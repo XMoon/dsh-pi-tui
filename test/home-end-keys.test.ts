@@ -48,9 +48,11 @@ function resetKeybindings(): void {
 /** Whether the viewport contains the EXACT rendered line — `includes('line 1')`
  * would also match `line 10`..`line 19`, and the first transcript line
  * carries the bullet prefix (`🐋  line 1`), so the match is a trimmed
- * endsWith. */
+ * endsWith. The v0.85.1 full-track scrollbar paints `│`/`┃`/`█` on the
+ * last column of every scroll-pane row, so the trailing scrollbar char is
+ * stripped before the match. */
 function viewportHasLine(vt: VirtualTerminal, text: string): boolean {
-  return vt.getViewport().some(line => line.trim().endsWith(text))
+  return vt.getViewport().some(line => line.replace(/[│┃█]$/, '').trim().endsWith(text))
 }
 
 // ── the preset itself ────────────────────────────────────────────────────
@@ -328,7 +330,7 @@ test('folder window summaries do not discard the older-page top anchor', async (
     assert.equal(folder.window({ maxTurns: 20 }).messages[0]?.kind, 'summary')
     app.scrollToTop({ disableFollow: true })
     await vt.waitForRender()
-    const viewportRow = (text: string): number => vt.getViewport().findIndex(line => line.trim().endsWith(text))
+    const viewportRow = (text: string): number => vt.getViewport().findIndex(line => line.replace(/[│┃█]$/, '').trim().endsWith(text))
     const beforeAnchor = app.captureTranscriptViewportAnchor()
     assert.equal(beforeAnchor?.top?.turn, 81, 'the top anchor must skip the leading presentation-only summary')
     const beforeRow = viewportRow('turn-81')

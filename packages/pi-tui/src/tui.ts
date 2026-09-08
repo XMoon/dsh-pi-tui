@@ -2,8 +2,6 @@
  * Minimal TUI implementation with differential rendering
  */
 
-import * as os from "node:os";
-import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.ts";
 import type { Terminal } from "./terminal.ts";
@@ -20,6 +18,131 @@ import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth
 /**
  * Component interface - all components must implement this
  */
+export type TuiMouseEventType = "press" | "release" | "move" | "drag" | "click" | "wheel";
+export type TuiMouseButton = "left" | "middle" | "right" | "none";
+
+/** Normalized cell-based mouse event. Coordinates are zero-based. */
+export interface TuiMouseEvent {
+	type: TuiMouseEventType;
+	button: TuiMouseButton;
+	/** Coordinates local to the receiving component. */
+	x: number;
+	y: number;
+	/** Absolute terminal coordinates. */
+	screenX: number;
+	screenY: number;
+	/** Current component bounds. */
+	width: number;
+	height: number;
+	shift: boolean;
+	alt: boolean;
+	ctrl: boolean;
+	/** Logical lines. Negative values scroll up. */
+	wheelDelta?: number;
+	/** Consecutive click count when type is click. */
+	clickCount?: number;
+}
+
+export interface TuiMouseEventResult {
+	/** Stop propagation and suppress renderer-level fallback behavior. */
+	handled?: boolean;
+	/** Route subsequent drag/release events to this component. Implies handled. */
+	capture?: boolean;
+	/** Give keyboard focus to this component. Implies handled. */
+	focus?: boolean;
+	/**
+	 * Explicitly request or suppress a render. Move and release default to false;
+	 * press, click, drag, and wheel default to true.
+	 */
+	render?: boolean;
+}
+
+/** Internal target metadata used by containers and alternate-screen dispatch. */
+export interface TuiMouseDispatchTarget {
+	component: Component;
+	originX: number;
+	originY: number;
+	width: number;
+	height: number;
+}
+
+/** Result of dispatching to a concrete component. */
+export interface TuiMouseDispatchResult extends TuiMouseEventResult {
+	handled: true;
+	target: TuiMouseDispatchTarget;
+	/** Keyboard focus target, which may be a delegating parent container. */
+	focusTarget?: Component;
+}
+
+/**
+ * Dispatch an event to a component and retain the exact target and coordinate
+ * transform. Containers use this when forwarding events to nested children.
+ */
+let mouseDispatchRecorder: ((component: Component) => void) | undefined;
+let mouseDispatchAllowedSet: Set<Component> | undefined;
+/** Install a recorder for the components a mouse dispatch reaches
+ * (TuiAltScreen uses it to snapshot the press-time hit relationship so a
+ * release's synthesized click cannot transfer to a control painted after
+ * the press). Returns the PREVIOUS recorder so callers can restore it on
+ * exit — reentrancy-safe when a child handler synchronously triggers a
+ * nested mouse dispatch. (dsh-pi-tui divergence X018 hardening.) */
+export function setMouseDispatchRecorder(recorder: ((component: Component) => void) | undefined): ((component: Component) => void) | undefined {
+	const previous = mouseDispatchRecorder;
+	mouseDispatchRecorder = recorder;
+	return previous;
+}
+
+/** Record a component as reached by the current mouse dispatch (called by
+ * dispatchMouseEvent and by wrappers that rewrite the gesture target to
+ * themselves). */
+export function recordMouseDispatch(component: Component): void {
+	mouseDispatchRecorder?.(component);
+}
+
+/** Restrict the next mouse dispatch to a set of components (the press-time
+ * hit relationship): a synthesized click must not reach a control that was
+ * not reachable when the press was rejected. Returns the PREVIOUS set so
+ * callers can restore it on exit (reentrancy-safe). */
+export function setMouseDispatchAllowedSet(set: Set<Component> | undefined): Set<Component> | undefined {
+	const previous = mouseDispatchAllowedSet;
+	mouseDispatchAllowedSet = set;
+	return previous;
+}
+
+export function dispatchMouseEvent(component: Component, event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
+	if (mouseDispatchAllowedSet !== undefined && !mouseDispatchAllowedSet.has(component)) {
+		return undefined;
+	}
+	recordMouseDispatch(component);
+	const result = component.handleMouse?.(event);
+	if (!result) return undefined;
+	if ("target" in result) return result as TuiMouseDispatchResult;
+	if (!result.handled && !result.capture && !result.focus) return undefined;
+	return {
+		...result,
+		handled: true,
+		...(result.focus ? { focusTarget: component } : {}),
+		target: {
+			component,
+			originX: event.screenX - event.x,
+			originY: event.screenY - event.y,
+			width: event.width,
+			height: event.height,
+		},
+	};
+}
+
+/** Recreate local coordinates for a previously dispatched mouse target. */
+export function retargetMouseEvent(event: TuiMouseEvent, target: TuiMouseDispatchTarget): TuiMouseEvent {
+	return {
+		...event,
+		x: event.screenX - target.originX,
+		y: event.screenY - target.originY,
+		width: target.width,
+		height: target.height,
+	};
+}
+
 export interface Component {
 	/**
 	 * Render the component to lines for the given viewport width
@@ -28,10 +151,11 @@ export interface Component {
 	 */
 	render(width: number): string[];
 
-	/**
-	 * Optional handler for keyboard input when component has focus
-	 */
+	/** Optional handler for keyboard input when component has focus. */
 	handleInput?(data: string): void;
+
+	/** Optional normalized mouse handler. */
+	handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
 
 	/**
 	 * If true, component receives key release events (Kitty protocol).
@@ -183,6 +307,14 @@ export interface OverlayUnfocusOptions {
 	target: Component | null;
 }
 
+/** Last rendered terminal-relative overlay rectangle. */
+export interface OverlayBounds {
+	row: number;
+	col: number;
+	width: number;
+	height: number;
+}
+
 /**
  * Handle returned by showOverlay for controlling the overlay
  */
@@ -199,6 +331,8 @@ export interface OverlayHandle {
 	unfocus(options?: OverlayUnfocusOptions): void;
 	/** Check if this overlay currently has focus */
 	isFocused(): boolean;
+	/** Get the most recent rendered bounds for a visible overlay. */
+	getBounds(): OverlayBounds | undefined;
 }
 
 type OverlayStackEntry = {
@@ -207,6 +341,15 @@ type OverlayStackEntry = {
 	preFocus: Component | null;
 	hidden: boolean;
 	focusOrder: number;
+	bounds?: OverlayBounds;
+};
+
+type RenderedOverlayLayout = {
+	entry: OverlayStackEntry;
+	row: number;
+	col: number;
+	width: number;
+	height: number;
 };
 
 type OverlayBlockedFocusResume = { status: "restore-overlay" } | { status: "focus-target"; target: Component | null };
@@ -226,6 +369,7 @@ type OverlayFocusRestorePolicy = "clear" | "preserve";
  */
 export class Container implements Component {
 	children: Component[] = [];
+	private mouseLayout?: { width: number; children: Array<{ component: Component; height: number }> };
 
 	addChild(component: Component): void {
 		this.children.push(component);
@@ -235,11 +379,15 @@ export class Container implements Component {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
+			// Removal ends ownership: release the child's resources.
+			// (dsh-pi-tui divergence X007.)
 			component.dispose?.();
 		}
 	}
 
 	clear(): void {
+		// Release every child's resources before dropping the references.
+		// (dsh-pi-tui divergence X007.)
 		for (const child of this.children) child.dispose?.();
 		this.children = [];
 	}
@@ -264,18 +412,56 @@ export class Container implements Component {
 		}
 	}
 
+	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
+		if (event.y < 0 || event.y >= event.height) return undefined;
+		// The cached mouse layout is only refreshed on render: child
+		// mutations (addChild/removeChild/clear, or a subclass directly
+		// replacing `children`) must invalidate it. A click must hit the
+		// geometry that was ACTUALLY PAINTED: when the cache is stale
+		// (removed children, or new children not yet painted), dispatch
+		// nothing — re-rendering the live children here would hand the
+		// click to a component the user cannot see yet (a ghost click).
+		// The next real render refreshes the cache. (dsh-pi-tui divergence
+		// X018 hardening.)
+		const cached = this.mouseLayout;
+		const cacheValid =
+			cached !== undefined &&
+			cached.width === event.width &&
+			cached.children.length === this.children.length &&
+			cached.children.every((entry, index) => entry.component === this.children[index]);
+		if (!cacheValid) return undefined;
+		const mouseChildren = cached!.children;
+		let childY = 0;
+		for (const { component: child, height: childHeight } of mouseChildren) {
+			if (event.y >= childY && event.y < childY + childHeight) {
+				const result = dispatchMouseEvent(child, {
+					...event,
+					y: event.y - childY,
+					height: childHeight,
+				});
+				if (result?.focus && (this as Component).handleInput) return { ...result, focusTarget: this };
+				return result;
+			}
+			childY += childHeight;
+		}
+		return undefined;
+	}
+
 	render(width: number): string[] {
 		// Extremely narrow terminals can report tiny or even non-positive
 		// column counts; never propagate a width below 1 into components.
 		// (dsh-pi-tui divergence X032.)
 		width = Math.max(1, width);
 		const lines: string[] = [];
+		const mouseChildren: Array<{ component: Component; height: number }> = [];
 		for (const child of this.children) {
 			const childLines = child.render(width);
+			mouseChildren.push({ component: child, height: childLines.length });
 			for (const line of childLines) {
 				lines.push(line);
 			}
 		}
+		this.mouseLayout = { width, children: mouseChildren };
 		return lines;
 	}
 }
@@ -377,29 +563,73 @@ export abstract class TuiBase extends Container implements TUI {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
-	private showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
-	private clearOnShrink = process.env.PI_CLEAR_ON_SHRINK === "1";
+	private showHardwareCursor = false;
+	private clearOnShrink = false;
 	protected fullRedrawCount = 0;
 	protected stopped = false;
 	private pendingOsc11BackgroundReplies = 0;
 	private pendingOsc11BackgroundQueries: PendingOsc11BackgroundQuery[] = [];
+	/** The single in-flight OSC 11 query, or a timed-out query kept as a
+	 * late-reply tombstone (X008). Serialized: at most one query is ever
+	 * written to the terminal, so a reply always pairs with the query that
+	 * is actually waiting for it. */
+	private activeOsc11BackgroundQuery: PendingOsc11BackgroundQuery | undefined;
 	private terminalColorSchemeListeners = new Set<(scheme: TerminalColorScheme) => void>();
 	private terminalColorSchemeNotificationsEnabled = false;
-	protected readonly logDirectory: string;
+	/** Directory for debug/crash logs. When undefined, debug logging is disabled and crash dumps fall back to the OS temp directory. */
+	protected readonly logDirectory: string | undefined;
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
 	private overlayStack: OverlayStackEntry[] = [];
+	private renderedOverlayLayouts: RenderedOverlayLayout[] = [];
 
 	get hasOverlayEntries(): boolean {
 		return this.overlayStack.length > 0;
+	}
+
+	/** Whether a component is still a mounted, visible overlay. Subclasses
+	 * (TuiAltScreen) revalidate gesture targets against this before
+	 * dispatching pointer events. (dsh-pi-tui divergence X018 hardening.) */
+	protected isOverlayComponentLive(component: Component): boolean {
+		const entry = this.overlayStack.find((candidate) => candidate.component === component);
+		return entry !== undefined && this.isOverlayVisible(entry);
+	}
+
+	/** The deepest component the most recent component dispatch delivered
+	 * to (set by dispatchMouseToOverlay and TuiAltScreen's
+	 * dispatchMouseToLayout). TuiAltScreen snapshots it at selection-press
+	 * time so a release's synthesized click cannot transfer to a control
+	 * painted after the press. (dsh-pi-tui divergence X018 hardening.) */
+	protected lastMouseDispatchComponent: Component | undefined = undefined;
+
+	/** Whether a component is inside a mounted, visible overlay's subtree
+	 * (Container children reachable through `children`). Gesture targets
+	 * recorded from a nested dispatch (e.g. a SelectList inside an
+	 * overlay-root Container) must stay live for the whole gesture.
+	 * (dsh-pi-tui divergence X018 hardening.) */
+	protected isOverlaySubtreeLive(component: Component): boolean {
+		return this.overlayStack.some(
+			(entry) => this.isOverlayVisible(entry) && this.componentTreeContains(entry.component, component),
+		);
+	}
+
+	/** Walk a mounted component's `children` subtree looking for `target`. */
+	protected componentTreeContains(root: Component, target: Component): boolean {
+		if (root === target) return true;
+		const children = (root as Container).children;
+		if (children === undefined) return false;
+		for (const child of children) {
+			if (this.componentTreeContains(child, target)) return true;
+		}
+		return false;
 	}
 	private overlayFocusRestore: OverlayFocusRestoreState = { status: "inactive" };
 
 	constructor(terminal: Terminal, showHardwareCursor?: boolean, logDirectory?: string) {
 		super();
 		this.terminal = terminal;
-		this.logDirectory = logDirectory ?? process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
+		this.logDirectory = logDirectory;
 		if (showHardwareCursor !== undefined) {
 			this.showHardwareCursor = showHardwareCursor;
 		}
@@ -440,8 +670,8 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/**
 	 * Set whether to trigger full re-render when content shrinks.
-	 * When true (default), empty rows are cleared when content shrinks.
-	 * When false, empty rows remain (reduces redraws on slower terminals).
+	 * When true, empty rows are cleared when content shrinks.
+	 * When false (default), empty rows remain (reduces redraws on slower terminals).
 	 */
 	setClearOnShrink(enabled: boolean): void {
 		this.clearOnShrink = enabled;
@@ -680,6 +910,10 @@ export abstract class TuiBase extends Container implements TUI {
 				this.requestRender();
 			},
 			isFocused: () => this.focusedComponent === component,
+			getBounds: () => {
+				if (!this.overlayStack.includes(entry) || !this.isOverlayVisible(entry) || !entry.bounds) return undefined;
+				return { ...entry.bounds };
+			},
 		};
 	}
 
@@ -712,6 +946,54 @@ export abstract class TuiBase extends Container implements TUI {
 		return this.overlayStack.some(
 			(entry) => entry.component === this.focusedComponent && this.isOverlayVisible(entry),
 		);
+	}
+
+	/** Keep overlay containers as keyboard focus owners when a nested control is clicked. */
+	protected resolveMouseFocusTarget(component: Component): Component {
+		for (let index = this.overlayStack.length - 1; index >= 0; index--) {
+			const overlay = this.overlayStack[index]!;
+			if (this.isOverlayVisible(overlay) && this.containsComponent(overlay.component, component)) {
+				return overlay.component;
+			}
+		}
+		return component;
+	}
+
+	/** Dispatch to the visually topmost overlay under the pointer. */
+	protected dispatchMouseToOverlay(event: TuiMouseEvent): { hit: boolean; result?: TuiMouseDispatchResult } {
+		for (let index = this.renderedOverlayLayouts.length - 1; index >= 0; index--) {
+			const layout = this.renderedOverlayLayouts[index]!;
+			// The layout cache is only refreshed on render: an overlay that
+			// was hidden or removed since the last frame must not receive
+			// pointer events (its cached geometry is stale until the next
+			// paint). (dsh-pi-tui divergence X018 hardening.)
+			if (!this.overlayStack.includes(layout.entry) || !this.isOverlayVisible(layout.entry)) {
+				continue;
+			}
+			if (
+				event.screenX < layout.col ||
+				event.screenX >= layout.col + layout.width ||
+				event.screenY < layout.row ||
+				event.screenY >= layout.row + layout.height
+			) {
+				continue;
+			}
+			this.lastMouseDispatchComponent = layout.entry.component;
+			const result = dispatchMouseEvent(layout.entry.component, {
+				...event,
+				x: event.screenX - layout.col,
+				y: event.screenY - layout.row,
+				width: layout.width,
+				height: layout.height,
+			});
+			return result
+				? {
+						hit: true,
+						result: result.focus ? { ...result, focusTarget: layout.entry.component } : result,
+					}
+				: { hit: true };
+		}
+		return { hit: false };
 	}
 
 	/** Check if an overlay entry is currently visible */
@@ -963,8 +1245,9 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 
 		const rgb = parseOsc11BackgroundColor(data);
-		this.pendingOsc11BackgroundReplies -= 1;
-		const query = this.pendingOsc11BackgroundQueries.shift();
+		this.pendingOsc11BackgroundReplies = 0;
+		const query = this.activeOsc11BackgroundQuery;
+		this.activeOsc11BackgroundQuery = undefined;
 		if (query && !query.settled) {
 			query.settled = true;
 			if (query.timer) {
@@ -974,7 +1257,21 @@ export abstract class TuiBase extends Container implements TUI {
 			query.resolve?.(rgb);
 			query.resolve = undefined;
 		}
+		// A settled tombstone swallows the late reply; either way the next
+		// waiting query may now be sent.
+		this.pumpOsc11Queries();
 		return true;
+	}
+
+	/** Send the next waiting OSC 11 query when the active slot is free. */
+	private pumpOsc11Queries(): void {
+		if (this.activeOsc11BackgroundQuery !== undefined || this.pendingOsc11BackgroundQueries.length === 0) {
+			return;
+		}
+		const query = this.pendingOsc11BackgroundQueries.shift()!;
+		this.activeOsc11BackgroundQuery = query;
+		this.pendingOsc11BackgroundReplies = 1;
+		this.terminal.write("\x1b]11;?\x07");
 	}
 
 	private consumeTerminalColorSchemeReport(data: string): boolean {
@@ -1149,11 +1446,16 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Composite all overlays into content lines (sorted by focusOrder, higher = on top). */
 	protected compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
-		if (this.overlayStack.length === 0) return lines;
+		if (this.overlayStack.length === 0) {
+			this.renderedOverlayLayouts = [];
+			return lines;
+		}
 		const result = [...lines];
 
+		for (const entry of this.overlayStack) entry.bounds = undefined;
+
 		// Pre-render all visible overlays and calculate positions
-		const rendered: { overlayLines: string[]; row: number; col: number; w: number }[] = [];
+		const rendered: { entry: OverlayStackEntry; overlayLines: string[]; row: number; col: number; w: number }[] = [];
 		let minLinesNeeded = result.length;
 
 		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
@@ -1175,10 +1477,18 @@ export abstract class TuiBase extends Container implements TUI {
 
 			// Get final row/col with actual overlay height
 			const { row, col } = this.resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
+			entry.bounds = { row, col, width, height: overlayLines.length };
 
-			rendered.push({ overlayLines, row, col, w: width });
+			rendered.push({ entry, overlayLines, row, col, w: width });
 			minLinesNeeded = Math.max(minLinesNeeded, row + overlayLines.length);
 		}
+		this.renderedOverlayLayouts = rendered.map(({ entry, row, col, w, overlayLines }) => ({
+			entry,
+			row,
+			col,
+			width: w,
+			height: overlayLines.length,
+		}));
 
 		// Pad to at least terminal height so overlays have screen-relative positions.
 		// Excludes maxLinesRendered: the historical high-water mark caused self-reinforcing
@@ -1279,20 +1589,31 @@ export abstract class TuiBase extends Container implements TUI {
 				query.timer = undefined;
 				query.resolve?.(undefined);
 				query.resolve = undefined;
-				// The reply may still arrive late. Drop the query from the queue so
-				// the pending counter stays in sync: without this, every timed-out
-				// query leaked +1 into pendingOsc11BackgroundReplies, which made
-				// later unrelated input get consumed as replies and shifted the
-				// queue/counter pair out of alignment. (dsh-pi-tui divergence X008.)
+				if (this.activeOsc11BackgroundQuery === query) {
+					// The in-flight query timed out. It STAYS as the active
+					// tombstone until a late reply consumes it: OSC 11
+					// replies carry no query id, so the next waiting query
+					// is only sent after this one's reply is consumed —
+					// otherwise a late reply would be misattributed to the
+					// next query (X008). A terminal that never replies
+					// leaves the tombstone in place, and every waiting query
+					// settles on its own timeout (the same outcome as a
+					// terminal without OSC 11 support).
+					return;
+				}
+				// The query was still waiting to be sent: drop it from the
+				// queue so it can never be sent after settling.
 				const index = this.pendingOsc11BackgroundQueries.indexOf(query);
 				if (index !== -1) {
 					this.pendingOsc11BackgroundQueries.splice(index, 1);
-					this.pendingOsc11BackgroundReplies -= 1;
 				}
 			}, timeoutMs);
+			// The primary timeout is deliberately REFERENCED: the public
+			// query Promise must settle even when the TUI is not started
+			// and no other event-loop handle keeps the process alive
+			// (an unref'd timer lets Node exit with the Promise pending).
 			this.pendingOsc11BackgroundQueries.push(query);
-			this.pendingOsc11BackgroundReplies += 1;
-			this.terminal.write("\x1b]11;?\x07");
+			this.pumpOsc11Queries();
 		});
 	}
 

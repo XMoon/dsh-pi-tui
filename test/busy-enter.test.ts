@@ -375,3 +375,63 @@ test('/help copy is key-neutral after a remap — no stale bare Esc/Enter claims
   assert.ok(view.includes('interrupt action twice'), 'the cancel prose is key-neutral (semantic action)')
   t.app.stop()
 })
+
+test('/settings SettingsList row responds to a fullscreen mouse click (v0.85.1 mouse integration)', async () => {
+  const t = setup({ busyEnter: 'steer' })
+  t.app.setFullscreen(true)
+  await t.run('')
+  await t.view()
+  const viewport = t.vt.getViewport()
+  const rowY = viewport.findIndex(line => line.includes('Submit while busy'))
+  assert.ok(rowY >= 0, `busy-enter row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[rowY]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'frame left border missing')
+  // SGR click on the row's content (1-based): the content starts two cells
+  // right of the left border (`│` + one padding cell).
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${rowY + 1}M`)
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${rowY + 1}m`)
+  await t.view()
+  assert.ok(t.settings.writes.length >= 1, 'the mouse click must toggle and persist a write')
+  const last = t.settings.writes[t.settings.writes.length - 1]
+  assert.equal(last?.busyEnter, 'queue', `the click must flip steer -> queue, wrote: ${JSON.stringify(last)}`)
+  t.app.stop()
+})
+
+test('/settings frame borders do not activate SettingsList rows (v0.85.1 mouse integration)', async () => {
+  const t = setup({ busyEnter: 'steer' })
+  t.app.setFullscreen(true)
+  await t.run('')
+  await t.view()
+  const viewport = t.vt.getViewport()
+  const borderY = viewport.findIndex(line => line.includes('╰'))
+  assert.ok(borderY >= 0, `frame bottom border missing:\n${viewport.join('\n')}`)
+  const rowY = viewport.findIndex(line => line.includes('Submit while busy'))
+  const leftBorder = viewport[rowY]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'frame left border missing')
+  // Click the bottom border (inside the frame, on the border row): it must
+  // NOT reach the child as a valid row.
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${borderY + 1}M`)
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${borderY + 1}m`)
+  await t.view()
+  assert.equal(t.settings.writes.length, 0, 'a bottom-border click must not toggle a row')
+  t.app.stop()
+})
+
+test('/settings frame left padding does not activate SettingsList rows (v0.85.1 mouse integration)', async () => {
+  const t = setup({ busyEnter: 'steer' })
+  t.app.setFullscreen(true)
+  await t.run('')
+  await t.view()
+  const viewport = t.vt.getViewport()
+  const rowY = viewport.findIndex(line => line.includes('Submit while busy'))
+  assert.ok(rowY >= 0, `busy-enter row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[rowY]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'frame left border missing')
+  // Click the padding cell between the left border and the content
+  // (frame-local x=1): it must NOT reach the child as column 0.
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${rowY + 1}M`)
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${rowY + 1}m`)
+  await t.view()
+  assert.equal(t.settings.writes.length, 0, 'a left-padding click must not toggle a row')
+  t.app.stop()
+})

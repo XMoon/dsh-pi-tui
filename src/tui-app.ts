@@ -49,6 +49,10 @@ import {
   type Terminal,
   type TuiInputListenerResult,
   type KeyId,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+  type TuiMouseDispatchResult,
+  dispatchMouseEvent,
 } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
@@ -402,6 +406,11 @@ function preview(text: string, lines: number): string {
 export class Frame implements Component {
   private readonly child: Component
   private readonly fillWidth: boolean
+  /** Child content offset/width/height from the LAST render (mouse hit-testing). */
+  protected childOffsetX = 2
+  protected childOffsetY = 1
+  protected childWidth = 0
+  protected childHeight = 0
 
   constructor(child: Component, fillWidth = false) {
     this.child = child
@@ -420,6 +429,48 @@ export class Frame implements Component {
     return this.child.wantsKeyRelease
   }
 
+  /**
+   * Transparent mouse wrapper (v0.85.1 mouse integration): translate the
+   * event into the child's content box (borders + one padding cell each
+   * side) and forward. The gesture target is rewritten to THIS frame — the
+   * child is a private field not reachable from the mounted tree, so the
+   * fork's X018 gesture-liveness check tracks the frame (the mounted
+   * unit), and drag/release re-enter through it with the same translation.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
+    const x = event.x - this.childOffsetX
+    const y = event.y - this.childOffsetY
+    // Reject clicks outside the child content box: the borders (and any
+    // row below the rendered content) must never reach the child as a
+    // valid row/column.
+    if (this.childWidth === 0 || this.childHeight === 0 || x < 0 || y < 0 || x >= this.childWidth || y >= this.childHeight) {
+      return undefined
+    }
+    const result = dispatchMouseEvent(this.child, {
+      ...event,
+      x,
+      y,
+      width: this.childWidth,
+      height: this.childHeight,
+    })
+    if (!result) return undefined
+    return {
+      ...result,
+      // A focus request from the child must land on THIS frame: the child
+      // is a private field the focus resolver cannot see, and the overlay
+      // focus state (isOverlayFocused) tracks the mounted root — otherwise
+      // the alt-screen viewport listener preempts modal keyboard input.
+      ...(result.focus ? { focusTarget: this } : {}),
+      target: {
+        component: this,
+        originX: event.screenX - event.x,
+        originY: event.screenY - event.y,
+        width: event.width,
+        height: event.height,
+      },
+    }
+  }
+
   render(width: number): string[] {
     const inner = Math.max(1, Math.floor(width) - 4)
     const lines = this.child.render(inner).map(line => truncateToWidth(line, inner, '…'))
@@ -427,6 +478,10 @@ export class Frame implements Component {
       ? inner
       : Math.min(inner, Math.max(1, ...lines.map(line => visibleWidth(line))))
     const frameWidth = contentWidth + 4
+    this.childOffsetX = 2
+    this.childOffsetY = 1
+    this.childWidth = contentWidth
+    this.childHeight = lines.length
     const b = color.border
     const out = [b(`╭${'─'.repeat(frameWidth - 2)}╮`)]
     for (const line of lines) {
@@ -626,6 +681,9 @@ class ResponsiveOverlayFrame extends FocusForwardingFrame {
     const lines = super.render(frameWidth)
     if (frameWidth === availableWidth) return lines
     const left = Math.max(0, Math.floor((availableWidth - frameWidth) / 2))
+    // The centered frame shifts the child content box right by `left`
+    // (Frame.handleMouse hit-testing reads this offset).
+    this.childOffsetX = left + 2
     return lines.map(line => `${' '.repeat(left)}${line}${' '.repeat(Math.max(0, availableWidth - left - visibleWidth(line)))}`)
   }
 }
@@ -4901,7 +4959,7 @@ export class TuiApp {
     // caller — a stopped screen's showOverlay would otherwise revive a
     // dead surface's overlay stack).
     if (this.disposed) {
-      return { hide: () => {}, setHidden: () => {}, isHidden: () => true, focus: () => {}, unfocus: () => {}, isFocused: () => false }
+      return { hide: () => {}, setHidden: () => {}, isHidden: () => true, focus: () => {}, unfocus: () => {}, isFocused: () => false, getBounds: () => undefined }
     }
     // Mounting an overlay is a focus transition; an armed keyboard exit
     // confirmation must not survive while the overlay is active.

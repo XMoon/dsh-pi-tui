@@ -51,7 +51,7 @@ const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
 // value): the host renders CJK-heavy transcripts where a 512-entry FIFO
 // thrashes on width changes / theme invalidations / cold renders that
 // re-measure many non-ASCII lines; the entry cost is a short string key.
-// (Upstream 0.84.4 uses 512.)
+// (Upstream 0.85.1 uses 512.)
 const WIDTH_CACHE_SIZE = 4096;
 const widthCache = new Map<string, number>();
 
@@ -722,6 +722,10 @@ class AnsiCodeTracker {
 		return result;
 	}
 
+	getActiveBackgroundCode(): string {
+		return this.bgColor ? `\x1b[${this.bgColor}m` : "";
+	}
+
 	hasActiveCodes(): boolean {
 		return (
 			this.bold ||
@@ -792,6 +796,13 @@ function updateTrackerFromText(text: string, tracker: AnsiCodeTracker): void {
 			i++;
 		}
 	}
+}
+
+/** Return only the background color active at the end of an ANSI-styled string. */
+export function getActiveBackgroundAnsi(text: string): string {
+	const tracker = new AnsiCodeTracker();
+	updateTrackerFromText(text, tracker);
+	return tracker.getActiveBackgroundCode();
 }
 
 /**

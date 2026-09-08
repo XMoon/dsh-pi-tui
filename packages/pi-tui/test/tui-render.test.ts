@@ -1,8 +1,7 @@
 import assert from "node:assert";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { performance } from "node:perf_hooks";
 import { describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Image } from "../src/components/image.ts";
@@ -156,7 +155,7 @@ describe("TUI debug logging", () => {
 	it("writes redraw logs to the provided directory", async () => {
 		const logDir = mkdtempSync(join(tmpdir(), "pi-tui-log-"));
 		try {
-			await withEnv({ PI_DEBUG_REDRAW: "1" }, async () => {
+			await withEnv({ PI_TUI_DEBUG_REDRAW: "1" }, async () => {
 				const terminal = new VirtualTerminal(40, 10);
 				const tui: TUI = new TuiMainScreen(terminal, undefined, logDir);
 				const component = new TestComponent();
@@ -165,7 +164,7 @@ describe("TUI debug logging", () => {
 				tui.start();
 				await terminal.waitForRender();
 
-				assert.match(readFileSync(join(logDir, "pi-debug.log"), "utf-8"), /fullRender: first render/);
+				assert.match(readFileSync(join(logDir, "pi-tui-debug.log"), "utf-8"), /fullRender: first render/);
 				tui.stop();
 			});
 		} finally {
@@ -216,6 +215,58 @@ describe("TUI bounded render output", () => {
 		assert.ok(output.startsWith("\x1b[?2026h"));
 		assert.ok(output.endsWith("\x1b[?2026l"));
 		assert.ok(!output.includes("\x1b[2J"), "the update should stay on the differential render path");
+	});
+});
+
+/** Set each environment variable to `value`, returning a function that restores the previous state. */
+function overrideEnv(names: readonly string[], value: string): () => void {
+	const previousValues = names.map((name) => [name, process.env[name]] as const);
+	for (const name of names) {
+		process.env[name] = value;
+	}
+	return () => {
+		for (const [name, previousValue] of previousValues) {
+			if (previousValue === undefined) delete process.env[name];
+			else process.env[name] = previousValue;
+		}
+	};
+}
+
+describe("TUI overwide line handling without configured log directory", () => {
+	it("truncates overwide lines instead of writing a crash dump (dsh-pi-tui divergence X033)", async () => {
+		// Upstream v0.85.1 crashes on an overwide non-image line and writes a
+		// crash dump to os.tmpdir(). The fork's X033 divergence truncates
+		// every non-image line to the terminal width BEFORE the differential
+		// render, so the upstream crash path is unreachable for non-image
+		// lines — verify the fork behavior: no throw, no crash log, and the
+		// truncated line in the output. os.tmpdir() reads TMPDIR on POSIX and
+		// TEMP/TMP on Windows, so override all three to prove nothing is
+		// written to the temp directory.
+		const crashDir = mkdtempSync(join(tmpdir(), "pi-tui-crash-"));
+		const crashLogPath = join(crashDir, "pi-tui-crash.log");
+		const restoreTmpdirEnv = overrideEnv(["TMPDIR", "TEMP", "TMP"], crashDir);
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			component.lines = ["ok"];
+			tui.start();
+			await terminal.waitForRender();
+
+			// Width overflow is truncated in the differential render path
+			component.lines = ["ok", "x".repeat(60)];
+			assert.doesNotThrow(() => tui.renderNow());
+			assert.ok(
+				!existsSync(crashLogPath),
+				"the X033 truncation must prevent the upstream crash-dump path",
+			);
+			const output = terminal.getWrites();
+			assert.ok(output.includes("x".repeat(40)), "the overwide line must be truncated to the terminal width");
+		} finally {
+			restoreTmpdirEnv();
+			rmSync(crashDir, { recursive: true, force: true });
+		}
 	});
 });
 

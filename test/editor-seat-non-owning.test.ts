@@ -310,3 +310,90 @@ test('P1-E: queued question transfer keeps the editor alive but detached until t
   assert.deepEqual(await second, [{ id: 'q2', selected: ['Yes'] }])
   app.stop()
 })
+
+test('a click before the seat repaint reaches neither the removed editor nor the not-yet-painted occupant (ghost click)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const seat = (app as unknown as { editorSeat: EditorSeatMount }).editorSeat
+  const events: string[] = []
+  const old = {
+    render: () => ['old editor'],
+    invalidate: () => {},
+    handleMouse: () => { events.push('old'); return { handled: true } },
+  }
+  const fresh = {
+    render: () => ['fresh occupant'],
+    invalidate: () => {},
+    handleMouse: () => { events.push('fresh'); return { handled: true } },
+  }
+  seat.replace(old)
+  app.requestRender()
+  await vt.waitForRender()
+  const rowY = vt.getViewport().findIndex(line => line.includes('old editor'))
+  assert.ok(rowY >= 0, `old editor row missing:\n${vt.getViewport().join('\n')}`)
+
+  // Swap the occupant WITHOUT repainting: the screen still shows the old
+  // editor, so a click must hit neither the removed editor (stale cache)
+  // nor the not-yet-painted occupant (ghost click).
+  seat.replace(fresh)
+  vt.sendInput(`\x1b[<0;2;${rowY + 1}M`)
+  vt.sendInput(`\x1b[<0;2;${rowY + 1}m`)
+  await vt.waitForRender()
+  assert.deepStrictEqual(events, [], 'a pre-repaint click must not reach the removed editor or the not-yet-painted occupant')
+
+  // After the next real render, clicks reach the new occupant (a full
+  // click = press + release + synthesized click).
+  vt.sendInput(`\x1b[<0;2;${rowY + 1}M`)
+  vt.sendInput(`\x1b[<0;2;${rowY + 1}m`)
+  await vt.waitForRender()
+  assert.deepStrictEqual(events, ['fresh', 'fresh', 'fresh'], 'after repaint the new occupant must receive the full click')
+  app.stop()
+})
+
+test('a click whose press was rejected before a seat repaint does not transfer to the new occupant (selection fallback)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const seat = (app as unknown as { editorSeat: EditorSeatMount }).editorSeat
+  const events: string[] = []
+  const old = {
+    render: () => ['old editor'],
+    invalidate: () => {},
+    handleMouse: () => undefined, // click-only: presses fall to selection
+  }
+  const fresh = {
+    render: () => ['fresh occupant'],
+    invalidate: () => {},
+    // Click-only: presses and releases fall through to the selection path,
+    // and the release's synthesized click is what activates it.
+    handleMouse: (event: { type: string }) => {
+      if (event.type !== 'click') return undefined
+      events.push('click')
+      return { handled: true }
+    },
+  }
+  seat.replace(old)
+  app.requestRender()
+  await vt.waitForRender()
+  const rowY = vt.getViewport().findIndex(line => line.includes('old editor'))
+  assert.ok(rowY >= 0, `old editor row missing:\n${vt.getViewport().join('\n')}`)
+
+  // Swap the occupant; the press is rejected by the stale cache and falls
+  // into the text-selection path, which schedules a repaint.
+  seat.replace(fresh)
+  vt.sendInput(`\x1b[<0;2;${rowY + 1}M`)
+  // The repaint completes BEFORE the release: the screen now shows the new
+  // occupant, but the release's synthesized click must not transfer to it.
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;2;${rowY + 1}m`)
+  await vt.waitForRender()
+  assert.deepStrictEqual(events, [], 'a click whose press was rejected before the repaint must not reach the new occupant')
+  app.stop()
+})

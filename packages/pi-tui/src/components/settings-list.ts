@@ -1,6 +1,6 @@
 import { fuzzyFilter } from "../fuzzy.ts";
 import { getKeybindings } from "../keybindings.ts";
-import type { Component, Focusable } from "../tui.ts";
+import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from "../tui.ts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 import { Input } from "./input.ts";
 
@@ -51,6 +51,7 @@ export class SettingsList implements Component, Focusable {
 	private filteredItems: SettingItem[];
 	private theme: SettingsListTheme;
 	private selectedIndex = 0;
+	private mousePressedIndex: number | undefined;
 	/** Caller-configured item cap; the host may lower it for a short frame. */
 	private configuredMaxVisible: number;
 	private maxVisible: number;
@@ -205,7 +206,7 @@ export class SettingsList implements Component, Focusable {
 			return this.finalizeEmpty(lines);
 		}
 
-		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
+		const displayItems = this.getDisplayItems();
 		if (displayItems.length === 0) {
 			lines.push(truncateToWidth(this.theme.hint("  No matching settings"), width));
 			this.addHintLine(lines, width);
@@ -329,6 +330,49 @@ export class SettingsList implements Component, Focusable {
 		return 1 + wrapTextWithAnsi(selectedItem.description, width - 4).length;
 	}
 
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (this.submenuComponent) {
+			const result = this.submenuComponent.handleMouse?.(event);
+			return result ? { ...result, focus: true } : undefined;
+		}
+
+		if (this.searchEnabled && this.searchInput) {
+			if (event.y === 0) {
+				const result = this.searchInput.handleMouse?.(event);
+				return result ? { ...result, focus: true } : undefined;
+			}
+			if (event.y === 1) return undefined;
+		}
+
+		const displayItems = this.getDisplayItems();
+		if (displayItems.length === 0) return undefined;
+		if (event.type === "wheel" && event.wheelDelta) {
+			const delta = event.wheelDelta < 0 ? -1 : 1;
+			const previousIndex = this.selectedIndex;
+			this.selectedIndex = Math.max(0, Math.min(displayItems.length - 1, this.selectedIndex + delta));
+			return { handled: true, render: this.selectedIndex !== previousIndex };
+		}
+		// Hover must not change selection: the visible range is centered on it.
+		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
+
+		const rowOffset = this.searchEnabled ? 2 : 0;
+		const { startIndex, endIndex } = this.getVisibleRange(displayItems);
+		const itemIndex = startIndex + event.y - rowOffset;
+		if (itemIndex < startIndex || itemIndex >= endIndex) return undefined;
+		if (event.type === "press") {
+			this.mousePressedIndex = itemIndex;
+			this.selectedIndex = itemIndex;
+			return { handled: true, focus: true };
+		}
+		if (event.type === "click") {
+			this.selectedIndex = this.mousePressedIndex ?? itemIndex;
+			this.mousePressedIndex = undefined;
+			this.activateItem();
+			return { handled: true };
+		}
+		return undefined;
+	}
+
 	handleInput(data: string): void {
 		// If submenu is active, delegate all input to it
 		// The submenu's onCancel (triggered by escape) will call done() which closes it
@@ -339,7 +383,7 @@ export class SettingsList implements Component, Focusable {
 
 		// Main list input handling
 		const kb = getKeybindings();
-		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
+		const displayItems = this.getDisplayItems();
 		if (kb.matches(data, "tui.select.up")) {
 			if (displayItems.length === 0) return;
 			this.selectedIndex = this.selectedIndex === 0 ? displayItems.length - 1 : this.selectedIndex - 1;
@@ -359,8 +403,20 @@ export class SettingsList implements Component, Focusable {
 		}
 	}
 
+	private getDisplayItems(): SettingItem[] {
+		return this.searchEnabled ? this.filteredItems : this.items;
+	}
+
+	private getVisibleRange(displayItems: readonly SettingItem[]): { startIndex: number; endIndex: number } {
+		const startIndex = Math.max(
+			0,
+			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), displayItems.length - this.maxVisible),
+		);
+		return { startIndex, endIndex: Math.min(startIndex + this.maxVisible, displayItems.length) };
+	}
+
 	private activateItem(): void {
-		const item = this.searchEnabled ? this.filteredItems[this.selectedIndex] : this.items[this.selectedIndex];
+		const item = this.getDisplayItems()[this.selectedIndex];
 		if (!item) return;
 
 		if (item.submenu) {
