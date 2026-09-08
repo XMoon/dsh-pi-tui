@@ -1981,30 +1981,44 @@ test('viewport anchors distinguish duplicate messages and cloned Focus activitie
   app.stop()
 })
 
-test('welcome card wraps long facts inside a full-width box', async () => {
+test('welcome card shows the whale and full facts in the wide layout', async () => {
   const { vt, app } = startApp()
+  // Values long enough to wrap inside the ~65-col side-by-side facts column.
+  const longCwd = `/very/long/working/directory/that/keeps/going/${'segment/'.repeat(12)}end`
+  const longSession = `session-${'x'.repeat(100)}`
   app.setWelcomeCard({
-    cwd: '/very/long/working/directory/that/keeps/going',
-    sessionId: `session-${'x'.repeat(40)}`,
+    cwd: longCwd,
+    sessionId: longSession,
     model: 'opencode-go/deepseek-v4-flash',
     version: '0.1.0-rc.6',
     preset: 'standard',
   })
   const view = await viewport(vt)
   // Facts render in full: the session id is never truncated, and long lines
-  // wrap instead of ending in an ellipsis.
-  assert.ok(view.includes(`session-${'x'.repeat(40)}`), `session id truncated:\n${view}`)
+  // wrap instead of ending in an ellipsis. The side-by-side facts column is
+  // 66 cells at width 100 (whale 30 + gap 4); the fixture values have no
+  // spaces, so each wrap segment is a hard cut that must survive in full.
+  const factsColumn = 100 - 34
+  for (const segment of longSession.match(new RegExp(`.{1,${factsColumn}}`, 'g'))!) {
+    assert.ok(view.includes(segment), `session id segment truncated:\n${view}`)
+  }
+  for (const segment of longCwd.match(new RegExp(`.{1,${factsColumn}}`, 'g'))!) {
+    assert.ok(view.includes(segment), `cwd segment truncated:\n${view}`)
+  }
   assert.ok(view.includes('deepseek-v4-flash'), `model missing:\n${view}`)
   assert.ok(view.includes('standard'), `preset missing:\n${view}`)
   assert.ok(view.includes('0.1.0-rc.6'), `version missing:\n${view}`)
-  assert.ok(view.includes('/very/long/working/directory/that/keeps/going'), `cwd truncated:\n${view}`)
-  // The box spans the full terminal width, matching the editor border below.
-  const lines = view.split('\n')
-  const top = lines.find(line => line.includes('╭') && line.includes('╮'))
-  assert.ok(top !== undefined, `box top missing:\n${view}`)
-  assert.equal(top.length, 100, `box top must be full width, got ${top.length}`)
-  assert.ok(lines.some(line => line.includes('╰') && line.includes('╯')), `box bottom missing:\n${view}`)
-  assert.ok(lines.some(line => line.includes('│')), `box sides missing:\n${view}`)
+  assert.ok(!view.includes('…'), `facts ellipsized:\n${view}`)
+  // 100 >= 72: the whale mascot renders side-by-side with the facts.
+  assert.ok(view.includes("_.-' `-._"), `whale missing:\n${view}`)
+  // No physical row overflows the terminal width (ANSI-aware).
+  for (const line of view.split('\n')) {
+    assert.ok(visibleWidth(line) <= 100, `row overflows terminal width:\n${view}`)
+  }
+  // The old full-width box presentation is no longer a contract.
+  assert.ok(!view.includes('╭'), `old box top survived:\n${view}`)
+  assert.ok(!view.includes('╰'), `old box bottom survived:\n${view}`)
+  assert.ok(!view.includes('│'), `old box sides survived:\n${view}`)
 })
 test('working indicator shows on the row directly above the editor while active', async () => {
   const { vt, app } = startApp()
@@ -2132,7 +2146,7 @@ test('live theme switch recolors every surface while the content stays identical
   app.stop()
 })
 
-test('theme switch recolors the welcome card (its width cache must not freeze ANSI)', async () => {
+test('theme switch repaints the welcome card: whale gradient stays, facts follow the palette', async () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -2140,13 +2154,130 @@ test('theme switch recolors the welcome card (its width cache must not freeze AN
   startedApps.add(app)
   app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-x', model: 'p/m', version: '0.0.0' })
   await vt.waitForRender()
-  const row = vt.getViewport().findIndex(line => line.includes('╭'))
-  assert.ok(row >= 0, `welcome card missing:\n${vt.getViewport().join('\n')}`)
-  // Dark border #5A5A5A → light border #737373 after the switch.
-  assert.equal(vt.getCellFgRgb(row, 0), 0x5a5a5a, 'dark welcome border must be #5A5A5A')
+  const lines = vt.getViewport()
+  const whaleRow = lines.findIndex(line => line.includes("_.-' `-._"))
+  assert.ok(whaleRow >= 0, `welcome card missing:\n${lines.join('\n')}`)
+  // The whale gradient is a fixed brand ramp: line 3 paints #49A3CB.
+  assert.equal(vt.getCellFgRgb(whaleRow, 6), 0x49a3cb, 'whale line 3 must be #49A3CB')
+  // The facts title is the welcome card's own row (the header also reads
+  // "dsh-pi-tui", so match the versioned title).
+  const titleRow = lines.findIndex(line => line.includes('dsh-pi-tui  v'))
+  assert.ok(titleRow >= 0, `facts title missing:\n${lines.join('\n')}`)
+  const titleCol = lines[titleRow]!.indexOf('dsh-pi-tui')
+  assert.equal(vt.getCellFgRgb(titleRow, titleCol), 0x6b6b6b, 'dark facts must be #6B6B6B')
   app.applyTheme('light')
   await vt.waitForRender()
-  assert.equal(vt.getCellFgRgb(row, 0), 0x737373, 'welcome border must follow the live theme')
+  // Facts follow the live palette; the whale gradient stays fixed (the
+  // width cache must not freeze the old ANSI).
+  assert.equal(vt.getCellFgRgb(titleRow, titleCol), 0x5f5f5f, 'light facts must be #5F5F5F')
+  assert.equal(vt.getCellFgRgb(whaleRow, 6), 0x49a3cb, 'whale gradient must survive the theme switch')
+  app.stop()
+})
+
+test('welcome card stacks the whale above the facts at medium width', async () => {
+  const { vt, app } = startApp(60, 24)
+  app.setWelcomeCard({
+    cwd: '/ws',
+    sessionId: 'session-1',
+    model: 'p/m',
+    version: '0.1.0',
+    preset: 'code',
+  })
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  // 40 <= 60 < 72: the full whale renders, centered, above the facts.
+  const whaleRow = lines.findIndex(line => line.includes("_.-' `-._"))
+  assert.ok(whaleRow >= 0, `whale missing:\n${view}`)
+  // The whale rows are never wrapped: the widest row fits the terminal.
+  for (const line of lines.filter(candidate => candidate.includes('~^~^~^~^~^~^~^~^~^~^~^~^~') || candidate.includes('`------._/'))) {
+    assert.ok(visibleWidth(line) <= 60, `whale row wrapped:\n${view}`)
+  }
+  // Facts come after the whale block (one blank row between). The header
+  // also reads "dsh-pi-tui", so match the versioned welcome title.
+  const factsRow = lines.findIndex(line => line.includes('dsh-pi-tui  v'))
+  assert.ok(factsRow > whaleRow, `facts must follow the whale:\n${view}`)
+  assert.ok(view.includes('session-1'), `session id missing:\n${view}`)
+  assert.ok(view.includes('code'), `preset missing:\n${view}`)
+  // No full-width box.
+  assert.ok(!view.includes('╭'), `old box top survived:\n${view}`)
+})
+
+test('welcome card compacts to text rows at narrow width', async () => {
+  const { vt, app } = startApp(32, 24)
+  app.setWelcomeCard({
+    cwd: '/ws',
+    sessionId: 'session-1',
+    model: 'p/m',
+    version: '0.1.0',
+    preset: 'code',
+  })
+  const view = await viewport(vt)
+  // Below 40 columns the full whale is not shown.
+  assert.ok(!view.includes("_.-' `-._"), `whale leaked into compact:\n${view}`)
+  assert.ok(view.includes('🐋 dsh-pi-tui'), `compact title missing:\n${view}`)
+  assert.ok(view.includes('session-1'), `session id missing:\n${view}`)
+  assert.ok(view.includes('p/m'), `model missing:\n${view}`)
+  assert.ok(view.includes('code'), `preset missing:\n${view}`)
+  assert.ok(view.includes('/ws'), `cwd missing:\n${view}`)
+  assert.ok(view.includes('0.1.0'), `version missing:\n${view}`)
+  // No ellipsis truncation in compact mode.
+  assert.ok(!view.includes('…'), `compact truncated:\n${view}`)
+})
+
+test('welcome card switches layouts across resize breakpoints and back', async () => {
+  const { vt, app } = startApp(100, 24)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-1', model: 'p/m', version: '0.1.0' })
+  await viewport(vt)
+  const viewText = (): string => vt.getViewport().join('\n')
+  assert.ok(viewText().includes("_.-' `-._"), 'wide layout must show the whale')
+  vt.resize(60, 24)
+  await viewport(vt)
+  assert.ok(viewText().includes("_.-' `-._"), 'stacked layout must show the whale')
+  vt.resize(32, 24)
+  await viewport(vt)
+  assert.ok(!viewText().includes("_.-' `-._"), 'compact layout must hide the whale')
+  assert.ok(viewText().includes('🐋 dsh-pi-tui'), 'compact layout must show the emoji title')
+  vt.resize(100, 24)
+  await viewport(vt)
+  assert.ok(viewText().includes("_.-' `-._"), 'wide layout must restore the whale')
+  assert.ok(!viewText().includes('🐋 dsh-pi-tui'), 'compact emoji must not survive the resize back')
+})
+
+test('fullscreen anchor offsets follow the welcome card height across layout breakpoints', async () => {
+  const { vt, app } = startApp(100, 30)
+  const messages = [
+    { kind: 'user' as const, turn: 1, text: 'first user' },
+    { kind: 'assistant' as const, turn: 1, text: 'first answer' },
+    ...Array.from({ length: 20 }, (_, index) => ({ kind: 'assistant' as const, turn: index + 2, text: `tail ${index}` })),
+  ]
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-1', model: 'p/m', version: '0.1.0' })
+  app.setTranscript(messages)
+  app.setFullscreen(true)
+  await viewport(vt)
+  const anchor: TranscriptViewportAnchor = {
+    scrollTop: 0,
+    top: {
+      turn: 5,
+      rowKind: 'message',
+      occurrence: 0,
+      message: { kind: 'assistant', turn: 5, text: 'tail 3' },
+      rowOffset: 0,
+      viewportOffset: 0,
+    },
+  }
+  // The anchored message must sit at the viewport top in EVERY layout: a
+  // stale welcome height would shift the row mapping.
+  const assertAnchored = async (label: string): Promise<void> => {
+    assert.equal(app.restoreTranscriptViewportAnchor(anchor, 'top'), true)
+    const view = await viewport(vt)
+    assert.ok(view.includes('tail 3'), `${label} anchor message missing:\n${view}`)
+    assert.ok(!view.includes('tail 2'), `${label} anchor must not leave the previous message at the top:\n${view}`)
+  }
+  await assertAnchored('wide')
+  vt.resize(60, 30)
+  await assertAnchored('stacked')
+  vt.resize(32, 30)
+  await assertAnchored('compact')
   app.stop()
 })
 

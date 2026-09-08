@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **Welcome Card 视觉重构。** 首屏欢迎卡引入原创圆润鲸鱼 ASCII mascot,按终端宽度使用三档响应式布局:72 列以上鲸鱼与 session facts 左右并排,40～71 列鲸鱼居中、facts 在下,40 列以下切换为紧凑文本布局(🐋 标题)。鲸鱼 6 行保留 cyan → blue → indigo 品牌渐变,不随主题切换改色;facts 继续完整显示(长值 wrap、不截断),idle 邀请、`setWelcomeCard()` 契约、fullscreen 滚动/锚点/点击映射均保持不变。
+
 ## [0.4.3-alpha.2] - 2026-09-08
 
 ### 安装与版本对应

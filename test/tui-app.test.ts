@@ -1368,8 +1368,44 @@ test('the pre-session welcome invites the first message and clears on facts', as
   app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-1', model: 'p/m', version: '0.1.0' })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('session session-1'), `welcome card missing:\n${view}`)
+  assert.ok(view.includes('session-1'), `welcome card missing:\n${view}`)
   assert.ok(!view.includes('type a message to start'), `invitation survived:\n${view}`)
+  // No preset was provided: the preset row is omitted entirely.
+  assert.ok(!view.includes('preset'), `preset row must be omitted when undefined:\n${view}`)
+})
+
+test('the idle welcome adapts to stacked and compact widths', async () => {
+  // Stacked (60): the whale stays, the invitation reads without the emoji.
+  const stackedVt = new VirtualTerminal(60, 24)
+  const stackedApp = new TuiApp(stackedVt, { onSubmit: () => {}, onExit: () => {} })
+  stackedApp.start()
+  startedApps.add(stackedApp)
+  stackedApp.setWelcomeIdle(true)
+  await stackedVt.waitForRender()
+  let view = stackedVt.getViewport().join('\n')
+  assert.ok(view.includes('type a message to start a session'), `stacked idle invitation missing:\n${view}`)
+  assert.ok(view.includes("_.-' `-._"), `stacked idle whale missing:\n${view}`)
+  assert.ok(!view.includes('🐋 dsh-pi-tui'), `stacked idle must not use the compact emoji title:\n${view}`)
+  // Dispose releases the process-global TuiApp slot before the next app.
+  stackedApp.dispose()
+  // Compact (32): the whale is replaced by the emoji title; the invitation
+  // wraps, so join the stripped rows with a space (the wrap boundary is a
+  // word boundary) before matching.
+  const compactVt = new VirtualTerminal(32, 24)
+  const compactApp = new TuiApp(compactVt, { onSubmit: () => {}, onExit: () => {} })
+  compactApp.start()
+  startedApps.add(compactApp)
+  compactApp.setWelcomeIdle(true)
+  await compactVt.waitForRender()
+  view = compactVt.getViewport().join('\n')
+  const joined = view.split('\n')
+    .map(line => line.replace(/\x1b\[[0-9;]*m/g, '').trimEnd())
+    .join(' ')
+    .replace(/\s+/g, ' ')
+  assert.ok(joined.includes('🐋 dsh-pi-tui'), `compact idle emoji title missing:\n${view}`)
+  assert.ok(joined.includes('type a message to start a session'), `compact idle invitation missing:\n${view}`)
+  assert.ok(!view.includes("_.-' `-._"), `compact idle must not show the full whale:\n${view}`)
+  compactApp.dispose()
 })
 
 test('overlay frame borders stay aligned when content is narrower than the panel', async () => {
@@ -1385,7 +1421,7 @@ test('overlay frame borders stay aligned when content is narrower than the panel
   await vt.waitForRender()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   const lines = vt.getViewport().map(strip)
-  // Locate the picker box around its first row, not the welcome card's frame.
+  // Locate the picker box around its first row, not the welcome card above it.
   const pickerRow = lines.findIndex(line => line.includes('short label one'))
   assert.ok(pickerRow >= 0, `picker row missing:\n${lines.join('\n')}`)
   let top = pickerRow
