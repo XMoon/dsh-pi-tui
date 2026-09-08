@@ -434,12 +434,13 @@ test('pairs tool calls with their results and caps long summaries', () => {
 //
 // Alpha.2's `ptc` preset keeps `run_code` as the model-authored composition
 // surface and appends LOG-ONLY `tool/code-dispatch-start` /
-// `tool/code-dispatch` events for nested bash/pwsh sub-calls. The outer
+// `tool/code-dispatch` events for nested bash/pwsh/read sub-calls. The outer
 // curated result may NOT carry the nested output (it can be
-// "(run_code completed with no output)"), so the TUI folds each sub-call
-// into its own tool card derived from the durable event payload (tool name,
-// raw args, rendered content, isError) — never from a Host callback or a
-// guessed exit status.
+// "(run_code completed with no output)"), so the TUI folds each sub-call into
+// a child card recursively attached to its parent card's `subCalls` tree —
+// sub-calls NEVER join the top-level surface flow (upstream PTC contract).
+// Status derives only from the durable `isError` flag; a start/settle without
+// a known parent (an incomplete replay fragment) creates no surface node.
 
 test('run_code root call folds into a stable Code card', () => {
   const messages = foldTranscript([
@@ -467,7 +468,7 @@ test('run_code root call folds into a stable Code card', () => {
   assert.equal(tool.result, 'program output')
 })
 
-test('nested PTC bash dispatch folds into a retained child card', () => {
+test('nested PTC bash dispatch attaches to the run_code card subCalls tree', () => {
   const events = [
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
     event('tool/code-dispatch-start', {
@@ -502,20 +503,21 @@ test('nested PTC bash dispatch folds into a retained child card', () => {
     }, 3),
   ]
   const messages = foldTranscript(events)
-  // The outer Code card AND the nested Bash child card are both retained.
-  assert.deepEqual(kinds(messages), ['tool', 'tool'])
-  const [code, bash] = messages
+  // The top-level surface flow carries ONLY the root Code card; the nested
+  // Bash child lives inside its subCalls tree.
+  assert.deepEqual(kinds(messages), ['tool'])
+  const code = messages[0]
   assert.ok(code !== undefined && code.kind === 'tool')
   assert.equal(code.name, 'run_code')
   assert.equal(code.status, 'ok')
   assert.equal(code.result, '(run_code completed with no output)')
-  assert.ok(bash !== undefined && bash.kind === 'tool')
+  assert.ok(code.subCalls !== undefined && code.subCalls.length === 1)
+  const bash = code.subCalls[0]
   assert.equal(bash.name, 'bash')
   assert.equal(bash.status, 'ok')
   assert.equal(bash.result, 'file.txt')
   assert.equal(bash.args, JSON.stringify({ cmd: 'ls' }))
-  assert.equal(bash.parentCallId, 'code-1')
-  assert.equal(bash.rootCallId, 'code-1')
+  assert.equal(bash.subCallId, 'code-1:code:1')
 })
 
 test('nested PTC dispatch with an error outcome keeps the durable error status', () => {
@@ -552,10 +554,10 @@ test('nested PTC dispatch with an error outcome keeps the durable error status',
       },
     }, 3),
   ])
-  assert.deepEqual(kinds(messages), ['tool', 'tool'])
-  const bash = messages[1]
-  assert.ok(bash !== undefined && bash.kind === 'tool')
-  assert.equal(bash.name, 'bash')
+  const code = messages[0]
+  assert.ok(code !== undefined && code.kind === 'tool')
+  const bash = code.subCalls?.[0]
+  assert.ok(bash !== undefined)
   assert.equal(bash.status, 'error', 'the durable isError flag decides the child status')
   assert.equal(bash.result, 'command failed: boom')
 })
@@ -597,41 +599,141 @@ test('nested spilled/generic dispatch content stays readable without a fabricate
       },
     }, 3),
   ])
-  const bash = messages[1]
-  assert.ok(bash !== undefined && bash.kind === 'tool')
+  const code = messages[0]
+  assert.ok(code !== undefined && code.kind === 'tool')
+  const bash = code.subCalls?.[0]
+  assert.ok(bash !== undefined)
   assert.equal(bash.status, 'ok', 'no exit status is invented for spilled content')
   assert.equal(bash.result, 'output spilled to /tmp/run-1.log (truncated)')
 })
 
-test('an orphan nested dispatch settle still retains the output', () => {
-  // A replay fragment may start after the dispatch-start; the settle alone
-  // must not drop the nested output.
+test('nested dispatch with an explicit exit marker keeps the marker in the body', () => {
+  // The plan requires: nested shell result with explicit exit marker →
+  // status/body parsed as the existing TUI contract expects. The status
+  // comes from the durable isError flag; the marker text stays in the body.
   const messages = foldTranscript([
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 0),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'false' },
+    }, 1),
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
-      name: 'pwsh',
-      arguments: { cmd: 'dir' },
-      isError: false,
-      content: [{ type: 'text', text: 'file.txt' }],
-    }, 0),
+      name: 'bash',
+      arguments: { cmd: 'false' },
+      isError: true,
+      content: [{ type: 'text', text: 'foo\n[exit code: 2]' }],
+    }, 2),
+    event('tool/result', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('msg-1'),
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: ToolCallId('code-1'),
+          content: [{ type: 'text', text: 'program output' }],
+        }],
+        source: { kind: 'tool', callId: ToolCallId('code-1') },
+      },
+    }, 3),
   ])
-  assert.deepEqual(kinds(messages), ['tool'])
-  const card = messages[0]
-  assert.ok(card !== undefined && card.kind === 'tool')
-  assert.equal(card.name, 'pwsh')
-  assert.equal(card.status, 'ok')
-  assert.equal(card.result, 'file.txt')
+  const code = messages[0]
+  assert.ok(code !== undefined && code.kind === 'tool')
+  const bash = code.subCalls?.[0]
+  assert.ok(bash !== undefined)
+  assert.equal(bash.status, 'error')
+  assert.equal(bash.result, 'foo\n[exit code: 2]', 'the explicit exit marker stays in the body')
 })
 
-test('an orphan nested dispatch settle derives the turn from the parent call and keeps the payload', () => {
-  // The settle alone (no dispatch-start) must still land in the PARENT
-  // call's turn — never the stale current turn — and preserve the settle
-  // payload's args and parent/root identity.
+test('a nested PTC read child never joins the top-level read grouping', () => {
+  // A run_code program may dispatch a nested `read` sub-call; the child lives
+  // in the parent card's subCalls tree, so it never reaches the top-level
+  // consecutive-read grouping. Ordinary reads after the run_code card still
+  // merge with each other.
   const messages = foldTranscript([
-    event('turn/start', { turn: 5 }, 0),
-    event('tool/call', { turn: 3, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 1),
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 1),
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'read',
+      arguments: { file: 'nested.ts' },
+    }, 2),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'read',
+      arguments: { file: 'nested.ts' },
+      isError: false,
+      content: [{ type: 'text', text: 'nested content' }],
+    }, 3),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('msg-4'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        source: { kind: 'tool', callId: ToolCallId('code-1') },
+      },
+    }, 4),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 5),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('msg-6'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('r1'), content: [{ type: 'text', text: 'aaa' }] }],
+        source: { kind: 'tool', callId: ToolCallId('r1') },
+      },
+    }, 6),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 7),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('msg-8'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('r2'), content: [{ type: 'text', text: 'bbb' }] }],
+        source: { kind: 'tool', callId: ToolCallId('r2') },
+      },
+    }, 8),
+  ])
+  const tools = messages.filter(message => message.kind === 'tool')
+  // Top level: the run_code card plus ONE merged ordinary read group.
+  assert.equal(tools.length, 2)
+  const [code, group] = tools
+  assert.ok(code !== undefined && code.kind === 'tool')
+  assert.equal(code.name, 'run_code')
+  const nested = code.subCalls?.[0]
+  assert.ok(nested !== undefined)
+  assert.equal(nested.name, 'read')
+  assert.equal(nested.result, 'nested content')
+  assert.ok(group !== undefined && group.kind === 'tool')
+  assert.equal(group.name, 'read')
+  assert.equal(group.args, '2 files', 'the ordinary reads still merge with each other')
+  assert.ok(group.result.includes('aaa') && group.result.includes('bbb'))
+})
+
+test('an orphan nested dispatch creates no surface node', () => {
+  // A start/settle without a known parent (an incomplete replay fragment)
+  // must not fabricate a top-level card: sub-calls never join the surface
+  // flow.
+  const orphanStart = foldTranscript([
+    event('tool/code-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'ls' },
+    }, 0),
+  ])
+  assert.deepEqual(kinds(orphanStart), [])
+  const orphanSettle = foldTranscript([
     event('tool/code-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
@@ -640,17 +742,9 @@ test('an orphan nested dispatch settle derives the turn from the parent call and
       arguments: { cmd: 'ls' },
       isError: false,
       content: [{ type: 'text', text: 'file.txt' }],
-    }, 2),
+    }, 0),
   ])
-  assert.deepEqual(kinds(messages), ['tool', 'tool'])
-  const child = messages[1]
-  assert.ok(child !== undefined && child.kind === 'tool')
-  assert.equal(child.turn, 3, 'the child must land in the parent call turn, not the current turn')
-  assert.equal(child.name, 'bash')
-  assert.equal(child.args, JSON.stringify({ cmd: 'ls' }))
-  assert.equal(child.result, 'file.txt')
-  assert.equal(child.parentCallId, 'code-1')
-  assert.equal(child.rootCallId, 'code-1')
+  assert.deepEqual(kinds(orphanSettle), [])
 })
 
 test('an outer run_code error result keeps the error status', () => {
@@ -1327,91 +1421,6 @@ test('consecutive read results group into one card', () => {
   assert.equal(last.args, '{"file":"c.ts"}', 'a single read keeps its args')
 })
 
-test('a nested PTC read child is never merged into an ordinary read group', () => {
-  // A run_code program may dispatch a nested `read` sub-call; its child card
-  // belongs to the outer PTC topology and must NOT be grouped with an
-  // ordinary read run that follows it.
-  const messages = foldTranscript([
-    event('turn/start', { turn: 0 }, 0),
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)"}' }, 1),
-    event('tool/code-dispatch-start', {
-      rootCallId: ToolCallId('code-1'),
-      parentCallId: ToolCallId('code-1'),
-      subCallId: ToolCallId('code-1:code:1'),
-      name: 'read',
-      arguments: { file: 'nested.ts' },
-    }, 2),
-    event('tool/code-dispatch', {
-      rootCallId: ToolCallId('code-1'),
-      parentCallId: ToolCallId('code-1'),
-      subCallId: ToolCallId('code-1:code:1'),
-      name: 'read',
-      arguments: { file: 'nested.ts' },
-      isError: false,
-      content: [{ type: 'text', text: 'nested content' }],
-    }, 3),
-    event('tool/result', {
-      turn: 0, step: 0,
-      message: {
-        id: MessageId('msg-4'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
-        source: { kind: 'tool', callId: ToolCallId('code-1') },
-      },
-    }, 4),
-    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 5),
-    event('tool/result', {
-      turn: 0, step: 0,
-      message: {
-        id: MessageId('msg-6'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('r1'), content: [{ type: 'text', text: 'ordinary content' }] }],
-        source: { kind: 'tool', callId: ToolCallId('r1') },
-      },
-    }, 6),
-  ])
-  const tools = messages.filter(message => message.kind === 'tool')
-  assert.equal(tools.length, 3, 'the nested child and the ordinary read must stay separate cards')
-  const [code, nested, ordinary] = tools
-  assert.ok(code !== undefined && code.kind === 'tool')
-  assert.equal(code.name, 'run_code')
-  assert.ok(nested !== undefined && nested.kind === 'tool')
-  assert.equal(nested.name, 'read')
-  assert.equal(nested.result, 'nested content')
-  assert.equal(nested.parentCallId, 'code-1')
-  assert.equal(nested.rootCallId, 'code-1')
-  assert.ok(ordinary !== undefined && ordinary.kind === 'tool')
-  assert.equal(ordinary.name, 'read')
-  assert.equal(ordinary.args, '{"file":"a.ts"}', 'the ordinary read keeps its own args')
-  assert.equal(ordinary.result, 'ordinary content')
-  assert.equal(ordinary.parentCallId, undefined)
-  assert.equal(ordinary.rootCallId, undefined)
-})
-
-test('groupConsecutiveReads never merges a nested PTC read child into an ordinary read', () => {
-  // The exported pure grouping path must apply the same exclusion as the
-  // stateful folder: a nested child read followed by an ordinary read stays
-  // two cards, and two ordinary reads still merge.
-  const child: TranscriptMessage = {
-    kind: 'tool', turn: 0, name: 'read', args: '{"file":"nested.ts"}',
-    result: 'nested content', status: 'ok', parentCallId: 'code-1', rootCallId: 'code-1',
-  }
-  const ordinaryA: TranscriptMessage = {
-    kind: 'tool', turn: 0, name: 'read', args: '{"file":"a.ts"}',
-    result: 'aaa', status: 'ok',
-  }
-  const ordinaryB: TranscriptMessage = {
-    kind: 'tool', turn: 0, name: 'read', args: '{"file":"b.ts"}',
-    result: 'bbb', status: 'ok',
-  }
-  const mixed = groupConsecutiveReads([child, ordinaryA])
-  assert.equal(mixed.length, 2, 'the nested child must break the group')
-  assert.equal(mixed[0]?.kind === 'tool' ? mixed[0].parentCallId : undefined, 'code-1')
-  const merged = groupConsecutiveReads([ordinaryA, ordinaryB])
-  assert.equal(merged.length, 1, 'ordinary reads still merge')
-  const group = merged[0]
-  assert.ok(group !== undefined && group.kind === 'tool')
-  assert.equal(group.args, '2 files')
-  assert.ok(group.result.includes('aaa') && group.result.includes('bbb'))
-})
 
 test('consecutive read grouping spans turn boundaries (incremental projection parity)', () => {
   const readResult = (seq: number, callId: string, text: string): SessionEvent => event('tool/result', {

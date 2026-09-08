@@ -2080,6 +2080,8 @@ interface MessageComponentEntry {
   result?: string
   meta?: unknown
   members?: unknown
+  /** PTC nested sub-calls (the parent card's `subCalls` tree). */
+  subCalls?: unknown
   error?: { name: string; code: string }
   /** Compaction card facts (kind 'compaction'). */
   items?: number
@@ -8668,6 +8670,7 @@ export class TuiApp {
         entry.result = message.result
         entry.meta = message.meta
         entry.members = message.members
+        entry.subCalls = message.subCalls
         entry.error = message.error
         entry.resultBlocks = message.resultBlocks
         break
@@ -8700,6 +8703,7 @@ export class TuiApp {
       case 'tool':
         return entry.status !== message.status || entry.args !== message.args
           || entry.result !== message.result || entry.meta !== message.meta || entry.members !== message.members
+          || entry.subCalls !== message.subCalls
           || entry.error !== message.error || entry.resultBlocks !== message.resultBlocks
       case 'summary':
         return false
@@ -9234,7 +9238,51 @@ export class TuiApp {
       }
       card.addChild(new Text(rows.join('\n'), 0, 0))
     }
+    // PTC nested sub-calls (alpha.2 tool/code-dispatch events): recursively
+    // attached to the parent card, never top-level surface items. Folded
+    // cards show one indented header row per child; expanded cards show the
+    // child header plus its result body, recursively.
+    if (message.subCalls !== undefined && message.subCalls.length > 0) {
+      for (const child of message.subCalls) {
+        this.renderSubCall(card, child, width, 2, expanded)
+      }
+    }
     return card
+  }
+
+  /** One PTC nested sub-call row group inside its parent tool card. The
+   * child reuses the ordinary tool-card header semantics (toolCardHeader +
+   * status pill + icon) and its raw result text; deeper nesting indents
+   * further. */
+  private renderSubCall(
+    card: Container,
+    child: Extract<TranscriptMessage, { kind: 'tool' }>,
+    width: number,
+    indent: number,
+    expanded: boolean,
+  ): void {
+    const header = toolCardHeader(child.name, child.args, this.workspaceRoot)
+    const pill = child.status === 'ok'
+      ? color.success('[ok]')
+      : child.status === 'error'
+        ? color.error('[error]')
+        : color.textDim('[running]')
+    const icon = iconPrefix(toolIconSemantic(child.name), this.iconStyle)
+    const head = color.textDim(`${icon}${header.title}${header.summary === '' ? '' : ` ${header.summary}`}`)
+    const pad = ' '.repeat(indent)
+    card.addChild(new Text(truncateToWidth(`${pad}${head} ${pill}`, width, '…'), 0, 0))
+    if (expanded) {
+      if (child.result !== '') {
+        for (const line of child.result.split('\n')) {
+          card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
+        }
+      }
+      if (child.subCalls !== undefined) {
+        for (const grand of child.subCalls) {
+          this.renderSubCall(card, grand, width, indent + 2, expanded)
+        }
+      }
+    }
   }
 
   /**
