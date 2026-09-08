@@ -1251,6 +1251,35 @@ test('a conflicting PTC sub-call identity fails fast', () => {
   }, 4)]), /conflicting PTC sub-call settle identity/u)
 })
 
+test('a conflicting duplicate parked settle fails fast', () => {
+  // Two settles for the same subCallId with conflicting durable identity
+  // (the child is not mounted yet, so both park) are impossible on a valid
+  // alpha.2 stream — the second must throw, never silently overwrite the
+  // first (last-write-wins).
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/code-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'ls', description: 'List files' },
+      isError: false,
+      content: [{ type: 'text', text: 'file.txt' }],
+    }, 1),
+  ])
+  assert.throws(() => folder.apply([event('tool/code-dispatch', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId('code-1'),
+    subCallId: ToolCallId('code-1:code:1'),
+    name: 'read',
+    arguments: { file_path: 'x', offset: 1, limit: 200 },
+    isError: false,
+    content: [{ type: 'text', text: 'x' }],
+  }, 2)]), /conflicting PTC sub-call settle identity/u)
+})
+
 test('a PTC sub-call colliding with its root callId fails fast at ingestion', () => {
   // The root call is NOT in subCallIndex, so a sub-call whose subCallId
   // equals the root callId would otherwise be accepted as a fresh child —
