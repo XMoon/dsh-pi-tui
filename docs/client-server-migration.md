@@ -197,8 +197,6 @@ physical persistence bytes to the Client for recompression.
 
 ### Pre-Stage-D Export convergence
 
-`/export` product semantics are now the official full Session-tree archive.
-
 ```text
 /export product semantics are now the official full Session-tree archive.
 

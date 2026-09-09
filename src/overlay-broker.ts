@@ -32,10 +32,20 @@ export interface QuestionSuspension {
   readonly suspendedOverlays: Set<OverlayHandle>
 }
 
+/** The broker's view of the active Save Location prompt suspension (owned
+ * by TuiApp). Same shape as the question suspension: a new overlay mounting
+ * while the prompt is active joins the prompt's suspension set instead of
+ * appearing on top. */
+export interface SaveLocationSuspension {
+  readonly suspendedOverlays: Set<OverlayHandle>
+}
+
 /** The broker's dependencies (the host's live state it reads). */
 export interface OverlayBrokerDeps {
   /** The currently active question flow, or undefined. */
   question?: () => QuestionSuspension | undefined
+  /** The currently active Save Location prompt, or undefined. */
+  saveLocation?: () => SaveLocationSuspension | undefined
   /** Report the focused seat (the host's setFocusSeat — broker reports
    * 'overlay' on capturing mounts). */
   setFocusSeat?: (seat: 'editor' | 'overlay' | 'editor-panel' | 'none') => void
@@ -94,6 +104,22 @@ export class OverlayBroker {
       question.suspendedOverlays.add(handle)
       return this.wrapClose(handle)
     }
+    const saveLocation = this.deps.saveLocation?.()
+    if (saveLocation !== undefined) {
+      // A new overlay mounting while the Save Location prompt is active is
+      // SUSPENDED (hidden, state intact) until the prompt settles — the
+      // same stacking rule as the question flow. The prompt's settle
+      // restores it (the broker's isTracked guard skips dead handles after
+      // a fullscreen teardown). The prompt is never cancelled by a mount:
+      // it survives fullscreen/programmatic screen swaps. An EXPLICIT
+      // setHidden(false)/show() on a suspended handle is an ownership
+      // override (the caller takes responsibility for the modal
+      // consistency) — the same forwarding contract as the question
+      // branch.
+      handle.setHidden(true)
+      saveLocation.suspendedOverlays.add(handle)
+      return this.wrapClose(handle)
+    }
     if (options.nonCapturing !== true) {
       const hidden = new Set<OverlayHandle>()
       for (const other of this.tracked) {
@@ -138,21 +164,33 @@ export class OverlayBroker {
   closeForHost(handle: OverlayHandle): void {
     const question = this.deps.question?.()
     if (question !== undefined) question.suspendedOverlays.delete(handle)
+    const saveLocation = this.deps.saveLocation?.()
+    if (saveLocation !== undefined) saveLocation.suspendedOverlays.delete(handle)
     for (const dependents of this.dependents.values()) dependents.delete(handle)
     const owned = this.dependents.get(handle)
     if (owned !== undefined) {
       this.dependents.delete(handle)
       if (question !== undefined) {
         for (const dependent of owned) question.suspendedOverlays.add(dependent)
+      } else if (saveLocation !== undefined) {
+        // The Save Location prompt owns the seat: the closed handle's
+        // still-mounted dependents stay hidden and become DIRECTLY owned
+        // by the prompt (they must not flash back over it — the same rule
+        // as the question branch).
+        for (const dependent of owned) saveLocation.suspendedOverlays.add(dependent)
       } else {
         for (const dependent of owned) dependent.setHidden(false)
       }
     }
-    this.tracked.delete(handle)
+    const wasTracked = this.tracked.delete(handle)
     handle.hide()
     // The seat may have returned to the editor (or to another capturing
     // overlay restored underneath); the host recomputes from live state.
-    this.deps.setFocusSeat?.('editor')
+    // A STALE close (an already-untracked handle, e.g. after a fullscreen
+    // teardown) must NOT republish the seat: the live state (an active
+    // Save prompt, question, or approval) is authoritative, and a dead
+    // handle's hide() requests no render to correct it later.
+    if (wasTracked) this.deps.setFocusSeat?.('editor')
   }
 
   /** Hide every tracked overlay (fullscreen migration — the host stops

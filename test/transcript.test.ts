@@ -5045,6 +5045,62 @@ test('a settled member keeps its durable outcome when the run is interrupted', (
   assert.match(markdown, /checker — completed/)
 })
 
+test('a replayed step fragment after turn/end cannot reopen the export owner lifecycle', () => {
+  const markdown = renderTranscriptMarkdown({
+    header: { id: 'session-export' as never, cwd: '/workspace' },
+    snapshotEvents: () => [
+      rawEvent('turn/start', { turn: 0 }, 0),
+      rawEvent('step/start', { turn: 0, step: 0 }, 1),
+      rawEvent('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 2),
+      rawEvent('step/end', { turn: 0, step: 0 }, 3),
+      rawEvent('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 4),
+      // Replayed fragment: a late step/start + step/end for the closed turn
+      // must not reopen the owner lifecycle (the visual fold fences these
+      // events after turn/end — the export applies the same fence).
+      rawEvent('step/start', { turn: 0, step: 0 }, 5),
+      rawEvent('tool-workflow/run-start', { runId: 'run-2', name: 'audit' }, 6),
+      rawEvent('step/end', { turn: 0, step: 0 }, 7),
+    ],
+  } as never)
+  // run-1 was interrupted by its own step/end; run-2 started after the turn
+  // closed and is session-owned — it must stay running, exactly like the
+  // visual projection, never interrupted by the replayed step/end.
+  assert.match(markdown, /Workflow: audit — interrupted/)
+  assert.match(markdown, /Workflow: audit — running/)
+})
+
+test('a replayed turn/start for an older closed turn cannot reopen the export owner lifecycle', () => {
+  const markdown = renderTranscriptMarkdown({
+    header: { id: 'session-export' as never, cwd: '/workspace' },
+    snapshotEvents: () => [
+      rawEvent('turn/start', { turn: 2 }, 0),
+      rawEvent('turn/end', { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 1),
+      // Replayed fragment: a late turn/start for the OLDER turn 1 must not
+      // open the workflow turn (the visual fold only opens the NEWEST
+      // turn's turn/start).
+      rawEvent('turn/start', { turn: 1 }, 2),
+      rawEvent('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 3),
+      rawEvent('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 4),
+    ],
+  } as never)
+  // The run started with no open turn and is session-owned: it must stay
+  // running, exactly like the visual projection.
+  assert.match(markdown, /Workflow: audit — running/)
+  assert.doesNotMatch(markdown, /Workflow: audit — interrupted/)
+})
+
+test('workflow: completed runs drop their fold index at run-end', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    rawEvent('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 1),
+    rawEvent('tool-workflow/run-end', { runId: 'run-1', stopReason: 'completed' }, 2),
+  ])
+  assert.equal(folder.activeWorkflowIndexCount(), 0, 'the completed run index is dropped')
+  // An active run keeps its index (search dirty marking needs it).
+  folder.apply([rawEvent('tool-workflow/run-start', { runId: 'run-2', name: 'audit' }, 3)])
+  assert.equal(folder.activeWorkflowIndexCount(), 1, 'an active run keeps its index')
+})
+
 test('failed-attempt reasoning resets on retry and matches a cold replay', () => {
   const durable = [
     event('turn/start', { turn: 0 }, 0),

@@ -110,11 +110,11 @@ transition rules; zero Host coupling). Representative files:
 `src/overlay-broker.ts`, `src/keybinding-registry.ts`,
 `src/editor-registry.ts`, `src/renderer-registry.ts`.
 `src/session-artifact-filename.ts` (Pre-Stage-D export convergence) is
-Client-local filename policy: the archive name stays upstream-authoritative
-(`sessionLogZipFilename` from the `dsh-session-log-export` utility package —
-the gate's prefix pattern classifies it under `import:dsh-session`; baseline
-entry added with the module), and the transcript name shares the same safe
-full-Session-id convention. `src/client-artifact-save.ts` and
+Client-local filename policy with ZERO Host coupling: the archive name
+mirrors the upstream `sessionLogZipFilename` convention exactly and is
+test-pinned against the upstream function (parity test in
+`test/export-command.test.ts`), and the transcript name shares the same
+safe full-Session-id convention. `src/client-artifact-save.ts` and
 `src/save-location.ts` are the Client-local temp/atomic-commit sink and the
 Save Location UI — zero Host coupling.
 

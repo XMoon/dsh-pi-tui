@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { ProcessTerminal } from '@xmoon76/pi-tui'
@@ -22,7 +22,7 @@ import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { apply as applyRunner, type Config } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
 import { sessionArtifactFilename, safeSessionIdSegment } from '../src/session-artifact-filename.ts'
-import { streamToFile, writeTextAtomically } from '../src/client-artifact-save.ts'
+import { resolveClientDirectory, streamToFile, writeTextAtomically } from '../src/client-artifact-save.ts'
 import { sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
@@ -337,7 +337,7 @@ test('streamToFile writes multiple chunks in order and commits the exact bytes',
       controller.close()
     },
   })
-  const path = await streamToFile(target, stream, new AbortController().signal)
+  const path = await streamToFile(target, stream, new AbortController().signal, false)
   assert.equal(path, target)
   assert.deepEqual([...readFileSync(target)], [1, 2, 3, 4, 5, 6, 7, 8, 9], 'chunks preserved in order')
   // The temp file is gone; only the final artifact remains.
@@ -355,7 +355,7 @@ test('streamToFile never exposes a partial final file on mid-stream failure', as
       controller.error(new Error('mid-stream failure'))
     },
   })
-  await assert.rejects(streamToFile(target, stream, new AbortController().signal), /mid-stream failure/)
+  await assert.rejects(streamToFile(target, stream, new AbortController().signal, false), /mid-stream failure/)
   assert.equal(readFileSync(target, 'utf8'), 'original', 'the final file is not replaced by partial data')
   assert.deepEqual(readdirSync(dir), ['out.zip'], 'the temp file is cleaned')
 })
@@ -374,7 +374,7 @@ test('streamToFile abort cancels the stream and cleans the temp file', async (t)
     },
   })
   const controller = new AbortController()
-  const promise = streamToFile(target, stream, controller.signal)
+  const promise = streamToFile(target, stream, controller.signal, false)
   controller.abort()
   await assert.rejects(promise, error => error instanceof Error && error.name === 'AbortError')
   assert.equal(cancelled, true, 'the producer stream is cancelled')
@@ -386,9 +386,246 @@ test('writeTextAtomically commits the text and cleans the temp on failure', asyn
   const life = testLifecycle(t)
   const dir = life.tempDir('dsh-sink-')
   const target = join(dir, 'out.md')
-  await writeTextAtomically(target, '# Session\n\nhello', new AbortController().signal)
+  await writeTextAtomically(target, '# Session\n\nhello', new AbortController().signal, false)
   assert.equal(readFileSync(target, 'utf8'), '# Session\n\nhello')
   assert.deepEqual(readdirSync(dir), ['out.md'])
+})
+
+test('writeTextAtomically with overwrite consent replaces an existing target', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-sink-')
+  const target = join(dir, 'out.md')
+  writeFileSync(target, 'old markdown')
+  await writeTextAtomically(target, '# Session\n\nnew', new AbortController().signal, true)
+  assert.equal(readFileSync(target, 'utf8'), '# Session\n\nnew', 'the consented replace commits the new text')
+  assert.deepEqual(readdirSync(dir), ['out.md'], 'the temp file is cleaned')
+})
+
+test('streamToFile abort settles promptly even while a read is pending', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-sink-')
+  const target = join(dir, 'out.zip')
+  // One chunk, then the next read stays pending forever: the abort must
+  // interrupt the PENDING read (the producer is cancelled), never hang.
+  let pulled = false
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!pulled) {
+        pulled = true
+        controller.enqueue(new Uint8Array([1, 2, 3]))
+      }
+      // Second pull: enqueue nothing — the read stays pending.
+    },
+  })
+  const controller = new AbortController()
+  const promise = streamToFile(target, stream, controller.signal, false)
+  // Wait until the first chunk was consumed and the second read is pending.
+  await new Promise<void>(resolve => setTimeout(resolve, 20))
+  controller.abort()
+  await assert.rejects(promise, error => error instanceof Error && error.name === 'AbortError')
+  assert.ok(!existsSync(target), 'no final file after abort')
+  assert.deepEqual(readdirSync(dir), [], 'the temp file is cleaned')
+})
+
+test('streamToFile abort after the last chunk still prevents the commit', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-sink-')
+  const target = join(dir, 'out.zip')
+  const controller = new AbortController()
+  const stream = new ReadableStream<Uint8Array>({
+    pull(streamController) {
+      streamController.enqueue(new Uint8Array([1, 2, 3]))
+      streamController.close()
+      // The abort lands after the final chunk is delivered, while the async
+      // write/close are still in flight — before the commit. A microtask is
+      // deterministic: it drains before the next fs macrotask completes.
+      queueMicrotask(() => controller.abort())
+    },
+  })
+  const promise = streamToFile(target, stream, controller.signal, false)
+  await assert.rejects(promise, error => error instanceof Error && error.name === 'AbortError')
+  assert.ok(!existsSync(target), 'a cancelled save never commits the final artifact')
+  assert.deepEqual(readdirSync(dir), [], 'the temp file is cleaned')
+})
+
+test('resolveClientDirectory normalizes the POSIX backslash dialect like the completion engine', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-save-loc-')
+  const cwd = join(root, 'cwd')
+  const out = join(cwd, 'out')
+  mkdirSync(cwd)
+  mkdirSync(out)
+  // The completion engine suggests `out\` (Windows dialect on POSIX);
+  // resolving it must land on the SAME directory as the forward-slash form.
+  assert.equal(resolveClientDirectory('out\\', cwd), resolveClientDirectory('out/', cwd))
+  assert.equal(resolveClientDirectory('out\\sub', cwd), resolveClientDirectory('out/sub', cwd))
+  assert.equal(resolveClientDirectory('out', cwd), out)
+  // A POSIX-ABSOLUTE path with the backslash dialect round-trips too (the
+  // query engine treats `\` as a separator there; the resolver must match).
+  assert.equal(resolveClientDirectory(`${out}\\sub`, cwd), resolveClientDirectory(`${out}/sub`, cwd))
+  assert.equal(resolveClientDirectory(`${out}\\sub`, cwd), join(out, 'sub'))
+})
+
+test('streamToFile releases the reader lock when the temp open fails', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-sink-')
+  // The parent directory does not exist: the temp open rejects.
+  const target = join(root, 'missing-dir', 'out.zip')
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2, 3]))
+      controller.close()
+    },
+  })
+  await assert.rejects(streamToFile(target, stream, new AbortController().signal, false), /ENOENT/)
+  // The reader lock must be released even when the temp open fails.
+  const reader = stream.getReader()
+  const { done } = await reader.read()
+  assert.equal(done, true, 'the stream is reusable after the open failure')
+  reader.releaseLock()
+})
+
+test('streamToFile without overwrite consent refuses a target that appeared after the check', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-sink-')
+  const target = join(dir, 'out.zip')
+  // The target exists when the sink commits: the no-overwrite guard must
+  // refuse it and never replace it. (The EXACT lstat→link race window —
+  // a target inserted between the guard and the atomic link() — is closed
+  // by the kernel's link() EEXIST semantics and is not directly testable
+  // without an injection seam; the existing-target case pins the same
+  // no-silent-overwrite contract, and the dangling-symlink case pins the
+  // non-following guard.)
+  writeFileSync(target, 'another process wrote this')
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2, 3]))
+      controller.close()
+    },
+  })
+  await assert.rejects(streamToFile(target, stream, new AbortController().signal, false), /appeared after the collision check/)
+  assert.equal(readFileSync(target, 'utf8'), 'another process wrote this', 'the foreign target is never overwritten')
+  assert.deepEqual(readdirSync(dir), ['out.zip'], 'the temp file is cleaned')
+})
+
+test('streamToFile with overwrite consent replaces an existing target', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-sink-')
+  const target = join(dir, 'out.zip')
+  writeFileSync(target, 'old bytes')
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2, 3]))
+      controller.close()
+    },
+  })
+  const path = await streamToFile(target, stream, new AbortController().signal, true)
+  assert.equal(path, target)
+  assert.deepEqual([...readFileSync(target)], [1, 2, 3], 'the consented replace commits the new bytes')
+})
+
+test('streamToFile without overwrite consent refuses a dangling symlink target', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-sink-')
+  const target = join(dir, 'out.zip')
+  // A dangling symlink: statSync would follow it into ENOENT, but the entry
+  // itself exists — it must never be silently replaced.
+  symlinkSync(join(dir, 'missing-target'), target)
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2, 3]))
+      controller.close()
+    },
+  })
+  await assert.rejects(streamToFile(target, stream, new AbortController().signal, false), /appeared after the collision check/)
+  assert.ok(lstatSync(target).isSymbolicLink(), 'the dangling symlink is never replaced')
+  assert.deepEqual(readdirSync(dir), ['out.zip'], 'the temp file is cleaned')
+})
+
+test('streamToFile fails closed when the filesystem cannot commit without replacing', async (t) => {
+  // The no-overwrite commit uses link() (atomic no-replace). A filesystem
+  // that refuses hard links must FAIL the save — never fall back to an
+  // unchecked rename that could silently overwrite. The directory is made
+  // read-only mid-save (after the temp file is open) so link() returns
+  // EPERM; root and Windows bypass POSIX permission enforcement.
+  if (process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0)) {
+    t.skip('requires POSIX permission enforcement')
+    return
+  }
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-sink-')
+  const target = join(dir, 'out.zip')
+  let pulls = 0
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls += 1
+      if (pulls === 1) {
+        controller.enqueue(new Uint8Array([1, 2, 3]))
+      } else {
+        // The second (eager) pull runs only after the first read consumed
+        // the chunk — the temp file is already open by then. Make the
+        // directory read-only so the commit's link() fails with
+        // EACCES/EPERM (never before the open, which would fail the test
+        // for the wrong reason).
+        chmodSync(dir, 0o555)
+        controller.close()
+      }
+    },
+  })
+  try {
+    await assert.rejects(
+      streamToFile(target, stream, new AbortController().signal, false),
+      /does not support atomic no-replace commit/,
+    )
+    assert.ok(!existsSync(target), 'no final file on the fail-closed path')
+  } finally {
+    // Restore write permission so the temp cleanup and the fixture teardown
+    // can remove the directory.
+    chmodSync(dir, 0o755)
+  }
+})
+
+test('streamToFile releases the reader lock after a successful save', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-sink-')
+  const target = join(dir, 'out.zip')
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2, 3]))
+      controller.close()
+    },
+  })
+  await streamToFile(target, stream, new AbortController().signal, false)
+  // The reader lock must be released: a new reader can be acquired.
+  const reader = stream.getReader()
+  const { done } = await reader.read()
+  assert.equal(done, true, 'the stream is fully consumed and reusable')
+  reader.releaseLock()
+})
+
+test('streamToFile releases the reader lock after a cancelled save', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-sink-')
+  const target = join(dir, 'out.zip')
+  let pulled = false
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!pulled) {
+        pulled = true
+        controller.enqueue(new Uint8Array([1, 2, 3]))
+      }
+    },
+  })
+  const controller = new AbortController()
+  const promise = streamToFile(target, stream, controller.signal, false)
+  await new Promise<void>(resolve => setTimeout(resolve, 20))
+  controller.abort()
+  await assert.rejects(promise, error => error instanceof Error && error.name === 'AbortError')
+  // The reader lock must be released even on cancellation.
+  const reader = stream.getReader()
+  const { done } = await reader.read()
+  assert.equal(done, true, 'the cancelled stream is reusable')
+  reader.releaseLock()
 })
 
 // ── 23.2/23.3 runner-level lifecycle ─────────────────────────────────────
@@ -676,6 +913,57 @@ test('BLOCKING: a failed /export result never opens Save Location', async (t) =>
   assert.equal(opened, 0, 'an error result must never open Save Location')
 })
 
+test('a second artifact save while one prompt is active is refused with a notice (never silent)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-export-race-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const sessionA = { id: 'session-a', header: { id: 'session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION } }
+  const harness = makeHarness(home, { sessions: { 'session-a': sessionA } })
+  // Both commands stay in flight until released: two concurrent command
+  // successes can race the Save prompt (the dispatch is not serialized).
+  const executeGates: Array<() => void> = []
+  const originalExecute = harness.commands.execute
+  harness.commands.execute = async () => {
+    await new Promise<void>(resolve => executeGates.push(resolve))
+    return originalExecute()
+  }
+  const probe = installAppProbe()
+  life.defer(probe.restore)
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const ctx = new Context()
+  life.defer(() => disposeContext(ctx))
+  const fiber = await mountRunner(ctx, home, harness, { sessionId: 'session-a' }, {})
+  life.defer(() => fiber.dispose())
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  startedApps.add(app)
+  // Two commands in flight: /export then /transcript (both submitted while
+  // the editor is free — no prompt is open until a command settles).
+  submitText(app, '/export')
+  submitText(app, '/transcript')
+  await settle()
+  // Release both commands: both settle successfully, then the save
+  // workflows race the prompt — the first opens the REAL prompt, the
+  // second is refused by the duplicate guard.
+  for (const release of executeGates) release()
+  await settle()
+  await new Promise<void>(resolve => setTimeout(resolve, 50))
+  await settle()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('already active'),
+    `the refused second save must notify, never silently drop:\n${view}`)
+  // Cancel the first prompt (Esc) to clean up.
+  vt.sendInput('\x1b')
+  await settle()
+})
+
 test('the post-success workflow targets the CAPTURED originating Session even after a switch', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-export-identity-')
@@ -718,7 +1006,7 @@ test('the post-success workflow targets the CAPTURED originating Session even af
     const outcome = await (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: 'session-b' })
     assert.equal((outcome as { kind?: string }).kind, 'success', 'the switch to B must succeed')
     await settle()
-    return { kind: 'selected', directory: outDir }
+    return { kind: 'selected', directory: outDir, overwrite: false }
   }
   life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
   const probe = installAppProbe()
@@ -766,7 +1054,7 @@ test('/transcript writes the readable Markdown from the originating Session afte
   const harness = makeHarness(home, { sessions: { 'session-a': sessionA } })
   const originalAsk = TuiApp.prototype.askSaveLocation
   TuiApp.prototype.askSaveLocation = async function () {
-    return { kind: 'selected', directory: outDir }
+    return { kind: 'selected', directory: outDir, overwrite: false }
   }
   life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
   const probe = installAppProbe()
