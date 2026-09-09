@@ -7199,17 +7199,18 @@ export class TuiApp {
    * §7, Web advanceDisclosureState parity): the open/closed value is
    * derived from the CURRENT FACTS at render time (completed/clean →
    * closed, running/abnormal → open), so any number of running→clean
-   * cycles fold and unfold correctly. The stored EDGES distinguish an
-   * ordinary update from a new cycle:
-   * - running → running (a new member joins a still-running phase): the
-   *   user's close persists (plan §7.4);
-   * - clean → running/abnormal (a completed phase gains a new member):
-   *   a NEW CYCLE — the phase reopens and the outer run reopens too
-   *   (plan §7.7), overriding a prior user close;
+   * cycles fold and unfold correctly. The stored EDGES consume the user's
+   * choice exactly like Web:
+   * - entering clean (running/abnormal → clean, or a clean phase whose
+   *   member count changed): the clean facts auto-close — the user's
+   *   choice is consumed (Web: new clean facts => close). Reopening AFTER
+   *   the card is already clean persists (no facts change);
+   * - clean → running/abnormal: a NEW CYCLE — the phase reopens and the
+   *   outer run reopens too (plan §7.7), overriding a prior user close;
    * - non-abnormal → abnormal: the first abnormal edge opens once
-   *   (plan §7.5), overriding a prior user close.
-   * An explicit user OPEN is never cleared by any edge. The caller has
-   * already verified the run's content actually changed. */
+   *   (plan §7.5), overriding a prior user close;
+   * - running → running: an ordinary update — the user's choice persists.
+   * The caller has already verified the run's content actually changed. */
   private advanceWorkflowDisclosure(
     message: Extract<TranscriptMessage, { kind: 'workflow' }>,
   ): void {
@@ -7229,7 +7230,15 @@ export class TuiApp {
     let changed = false
     const previousRunMode = state.previousMode
     state.previousMode = runMode
-    if (previousRunMode === 'clean' && runMode !== 'clean') {
+    if (runMode === 'clean' && previousRunMode !== 'clean') {
+      // Normal completion: the clean facts consume the user's choice — the
+      // run auto-closes (Web: new clean facts => close). A user who
+      // reopens AFTER the run is already clean keeps their choice.
+      if (state.userOpen !== undefined) {
+        state.userOpen = undefined
+        changed = true
+      }
+    } else if (previousRunMode === 'clean' && runMode !== 'clean') {
       // A completed run resumed (unreachable today — run-end is terminal —
       // kept symmetric with the phase rule).
       if (state.userOpen === false) { state.userOpen = undefined; changed = true }
@@ -7256,15 +7265,27 @@ export class TuiApp {
       }
       const previousPhaseMode = phaseState.previousMode
       const previousActivityCount = phaseState.previousActivityCount
+      const phaseFactsChanged = previousPhaseMode !== phaseMode
+        || previousActivityCount !== phase.members.length
       phaseState.previousMode = phaseMode
       phaseState.previousActivityCount = phase.members.length
-      // NEW CYCLE (Web `phaseStartedCycle` parity, plan §7.7): a clean
-      // phase gained a new member — either the mode left clean, or the
-      // member count changed while staying clean (a member that started
-      // and settled within one facts update). Reopen the phase and mark
-      // the run for reopen.
-      if (previousPhaseMode === 'clean'
-        && (phaseMode !== 'clean' || phase.members.length !== previousActivityCount)) {
+      if (phaseMode === 'clean' && phaseFactsChanged) {
+        // Normal completion (incl. clean→clean with a changed member
+        // count): the clean facts consume the user's choice — the phase
+        // auto-closes (Web: new clean facts => close). A clean phase
+        // whose member count changed is still a NEW CYCLE for the outer
+        // run (Web phaseStartedCycle: the run reopens, the phase stays
+        // folded).
+        if (phaseState.userOpen !== undefined) {
+          phaseState.userOpen = undefined
+          changed = true
+        }
+        if (previousPhaseMode === 'clean' && phase.members.length !== previousActivityCount) {
+          phaseStartedCycle = true
+        }
+      } else if (previousPhaseMode === 'clean' && phaseMode !== 'clean') {
+        // NEW CYCLE (plan §7.7): a completed phase gained a new running or
+        // abnormal member — reopen the phase and mark the run for reopen.
         if (phaseState.userOpen === false) { phaseState.userOpen = undefined; changed = true }
         phaseStartedCycle = true
       } else if (previousPhaseMode !== 'abnormal' && phaseMode === 'abnormal') {
@@ -7272,7 +7293,6 @@ export class TuiApp {
         if (phaseState.userOpen === false) { phaseState.userOpen = undefined; changed = true }
       }
       // running → running: ordinary update — the user's choice persists.
-      // running → clean: status-driven close — the user's choice persists.
     }
     if (phaseStartedCycle && runMode !== 'clean' && state.userOpen === false) {
       // The outer run reopens with the new cycle (Web parity, plan §7.7):
