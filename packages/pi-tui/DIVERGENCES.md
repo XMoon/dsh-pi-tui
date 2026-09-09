@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `ea83c78c0534ae1847ac3ac3cd22b49bc39d98cf`
+- Audited local source commit: `3bec30fc13e39ef1333bddc0ce600ba9506d5f85`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -58,10 +58,13 @@
 - `MOVED_TO_HOST`: `X001`, `X002`, `X041` — The DSH searchable picker behavior moved to the Host-owned src/searchable-picker.ts SearchablePicker (guarded by test/searchable-picker.test.ts); the vendored SelectList is restored to the pinned upstream baseline.
 - `NOT_MOVABLE`: `X042` — The remaining X042 seam is SettingsList focus/row-budget propagation inside the vendored fork; the SelectList-side Input focus ownership moved to the Host SearchablePicker.
 - `NOT_MOVABLE`: `X004A`, `X004B`, `X005`, `X006`, `X007`, `X008`, `X009`, `X010`, `X014`, `X016`, `X018`, `X020`, `X021`, `X022`, `X023`, `X024`, `X025`, `X027`, `X028`, `X029`, `X031`, `X032`, `X033`, `X034`, `X035`, `X036`, `X037`, `X038`, `X039`, `X040`, `X043`, `X044`, `X045`, `X046`, `X047` — The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary.
-- `NOT_MOVABLE`: `X048`, `X049`, `X050`, `X051` — Input mouse click geometry is a public component contract inside the vendored fork; a host wrapper cannot equivalently fix it for all package/public-extension consumers.
 - `UPSTREAM_LEVER`: `X005`, `X006`, `X007`, `X008`, `X014`, `X016`, `X021`, `X033`, `X035`, `X048`, `X049`, `X050`, `X051` — Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence.
 - `SUPERSEDED`: `X012`, `X019` — X012's explicit fuzzy tie-break is redundant under the supported stable-sort runtime contract; X019's Text no-op dispose shim is replaced by Loader-owned X007 cleanup without a base super call.
 - `ABSORBED_UPSTREAM`: `X011` — Earendil v0.85.1 clips Input prompts at extremely narrow widths; direct width-0/1 regressions guard the absorbed behavior.
+- `NOT_MOVABLE`: `X048` — Input prompt mouse click geometry is a public component contract inside the vendored fork; a host wrapper cannot equivalently fix the Input's own coordinate mapping, and the fix depends on visibleWidth(this.prompt) which is vendor-internal.
+- `NOT_MOVABLE`: `X049` — AltScreenSearchComponent owns its PRIVATE query Input; the host cannot reach or rewire that Input, so the mouse-forwarding seam must live inside the vendored fork's alt-screen search component.
+- `NOT_MOVABLE`: `X050` — Editor visual-line/wrapped-segment cursor mapping and slash-autocomplete click-submit are internal Editor semantics (two distinct bugs confirmed against upstream v0.85.1 and main); they cannot be reproduced through the public Editor surface from a host wrapper.
+- `NOT_MOVABLE`: `X051` — Container/Box focus-ownership and input/key-release forwarding is a public component/framework contract inside the vendored fork (the TUI routes keyboard to the focused component and filters key releases by wantsKeyRelease); a host wrapper cannot change how the fork's own focus model resolves overlay roots.
 
 ## Removed or superseded legacy surfaces
 
@@ -4154,6 +4157,7 @@ showOverlay accepts any Component as the overlay root, and the overlay focus sta
 - Container and Box implement Focusable: the focused flag forwards to the child the last mouse press focused (tracked in handleMouse), and handleInput forwards to that child only
 - focus promotion to the container root applies to plain Container/Box overlay roots only, never to the TUI root (TuiBase extends Container)
 - focusedChild is cleared on removeChild/clear/dispose so a detached child never keeps receiving keyboard input
+- Container and Box forward the focused child's wantsKeyRelease (the TUI filters Kitty key releases by the focused component's wantsKeyRelease, so a Container/Box focus owner without forwarding drops releases aimed at the child)
 
 #### Dependency map
 
@@ -4185,6 +4189,7 @@ showOverlay accepts any Component as the overlay root, and the overlay focus sta
 #### Guarding tests
 
 - packages/pi-tui/test/tui-alt-screen.test.ts: X051 — an Input inside a plain Container overlay root receives the focused flag and keyboard input; in a multi-child Container root only the clicked child receives focus and keys; an Input inside a plain Box overlay root receives focus and keyboard input; the TUI root keeps the clicked component as the focus target
+- packages/pi-tui/test/tui-alt-screen.test.ts: a wantsKeyRelease child receives Kitty key releases through a Container overlay root and through a Box overlay root
 
 #### Upstream comparison
 

@@ -9,7 +9,7 @@
  "verification": {
   "auditedAt": "2026-09-09",
   "branch": "chore/revendor-pi-tui-v0.85.1",
-  "auditedSourceCommit": "ea83c78c0534ae1847ac3ac3cd22b49bc39d98cf",
+  "auditedSourceCommit": "3bec30fc13e39ef1333bddc0ce600ba9506d5f85",
   "referenceSnapshots": {
    "upstream": {
     "repository": "earendil-works/pi",
@@ -120,16 +120,6 @@
    "reason": "The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary."
   },
   {
-   "decision": "NOT_MOVABLE",
-   "records": [
-    "X048",
-    "X049",
-    "X050",
-    "X051"
-   ],
-   "reason": "Input mouse click geometry is a public component contract inside the vendored fork; a host wrapper cannot equivalently fix it for all package/public-extension consumers."
-  },
-  {
    "decision": "UPSTREAM_LEVER",
    "records": [
     "X005",
@@ -162,6 +152,34 @@
     "X011"
    ],
    "reason": "Earendil v0.85.1 clips Input prompts at extremely narrow widths; direct width-0/1 regressions guard the absorbed behavior."
+  },
+  {
+   "decision": "NOT_MOVABLE",
+   "records": [
+    "X048"
+   ],
+   "reason": "Input prompt mouse click geometry is a public component contract inside the vendored fork; a host wrapper cannot equivalently fix the Input's own coordinate mapping, and the fix depends on visibleWidth(this.prompt) which is vendor-internal."
+  },
+  {
+   "decision": "NOT_MOVABLE",
+   "records": [
+    "X049"
+   ],
+   "reason": "AltScreenSearchComponent owns its PRIVATE query Input; the host cannot reach or rewire that Input, so the mouse-forwarding seam must live inside the vendored fork's alt-screen search component."
+  },
+  {
+   "decision": "NOT_MOVABLE",
+   "records": [
+    "X050"
+   ],
+   "reason": "Editor visual-line/wrapped-segment cursor mapping and slash-autocomplete click-submit are internal Editor semantics (two distinct bugs confirmed against upstream v0.85.1 and main); they cannot be reproduced through the public Editor surface from a host wrapper."
+  },
+  {
+   "decision": "NOT_MOVABLE",
+   "records": [
+    "X051"
+   ],
+   "reason": "Container/Box focus-ownership and input/key-release forwarding is a public component/framework contract inside the vendored fork (the TUI routes keyboard to the focused component and filters key releases by wantsKeyRelease); a host wrapper cannot change how the fork's own focus model resolves overlay roots."
   }
  ],
  "removedLegacy": [
@@ -5041,7 +5059,8 @@
    "changedSurface": [
     "Container and Box implement Focusable: the focused flag forwards to the child the last mouse press focused (tracked in handleMouse), and handleInput forwards to that child only",
     "focus promotion to the container root applies to plain Container/Box overlay roots only, never to the TUI root (TuiBase extends Container)",
-    "focusedChild is cleared on removeChild/clear/dispose so a detached child never keeps receiving keyboard input"
+    "focusedChild is cleared on removeChild/clear/dispose so a detached child never keeps receiving keyboard input",
+    "Container and Box forward the focused child's wantsKeyRelease (the TUI filters Kitty key releases by the focused component's wantsKeyRelease, so a Container/Box focus owner without forwarding drops releases aimed at the child)"
    ],
    "dependencies": {
     "vendorInternal": {
@@ -5086,7 +5105,8 @@
     }
    },
    "tests": [
-    "packages/pi-tui/test/tui-alt-screen.test.ts: X051 — an Input inside a plain Container overlay root receives the focused flag and keyboard input; in a multi-child Container root only the clicked child receives focus and keys; an Input inside a plain Box overlay root receives focus and keyboard input; the TUI root keeps the clicked component as the focus target"
+    "packages/pi-tui/test/tui-alt-screen.test.ts: X051 — an Input inside a plain Container overlay root receives the focused flag and keyboard input; in a multi-child Container root only the clicked child receives focus and keys; an Input inside a plain Box overlay root receives focus and keyboard input; the TUI root keeps the clicked component as the focus target",
+    "packages/pi-tui/test/tui-alt-screen.test.ts: a wantsKeyRelease child receives Kitty key releases through a Container overlay root and through a Box overlay root"
    ],
    "upstream": {
     "equivalence": "NO",
