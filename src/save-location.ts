@@ -259,7 +259,17 @@ export class SaveLocationPrompt implements Component, Focusable {
     // Collision confirmation is a modal state (y/Enter replaces, n/Esc
     // returns): the directory/suggestion rows are inert while it shows.
     if (this.confirming) return undefined
-    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click' && event.type !== 'wheel')) {
+    // Wheel is normalized by the TUI with button "none" (never "left"):
+    // it must be handled BEFORE the left-button gate, or a real wheel
+    // over a suggestion never reaches moveSuggestion.
+    if (event.type === 'wheel') {
+      if (!event.wheelDelta) return undefined
+      const suggestion = this.suggestionRows.find(entry => entry.row === event.y)
+      if (!suggestion) return undefined
+      this.moveSuggestion(event.wheelDelta < 0 ? -1 : 1)
+      return { handled: true, render: true }
+    }
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) {
       return undefined
     }
     // Directory row: click-to-position the private Input. The row is
@@ -267,7 +277,6 @@ export class SaveLocationPrompt implements Component, Focusable {
     // Input's value starts at ITS OWN local x=2 (the '> ' prompt), at
     // row column 11, so the Input-local x = row x - 11 + 2 = row x - 9.
     if (event.y === this.directoryRow) {
-      if (event.type === 'wheel') return undefined
       const localX = event.x - 9
       if (localX < 0) return { handled: true }
       const result = dispatchMouseEvent(this.input, { ...event, x: localX, y: 0, height: 1 })
@@ -275,10 +284,6 @@ export class SaveLocationPrompt implements Component, Focusable {
     }
     const suggestion = this.suggestionRows.find(entry => entry.row === event.y)
     if (suggestion !== undefined) {
-      if (event.type === 'wheel' && event.wheelDelta) {
-        this.moveSuggestion(event.wheelDelta < 0 ? -1 : 1)
-        return { handled: true, render: true }
-      }
       if (event.type === 'press') {
         // Every press starts a fresh gesture: clear any latched pressed
         // identity first (a rejected stale press must not leave an old

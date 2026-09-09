@@ -16,7 +16,8 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationResult } from '../src/save-location.ts'
 import type { DirectoryCompletionItem } from '../src/file-completion/directory-completion.ts'
-import { TuiApp } from '../src/tui-app.ts'
+import { Frame, TuiApp } from '../src/tui-app.ts'
+import { TuiAltScreen } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
@@ -639,4 +640,71 @@ test('mouse parity: the collision confirmation blocks directory-row editing (ine
   assert.equal(handled, undefined, 'the confirmation must be inert to mouse input')
   assert.equal(prompt.getValue(), before, 'the directory value must not change')
   assert.equal(result, undefined, 'the confirmation must not settle')
+})
+
+test('mouse parity: a REAL wheel event (button "none") moves the suggestion selection', async (t) => {
+  const deps = {
+    resolveDirectory: (input: string) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async (raw: string) =>
+      raw === './' ? [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }] : null,
+  }
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  const rendered = prompt.render(60)
+  const libRow = rendered.findIndex(line => line.includes('lib/'))
+  assert.ok(libRow >= 0, `suggestion rows missing:\n${rendered.join('\n')}`)
+  // The TUI normalizes wheel events with button "none" — the wheel must
+  // move the suggestion cursor despite the left-button gate.
+  const result = prompt.handleMouse({
+    type: 'wheel', button: 'none', x: 2, y: libRow, screenX: 2, screenY: libRow,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false, wheelDelta: 1,
+  })
+  assert.ok(result?.handled, 'the wheel over a suggestion must be handled')
+  const state = prompt as unknown as { suggestionCursor: number }
+  assert.strictEqual(state.suggestionCursor, 1, 'the wheel must move the suggestion selection')
+})
+
+test('alt-screen integration: a real SGR wheel reaches the prompt through the frame (button "none")', async (t) => {
+  const deps = {
+    resolveDirectory: (input: string) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async (raw: string) =>
+      raw === './' ? [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }] : null,
+  }
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  const frame = new Frame(prompt, true)
+  const vt = new VirtualTerminal(100, 24)
+  const tui = new TuiAltScreen(vt)
+  tui.start()
+  try {
+    tui.showOverlay(frame)
+    await vt.waitForRender()
+    await new Promise<void>(resolve => setTimeout(resolve, 10)) // suggestions land
+    await vt.waitForRender()
+    const viewport = vt.getViewport()
+    const srcRow = viewport.findIndex(line => line.includes('src/'))
+    assert.ok(srcRow >= 0, `suggestion row missing:\n${viewport.join('\n')}`)
+    const state = prompt as unknown as { suggestionCursor: number }
+    assert.strictEqual(state.suggestionCursor, 0, 'precondition — first suggestion selected')
+    // SGR wheel down (button 65) over the suggestion row INSIDE the
+    // overlay (the overlay starts at col 10): the alt screen normalizes
+    // it to { type: 'wheel', button: 'none' } and the frame forwards it
+    // to the prompt.
+    vt.sendInput(`\x1b[<65;13;${srcRow + 1}M`)
+    await vt.waitForRender()
+    assert.strictEqual(state.suggestionCursor, 1, 'the real SGR wheel must move the suggestion selection')
+  } finally {
+    tui.stop()
+  }
 })
