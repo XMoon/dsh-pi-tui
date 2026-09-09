@@ -280,28 +280,29 @@ function workflowMemberMark(status: WorkflowRunStatus): string {
 
 /** One phase's disclosure state inside a Workflow run (PR2 plan §7, Web
  * advanceDisclosureState parity): the user's explicit choice wins forever
- * once set; otherwise the CURRENT FACTS decide at every change — a clean
- * phase (all members completed) closes, a running/abnormal phase opens.
- * The only lifecycle flag is `abnormalOpened`: the FIRST abnormal edge
- * overrides a prior user close exactly once (plan §7.5), so an exception
- * is never hidden by an earlier toggle. */
+ * once set — EXCEPT across a NEW CYCLE: a clean phase (all members
+ * completed) that gains a new running/abnormal member reopens (plan
+ * §7.7), overriding a prior user close. `previousMode` is the edge
+ * detector: running → running is an ordinary update (the user's close
+ * persists), clean → running is a new cycle (reopen). */
 interface WorkflowPhaseDisclosureState {
   /** The user's explicit open/closed choice (undefined = fact-driven). */
   userOpen?: boolean
-  /** Whether the first abnormal edge already overrode the user choice. */
-  abnormalOpened: boolean
+  /** The phase's mode at the last advance (edge detection). */
+  previousMode: 'clean' | 'running' | 'abnormal'
 }
 
 /** One Workflow run's disclosure state (PR2 plan §7). Keyed by the durable
  * `runId`; phase state is keyed by `workflowPhaseKey(phase)` — never the
  * display label, never an array index. The run's open/closed value is
  * derived from the CURRENT facts at render time (completed → closed,
- * otherwise open) unless the user set an explicit choice. */
+ * otherwise open) unless the user set an explicit choice; a phase starting
+ * a new cycle reopens a user-closed run (plan §7.7). */
 interface WorkflowRunDisclosureState {
   /** The user's explicit open/closed choice (undefined = fact-driven). */
   userOpen?: boolean
-  /** Whether the first abnormal edge already overrode the user choice. */
-  abnormalOpened: boolean
+  /** The run's mode at the last advance (edge detection). */
+  previousMode: 'clean' | 'running' | 'abnormal'
   /** Per-phase disclosure state by exact phase identity key. */
   phases: Map<string, WorkflowPhaseDisclosureState>
 }
@@ -7192,10 +7193,16 @@ export class TuiApp {
    * §7, Web advanceDisclosureState parity): the open/closed value is
    * derived from the CURRENT FACTS at render time (completed/clean →
    * closed, running/abnormal → open), so any number of running→clean
-   * cycles fold and unfold correctly. The ONLY transition stored here is
-   * the first abnormal edge: it overrides a prior user close exactly once
-   * (plan §7.5 — an exception must never stay hidden behind an earlier
-   * toggle); afterwards the user's choice wins forever. The caller has
+   * cycles fold and unfold correctly. The stored EDGES distinguish an
+   * ordinary update from a new cycle:
+   * - running → running (a new member joins a still-running phase): the
+   *   user's close persists (plan §7.4);
+   * - clean → running/abnormal (a completed phase gains a new member):
+   *   a NEW CYCLE — the phase reopens and the outer run reopens too
+   *   (plan §7.7), overriding a prior user close;
+   * - non-abnormal → abnormal: the first abnormal edge opens once
+   *   (plan §7.5), overriding a prior user close.
+   * An explicit user OPEN is never cleared by any edge. The caller has
    * already verified the run's content actually changed. */
   private advanceWorkflowDisclosure(
     message: Extract<TranscriptMessage, { kind: 'workflow' }>,
@@ -7204,55 +7211,68 @@ export class TuiApp {
     // The run's abnormal facts include the RUN status itself: a run can
     // settle failed/cancelled/interrupted with zero members or only
     // completed members — the abnormal edge must still open it once, and
-    // cold replay must pre-settle the flag.
+    // cold replay must pre-settle the mode.
     const runStatusAbnormal = message.status === 'failed'
       || message.status === 'cancelled'
       || message.status === 'interrupted'
-    const runHasAbnormal = runCounts.failed + runCounts.cancelled + runCounts.interrupted > 0
-      || runStatusAbnormal
+    const runHasAbnormalMembers = runCounts.failed + runCounts.cancelled + runCounts.interrupted > 0
+    const runMode: 'clean' | 'running' | 'abnormal' = message.status === 'completed'
+      ? 'clean'
+      : (runStatusAbnormal || runHasAbnormalMembers) ? 'abnormal' : 'running'
     let state = this.workflowDisclosure.get(message.runId)
     if (state === undefined) {
-      // First sight: a run that already carries abnormal facts has its
-      // abnormal edge pre-settled (a cold-replayed terminal run must never
-      // be force-opened by a later update).
-      state = { abnormalOpened: runHasAbnormal, phases: new Map() }
+      // First sight: the current mode is the pre-settled edge baseline (a
+      // cold-replayed terminal run never re-triggers an edge).
+      state = { previousMode: runMode, phases: new Map() }
       this.workflowDisclosure.set(message.runId, state)
     }
     let changed = false
-    if (state.abnormalOpened === false && runHasAbnormal) {
+    const previousRunMode = state.previousMode
+    state.previousMode = runMode
+    if (previousRunMode === 'clean' && runMode !== 'clean') {
+      // A completed run resumed (unreachable today — run-end is terminal —
+      // kept symmetric with the phase rule).
+      if (state.userOpen === false) { state.userOpen = undefined; changed = true }
+    } else if (previousRunMode !== 'abnormal' && runMode === 'abnormal') {
       // First abnormal edge: override ONLY a prior user CLOSE so the
-      // exception is not hidden behind an earlier fold (plan §7.5). A
-      // user who explicitly OPENED the run keeps their choice — clearing
-      // it here would let a later late-terminal completion (PR1's
-      // interrupted → completed recovery) snap the run shut against the
-      // user's explicit open (review finding).
-      state.abnormalOpened = true
-      if (state.userOpen === false) {
-        state.userOpen = undefined
-        changed = true
-      }
+      // exception is not hidden behind an earlier fold (plan §7.5). An
+      // explicit user OPEN is preserved (review finding).
+      if (state.userOpen === false) { state.userOpen = undefined; changed = true }
     }
-    // Phase-level facts over the CURRENT phase groups. A phase that
+    // Phase-level edges over the CURRENT phase groups. A phase that
     // disappears (impossible today — members are append-only) simply keeps
     // its state; the renderer only consults present phases.
+    let phaseStartedCycle = false
     for (const phase of workflowPhasePresentations(message.members)) {
-      let phaseState = state.phases.get(phase.key)
       const phaseHasAbnormal = phase.counts.failed + phase.counts.cancelled + phase.counts.interrupted > 0
+      const phaseMode: 'clean' | 'running' | 'abnormal' = phaseHasAbnormal
+        ? 'abnormal'
+        : phase.counts.completed === phase.members.length ? 'clean' : 'running'
+      let phaseState = state.phases.get(phase.key)
       if (phaseState === undefined) {
-        phaseState = { abnormalOpened: phaseHasAbnormal }
+        phaseState = { previousMode: phaseMode }
         state.phases.set(phase.key, phaseState)
         continue
       }
-      if (phaseState.abnormalOpened === false && phaseHasAbnormal) {
-        // First abnormal edge: same one-shot override as the run level —
-        // only a prior user CLOSE is lifted, an explicit user OPEN is
-        // preserved (review finding).
-        phaseState.abnormalOpened = true
-        if (phaseState.userOpen === false) {
-          phaseState.userOpen = undefined
-          changed = true
-        }
+      const previousPhaseMode = phaseState.previousMode
+      phaseState.previousMode = phaseMode
+      if (previousPhaseMode === 'clean' && phaseMode !== 'clean') {
+        // NEW CYCLE (plan §7.7): a completed phase gained a new running or
+        // abnormal member — reopen the phase and mark the run for reopen.
+        if (phaseState.userOpen === false) { phaseState.userOpen = undefined; changed = true }
+        phaseStartedCycle = true
+      } else if (previousPhaseMode !== 'abnormal' && phaseMode === 'abnormal') {
+        // First abnormal edge: same one-shot override as the run level.
+        if (phaseState.userOpen === false) { phaseState.userOpen = undefined; changed = true }
       }
+      // running → running: ordinary update — the user's choice persists.
+      // running → clean: status-driven close — the user's choice persists.
+    }
+    if (phaseStartedCycle && state.userOpen === false) {
+      // The outer run reopens with the new cycle (plan §7.7): a user who
+      // folded the whole run must not keep the second batch hidden.
+      state.userOpen = undefined
+      changed = true
     }
     if (changed) this.workflowDisclosureRevision += 1
   }

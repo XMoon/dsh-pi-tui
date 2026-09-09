@@ -724,3 +724,70 @@ test('an explicit user open survives the interrupted edge and late terminal fact
   assert.equal(runChevron(view), '▼', `late completion must not snap the explicitly opened run shut:\n${view}`)
   assert.ok(view.includes('▼ Unassigned 1 agent'), `late completion must not snap the explicitly opened phase shut:\n${view}`)
 })
+
+test('a new running cycle reopens a user-closed run and phase (review P2, plan §7.7)', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-a' } } as SessionEvent,
+  ])
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages())
+  let view = await viewport(vt)
+  // The user folds the phase and the whole run.
+  const phaseRow = rowOf(view, '▼ Unassigned 1 agent')
+  await clickCell(vt, 10, phaseRow)
+  view = await viewport(vt)
+  const runRow = rowOf(view, 'Workflow audit [running]')
+  await clickCell(vt, 10, runRow)
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▶', `the run must be user-closed:\n${view}`)
+  // A completes: the phase is clean — the user's close persists.
+  folder.apply([
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▶', `a clean phase must keep the user close:\n${view}`)
+  // B starts in the SAME phase: a NEW CYCLE — the phase AND the run reopen
+  // (plan §7.7), overriding the prior user close.
+  folder.apply([
+    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 1, label: 'b', childId: 'session-b' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▼', `a new cycle must reopen the run:\n${view}`)
+  assert.ok(view.includes('▼ Unassigned 2 agents'), `a new cycle must reopen the phase:\n${view}`)
+})
+
+test('a new member in a still-running phase is an ordinary update, not a new cycle (review P2)', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-a' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, label: 'b', childId: 'session-b' } } as SessionEvent,
+  ])
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages())
+  let view = await viewport(vt)
+  // The user folds the phase and the run while both are still running.
+  const phaseRow = rowOf(view, '▼ Unassigned 2 agents')
+  await clickCell(vt, 10, phaseRow)
+  view = await viewport(vt)
+  const runRow = rowOf(view, 'Workflow audit [running]')
+  await clickCell(vt, 10, runRow)
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▶', `the run must be user-closed:\n${view}`)
+  // C starts while the phase is STILL running: an ordinary update — the
+  // user's close persists (plan §7.4).
+  folder.apply([
+    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 2, label: 'c', childId: 'session-c' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▶', `an ordinary update must keep the user close:\n${view}`)
+})
