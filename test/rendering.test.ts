@@ -2824,7 +2824,7 @@ test('minimal hides decorative icons with no dangling whitespace', async (t) => 
   assert.ok(read !== undefined, `minimal read header missing or space-prefixed:\n${view}`)
   const subagent = lines.find(line => line.startsWith('Subagent'))
   assert.ok(subagent !== undefined, `minimal subagent header missing or space-prefixed:\n${view}`)
-  const workflow = lines.find(line => line.startsWith('Workflow'))
+  const workflow = lines.find(line => line.replace(/^[▶▼] /, '').startsWith('Workflow'))
   assert.ok(workflow !== undefined, `minimal workflow header missing or space-prefixed:\n${view}`)
   const slash = lines.find(line => line.startsWith('compact [ok]'))
   assert.ok(slash !== undefined, `minimal slash header missing or space-prefixed:\n${view}`)
@@ -3681,7 +3681,7 @@ test('workflow runs expand into a phase-grouped member tree', async () => {
     turn: 0,
     runId: 'run-1' as WorkflowRunId,
     name: 'audit',
-    status: 'completed',
+    status: 'running',
     members: [
       { seq: 0, label: 'checker', phase: 'review', childId: 'session-x' as never, status: 'completed' },
       { seq: 1, label: 'patcher', phase: 'review', childId: 'session-y' as never, status: 'failed' },
@@ -3690,12 +3690,15 @@ test('workflow runs expand into a phase-grouped member tree', async () => {
     ],
   }])
   const view = await viewport(vt)
-  assert.ok(view.includes('Workflow audit [completed]'), `run header missing:\n${view}`)
-  assert.ok(view.includes('  review'), `phase header missing:\n${view}`)
+  assert.ok(view.includes('Workflow audit [running]'), `run header missing:\n${view}`)
+  assert.ok(view.includes('▼ review 2 agents'), `phase header missing:\n${view}`)
   assert.ok(view.includes('checker — completed'), `completed member missing:\n${view}`)
   assert.ok(view.includes('patcher — failed'), `failed member missing:\n${view}`)
-  assert.ok(view.includes('  report'), `second phase missing:\n${view}`)
-  assert.ok(view.includes('reporter — completed'), `report member missing:\n${view}`)
+  // A fully-completed phase auto-closes (PR2 plan §7.6): the header stays,
+  // the members fold.
+  assert.ok(view.includes('▶ report 1 agent'), `second phase missing:\n${view}`)
+  assert.ok(!view.includes('reporter — completed'), `closed phase must not leak members:\n${view}`)
+  assert.ok(view.includes('▼ Unassigned 1 agent'), `null phase readable label missing:\n${view}`)
   assert.ok(view.includes('live-agent — running'), `running member missing:\n${view}`)
 })
 
@@ -3739,7 +3742,8 @@ test('workflow live member/status updates invalidate the cached card (plan §8.1
   assert.notStrictEqual(secondComponent, firstComponent, 'agent-start must invalidate the cached workflow card')
   view = await viewport(vt)
   assert.ok(view.includes('checker — running'), `live member row missing:\n${view}`)
-  // agent-end: the member status changes → rebuild.
+  // agent-end: the member status changes → rebuild. The phase is now fully
+  // completed, so the PR2 completion auto-close folds it (plan §7.6).
   folder.apply([
     { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
   ])
@@ -3747,7 +3751,8 @@ test('workflow live member/status updates invalidate the cached card (plan §8.1
   const thirdComponent = cache.get(first)?.component
   assert.notStrictEqual(thirdComponent, secondComponent, 'agent-end must invalidate the cached workflow card')
   view = await viewport(vt)
-  assert.ok(view.includes('checker — completed'), `live member status missing:\n${view}`)
+  assert.ok(view.includes('▶ Unassigned 1 agent'), `completed phase must auto-close:\n${view}`)
+  assert.ok(!view.includes('checker — completed'), `closed phase must not leak members:\n${view}`)
   // An unchanged re-render keeps the component.
   app.setTranscript(folder.messages())
   assert.strictEqual(cache.get(first)?.component, thirdComponent, 'an unchanged workflow card must not churn the component')

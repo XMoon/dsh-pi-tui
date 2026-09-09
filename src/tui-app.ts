@@ -135,6 +135,14 @@ import { QuestionFlow } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type TranscriptMessage, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
+import {
+  workflowCountsText,
+  workflowPhasePresentations,
+  workflowRunSummaryText,
+  workflowRunViewAllVisible,
+  workflowStatusCounts,
+  type WorkflowPhasePresentation,
+} from './workflow-presentation.ts'
 import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
@@ -232,11 +240,12 @@ export interface TranscriptViewportAnchor {
 /** Whether a message is a Focus SECONDARY disclosure: a foldable process
  * card inside an expanded Thought that has its own compact/full two-state
  * renderer (plan §10). Shared by the render rule and the click handler —
- * never two different foldable sets. */
+ * never two different foldable sets. Workflow is deliberately NOT in the
+ * set (PR2 plan §7.1/§12.3): the Workflow card owns its own Run/Phase
+ * disclosure and must never be wrapped in a second generic fold. */
 function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
   return message.kind === 'thinking'
     || message.kind === 'tool'
-    || message.kind === 'workflow'
     || message.kind === 'system'
     || message.kind === 'compaction'
 }
@@ -244,29 +253,75 @@ function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
 /** The Workflow run header pill: the REAL status (plan §7.1 — the run's
  * state must be perceivable in the header). The old three-state
  * ok/error/running chrome is a generic-tool presentation; the Workflow card
- * is its own kind and never collapses cancelled/interrupted into error. */
+ * is its own kind and never collapses cancelled/interrupted into error
+ * (PR2 plan §8.2: failed → error, cancelled/interrupted → warning). */
 function workflowStatusPill(status: WorkflowRunStatus): string {
   switch (status) {
-    case 'running': return color.textDim('[running]')
+    case 'running': return color.primary('[running]')
     case 'completed': return color.success('[completed]')
-    case 'failed':
+    case 'failed': return color.error(`[${status}]`)
     case 'cancelled':
-    case 'interrupted': return color.error(`[${status}]`)
+    case 'interrupted': return color.warning(`[${status}]`)
   }
 }
 
 /** The Workflow member row mark: completed → success, running → primary,
- * failed/cancelled/interrupted → error (the old chrome mapping, kept only
- * at this presentation boundary — never written back into the model). */
+ * failed → error, cancelled/interrupted → warning (PR2 plan §8.3 — the
+ * warning category is no longer fused into error). */
 function workflowMemberMark(status: WorkflowRunStatus): string {
   switch (status) {
     case 'completed': return color.success('•')
     case 'running': return color.primary('●')
-    case 'failed':
+    case 'failed': return color.error('✗')
     case 'cancelled':
-    case 'interrupted': return color.error('✗')
+    case 'interrupted': return color.warning('!')
   }
 }
+
+/** One phase's disclosure state inside a Workflow run (PR2 plan §7): the
+ * user's explicit choice wins forever once set; otherwise the status-driven
+ * value after the one-shot transitions (first abnormal edge opens once,
+ * completion closes once, a post-completion running member reopens once). */
+interface WorkflowPhaseDisclosureState {
+  /** The user's explicit open/closed choice (undefined = status-driven). */
+  userOpen?: boolean
+  /** The status-driven effective value after one-shot transitions. */
+  phaseOpen: boolean
+  /** Whether the first abnormal edge already auto-opened this phase. */
+  abnormalOpened: boolean
+  /** Whether completion already auto-closed this phase. */
+  completionClosed: boolean
+  /** Whether a post-completion running member already reopened this phase. */
+  reopened: boolean
+}
+
+/** One Workflow run's disclosure state (PR2 plan §7). Keyed by the durable
+ * `runId`; phase state is keyed by `workflowPhaseKey(phase)` — never the
+ * display label, never an array index. */
+interface WorkflowRunDisclosureState {
+  /** The user's explicit open/closed choice (undefined = status-driven). */
+  userOpen?: boolean
+  /** The status-driven effective value after one-shot transitions. */
+  runOpen: boolean
+  /** Whether the first abnormal edge already auto-opened this run. */
+  abnormalOpened: boolean
+  /** Whether completion already auto-closed this run. */
+  completionClosed: boolean
+  /** Whether a post-completion running member already reopened this run. */
+  reopened: boolean
+  /** Per-phase disclosure state by exact phase identity key. */
+  phases: Map<string, WorkflowPhaseDisclosureState>
+}
+
+/** One Workflow card row hit target (PR2 plan §12.5): the minimal per-line
+ * metadata the fullscreen click map consumes — run header, phase header,
+ * inline running member, phase `View N agents`, run `View all N agents`. */
+export type WorkflowHit =
+  | { readonly kind: 'run'; readonly runId: string }
+  | { readonly kind: 'phase'; readonly runId: string; readonly phaseKey: string }
+  | { readonly kind: 'member'; readonly runId: string; readonly seq: number; readonly childId: string }
+  | { readonly kind: 'phase-agents'; readonly runId: string; readonly phaseKey: string }
+  | { readonly kind: 'run-agents'; readonly runId: string }
 
 /** The compaction lifecycle phase the working row advertises: idle (no
  * compaction), summarizing (compaction/start seen, the summary is being
@@ -1443,6 +1498,23 @@ export interface SubagentViewerSubmit {
   readonly text: string
 }
 
+/** One semantic Workflow card action (PR2 plan §12.5/§14.2): the TUI emits
+ * the intent, the HOST resolves it — member authority against the real
+ * Task Center / Subagent catalog, and the scoped Task Viewer opening. The
+ * app never queries a session service itself. The scoped-agent actions
+ * carry the display context (run name / readable phase label) so the host
+ * can title the scoped Task Viewer without re-deriving the model. */
+export type WorkflowAction =
+  | { readonly kind: 'open-member'; readonly runId: string; readonly seq: number; readonly childId: string }
+  | {
+    readonly kind: 'open-phase-agents'
+    readonly runId: string
+    readonly name: string
+    readonly phaseLabel: string
+    readonly childIds: readonly string[]
+  }
+  | { readonly kind: 'open-run-agents'; readonly runId: string; readonly name: string; readonly childIds: readonly string[] }
+
 /** The footer override while the subagent viewer is open: the footer shows
  * the VIEWED child's own identity instead of the parent session's (the
  * parent's permission/model/plan/task badges describe a session the user
@@ -2071,6 +2143,14 @@ export interface TuiAppOptions {
    * interval). */
   onTerminalResize?: () => void
   /**
+   * PR2: the semantic Workflow card action sink (plan §14.2). The app
+   * emits member-open / scoped-agent-browse intents; the HOST resolves
+   * them (member authority against the real Task Center / Subagent
+   * catalog, scoped Task Viewer opening). Optional — absent leaves the
+   * Workflow card display-only.
+   */
+  onWorkflowAction?: (action: WorkflowAction) => void
+  /**
    * M6: the plugin keybinding resolver (wired by the runner from the M5
    * KeybindingRegistry). Maps a NORMALIZED key (the InputRouter has
    * already decoded raw terminal input) → a plugin SEMANTIC action —
@@ -2309,6 +2389,9 @@ interface MessageComponentEntry {
   result?: string
   meta?: unknown
   members?: unknown
+  /** The Workflow disclosure revision the card was built at (PR2 plan
+   * §16.8): Run/Phase toggles and one-shot transitions rebuild the card. */
+  workflowDisclosureRev?: number
   /** PTC nested sub-calls (the parent card's `subCalls` tree). */
   subCalls?: unknown
   /** The sub-call disclosure revision at build time (cache key). */
@@ -2518,6 +2601,9 @@ export class TuiApp {
   private lastCommandWidth = 0
   /** M5: the terminal-resize callback (the command surface refresh). */
   private readonly onTerminalResize: (() => void) | undefined
+  /** PR2: the semantic Workflow card action sink (member open / scoped
+   * agent browse), resolved by the HOST. */
+  private readonly onWorkflowAction: ((action: WorkflowAction) => void) | undefined
 
   /** Whether the Ctrl+O expansion master switch is on. */
   isToolOutputExpanded(): boolean {
@@ -2761,6 +2847,20 @@ export class TuiApp {
   /** The block-relative sub-call hit rows recorded at render time, keyed by
    * the root message object (the renderer knows the exact layout). */
   private readonly subCallHitsByMessage = new Map<TranscriptMessage, { hits: ReadonlyArray<{ top: number; height: number; subCallId: string }>; total: number }>()
+  /** The block-relative Workflow card hit rows recorded at render time,
+   * keyed by the message object (the renderer owns the exact layout). */
+  private readonly workflowHitsByMessage = new Map<TranscriptMessage, { hits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>; total: number }>()
+  /** Per-run Workflow disclosure state (PR2 plan §7), keyed by the durable
+   * `runId`. Session-scoped: cleared on session switch. */
+  private readonly workflowDisclosure = new Map<string, WorkflowRunDisclosureState>()
+  /** The last-seen content snapshot per Workflow run: the members array
+   * reference + run status. The message OBJECT is mutated in place by the
+   * folder (plan §6.2 replaces the members array), so edge detection
+   * compares this snapshot, never the object identity. */
+  private readonly workflowSeen = new Map<string, { members: readonly WorkflowMemberView[]; status: WorkflowRunStatus }>()
+  /** Bumped on every Workflow disclosure change (toggle or one-shot
+   * transition): the render-cache identity for Workflow cards. */
+  private workflowDisclosureRevision = 0
   /**
    * Focus Mode (plan): the persisted preference is applied through
    * {@link setFocusMode}; while ON, the transcript projection replaces each
@@ -2830,6 +2930,10 @@ export class TuiApp {
     /** The row span (block-relative) of every PTC sub-call header's click
      * region, keyed by the durable subCallId. */
     subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
+    /** The row span (block-relative) of every Workflow card hit target
+     * (run/phase headers, running members, scoped-agent entries — PR2
+     * plan §12.5). */
+    workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
     /** Whether this entry's height includes the trailing inter-block
      * spacer (a blank visual row — the plan §9 blank-row collapse
      * target). Never set on the projection's LAST block or on skipped
@@ -2937,6 +3041,7 @@ export class TuiApp {
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
+    this.onWorkflowAction = options.onWorkflowAction
     // M0: the unified status projection store. The runner passes its own
     // store; without one the app keeps an internal projection so the
     // footer always composes from a snapshot (headless tests drive it
@@ -5467,6 +5572,9 @@ export class TuiApp {
     this.streamingToolPreviews = [...(streamingToolPreviews ?? [])]
     this.transcriptWindow = window
     this.refreshTranscriptWindowHint()
+    // The Workflow disclosure transitions fold BEFORE the rebuild: the
+    // renderer reads the advanced state (PR2 plan §7.5–§7.7).
+    this.updateWorkflowDisclosure(messages)
     // Repaints do NOT clear the transient notify line: an active session
     // repaints every frame (streaming chunks, tool cards), and clearing on
     // each repaint would make every notice — including error blocks like
@@ -5929,8 +6037,10 @@ export class TuiApp {
       this.messageComponents.delete(message)
       // The PTC sub-call hit map holds the same message objects: prune it
       // with the component so a long session never retains the sub-call
-      // trees of cards that left the live window.
+      // trees of cards that left the live window. The Workflow hit map is
+      // pruned with it for the same reason.
       this.subCallHitsByMessage.delete(message)
+      this.workflowHitsByMessage.delete(message)
       const component = entry.component as { dispose?: () => void } | undefined
       if (component?.dispose !== undefined) {
         try {
@@ -6170,6 +6280,7 @@ export class TuiApp {
       attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
       collapseFocusOwnerOnClick?: number
       subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
+      workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
       hasTrailingSpacer: boolean
     }> = []
     // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
@@ -6183,6 +6294,7 @@ export class TuiApp {
       let truncatedMarker = false
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
+      let workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined
       const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
       if (block.kind === 'activity') {
         // The live Thought disclosure; the hidden process rows (if any)
@@ -6214,6 +6326,10 @@ export class TuiApp {
         subCallHits = subCallInfo === undefined
           ? undefined
           : subCallInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - subCallInfo.total }))
+        const workflowInfo = this.workflowHitsByMessage.get(block.message)
+        workflowHits = workflowInfo === undefined
+          ? undefined
+          : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
       }
       if (rendered.length === 0 && !truncatedMarker) {
         // A zero-row block must not occupy a spacer row: the image
@@ -6262,6 +6378,7 @@ export class TuiApp {
         height,
         attachments,
         ...(subCallHits === undefined ? {} : { subCallHits }),
+        ...(workflowHits === undefined ? {} : { workflowHits }),
         hasTrailingSpacer: index < blocks.length - 1,
       })
       if (index < blocks.length - 1) this.messagesView.addChild(new Spacer())
@@ -6384,6 +6501,8 @@ export class TuiApp {
       height: number
       attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
       collapseFocusOwnerOnClick?: number
+      subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
+      workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
       hasTrailingSpacer: boolean
     }> = []
     blocks.forEach((block, index) => {
@@ -6392,6 +6511,7 @@ export class TuiApp {
       let truncatedMarker = false
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
+      let workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined
       const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
       if (block.kind === 'activity') {
         component = this.focusActivityComponentFor(
@@ -6415,6 +6535,10 @@ export class TuiApp {
         subCallHits = subCallInfo === undefined
           ? undefined
           : subCallInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - subCallInfo.total }))
+        const workflowInfo = this.workflowHitsByMessage.get(block.message)
+        workflowHits = workflowInfo === undefined
+          ? undefined
+          : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
       }
       if (rendered.length === 0 && !truncatedMarker) {
         // Same zero-row rule as rebuildMessages: no spacer row, no height —
@@ -6443,6 +6567,7 @@ export class TuiApp {
         height,
         attachments,
         ...(subCallHits === undefined ? {} : { subCallHits }),
+        ...(workflowHits === undefined ? {} : { workflowHits }),
         hasTrailingSpacer: index < blocks.length - 1,
       })
     })
@@ -6922,6 +7047,19 @@ export class TuiApp {
             return
           }
         }
+        // Workflow card rows (PR2 plan §12.4/§12.5): the run/phase headers
+        // toggle their own disclosure, an eligible running member and the
+        // scoped-agent entries emit the semantic action. EVERY row of the
+        // card consumes the click — a click inside the Workflow card never
+        // falls through to the owning Focus collapse.
+        if (entry.workflowHits !== undefined) {
+          const hit = entry.workflowHits.find(candidate => inMessage >= candidate.top && inMessage < candidate.top + candidate.height)
+          if (hit !== undefined) {
+            this.handleWorkflowHit(hit.hit)
+            return
+          }
+          return
+        }
         // Attachment rows win FIRST (plan §8.3): a click on an image's
         // info bar or its image rows toggles THAT OCCURRENCE's display —
         // the identity stays, the picture collapses/expands, and a
@@ -7008,6 +7146,216 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
+  /** The effective Run disclosure of one Workflow card: the user's explicit
+   * choice wins forever once set; otherwise the status-driven value after
+   * the one-shot transitions (PR2 plan §7.4). */
+  private workflowRunOpen(message: Extract<TranscriptMessage, { kind: 'workflow' }>): boolean {
+    const state = this.workflowDisclosure.get(message.runId)
+    if (state?.userOpen !== undefined) return state.userOpen
+    if (state !== undefined) return state.runOpen
+    return message.status !== 'completed'
+  }
+
+  /** The effective Phase disclosure of one Workflow phase: user choice
+   * first, then the status-driven value after the one-shot transitions. */
+  private workflowPhaseOpen(runId: string, phaseKey: string, phase: WorkflowPhasePresentation): boolean {
+    const state = this.workflowDisclosure.get(runId)?.phases.get(phaseKey)
+    if (state?.userOpen !== undefined) return state.userOpen
+    if (state !== undefined) return state.phaseOpen
+    return phase.counts.completed !== phase.members.length
+  }
+
+  /** Toggle one Workflow Run disclosure (click on the run header). The
+   * choice is explicit and persists: ordinary live updates never override
+   * it (PR2 plan §7.4). */
+  private toggleWorkflowRun(runId: string): void {
+    const state = this.workflowDisclosure.get(runId)
+    if (state === undefined) return
+    state.userOpen = !(state.userOpen ?? state.runOpen)
+    this.workflowDisclosureRevision += 1
+    this.rebuildMessages()
+  }
+
+  /** Toggle one Workflow Phase disclosure (click on the phase header). The
+   * choice is explicit and persists; closing and reopening the outer Run
+   * never clears it (PR2 plan §7.4/§16.3-12). */
+  private toggleWorkflowPhase(runId: string, phaseKey: string): void {
+    const state = this.workflowDisclosure.get(runId)?.phases.get(phaseKey)
+    if (state === undefined) return
+    state.userOpen = !(state.userOpen ?? state.phaseOpen)
+    this.workflowDisclosureRevision += 1
+    this.rebuildMessages()
+  }
+
+  /** Advance the Workflow disclosure state for one changed run (PR2 plan
+   * §7.5–§7.7): the one-shot transitions fire at most once per run/phase
+   * lifetime, and only while the user has not set an explicit choice —
+   * after a toggle the user's choice wins forever. The transition flags
+   * encode the history; the caller has already verified the run's content
+   * actually changed. */
+  private advanceWorkflowDisclosure(
+    message: Extract<TranscriptMessage, { kind: 'workflow' }>,
+  ): void {
+    const runCounts = workflowStatusCounts(message.members)
+    // The run's abnormal facts include the RUN status itself: a run can
+    // settle failed/cancelled/interrupted with zero members or only
+    // completed members (review finding) — the abnormal edge must still
+    // open it once, and cold replay must pre-settle the flag.
+    const runStatusAbnormal = message.status === 'failed'
+      || message.status === 'cancelled'
+      || message.status === 'interrupted'
+    const runHasAbnormal = runCounts.failed + runCounts.cancelled + runCounts.interrupted > 0
+      || runStatusAbnormal
+    const runHasRunning = runCounts.running > 0
+    const runFullyCompleted = message.status === 'completed'
+    let state = this.workflowDisclosure.get(message.runId)
+    if (state === undefined) {
+      // First sight: the initial state IS the status-driven default, and a
+      // run that already carries abnormal/completed facts at first sight
+      // has its one-shot transitions pre-settled (a cold-replayed terminal
+      // run must never be force-opened by a later update).
+      state = {
+        runOpen: message.status !== 'completed',
+        abnormalOpened: runHasAbnormal,
+        completionClosed: message.status === 'completed',
+        reopened: false,
+        phases: new Map(),
+      }
+      this.workflowDisclosure.set(message.runId, state)
+    }
+    let changed = false
+    if (state.abnormalOpened === false && runHasAbnormal) {
+      // First abnormal edge: open once so the exception is visible. This
+      // OVERRIDES a prior user close by returning the run to the
+      // status-driven default (plan §7.5 — the abnormal fact is a
+      // significant event); the flag makes it one-shot, so a later user
+      // close persists forever, and a later completion can still close it.
+      state.abnormalOpened = true
+      state.userOpen = undefined
+      if (state.runOpen !== true) { state.runOpen = true; changed = true }
+    } else if (state.completionClosed === false && runFullyCompleted) {
+      // Normal completion: close once. A user's explicit open choice is
+      // respected (they asked to see the run; the close is a default).
+      state.completionClosed = true
+      if (state.runOpen !== false) { state.runOpen = false; changed = true }
+    } else if (state.reopened === false && state.completionClosed && runHasRunning) {
+      // A completed run with a new running member: reopen once.
+      state.reopened = true
+      if (state.runOpen !== true) { state.runOpen = true; changed = true }
+    }
+    // Phase-level transitions over the CURRENT phase groups. A phase that
+    // disappears (impossible today — members are append-only) simply keeps
+    // its state; the renderer only consults present phases.
+    for (const phase of workflowPhasePresentations(message.members)) {
+      let phaseState = state.phases.get(phase.key)
+      if (phaseState === undefined) {
+        const allCompleted = phase.counts.completed === phase.members.length
+        phaseState = {
+          phaseOpen: !allCompleted,
+          abnormalOpened: phase.counts.failed + phase.counts.cancelled + phase.counts.interrupted > 0,
+          completionClosed: allCompleted,
+          reopened: false,
+        }
+        state.phases.set(phase.key, phaseState)
+        continue
+      }
+      const phaseHasAbnormal = phase.counts.failed + phase.counts.cancelled + phase.counts.interrupted > 0
+      const phaseHasRunning = phase.counts.running > 0
+      const phaseFullyCompleted = phase.counts.completed === phase.members.length
+      if (phaseState.abnormalOpened === false && phaseHasAbnormal) {
+        // First abnormal edge: open once, overriding a prior user close
+        // by returning the phase to the status-driven default (plan §7.5);
+        // one-shot like the run-level flag.
+        phaseState.abnormalOpened = true
+        phaseState.userOpen = undefined
+        if (phaseState.phaseOpen !== true) { phaseState.phaseOpen = true; changed = true }
+      } else if (phaseState.completionClosed === false && phaseFullyCompleted) {
+        phaseState.completionClosed = true
+        if (phaseState.phaseOpen !== false) { phaseState.phaseOpen = false; changed = true }
+      } else if (phaseState.reopened === false && phaseState.completionClosed && phaseHasRunning) {
+        phaseState.reopened = true
+        if (phaseState.phaseOpen !== true) { phaseState.phaseOpen = true; changed = true }
+      }
+    }
+    if (changed) this.workflowDisclosureRevision += 1
+  }
+
+  /** Fold the Workflow disclosure transitions for the CURRENT transcript
+   * snapshot (called from {@link setTranscript}): each run's content
+   * snapshot is compared against the last-seen one, and only a real
+   * change (members array reference or run status) advances the state. */
+  private updateWorkflowDisclosure(messages: readonly TranscriptMessage[]): void {
+    for (const message of messages) {
+      if (message.kind !== 'workflow') continue
+      const previous = this.workflowSeen.get(message.runId)
+      if (previous !== undefined && previous.members === message.members && previous.status === message.status) continue
+      this.workflowSeen.set(message.runId, { members: message.members, status: message.status })
+      this.advanceWorkflowDisclosure(message)
+    }
+  }
+
+  /** Dispatch one Workflow card hit (PR2 plan §12.4/§12.5): run/phase
+   * headers toggle their disclosure; a running inline member and the
+   * scoped-agent entries emit the semantic action for the HOST to resolve
+   * (authority + viewer/task-browser opening). */
+  private handleWorkflowHit(hit: WorkflowHit): void {
+    switch (hit.kind) {
+      case 'run':
+        this.toggleWorkflowRun(hit.runId)
+        return
+      case 'phase':
+        this.toggleWorkflowPhase(hit.runId, hit.phaseKey)
+        return
+      case 'member': {
+        const message = this.workflowMessageOf(hit.runId)
+        if (message === undefined) return
+        // The model-side authority re-check at CLICK time: the member must
+        // still be running (it may have settled since the row rendered),
+        // and the hit's child identity must still match the member's — a
+        // stale hit must never open a different child (review finding).
+        const member = message.members.find(candidate => candidate.seq === hit.seq)
+        if (member === undefined || member.status !== 'running') return
+        if (String(member.childId) !== hit.childId) return
+        this.onWorkflowAction?.({ kind: 'open-member', runId: hit.runId, seq: hit.seq, childId: hit.childId })
+        return
+      }
+      case 'phase-agents': {
+        const message = this.workflowMessageOf(hit.runId)
+        if (message === undefined) return
+        const phase = workflowPhasePresentations(message.members).find(candidate => candidate.key === hit.phaseKey)
+        if (phase === undefined) return
+        this.onWorkflowAction?.({
+          kind: 'open-phase-agents',
+          runId: hit.runId,
+          name: message.name,
+          phaseLabel: phase.label,
+          childIds: phase.members.map(member => String(member.childId)),
+        })
+        return
+      }
+      case 'run-agents': {
+        const message = this.workflowMessageOf(hit.runId)
+        if (message === undefined) return
+        this.onWorkflowAction?.({
+          kind: 'open-run-agents',
+          runId: hit.runId,
+          name: message.name,
+          childIds: message.members.map(member => String(member.childId)),
+        })
+        return
+      }
+    }
+  }
+
+  /** The current Workflow message for one runId (the click-time source of
+   * the member/child identities — never a stale render snapshot). */
+  private workflowMessageOf(runId: string): Extract<TranscriptMessage, { kind: 'workflow' }> | undefined {
+    for (const message of this.messages) {
+      if (message.kind === 'workflow' && message.runId === runId) return message
+    }
+    return undefined
+  }
+
   /** Drop all per-message expansion overrides (session-scoped state: a
    * session switch must not leak the old session's click toggles). */
   clearSessionOverrides(): void {
@@ -7032,6 +7380,13 @@ export class TuiApp {
     this.subCallExpanded.clear()
     this.subCallHitsByMessage.clear()
     this.subCallExpandedRevision += 1
+    // The Workflow disclosure state, its seen-snapshots and its render-time
+    // hit map are session-scoped too: a switched-in session must never
+    // inherit the old session's run/phase choices or retain its messages.
+    this.workflowDisclosure.clear()
+    this.workflowSeen.clear()
+    this.workflowHitsByMessage.clear()
+    this.workflowDisclosureRevision += 1
     // The per-message render cache is session-scoped too: old messages are
     // unreachable after a switch, so drop their cached components — with
     // disposal so thumbnail loader subscriptions never leak (round-2
@@ -8774,7 +9129,7 @@ export class TuiApp {
       }
       return this.toolOutputExpanded || this.expandedOverride.get(message) === true
     }
-    return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'workflow' || message.kind === 'compaction')
+    return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
       && (message.turn >= boundary || this.expandedOverride.get(message) === true)
   }
 
@@ -8906,13 +9261,17 @@ export class TuiApp {
    * contract, plan §23).
    */
   private bakesFoldedWidth(message: TranscriptMessage, expanded: boolean): boolean {
+    // The Workflow card bakes EVERY row to the content width (run header,
+    // summary, phase/member rows) — a resize must rebuild it at the new
+    // width (PR2 plan §16.8).
+    if (message.kind === 'workflow') return true
     if (expanded) {
       // An expanded Edit bakes its diff; an expanded PTC root bakes its
       // sub-call rows (truncateToWidth at build time) — both must rebuild
       // on a resize.
       return message.kind === 'tool' && (message.name === 'edit' || (message.subCalls?.length ?? 0) > 0)
     }
-    return message.kind === 'system' || message.kind === 'compaction' || message.kind === 'workflow'
+    return message.kind === 'system' || message.kind === 'compaction'
       || (message.kind === 'tool' && !isCompactActionTool(message.name, message.args))
   }
 
@@ -8949,8 +9308,12 @@ export class TuiApp {
     if (!hostBuilt) {
       // An extension renderer owns the whole card: the host sub-call tree
       // is not rendered, so its render-time hit map must not survive (a
-      // ghost click target could toggle an invisible child).
+      // ghost click target could toggle an invisible child). The Workflow
+      // hit map is cleared with it — a plugin-rendered workflow card must
+      // never dispatch host workflow actions against stale geometry
+      // (review finding).
       this.subCallHitsByMessage.delete(message)
+      this.workflowHitsByMessage.delete(message)
     }
     return {
       // The EFFECTIVE expansion (the surface-adaptive rule) drives the
@@ -9005,9 +9368,12 @@ export class TuiApp {
       case 'workflow':
         // The run status and the members array reference (replaced on every
         // visible member/status change — plan §6.2) drive the staleness
-        // check; the run name is durable and never changes.
+        // check; the run name is durable and never changes. The disclosure
+        // revision covers Run/Phase toggles and one-shot transitions (PR2
+        // plan §16.8 — the rendered rows depend on the disclosure state).
         entry.status = message.status
         entry.members = message.members
+        entry.workflowDisclosureRev = this.workflowDisclosureRevision
         break
       case 'summary':
         break
@@ -9045,8 +9411,11 @@ export class TuiApp {
       case 'workflow':
         // The members array reference is replaced on every visible change
         // (plan §6.2), so reference comparison is the reliable invalidation
-        // evidence — never an in-place-mutation coincidence.
+        // evidence — never an in-place-mutation coincidence. The disclosure
+        // revision invalidates on Run/Phase toggles and one-shot
+        // transitions (PR2 plan §16.8).
         return entry.status !== message.status || entry.members !== message.members
+          || entry.workflowDisclosureRev !== this.workflowDisclosureRevision
       case 'summary':
         return false
       case 'compaction':
@@ -9365,7 +9734,9 @@ export class TuiApp {
       return card
     }
     if (message.kind === 'workflow') {
-      return this.renderWorkflowCard(message, expanded, width)
+      // The Workflow card owns its Run/Phase disclosure (PR2 plan §7.1) —
+      // the generic secondary `expanded` never applies to it.
+      return this.renderWorkflowCard(message, width)
     }
     // Tool card: the Web row-model header (design title + relativized args
     // summary + status pill), with the result body when expanded. The whole
@@ -9830,49 +10201,89 @@ export class TuiApp {
   }
 
   /**
-   * Render one Workflow run card (plan §7.1): the run header with the REAL
-   * status pill (running/completed/failed/cancelled/interrupted), and the
-   * member tree grouped by phase identity — `null` (absent) and `''`
-   * (explicit empty) are distinct groups via {@link workflowPhaseKey}, never
-   * merged by `phase ?? ''`. PR1 keeps the single-card disclosure shape;
-   * nested Run/Phase disclosure and child navigation are PR2.
+   * Render one Workflow run card (PR2 plan §5/§7): the run header IS the
+   * Run disclosure owner (never a second generic fold — plan §7.1), with
+   * the REAL status pill (running/completed/failed/cancelled/interrupted).
+   * When open: the run summary line, then each phase's own disclosure —
+   * a small phase (<= 5 members) renders every member inline, a large
+   * phase renders aggregate counts + a capped abnormal preview + a
+   * `View N agents` scoped Task Viewer entry. `null` (absent) and `''`
+   * (explicit empty) phases stay distinct groups with distinct readable
+   * labels (plan §6.2). Every row is width-baked and recorded as a hit
+   * target for the fullscreen click map.
    */
   private renderWorkflowCard(
     message: Extract<TranscriptMessage, { kind: 'workflow' }>,
-    expanded: boolean,
     width: number,
   ): Component {
     const card = new Container()
+    const runId = message.runId
+    const runOpen = this.workflowRunOpen(message)
     const icon = iconPrefix('workflow', this.iconStyle)
-    const head = `${color.textDim(`${icon}Workflow ${message.name}`)} ${workflowStatusPill(message.status)}`
-    if (expanded) {
-      card.addChild(new Text(head, 0, 0))
-      // Phase grouping over the durable arrival-ordered rows (Web
-      // WorkflowRunPanel parity). The phase identity key keeps absent and
-      // explicit-empty phases in separate groups (plan §4.2).
-      const groups = new Map<string, WorkflowMemberView[]>()
-      for (const member of message.members) {
-        const key = workflowPhaseKey(member.phase)
-        const list = groups.get(key)
-        if (list === undefined) groups.set(key, [member])
-        else list.push(member)
-      }
-      for (const members of groups.values()) {
-        const phase = members[0]?.phase
-        if (phase !== null && phase !== '') card.addChild(new Text(color.textMuted(`  ${phase}`), 0, 0))
-        for (const member of members) {
-          card.addChild(new Text(
-            `  ${workflowMemberMark(member.status)} ${member.label} — ${color.textDim(member.status)}`,
-            0,
-            0,
-          ))
+    const disclosure = runOpen ? '▼' : '▶'
+    const head = `${color.textDim(`${disclosure} ${icon}Workflow ${message.name}`)} ${workflowStatusPill(message.status)}`
+    const rows: string[] = []
+    const hits: Array<{ top: number; height: number; hit: WorkflowHit }> = []
+    rows.push(truncateToWidth(head, width, '…'))
+    hits.push({ top: 0, height: 1, hit: { kind: 'run', runId } })
+    // The aggregate summary renders in BOTH states (plan §5.6: a compact
+    // completed run still shows `126 agents · completed` — the phases and
+    // members stay hidden, the aggregate never does).
+    const runSummary = workflowRunSummaryText(workflowStatusCounts(message.members))
+    if (runSummary !== '') {
+      rows.push(truncateToWidth(color.textDim(`  ${runSummary}`), width, '…'))
+    }
+    if (runOpen) {
+      const phases = workflowPhasePresentations(message.members)
+      for (const phase of phases) {
+        const phaseOpen = this.workflowPhaseOpen(runId, phase.key, phase)
+        const phaseDisclosure = phaseOpen ? '▼' : '▶'
+        const countLabel = phase.members.length === 1 ? '1 agent' : `${phase.members.length} agents`
+        rows.push(truncateToWidth(
+          `${color.textDim(`  ${phaseDisclosure} ${phase.label}`)} ${color.textMuted(countLabel)}`,
+          width,
+          '…',
+        ))
+        hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'phase', runId, phaseKey: phase.key } })
+        if (!phaseOpen) continue
+        if (phase.mode === 'inline') {
+          // Small phase: every member in durable seq order. Only a RUNNING
+          // member is a direct navigation target (plan §9.1/§9.4 — terminal
+          // members stay visible but never cold-open from the card).
+          for (const member of phase.members) {
+            rows.push(truncateToWidth(
+              `    ${workflowMemberMark(member.status)} ${member.label} — ${color.textDim(member.status)}`,
+              width,
+              '…',
+            ))
+            if (member.status === 'running') {
+              hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'member', runId, seq: member.seq, childId: String(member.childId) } })
+            }
+          }
+        } else {
+          // Large phase: aggregate + capped abnormal preview + scoped
+          // viewer entry — never a dynamic running top-N (plan §5.3).
+          const counts = workflowCountsText(phase.counts)
+          if (counts !== '') {
+            rows.push(truncateToWidth(color.textDim(`    ${counts}`), width, '…'))
+          }
+          for (const member of phase.anomalyPreview) {
+            rows.push(truncateToWidth(`    ${workflowMemberMark(member.status)} ${member.label}`, width, '…'))
+          }
+          if (phase.hiddenAnomalyCount > 0) {
+            rows.push(truncateToWidth(color.textDim(`    … ${phase.hiddenAnomalyCount} more abnormal`), width, '…'))
+          }
+          rows.push(truncateToWidth(`    ${color.textDim('›')} View ${phase.members.length} agents`, width, '…'))
+          hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'phase-agents', runId, phaseKey: phase.key } })
         }
       }
-    } else {
-      // The folded row truncates to the content width (same rule as the
-      // folded tool cards — the width-baking cache contract).
-      card.addChild(new Text(truncateToWidth(head, width, '…'), 0, 0))
+      if (workflowRunViewAllVisible(message.members.length, phases.length)) {
+        rows.push(truncateToWidth(`  ${color.textDim('›')} View all ${message.members.length} agents`, width, '…'))
+        hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'run-agents', runId } })
+      }
     }
+    card.addChild(new Text(rows.join('\n'), 0, 0))
+    this.workflowHitsByMessage.set(message, { hits, total: rows.length })
     return card
   }
 
