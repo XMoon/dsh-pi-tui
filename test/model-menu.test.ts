@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { CURSOR_MARKER } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { ModelSubmenu } from '../src/model-menu.ts'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
@@ -482,4 +483,83 @@ test('ModelSubmenu mouse click selects an effort (mouse parity)', async () => {
   await settle()
   assert.deepEqual(applied, [{ provider: 'p', model: 'm0', reasoningEffort: 'low' }], 'clicking an effort row must apply it')
   assert.equal(doneValue, 'low', 'the effort selection must close the submenu with the effort id')
+})
+
+test('ModelSubmenu retains focus across the async inner swap (CURSOR_MARKER)', async () => {
+  const applied: ModelSelection[] = []
+  const menu = directModelSubmenu(fakeLlm({ models: [{ id: 'm0' }], efforts: undefined }), applied, () => {})
+  // Focused while the model list is still loading: the swapped-in
+  // searchable SettingsList must receive the already-active focus state.
+  menu.focused = true
+  await settle()
+  const rendered = menu.render(80).join('\n')
+  assert.ok(rendered.includes(CURSOR_MARKER), 'the swapped-in searchable list must emit the cursor marker')
+  // Unfocused before resolve → no marker.
+  const menu2 = directModelSubmenu(fakeLlm({ models: [{ id: 'm0' }], efforts: undefined }), applied, () => {})
+  await settle()
+  const rendered2 = menu2.render(80).join('\n')
+  assert.ok(!rendered2.includes(CURSOR_MARKER), 'an unfocused swapped-in list must not emit the marker')
+})
+
+test('externally disposing ModelSubmenu aborts pending work without side effects', async () => {
+  const applied: ModelSelection[] = []
+  let doneValue: string | undefined
+  let renders = 0
+  const pending = deferred<{ reasoning?: { efforts?: readonly { id: string; name: string }[] } }>()
+  const menu = new ModelSubmenu('p', 'm0', undefined, {
+    listModels: async () => [{ id: 'm0' }],
+    resolveModelInfo: () => pending.promise,
+    apply: (next) => { applied.push(next) },
+    requestRender: () => { renders += 1 },
+    done: (selected) => { doneValue = selected },
+    runOwned: (label, task, options) => {
+      runOwned(label, task, { ...options, diag: createDiag({ filePath: undefined, stderrLevel: 'off' }) })
+    },
+  })
+  await settle()
+  // Open the effort level (the model row has a submenu).
+  menu.handleInput('\r')
+  await settle()
+  const rendersBefore = renders
+  // External teardown (NOT Esc / NOT done()).
+  menu.dispose()
+  assert.equal(doneValue, undefined, 'dispose must not call done')
+  assert.deepEqual(applied, [], 'dispose must not apply')
+  // A late resolve must not repaint or apply.
+  pending.resolve({ reasoning: { efforts: [{ id: 'low', name: 'Low' }] } })
+  await settle()
+  assert.equal(renders, rendersBefore, 'a late resolve after disposal must not requestRender')
+  assert.deepEqual(applied, [], 'a late resolve after disposal must not apply')
+  assert.equal(doneValue, undefined, 'a late resolve after disposal must not call done')
+})
+
+test('externally disposing ModelSubmenu terminates a nested EffortSubmenu', async () => {
+  const applied: ModelSelection[] = []
+  let doneValue: string | undefined
+  let renders = 0
+  const info = deferred<{ reasoning?: { efforts?: readonly { id: string; name: string }[] } }>()
+  const menu = new ModelSubmenu('p', 'm0', undefined, {
+    listModels: async () => [{ id: 'm0' }],
+    resolveModelInfo: () => info.promise,
+    apply: (next) => { applied.push(next) },
+    requestRender: () => { renders += 1 },
+    done: (selected) => { doneValue = selected },
+    runOwned: (label, task, options) => {
+      runOwned(label, task, { ...options, diag: createDiag({ filePath: undefined, stderrLevel: 'off' }) })
+    },
+  })
+  await settle()
+  // Open the effort level: the EffortSubmenu starts resolveModelInfo.
+  menu.handleInput('\r')
+  await settle()
+  const rendersBefore = renders
+  // External teardown of the OWNING ModelSubmenu: the chain must reach
+  // the nested EffortSubmenu (ModelSubmenu → inner SettingsList →
+  // EffortSubmenu) and latch/abort it.
+  menu.dispose()
+  info.resolve({ reasoning: { efforts: [{ id: 'low', name: 'Low' }] } })
+  await settle()
+  assert.equal(renders, rendersBefore, 'the nested effort resolve after disposal must not requestRender')
+  assert.deepEqual(applied, [], 'the nested effort resolve after disposal must not apply')
+  assert.equal(doneValue, undefined, 'the nested effort resolve after disposal must not call done')
 })

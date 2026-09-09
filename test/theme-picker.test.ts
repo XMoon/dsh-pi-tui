@@ -12,7 +12,7 @@ import test, { afterEach } from 'node:test'
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
+import { CURSOR_MARKER, SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { customThemesDir, darkColors, loadCustomTheme, settingsListTheme } from '../src/theme.ts'
 import { ThemeRegistry } from '../src/theme-registry.ts'
 import { resolveThemeSelection, themePickerRows } from '../src/theme-source.ts'
@@ -622,4 +622,15 @@ test('ThemeSubmenu search Input click positions the search cursor (mouse parity)
   menu.handleInput('X')
   const rendered = menu.render(80).map(line => line.replace(/\x1b\[[0-9;]*m/gu, '')).join('\n')
   assert.ok(rendered.includes('daXrk'), 'typing after the click must insert at the clicked filter column')
+})
+
+test('ThemeSubmenu forwards focused state to the search Input (CURSOR_MARKER)', () => {
+  const registry = new ThemeRegistry()
+  const menu = new ThemeSubmenu('auto', registry, () => {})
+  menu.focused = true
+  const focusedRender = menu.render(80).join('\n')
+  assert.ok(focusedRender.includes(CURSOR_MARKER), 'focused render must emit the hardware cursor marker')
+  menu.focused = false
+  const unfocusedRender = menu.render(80).join('\n')
+  assert.ok(!unfocusedRender.includes(CURSOR_MARKER), 'unfocused render must not emit the marker')
 })

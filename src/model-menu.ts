@@ -111,8 +111,7 @@ class EffortSubmenu implements Component, RowBudgetAware, Focusable {
    * Focusable (mouse parity: a swapped-in SettingsList must receive the
    * focused flag for its search Input's cursor/IME state). */
   private applyFocused(): void {
-    const inner = this.inner as Focusable
-    if ('focused' in inner) inner.focused = this._focused
+    if ('focused' in this.inner) (this.inner as Focusable).focused = this._focused
   }
 
   /** Host row-budget seam: keep the grant and forward it to the inner
@@ -203,6 +202,24 @@ class EffortSubmenu implements Component, RowBudgetAware, Focusable {
     this.inner.handleInput?.(data)
   }
 
+  /**
+   * Ownership-safe external disposal (X007 lifecycle): the owning
+   * SettingsList calls dispose() when the list itself is removed or
+   * replaced (app teardown, overlay replacement, owner disposal — NOT the
+   * submenu's own Esc/selection). Latch + abort the owned async work and
+   * dispose the owned inner component exactly once (a SettingsList inner
+   * forwards to its own open EffortSubmenu, closing the nested chain).
+   * NEVER calls deps.done()/apply/navigation — teardown is ownership, not
+   * a user choice — and a late result/error is already fenced by the
+   * disposed latch, so it cannot requestRender after disposal.
+   */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.abort.abort()
+    this.inner.dispose?.()
+  }
+
   /** Transparent mouse forwarding (mouse parity): the outer SettingsList
    * dispatches submenu events here; the current inner (a SettingsList
    * once loaded) owns row hit-testing, search-Input positioning, and
@@ -249,8 +266,7 @@ export class ModelSubmenu implements Component, RowBudgetAware, Focusable {
    * Focusable (mouse parity: a swapped-in SettingsList must receive the
    * focused flag for its search Input's cursor/IME state). */
   private applyFocused(): void {
-    const inner = this.inner as Focusable
-    if ('focused' in inner) inner.focused = this._focused
+    if ('focused' in this.inner) (this.inner as Focusable).focused = this._focused
   }
 
   /** Host row-budget seam: keep the grant and forward it to the inner
@@ -322,6 +338,24 @@ export class ModelSubmenu implements Component, RowBudgetAware, Focusable {
 
   handleInput(data: string): void {
     this.inner.handleInput?.(data)
+  }
+
+  /**
+   * Ownership-safe external disposal (X007 lifecycle): the owning
+   * SettingsList calls dispose() when the list itself is removed or
+   * replaced (app teardown, overlay replacement, owner disposal — NOT the
+   * submenu's own Esc/selection). Latch + abort the owned async work and
+   * dispose the owned inner component exactly once (a SettingsList inner
+   * forwards to its own open EffortSubmenu, closing the nested chain).
+   * NEVER calls deps.done()/apply/navigation — teardown is ownership, not
+   * a user choice — and a late result/error is already fenced by the
+   * disposed latch, so it cannot requestRender after disposal.
+   */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.abort.abort()
+    this.inner.dispose?.()
   }
 
   /** Transparent mouse forwarding (mouse parity): the outer SettingsList
