@@ -111,6 +111,7 @@ describe("mouse-aware components", () => {
 			() => {},
 		);
 
+		list.render(40);
 		list.handleMouse(mouse("press", 1, 2, 40, 5));
 		list.handleMouse(mouse("click", 1, 2, 40, 5));
 		assert.deepStrictEqual(changes, [{ id: "third", value: "high" }]);
@@ -180,7 +181,6 @@ describe("mouse-aware components", () => {
 			assert.deepStrictEqual(changes, []);
 
 			list.handleMouse(mouse("press", 1, row + 2));
-			list.render(80);
 			list.handleMouse(mouse("click", 1, row + 2));
 			assert.deepStrictEqual(changes, [{ id: `item-${4 + row}`, value: "on" }]);
 		});

@@ -76,6 +76,10 @@ export function lastRouteWhileEnabled(
 /** The two-level allowlist picker. */
 export class SubagentModelAllowlistSubmenu implements Component, Focusable {
   private inner: Component
+  /** The inner that was ACTUALLY PAINTED last (mouse parity): an async
+   * inner swap between paint and pointer event must not let the new inner
+   * eat a click aimed at the old screen (Loading…). */
+  private paintedInner: Component | undefined
   private readonly requestRender: () => void
   /** Latched by every close path; late async results must not act after. */
   private disposed = false
@@ -309,8 +313,12 @@ export class SubagentModelAllowlistSubmenu implements Component, Focusable {
   /** Transparent mouse forwarding (mouse parity): the outer SettingsList
    * dispatches submenu events here; the current inner (a SettingsList
    * once loaded) owns row hit-testing and wheel selection. Loading/error
-   * text rows stay inert. */
+   * text rows stay inert. A pointer event is fenced to the PAINTED
+   * inner: an async swap that has not repainted yet must not receive a
+   * click aimed at the previous screen (a stale click must never write
+   * the allowlist). */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.inner !== this.paintedInner) return undefined
     return this.inner.handleMouse?.(event)
   }
 
@@ -319,6 +327,7 @@ export class SubagentModelAllowlistSubmenu implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    this.paintedInner = this.inner
     return this.inner.render(width)
   }
 }

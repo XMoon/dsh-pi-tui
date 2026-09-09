@@ -89,6 +89,10 @@ class EscDismiss implements Component {
  */
 class EffortSubmenu implements Component, RowBudgetAware, Focusable {
   private inner: Component
+  /** The inner that was ACTUALLY PAINTED last (mouse parity): an async
+   * inner swap between paint and pointer event must not let the new inner
+   * eat a click aimed at the old screen (Loading…). */
+  private paintedInner: Component | undefined
   private readonly requestRender: () => void
   /** Latched by every close path; late async results must not act after. */
   private disposed = false
@@ -223,8 +227,11 @@ class EffortSubmenu implements Component, RowBudgetAware, Focusable {
   /** Transparent mouse forwarding (mouse parity): the outer SettingsList
    * dispatches submenu events here; the current inner (a SettingsList
    * once loaded) owns row hit-testing, search-Input positioning, and
-   * wheel selection. Loading/error text rows stay inert. */
+   * wheel selection. Loading/error text rows stay inert. A pointer event
+   * is fenced to the PAINTED inner: an async swap that has not repainted
+   * yet must not receive a click aimed at the previous screen. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.inner !== this.paintedInner) return undefined
     return this.inner.handleMouse?.(event)
   }
 
@@ -233,6 +240,7 @@ class EffortSubmenu implements Component, RowBudgetAware, Focusable {
   }
 
   render(width: number): string[] {
+    this.paintedInner = this.inner
     return this.inner.render(width)
   }
 }
@@ -244,6 +252,10 @@ class EffortSubmenu implements Component, RowBudgetAware, Focusable {
  */
 export class ModelSubmenu implements Component, RowBudgetAware, Focusable {
   private inner: Component
+  /** The inner that was ACTUALLY PAINTED last (mouse parity): an async
+   * inner swap between paint and pointer event must not let the new inner
+   * eat a click aimed at the old screen (Loading…). */
+  private paintedInner: Component | undefined
   private readonly requestRender: () => void
   /** Latched by every close path; late async results must not act after. */
   private disposed = false
@@ -361,8 +373,11 @@ export class ModelSubmenu implements Component, RowBudgetAware, Focusable {
   /** Transparent mouse forwarding (mouse parity): the outer SettingsList
    * dispatches submenu events here; the current inner (a SettingsList
    * once loaded) owns row hit-testing, search-Input positioning, and
-   * wheel selection. Loading/error text rows stay inert. */
+   * wheel selection. Loading/error text rows stay inert. A pointer event
+   * is fenced to the PAINTED inner: an async swap that has not repainted
+   * yet must not receive a click aimed at the previous screen. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.inner !== this.paintedInner) return undefined
     return this.inner.handleMouse?.(event)
   }
 
@@ -371,6 +386,7 @@ export class ModelSubmenu implements Component, RowBudgetAware, Focusable {
   }
 
   render(width: number): string[] {
+    this.paintedInner = this.inner
     return this.inner.render(width)
   }
 }

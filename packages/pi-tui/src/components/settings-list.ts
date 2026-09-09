@@ -51,7 +51,14 @@ export class SettingsList implements Component, Focusable {
 	private filteredItems: SettingItem[];
 	private theme: SettingsListTheme;
 	private selectedIndex = 0;
-	private mousePressedIndex: number | undefined;
+	/** Physical row → hit entry from the LAST render (mouse parity): the
+	 * mapping is produced by the FINAL render (after the description
+	 * shrink), never re-derived from maxVisible — a click must hit the
+	 * row the user actually saw. */
+	private mouseRows: Array<{ kind: "item"; id: string } | { kind: "search" } | { kind: "inert" }> = [];
+	/** The pressed item ID (mouse parity): a click may only activate the
+	 * exact identity that was pressed. */
+	private mousePressedId: string | undefined;
 	/** Caller-configured item cap; the host may lower it for a short frame. */
 	private configuredMaxVisible: number;
 	private maxVisible: number;
@@ -192,8 +199,11 @@ export class SettingsList implements Component, Focusable {
 
 	private renderMainList(width: number): string[] {
 		const lines: string[] = [];
+		// The mouse mapping is rebuilt from THIS frame's final rows.
+		this.mouseRows = [];
 
 		if (this.searchEnabled && this.searchInput) {
+			this.mouseRows.push({ kind: "search" }, { kind: "inert" });
 			lines.push(...this.searchInput.render(width));
 			lines.push("");
 		}
@@ -227,12 +237,18 @@ export class SettingsList implements Component, Focusable {
 		// baseline, so moving to a row without a description restores the
 		// full window (no render-time ratchet on PageUp/PageDown).
 		while (Number.isFinite(this.maxRows)
-			&& lines.length + window.length + this.descriptionRowCount(width, displayItems) + 2 > this.maxRows
+			&& lines.length + window.lines.length + this.descriptionRowCount(width, displayItems) + 2 > this.maxRows
 			&& visibleCount > 1) {
 			visibleCount -= 1;
 			window = this.renderItemWindow(width, maxLabelWidth, displayItems, visibleCount);
 		}
-		lines.push(...window);
+		lines.push(...window.lines);
+		// Record the FINAL painted item rows (after the shrink): physical
+		// row → item ID, exactly what the user sees.
+		const rowOffset = this.searchEnabled ? 2 : 0;
+		for (const { row, id } of window.itemRows) {
+			this.mouseRows[row + rowOffset] = { kind: "item", id };
+		}
 
 		// Description for the selected item — wrapped, then capped to the
 		// rows left after the hint, so the hint below always survives.
@@ -280,8 +296,14 @@ export class SettingsList implements Component, Focusable {
 
 	/** Render the item window (rows + scroll indicator) at `visibleCount`,
 	 * centered on the selected row. */
-	private renderItemWindow(width: number, maxLabelWidth: number, displayItems: SettingItem[], visibleCount: number): string[] {
+	private renderItemWindow(
+		width: number,
+		maxLabelWidth: number,
+		displayItems: SettingItem[],
+		visibleCount: number,
+	): { lines: string[]; itemRows: Array<{ row: number; id: string }> } {
 		const lines: string[] = [];
+		const itemRows: Array<{ row: number; id: string }> = [];
 
 		// Calculate visible range with scrolling
 		const startIndex = Math.max(
@@ -310,16 +332,21 @@ export class SettingsList implements Component, Focusable {
 
 			const valueText = this.theme.value(truncateToWidth(item.currentValue, valueMaxWidth, ""), isSelected);
 
+			// The mouse mapping is built from the FINAL painted rows: the
+			// physical row → item ID pair is recorded here, exactly as the
+			// user sees it (the description shrink may have reduced the
+			// window below maxVisible).
+			itemRows.push({ row: lines.length, id: item.id });
 			lines.push(truncateToWidth(prefix + labelText + separator + valueText, width));
 		}
 
-		// Add scroll indicator if needed
+		// Add scroll indicator if needed (inert for mouse)
 		if (startIndex > 0 || endIndex < displayItems.length) {
 			const scrollText = `  (${this.selectedIndex + 1}/${displayItems.length})`;
 			lines.push(this.theme.hint(truncateToWidth(scrollText, width - 2, "")));
 		}
 
-		return lines;
+		return { lines, itemRows };
 	}
 
 	/** The rendered row count of the selected item's description block
@@ -355,18 +382,32 @@ export class SettingsList implements Component, Focusable {
 		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
 
-		const rowOffset = this.searchEnabled ? 2 : 0;
-		const { startIndex, endIndex } = this.getVisibleRange(displayItems);
-		const itemIndex = startIndex + event.y - rowOffset;
-		if (itemIndex < startIndex || itemIndex >= endIndex) return undefined;
+		// The hit map is the FINAL painted geometry (after the description
+		// shrink): a click must hit the row the user actually saw, never a
+		// re-derived range from maxVisible.
+		const row = this.mouseRows[event.y];
+		if (!row || row.kind !== "item") return undefined;
 		if (event.type === "press") {
-			this.mousePressedIndex = itemIndex;
-			this.selectedIndex = itemIndex;
+			// Every press starts a fresh gesture: clear any latched pressed
+			// identity first.
+			this.mousePressedId = undefined;
+			// Resolve the CURRENT index by the painted item ID (a live
+			// items() change between paint and press may have reordered the
+			// list WITHOUT a repaint). No match => reject.
+			const currentIndex = displayItems.findIndex(item => item.id === row.id);
+			if (currentIndex === -1) return undefined;
+			this.mousePressedId = row.id;
+			this.selectedIndex = currentIndex;
 			return { handled: true, focus: true };
 		}
 		if (event.type === "click") {
-			this.selectedIndex = this.mousePressedIndex ?? itemIndex;
-			this.mousePressedIndex = undefined;
+			// Activate only the exact pressed identity (press A → repaint →
+			// release must not activate whatever moved into the row).
+			if (this.mousePressedId !== row.id) return undefined;
+			this.mousePressedId = undefined;
+			const currentIndex = displayItems.findIndex(item => item.id === row.id);
+			if (currentIndex === -1) return undefined;
+			this.selectedIndex = currentIndex;
 			this.activateItem();
 			return { handled: true };
 		}
@@ -405,14 +446,6 @@ export class SettingsList implements Component, Focusable {
 
 	private getDisplayItems(): SettingItem[] {
 		return this.searchEnabled ? this.filteredItems : this.items;
-	}
-
-	private getVisibleRange(displayItems: readonly SettingItem[]): { startIndex: number; endIndex: number } {
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), displayItems.length - this.maxVisible),
-		);
-		return { startIndex, endIndex: Math.min(startIndex + this.maxVisible, displayItems.length) };
 	}
 
 	private activateItem(): void {

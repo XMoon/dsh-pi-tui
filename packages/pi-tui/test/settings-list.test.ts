@@ -115,7 +115,7 @@ describe("SettingsList setMaxRows (dsh-pi-tui extension)", () => {
 			currentValue: "on",
 			// Only the FIRST row carries a long description, so selecting it
 			// shrinks the window; moving to a plain row must restore it.
-			description: index === 0 ? "a long description " + "that wraps ".repeat(40) : undefined,
+			description: index === 0 ? "a long description " + "that wraps ".repeat(3) : undefined,
 		}));
 		const list = new SettingsList(rows, 10, testTheme, () => {}, () => {});
 		list.setMaxRows(10); // budget: no search prefix + indicator 1 + hint 2 -> 7
@@ -162,5 +162,110 @@ describe("SettingsList setMaxRows (dsh-pi-tui extension)", () => {
 		assert.ok(rendered.length <= 4, `no-match must fit the grant (${rendered.length})`);
 		assert.ok(rendered.some((line) => line.includes("No matching settings")), "message must survive");
 		assert.ok(rendered.some((line) => line.includes("Esc to cancel")), "hint must survive");
+	});
+});
+
+describe("SettingsList mouse parity (last-painted rows)", () => {
+	const mouse = (type: "press" | "click", y: number, width = 80, height = 6) => ({
+		type,
+		button: "left" as const,
+		x: 2,
+		y,
+		screenX: 2,
+		screenY: y,
+		width,
+		height,
+		shift: false,
+		alt: false,
+		ctrl: false,
+		...(type === "click" ? { clickCount: 1 } : {}),
+	});
+
+	it("activates the item the user actually saw when the description shrinks the window (Case A)", () => {
+		const rows = Array.from({ length: 8 }, (_, index) => ({
+			id: `setting-${index}`,
+			label: `setting ${index}`,
+			currentValue: "on",
+			values: ["on", "off"],
+			description: index === 0 ? "a long description " + "that wraps ".repeat(3) : undefined,
+		}));
+		const changes: Array<{ id: string; value: string }> = [];
+		const list = new SettingsList(rows, 10, testTheme, (id, value) => changes.push({ id, value }), () => {});
+		list.setMaxRows(10);
+		const rendered = list.render(30);
+		// The description shrink must have reduced the window below maxVisible.
+		const itemRows = rendered
+			.map((line, row) => ({ row, id: /setting (\d+)/.exec(line)?.[1] }))
+			.filter((entry): entry is { row: number; id: string } => entry.id !== undefined);
+		assert.ok(itemRows.length >= 2, `at least two items must render:\n${rendered.join("\n")}`);
+		// Clicking each PAINTED row must activate the item on THAT row.
+		for (const { row, id } of itemRows) {
+			changes.length = 0;
+			list.handleMouse(mouse("press", row));
+			list.handleMouse(mouse("click", row));
+			assert.deepStrictEqual(
+				changes,
+				[{ id: `setting-${id}`, value: "off" }],
+				`row ${row} must activate setting-${id} (the painted row), not a re-derived range:\n${rendered.join("\n")}`,
+			);
+		}
+	});
+
+	it("keeps the row offset correct with search enabled + shrink (Case B)", () => {
+		const rows = Array.from({ length: 8 }, (_, index) => ({
+			id: `setting-${index}`,
+			label: `setting ${index}`,
+			currentValue: "on",
+			values: ["on", "off"],
+			description: index === 0 ? "a long description " + "that wraps ".repeat(3) : undefined,
+		}));
+		const changes: Array<{ id: string; value: string }> = [];
+		const list = new SettingsList(rows, 10, testTheme, (id, value) => changes.push({ id, value }), () => {}, {
+			enableSearch: true,
+		});
+		list.setMaxRows(10);
+		const rendered = list.render(60);
+		const itemRows = rendered
+			.map((line, row) => ({ row, id: /setting (\d+)/.exec(line)?.[1] }))
+			.filter((entry): entry is { row: number; id: string } => entry.id !== undefined);
+		assert.ok(itemRows.length >= 2, `at least two items must render:\n${rendered.join("\n")}`);
+		for (const { row, id } of itemRows) {
+			changes.length = 0;
+			list.handleMouse(mouse("press", row));
+			list.handleMouse(mouse("click", row));
+			assert.deepStrictEqual(
+				changes,
+				[{ id: `setting-${id}`, value: "off" }],
+				`searchable row ${row} must activate setting-${id}:\n${rendered.join("\n")}`,
+			);
+		}
+	});
+
+	it("keeps search blank, description rows, indicator and hint inert (Case C)", () => {
+		const rows = Array.from({ length: 8 }, (_, index) => ({
+			id: `setting-${index}`,
+			label: `setting ${index}`,
+			currentValue: "on",
+			values: ["on", "off"],
+			description: index === 0 ? "a long description " + "that wraps ".repeat(3) : undefined,
+		}));
+		const changes: Array<{ id: string; value: string }> = [];
+		const list = new SettingsList(rows, 10, testTheme, (id, value) => changes.push({ id, value }), () => {}, {
+			enableSearch: true,
+		});
+		list.setMaxRows(8);
+		const rendered = list.render(80);
+		const inertRows = rendered
+			.map((line, row) => ({ row, line }))
+			.filter(({ line }) => !/setting \d+/.test(line));
+		assert.ok(inertRows.length >= 2, `inert rows must exist:\n${rendered.join("\n")}`);
+		for (const { row } of inertRows) {
+			changes.length = 0;
+			const press = list.handleMouse(mouse("press", row));
+			if (press !== undefined) {
+				list.handleMouse(mouse("click", row));
+			}
+			assert.deepStrictEqual(changes, [], `row ${row} (${JSON.stringify(rendered[row])}) must be inert`);
+		}
 	});
 });

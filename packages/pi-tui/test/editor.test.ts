@@ -5010,6 +5010,21 @@ describe("Editor slash autocomplete mouse click (mouse parity)", () => {
 		const rendered = editor.render(80);
 		const suggestionRow = rendered.findIndex((line) => line.includes("/help"));
 		assert.ok(suggestionRow >= 0, `suggestion row missing:\n${rendered.join("\n")}`);
+		// A real click is a press + release (the renderer synthesizes the
+		// click): press first, then the click.
+		editor.handleMouse({
+			type: "press",
+			button: "left",
+			x: 2,
+			y: suggestionRow,
+			screenX: 2,
+			screenY: 2,
+			width: 80,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
 		const result = editor.handleMouse({
 			type: "click",
 			button: "left",
@@ -5058,6 +5073,19 @@ describe("Editor slash autocomplete mouse click (mouse parity)", () => {
 		const rendered = editor.render(80);
 		const suggestionRow = rendered.findIndex((line) => line.includes("/help"));
 		assert.ok(suggestionRow >= 0, `suggestion row missing:\n${rendered.join("\n")}`);
+		editor.handleMouse({
+			type: "press",
+			button: "left",
+			x: 2,
+			y: suggestionRow,
+			screenX: 2,
+			screenY: 2,
+			width: 80,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
 		const result = editor.handleMouse({
 			type: "click",
 			button: "left",
@@ -5074,5 +5102,103 @@ describe("Editor slash autocomplete mouse click (mouse parity)", () => {
 		assert.ok(result?.handled, "clicking a slash suggestion must be handled");
 		assert.strictEqual(submitted, "", "disableSubmit must block the mouse slash submit");
 		assert.ok(!editor.isShowingAutocomplete(), "the autocomplete must be cancelled");
+	});
+});
+
+describe("Editor autocomplete painted-list identity (mouse parity)", () => {
+	const mouse = (type: "press" | "click", y: number, width = 80, height = 24) => ({
+		type,
+		button: "left" as const,
+		x: 2,
+		y,
+		screenX: 2,
+		screenY: y,
+		width,
+		height,
+		shift: false,
+		alt: false,
+		ctrl: false,
+		...(type === "click" ? { clickCount: 1 } : {}),
+	});
+
+	async function openAutocomplete(editor: Editor, value: string): Promise<number> {
+		editor.handleInput("/");
+		editor.handleInput("h");
+		editor.handleInput("e");
+		editor.handleInput("\t");
+		await flushAutocomplete();
+		const rendered = editor.render(80);
+		const row = rendered.findIndex((line) => line.includes(value));
+		assert.ok(row >= 0, `suggestion row missing:\n${rendered.join("\n")}`);
+		return row;
+	}
+
+	it("an unpainted list replacement cannot receive a click (Case A/B: no unpainted slash submit)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/old", label: "/old" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		const row = await openAutocomplete(editor, "/old");
+		// An async suggestion swap replaces the list WITHOUT a repaint.
+		const createList = (editor as unknown as {
+			createAutocompleteList(prefix: string, items: Array<{ value: string; label: string }>): unknown;
+		}).createAutocompleteList;
+		const newList = createList.call(editor, "/he", [{ value: "/new", label: "/new" }]);
+		(editor as unknown as { autocompleteList: unknown }).autocompleteList = newList;
+		// A click on the painted /old row must NOT submit the unpainted /new.
+		editor.handleMouse(mouse("click", row));
+		assert.strictEqual(submitted, "", "the unpainted list must not receive the click (no unpainted slash submit)");
+		// After the repaint the painted list works normally (Case D).
+		const rendered2 = editor.render(80);
+		const row2 = rendered2.findIndex((line) => line.includes("/new"));
+		assert.ok(row2 >= 0, `replacement row missing:\n${rendered2.join("\n")}`);
+		editor.handleMouse(mouse("press", row2));
+		editor.handleMouse(mouse("click", row2));
+		assert.strictEqual(submitted, "/new", "the painted list must submit after repaint");
+	});
+
+	it("press A → repaint B → release must not activate B (Case C)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/old", label: "/old" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		const row = await openAutocomplete(editor, "/old");
+		// Press on the painted /old row.
+		editor.handleMouse(mouse("press", row));
+		// The list is replaced WITHOUT a repaint.
+		const createList = (editor as unknown as {
+			createAutocompleteList(prefix: string, items: Array<{ value: string; label: string }>): unknown;
+		}).createAutocompleteList;
+		const newList = createList.call(editor, "/he", [{ value: "/new", label: "/new" }]);
+		(editor as unknown as { autocompleteList: unknown }).autocompleteList = newList;
+		// The release click must NOT activate the replacement list.
+		editor.handleMouse(mouse("click", row));
+		assert.strictEqual(submitted, "", "the release must not activate the replacement list");
 	});
 });

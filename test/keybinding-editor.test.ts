@@ -965,3 +965,46 @@ test('keybinding panel: openKeybindingEditor forwards focus to the search Input 
   assert.strictEqual(state.searchInput.focused, true, 'the mounted panel must forward focus to the search Input')
   app.stop()
 })
+
+test('action editor: an async model replacement cannot transfer a click to another binding (mouse parity)', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+  })
+  try {
+    const lines = editor.render(88).map(plain)
+    const bindingRow = lines.findIndex(line => line.includes('Ctrl+T'))
+    assert.ok(bindingRow >= 0, `binding row missing:\n${lines.join('\n')}`)
+    // An async model replacement swaps the row to a DIFFERENT binding
+    // WITHOUT a repaint: the screen still shows Ctrl+T.
+    const parsed2 = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+y' })
+    const model2 = buildKeybindingEditorModel(manager, parsed2)
+    const row2 = model2.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+    ;(editor as unknown as { row: unknown }).row = row2
+    // A press+click on the stale Ctrl+T row must NOT start a recorder for
+    // the replacement binding (Ctrl+Y).
+    editor.handleMouse(mouse('press', 10, bindingRow, 88, 30))
+    const click = editor.handleMouse(mouse('click', 10, bindingRow, 88, 30))
+    assert.equal(click, undefined, 'the click must not transfer to the replacement binding')
+    const state = editor as unknown as { recorder: unknown }
+    assert.equal(state.recorder, undefined, 'no recorder must start from the stale row')
+    // After the repaint the painted binding works normally.
+    const lines2 = editor.render(88).map(plain)
+    const yRow = lines2.findIndex(line => line.includes('Ctrl+Y'))
+    assert.ok(yRow >= 0, `replacement binding row missing:\n${lines2.join('\n')}`)
+    editor.handleMouse(mouse('press', 10, yRow, 88, 30))
+    editor.handleMouse(mouse('click', 10, yRow, 88, 30))
+    assert.ok((editor as unknown as { recorder: unknown }).recorder !== undefined, 'the painted binding must start the recorder')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})

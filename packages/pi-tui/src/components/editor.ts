@@ -331,6 +331,13 @@ export class Editor implements Component, Focusable {
 	private lastWidth: number = 80;
 	private renderedVisibleLineCount = 1;
 	private renderedAutocompleteHeight = 0;
+	/** The autocomplete list that was ACTUALLY PAINTED last (mouse
+	 * parity): an async suggestion swap between paint and pointer event
+	 * must not let the new list eat a click aimed at the old screen. */
+	private renderedAutocompleteList: SelectList | undefined;
+	/** The autocomplete list the press started on (mouse parity): a click
+	 * may only act on the exact list instance that was pressed. */
+	private mousePressedAutocompleteList: SelectList | undefined;
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -708,6 +715,10 @@ export class Editor implements Component, Focusable {
 		// Add autocomplete list if active
 		this.renderedAutocompleteHeight = 0;
 		if (this.autocompleteState && this.autocompleteList) {
+			// The painted list is the one the user actually sees: mouse
+			// dispatch is fenced to it (an async swap that has not
+			// repainted must not receive a click aimed at the old list).
+			this.renderedAutocompleteList = this.autocompleteList;
 			const autocompleteResult = this.autocompleteList.render(contentWidth);
 			this.renderedAutocompleteHeight = autocompleteResult.length;
 			for (const line of autocompleteResult) {
@@ -715,6 +726,8 @@ export class Editor implements Component, Focusable {
 				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
 				result.push(`${leftPadding}${line}${linePadding}${rightPadding}`);
 			}
+		} else {
+			this.renderedAutocompleteList = undefined;
 		}
 
 		return result;
@@ -725,9 +738,24 @@ export class Editor implements Component, Focusable {
 		if (
 			this.autocompleteState &&
 			this.autocompleteList &&
+			// The dispatch is fenced to the PAINTED list: an async swap
+			// that has not repainted must not receive a click aimed at the
+			// old screen (a slash click must never submit an unpainted
+			// command).
+			this.autocompleteList === this.renderedAutocompleteList &&
 			event.y >= autocompleteStartRow &&
 			event.y < autocompleteStartRow + this.renderedAutocompleteHeight
 		) {
+			if (event.type === "press") {
+				this.mousePressedAutocompleteList = this.autocompleteList;
+			}
+			if (event.type === "click") {
+				// A click may only act on the exact list instance that was
+				// pressed (press A → repaint B → release must not activate
+				// B).
+				if (this.mousePressedAutocompleteList !== this.autocompleteList) return undefined;
+				this.mousePressedAutocompleteList = undefined;
+			}
 			const maxPadding = Math.max(0, Math.floor((event.width - 1) / 2));
 			const paddingX = Math.min(this.paddingX, maxPadding);
 			const contentWidth = Math.max(1, event.width - paddingX * 2);
@@ -2798,6 +2826,8 @@ export class Editor implements Component, Focusable {
 	private clearAutocompleteUi(): void {
 		this.autocompleteState = null;
 		this.autocompleteList = undefined;
+		this.renderedAutocompleteList = undefined;
+		this.mousePressedAutocompleteList = undefined;
 		this.autocompletePrefix = "";
 	}
 

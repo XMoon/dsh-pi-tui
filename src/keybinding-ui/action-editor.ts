@@ -119,7 +119,7 @@ function actionViewport(
  * the viewport slice), so a click can only act on last-painted geometry.
  * (Mouse parity.) */
 type ActionEditorMouseHit =
-  | { kind: 'select'; index: number }
+  | { kind: 'select'; key: string }
   | { kind: 'inert' }
 
 export class ActionEditorPanel implements Component {
@@ -139,6 +139,12 @@ export class ActionEditorPanel implements Component {
   private message: string | undefined
   /** Physical row → hit entry from the LAST render (mouse parity). */
   private hitMap: ActionEditorMouseHit[] = []
+  /** The pressed binding identity (mouse parity): a click may only act on
+   * the exact identity that was pressed. */
+  private mousePressedKey: string | undefined
+  /** The selectable rows' stable identities from the LAST render (the
+   * bindingKey per selectable ordinal; 'add' for the Add row). */
+  private selectableKeys: string[] = []
   /** The width the hit map was painted at; a stale-width event is rejected. */
   private lastRenderWidth = 0
 
@@ -186,19 +192,27 @@ export class ActionEditorPanel implements Component {
     }
     const canEdit = this.row.configurable && !this.row.reserved && !this.row.safeMode
     if (canEdit) {
+      // The selectable rows carry their STABLE binding identity (the
+      // bindingKey), never an ordinal: an async model replacement between
+      // paint and press/click must not transfer the action to whatever
+      // moved into the row.
+      const selectableKeys: string[] = []
       for (let index = 0; index < editable.length; index += 1) {
         const binding = editable[index]!
         const defaultSuffix = this.row.customized ? '' : ' (default)'
         const conditionalSuffix = isConditionalBinding(this.row, binding) ? ' (conditional)' : ''
         const conflictSuffix = this.row.conflict ? color.warning(' !') : ''
         selectableLineIndices.push(lines.length)
+        selectableKeys.push(bindingKey(binding))
         lines.push(selectedLine(`${bindingLabel(binding)}${defaultSuffix}${conditionalSuffix}${conflictSuffix}`, this.selectedIndex === index, safeWidth))
       }
       if (editable.some(binding => isConditionalBinding(this.row, binding))) {
         lines.push(color.textDim(`  Conditional: ${this.row.conditionalDescription ?? 'when its context is active'}`))
       }
       selectableLineIndices.push(lines.length)
+      selectableKeys.push('add')
       lines.push(selectedLine('+ Add shortcut', this.selectedIndex === editable.length, safeWidth))
+      this.selectableKeys = selectableKeys
     } else if (this.row.defaults.length > 0) {
       for (const binding of this.row.defaults) lines.push(`  ${bindingLabel(binding)}`)
     }
@@ -234,7 +248,9 @@ export class ActionEditorPanel implements Component {
     this.lastRenderWidth = safeWidth
     this.hitMap = viewport.lines.map((_, row) => {
       const selectable = viewport.selectableRows.find(candidate => candidate.row === row)
-      return selectable !== undefined ? { kind: 'select', index: selectable.ordinal } : { kind: 'inert' }
+      if (selectable === undefined) return { kind: 'inert' }
+      const key = this.selectableKeys[selectable.ordinal]
+      return key !== undefined ? { kind: 'select', key } : { kind: 'inert' }
     })
     return viewport.lines
   }
@@ -368,17 +384,42 @@ export class ActionEditorPanel implements Component {
     }
     if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
     if (event.type === 'press') {
-      this.selectedIndex = hit.index
+      // Every press starts a fresh gesture: clear any latched pressed
+      // identity first.
+      this.mousePressedKey = undefined
+      if (this.mode === 'choose-binding') {
+        const currentIndex = hit.key === 'choice:direct' ? 0 : hit.key === 'choice:leader' ? 1 : -1
+        if (currentIndex === -1) return undefined
+        this.mousePressedKey = hit.key
+        this.selectedIndex = currentIndex
+        this.message = undefined
+        return { handled: true, focus: true }
+      }
+      // Resolve the CURRENT selectable index by the painted binding
+      // identity (an async model replacement between paint and press may
+      // have reordered the list WITHOUT a repaint). No match => reject.
+      const editable = this.row.customized ? this.row.configured : this.row.editableDefaults
+      const currentIndex = hit.key === 'add' ? editable.length : editable.findIndex(binding => bindingKey(binding) === hit.key)
+      if (currentIndex === -1) return undefined
+      this.mousePressedKey = hit.key
+      this.selectedIndex = currentIndex
       this.message = undefined
       return { handled: true, focus: true }
     }
-    // click: the same action as Enter.
+    // click: the same action as Enter, but only for the exact pressed
+    // identity (press A → model replacement → release must not act on
+    // whatever moved into the row).
+    if (this.mousePressedKey !== hit.key) return undefined
+    this.mousePressedKey = undefined
     if (this.mode === 'choose-binding') {
-      this.handleBindingChoice(this.selectedIndex === 0 ? 'd' : 'l')
+      this.handleBindingChoice(hit.key === 'choice:direct' ? 'd' : 'l')
       return { handled: true }
     }
     const configured = this.row.customized ? this.row.configured : []
     const editable = this.row.customized ? this.row.configured : this.row.editableDefaults
+    const currentIndex = hit.key === 'add' ? editable.length : editable.findIndex(binding => bindingKey(binding) === hit.key)
+    if (currentIndex === -1) return undefined
+    this.selectedIndex = currentIndex
     if (this.selectedIndex >= editable.length) {
       this.mode = 'choose-binding'
       this.selectedIndex = 0
@@ -408,7 +449,7 @@ export class ActionEditorPanel implements Component {
     const limit = Math.max(1, this.maxRows())
     this.lastRenderWidth = Math.max(1, width)
     this.hitMap = lines.slice(0, limit).map((_, row) =>
-      row === 3 ? { kind: 'select', index: 0 } : row === 4 ? { kind: 'select', index: 1 } : { kind: 'inert' })
+      row === 3 ? { kind: 'select', key: 'choice:direct' } : row === 4 ? { kind: 'select', key: 'choice:leader' } : { kind: 'inert' })
     return lines.slice(0, limit)
   }
 
