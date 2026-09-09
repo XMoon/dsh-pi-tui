@@ -132,6 +132,7 @@ import { CompactTextPreview } from './compact-text-preview.ts'
 import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
+import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type TranscriptMessage, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
 import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
@@ -455,6 +456,28 @@ class QuestionFrame extends Frame implements Focusable {
   }
 
   private lastTermColumns = 0
+}
+
+/**
+ * Frame for the Save Location prompt in the EDITOR SEAT: forwards focus to
+ * the prompt so its directory Input keeps the hardware cursor (a plain Frame
+ * would swallow the focus flag — the same contract as QuestionFrame).
+ */
+class SaveLocationFrame extends Frame implements Focusable {
+  private readonly prompt: SaveLocationPrompt
+
+  constructor(prompt: SaveLocationPrompt) {
+    super(prompt, true)
+    this.prompt = prompt
+  }
+
+  get focused(): boolean {
+    return this.prompt.focused
+  }
+
+  set focused(value: boolean) {
+    this.prompt.focused = value
+  }
 }
 
 /**
@@ -1737,6 +1760,24 @@ interface QuestionState {
   settled?: boolean
 }
 
+/** Live state of one Save Location prompt (the editor-seat directory
+ * chooser). One prompt on screen at a time; a second request while one is
+ * active is refused (the caller notifies — the prompt is a narrow
+ * Client-local interaction, not a queueable flow). */
+interface SaveLocationState {
+  prompt: SaveLocationPrompt
+  /** The mounted SaveLocationFrame, while the prompt owns the editor seat. */
+  frame?: SaveLocationFrame
+  /** Overlay handles suspended (hidden) while the prompt owns the seat. */
+  suspendedOverlays: Set<OverlayHandle>
+  resolve: (result: SaveLocationResult) => void
+  reject: (error: unknown) => void
+  signal?: AbortSignal
+  onAbort?: () => void
+  /** Latched by settle/cancel: every askSaveLocation promise settles exactly once. */
+  settled?: boolean
+}
+
 /** One picker row; `group` renders a workspace-style header before the group. */
 export interface PickerItem {
   value: string
@@ -2375,6 +2416,8 @@ export class TuiApp {
   private activeQuestions: QuestionState | undefined
   /** Flows waiting behind the active one (FIFO; shown on settle). */
   private readonly questionQueue: QuestionState[] = []
+  /** The active Save Location prompt, if any (one on screen at a time). */
+  private activeSaveLocation: SaveLocationState | undefined
   /** The folded transcript; re-rendered into the messages view on change. */
   private messages: readonly TranscriptMessage[] = []
   /** Live-only tool-call previews; never part of the folded transcript or
@@ -3479,6 +3522,9 @@ export class TuiApp {
     // Every pending question flow settles rejected: a stopped TUI must
     // not leave askQuestions promises hanging forever.
     this.cancelQuestionFlows()
+    // The same for an active Save Location prompt: a stopped TUI must not
+    // leave askSaveLocation promises hanging forever.
+    this.cancelSaveLocationPrompt()
     for (const dispose of this.schemeDisposers) dispose()
     this.schemeDisposers = []
     this.tui.stop()
@@ -3903,6 +3949,10 @@ export class TuiApp {
       ? !this.keybindings.physicalEscapeEnabled()
       : !this.keybindings.matches(data, 'app.agent.interrupt')) {
       this.lastEscapeAt = undefined
+    }
+    if (this.activeSaveLocation !== undefined) {
+      this.clearExitConfirmation()
+      return this.handleSaveLocationKey(data)
     }
     if (this.activeQuestions !== undefined) {
       this.clearExitConfirmation()
@@ -12924,6 +12974,12 @@ export class TuiApp {
     // M6: a question owns the seat now — any pending leader sequence is
     // cancelled (focus-transition cancellation).
     this.keybindings.cancelLeader()
+    // A Host question is authoritative over a Client-local Save Location
+    // prompt: presenting a question settles the prompt as cancelled (the
+    // caller's owned workflow classifies it and notifies nothing).
+    if (this.activeSaveLocation !== undefined) {
+      this.settleSaveLocation(this.activeSaveLocation, { kind: 'cancelled' })
+    }
     // Set the active flow BEFORE touching overlays: showOverlayOnHost and
     // the suspension bookkeeping branch on it.
     this.activeQuestions = state
@@ -13052,6 +13108,149 @@ export class TuiApp {
     } else {
       state.resolve(answers)
     }
+  }
+
+  /**
+   * Ask the user where a Client-local artifact should be saved (Pre-Stage-D
+   * export convergence): a narrow directory chooser in the editor seat with
+   * a FIXED filename. This is filesystem UI, NOT an agent question — it never
+   * goes through TuiQuestion / QuestionFlow / askQuestions.
+   * @param request - the prompt title, the fixed filename and the initial
+   *   directory value.
+   * @param deps - the Client-local filesystem facts (resolution, validation,
+   *   collision check, directory completion).
+   * @param signal - optional abort; settles the prompt rejected.
+   * @returns the selected directory, or cancelled.
+   */
+  askSaveLocation(
+    request: SaveLocationRequest,
+    deps: SaveLocationDeps,
+    signal?: AbortSignal,
+  ): Promise<SaveLocationResult> {
+    // A disposed surface must never leave the caller hanging: settle
+    // rejected immediately (the same stale-generation contract as
+    // askQuestions).
+    if (this.disposed) {
+      return Promise.reject(cancellationError('save location cancelled'))
+    }
+    return new Promise<SaveLocationResult>((resolve, reject) => {
+      const state: SaveLocationState = {
+        prompt: new SaveLocationPrompt(
+          request,
+          deps,
+          (result) => this.settleSaveLocation(state, result),
+        ),
+        suspendedOverlays: new Set(),
+        resolve,
+        reject,
+        signal,
+      }
+      state.prompt.onChange = () => this.requestRender()
+      if (signal?.aborted === true) {
+        reject(cancellationError('save location aborted'))
+        return
+      }
+      if (signal !== undefined) {
+        const onAbort = (): void => this.cancelSaveLocation(state)
+        state.onAbort = onAbort
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
+      // One prompt on screen at a time; a second request while one is active
+      // is refused (the caller notifies — the prompt is a narrow interaction,
+      // not a queueable flow).
+      if (this.activeSaveLocation !== undefined) {
+        reject(cancellationError('a save location prompt is already active'))
+        return
+      }
+      this.presentSaveLocation(state)
+    })
+  }
+
+  /** Mount one Save Location prompt into the editor seat and make it the
+   * active one. */
+  private presentSaveLocation(state: SaveLocationState): void {
+    // A prompt owns the seat now: any pending leader sequence is cancelled
+    // (focus-transition cancellation).
+    this.keybindings.cancelLeader()
+    this.activeSaveLocation = state
+    this.projectActivity()
+    // The prompt is a logical capturing modal: every visible overlay is
+    // suspended (hidden, state intact) until it settles.
+    for (const handle of this.overlayBroker.handles()) {
+      if (!handle.isHidden()) {
+        handle.setHidden(true)
+        state.suspendedOverlays.add(handle)
+      }
+    }
+    const frame = new SaveLocationFrame(state.prompt)
+    state.frame = frame
+    // The prompt only PROJECTS into the seat — the previous occupant (the
+    // editor's compiled component) stays ALIVE but detached; the non-owning
+    // replace() never disposes it (the same rule as the question flow).
+    this.editorSeat.replace(frame)
+    const screen = this.fullscreen ?? this.tui
+    screen.setFocus(frame)
+    this.setFocusSeat('overlay')
+    screen.requestRender()
+  }
+
+  /** Abort one prompt (its signal fired): the active prompt settles
+   * rejected. */
+  private cancelSaveLocation(state: SaveLocationState): void {
+    if (state.settled === true) return
+    if (this.activeSaveLocation === state) {
+      this.settleSaveLocation(state, { kind: 'cancelled' })
+      return
+    }
+    state.settled = true
+    if (state.onAbort !== undefined && state.signal !== undefined) {
+      state.signal.removeEventListener('abort', state.onAbort)
+    }
+    state.reject(cancellationError('save location cancelled'))
+  }
+
+  /** Cancel the active prompt (surface stop/teardown). */
+  private cancelSaveLocationPrompt(): void {
+    if (this.activeSaveLocation !== undefined) {
+      this.settleSaveLocation(this.activeSaveLocation, { kind: 'cancelled' })
+    }
+  }
+
+  /** Route a key while a Save Location prompt is showing; every key is
+   * consumed. */
+  private handleSaveLocationKey(data: string): TuiInputListenerResult {
+    const state = this.activeSaveLocation
+    if (state === undefined) return undefined
+    state.prompt.handleInput(data)
+    this.requestRender()
+    return { consume: true }
+  }
+
+  /** Settle the prompt with its result (or cancelled), restoring the editor
+   * seat and the suspended overlays. */
+  private settleSaveLocation(state: SaveLocationState, result: SaveLocationResult): void {
+    if (this.activeSaveLocation !== state || state.settled === true) return
+    state.settled = true
+    if (state.onAbort !== undefined && state.signal !== undefined) {
+      state.signal.removeEventListener('abort', state.onAbort)
+    }
+    state.prompt.dispose()
+    // Final restoration: the editor FIRST, then the suspended overlays — a
+    // restored capturing overlay focuses itself through setHidden(false), so
+    // the editor must not be re-focused afterwards (the question-flow rule).
+    this.activeSaveLocation = undefined
+    this.mountSeatChild()
+    const screen = this.fullscreen ?? this.tui
+    screen.setFocus(this.seatEditor().component)
+    for (const handle of state.suspendedOverlays) {
+      if (this.overlayBroker.isTracked(handle)) handle.setHidden(false)
+    }
+    state.suspendedOverlays.clear()
+    this.setFocusSeat('editor')
+    this.publishFocusSeat()
+    this.projectActivity()
+    screen.requestRender()
+    state.resolve(result)
   }
 }
 
