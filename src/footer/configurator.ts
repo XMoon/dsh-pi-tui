@@ -104,6 +104,26 @@ type ConfiguratorMouseHit =
   | { kind: 'exit'; choice: 'save' | 'discard' | 'keep' }
   | { kind: 'inert' }
 
+/** The actionable subset of a hit, used as the press-time gesture
+ * identity (mouse parity): a click may only run the EXACT semantic
+ * action that was pressed — a resize/repaint between press and release
+ * must not transfer the click to whatever action repainted into the
+ * same cell (a transaction-level wrong action, e.g. Keep Editing →
+ * Save & Exit). */
+type ConfiguratorMouseAction =
+  | { kind: 'select'; target: number }
+  | { kind: 'save' }
+  | { kind: 'exit'; choice: 'save' | 'discard' | 'keep' }
+
+/** The pressed semantic action equals the current hit's action. */
+function sameMouseAction(a: ConfiguratorMouseAction | undefined, b: ConfiguratorMouseHit): boolean {
+  if (a === undefined) return false
+  if (a.kind === 'select') return b.kind === 'select' && b.target === a.target
+  if (a.kind === 'save') return b.kind === 'save'
+  if (a.kind === 'exit') return b.kind === 'exit' && b.choice === a.choice
+  return false
+}
+
 /** The footer configurator overlay panel. */
 export class FooterConfiguratorPanel implements Component {
   private readonly model: FooterConfiguratorModel
@@ -121,6 +141,9 @@ export class FooterConfiguratorPanel implements Component {
   private scrollTop = 0
   /** Physical row → hit entry from the LAST render (mouse parity). */
   private hitMap: ConfiguratorMouseHit[] = []
+  /** The semantic action the last left press latched (mouse parity): a
+   * click may only run the exact pressed action. */
+  private mousePressedAction: ConfiguratorMouseAction | undefined
   /** The width the hit map was painted at; a stale-width event is rejected. */
   private lastRenderWidth = 0
   /** Bracketed-paste buffering (the fork's Input-component pattern):
@@ -413,6 +436,18 @@ export class FooterConfiguratorPanel implements Component {
    * input — no click can create a second save.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // A click ends any gesture, and every left press starts a fresh
+    // one: release the pressed action up front — BEFORE the width
+    // guard / hit lookup / inert return / saving gate, so a press on
+    // stale-width or inert geometry still replaces the old identity
+    // (the TUI keeps the frame as the press target for a handled
+    // press, so a later release on the same cell synthesizes a click
+    // that must not match a stale action). The local copy still guards
+    // the valid-row comparison below.
+    const pressedAction = this.mousePressedAction
+    if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) {
+      this.mousePressedAction = undefined
+    }
     // The hit map is only valid for the last painted width: a resize
     // that has not been repainted must not dispatch against stale
     // geometry (last-painted geometry is authoritative).
@@ -429,11 +464,21 @@ export class FooterConfiguratorPanel implements Component {
         // mouse click must not implicitly reorder (mouse-plan boundary:
         // "row-move: click row selects it only"). Item rows are
         // mouse-inert in that mode.
-        if (this.model.state().mode !== 'row-move') this.moveCursorTo(hit.target)
+        if (this.model.state().mode !== 'row-move') {
+          this.moveCursorTo(hit.target)
+          this.mousePressedAction = { kind: 'select', target: hit.target }
+        }
+      } else if (hit.kind === 'save') {
+        this.mousePressedAction = { kind: 'save' }
+      } else if (hit.kind === 'exit') {
+        this.mousePressedAction = { kind: 'exit', choice: hit.choice }
       }
       return { handled: true, focus: true }
     }
-    // click: the same operations as Enter.
+    // click: the same operations as Enter, but only for the exact
+    // pressed semantic action (a resize/repaint between press and
+    // release must not transfer the click to a different action).
+    if (!sameMouseAction(pressedAction, hit)) return undefined
     if (hit.kind === 'save') {
       this.requestSave()
     } else if (hit.kind === 'exit') {

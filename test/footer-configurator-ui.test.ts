@@ -1626,6 +1626,44 @@ test('configurator: exit-confirm mouse click routes Discard & Exit (mouse parity
   app.stop()
 })
 
+test('configurator: exit-confirm click cannot transfer to a different action after a resize (mouse parity)', async () => {
+  const { vt, app } = startApp(100, 10)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let saved = 0
+  let cancelled = 0
+  openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  vt.sendInput('\x1b') // dirty → exit-confirm
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  const keepRow = viewport.findIndex(line => line.includes('Keep Editing') && !line.includes('↑↓'))
+  assert.ok(keepRow >= 0, `Keep Editing missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[keepRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0)
+  // Press Keep Editing (no release yet): the gesture identity is the
+  // exit/keep semantic action.
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${keepRow + 1}M`)
+  await vt.waitForRender()
+  // Resize: the preview block inserts and the action rows move down —
+  // the pressed cell now shows Save & Exit.
+  vt.resize(100, 11)
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok(
+    (after[keepRow] ?? '').includes('Save & Exit'),
+    `the pressed cell must now show Save & Exit:\n${after.join('\n')}`,
+  )
+  // Release on the SAME absolute cell: the synthesized click must NOT
+  // run the repainted action (no save, no discard, no wrong transition).
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${keepRow + 1}m`)
+  await vt.waitForRender()
+  assert.equal(saved, 0, 'the transferred click must not save')
+  assert.equal(cancelled, 0, 'the transferred click must not discard/close')
+  app.stop()
+})
+
 test('configurator: the preview block is inert (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
