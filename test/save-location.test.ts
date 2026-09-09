@@ -616,3 +616,27 @@ test('mouse parity: a stale pressed VALUE is released on click mismatch (no ghos
   prompt.handleMouse(click(srcRow2))
   assert.equal(prompt.getValue(), './', 'a click without a fresh press must not accept')
 })
+
+test('mouse parity: the collision confirmation blocks directory-row editing (inert while confirming)', (t) => {
+  const { deps } = fixtureDeps(testLifecycle(t))
+  let result: SaveLocationResult | undefined
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    (value) => { result = value },
+  )
+  prompt.handleInput('out')
+  prompt.handleInput('\r') // target exists → confirmation state
+  assert.equal(prompt.isConfirming(), true, 'precondition — confirmation state')
+  const rendered = prompt.render(60)
+  const directoryRow = rendered.findIndex(line => line.includes('Directory:'))
+  assert.ok(directoryRow >= 0)
+  const before = prompt.getValue()
+  const handled = prompt.handleMouse({
+    type: 'press', button: 'left', x: 14, y: directoryRow, screenX: 14, screenY: directoryRow,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(handled, undefined, 'the confirmation must be inert to mouse input')
+  assert.equal(prompt.getValue(), before, 'the directory value must not change')
+  assert.equal(result, undefined, 'the confirmation must not settle')
+})

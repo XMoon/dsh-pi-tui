@@ -53,3 +53,17 @@ test('transcript search: title and hint rows are inert', () => {
   assert.equal(component.handleMouse(mouse('press', 5, 0)), undefined, 'the title row must be inert')
   assert.equal(component.handleMouse(mouse('press', 5, 2)), undefined, 'the hint row must be inert')
 })
+
+test('transcript search: the mouse dispatch target is the mounted component (not the private Input)', () => {
+  const queries: string[] = []
+  const component = new TranscriptSearchComponent(query => queries.push(query))
+  component.handleInput('a')
+  component.render(40)
+  const result = component.handleMouse(mouse('press', 3, 1))
+  assert.ok(result?.handled, 'the query row press must be handled')
+  assert.ok(result?.target, 'the result must carry a dispatch target')
+  assert.strictEqual(result!.target!.component, component, 'the gesture target must be the mounted component')
+  if (result?.focus) {
+    assert.strictEqual(result.focusTarget, component, 'the focus target must be the mounted component')
+  }
+})

@@ -256,6 +256,9 @@ export class SaveLocationPrompt implements Component, Focusable {
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     // The row map is only valid for the last painted width.
     if (event.width !== this.lastRenderWidth) return undefined
+    // Collision confirmation is a modal state (y/Enter replaces, n/Esc
+    // returns): the directory/suggestion rows are inert while it shows.
+    if (this.confirming) return undefined
     if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click' && event.type !== 'wheel')) {
       return undefined
     }

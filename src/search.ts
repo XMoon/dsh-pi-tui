@@ -8,7 +8,7 @@
  */
 
 import { Input, dispatchMouseEvent, truncateToWidth } from '@xmoon76/pi-tui'
-import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
+import type { Component, Focusable, TuiMouseDispatchResult, TuiMouseEvent } from '@xmoon76/pi-tui'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { color } from './theme.ts'
 
@@ -59,12 +59,27 @@ export class TranscriptSearchComponent implements Component, Focusable {
    * Mouse parity (mirrors vendor X049 for the alt-screen search): the
    * query Input row (row 1, the Input's own render at full width)
    * click-positions the private Input; title and hint rows stay inert.
+   * The dispatch target/focus are rewritten to THIS component: the
+   * private Input is not mounted in the TUI tree (isMouseTargetLive
+   * would clear the gesture on release), so the mounted wrapper must
+   * stay the gesture/focus owner.
    */
-  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+  handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
     if (event.width !== this.lastRenderWidth || event.y !== 1) return undefined
     if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
     const result = dispatchMouseEvent(this.input, { ...event, y: 0, height: 1 })
-    return result ? { ...result, focus: true } : undefined
+    if (!result) return undefined
+    return {
+      ...result,
+      ...(result.focus ? { focusTarget: this } : {}),
+      target: {
+        component: this,
+        originX: event.screenX - event.x,
+        originY: event.screenY - event.y,
+        width: event.width,
+        height: event.height,
+      },
+    }
   }
 
   invalidate(): void {
