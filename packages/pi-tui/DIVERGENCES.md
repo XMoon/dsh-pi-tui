@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `6b1fcbfb0276dfc5f56a55616aad4e73732c1e7d`
+- Audited local source commit: `023117a3c8cbdef030628006b2da36983373639a`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -3450,7 +3450,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 - SettingsList Focusable propagation reaches search Input and conditionally forwards to an open submenu
 - row-budget forwarding for nested submenu lists
-- SettingsList mouse hit-testing uses the FINAL painted rows (a render-time mouseRows map built after the description shrink AND the tail slice), never a re-derived range from maxVisible — a click hits the row the user actually saw, resolved by item ID with pressed-identity click activation; the search Input is reachable only where the LAST paint put it (the tail slice may drop it off-screen — a click on the row that replaced it must not reach the hidden input)
+- SettingsList mouse hit-testing uses the FINAL painted rows (a render-time mouseRows map built after the description shrink AND the tail slice), never a re-derived range from maxVisible — a click hits the row the user actually saw, resolved by item ID with pressed-identity click activation; the search Input is reachable only where the LAST paint put it (the tail slice may drop it off-screen — a click on the row that replaced it must not reach the hidden input); every left press replaces the gesture identity at handler entry (a delegated search press or an inert-row press clears the old latch — a later synthesized click on the same cell must not activate an item that repainted there)
 
 #### Dependency map
 
