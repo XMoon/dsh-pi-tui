@@ -872,3 +872,40 @@ test('keybinding list: query shrink WITHOUT a repaint between paint and press re
     manager.dispose()
   }
 })
+
+test('action editor: mouse input is frozen while a mutation is pending (mouse parity)', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => { /* never resolves: the mutation stays pending */ },
+    onModelChange: () => {},
+    onBack: () => {},
+  })
+  try {
+    // Start an async mutation that never settles: the edit surface freezes.
+    const startMutation = (editor as unknown as { startMutation(m: { kind: string }): void }).startMutation
+    startMutation.call(editor, { kind: 'disable-action', action: row.id })
+    let rendered = editor.render(88)
+    assert.ok(rendered.map(plain).join('\n').includes('Saving…'), `precondition — pending mutation:\n${rendered.map(plain).join('\n')}`)
+
+    // wheel: the selection must not move.
+    const before = (editor as unknown as { selectedIndex: number }).selectedIndex
+    editor.handleMouse(mouse('wheel', 10, 9, 88, 30, 1))
+    assert.strictEqual((editor as unknown as { selectedIndex: number }).selectedIndex, before, 'wheel must be frozen while pending')
+
+    // press / click: rejected — no selection move, no recorder start.
+    assert.strictEqual(editor.handleMouse(mouse('press', 10, 9, 88, 30)), undefined, 'press must be rejected while pending')
+    assert.strictEqual(editor.handleMouse(mouse('click', 10, 9, 88, 30)), undefined, 'click must be rejected while pending')
+    const state = editor as unknown as { recorder: unknown; pending: boolean }
+    assert.strictEqual(state.recorder, undefined, 'a click while pending must not start a recorder')
+    assert.strictEqual(state.pending, true, 'the pending mutation must stay armed')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})

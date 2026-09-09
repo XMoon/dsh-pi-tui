@@ -348,6 +348,10 @@ export class ActionEditorPanel implements Component {
     // geometry (last-painted geometry is authoritative).
     if (event.width !== this.lastRenderWidth) return undefined
     if (this.recorder !== undefined) return undefined
+    // An async mutation is pending (Saving…): the edit surface is frozen
+    // (mirror the keyboard guard) — wheel/press/click must not move the
+    // selection or start a recorder while the old mutation is in flight.
+    if (this.pending) return undefined
     const hit = this.hitMap[event.y]
     if (!hit || hit.kind === 'inert') return undefined
 

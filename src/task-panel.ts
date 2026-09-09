@@ -764,6 +764,10 @@ export class TaskBrowserPanel implements Component, Focusable {
         if (currentIndex === -1) return undefined
         this.mousePressedValue = hit.value
         if (this.selected !== currentIndex) {
+          // Changing selection cancels a pending destructive
+          // confirmation (mirror the keyboard navigation state machine:
+          // cursor/page moves clear pendingStopValue).
+          this.pendingStopValue = undefined
           this.selected = currentIndex
           this.selectionTouched = true
           this.ensureVisible()
@@ -779,6 +783,9 @@ export class TaskBrowserPanel implements Component, Focusable {
       // point at a different item). No match => drop.
       if (this.mousePressedValue !== hit.value) return undefined
       this.mousePressedValue = undefined
+      // A pending destructive confirmation is a modal state: the click
+      // must not bypass it (keyboard Enter is ignored there).
+      if (this.pendingStopValue !== undefined) return { handled: true }
       const item = this.filtered.find(candidate => candidate.value === hit.value)
       if (item !== undefined) {
         if (item.kind === 'view-full') {

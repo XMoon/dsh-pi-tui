@@ -5027,4 +5027,52 @@ describe("Editor slash autocomplete mouse click (mouse parity)", () => {
 		assert.strictEqual(submitted, "/help", "clicking a slash suggestion must submit the completed command");
 		assert.strictEqual(editor.getText(), "", "the editor must clear after the slash submit");
 	});
+
+	it("does NOT submit a slash-prefix completion on mouse click while disableSubmit is set (X050 parity)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/help", label: "/help" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		editor.disableSubmit = true; // public Editor contract: no submission
+
+		editor.handleInput("/");
+		editor.handleInput("h");
+		editor.handleInput("e");
+		editor.handleInput("\t"); // trigger autocomplete
+		await flushAutocomplete();
+		assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+		const rendered = editor.render(80);
+		const suggestionRow = rendered.findIndex((line) => line.includes("/help"));
+		assert.ok(suggestionRow >= 0, `suggestion row missing:\n${rendered.join("\n")}`);
+		const result = editor.handleMouse({
+			type: "click",
+			button: "left",
+			x: 2,
+			y: suggestionRow,
+			screenX: 2,
+			screenY: 2,
+			width: 80,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.ok(result?.handled, "clicking a slash suggestion must be handled");
+		assert.strictEqual(submitted, "", "disableSubmit must block the mouse slash submit");
+		assert.ok(!editor.isShowingAutocomplete(), "the autocomplete must be cancelled");
+	});
 });

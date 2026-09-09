@@ -1052,3 +1052,50 @@ test('task panel: async enrichment WITHOUT a repaint between paint and press can
   const press = panel.handleMouse(mouse('press', 10, row, 100, 24))
   assert.equal(press, undefined, 'a press on a row whose value no longer exists must be rejected')
 })
+
+test('task panel: a mouse press that changes selection cancels a pending stop confirmation (mouse parity)', () => {
+  const stopped: string[] = []
+  const panel = new TaskBrowserPanel(
+    [runningJob({ value: 'job:a', label: 'first', canStop: true }), runningJob({ value: 'job:b', label: 'second', canStop: true })],
+    24,
+    { header: 'tasks', enableSearch: false, mode: 'quick', onStop: value => stopped.push(value) },
+    () => {},
+    () => {},
+    () => {},
+  )
+  // S on the selected first job: pending stop on job:a.
+  panel.handleInput('s')
+  let rendered = panel.render(100)
+  assert.ok(rendered.map(strip).join('\n').includes('Y confirm stop'), `precondition — pending stop on the first job:\n${rendered.map(strip).join('\n')}`)
+  // Mouse press on the second job: changing selection cancels the
+  // pending destructive confirmation (mirror the keyboard navigation).
+  const row = rendered.findIndex(line => line.includes('second'))
+  assert.ok(row >= 0)
+  panel.handleMouse(mouse('press', 10, row, 100, 24))
+  // Y must NOT stop job:a (the confirmation was cancelled).
+  panel.handleInput('y')
+  assert.deepEqual(stopped, [], 'the cancelled confirmation must not stop the previously pending job')
+})
+
+test('task panel: a click cannot bypass a pending stop confirmation (mouse parity)', () => {
+  const selected: string[] = []
+  const panel = new TaskBrowserPanel(
+    [runningJob({ value: 'job:a', label: 'first', canStop: true }), runningJob({ value: 'job:b', label: 'second', canStop: true })],
+    24,
+    { header: 'tasks', enableSearch: false, mode: 'quick' },
+    value => selected.push(value),
+    () => {},
+    () => {},
+  )
+  // S on the selected first job: pending stop on job:a.
+  panel.handleInput('s')
+  const rendered = panel.render(100)
+  assert.ok(rendered.map(strip).join('\n').includes('Y confirm stop'), 'precondition — pending stop on the first job')
+  // Press + click on the SAME row (selection unchanged, pending kept):
+  // the click must NOT bypass the confirmation and open the job.
+  const row = rendered.findIndex(line => line.includes('first'))
+  assert.ok(row >= 0)
+  panel.handleMouse(mouse('press', 10, row, 100, 24))
+  panel.handleMouse(mouse('click', 10, row, 100, 24))
+  assert.deepEqual(selected, [], 'the click must not bypass the pending confirmation')
+})

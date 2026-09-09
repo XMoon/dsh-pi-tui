@@ -7,8 +7,8 @@
  * @module @xmoon76/dsh-pi-tui/search
  */
 
-import { Input, truncateToWidth } from '@xmoon76/pi-tui'
-import type { Component, Focusable } from '@xmoon76/pi-tui'
+import { Input, dispatchMouseEvent, truncateToWidth } from '@xmoon76/pi-tui'
+import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { color } from './theme.ts'
 
@@ -26,6 +26,8 @@ export class TranscriptSearchComponent implements Component, Focusable {
   private resultCount = 0
   private resultIndex = -1
   private _focused = false
+  /** Render width from the last paint (stale-geometry guard). */
+  private lastRenderWidth = 0
 
   constructor(onQueryChange: (query: string) => void) {
     this.onQueryChange = onQueryChange
@@ -53,11 +55,24 @@ export class TranscriptSearchComponent implements Component, Focusable {
     if (query !== previous) this.onQueryChange(query)
   }
 
+  /**
+   * Mouse parity (mirrors vendor X049 for the alt-screen search): the
+   * query Input row (row 1, the Input's own render at full width)
+   * click-positions the private Input; title and hint rows stay inert.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.width !== this.lastRenderWidth || event.y !== 1) return undefined
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+    const result = dispatchMouseEvent(this.input, { ...event, y: 0, height: 1 })
+    return result ? { ...result, focus: true } : undefined
+  }
+
   invalidate(): void {
     this.input.invalidate()
   }
 
   render(width: number): string[] {
+    this.lastRenderWidth = width
     const safeWidth = Math.max(1, width)
     const label = ' Find transcript'
     const query = this.input.getValue()

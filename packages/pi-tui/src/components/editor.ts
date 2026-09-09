@@ -2564,9 +2564,12 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol(result.cursorCol);
 			if (this.autocompletePrefix.startsWith("/")) {
 				// Slash-prefix completions SUBMIT, exactly like the keyboard
-				// Enter path (apply → cancel → fall through to submit): a
-				// mouse click on a `/command` suggestion must behave like
-				// Enter, not just insert the text. (Mouse parity.)
+				// Enter path (apply → cancel → fall through to submit) —
+				// INCLUDING the disableSubmit guard: a mouse click must not
+				// bypass the public "submission disabled" contract. (Mouse
+				// parity / X050.)
+				this.cancelAutocomplete();
+				if (this.disableSubmit) return;
 				this.submitValue();
 			} else {
 				this.cancelAutocomplete();
