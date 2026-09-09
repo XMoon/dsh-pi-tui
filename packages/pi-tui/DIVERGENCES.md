@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `b99f0036e5d681cf097fd46760079a174b59a499`
+- Audited local source commit: `09ba8b28f0a3f9a4f57ae5647fdd40c096f59714`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-08`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -58,8 +58,8 @@
 - `MOVED_TO_HOST`: `X001`, `X002`, `X041` — The DSH searchable picker behavior moved to the Host-owned src/searchable-picker.ts SearchablePicker (guarded by test/searchable-picker.test.ts); the vendored SelectList is restored to the pinned upstream baseline.
 - `NOT_MOVABLE`: `X042` — The remaining X042 seam is SettingsList focus/row-budget propagation inside the vendored fork; the SelectList-side Input focus ownership moved to the Host SearchablePicker.
 - `NOT_MOVABLE`: `X004A`, `X004B`, `X005`, `X006`, `X007`, `X008`, `X009`, `X010`, `X014`, `X016`, `X018`, `X020`, `X021`, `X022`, `X023`, `X024`, `X025`, `X027`, `X028`, `X029`, `X031`, `X032`, `X033`, `X034`, `X035`, `X036`, `X037`, `X038`, `X039`, `X040`, `X043`, `X044`, `X045`, `X046`, `X047` — The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary.
-- `NOT_MOVABLE`: `X048` — Input mouse click geometry is a public component contract inside the vendored fork; a host wrapper cannot equivalently fix it for all package/public-extension consumers.
-- `UPSTREAM_LEVER`: `X005`, `X006`, `X007`, `X008`, `X014`, `X016`, `X021`, `X033`, `X035`, `X048` — Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence.
+- `NOT_MOVABLE`: `X048`, `X049`, `X050`, `X051` — Input mouse click geometry is a public component contract inside the vendored fork; a host wrapper cannot equivalently fix it for all package/public-extension consumers.
+- `UPSTREAM_LEVER`: `X005`, `X006`, `X007`, `X008`, `X014`, `X016`, `X021`, `X033`, `X035`, `X048`, `X049`, `X050`, `X051` — Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence.
 - `SUPERSEDED`: `X012`, `X019` — X012's explicit fuzzy tie-break is redundant under the supported stable-sort runtime contract; X019's Text no-op dispose shim is replaced by Loader-owned X007 cleanup without a base super call.
 - `ABSORBED_UPSTREAM`: `X011` — Earendil v0.85.1 clips Input prompts at extremely narrow widths; direct width-0/1 regressions guard the absorbed behavior.
 
@@ -75,8 +75,8 @@
 
 ## Summary
 
-- Records: 49
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 38, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
+- Records: 52
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 41, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -129,6 +129,9 @@
 | X046 | ACTIVE | CRITICAL | HARD_HOST_API | NO |
 | X047 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 | X048 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X049 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X050 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X051 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT | NO |
 
 ## Divergences
 
@@ -1548,6 +1551,9 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - wrapper gesture targets (MouseRegion, Host Frame) are rewritten to the mounted wrapper, with focus requests landing on the wrapper too
 - MouseRegion transparently forwards handleInput/wantsKeyRelease and the Focusable focused flag to its child
 - setLayoutRoot clears an in-flight component mouse gesture
+- the selection press-time dispatch snapshot is released when the selection gesture ends (no dead component references retained between gestures)
+- a stationary first press on a HIDDEN auto scrollbar jumps the track / starts a drag immediately (includeHiddenAuto on the press path, matching the hover path)
+- when a mounted overlay is hit, in-flight pointer gestures that started outside are cancelled (selection gesture + snapshot, scrollbar drag) — the hidden selection must not reappear after the overlay closes and the drag must not resume on release
 
 #### Dependency map
 
@@ -1589,6 +1595,8 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - packages/pi-tui/test/mouse-components.test.ts: MouseRegion transparent keyboard forwarding, wrapper focus ownership, and Focusable flag propagation (CURSOR_MARKER)
 - test/busy-enter.test.ts: fullscreen /settings SettingsList row responds to a mouse click through the Host Frame wrapper; frame borders/padding do not activate rows
 - test/editor-seat-non-owning.test.ts: ghost click and selection-fallback cross-repaint regressions on the production EditorSeatMount path
+- packages/pi-tui/test/tui-alt-screen.test.ts: selection press-time component snapshot lifecycle — the press snapshots the reached set and the release clears it
+- packages/pi-tui/test/tui-alt-screen.test.ts: hidden auto scrollbar track jumps on a stationary first press; in-flight selection gesture and scrollbar drag are cancelled when the pointer lands on a capturing overlay
 
 #### Upstream comparison
 
@@ -3462,7 +3470,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 - IME candidate window follows top-level search focus
 - submenu receives focus only when it implements Focusable
 - selection/description tail remains within budget
-- Audit note: Current host submenu wrappers without focused do not receive the inner search focus; this is an identified follow-up gap, not proof that the vendor seam is unused.
+- Audit note: Post-v0.85.1 audit: ALL four Host submenu wrappers implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps), so the SettingsList propagateFocus() edge reaches every submenu's focus-sensitive child; no follow-up gap remains.
 
 #### Guarding tests
 
@@ -3975,3 +3983,230 @@ Input supports arbitrary prompts (new Input({ prompt: ... })) and renders them w
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Confirmed upstream v0.85.1 and current upstream main both use event.x - 2; the fork fix is a one-line arithmetic change with click-position regressions.
+
+### X049 — Fullscreen transcript-search query Input mouse forwarding
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `MEDIUM`
+- Files: `src/alt-screen-search.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+AltScreenSearchComponent renders a mouse-aware Input and forwards keyboard/focus to it, but had no component-level mouse forwarding: a click on the query Input fell through to the overlay component, which has no handleMouse(), so the fullscreen transcript-search query cursor could not be positioned by mouse. The Host cannot fix this cleanly because the component and its private Input are inside the vendored fork.
+
+#### Changed surface
+
+- AltScreenSearchComponent.handleMouse forwards press events on the last-painted query-content row to its private Input, with the gesture/focus target rewritten to the component (X018 liveness tracks the mounted unit); the result-count suffix and borders stay inert
+
+#### Dependency map
+
+**Vendor internal**
+- AltScreenSearchComponent owns the private Input; the component-level handleMouse uses the last-painted input width (cached in render) and the same previous/current query comparison as handleInput.
+- Audit note: Single-component forwarding inside the fork; no other component reads the search query row.
+
+**Inheritance / structural**
+- AltScreenSearchComponent implements Component and Focusable; the new handleMouse follows the MouseRegion/Frame wrapper pattern (dispatch to the private child, rewrite target/focus to the mounted unit).
+- Audit note: No override/super edge affected.
+
+**Host**
+- The built-in fullscreen transcript search relies on this vendor-owned component; TuiAltScreen.handleSearchMouseEvent still owns the navigation buttons.
+- Audit note: Host behavior improves for the query Input; navigation-button handling is unchanged.
+
+**Public / extension**
+- AltScreenSearchComponent is not part of the public extension surface; the change is vendor-internal.
+- Audit note: No extension API change.
+
+**Behavioral coupling**
+- press on the query-content row positions the Input cursor at the clicked value column
+- the result-count suffix, top/bottom borders, and the navigation-button row stay inert
+- typing after the click inserts at the clicked query position
+- Audit note: Regression tests cover cursor positioning, inert chrome, and the fullscreen integration path.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: X049 — query Input press positions the cursor, typing inserts at the clicked column, result-count suffix and borders inert, and the fullscreen TuiAltScreen click-to-position integration
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/alt-screen-search.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream v0.85.1 (d981de1) and current upstream main (aa23e784c) both lack component-level mouse forwarding for the transcript-search query Input; the fork forwards press events to the private Input with last-painted geometry and wrapper target/focus ownership.
+
+#### Retirement conditions
+
+- Retire only when pinned upstream includes semantically equivalent query-Input mouse forwarding in AltScreenSearchComponent (or the component is restructured so the Host can forward without changing the vendor surface), then run the query-cursor, inert-chrome, and fullscreen integration tests.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream v0.85.1 and current upstream main both lack the query-Input mouse forwarding; the fork fix is component-level forwarding with last-painted geometry and wrapper target/focus ownership.
+
+### X050 — Editor mouse click parity: wrapped-segment cursor placement and slash-completion submit
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `MEDIUM`
+- Files: `src/components/editor.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+Two upstream Editor mouse-path bugs: (1) handleMouse forces targetIndex = lastGraphemeIndex when a click lands at/after the end of a NON-last wrapped visual segment, placing the cursor one grapheme BEFORE the segment end instead of at the end; (2) the autocomplete list's onSelect (the mouse click path) applies a slash-prefix completion but does not submit, while the keyboard Enter path explicitly falls through to submit for slash prefixes — a click on a /command suggestion must behave like Enter. The fork fixes both: the natural end-of-segment position (chunk.length, matching the Input clamp-to-end behavior) and the slash submit fall-through.
+
+#### Changed surface
+
+- Editor.handleMouse click-to-cursor on a wrapped non-last visual segment: clicking at/after the segment text places the cursor at the segment end, not one grapheme before it
+- Editor autocomplete onSelect (mouse click): a slash-prefix completion applies, cancels the autocomplete, and submits (submitValue), exactly like the keyboard Enter path
+
+#### Dependency map
+
+**Vendor internal**
+- Editor.handleMouse builds the visual line map and maps the click column to a grapheme index; the fork removed the upstream decrement that shifted the end-of-segment hit one grapheme back.
+- Editor.createAutocompleteList onSelect now mirrors the keyboard Enter path for slash prefixes (apply → cancel → submitValue).
+- Audit note: Two single-branch fixes inside Editor; no other component reads the wrapped-segment cursor mapping or the autocomplete onSelect.
+
+**Inheritance / structural**
+- Editor does not override another component's mouse handling; the host TuiEditor extends Editor and inherits the fixed mapping.
+- Audit note: No override/super edge affected.
+
+**Host**
+- The host editor seat uses Editor; wrapped-line click-to-position now lands at the segment end.
+- Audit note: Host behavior improves for wrapped lines; the last-segment clamp-to-end behavior is unchanged.
+
+**Public / extension**
+- Editor is a public component; wrapped-segment click cursor placement is part of its public contract.
+- Audit note: No extension API change; behavioral fix only.
+
+**Behavioral coupling**
+- click at/after the end of a non-last wrapped segment places the cursor at the segment end
+- click past the last segment still clamps to the line end
+- clicking a slash-prefix autocomplete suggestion submits the completed command and clears the editor
+- Audit note: Regression tests cover the wrapped non-last segment, the last-segment clamp, and the slash-completion click submit.
+
+#### Guarding tests
+
+- packages/pi-tui/test/editor.test.ts: X050 — clicking past the text of a wrapped non-last segment lands at the segment end, clicking past the last segment clamps to the line end, and clicking a slash-prefix autocomplete suggestion submits the completed command (like keyboard Enter)
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/components/editor.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream v0.85.1 (d981de1) and current upstream main (aa23e784c) both force targetIndex = lastGraphemeIndex for clicks at/after the end of a non-last wrapped segment, and both apply slash-prefix autocomplete completions on click without submitting; the fork keeps the natural end-of-segment position and submits slash completions like the keyboard path.
+
+#### Retirement conditions
+
+- Retire only when upstream Editor.handleMouse places the cursor at the end of a wrapped non-last segment AND upstream autocomplete onSelect submits slash-prefix completions like the keyboard Enter path, then run the wrapped-segment, last-segment, and slash-completion click tests.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream v0.85.1 and current upstream main both keep the decrement and the non-submitting slash onSelect; the fork fixes both editor mouse paths.
+
+### X051 — Container/Box overlay-root focus and input forwarding
+
+- Status: `ACTIVE`
+- Category: `PUBLIC_COMPONENT_CONTRACT`
+- Risk: `MEDIUM`
+- Files: `src/tui.ts`, `src/components/box.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+showOverlay accepts any Component as the overlay root, and the overlay focus state tracks the mounted root (dispatchMouseToOverlay rewrites the focusTarget to the root). A plain Container or Box root containing an interactive child (e.g. an Input) therefore never forwarded the focused flag or keyboard input to that child: the child received the mouse press but stayed focused=false (no IME cursor) and never received keys. The fork tracks the child the mouse press focused and forwards focus/input to THAT child only — never broadcasting to all children (a multi-Input root must not show every cursor or consume every key). The focus promotion to the container root is excluded for the TUI root itself (TuiBase extends Container), so a TUI-root mouse dispatch never steals the focus target from the clicked child.
+
+#### Changed surface
+
+- Container and Box implement Focusable: the focused flag forwards to the child the last mouse press focused (tracked in handleMouse), and handleInput forwards to that child only
+- focus promotion to the container root applies to plain Container/Box overlay roots only, never to the TUI root (TuiBase extends Container)
+- focusedChild is cleared on removeChild/clear/dispose so a detached child never keeps receiving keyboard input
+
+#### Dependency map
+
+**Vendor internal**
+- Container.handleMouse and Box.handleMouse record the child whose dispatch result requested focus; the focused getter/setter and handleInput forward to that child only.
+- TuiBase extends Container; the focus-promotion guard excludes TuiBase instances so the TUI root never becomes the focus target of its own children's mouse presses.
+- Audit note: Two container classes share the same focusedChild pattern; the TUI-root exclusion is required because TuiBase inherits Container.
+
+**Inheritance / structural**
+- Container and Box are base container classes; subclasses (ScrollView, Stack, HStack/VStack) inherit the new Focusable surface and input forwarding.
+- TuiBase extends Container; the instanceof TuiBase guard in Container.handleMouse keeps the TUI root's focus behavior unchanged.
+- Audit note: The Focusable addition is additive; existing subclasses that override handleInput/handleMouse keep their behavior.
+
+**Host**
+- The Host wraps interactive overlays in FocusForwardingFrame, which already forwards focus/input; the Container/Box forwarding covers the public showOverlay(component) contract for direct roots.
+- Audit note: Host behavior is unchanged (FocusForwardingFrame remains the primary path); the public contract now works for plain Container/Box roots too.
+
+**Public / extension**
+- Extensions may call showOverlay with any Component; a plain Container/Box root with an interactive child now receives focus and keyboard input.
+- Audit note: No extension API change; the existing public showOverlay contract is completed.
+
+**Behavioral coupling**
+- a mouse press on an Input inside a plain Container/Box overlay root forwards focused=true and keyboard input to that Input
+- in a multi-child root only the CLICKED child receives focus and keys (no fan-out)
+- removing/clearing/disposing the focused child clears the forwarding reference
+- the TUI root (TuiBase) never promotes its own children's focus to itself
+- Audit note: Regression tests cover the single-child root, the multi-child no-fan-out case, the removal lifecycle, and the TUI-root focus identity.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: X051 — an Input inside a plain Container overlay root receives the focused flag and keyboard input; in a multi-child Container root only the clicked child receives focus and keys; an Input inside a plain Box overlay root receives focus and keyboard input; the TUI root keeps the clicked component as the focus target
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/tui.ts
+- packages/tui/src/components/box.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream Container and Box are not Focusable and do not forward input; the fork adds focusedChild tracking so a plain overlay root reaches its interactive child, with the TUI root excluded from focus promotion.
+
+#### Retirement conditions
+
+- Retire only when upstream Container/Box forward focus and input to the child the mouse press focused (or the overlay focus model changes so the root no longer needs to forward), then run the single-child, multi-child no-fan-out, removal lifecycle, and TUI-root focus identity tests.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream Container and Box lack focus/input forwarding; the fork tracks the mouse-focused child and forwards to it only, excluding the TUI root (TuiBase extends Container).
