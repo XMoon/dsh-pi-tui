@@ -713,16 +713,24 @@ test('an explicit user open survives the interrupted edge and late terminal fact
   assert.equal(runChevron(view), '▼', `the interrupted edge must keep the explicit run open:\n${view}`)
   assert.ok(view.includes('▼ Unassigned 1 agent'), `the interrupted edge must keep the explicit phase open:\n${view}`)
   // Late durable terminal facts recover completed (PR1 late-terminal
-  // contract): the user's explicit opens still win over the fact-driven
-  // completed → closed default.
+  // contract). The final facts are ALL clean, so the completion edge
+  // auto-closes both the run and the phase (Web: new clean facts =>
+  // close) — the explicit opens were consumed by the clean transition.
   folder.apply([
     { type: 'tool-workflow/agent-end', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
     { type: 'tool-workflow/run-end', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', stopReason: 'completed' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
-  assert.equal(runChevron(view), '▼', `late completion must not snap the explicitly opened run shut:\n${view}`)
-  assert.ok(view.includes('▼ Unassigned 1 agent'), `late completion must not snap the explicitly opened phase shut:\n${view}`)
+  assert.equal(runChevron(view), '▶', `all-clean late completion must auto-close the run:\n${view}`)
+  // Reopen the run: the phase's clean transition already consumed the
+  // explicit open, so the phase is folded too (Web: new clean facts =>
+  // close).
+  const closedRunRow = rowOf(view, 'Workflow audit [completed]')
+  await clickCell(vt, 10, closedRunRow)
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▼', `the run must reopen on click:\n${view}`)
+  assert.ok(view.includes('▶ Unassigned 1 agent'), `all-clean late completion must auto-close the phase:\n${view}`)
 })
 
 test('a new running cycle reopens a user-closed run and phase (review P2, plan §7.7)', async () => {
@@ -864,4 +872,34 @@ test('a clean phase whose member count changed reopens a user-closed run (Web ph
   app.setTranscript(folder.messages())
   view = await viewport(vt)
   assert.equal(runChevron(view), '▼', `a clean phase with a changed member count must reopen the run:\n${view}`)
+})
+
+test('a clean phase manually opened then batch-grown closes while the run reopens (Web parity)', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-a' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+  ])
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages())
+  let view = await viewport(vt)
+  // The user manually opens the clean phase (userOpen = true).
+  const phaseRow = rowOf(view, '▶ Unassigned 1 agent')
+  await clickCell(vt, 10, phaseRow)
+  view = await viewport(vt)
+  assert.ok(view.includes('▼ Unassigned 1 agent'), `the phase must be explicitly open:\n${view}`)
+  // B starts AND settles within one facts update: the phase stays clean
+  // but its member count changed. Web: the clean facts consume the user's
+  // open (phase folds) while the outer run reopens (new clean cycle).
+  folder.apply([
+    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 1, label: 'b', childId: 'session-b' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▼', `a new clean cycle must reopen the run:\n${view}`)
+  assert.ok(view.includes('▶ Unassigned 2 agents'), `the clean phase must fold despite the explicit open:\n${view}`)
 })
