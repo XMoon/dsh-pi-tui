@@ -778,7 +778,6 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     },
     catalog: new DirectCatalogPort(options.ctx as never, () => undefined),
     config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),

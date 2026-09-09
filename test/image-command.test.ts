@@ -98,7 +98,6 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),

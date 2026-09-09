@@ -178,7 +178,6 @@ test('the picker opens and Esc cancels while list() pends forever', async (t) =>
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -200,7 +199,6 @@ test('Enter on the loading placeholder never triggers a resume', async (t) => {
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -223,7 +221,6 @@ test('arrows, search, and Esc stay responsive while a projection batch pends', a
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: () => new Promise<ProjectionMap>(() => {}),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -261,7 +258,6 @@ test('closing the picker aborts the pending projection batch', async (t) => {
       return new Promise<ProjectionMap>(resolve => { settleBatch = () => resolve(new Map()) })
     },
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -296,7 +292,6 @@ test('a superseding open fences the previous load out of the UI', async (t) => {
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -315,7 +310,6 @@ test('a listing failure swaps the loading row for the refusal row', async (t) =>
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -343,7 +337,6 @@ test('progressive title enrichment preserves the live search query', async (t) =
       return new Map()
     },
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -367,7 +360,6 @@ test('/resume <arg> is input-first: the overlay opens while list() pends forever
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -404,7 +396,6 @@ test('/resume <arg> with NO match lists exactly once and keeps the argument as t
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -435,7 +426,6 @@ test('/resume <arg> with a unique match switches after exactly one listing', asy
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 

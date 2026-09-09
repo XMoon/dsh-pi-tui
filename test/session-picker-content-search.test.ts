@@ -134,7 +134,6 @@ function harness(options: {
       },
       projectionBatch: options.projectionBatch ?? (async () => new Map()),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     } as never,
     sessionWriter: {
       followup: () => {},

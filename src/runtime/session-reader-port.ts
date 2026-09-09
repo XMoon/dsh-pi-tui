@@ -61,28 +61,6 @@ export interface SessionProjectionSummary {
   readonly preset?: string
 }
 
-/** A canonical logical committed Session serialization for /export. */
-export interface SessionExportData {
-  /** A suggested client-local artifact filename. */
-  filename: string
-  /** Canonical JSONL for the validated committed logical Session log. */
-  content: string
-}
-
-/** The outcome of reading one canonical committed logical Session export,
- * or WHY it cannot be exported (the failure kinds are distinct — the
- * persistence service may be absent, the Session may be absent from the
- * active backend, or the committed read may fail with a real diagnostic). */
-export type ExportReadResult =
-  | { readonly kind: 'found'; readonly data: SessionExportData }
-  /** The persistence service is unavailable in this deployment. */
-  | { readonly kind: 'unavailable' }
-  /** The Session is not present in the active persistence backend. */
-  | { readonly kind: 'none' }
-  /** The committed logical Session read failed (corrupt/validation/I-O): the
-   * error text is preserved for the user, never misclassified as absence. */
-  | { readonly kind: 'error'; readonly message: string }
-
 /** The session READ domain port. */
 export interface SessionReader {
   /** List semantic session-query rows newest-first: live rows remain visible,
@@ -116,8 +94,4 @@ export interface SessionReader {
    * /status context row). `undefined` = unmeasurable (service absent,
    * session unknown, or a measurement failure — never a crash). */
   measureContext(sessionId: string): number | undefined
-  /** Export a canonical committed logical JSONL Session. The FILE WRITE stays
-   * a client-local behavior — only the committed log READ is Host-owned
-   * (migration M1.11). */
-  readExportData(sessionId: string): Promise<ExportReadResult>
 }
