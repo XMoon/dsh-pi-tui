@@ -16,8 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `seq`, `childId` and exact phase identity (a missing phase and an explicit
   empty phase no longer merge); a run whose owning step/turn closed without
   terminal events projects as `interrupted` (cold replay and live append
-  agree); search matches by run name/status, and `/export md` keeps workflow
+  agree); search matches by run name/status, and `/transcript` keeps workflow
   records.
+- **`/export` saves the full Session archive.** The command now produces the
+  official full Session-tree archive (descendants + attachments) and asks
+  for a Client-local save directory after the command succeeds; the file
+  name is fixed to the full Session id. The old single-log JSONL export is
+  gone.
+- **New `/transcript` command.** Saves a readable Markdown transcript of the
+  current Session to a Client-local directory, with the same
+  no-argument/save-location UX as `/export`.
 - **Welcome card visual refresh.** The session-head card now shows an original round-backed whale ASCII mascot (five variants, one picked per process) with three responsive layouts: side-by-side (whale left, facts right) at 72+ columns, stacked (whale centered above the facts) at 24–71 columns, and a compact text layout (🐋 title) below 24 columns. The whale keeps a fixed cyan → blue brand gradient that does not follow theme switches; facts still render in full (long values wrap, never truncate); the idle invitation, the `setWelcomeCard()` contract, and fullscreen scroll/anchor/click mapping are unchanged.
 
 ## [0.4.3-alpha.2] - 2026-09-08

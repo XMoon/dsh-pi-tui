@@ -56,7 +56,16 @@ function readHandle(stored: StoredLog) {
     header: stored.header,
     access: 'read',
     inheritedEventCount: 0,
-    read: async () => ({ eventState: 'detached', events: structuredClone(stored.events) }),
+    read: async () => {
+      const events = structuredClone(stored.events)
+      // The upstream read contract differs across DSH distributions: the npm
+      // 0.1.3-alpha.2 line destructures `{ events }` from the detached read
+      // result, while the pinned source line (0.1.3-alpha.1) consumes the
+      // events array directly. Return a shape satisfying BOTH (an array
+      // that also carries the detached `events` property), so the adapter
+      // contract test is distribution-agnostic.
+      return Object.assign(events, { eventState: 'detached', events })
+    },
     close: async () => {},
   }
 }

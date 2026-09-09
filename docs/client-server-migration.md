@@ -181,8 +181,9 @@ it never falls back to raw persistence and never means listing is unavailable.
 A future Remote adapter maps the same port method onto the official
 `session.search` contract without touching `/sessions`, `/resume` or `/search`.
 No TUI semantic path uses `readRaw()` or scans physical persistence artifacts:
-`/export` reads the committed logical log through the persistence read handle,
-and the retired repair stack has no runtime owner.
+`/export` reads the committed logical log through the archive port's
+persistence read handle (the full-tree ZIP semantics below), and the retired
+repair stack has no runtime owner.
 
 Session export is a separate Host streaming route:
 
@@ -193,6 +194,50 @@ canonical session-log export           -> Connection HTTP GET/HEAD /api/session.
 
 It is not an ordinary JSON-RPC payload and must not be implemented by sending
 physical persistence bytes to the Client for recompression.
+
+### Pre-Stage-D Export convergence
+
+`/export` product semantics are now the official full Session-tree archive.
+
+```text
+/export product semantics are now the official full Session-tree archive.
+
+Direct:
+    SessionArchivePort -> DirectSessionArchive
+    -> DSH public Host archive primitives
+
+Stage D later:
+    same SessionArchivePort -> Remote adapter
+    -> GET/HEAD /api/session.export
+
+Client destination:
+    post-command Save Location
+    Client filesystem only
+
+/transcript:
+    TUI readable Markdown artifact
+    same no-argument/save-location UX
+
+SessionReader.readExportData:
+    retired
+
+M2 remains NOT STARTED.
+```
+
+The Direct archive adapter (`DirectSessionArchive`) implements the narrow
+`SessionArchivePort.open()` over the DSH public `session-log-export`
+primitives: it flushes a live Session through the store's durability barrier,
+opens a persistence READ handle for the committed log ONLY (never the
+cold-view observation seam), and streams the official full-tree ZIP
+(descendants + attachments) to the Client. The FILE WRITE stays Client-local:
+after a successful `/export` or `/transcript` command settles, the runner
+opens the Client-local Save Location UI and sinks the artifact through the
+temp + atomic-commit helpers — the final artifact is never exposed partially
+written. `/transcript` renders the readable Markdown from the CAPTURED
+originating Session (never `liveAgent` at delayed settle time). The
+migration-era `SessionReader.readExportData()` seam is retired; the archive
+port is the single export plane for both Direct today and the Remote adapter
+in Stage D.
 
 ## Phases (one behavior axis per phase; each independently mergeable/verifiable/rollback-able)
 

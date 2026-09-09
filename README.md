@@ -136,7 +136,8 @@ dsh --profile pi-tui --session <session-id>
 * Fork
 * Rewind
 * Session lineage
-* Transcript 导出
+* `/export` — 完整 Session 归档(含子代理与附件),保存到 Client 本地目录
+* `/transcript` — 可读 Markdown 对话记录,保存到 Client 本地目录
 
 使用：
 
@@ -144,6 +145,8 @@ dsh --profile pi-tui --session <session-id>
 /sessions
 /fork
 /rewind
+/export
+/transcript
 ```
 
 空闲且编辑器为空时也可以快速按两次 `Esc` 打开 Rewind。

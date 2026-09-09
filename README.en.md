@@ -139,7 +139,8 @@ Supports persisted DSH Sessions, including:
 * Forking
 * Rewind
 * Session lineage
-* Transcript export
+* `/export` — full Session archive (descendants + attachments) saved to a Client-local directory
+* `/transcript` — readable Markdown transcript saved to a Client-local directory
 
 Use:
 
@@ -147,6 +148,8 @@ Use:
 /sessions
 /fork
 /rewind
+/export
+/transcript
 ```
 
 When the Agent is idle and the editor is empty, pressing `Esc` twice quickly also opens Rewind.
