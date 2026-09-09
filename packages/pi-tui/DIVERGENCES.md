@@ -13,9 +13,9 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `09ba8b28f0a3f9a4f57ae5647fdd40c096f59714`
+- Audited local source commit: `ea83c78c0534ae1847ac3ac3cd22b49bc39d98cf`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
-- Audit date: `2026-09-08`
+- Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Kimi reference snapshot: `MoonshotAI/kimi-code@9e881528a89945a373002b0b229f91735e8f2c4f`
 - Snapshot policy: Reference snapshots and auditedSourceCommit are audit evidence, not continuous views of repository HEAD. Refresh them only during an explicit re-vendor, divergence re-audit, retirement evaluation, or upstream-equivalence review.
@@ -685,7 +685,7 @@ Forward word navigation should cross leading punctuation at the next word-like s
 - Category: `HARD_HOST_API`, `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `CRITICAL`
 - Files: `src/tui.ts`, `src/components/scroll-view.ts`, `src/components/loader.ts`, `src/components/box.ts`, `src/components/settings-list.ts`, `src/components/stack.ts`, `src/components/mouse-region.ts`
-- Last audited: `2026-09-03`
+- Last audited: `2026-09-09`
 - Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
@@ -714,7 +714,8 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - src/tui-app.ts OverlayBroker.disposeAll and overlay leases
 - editor seat, panels, timers, and fullscreen surface teardown
 - test/pi-component-compat.test.ts public component compatibility
-- Audit note: Host final teardown relies on exactly-once release.
+- src/model-menu.ts ModelSubmenu/EffortSubmenu ownership-safe external dispose (latch/abort owned async work, dispose owned inner exactly once, never done/apply/navigation on teardown)
+- Audit note: Host final teardown relies on exactly-once release. Post-v0.85.1 audit: ModelSubmenu and EffortSubmenu now implement ownership-safe external dispose so the SettingsList's submenuComponent.dispose() chain (owner → ModelSubmenu → inner SettingsList → nested EffortSubmenu) latches/aborts every owned async workflow; late resolves cannot repaint or apply after teardown (regressions in test/model-menu.test.ts).
 
 **Public / extension**
 - Stable/Advanced/Unstable extension mounts and public component leases
@@ -735,6 +736,7 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - packages/pi-tui/test/layout.test.ts: Stack entries and disposed layout behavior
 - packages/pi-tui/test/overlay-options.test.ts: disposeOnHide ownership
 - packages/pi-tui/test/dispose-lifecycle.test.ts: MouseRegion dispose forwarding — owned child disposed exactly once, wrapped Loader timer cleared
+- test/model-menu.test.ts: ModelSubmenu/EffortSubmenu ownership-safe external dispose — dispose latches/aborts pending work without done/apply/navigation, and the owner → ModelSubmenu → inner SettingsList → nested EffortSubmenu chain terminates a late effort resolve
 
 #### Upstream comparison
 
@@ -769,7 +771,7 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Known ownership graph was re-read in the audited checkout. X007 remains KEEP HARD; no source deletion or upstream absorption experiment was attempted.
+- Notes: Known ownership graph was re-read in the audited checkout. X007 remains KEEP HARD; no source deletion or upstream absorption experiment was attempted. Re-audited after the v0.85.1 mouse-parity pass: the Model/Effort async submenu ownership chain is closed by external disposal.
 
 ### X008 — Serialized OSC 11 queries with late-reply tombstone
 
@@ -1532,7 +1534,7 @@ Mouse handling belongs to the alternate fullscreen screen; regular mode remains 
 - Category: `HARD_HOST_API`
 - Risk: `HIGH`
 - Files: `src/tui-alt-screen.ts`, `src/tui.ts`, `src/components/box.ts`, `src/components/mouse-region.ts`
-- Last audited: `2026-09-03`
+- Last audited: `2026-09-09`
 - Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
@@ -3434,7 +3436,7 @@ filterQuery is the single source of truth for the rendered search box, getFilter
 - Category: `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `HIGH`
 - Files: `src/components/settings-list.ts`
-- Last audited: `2026-09-07`
+- Last audited: `2026-09-09`
 - Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
@@ -3454,12 +3456,13 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 **Inheritance / structural**
 - SettingsList implements Focusable; SettingsList forwards only when a submenu structurally exposes focused.
-- Audit note: The conditional optional-method edge is real; host ThemeSubmenu, Model/EffortSubmenu, and SubagentModelAllowlistSubmenu currently do not all implement Focusable.
+- Audit note: The conditional optional-method edge is real; post-v0.85.1 audit: ALL four Host submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps), so the SettingsList propagateFocus() edge reaches every submenu's focus-sensitive child.
 
 **Host**
 - src/tui-app.ts FocusForwardingFrame and settings overlays
 - src/theme-menu.ts, src/model-menu.ts, and src/subagent-model-menu.ts submenu wrappers
-- Audit note: Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. The audit found a remaining IME/cursor gap for non-Focusable submenu wrappers.
+- test/theme-picker.test.ts and test/model-menu.test.ts CURSOR_MARKER regressions
+- Audit note: Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. Post-v0.85.1 audit: all four submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) forward Focusable state to their inner SettingsList/Input, including ModelSubmenu's async inner replacement (the swapped-in searchable list receives the already-active focus and emits CURSOR_MARKER); the non-searchable wrappers (EffortSubmenu, SubagentModelAllowlistSubmenu) forward the flag too, so no IME/cursor path is lost at any wrapper boundary.
 
 **Public / extension**
 - Focusable component interface and row-budget-aware submenu public shape.
@@ -3476,7 +3479,8 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 - packages/pi-tui/test/settings-list.test.ts: focus/row-budget behavior
 - test/extension-focus-seat.test.ts: SurfaceSnapshot.focusedSeat state only (not SettingsList or IME)
-- Missing dedicated host submenu focus/IME integration regression for non-Focusable wrappers; add before retirement
+- test/theme-picker.test.ts: ThemeSubmenu forwards focused state to the search Input (CURSOR_MARKER present when focused, absent when not)
+- test/model-menu.test.ts: ModelSubmenu retains focus across the async inner swap (CURSOR_MARKER on the swapped-in searchable list only when focused)
 
 #### Upstream comparison
 
@@ -3509,7 +3513,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam.
+- Notes: The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam. Re-audited after the v0.85.1 mouse-parity pass: ALL four Host submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps); CURSOR_MARKER regressions cover the searchable wrappers, and the non-searchable wrappers forward the flag too, so no IME/cursor path is lost at any wrapper boundary.
 
 ### X043 — Deferred viewport input listener registration
 
