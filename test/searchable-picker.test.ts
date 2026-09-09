@@ -9,11 +9,12 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CURSOR_MARKER } from '@xmoon76/pi-tui'
+import { CURSOR_MARKER, TuiAltScreen } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
   type SearchablePickerTheme,
 } from '../src/searchable-picker.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 
 const testTheme: SearchablePickerTheme = {
   selectedPrefix: (text: string) => text,
@@ -624,6 +625,65 @@ test('tiny-budget sliced rows keep hit-map alignment (mouse parity)', () => {
   if (hintRow >= 0) {
     assert.equal(picker.handleMouse(mouse('press', 5, hintRow, 80, 4)), undefined, 'sliced hint must be inert')
   }
+})
+
+test('delegated search press replaces the stale pressed value (mouse parity)', () => {
+  const items = Array.from({ length: 6 }, (_, index) => ({ value: `v${index}`, label: `item ${index}` }))
+  const activated: string[] = []
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.render(80)
+  // Rows: 0=search, 1=blank, 2=v0 ... 6=v4.
+  // 1. Press v4: the gesture latch is 'v4'.
+  picker.handleMouse(mouse('press', 5, 6, 80, 10))
+  // 2. Press the search row: the Input handles it (handled+focus, target
+  //    rewritten to the picker), but the parent's gesture identity must
+  //    be REPLACED — a delegated press is a fresh gesture, not a
+  //    continuation of the item press.
+  picker.handleMouse(mouse('press', 5, 0, 80, 10))
+  // 3. The terminal shrinks between press and release: the tail slice
+  //    drops the search box and v4 (the selected row) moves to row 0.
+  picker.setMaxRows(4)
+  picker.render(80)
+  // 4. Release on the same physical cell: the synthesized click must
+  //    NOT activate v4 — the stale latch was replaced by the search press.
+  picker.handleMouse(mouse('click', 5, 0, 80, 4))
+  assert.deepEqual(activated, [], 'the stale pressed value must not activate the moved item')
+})
+
+test('TUI click synthesis cannot activate a stale pressed value after a delegated search press (mouse parity)', async () => {
+  const terminal = new VirtualTerminal(20, 10)
+  const tui = new TuiAltScreen(terminal)
+  const items = Array.from({ length: 6 }, (_, index) => ({ value: `v${index}`, label: `item ${index}` }))
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { enableSearch: true })
+  const activated: string[] = []
+  picker.onSelect = (item) => { activated.push(item.value) }
+  tui.start()
+  tui.showOverlay(picker, { anchor: 'top-left', width: 20 })
+  await terminal.waitForRender()
+  // 1. Press v4 (row 6): the TUI saves the picker as the press target.
+  terminal.sendInput('\x1b[<0;1;7M')
+  await terminal.waitForRender()
+  // 2. Move away and release on a DIFFERENT cell: no click is
+  //    synthesized and the gesture (and its pressed value) is abandoned.
+  terminal.sendInput('\x1b[<0;1;8m')
+  await terminal.waitForRender()
+  // 3. Press the search row (row 0): a FRESH gesture — handled, target
+  //    rewritten to the picker — so the old pressed value must be
+  //    replaced.
+  terminal.sendInput('\x1b[<0;1;1M')
+  await terminal.waitForRender()
+  // 4. Shrink + repaint: the tail slice drops the search box and v4
+  //    (the selected row) moves to row 0.
+  picker.setMaxRows(4)
+  tui.requestRender()
+  await terminal.waitForRender()
+  // 5. Release on the same physical cell: the synthesized click must
+  //    not activate v4 — the stale latch was replaced by the search press.
+  terminal.sendInput('\x1b[<0;1;1m')
+  await terminal.waitForRender()
+  assert.deepEqual(activated, [], 'the stale pressed value must not activate the moved item')
+  tui.stop()
 })
 
 test('stale-width events are rejected (mouse parity)', () => {
