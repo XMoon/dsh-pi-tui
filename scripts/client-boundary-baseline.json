@@ -84,6 +84,9 @@
   "runtime/direct/model-selection-direct.ts": [
     "import:dsh-agent"
   ],
+  "runtime/direct/session-archive-direct.ts": [
+    "import:dsh-session"
+  ],
   "runtime/direct/session-writer-direct.ts": [
     "sessionTitle"
   ],

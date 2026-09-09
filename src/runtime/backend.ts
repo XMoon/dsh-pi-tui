@@ -19,6 +19,7 @@ import type { InteractionPort } from './interaction-port.ts'
 import type { Catalog } from './catalog-port.ts'
 import type { ConfigPort } from './config-port.ts'
 import type { HostFilePort } from './host-file-port.ts'
+import type { SessionArchivePort } from './session-archive-port.ts'
 
 /** The transport backends the TUI can run on. `direct` is the only one
  * today; the migration adds opt-in backends milestone by milestone. */
@@ -47,6 +48,9 @@ export interface Backend {
   /** The Host-file domain port (M1.10): `@`-reference discovery and
    * canonicalization against the Host filesystem. */
   readonly hostFile: HostFilePort
+  /** The session ARCHIVE domain port (Pre-Stage-D): one complete
+   * Session-tree archive stream per root Session. */
+  readonly sessionArchive: SessionArchivePort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -61,6 +65,7 @@ export function createDirectBackend(
   catalog: Catalog,
   config: ConfigPort,
   hostFile: HostFilePort,
+  sessionArchive: SessionArchivePort,
 ): Backend {
   return {
     kind: 'direct',
@@ -73,5 +78,6 @@ export function createDirectBackend(
     catalog,
     config,
     hostFile,
+    sessionArchive,
   }
 }
