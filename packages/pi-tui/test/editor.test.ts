@@ -5244,11 +5244,14 @@ describe("Editor autocomplete painted-list identity (mouse parity)", () => {
 		assert.ok(result?.handled, "the autocomplete press must be handled");
 		// The dispatch target must be the MOUNTED editor (the private
 		// SelectList is not in the TUI tree — X018 isMouseTargetLive would
-		// clear the gesture on release).
-		assert.ok(result?.target, "the result must carry a dispatch target");
-		assert.strictEqual(result!.target!.component, editor, "the gesture target must be the mounted editor");
+		// clear the gesture on release). The handleMouse return is a union
+		// (TuiMouseDispatchResult | TuiMouseEventResult), so the dispatch
+		// metadata is accessed through a structural cast.
+		const dispatch = result as { target?: { component: unknown }; focusTarget?: unknown } | undefined;
+		assert.ok(dispatch?.target, "the result must carry a dispatch target");
+		assert.strictEqual(dispatch!.target!.component, editor, "the gesture target must be the mounted editor");
 		if (result?.focus) {
-			assert.strictEqual(result.focusTarget, editor, "the focus target must be the mounted editor");
+			assert.strictEqual(dispatch?.focusTarget, editor, "the focus target must be the mounted editor");
 		}
 	});
 
