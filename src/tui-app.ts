@@ -7220,11 +7220,17 @@ export class TuiApp {
     }
     let changed = false
     if (state.abnormalOpened === false && runHasAbnormal) {
-      // First abnormal edge: drop the user's prior choice and let the
-      // current facts (abnormal → open) show the exception (plan §7.5).
+      // First abnormal edge: override ONLY a prior user CLOSE so the
+      // exception is not hidden behind an earlier fold (plan §7.5). A
+      // user who explicitly OPENED the run keeps their choice — clearing
+      // it here would let a later late-terminal completion (PR1's
+      // interrupted → completed recovery) snap the run shut against the
+      // user's explicit open (review finding).
       state.abnormalOpened = true
-      state.userOpen = undefined
-      changed = true
+      if (state.userOpen === false) {
+        state.userOpen = undefined
+        changed = true
+      }
     }
     // Phase-level facts over the CURRENT phase groups. A phase that
     // disappears (impossible today — members are append-only) simply keeps
@@ -7238,10 +7244,14 @@ export class TuiApp {
         continue
       }
       if (phaseState.abnormalOpened === false && phaseHasAbnormal) {
-        // First abnormal edge: same one-shot override as the run level.
+        // First abnormal edge: same one-shot override as the run level —
+        // only a prior user CLOSE is lifted, an explicit user OPEN is
+        // preserved (review finding).
         phaseState.abnormalOpened = true
-        phaseState.userOpen = undefined
-        changed = true
+        if (phaseState.userOpen === false) {
+          phaseState.userOpen = undefined
+          changed = true
+        }
       }
     }
     if (changed) this.workflowDisclosureRevision += 1

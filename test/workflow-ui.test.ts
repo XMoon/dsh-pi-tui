@@ -676,3 +676,51 @@ test('a phase folds and unfolds across ANY number of running→clean cycles (rev
   const view = await viewport(vt)
   assert.ok(view.includes('▼ Unassigned'), `the third cycle must open the phase again:\n${view}`)
 })
+
+test('an explicit user open survives the interrupted edge and late terminal facts (review P2)', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-x' } } as SessionEvent,
+  ])
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages())
+  let view = await viewport(vt)
+  // The user closes and reopens the PHASE, then the RUN: both choices are
+  // now explicit opens (userOpen = true).
+  const phaseRow = rowOf(view, '▼ Unassigned 1 agent')
+  await clickCell(vt, 10, phaseRow)
+  view = await viewport(vt)
+  await clickCell(vt, 10, phaseRow)
+  view = await viewport(vt)
+  const runRow = rowOf(view, 'Workflow audit [running]')
+  await clickCell(vt, 10, runRow)
+  view = await viewport(vt)
+  await clickCell(vt, 10, runRow)
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▼', `the run must be explicitly open:\n${view}`)
+  assert.ok(view.includes('▼ Unassigned 1 agent'), `the phase must be explicitly open:\n${view}`)
+  // The owner closes without terminal facts: run + member project
+  // interrupted (PR1). The first abnormal edge must NOT clear the user's
+  // explicit opens.
+  folder.apply([
+    { type: 'turn/end', seq: 3, time: 1_700_000_000_003, data: { turn: 0, reason: { kind: 'completed' } } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▼', `the interrupted edge must keep the explicit run open:\n${view}`)
+  assert.ok(view.includes('▼ Unassigned 1 agent'), `the interrupted edge must keep the explicit phase open:\n${view}`)
+  // Late durable terminal facts recover completed (PR1 late-terminal
+  // contract): the user's explicit opens still win over the fact-driven
+  // completed → closed default.
+  folder.apply([
+    { type: 'tool-workflow/agent-end', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/run-end', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', stopReason: 'completed' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▼', `late completion must not snap the explicitly opened run shut:\n${view}`)
+  assert.ok(view.includes('▼ Unassigned 1 agent'), `late completion must not snap the explicitly opened phase shut:\n${view}`)
+})
