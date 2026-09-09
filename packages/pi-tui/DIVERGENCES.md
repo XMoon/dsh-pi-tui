@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `3bec30fc13e39ef1333bddc0ce600ba9506d5f85`
+- Audited local source commit: `5b7e7e21fdacc47687acdd4375e95f276d221dc6`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -4075,12 +4075,13 @@ AltScreenSearchComponent renders a mouse-aware Input and forwards keyboard/focus
 
 #### Why it exists
 
-Two upstream Editor mouse-path bugs: (1) handleMouse forces targetIndex = lastGraphemeIndex when a click lands at/after the end of a NON-last wrapped visual segment, placing the cursor one grapheme BEFORE the segment end instead of at the end; (2) the autocomplete list's onSelect (the mouse click path) applies a slash-prefix completion but does not submit, while the keyboard Enter path explicitly falls through to submit for slash prefixes — a click on a /command suggestion must behave like Enter. The fork fixes both: the natural end-of-segment position (chunk.length, matching the Input clamp-to-end behavior) and the slash submit fall-through.
+Two upstream Editor mouse-path bugs: (1) handleMouse forces targetIndex = lastGraphemeIndex when a click lands at/after the end of a NON-last wrapped visual segment, placing the cursor one grapheme BEFORE the segment end instead of at the end; (2) the autocomplete list's onSelect (the mouse click path) applies a slash-prefix completion but does not submit, while the keyboard Enter path explicitly falls through to submit for slash prefixes — a click on a /command suggestion must behave like Enter. The fork fixes both: the natural end-of-segment position (chunk.length, matching the Input clamp-to-end behavior) and the slash submit fall-through. The slash-completion mouse click mirrors the keyboard Enter path INCLUDING the disableSubmit guard: a mouse click on a `/command` suggestion must not bypass the public 'submission disabled' contract.
 
 #### Changed surface
 
 - Editor.handleMouse click-to-cursor on a wrapped non-last visual segment: clicking at/after the segment text places the cursor at the segment end, not one grapheme before it
 - Editor autocomplete onSelect (mouse click): a slash-prefix completion applies, cancels the autocomplete, and submits (submitValue), exactly like the keyboard Enter path
+- the slash-completion mouse click cancels the autocomplete and honors disableSubmit before submitting (exactly like the keyboard Enter path)
 
 #### Dependency map
 
@@ -4110,6 +4111,7 @@ Two upstream Editor mouse-path bugs: (1) handleMouse forces targetIndex = lastGr
 #### Guarding tests
 
 - packages/pi-tui/test/editor.test.ts: X050 — clicking past the text of a wrapped non-last segment lands at the segment end, clicking past the last segment clamps to the line end, and clicking a slash-prefix autocomplete suggestion submits the completed command (like keyboard Enter)
+- packages/pi-tui/test/editor.test.ts: disableSubmit=true blocks the mouse slash-completion submit and cancels the autocomplete
 
 #### Upstream comparison
 
