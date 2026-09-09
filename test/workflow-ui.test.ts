@@ -639,3 +639,40 @@ test('a running run auto-closes once on run-end completed; an explicit user open
   view = await viewport(vt)
   assert.equal(runChevron(view), '▼', `an unchanged re-render must keep the user choice:\n${view}`)
 })
+
+test('a phase folds and unfolds across ANY number of running→clean cycles (review P2)', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
+  ])
+  const { vt, app } = startApp()
+  app.setTranscript(folder.messages())
+  const cycle = async (seq: number, label: string): Promise<string> => {
+    folder.apply([
+      { type: 'tool-workflow/agent-start', seq, time: 1_700_000_000_000 + seq, data: { runId: 'run-1', seq: seq - 2, label, childId: `session-${label}` } } as SessionEvent,
+    ])
+    app.setTranscript(folder.messages())
+    let view = await viewport(vt)
+    assert.ok(view.includes('▼ Unassigned'), `${label} start must open the phase:\n${view}`)
+    folder.apply([
+      { type: 'tool-workflow/agent-end', seq: seq + 1, time: 1_700_000_000_000 + seq + 1, data: { runId: 'run-1', seq: seq - 2, outcome: 'completed' } } as SessionEvent,
+    ])
+    app.setTranscript(folder.messages())
+    view = await viewport(vt)
+    assert.ok(view.includes('▶ Unassigned'), `${label} completion must close the phase again:\n${view}`)
+    return view
+  }
+  // A start -> open, A complete -> close.
+  await cycle(2, 'a')
+  // B start -> open, B complete -> close (the SECOND cycle — the old
+  // one-shot completionClosed/reopened flags would leave it stuck open).
+  await cycle(4, 'b')
+  // C start -> open (a THIRD cycle still works).
+  folder.apply([
+    { type: 'tool-workflow/agent-start', seq: 6, time: 1_700_000_000_006, data: { runId: 'run-1', seq: 4, label: 'c', childId: 'session-c' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  const view = await viewport(vt)
+  assert.ok(view.includes('▼ Unassigned'), `the third cycle must open the phase again:\n${view}`)
+})

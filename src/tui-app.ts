@@ -278,37 +278,30 @@ function workflowMemberMark(status: WorkflowRunStatus): string {
   }
 }
 
-/** One phase's disclosure state inside a Workflow run (PR2 plan §7): the
- * user's explicit choice wins forever once set; otherwise the status-driven
- * value after the one-shot transitions (first abnormal edge opens once,
- * completion closes once, a post-completion running member reopens once). */
+/** One phase's disclosure state inside a Workflow run (PR2 plan §7, Web
+ * advanceDisclosureState parity): the user's explicit choice wins forever
+ * once set; otherwise the CURRENT FACTS decide at every change — a clean
+ * phase (all members completed) closes, a running/abnormal phase opens.
+ * The only lifecycle flag is `abnormalOpened`: the FIRST abnormal edge
+ * overrides a prior user close exactly once (plan §7.5), so an exception
+ * is never hidden by an earlier toggle. */
 interface WorkflowPhaseDisclosureState {
-  /** The user's explicit open/closed choice (undefined = status-driven). */
+  /** The user's explicit open/closed choice (undefined = fact-driven). */
   userOpen?: boolean
-  /** The status-driven effective value after one-shot transitions. */
-  phaseOpen: boolean
-  /** Whether the first abnormal edge already auto-opened this phase. */
+  /** Whether the first abnormal edge already overrode the user choice. */
   abnormalOpened: boolean
-  /** Whether completion already auto-closed this phase. */
-  completionClosed: boolean
-  /** Whether a post-completion running member already reopened this phase. */
-  reopened: boolean
 }
 
 /** One Workflow run's disclosure state (PR2 plan §7). Keyed by the durable
  * `runId`; phase state is keyed by `workflowPhaseKey(phase)` — never the
- * display label, never an array index. */
+ * display label, never an array index. The run's open/closed value is
+ * derived from the CURRENT facts at render time (completed → closed,
+ * otherwise open) unless the user set an explicit choice. */
 interface WorkflowRunDisclosureState {
-  /** The user's explicit open/closed choice (undefined = status-driven). */
+  /** The user's explicit open/closed choice (undefined = fact-driven). */
   userOpen?: boolean
-  /** The status-driven effective value after one-shot transitions. */
-  runOpen: boolean
-  /** Whether the first abnormal edge already auto-opened this run. */
+  /** Whether the first abnormal edge already overrode the user choice. */
   abnormalOpened: boolean
-  /** Whether completion already auto-closed this run. */
-  completionClosed: boolean
-  /** Whether a post-completion running member already reopened this run. */
-  reopened: boolean
   /** Per-phase disclosure state by exact phase identity key. */
   phases: Map<string, WorkflowPhaseDisclosureState>
 }
@@ -7147,21 +7140,23 @@ export class TuiApp {
   }
 
   /** The effective Run disclosure of one Workflow card: the user's explicit
-   * choice wins forever once set; otherwise the status-driven value after
-   * the one-shot transitions (PR2 plan §7.4). */
+   * choice wins forever once set; otherwise the CURRENT FACTS decide —
+   * a completed run closes, every other status opens (PR2 plan §7.4/§7.6,
+   * Web advanceDisclosureState parity). */
   private workflowRunOpen(message: Extract<TranscriptMessage, { kind: 'workflow' }>): boolean {
     const state = this.workflowDisclosure.get(message.runId)
     if (state?.userOpen !== undefined) return state.userOpen
-    if (state !== undefined) return state.runOpen
     return message.status !== 'completed'
   }
 
   /** The effective Phase disclosure of one Workflow phase: user choice
-   * first, then the status-driven value after the one-shot transitions. */
+   * first, then the CURRENT FACTS — a clean phase (all members completed)
+   * closes, a running/abnormal phase opens. Re-derived at every change,
+   * so any number of running→clean cycles fold and unfold (Web
+   * advanceDisclosureState parity). */
   private workflowPhaseOpen(runId: string, phaseKey: string, phase: WorkflowPhasePresentation): boolean {
     const state = this.workflowDisclosure.get(runId)?.phases.get(phaseKey)
     if (state?.userOpen !== undefined) return state.userOpen
-    if (state !== undefined) return state.phaseOpen
     return phase.counts.completed !== phase.members.length
   }
 
@@ -7171,7 +7166,9 @@ export class TuiApp {
   private toggleWorkflowRun(runId: string): void {
     const state = this.workflowDisclosure.get(runId)
     if (state === undefined) return
-    state.userOpen = !(state.userOpen ?? state.runOpen)
+    const message = this.workflowMessageOf(runId)
+    if (message === undefined) return
+    state.userOpen = !(state.userOpen ?? this.workflowRunOpen(message))
     this.workflowDisclosureRevision += 1
     this.rebuildMessages()
   }
@@ -7182,99 +7179,69 @@ export class TuiApp {
   private toggleWorkflowPhase(runId: string, phaseKey: string): void {
     const state = this.workflowDisclosure.get(runId)?.phases.get(phaseKey)
     if (state === undefined) return
-    state.userOpen = !(state.userOpen ?? state.phaseOpen)
+    const message = this.workflowMessageOf(runId)
+    if (message === undefined) return
+    const phase = workflowPhasePresentations(message.members).find(candidate => candidate.key === phaseKey)
+    if (phase === undefined) return
+    state.userOpen = !(state.userOpen ?? this.workflowPhaseOpen(runId, phaseKey, phase))
     this.workflowDisclosureRevision += 1
     this.rebuildMessages()
   }
 
   /** Advance the Workflow disclosure state for one changed run (PR2 plan
-   * §7.5–§7.7): the one-shot transitions fire at most once per run/phase
-   * lifetime, and only while the user has not set an explicit choice —
-   * after a toggle the user's choice wins forever. The transition flags
-   * encode the history; the caller has already verified the run's content
-   * actually changed. */
+   * §7, Web advanceDisclosureState parity): the open/closed value is
+   * derived from the CURRENT FACTS at render time (completed/clean →
+   * closed, running/abnormal → open), so any number of running→clean
+   * cycles fold and unfold correctly. The ONLY transition stored here is
+   * the first abnormal edge: it overrides a prior user close exactly once
+   * (plan §7.5 — an exception must never stay hidden behind an earlier
+   * toggle); afterwards the user's choice wins forever. The caller has
+   * already verified the run's content actually changed. */
   private advanceWorkflowDisclosure(
     message: Extract<TranscriptMessage, { kind: 'workflow' }>,
   ): void {
     const runCounts = workflowStatusCounts(message.members)
     // The run's abnormal facts include the RUN status itself: a run can
     // settle failed/cancelled/interrupted with zero members or only
-    // completed members (review finding) — the abnormal edge must still
-    // open it once, and cold replay must pre-settle the flag.
+    // completed members — the abnormal edge must still open it once, and
+    // cold replay must pre-settle the flag.
     const runStatusAbnormal = message.status === 'failed'
       || message.status === 'cancelled'
       || message.status === 'interrupted'
     const runHasAbnormal = runCounts.failed + runCounts.cancelled + runCounts.interrupted > 0
       || runStatusAbnormal
-    const runHasRunning = runCounts.running > 0
-    const runFullyCompleted = message.status === 'completed'
     let state = this.workflowDisclosure.get(message.runId)
     if (state === undefined) {
-      // First sight: the initial state IS the status-driven default, and a
-      // run that already carries abnormal/completed facts at first sight
-      // has its one-shot transitions pre-settled (a cold-replayed terminal
-      // run must never be force-opened by a later update).
-      state = {
-        runOpen: message.status !== 'completed',
-        abnormalOpened: runHasAbnormal,
-        completionClosed: message.status === 'completed',
-        reopened: false,
-        phases: new Map(),
-      }
+      // First sight: a run that already carries abnormal facts has its
+      // abnormal edge pre-settled (a cold-replayed terminal run must never
+      // be force-opened by a later update).
+      state = { abnormalOpened: runHasAbnormal, phases: new Map() }
       this.workflowDisclosure.set(message.runId, state)
     }
     let changed = false
     if (state.abnormalOpened === false && runHasAbnormal) {
-      // First abnormal edge: open once so the exception is visible. This
-      // OVERRIDES a prior user close by returning the run to the
-      // status-driven default (plan §7.5 — the abnormal fact is a
-      // significant event); the flag makes it one-shot, so a later user
-      // close persists forever, and a later completion can still close it.
+      // First abnormal edge: drop the user's prior choice and let the
+      // current facts (abnormal → open) show the exception (plan §7.5).
       state.abnormalOpened = true
       state.userOpen = undefined
-      if (state.runOpen !== true) { state.runOpen = true; changed = true }
-    } else if (state.completionClosed === false && runFullyCompleted) {
-      // Normal completion: close once. A user's explicit open choice is
-      // respected (they asked to see the run; the close is a default).
-      state.completionClosed = true
-      if (state.runOpen !== false) { state.runOpen = false; changed = true }
-    } else if (state.reopened === false && state.completionClosed && runHasRunning) {
-      // A completed run with a new running member: reopen once.
-      state.reopened = true
-      if (state.runOpen !== true) { state.runOpen = true; changed = true }
+      changed = true
     }
-    // Phase-level transitions over the CURRENT phase groups. A phase that
+    // Phase-level facts over the CURRENT phase groups. A phase that
     // disappears (impossible today — members are append-only) simply keeps
     // its state; the renderer only consults present phases.
     for (const phase of workflowPhasePresentations(message.members)) {
       let phaseState = state.phases.get(phase.key)
+      const phaseHasAbnormal = phase.counts.failed + phase.counts.cancelled + phase.counts.interrupted > 0
       if (phaseState === undefined) {
-        const allCompleted = phase.counts.completed === phase.members.length
-        phaseState = {
-          phaseOpen: !allCompleted,
-          abnormalOpened: phase.counts.failed + phase.counts.cancelled + phase.counts.interrupted > 0,
-          completionClosed: allCompleted,
-          reopened: false,
-        }
+        phaseState = { abnormalOpened: phaseHasAbnormal }
         state.phases.set(phase.key, phaseState)
         continue
       }
-      const phaseHasAbnormal = phase.counts.failed + phase.counts.cancelled + phase.counts.interrupted > 0
-      const phaseHasRunning = phase.counts.running > 0
-      const phaseFullyCompleted = phase.counts.completed === phase.members.length
       if (phaseState.abnormalOpened === false && phaseHasAbnormal) {
-        // First abnormal edge: open once, overriding a prior user close
-        // by returning the phase to the status-driven default (plan §7.5);
-        // one-shot like the run-level flag.
+        // First abnormal edge: same one-shot override as the run level.
         phaseState.abnormalOpened = true
         phaseState.userOpen = undefined
-        if (phaseState.phaseOpen !== true) { phaseState.phaseOpen = true; changed = true }
-      } else if (phaseState.completionClosed === false && phaseFullyCompleted) {
-        phaseState.completionClosed = true
-        if (phaseState.phaseOpen !== false) { phaseState.phaseOpen = false; changed = true }
-      } else if (phaseState.reopened === false && phaseState.completionClosed && phaseHasRunning) {
-        phaseState.reopened = true
-        if (phaseState.phaseOpen !== true) { phaseState.phaseOpen = true; changed = true }
+        changed = true
       }
     }
     if (changed) this.workflowDisclosureRevision += 1
