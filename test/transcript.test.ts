@@ -2289,6 +2289,41 @@ test('workflow: step/end without terminal facts projects interrupted (plan §8.6
   assert.equal(after.members[0]?.status, 'interrupted')
 })
 
+test('workflow: late durable terminal facts override the derived interrupted state', () => {
+  // `interrupted` is a projection of a MISSING terminal fact plus a closed
+  // owner — never a durable stop reason. The fold state stays alive after
+  // the projection, so a LATER agent-end / run-end must override it with
+  // the real terminal fact (plan §2.2/§6.4).
+  const cases = [
+    { runId: 'run-a', outcome: 'completed', stopReason: 'completed', member: 'completed', run: 'completed' },
+    { runId: 'run-b', outcome: 'failed', stopReason: 'error', member: 'failed', run: 'failed' },
+    { runId: 'run-c', outcome: 'cancelled', stopReason: 'cancelled', member: 'cancelled', run: 'cancelled' },
+  ] as const
+  for (const c of cases) {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      event('turn/start', { turn: 0 }, 0),
+      event('step/start', { turn: 0, step: 0 }, 1),
+      rawEvent('tool-workflow/run-start', { runId: c.runId, name: 'audit' }, 2),
+      rawEvent('tool-workflow/agent-start', { runId: c.runId, seq: 0, label: 'checker', childId: 'session-x' }, 3),
+      event('step/end', { turn: 0, step: 0 }, 4),
+    ])
+    const interrupted = folder.messages()[0]
+    assert.ok(interrupted !== undefined && interrupted.kind === 'workflow')
+    assert.equal(interrupted.status, 'interrupted', `${c.runId} run must project interrupted`)
+    assert.equal(interrupted.members[0]?.status, 'interrupted', `${c.runId} member must project interrupted`)
+    // Late durable facts override the derived projection.
+    folder.apply([
+      rawEvent('tool-workflow/agent-end', { runId: c.runId, seq: 0, outcome: c.outcome }, 5),
+      rawEvent('tool-workflow/run-end', { runId: c.runId, stopReason: c.stopReason }, 6),
+    ])
+    const settled = folder.messages()[0]
+    assert.ok(settled !== undefined && settled.kind === 'workflow')
+    assert.equal(settled.members[0]?.status, c.member, `${c.runId} member must settle to the durable outcome`)
+    assert.equal(settled.status, c.run, `${c.runId} run must settle to the durable stop reason`)
+  }
+})
+
 test('workflow: turn/end without terminal facts projects interrupted (plan §8.7)', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
