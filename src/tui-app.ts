@@ -3081,6 +3081,7 @@ export class TuiApp {
     this.readClipboardText = options.readClipboardText
     this.overlayBroker = new OverlayBroker({
       question: () => this.activeQuestions,
+      saveLocation: () => this.activeSaveLocation,
       setFocusSeat: (seat) => this.setFocusSeat(seat),
     })
 
@@ -5104,6 +5105,20 @@ export class TuiApp {
     for (const handle of this.overlayBroker.handles()) handle.hide()
     this.overlayBroker.clear()
     if (this.activeQuestions !== undefined) this.activeQuestions.suspendedOverlays.clear()
+    // The Save Location prompt's suspended handles are dead after the
+    // teardown too; the settle's isTracked guard skips them, but drop them
+    // now so the set never accumulates stale handles (question symmetry).
+    if (this.activeSaveLocation !== undefined) this.activeSaveLocation.suspendedOverlays.clear()
+    // The ordinary search overlay is NOT remounted across the screen swap
+    // (only extension/advanced/unstable/history leases are): its raw
+    // handle died with the old screen — close it properly (the runner's
+    // onSearchClose resets the search state/anchor) so the next Ctrl+F
+    // reopens a FRESH search instead of focusing a stale dead handle.
+    if (this.searchOverlay !== undefined) {
+      this.searchOverlay = undefined
+      this.searchComponent = undefined
+      this.events.onSearchClose?.()
+    }
     if (enabled) {
       // The alt screen owns mouse handling (wheel scroll, drag selection,
       // right-click paste — pi's fullscreen behavior); a same-cell primary
@@ -5274,6 +5289,14 @@ export class TuiApp {
     const question = this.activeQuestions
     if (question?.frame !== undefined) {
       (this.fullscreen ?? this.tui).setFocus(question.frame)
+    }
+    // A Save Location prompt survives the switch through the SHARED seat
+    // the same way: keep its frame focused on the new screen (the prompt's
+    // input routing is screen-agnostic). The question/approval precedence
+    // above wins when both are somehow active.
+    const saveLocation = this.activeSaveLocation
+    if (saveLocation?.frame !== undefined) {
+      (this.fullscreen ?? this.tui).setFocus(saveLocation.frame)
     }
     // The surface slice tracks the mode switch (plan §7.1).
     this.extensionHost?.updateSurface({ fullscreen: enabled })
@@ -10539,6 +10562,13 @@ export class TuiApp {
       this.setFocusSeat('overlay')
       return
     }
+    // A Save Location prompt owns the seat and ALL input while active (the
+    // same capturing-modal rule as questions/approvals): an async overlay
+    // close or fullscreen remount must never publish 'editor' behind it.
+    if (this.activeSaveLocation !== undefined) {
+      this.setFocusSeat('overlay')
+      return
+    }
     const screen = this.activeScreen
     if (!this.disposed && screen.hasOverlayEntries && screen.getFocusedComponent() !== null) {
       this.setFocusSeat('overlay')
@@ -12785,6 +12815,14 @@ export class TuiApp {
       this.settleApproval(pending, 'cancelled')
       return
     }
+    // A Host approval is authoritative over a Client-local Save Location
+    // prompt: showing the approval settles the prompt as cancelled (the
+    // caller's owned workflow classifies it and notifies nothing) — the
+    // approval must never be left unanswerable behind the prompt's input
+    // routing (the same rule as presentQuestion).
+    if (this.activeSaveLocation !== undefined) {
+      this.settleSaveLocation(this.activeSaveLocation, { kind: 'cancelled' })
+    }
     this.renderApprovalDialog(pending)
     this.activeApproval = pending
     // M6: a capturing surface owns the input now — any pending leader
@@ -13119,7 +13157,8 @@ export class TuiApp {
    *   directory value.
    * @param deps - the Client-local filesystem facts (resolution, validation,
    *   collision check, directory completion).
-   * @param signal - optional abort; settles the prompt rejected.
+   * @param signal - optional abort; settles the prompt as cancelled (the
+   *   caller's owned workflow classifies it and notifies nothing).
    * @returns the selected directory, or cancelled.
    */
   askSaveLocation(
@@ -13134,6 +13173,28 @@ export class TuiApp {
       return Promise.reject(cancellationError('save location cancelled'))
     }
     return new Promise<SaveLocationResult>((resolve, reject) => {
+      // Early-reject BEFORE constructing the prompt: a rejected request must
+      // never start the prompt's completion work (the component's async
+      // refresh would otherwise stay live with no owner to dispose it).
+      if (signal?.aborted === true) {
+        reject(cancellationError('save location aborted'))
+        return
+      }
+      // One prompt on screen at a time; a second request while one is active
+      // is refused (the caller notifies — the prompt is a narrow interaction,
+      // not a queueable flow).
+      if (this.activeSaveLocation !== undefined) {
+        reject(cancellationError('a save location prompt is already active'))
+        return
+      }
+      // A Host question or approval owns the seat: a Save Location request
+      // is refused — the prompt must never replace a Host modal's seat and
+      // leave it pending behind the prompt's input routing (the Host modal
+      // wins; the caller notifies).
+      if (this.activeQuestions !== undefined || this.activeApproval !== undefined) {
+        reject(cancellationError('a host question or approval is active'))
+        return
+      }
       const state: SaveLocationState = {
         prompt: new SaveLocationPrompt(
           request,
@@ -13146,21 +13207,10 @@ export class TuiApp {
         signal,
       }
       state.prompt.onChange = () => this.requestRender()
-      if (signal?.aborted === true) {
-        reject(cancellationError('save location aborted'))
-        return
-      }
       if (signal !== undefined) {
         const onAbort = (): void => this.cancelSaveLocation(state)
         state.onAbort = onAbort
         signal.addEventListener('abort', onAbort, { once: true })
-      }
-      // One prompt on screen at a time; a second request while one is active
-      // is refused (the caller notifies — the prompt is a narrow interaction,
-      // not a queueable flow).
-      if (this.activeSaveLocation !== undefined) {
-        reject(cancellationError('a save location prompt is already active'))
-        return
       }
       this.presentSaveLocation(state)
     })

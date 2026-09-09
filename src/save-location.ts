@@ -37,7 +37,15 @@ export interface SaveLocationRequest {
 
 /** The outcome of the Save Location interaction. */
 export type SaveLocationResult =
-  | { readonly kind: 'selected'; readonly directory: string }
+  | {
+    readonly kind: 'selected'
+    readonly directory: string
+    /** Whether the user explicitly consented to REPLACING an existing
+     * target file (the collision Yes). The sink refuses to overwrite a
+     * target that appeared after the prompt's collision check unless this
+     * consent was given — no silent overwrite. */
+    readonly overwrite: boolean
+  }
   | { readonly kind: 'cancelled' }
 
 /** The Client-local filesystem facts the prompt needs (injected so headless
@@ -75,8 +83,9 @@ export class SaveLocationPrompt implements Component, Focusable {
   private suggestionCursor = 0
   /** Completion generation: a late result from an older refresh is dropped. */
   private completionGeneration = 0
-  /** The prompt's own abort controller (cancelled on dispose). */
-  private readonly completionAbort = new AbortController()
+  /** The CURRENT generation's abort controller (a superseded refresh aborts
+   * the previous scan; the prompt's settle/dispose aborts the live one). */
+  private completionAbort = new AbortController()
   /** Local validation error shown under the directory row. */
   private validationError: string | undefined
   /** The validated directory awaiting a collision decision. */
@@ -149,10 +158,15 @@ export class SaveLocationPrompt implements Component, Focusable {
   }
 
   /** Refresh the directory suggestions for the current field value. Each
-   * refresh owns its generation; a late result after a newer refresh or
-   * after settle/dispose is dropped. */
+   * refresh owns its generation AND its abort controller: a superseded
+   * refresh aborts the previous scan (rapid typing must not leave
+   * concurrent filesystem scans/processes running — only the latest
+   * generation's completion is live), and a late result after a newer
+   * refresh or after settle/dispose is dropped. */
   private refreshSuggestions(): void {
     const generation = ++this.completionGeneration
+    this.completionAbort.abort()
+    this.completionAbort = new AbortController()
     const raw = this.input.getValue()
     this.suggestions = []
     this.suggestionCursor = 0
@@ -200,7 +214,7 @@ export class SaveLocationPrompt implements Component, Focusable {
       this.input.focused = false
       return
     }
-    this.onDone({ kind: 'selected', directory })
+    this.onDone({ kind: 'selected', directory, overwrite: false })
   }
 
   /** Esc: close the suggestions first; otherwise cancel the prompt. */
@@ -220,7 +234,7 @@ export class SaveLocationPrompt implements Component, Focusable {
       // directory selection (never cancels the whole command automatically).
       if (matchesKey(data, 'y') || componentKeymap.matches(data, 'question.confirm')) {
         const directory = this.selectedDirectory
-        if (directory !== undefined) this.onDone({ kind: 'selected', directory })
+        if (directory !== undefined) this.onDone({ kind: 'selected', directory, overwrite: true })
       } else if (matchesKey(data, 'n') || componentKeymap.matches(data, 'question.cancel')) {
         this.confirming = false
         this.input.focused = this._focused

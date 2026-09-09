@@ -126,7 +126,7 @@ test('Enter on a valid directory selects it', (t) => {
     (value) => { result = value },
   )
   prompt.handleInput('\r')
-  assert.deepEqual(result, { kind: 'selected', directory: cwd })
+  assert.deepEqual(result, { kind: 'selected', directory: cwd, overwrite: false })
 })
 
 test('Esc closes the suggestions first, then cancels', async (t) => {
@@ -182,7 +182,7 @@ test('collision: Yes replaces and selects the directory', (t) => {
   prompt.handleInput('\r')
   assert.equal(prompt.isConfirming(), true)
   prompt.handleInput('y')
-  assert.deepEqual(result, { kind: 'selected', directory: out })
+  assert.deepEqual(result, { kind: 'selected', directory: out, overwrite: true })
 })
 
 test('left/right editing moves the text cursor', (t) => {
@@ -226,6 +226,38 @@ test('late completion after cancel is ignored', async (t) => {
   void life
 })
 
+test('a superseded refresh aborts the previous completion scan', async (t) => {
+  const life = testLifecycle(t)
+  const signals: AbortSignal[] = []
+  const deps: SaveLocationDeps = {
+    resolveDirectory: (input) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: (_raw, signal) => {
+      signals.push(signal)
+      // Never resolves: the scan stays live until aborted.
+      return new Promise<DirectoryCompletionItem[] | null>(() => {})
+    },
+  }
+  let result: SaveLocationResult | undefined
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    (value) => { result = value },
+  )
+  // The initial refresh starts completion #1.
+  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  // Typing triggers refresh #2: completion #1's scan must be aborted (rapid
+  // typing must not leave concurrent filesystem scans running).
+  prompt.handleInput('x')
+  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  assert.equal(signals.length, 2)
+  assert.equal(signals[0]?.aborted, true, 'the superseded completion is aborted')
+  assert.equal(signals[1]?.aborted, false, 'the latest completion stays live')
+  void life
+  void result
+})
+
 test('app: askSaveLocation mounts the prompt in the editor seat and restores it', async (t) => {
   const life = testLifecycle(t)
   const { deps, cwd } = fixtureDeps(life)
@@ -241,7 +273,7 @@ test('app: askSaveLocation mounts the prompt in the editor seat and restores it'
     // The prompt owns the seat: Enter selects the valid ./ directory.
     vt.sendInput('\r')
     const result = await promise
-    assert.deepEqual(result, { kind: 'selected', directory: cwd })
+    assert.deepEqual(result, { kind: 'selected', directory: cwd, overwrite: false })
     await vt.waitForRender()
     // The editor seat is restored (the app is still interactive).
     assert.equal(app.isDisposed(), false)
@@ -276,7 +308,8 @@ test('app: askSaveLocation cancel restores the editor seat', async (t) => {
 test('app: a second askSaveLocation while one is active is refused', async (t) => {
   const life = testLifecycle(t)
   const { deps } = fixtureDeps(life)
-  const noSuggestions: SaveLocationDeps = { ...deps, complete: async () => null }
+  let completeCalls = 0
+  const noSuggestions: SaveLocationDeps = { ...deps, complete: async () => { completeCalls += 1; return null } }
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
   app.start()
@@ -286,6 +319,7 @@ test('app: a second askSaveLocation while one is active is refused', async (t) =
       noSuggestions,
     )
     await vt.waitForRender()
+    const callsAfterFirst = completeCalls
     await assert.rejects(
       app.askSaveLocation(
         { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
@@ -293,6 +327,7 @@ test('app: a second askSaveLocation while one is active is refused', async (t) =
       ),
       /already active/,
     )
+    assert.equal(completeCalls, callsAfterFirst, 'a refused duplicate must not start completion work')
     vt.sendInput('\x1b')
     assert.deepEqual(await first, { kind: 'cancelled' })
   } finally {
@@ -315,6 +350,154 @@ test('app: surface stop settles an open prompt as cancelled', async (t) => {
     await vt.waitForRender()
     app.stop()
     assert.deepEqual(await promise, { kind: 'cancelled' })
+  } finally {
+    app.dispose()
+  }
+})
+
+test('app: a Host approval settles an open Save Location prompt as cancelled', async (t) => {
+  const life = testLifecycle(t)
+  const { deps } = fixtureDeps(life)
+  const noSuggestions: SaveLocationDeps = { ...deps, complete: async () => null }
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  app.start()
+  try {
+    const promise = app.askSaveLocation(
+      { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+      noSuggestions,
+    )
+    await vt.waitForRender()
+    // A Host approval mounts while the prompt is active: the prompt settles
+    // cancelled and the approval is answerable — it must never be left
+    // unanswerable behind the prompt's input routing.
+    const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+    assert.deepEqual(await promise, { kind: 'cancelled' })
+    vt.sendInput('y')
+    assert.equal(await approval, 'allowed-once')
+  } finally {
+    app.dispose()
+  }
+})
+
+test('app: a capturing overlay mounting while Save Location is active is suspended, never left unanswerable', async (t) => {
+  const life = testLifecycle(t)
+  const { deps, cwd } = fixtureDeps(life)
+  const noSuggestions: SaveLocationDeps = { ...deps, complete: async () => null }
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  app.start()
+  try {
+    const promise = app.askSaveLocation(
+      { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+      noSuggestions,
+    )
+    await vt.waitForRender()
+    // A capturing picker mounts while the prompt is active: it is SUSPENDED
+    // (hidden, state intact) — the prompt keeps owning the seat and is
+    // never cancelled by the mount.
+    const picker = app.openPicker([{ value: 'a', label: 'option a' }], () => {}, () => {})
+    await vt.waitForRender()
+    // The prompt is still answerable: Enter selects the valid ./ directory.
+    vt.sendInput('\r')
+    assert.deepEqual(await promise, { kind: 'selected', directory: cwd, overwrite: false })
+    // The suspended picker is restored after the prompt settles.
+    picker.close()
+  } finally {
+    app.dispose()
+  }
+})
+
+test('app: an already-aborted signal rejects before any completion work starts', async (t) => {
+  const life = testLifecycle(t)
+  let completeCalls = 0
+  const deps: SaveLocationDeps = {
+    resolveDirectory: (input) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async () => { completeCalls += 1; return null },
+  }
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  app.start()
+  try {
+    const controller = new AbortController()
+    controller.abort()
+    await assert.rejects(
+      app.askSaveLocation(
+        { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+        deps,
+        controller.signal,
+      ),
+      /aborted/,
+    )
+    assert.equal(completeCalls, 0, 'a rejected request must never start completion work')
+  } finally {
+    app.dispose()
+  }
+})
+
+test('app: a Save Location prompt survives a fullscreen swap with its frame focused', async (t) => {
+  const life = testLifecycle(t)
+  const { deps, cwd } = fixtureDeps(life)
+  const noSuggestions: SaveLocationDeps = { ...deps, complete: async () => null }
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  app.start()
+  try {
+    const promise = app.askSaveLocation(
+      { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+      noSuggestions,
+    )
+    await vt.waitForRender()
+    // A fullscreen swap must not cancel the prompt; its frame stays the
+    // focused component on the new screen (the input routing is
+    // screen-agnostic, but the visible focus contract must hold).
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    const internals = app as unknown as {
+      activeScreen: { getFocusedComponent(): unknown }
+      activeSaveLocation?: { frame: unknown }
+    }
+    assert.equal(
+      internals.activeScreen.getFocusedComponent(),
+      internals.activeSaveLocation?.frame,
+      'the prompt frame is the focused component after the swap',
+    )
+    vt.sendInput('\r')
+    assert.deepEqual(await promise, { kind: 'selected', directory: cwd, overwrite: false })
+    app.setFullscreen(false)
+    await vt.waitForRender()
+  } finally {
+    app.dispose()
+  }
+})
+
+test('app: a Save Location request while a Host question is active is refused', async (t) => {
+  const life = testLifecycle(t)
+  const { deps } = fixtureDeps(life)
+  const noSuggestions: SaveLocationDeps = { ...deps, complete: async () => null }
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  app.start()
+  try {
+    const questions = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+    await vt.waitForRender()
+    // The Host question owns the seat: the Save request is refused and must
+    // never replace the question's seat (which would leave it pending
+    // behind the prompt's input routing).
+    await assert.rejects(
+      app.askSaveLocation(
+        { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+        noSuggestions,
+      ),
+      /host question or approval/,
+    )
+    // The question is still answerable: select option 1, then submit.
+    vt.sendInput('1')
+    vt.sendInput('\r')
+    const answers = await questions
+    assert.deepEqual(answers[0]?.selected, ['yes'])
   } finally {
     app.dispose()
   }

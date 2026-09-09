@@ -21,7 +21,7 @@
 import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -93,6 +93,7 @@ import type { TranscriptMessage, TranscriptWindow } from './transcript.ts'
 import { renderTranscriptMarkdown } from './transcript.ts'
 import { sessionArtifactFilename } from './session-artifact-filename.ts'
 import { isDirectoryPath, resolveClientDirectory, streamToFile, writeTextAtomically } from './client-artifact-save.ts'
+import type { SaveLocationResult } from './save-location.ts'
 import { completeDirectory } from './file-completion/directory-completion.ts'
 import { LocalFileSource } from './file-completion/local-file-source.ts'
 import { TranscriptWindowController } from './transcript-window.ts'
@@ -4208,38 +4209,55 @@ export function apply(ctx: Context, config: Config): void {
     ): Promise<ArtifactSaveOutcome> => {
       const sessionId = agent.session.id
       const filename = sessionArtifactFilename(sessionId, name === 'export' ? 'archive' : 'transcript')
-      const result = await app.askSaveLocation({
-        title: name === 'export' ? 'Save session archive' : 'Save readable transcript',
-        filename,
-        initialDirectory: './',
-      }, {
-        // Save Location is CLIENT-local filesystem UI: resolution, validation
-        // and completion all run against the Client process cwd — never the
-        // Host/session cwd, and never a Host call.
-        resolveDirectory: (input) => resolveClientDirectory(input, cwd),
-        isDirectory: (path) => isDirectoryPath(path),
-        targetExists: (directory, filename) => {
-          try {
-            return existsSync(join(directory, filename))
-          } catch {
-            return false
-          }
-        },
-        complete: (raw, completionSignal) => completeDirectory(raw, cwd, localFileSource, completionSignal),
-      }, signal)
+      let result: SaveLocationResult
+      try {
+        result = await app.askSaveLocation({
+          title: name === 'export' ? 'Save session archive' : 'Save readable transcript',
+          filename,
+          initialDirectory: './',
+        }, {
+          // Save Location is CLIENT-local filesystem UI: resolution, validation
+          // and completion all run against the Client process cwd — never the
+          // Host/session cwd, and never a Host call.
+          resolveDirectory: (input) => resolveClientDirectory(input, cwd),
+          isDirectory: (path) => isDirectoryPath(path),
+          targetExists: (directory, filename) => {
+            try {
+              // lstatSync: a dangling symlink is a real directory entry and
+              // must surface the collision confirmation too (the sink's
+              // commit guard uses the same non-following check).
+              lstatSync(join(directory, filename))
+              return true
+            } catch {
+              return false
+            }
+          },
+          complete: (raw, completionSignal) => completeDirectory(raw, cwd, localFileSource, completionSignal),
+        }, signal)
+      } catch (error) {
+        // A REFUSAL (a duplicate prompt, or an active Host question/approval)
+        // is a real user-visible failure — never a silent cancellation: the
+        // runOwned onCancel path emits no notice, so a second concurrent
+        // artifact save would silently disappear. The signal-abort path stays
+        // a cancellation (the task-local predicate classifies it).
+        if (isCancellation(error) && !signal.aborted) {
+          throw new ArtifactSaveFailure(safeErrorMessage(error))
+        }
+        throw error
+      }
       if (result.kind === 'cancelled') return { kind: 'cancelled' }
       const target = join(result.directory, filename)
       if (name === 'export') {
         const opened = await backend.sessionArchive.open(sessionId, signal)
         if (opened.kind === 'unavailable') throw new ArtifactSaveFailure('Session archive export is unavailable.')
         if (opened.kind === 'none') throw new ArtifactSaveFailure('Session was not found.')
-        const path = await streamToFile(target, opened.artifact.stream, signal)
+        const path = await streamToFile(target, opened.artifact.stream, signal, result.overwrite)
         return { kind: 'saved', path }
       }
       // /transcript: render from the CAPTURED originating Session after the
       // command lifecycle settled — never `liveAgent` at delayed settle time.
       const markdown = renderTranscriptMarkdown(agent.session)
-      const path = await writeTextAtomically(target, markdown, signal)
+      const path = await writeTextAtomically(target, markdown, signal, result.overwrite)
       return { kind: 'saved', path }
     }
     const startArtifactSave = (name: 'export' | 'transcript', agent: Agent): void => {

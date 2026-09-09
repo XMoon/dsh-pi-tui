@@ -2247,6 +2247,12 @@ export class TranscriptFolder {
     for (const event of events) this.applyEvent(event)
   }
 
+  /** The number of active workflow run index entries (test hook): completed
+   * runs drop their index at run-end so long sessions do not accumulate. */
+  activeWorkflowIndexCount(): number {
+    return this.workflowIndexes.size
+  }
+
   /**
    * Apply one live assistant stream input (Session v2 TRANSIENT plane —
    * `agent/assistant-stream` mapped through the neutral port). Live model
@@ -3895,6 +3901,10 @@ export class TranscriptFolder {
         // state so long sessions do not accumulate stale maps. The
         // TranscriptWorkflowMessage itself stays in the transcript items.
         this.workflow.onRunEnd(event.data.runId, event.data.stopReason)
+        // The index map must not retain completed runs either (the
+        // onChange hook already read the index before the projection
+        // dropped its state).
+        this.workflowIndexes.delete(event.data.runId)
         break
       }
       case 'llm/retry': {
@@ -4080,6 +4090,15 @@ export function renderTranscriptMarkdown(session: {
   // owner-closed run without a terminal fact exports as `interrupted`, not
   // `running`.
   const workflow = new WorkflowProjection()
+  // The visual fold's replay fences: a step/start or step/end for a turn
+  // whose turn/end already passed is a replay artifact and must not reopen
+  // the owner lifecycle (the export applies the same fence so a replayed
+  // fragment can never diverge from the visual projection).
+  const completedTurns = new Set<number>()
+  // The visual fold's current-turn rule: only the turn/start of the NEWEST
+  // turn opens the workflow turn (a late turn/start for an older turn — or
+  // for a closed turn — is a no-op).
+  let currentTurn = -1
   // Alpha.4 Session shape: the event log arrives as a snapshot read, never a
   // live array — the markdown export is a full-log fold by definition.
   for (const event of session.snapshotEvents()) {
@@ -4091,20 +4110,30 @@ export function renderTranscriptMarkdown(session: {
     if (isReplacementSurfaceEvent(event)) continue
     switch (event.type) {
       // Owner lifecycle: the shared projection tracks the open step/turn so
-      // run-start captures the same owner the visual fold would.
+      // run-start captures the same owner the visual fold would. The
+      // completed-turn fence mirrors the visual fold's activity.completed
+      // gate (a late step/start or step/end after turn/end is a no-op).
       case 'step/start': {
-        workflow.onStepStart(event.data.turn, event.data.step)
+        if (!completedTurns.has(event.data.turn)) workflow.onStepStart(event.data.turn, event.data.step)
         break
       }
       case 'step/end': {
-        workflow.onStepEnd(event.data.turn, event.data.step)
+        if (!completedTurns.has(event.data.turn)) workflow.onStepEnd(event.data.turn, event.data.step)
         break
       }
       case 'turn/start': {
-        workflow.onTurnStart(event.data.turn)
+        // The visual fold's exact gate: the turn is opened only for the
+        // NEWEST turn's first turn/start, and never for a closed turn (the
+        // projection's monotonic open-turn rule covers a mid-turn replay of
+        // the open turn itself).
+        if (event.data.turn > currentTurn) currentTurn = event.data.turn
+        if (!completedTurns.has(event.data.turn) && event.data.turn === currentTurn) {
+          workflow.onTurnStart(event.data.turn)
+        }
         break
       }
       case 'turn/end': {
+        completedTurns.add(event.data.turn)
         workflow.onTurnEnd(event.data.turn)
         break
       }

@@ -1,6 +1,6 @@
 /**
  * The TUI-owned slash commands (/exit /settings /sessions /skill /model
- * /new /tasks /preset /search /title /copy /export
+ * /new /tasks /preset /search /title /copy /export /transcript
  * /fork /status /login /logout /help), extracted from the runner's
  * monolithic apply() so the registration surface is testable and the runner
  * closure shrinks. Every command reads the live runner state through the
