@@ -791,3 +791,48 @@ test('a new member in a still-running phase is an ordinary update, not a new cyc
   view = await viewport(vt)
   assert.equal(runChevron(view), '▶', `an ordinary update must keep the user close:\n${view}`)
 })
+
+test('a completed run with a failed member is abnormal and opens by default (review P2, Web parity)', async () => {
+  const { vt, app } = startApp()
+  // Cold replay: the script handled the child's null and returned
+  // successfully — run-end completed, member failed. Web runDisclosureFacts
+  // says abnormal (any phase abnormal) → the run and the phase open.
+  app.setTranscript([workflow({ status: 'completed', members: [
+    member(0, 'a', 'P', 'failed'),
+  ] })])
+  const view = await viewport(vt)
+  assert.equal(runChevron(view), '▼', `a completed run with a failed member must open:\n${view}`)
+  assert.ok(view.includes('Workflow audit [completed]'), `the durable status pill stays completed:\n${view}`)
+  assert.ok(view.includes('▼ P 1 agent'), `the failed phase must open:\n${view}`)
+  assert.ok(view.includes('a — failed'), `the failed member must be visible:\n${view}`)
+})
+
+test('a run stays abnormal/open after run-end completed when a member failed (review P2)', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-a' } } as SessionEvent,
+  ])
+  const { vt, app } = startApp()
+  app.setTranscript(folder.messages())
+  let view = await viewport(vt)
+  assert.equal(runChevron(view), '▼', `a running run must open:\n${view}`)
+  // The member fails: the run becomes abnormal (still open).
+  folder.apply([
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'failed' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▼', `an abnormal run must stay open:\n${view}`)
+  // run-end completed: the run is STILL abnormal (member failed) — it must
+  // NOT collapse to the clean default.
+  folder.apply([
+    { type: 'tool-workflow/run-end', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', stopReason: 'completed' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▼', `run-end completed must not collapse an abnormal run:\n${view}`)
+  assert.ok(view.includes('Workflow audit [completed]'), `the durable status pill stays completed:\n${view}`)
+  assert.ok(view.includes('a — failed'), `the failed member stays visible:\n${view}`)
+})

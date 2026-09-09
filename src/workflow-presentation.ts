@@ -81,6 +81,36 @@ export function workflowAggregateStatus(members: readonly WorkflowMemberView[]):
   return 'completed'
 }
 
+/** The run's disclosure mode (Web WorkflowRunPanel `runDisclosureFacts`
+ * parity): the run is ABNORMAL when its own status OR any member is
+ * abnormal; RUNNING when its own status or any member is still running;
+ * CLEAN only when the run and every member completed normally. A completed
+ * run with a failed member (the script handled the child's `null` and
+ * returned successfully — an ordinary child failure never fails the run)
+ * is therefore abnormal, so the exception stays visible (PR2 goal:
+ * abnormal first). The durable `message.status` is untouched — the pill
+ * still reads `[completed]`. */
+export function workflowRunMode(
+  status: WorkflowRunStatus,
+  members: readonly WorkflowMemberView[],
+): 'clean' | 'running' | 'abnormal' {
+  const counts = workflowStatusCounts(members)
+  if (
+    status === 'failed'
+    || status === 'cancelled'
+    || status === 'interrupted'
+    || counts.failed > 0
+    || counts.cancelled > 0
+    || counts.interrupted > 0
+  ) {
+    return 'abnormal'
+  }
+  if (status === 'running' || counts.running > 0) {
+    return 'running'
+  }
+  return 'clean'
+}
+
 /** The adaptive phase presentations of one run's member rows, grouped by
  * exact phase identity and ordered by first appearance (durable arrival
  * order). A phase with `<= 5` members is `inline`; a larger phase is
