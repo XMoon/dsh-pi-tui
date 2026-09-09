@@ -29,12 +29,14 @@ export class Box implements Component, Focusable {
 	 * plain Box root never receives focused=true (no IME cursor).
 	 */
 	get focused(): boolean {
-		return this.focusedChild !== undefined && isFocusable(this.focusedChild) && this.focusedChild.focused;
+		const child = this.liveFocusedChild();
+		return child !== undefined && isFocusable(child) && child.focused;
 	}
 
 	set focused(value: boolean) {
-		if (this.focusedChild !== undefined && isFocusable(this.focusedChild)) {
-			this.focusedChild.focused = value;
+		const child = this.liveFocusedChild();
+		if (child !== undefined && isFocusable(child)) {
+			child.focused = value;
 		}
 	}
 
@@ -42,7 +44,7 @@ export class Box implements Component, Focusable {
 	 * overlay root must reach the interactive child the mouse press
 	 * focused. */
 	handleInput(data: string): void {
-		this.focusedChild?.handleInput?.(data);
+		this.liveFocusedChild()?.handleInput?.(data);
 	}
 
 	/** Transparent key-release capability (dsh-pi-tui divergence X051): a
@@ -50,7 +52,21 @@ export class Box implements Component, Focusable {
 	 * wantsKeyRelease, or the TUI filters Kitty key releases before they
 	 * reach the child. (Mirrors MouseRegion.) */
 	get wantsKeyRelease(): boolean | undefined {
-		return this.focusedChild?.wantsKeyRelease;
+		return this.liveFocusedChild()?.wantsKeyRelease;
+	}
+
+	/** The focused child is only valid while it is still a LIVE direct
+	 * child: a subclass/caller may replace `children` directly (the
+	 * public structural mutation contract), and keyboard input / the
+	 * focused flag / wantsKeyRelease must never reach a detached child.
+	 * The reference is dropped until a new mouse press names a new focus
+	 * owner — replacement never silently transfers focus to the new
+	 * child. (dsh-pi-tui divergence X051 hardening.) */
+	private liveFocusedChild(): Component | undefined {
+		const child = this.focusedChild;
+		if (child !== undefined && this.children.includes(child)) return child;
+		this.focusedChild = undefined;
+		return undefined;
 	}
 
 	// Cache for rendered output

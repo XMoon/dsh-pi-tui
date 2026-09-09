@@ -2860,3 +2860,120 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		assert.deepStrictEqual(received, ["\x1b[97;1:3u"], "the wantsKeyRelease child must receive the key release");
 		tui.stop();
 	});
+
+	it("drops a focused child replaced via direct children mutation in a Container (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const second = new Input();
+		const root = new Container();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press the Input: the Container forwards focus/input to it.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		// Direct structural replacement (the public children mutation
+		// contract): the old focused child is detached.
+		root.children = [second];
+		tui.requestRender();
+		await terminal.waitForRender();
+		// Keyboard input must NOT reach the detached child, and the
+		// replacement must NOT silently inherit focus.
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "", "the detached child must not receive keyboard input");
+		assert.strictEqual(second.getValue(), "", "the replacement must not implicitly receive keyboard input");
+		assert.strictEqual(second.focused, false, "the replacement must not implicitly receive focus");
+		// A fresh press names the new focus owner.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(second.getValue(), "x", "a fresh press must re-establish the focus owner");
+		tui.stop();
+	});
+
+	it("drops a focused child replaced via direct children mutation in a Box (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const second = new Input();
+		const root = new Box();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press the Input (the Box has default padding (1,1): the child
+		// renders at screen row 1, col 1 = SGR row 2, col 2).
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		// Direct structural replacement (the public children mutation
+		// contract): the old focused child is detached.
+		root.children = [second];
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "", "the detached child must not receive keyboard input");
+		assert.strictEqual(second.getValue(), "", "the replacement must not implicitly receive keyboard input");
+		assert.strictEqual(second.focused, false, "the replacement must not implicitly receive focus");
+		// A fresh press names the new focus owner.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(second.getValue(), "x", "a fresh press must re-establish the focus owner");
+		tui.stop();
+	});
+
+	it("does not leak wantsKeyRelease from a detached focused child (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const received: string[] = [];
+		const first = {
+			wantsKeyRelease: true,
+			render: () => ["first"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => (event.type === "press" ? { handled: true, focus: true } : undefined),
+			handleInput: (data: string) => {
+				received.push(data);
+			},
+		};
+		const second = {
+			render: () => ["second"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => (event.type === "press" ? { handled: true, focus: true } : undefined),
+			handleInput: (data: string) => {
+				received.push(data);
+			},
+		};
+		const root = new Container();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(root.wantsKeyRelease, true, "the pressed child's capability must forward");
+		// Direct replacement: the detached child's capability must not leak.
+		root.children = [second];
+		tui.requestRender();
+		await terminal.waitForRender();
+		assert.strictEqual(root.wantsKeyRelease, undefined, "a detached child's wantsKeyRelease must not leak");
+		tui.stop();
+	});
