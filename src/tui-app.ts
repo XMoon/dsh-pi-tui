@@ -283,14 +283,18 @@ function workflowMemberMark(status: WorkflowRunStatus): string {
  * advanceDisclosureState parity): the user's explicit choice wins forever
  * once set — EXCEPT across a NEW CYCLE: a clean phase (all members
  * completed) that gains a new running/abnormal member reopens (plan
- * §7.7), overriding a prior user close. `previousMode` is the edge
- * detector: running → running is an ordinary update (the user's close
- * persists), clean → running is a new cycle (reopen). */
+ * §7.7), overriding a prior user close. `previousMode` +
+ * `previousActivityCount` are the edge detectors (Web's
+ * `phaseStartedCycle`): running → running is an ordinary update (the
+ * user's close persists), clean → anything (or a clean phase whose
+ * member count changed) is a new cycle (reopen). */
 interface WorkflowPhaseDisclosureState {
   /** The user's explicit open/closed choice (undefined = fact-driven). */
   userOpen?: boolean
   /** The phase's mode at the last advance (edge detection). */
   previousMode: 'clean' | 'running' | 'abnormal'
+  /** The phase's member count at the last advance (edge detection). */
+  previousActivityCount: number
 }
 
 /** One Workflow run's disclosure state (PR2 plan §7). Keyed by the durable
@@ -7246,15 +7250,21 @@ export class TuiApp {
         : phase.counts.completed === phase.members.length ? 'clean' : 'running'
       let phaseState = state.phases.get(phase.key)
       if (phaseState === undefined) {
-        phaseState = { previousMode: phaseMode }
+        phaseState = { previousMode: phaseMode, previousActivityCount: phase.members.length }
         state.phases.set(phase.key, phaseState)
         continue
       }
       const previousPhaseMode = phaseState.previousMode
+      const previousActivityCount = phaseState.previousActivityCount
       phaseState.previousMode = phaseMode
-      if (previousPhaseMode === 'clean' && phaseMode !== 'clean') {
-        // NEW CYCLE (plan §7.7): a completed phase gained a new running or
-        // abnormal member — reopen the phase and mark the run for reopen.
+      phaseState.previousActivityCount = phase.members.length
+      // NEW CYCLE (Web `phaseStartedCycle` parity, plan §7.7): a clean
+      // phase gained a new member — either the mode left clean, or the
+      // member count changed while staying clean (a member that started
+      // and settled within one facts update). Reopen the phase and mark
+      // the run for reopen.
+      if (previousPhaseMode === 'clean'
+        && (phaseMode !== 'clean' || phase.members.length !== previousActivityCount)) {
         if (phaseState.userOpen === false) { phaseState.userOpen = undefined; changed = true }
         phaseStartedCycle = true
       } else if (previousPhaseMode !== 'abnormal' && phaseMode === 'abnormal') {
@@ -7264,9 +7274,11 @@ export class TuiApp {
       // running → running: ordinary update — the user's choice persists.
       // running → clean: status-driven close — the user's choice persists.
     }
-    if (phaseStartedCycle && state.userOpen === false) {
-      // The outer run reopens with the new cycle (plan §7.7): a user who
-      // folded the whole run must not keep the second batch hidden.
+    if (phaseStartedCycle && runMode !== 'clean' && state.userOpen === false) {
+      // The outer run reopens with the new cycle (Web parity, plan §7.7):
+      // a user who folded the whole run must not keep the second batch
+      // hidden. A clean run is never force-reopened (Web's
+      // `runFacts.mode !== 'clean'` guard).
       state.userOpen = undefined
       changed = true
     }
