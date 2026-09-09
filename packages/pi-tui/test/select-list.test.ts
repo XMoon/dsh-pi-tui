@@ -114,3 +114,61 @@ describe("SelectList", () => {
 		assert.equal(visibleIndexOf(rendered[0], "first"), visibleIndexOf(rendered[1], "second"));
 	});
 });
+
+describe("SelectList mouse parity (last-painted rows)", () => {
+	const mouse = (type: "press" | "click", y: number, width = 40, height = 5) => ({
+		type,
+		button: "left" as const,
+		x: 1,
+		y,
+		screenX: 1,
+		screenY: y,
+		width,
+		height,
+		shift: false,
+		alt: false,
+		ctrl: false,
+		...(type === "click" ? { clickCount: 1 } : {}),
+	});
+
+	it("hits the last-painted row, not the live visible range (no repaint)", () => {
+		const items = Array.from({ length: 12 }, (_, i) => ({ value: `item-${i}`, label: `Item ${i}` }));
+		const list = new SelectList(items, 5, testTheme);
+		const selected: string[] = [];
+		list.onSelectionChange = (item) => selected.push(item.value);
+		// Last paint: selectedIndex 0 → row 0 = item-0.
+		list.render(40);
+		// Live state moves the selection WITHOUT a repaint: the visible
+		// range now centers on item-6, but the user still sees item-0 on
+		// row 0. The press must resolve to the PAINTED item, never a
+		// re-derived live range.
+		list.setSelectedIndex(6);
+		const press = list.handleMouse(mouse("press", 0));
+		assert.strictEqual(press?.handled, true);
+		assert.strictEqual(list.getSelectedItem()?.value, "item-0", "the press must hit the last-painted row");
+		assert.deepStrictEqual(selected, ["item-0"]);
+	});
+
+	it("does not transfer a pressed item to whatever repainted into its row", () => {
+		const items = [
+			{ value: "a", label: "A" },
+			{ value: "b", label: "B" },
+			{ value: "c", label: "C" },
+		];
+		const list = new SelectList(items, 5, testTheme);
+		let selected: string | undefined;
+		list.onSelect = (item) => {
+			selected = item.value;
+		};
+		list.render(40); // row 0 = A
+		// Press A.
+		list.handleMouse(mouse("press", 0));
+		// The filter changes and repaints: row 0 is now B.
+		list.setFilter("b");
+		list.render(40);
+		// Release on the same physical cell: the synthesized click must
+		// NOT activate B — only the exact pressed identity may fire.
+		list.handleMouse(mouse("click", 0));
+		assert.strictEqual(selected, undefined, "the repainted row must not receive the pressed item's click");
+	});
+});

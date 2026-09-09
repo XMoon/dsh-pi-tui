@@ -90,6 +90,10 @@ describe("mouse-aware components", () => {
 			selected = item.value;
 		};
 
+		// The hit map is built by the LAST paint: render first, then
+		// press+click the painted row (a press that never painted has no
+		// geometry to hit).
+		list.render(40);
 		assert.strictEqual(list.handleMouse(mouse("press", 1, 2, 40, 3))?.handled, true);
 		assert.strictEqual(list.getSelectedItem()?.value, "c");
 		assert.strictEqual(list.handleMouse(mouse("click", 1, 2, 40, 3))?.handled, true);
@@ -146,7 +150,10 @@ describe("mouse-aware components", () => {
 			assert.strictEqual(selected, undefined);
 
 			list.handleMouse(mouse("press", 1, row));
-			list.render(80);
+			// No repaint between press and release: the click resolves
+			// against the SAME painted map, so the pressed row activates.
+			// (A repaint that moves the pressed item off the cell is
+			// covered by the X052 TUI click-synthesis regression.)
 			list.handleMouse(mouse("click", 1, row));
 			assert.strictEqual(selected, `item-${4 + row}`);
 			assert.deepStrictEqual(changes, ["item-6", `item-${4 + row}`]);
@@ -521,6 +528,46 @@ describe("nested gesture targets stay live (dsh-pi-tui divergence X018)", () => 
 		terminal.sendInput("\x1b[<0;2;2m");
 		await terminal.waitForRender();
 		assert.strictEqual(selected, "b", "the MouseRegion-wrapped SelectList click must fire onSelect");
+		tui.stop();
+	});
+});
+
+describe("SelectList last-painted gesture identity (dsh-pi-tui divergence X052)", () => {
+	it("does not transfer a pressed item to a repainted row through the TUI click synthesis", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		const list = new SelectList(
+			[
+				{ value: "a", label: "alpha" },
+				{ value: "b", label: "beta" },
+				{ value: "c", label: "gamma" },
+			],
+			5,
+			selectTheme,
+		);
+		let selected: string | undefined;
+		list.onSelect = (item) => {
+			selected = item.value;
+		};
+		const root = new Container();
+		root.addChild(list);
+		tui.start();
+		tui.showOverlay(root, { anchor: "top-left", width: 20 });
+		await terminal.waitForRender();
+
+		// Press row 0 (alpha): the TUI saves the SelectList as the press
+		// target and repaints (a press always requests a render).
+		terminal.sendInput("\x1b[<0;1;1M");
+		await terminal.waitForRender();
+		// The filter changes and repaints: row 0 is now beta.
+		list.setFilter("b");
+		tui.requestRender();
+		await terminal.waitForRender();
+		// Release on the same physical cell: the TUI synthesizes a click
+		// to the same component — beta must NOT be selected.
+		terminal.sendInput("\x1b[<0;1;1m");
+		await terminal.waitForRender();
+		assert.strictEqual(selected, undefined, "the repainted row must not receive the pressed item's click");
 		tui.stop();
 	});
 });

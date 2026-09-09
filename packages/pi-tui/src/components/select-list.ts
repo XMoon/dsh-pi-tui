@@ -41,7 +41,14 @@ export class SelectList implements Component {
 	private items: SelectItem[] = [];
 	private filteredItems: SelectItem[] = [];
 	private selectedIndex: number = 0;
-	private mousePressedIndex: number | undefined;
+	/** Physical row → item identity from the LAST render (mouse parity):
+	 * the mapping is produced by the FINAL paint, never re-derived from
+	 * the live selectedIndex/filteredItems — a press/click must hit the
+	 * row the user actually saw. */
+	private mouseRows: Array<SelectItem | undefined> = [];
+	/** The pressed item identity (mouse parity): a click may only
+	 * activate the exact identity that was pressed. */
+	private mousePressedItem: SelectItem | undefined;
 	private maxVisible: number = 5;
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
@@ -74,6 +81,8 @@ export class SelectList implements Component {
 
 	render(width: number): string[] {
 		const lines: string[] = [];
+		// The mouse mapping is rebuilt from THIS frame's final rows.
+		this.mouseRows = [];
 
 		// If no items match filter, show message
 		if (this.filteredItems.length === 0) {
@@ -93,14 +102,19 @@ export class SelectList implements Component {
 
 			const isSelected = i === this.selectedIndex;
 			const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined;
+			// The mouse mapping is built from the FINAL painted rows: the
+			// physical row → item identity pair is recorded here, exactly
+			// as the user sees it.
+			this.mouseRows.push(item);
 			lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth));
 		}
 
-		// Add scroll indicators if needed
+		// Add scroll indicators if needed (inert for mouse)
 		if (startIndex > 0 || endIndex < this.filteredItems.length) {
 			const scrollText = `  (${this.selectedIndex + 1}/${this.filteredItems.length})`;
 			// Truncate if too long for terminal
 			lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")));
+			this.mouseRows.push(undefined);
 		}
 
 		return lines;
@@ -117,26 +131,50 @@ export class SelectList implements Component {
 		}
 		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
-		const { startIndex, endIndex } = this.getVisibleRange();
-		const itemIndex = startIndex + event.y;
-		if (itemIndex < startIndex || itemIndex >= endIndex) return undefined;
+
+		// A click ends any gesture, and every left press starts a fresh
+		// one: release the pressed identity up front — a click on
+		// inert/removed/width-mismatched geometry, or a press that lands
+		// on a row that was not painted, must not leave a stale latch
+		// that a later synthesized click could match (a repaint may have
+		// moved an item onto the pressed cell). The local copy still
+		// guards the valid-row comparison below.
+		const pressedItem = this.mousePressedItem;
+		if (event.type === "click" || (event.type === "press" && event.button === "left")) {
+			this.mousePressedItem = undefined;
+		}
+
+		// The hit map is the FINAL painted geometry: a press/click must
+		// hit the row the user actually saw, never a re-derived range
+		// from the live selectedIndex/filteredItems.
+		const rowItem = this.mouseRows[event.y];
+		if (!rowItem) return undefined;
 
 		if (event.type === "press") {
-			this.mousePressedIndex = itemIndex;
-			if (this.selectedIndex !== itemIndex) {
-				this.selectedIndex = itemIndex;
+			// Resolve the CURRENT index by the painted item identity (a
+			// live filter/selection change between paint and press may
+			// have reordered the list WITHOUT a repaint). No match =>
+			// reject.
+			const currentIndex = this.filteredItems.indexOf(rowItem);
+			if (currentIndex === -1) return undefined;
+			this.mousePressedItem = rowItem;
+			if (this.selectedIndex !== currentIndex) {
+				this.selectedIndex = currentIndex;
 				this.notifySelectionChange();
 			}
 			return { handled: true, focus: true };
 		}
 		if (event.type === "click") {
-			const clickedIndex = this.mousePressedIndex ?? itemIndex;
-			this.mousePressedIndex = undefined;
-			const changed = this.selectedIndex !== clickedIndex;
-			this.selectedIndex = clickedIndex;
-			if (changed) this.notifySelectionChange();
-			const selectedItem = this.filteredItems[this.selectedIndex];
-			if (selectedItem) this.onSelect?.(selectedItem);
+			// Activate only the exact pressed identity (press A → repaint
+			// → release must not activate whatever moved into the row).
+			if (pressedItem !== rowItem) return undefined;
+			const currentIndex = this.filteredItems.indexOf(rowItem);
+			if (currentIndex === -1) return undefined;
+			if (this.selectedIndex !== currentIndex) {
+				this.selectedIndex = currentIndex;
+				this.notifySelectionChange();
+			}
+			this.onSelect?.(rowItem);
 			return { handled: true };
 		}
 		return undefined;
