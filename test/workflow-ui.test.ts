@@ -836,3 +836,32 @@ test('a run stays abnormal/open after run-end completed when a member failed (re
   assert.ok(view.includes('Workflow audit [completed]'), `the durable status pill stays completed:\n${view}`)
   assert.ok(view.includes('a — failed'), `the failed member stays visible:\n${view}`)
 })
+
+test('a clean phase whose member count changed reopens a user-closed run (Web phaseStartedCycle parity)', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-a' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+  ])
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages())
+  let view = await viewport(vt)
+  // The user folds the run while the phase is clean.
+  const runRow = rowOf(view, 'Workflow audit [running]')
+  await clickCell(vt, 10, runRow)
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▶', `the run must be user-closed:\n${view}`)
+  // B starts AND settles within one facts update: the phase stays clean
+  // but its member count changed — Web's phaseStartedCycle still fires
+  // (facts.activityCount !== previous.activityCount) and reopens the run.
+  folder.apply([
+    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 1, label: 'b', childId: 'session-b' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▼', `a clean phase with a changed member count must reopen the run:\n${view}`)
+})
