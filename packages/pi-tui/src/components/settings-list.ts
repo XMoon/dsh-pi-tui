@@ -271,9 +271,14 @@ export class SettingsList implements Component, Focusable {
 		this.addHintLine(lines, width);
 
 		// Keep the hint tail on degenerate tiny grants (mirrors SelectList):
-		// a head slice would cut the hint, the non-negotiable tail row.
+		// a head slice would cut the hint, the non-negotiable tail row. The
+		// mouse map must be shifted with the slice: the physical rows the
+		// user sees are the TAIL rows, so the hit entries move up by the
+		// number of dropped head rows.
 		if (Number.isFinite(this.maxRows) && lines.length > this.maxRows) {
-			return lines.slice(lines.length - this.maxRows);
+			const dropped = lines.length - this.maxRows;
+			this.mouseRows = this.mouseRows.slice(dropped);
+			return lines.slice(dropped);
 		}
 		return lines;
 	}
@@ -358,6 +363,12 @@ export class SettingsList implements Component, Focusable {
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		// A click ends any gesture: release the pressed identity up front —
+		// a click on inert/removed/width-mismatched geometry must not
+		// leave a stale latch that a later click could match. The local
+		// copy still guards the valid-row comparison below.
+		const pressedId = this.mousePressedId;
+		if (event.type === "click") this.mousePressedId = undefined;
 		if (this.submenuComponent) {
 			const result = this.submenuComponent.handleMouse?.(event);
 			return result ? { ...result, focus: true } : undefined;
@@ -403,8 +414,7 @@ export class SettingsList implements Component, Focusable {
 		if (event.type === "click") {
 			// Activate only the exact pressed identity (press A → repaint →
 			// release must not activate whatever moved into the row).
-			if (this.mousePressedId !== row.id) return undefined;
-			this.mousePressedId = undefined;
+			if (pressedId !== row.id) return undefined;
 			const currentIndex = displayItems.findIndex(item => item.id === row.id);
 			if (currentIndex === -1) return undefined;
 			this.selectedIndex = currentIndex;

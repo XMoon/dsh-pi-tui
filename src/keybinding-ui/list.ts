@@ -328,6 +328,12 @@ export class KeybindingEditorPanel implements Component, Focusable {
    * before they can reach the recorder, and this handler stays inert.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // A click ends any gesture: release the pressed identity up front —
+    // a click on inert/width-mismatched geometry must not leave a stale
+    // latch that a later click could match. The local copy still guards
+    // the valid-row comparison below.
+    const pressedId = this.mousePressedId
+    if (event.type === 'click') this.mousePressedId = undefined
     // The hit map is only valid for the last painted width: a resize
     // that has not been repainted must not dispatch against stale
     // geometry (last-painted geometry is authoritative).
@@ -378,12 +384,9 @@ export class KeybindingEditorPanel implements Component, Focusable {
       }
       // click: the same action as Enter, but only for the exact pressed
       // identity — a query/model change between press and release must
-      // not activate a different action.
-      if (this.mousePressedId !== hit.id) {
-        this.mousePressedId = undefined
-        return undefined
-      }
-      this.mousePressedId = undefined
+      // not activate a different action. The identity was released at
+      // handler entry; the local copy guards the comparison.
+      if (pressedId !== hit.id) return undefined
       const selectable = this.selectableEntries(this.displayEntries())
       const currentIndex = selectable.findIndex(entry => this.entryId(entry) === hit.id)
       if (currentIndex === -1) return undefined

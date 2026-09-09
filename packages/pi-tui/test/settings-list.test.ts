@@ -269,3 +269,54 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 		}
 	});
 });
+
+	it("keeps the mouse map in lockstep with the tail slice on a degenerate grant (Case D)", () => {
+		const rows = Array.from({ length: 6 }, (_, index) => ({
+			id: `setting-${index}`,
+			label: `setting ${index}`,
+			currentValue: "on",
+			values: ["on", "off"],
+		}));
+		const changes: Array<{ id: string; value: string }> = [];
+		const list = new SettingsList(rows, 10, testTheme, (id, value) => changes.push({ id, value }), () => {});
+		// A 3-row grant with 6 items: the final painted output is the
+		// scroll indicator + hint tail — the item rows are sliced away.
+		list.setMaxRows(3);
+		const rendered = list.render(80);
+		assert.ok(rendered.length <= 3, `the grant must hold (${rendered.length})`);
+		// The visible rows (indicator + hints) must be mouse-inert: a
+		// press+click on row 0 must NOT activate a removed item.
+		list.handleMouse({ type: "press", button: "left", x: 2, y: 0, screenX: 2, screenY: 0, width: 80, height: 3, shift: false, alt: false, ctrl: false });
+		list.handleMouse({ type: "click", button: "left", x: 2, y: 0, screenX: 2, screenY: 0, width: 80, height: 3, shift: false, alt: false, ctrl: false, clickCount: 1 });
+		assert.deepStrictEqual(changes, [], "the sliced-away item rows must not be clickable");
+	});
+
+	it("releases the pressed identity on click mismatch (no ghost accept without a fresh press)", () => {
+		const rows = [
+			{ id: "a", label: "A", currentValue: "on", values: ["on", "off"] },
+			{ id: "b", label: "B", currentValue: "on", values: ["on", "off"] },
+		];
+		const changes: Array<{ id: string; value: string }> = [];
+		const list = new SettingsList(rows, 10, testTheme, (id, value) => changes.push({ id, value }), () => {});
+		list.render(80);
+		// Press row 0 (item A).
+		list.handleMouse({ type: "press", button: "left", x: 2, y: 0, screenX: 2, screenY: 0, width: 80, height: 4, shift: false, alt: false, ctrl: false });
+		// The live items change WITHOUT a repaint: A is gone, B moves to
+		// row 0. The release click on row 0 mismatches (pressed A vs row B)
+		// and must RELEASE the pressed identity.
+		const state = list as unknown as { items: Array<{ id: string }>; mousePressedId: string | undefined };
+		state.items = [{ id: "b", label: "B", currentValue: "on", values: ["on", "off"] }];
+		list.handleMouse({ type: "click", button: "left", x: 2, y: 0, screenX: 2, screenY: 0, width: 80, height: 4, shift: false, alt: false, ctrl: false, clickCount: 1 });
+		assert.strictEqual(state.mousePressedId, undefined, "the pressed identity must be released on mismatch");
+		assert.deepStrictEqual(changes, [], "the mismatched click must not activate anything");
+		// A later click WITHOUT a fresh press must not activate (the
+		// identity was released). A returns to row 0: without the release
+		// the stale pressed A would match and activate.
+		state.items = [
+			{ id: "a", label: "A", currentValue: "on", values: ["on", "off"] },
+			{ id: "b", label: "B", currentValue: "on", values: ["on", "off"] },
+		];
+		list.render(80);
+		list.handleMouse({ type: "click", button: "left", x: 2, y: 0, screenX: 2, screenY: 0, width: 80, height: 4, shift: false, alt: false, ctrl: false, clickCount: 1 });
+		assert.deepStrictEqual(changes, [], "a click without a fresh press must not activate");
+	});

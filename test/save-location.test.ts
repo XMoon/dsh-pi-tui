@@ -708,3 +708,39 @@ test('alt-screen integration: a real SGR wheel reaches the prompt through the fr
     tui.stop()
   }
 })
+
+test('mouse parity: a click on an inert row releases the pressed identity (no stale accept)', async (t) => {
+  const deps = {
+    resolveDirectory: (input: string) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async (raw: string) =>
+      raw === './' ? [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }] : null,
+  }
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  const rendered = prompt.render(60)
+  const srcRow = rendered.findIndex(line => line.includes('src/'))
+  assert.ok(srcRow >= 0, `suggestion row missing:\n${rendered.join('\n')}`)
+  const press = (y: number) => ({
+    type: 'press' as const, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+  })
+  const click = (y: number) => ({
+    type: 'click' as const, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false, clickCount: 1,
+  })
+  prompt.handleMouse(press(srcRow))
+  const state = prompt as unknown as { mousePressedValue: string | undefined }
+  assert.strictEqual(state.mousePressedValue, 'src/', 'precondition — pressed identity latched')
+  // A click on an INERT row (the title) must release the pressed identity.
+  prompt.handleMouse(click(0))
+  assert.strictEqual(state.mousePressedValue, undefined, 'the pressed identity must be released on an inert click')
+  // A later click on the suggestion WITHOUT a fresh press must not accept.
+  prompt.handleMouse(click(srcRow))
+  assert.strictEqual(prompt.getValue(), './', 'a click without a fresh press must not accept')
+})

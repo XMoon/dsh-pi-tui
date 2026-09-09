@@ -254,6 +254,12 @@ export class SaveLocationPrompt implements Component, Focusable {
    * collision/hint rows stay inert.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // A click ends any gesture: release the pressed identity up front —
+    // a click on inert/width-mismatched geometry must not leave a stale
+    // latch that a later click could match. The local copy still guards
+    // the valid-row comparison below.
+    const pressedValue = this.mousePressedValue
+    if (event.type === 'click') this.mousePressedValue = undefined
     // The row map is only valid for the last painted width.
     if (event.width !== this.lastRenderWidth) return undefined
     // Collision confirmation is a modal state (y/Enter replaces, n/Esc
@@ -300,11 +306,11 @@ export class SaveLocationPrompt implements Component, Focusable {
       }
       // click = Tab accept, but only the exact pressed identity (press A
       // → refresh → release must not accept whatever moved into the row).
-      if (this.mousePressedValue !== suggestion.value) {
-        this.mousePressedValue = undefined
+      if (pressedValue !== suggestion.value) {
+        // A mismatch (or a click without a fresh press) is rejected; the
+        // identity was already released at handler entry.
         return undefined
       }
-      this.mousePressedValue = undefined
       const currentIndex = this.suggestions.findIndex(item => item.value === suggestion.value)
       if (currentIndex === -1) return undefined
       this.suggestionCursor = currentIndex

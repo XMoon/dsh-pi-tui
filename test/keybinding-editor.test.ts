@@ -1003,8 +1003,44 @@ test('action editor: an async model replacement cannot transfer a click to anoth
     editor.handleMouse(mouse('press', 10, yRow, 88, 30))
     editor.handleMouse(mouse('click', 10, yRow, 88, 30))
     assert.ok((editor as unknown as { recorder: unknown }).recorder !== undefined, 'the painted binding must start the recorder')
+    // The stale-latch release: the OLD binding returns and repaints; a
+    // click WITHOUT a fresh press must not start a recorder (the pressed
+    // identity was released on the mismatch). Esc cancels the recorder
+    // through the real onCancel path (exactly-once lifecycle).
+    editor.handleInput('\x1b')
+    assert.strictEqual((editor as unknown as { recorder: unknown }).recorder, undefined, 'Esc must cancel the recorder')
+    ;(editor as unknown as { row: unknown }).row = row
+    const lines3 = editor.render(88).map(plain)
+    const tRow = lines3.findIndex(line => line.includes('Ctrl+T'))
+    assert.ok(tRow >= 0, `restored binding row missing:\n${lines3.join('\n')}`)
+    editor.handleMouse(mouse('click', 10, tRow, 88, 30))
+    assert.strictEqual((editor as unknown as { recorder: unknown }).recorder, undefined, 'a click without a fresh press must not start a recorder')
   } finally {
     editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding list: a click on an inert row releases the pressed identity (no stale activation)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    const rendered = panel.render(88)
+    const row = rendered.findIndex(line => line.includes('Submit draft'))
+    assert.ok(row >= 0, `action row missing:\n${rendered.join('\n')}`)
+    panel.handleMouse(mouse('press', 10, row, 88, 30))
+    // A click on an INERT row (the header) must release the pressed
+    // identity.
+    const headerRow = rendered.findIndex(line => line.includes('Keyboard shortcuts'))
+    assert.ok(headerRow >= 0)
+    panel.handleMouse(mouse('click', 10, headerRow, 88, 30))
+    const state = panel as unknown as { mousePressedId: string | undefined }
+    assert.strictEqual(state.mousePressedId, undefined, 'the pressed identity must be released on an inert click')
+    // A later click on the action row WITHOUT a fresh press must not
+    // activate it.
+    panel.handleMouse(mouse('click', 10, row, 88, 30))
+    const opened = panel.render(88).map(plain)
+    assert.ok(!opened.some(line => line.includes('Record shortcut')), 'a click without a fresh press must not open the recorder')
+  } finally {
     manager.dispose()
   }
 })

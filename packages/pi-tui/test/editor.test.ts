@@ -5201,4 +5201,93 @@ describe("Editor autocomplete painted-list identity (mouse parity)", () => {
 		editor.handleMouse(mouse("click", row));
 		assert.strictEqual(submitted, "", "the release must not activate the replacement list");
 	});
+
+	it("rewrites the autocomplete dispatch target to the mounted editor (X018 liveness)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/help", label: "/help" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		editor.handleInput("/");
+		editor.handleInput("h");
+		editor.handleInput("e");
+		editor.handleInput("\t");
+		await flushAutocomplete();
+		const rendered = editor.render(80);
+		const row = rendered.findIndex((line) => line.includes("/help"));
+		assert.ok(row >= 0, `suggestion row missing:\n${rendered.join("\n")}`);
+		const result = editor.handleMouse({
+			type: "press",
+			button: "left",
+			x: 2,
+			y: row,
+			screenX: 2,
+			screenY: row,
+			width: 80,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.ok(result?.handled, "the autocomplete press must be handled");
+		// The dispatch target must be the MOUNTED editor (the private
+		// SelectList is not in the TUI tree — X018 isMouseTargetLive would
+		// clear the gesture on release).
+		assert.ok(result?.target, "the result must carry a dispatch target");
+		assert.strictEqual(result!.target!.component, editor, "the gesture target must be the mounted editor");
+		if (result?.focus) {
+			assert.strictEqual(result.focusTarget, editor, "the focus target must be the mounted editor");
+		}
+	});
+
+	it("releases the pressed list identity on mismatch (no stale submit without a fresh press)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/old", label: "/old" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		const row = await openAutocomplete(editor, "/old");
+		// Press on the painted /old row.
+		editor.handleMouse(mouse("press", row));
+		// The list is replaced WITHOUT a repaint; the release click on the
+		// stale row is fenced and must RELEASE the pressed identity.
+		const createList = (editor as unknown as {
+			createAutocompleteList(prefix: string, items: Array<{ value: string; label: string }>): unknown;
+		}).createAutocompleteList;
+		const newList = createList.call(editor, "/he", [{ value: "/new", label: "/new" }]);
+		(editor as unknown as { autocompleteList: unknown }).autocompleteList = newList;
+		editor.handleMouse(mouse("click", row));
+		assert.strictEqual(submitted, "", "the fenced click must not submit");
+		// The OLD list returns and repaints: a click WITHOUT a fresh press
+		// must not submit (the pressed identity was released).
+		const oldList = createList.call(editor, "/he", [{ value: "/old", label: "/old" }]);
+		(editor as unknown as { autocompleteList: unknown }).autocompleteList = oldList;
+		editor.render(80);
+		editor.handleMouse(mouse("click", row));
+		assert.strictEqual(submitted, "", "a click without a fresh press must not submit");
+	});
 });

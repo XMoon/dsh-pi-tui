@@ -8,6 +8,7 @@ import {
 	CURSOR_MARKER,
 	type Focusable,
 	type TUI,
+	type TuiMouseDispatchResult,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "../tui.ts";
@@ -733,8 +734,14 @@ export class Editor implements Component, Focusable {
 		return result;
 	}
 
-	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
 		const autocompleteStartRow = this.renderedVisibleLineCount + 2;
+		// Every press starts a fresh gesture: clear any latched pressed
+		// list first (a rejected/fenced press must not leave an old list
+		// that a later click could match).
+		if (event.type === "press") {
+			this.mousePressedAutocompleteList = undefined;
+		}
 		if (
 			this.autocompleteState &&
 			this.autocompleteList &&
@@ -752,8 +759,11 @@ export class Editor implements Component, Focusable {
 			if (event.type === "click") {
 				// A click may only act on the exact list instance that was
 				// pressed (press A → repaint B → release must not activate
-				// B).
-				if (this.mousePressedAutocompleteList !== this.autocompleteList) return undefined;
+				// B). A mismatch releases the pressed identity.
+				if (this.mousePressedAutocompleteList !== this.autocompleteList) {
+					this.mousePressedAutocompleteList = undefined;
+					return undefined;
+				}
 				this.mousePressedAutocompleteList = undefined;
 			}
 			const maxPadding = Math.max(0, Math.floor((event.width - 1) / 2));
@@ -766,7 +776,28 @@ export class Editor implements Component, Focusable {
 				width: contentWidth,
 				height: this.renderedAutocompleteHeight,
 			});
-			return result ? { ...result, focus: true } : undefined;
+			if (!result) return undefined;
+			// The dispatch target/focus are rewritten to THIS editor: the
+			// private SelectList is not mounted in the TUI tree, so X018
+			// gesture liveness (isMouseTargetLive) would clear the gesture
+			// on release and the synthetic click would never reach the
+			// list. (Mirrors the Search/X049 wrapper semantics.)
+			return {
+				...result,
+				...(result.focus ? { focusTarget: this } : {}),
+				target: {
+					component: this,
+					originX: event.screenX - event.x,
+					originY: event.screenY - event.y,
+					width: event.width,
+					height: event.height,
+				},
+			};
+		}
+		// A click that fell outside the painted autocomplete region (or a
+		// fenced list) must not leave a latched pressed identity either.
+		if (event.type === "click") {
+			this.mousePressedAutocompleteList = undefined;
 		}
 
 		// Leave press/drag/release unhandled so the renderer's screen-level text

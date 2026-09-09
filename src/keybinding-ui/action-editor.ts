@@ -359,6 +359,12 @@ export class ActionEditorPanel implements Component {
    * handler stays inert.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // A click ends any gesture: release the pressed identity up front —
+    // a click on inert/width-mismatched/pending geometry must not leave
+    // a stale latch that a later click could match. The local copy still
+    // guards the valid-row comparison below.
+    const pressedKey = this.mousePressedKey
+    if (event.type === 'click') this.mousePressedKey = undefined
     // The hit map is only valid for the last painted width: a resize
     // that has not been repainted must not dispatch against stale
     // geometry (last-painted geometry is authoritative).
@@ -409,8 +415,11 @@ export class ActionEditorPanel implements Component {
     // click: the same action as Enter, but only for the exact pressed
     // identity (press A → model replacement → release must not act on
     // whatever moved into the row).
-    if (this.mousePressedKey !== hit.key) return undefined
-    this.mousePressedKey = undefined
+    if (pressedKey !== hit.key) {
+      // A mismatch (or a click without a fresh press) is rejected; the
+      // identity was already released at handler entry.
+      return undefined
+    }
     if (this.mode === 'choose-binding') {
       this.handleBindingChoice(hit.key === 'choice:direct' ? 'd' : 'l')
       return { handled: true }
