@@ -44,7 +44,7 @@ const TUI_OWNED = [
   'copy', 'exit', 'export', 'fork', 'help', 'kill', 'login', 'logout',
   'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
-  'title', 'yolo',
+  'title', 'transcript', 'yolo',
 ]
 
 test('LOCAL_COMMANDS covers every TUI-owned command and nothing else', () => {
@@ -158,7 +158,6 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),

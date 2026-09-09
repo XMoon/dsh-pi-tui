@@ -35,6 +35,9 @@
   "rewind.ts": [
     "import:dsh-session"
   ],
+  "session-artifact-filename.ts": [
+    "import:dsh-session"
+  ],
   "runtime/direct/catalog-direct.ts": [
     "agentDefaultModel",
     "agentPresets",

@@ -90,6 +90,11 @@ import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { toolPresenterFrom, type ToolDefinitionLike } from './present.ts'
 import { childOwnEvents, textOf, TranscriptFolder, type TranscriptSearchMatch } from './transcript.ts'
 import type { TranscriptMessage, TranscriptWindow } from './transcript.ts'
+import { renderTranscriptMarkdown } from './transcript.ts'
+import { sessionArtifactFilename } from './session-artifact-filename.ts'
+import { isDirectoryPath, resolveClientDirectory, streamToFile, writeTextAtomically } from './client-artifact-save.ts'
+import { completeDirectory } from './file-completion/directory-completion.ts'
+import { LocalFileSource } from './file-completion/local-file-source.ts'
 import { TranscriptWindowController } from './transcript-window.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
@@ -190,6 +195,7 @@ import { DirectSessionLifecycle } from './runtime/direct/session-lifecycle-direc
 import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
 import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from './runtime/direct/config-direct.ts'
+import { DirectSessionArchive } from './runtime/direct/session-archive-direct.ts'
 import { serializeTuiSettingsMutation } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
 import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-direct.ts'
@@ -303,7 +309,7 @@ export const LOCAL_COMMANDS = new Set([
   'copy', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'attach', 'image', 'keybindings', 'kill', 'login', 'logout',
   'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
-  'title', 'yolo',
+  'title', 'transcript', 'yolo',
   // `/statusline` — the approved alias of `/footer` (see its registration
   // comment: the near-synonym rule stays, this pairing is an explicit
   // alias, and `/status` keeps priority matching).
@@ -2071,6 +2077,7 @@ export function apply(ctx: Context, config: Config): void {
       ),
       new DirectConfigPort(ctx, tuiSettings as unknown as import('./runtime/config-port.ts').TuiSettingsConfig | undefined, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
       new DirectHostFilePort((sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
+      new DirectSessionArchive(ctx),
     )
 
     // Whole-document settings writes must not copy a project-layer
@@ -4173,6 +4180,102 @@ export function apply(ctx: Context, config: Config): void {
         return provider === undefined || model === undefined ? undefined : { provider, model }
       },
     }
+    // ── Pre-Stage-D export convergence: the post-command-success artifact
+    // save workflows. The save NEVER starts inside the command handler —
+    // it starts here, after `commands.execute()` resolved (command/done
+    // durable), from the CAPTURED originating Agent/Session identity (never
+    // a later `liveAgent` read). The Client-local Save Location prompt, the
+    // fixed filename, the collision handling and the local sink are shared
+    // by /export (archive) and /transcript (Markdown).
+    const artifactInFlight = new Set<string>()
+    /** A user-facing artifact failure with a STABLE message (never a raw
+     * Host path from an upstream exception). */
+    class ArtifactSaveFailure extends Error {
+      constructor(message: string) {
+        super(message)
+        this.name = 'ArtifactSaveFailure'
+      }
+    }
+    /** The Client-local directory completion source (the shared engine). */
+    const localFileSource = new LocalFileSource()
+    /** One artifact save workflow outcome. */
+    type ArtifactSaveOutcome =
+      | { readonly kind: 'saved'; readonly path: string }
+      | { readonly kind: 'cancelled' }
+    const saveArtifact = async (
+      name: 'export' | 'transcript',
+      agent: Agent,
+    ): Promise<ArtifactSaveOutcome> => {
+      const sessionId = agent.session.id
+      const filename = sessionArtifactFilename(sessionId, name === 'export' ? 'archive' : 'transcript')
+      const result = await app.askSaveLocation({
+        title: name === 'export' ? 'Save session archive' : 'Save readable transcript',
+        filename,
+        initialDirectory: './',
+      }, {
+        // Save Location is CLIENT-local filesystem UI: resolution, validation
+        // and completion all run against the Client process cwd — never the
+        // Host/session cwd, and never a Host call.
+        resolveDirectory: (input) => resolveClientDirectory(input, cwd),
+        isDirectory: (path) => isDirectoryPath(path),
+        targetExists: (directory, filename) => {
+          try {
+            return existsSync(join(directory, filename))
+          } catch {
+            return false
+          }
+        },
+        complete: (raw, completionSignal) => completeDirectory(raw, cwd, localFileSource, completionSignal),
+      }, signal)
+      if (result.kind === 'cancelled') return { kind: 'cancelled' }
+      const target = join(result.directory, filename)
+      if (name === 'export') {
+        const opened = await backend.sessionArchive.open(sessionId, signal)
+        if (opened.kind === 'unavailable') throw new ArtifactSaveFailure('Session archive export is unavailable.')
+        if (opened.kind === 'none') throw new ArtifactSaveFailure('Session was not found.')
+        const path = await streamToFile(target, opened.artifact.stream, signal)
+        return { kind: 'saved', path }
+      }
+      // /transcript: render from the CAPTURED originating Session after the
+      // command lifecycle settled — never `liveAgent` at delayed settle time.
+      const markdown = renderTranscriptMarkdown(agent.session)
+      const path = await writeTextAtomically(target, markdown, signal)
+      return { kind: 'saved', path }
+    }
+    const startArtifactSave = (name: 'export' | 'transcript', agent: Agent): void => {
+      const sessionId = agent.session.id
+      const key = `${name}:${sessionId}`
+      // A narrow Client-local in-flight key: two simultaneous writes for the
+      // same logical artifact/session must never race the fixed filename.
+      if (artifactInFlight.has(key)) {
+        app.notify('this artifact is already being saved', 'error')
+        return
+      }
+      artifactInFlight.add(key)
+      runOwned(`artifact save: ${name}`, () => saveArtifact(name, agent).finally(() => {
+        artifactInFlight.delete(key)
+      }), {
+        diag,
+        sessionId: () => sessionId,
+        isCancellation: () => signal.aborted,
+        onResult: (outcome) => {
+          if (outcome.kind === 'saved') app.notify(`saved to ${outcome.path}`, 'info')
+        },
+        onError: (error) => {
+          // The detailed diagnostic (including any Host path inside an
+          // upstream exception) stays in the runOwned diag path; the user
+          // sees a stable artifact-level message.
+          const message = error instanceof ArtifactSaveFailure
+            ? error.message
+            : (name === 'export' ? 'session archive export failed' : 'transcript export failed')
+          app.notify(message, 'error')
+        },
+        onCancel: () => {
+          // A cancelled save (surface dispose / runner abort) needs no
+          // user notice; the temp cleanup is owned by the sink.
+        },
+      })
+    }
     /** The session-backed dispatch: create the session lazily (the first
      * user input is the deferred trigger), then execute a registered slash
      * command or follow up. */
@@ -4429,6 +4532,19 @@ export function apply(ctx: Context, config: Config): void {
                 // The command COMMITTED (no image fallback): release the
                 // handoff pin.
                 fallbackPin()
+                // Pre-Stage-D export convergence: a SUCCESSFUL /export or
+                // /transcript starts the Client-local save workflow ONLY
+                // after the command lifecycle settled (command/done
+                // durable) — never inside the handler. The originating
+                // Agent/Session identity is the CAPTURED `agent` from the
+                // same dispatch that executed the command, so a later
+                // session switch can never redirect the artifact.
+                if (execution.result.kind === 'success') {
+                  const commandName = parsedAtSubmit?.name
+                  if (commandName === 'export' || commandName === 'transcript') {
+                    startArtifactSave(commandName, agent)
+                  }
+                }
               }
             },
             onError: (error) => {
