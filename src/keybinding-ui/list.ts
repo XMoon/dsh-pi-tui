@@ -110,7 +110,9 @@ export class KeybindingEditorPanel implements Component {
   /** The shared Input is the ONLY query source of truth (left/right/Home/
    * End/Ctrl+A/E/B/F/delete/kill/undo all work here — the old hand-rolled
    * `query += chunk` string editing could only append and Backspace). */
-  private readonly searchInput = new Input()
+  // Empty prompt: the 'Search: ' label is rendered OUTSIDE the Input,
+  // so a hidden '> ' would offset mouse click positioning by its width.
+  private readonly searchInput = new Input({ prompt: '' })
   /** Read-only query view (the render + filtering read this; the Input
    * alone mutates it). */
   private get query(): string {
@@ -231,12 +233,14 @@ export class KeybindingEditorPanel implements Component {
   private searchRow(width: number): string {
     const label = 'Search: '
     const labelWidth = visibleWidth(label)
+    // The Input has an EMPTY prompt: its render is the value (and the
+    // fake cursor) directly, so rendered geometry, mouse geometry and
+    // the Input's own geometry all agree.
     const inputLines = this.searchInput.render(Math.max(1, width - labelWidth))
     const inputLine = inputLines[0] ?? ''
-    const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
     const content = this.query === ''
       ? `${color.text(label)}${color.textDim('type to filter')}`
-      : `${color.text(label)}${color.text(stripped)}`
+      : `${color.text(label)}${color.text(inputLine)}`
     return truncateToWidth(content, Math.max(1, width), '…')
   }
 

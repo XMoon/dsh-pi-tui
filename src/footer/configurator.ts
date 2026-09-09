@@ -424,7 +424,13 @@ export class FooterConfiguratorPanel implements Component {
     // keyboard input.
     if (this.model.state().saving) return undefined
     if (event.type === 'press') {
-      if (hit.kind === 'select') this.moveCursorTo(hit.target)
+      if (hit.kind === 'select') {
+        // In row-move mode the keyboard ↑/↓ REORDER the active item; a
+        // mouse click must not implicitly reorder (mouse-plan boundary:
+        // "row-move: click row selects it only"). Item rows are
+        // mouse-inert in that mode.
+        if (this.model.state().mode !== 'row-move') this.moveCursorTo(hit.target)
+      }
       return { handled: true, focus: true }
     }
     // click: the same operations as Enter.
@@ -433,7 +439,10 @@ export class FooterConfiguratorPanel implements Component {
     } else if (hit.kind === 'exit') {
       this.runExitChoice(hit.choice)
     } else if (hit.kind === 'select') {
-      this.model.activate()
+      // Same boundary: a click in row-move mode must not both reorder
+      // (via the press above) and exit the mode (via activate) — the
+      // item rows are inert, and Done stays a keyboard action.
+      if (this.model.state().mode !== 'row-move') this.model.activate()
     }
     return { handled: true }
   }

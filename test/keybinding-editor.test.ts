@@ -729,15 +729,22 @@ test('keybinding list: search Input click repositions the query cursor (mouse pa
   try {
     panel.render(88)
     panel.handleInput('ab')
-    panel.render(88)
-    // The search row is "Search: " (8 cols) + the Input render (prompt
-    // stripped): the value starts at row x=10, so value column 1 (between
-    // a and b) is at x=11.
-    const result = panel.handleMouse(mouse('press', 11, 2, 88, 30))
+    let rendered = panel.render(88).map(plain)
+    // The search row is "Search: " (8 cols) + the query directly (the
+    // Input has an EMPTY prompt): rendered geometry == mouse geometry ==
+    // the Input's own geometry. Locate the visible column of 'a' and
+    // click ONE column AFTER it (between a and b).
+    const searchRow = rendered.findIndex(line => line.startsWith('Search:'))
+    assert.ok(searchRow >= 0, `search row missing:\n${rendered.join('\n')}`)
+    // Locate the QUERY text (the first 'a' is inside the 'Search' label).
+    const abCol = rendered[searchRow]!.indexOf('ab')
+    assert.ok(abCol >= 0, 'query text missing in the search row')
+    // Click one column after 'a' (between a and b).
+    const result = panel.handleMouse(mouse('press', abCol + 1, searchRow, 88, 30))
     assert.ok(result?.handled, 'press on the search row must be handled')
     panel.handleInput('X')
-    const rendered = panel.render(88).map(plain)
-    assert.ok(rendered.some(line => line.includes('aXb')), 'typing after the click must insert at the clicked query column')
+    rendered = panel.render(88).map(plain)
+    assert.ok(rendered.some(line => line.includes('aXb')), `typing after the click must insert at the clicked query column:\n${rendered.join('\n')}`)
   } finally {
     manager.dispose()
   }

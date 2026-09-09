@@ -1673,3 +1673,32 @@ test('configurator: a save in flight freezes mouse mutations (mouse parity)', as
   await vt.waitForRender()
   app.stop()
 })
+
+test('row-move mode: a mouse click cannot reorder items or exit the mode (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1
+  await vt.waitForRender()
+  vt.sendInput('m') // → Move Mode
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  assert.ok(viewport.join('\n').includes('[MOVE]'), `the move banner must show:\n${viewport.join('\n')}`)
+  const before = model.preview().rows[0]!.left.map(row => row.id)
+  // Click a NON-active item row (the second item): a click must NOT
+  // implicitly reorder (the keyboard ↑/↓ in Move Mode reorder; the
+  // mouse-plan boundary says clicks select only) and must NOT exit the
+  // mode (Enter/Esc are the Done actions).
+  const itemRow = viewport.findIndex(line => line.includes('Permission preset'))
+  assert.ok(itemRow >= 0, `item row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[itemRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'frame left border missing')
+  mouseClick(vt, itemRow, leftBorder)
+  await vt.waitForRender()
+  const after = model.preview().rows[0]!.left.map(row => row.id)
+  assert.deepEqual(after, before, 'the click must not reorder items in Move Mode')
+  assert.equal(model.state().mode, 'row-move', 'the click must not exit Move Mode')
+  app.stop()
+})
