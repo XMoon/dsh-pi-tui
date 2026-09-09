@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scalable Workflow UI.** Workflow cards now own a two-level Run/Phase
+  disclosure: small phases (≤5 agents) list every member inline in the
+  transcript, large phases show aggregate counts + a capped abnormal preview
+  (max 3) + a `View N agents` entry, so a 100+ agent run never grows the
+  transcript linearly; a completed run collapses by default but keeps its
+  aggregate summary (e.g. `126 agents · completed`). `cancelled`/`interrupted`
+  use the warning visual category (no longer fused into `failed` error), and
+  a missing / explicit-empty phase reads as `Unassigned` / `Empty`. A running
+  direct child opens the existing read-only Subagent Viewer from the card;
+  `View N agents` opens the Task Viewer filtered to the exact Workflow
+  dataset (the global task list is restored on close). Search now covers
+  phase/member labels and statuses — a member hidden inside a large phase
+  still hits its card.
 - **Workflow lifecycle/model parity with DSH alpha.2.** Workflow runs now fold
   into their own transcript semantic model instead of a generic tool card: run
   and member statuses keep the full `running/completed/failed/cancelled/

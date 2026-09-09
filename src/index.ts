@@ -138,12 +138,12 @@ import { Text } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import {
-  buildTaskRows, isActiveJobStatus, isSubagentRowInterruptible, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessHint, viewerAccessOf, isViewerAccessInteractive,
+  buildTaskRows, isActiveJobStatus, isSubagentRowInterruptible, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessHint, viewerAccessOf, isViewerAccessInteractive, workflowMemberViewerTarget,
   type TaskBrowserRow, type ViewerAccess,
 } from './tasks-browser.ts'
 import type { TaskBrowserViewState, TaskPanelItem } from './task-panel.ts'
-import { TaskBrowserRuntime } from './task-browser-runtime.ts'
-import type { TaskBrowserHandle } from './tui-app.ts'
+import { TaskBrowserRuntime, type TaskBrowserDatasetScope } from './task-browser-runtime.ts'
+import type { TaskBrowserHandle, WorkflowAction } from './tui-app.ts'
 import { registerTuiCommands, type DefaultIntentRecord, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
@@ -3732,6 +3732,9 @@ export function apply(ctx: Context, config: Config): void {
       activeTaskBrowser?.close()
       activeTaskBrowser = undefined
       taskRuntime?.reset()
+      // The dataset scope is session-scoped too: a switched-in session
+      // must never inherit a Workflow-scoped browser (PR2 plan §10.8).
+      taskBrowserScope = { kind: 'all' }
       app.setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
       app.setTasks([])
       app.setAgents([])
@@ -5862,6 +5865,10 @@ export function apply(ctx: Context, config: Config): void {
       unstableInputsLive: () => extensionService?._unstableInputsLive() ?? false,
       unstableInputsRevision: () => extensionService?._unstableInputsRevision() ?? 0,
       unstableFailSafeRelease: () => extensionService?._unstableEmergencyRelease(),
+      // PR2: the semantic Workflow card actions (member open / scoped
+      // agent browse). The handler is declared below (it needs the task
+      // browser + viewer openers); the closure only runs on a user click.
+      onWorkflowAction: (action) => handleWorkflowAction(action),
     })
     // M3: the user-orchestrable keybinding manager (the app built it with
     // the builtin defaults). Apply safe mode, the persisted user
@@ -6016,8 +6023,20 @@ export function apply(ctx: Context, config: Config): void {
     // the merged list + search is the single command-side entry, with
     // row-level `S` = confirmed Stop on capable rows (the old /subagents
     // SettingsList submenu is gone).
-    const openTasksBrowser = (viewMode: 'quick' | 'full' = 'full', restoreState?: TaskBrowserViewState): void => {
+    const openTasksBrowser = (
+      viewMode: 'quick' | 'full' = 'full',
+      restoreState?: TaskBrowserViewState,
+      scope?: TaskBrowserDatasetScope,
+      header?: string,
+    ): void => {
       if (liveAgent === undefined) return
+      // PR2 plan §10.5/§10.8: an EXPLICIT scope (a Workflow phase/run
+      // dataset) becomes the browser's dataset scope; a transition
+      // (Quick→Full / Full→Quick) without one keeps the current scope; a
+      // fresh ordinary open after a close always starts from `all` (the
+      // close paths reset it). The scope applies at EVERY runtime commit.
+      if (scope !== undefined) taskBrowserScope = scope
+      taskRuntime?.setScope(taskBrowserScope)
       // The destructive-intent fence is captured at OPEN time: a Stop
       // confirmed later belongs to THIS surface's session. Comparing the
       // generation/session AT dispatch against values captured AT dispatch
@@ -6141,11 +6160,14 @@ export function apply(ctx: Context, config: Config): void {
         taskPanelItems(taskBrowserRows),
         // Selection closes the overlay (the app closes it before invoking the
         // callback): drop the active-handle reference so a later runtime
-        // refresh cannot repaint a closed browser.
-        (value) => { activeTaskBrowser = undefined; selectRow(value) },
+        // refresh cannot repaint a closed browser. The dataset scope resets
+        // with the close (PR2 plan §10.8 — the next ordinary Task Center
+        // must see the global dataset).
+        (value) => { activeTaskBrowser = undefined; resetTaskBrowserScope(); selectRow(value) },
         () => {
           const current = activeTaskBrowser?.getViewState?.()
           activeTaskBrowser = undefined
+          resetTaskBrowserScope()
           if (viewMode === 'full' && restoreState !== undefined) {
             // Esc from a promoted full view returns to Quick with the latest
             // shared context, not the state from the promotion moment.
@@ -6154,7 +6176,7 @@ export function apply(ctx: Context, config: Config): void {
           }
         },
         {
-          header: 'Tasks',
+          header: header ?? 'Tasks',
           enableSearch: true,
           mode: viewMode,
           openedFrom: viewMode === 'full' && restoreState !== undefined ? 'quick' : 'command',
@@ -6217,6 +6239,68 @@ export function apply(ctx: Context, config: Config): void {
           diag,
           sessionId: () => liveAgent?.session.id,
         })
+      }
+    }
+
+    /** Reset the task-browser dataset scope to the global dataset (PR2
+     * plan §10.8): every close path (Esc, row selection) clears the scope
+     * so the next ordinary `/tasks` / ↓ Task Center sees `all` again. */
+    const resetTaskBrowserScope = (): void => {
+      taskBrowserScope = { kind: 'all' }
+      taskRuntime?.setScope({ kind: 'all' })
+    }
+
+    /** The Workflow card action sink (PR2 plan §9/§10/§14.5): the TUI
+     * emits semantic intents; THIS handler resolves them against the real
+     * Task Center / Subagent catalog and opens the existing surfaces —
+     * never a Workflow-specific viewer or browser. */
+    const handleWorkflowAction = (action: WorkflowAction): void => {
+      if (liveAgent === undefined) return
+      switch (action.kind) {
+        case 'open-member': {
+          // Direct member navigation (plan §9.2): the SINGLE authority
+          // resolver checks the catalog facts (row exists, subagent,
+          // direct child of the current session, driver running) — the
+          // model-side `member.status === running` was already verified by
+          // the app at click time. A missing catalog row (agent-start
+          // before the listing) or any failed condition is a no-op — the
+          // row simply does not open (plan §9.5).
+          const row = taskBrowserRows.find(candidate =>
+            candidate.kind === 'subagent' && candidate.childId === action.childId)
+          const target = workflowMemberViewerTarget(
+            { status: 'running', childId: action.childId },
+            row,
+            liveAgent.session.id,
+          )
+          if (target === undefined) return
+          runOwned('workflow member view', () => enterView(
+            target.childSessionId as SessionId,
+            target.label,
+            target.mode,
+            target.parentSessionId as SessionId,
+            target.activity,
+            target.depth,
+          ), {
+            diag,
+            sessionId: () => liveAgent?.session.id,
+            onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
+          })
+          return
+        }
+        case 'open-phase-agents':
+        case 'open-run-agents': {
+          // Scoped Task Viewer (plan §10): the EXACT workflow child-id set
+          // becomes the browser's dataset scope; the existing Task Center
+          // provides search/filter/browse and the existing cold-view
+          // semantics for terminal children (plan §10.7).
+          if (taskRuntime === undefined) return
+          const count = action.childIds.length
+          const header = action.kind === 'open-phase-agents'
+            ? `Workflow · ${action.name} · ${action.phaseLabel} · ${count} agent${count === 1 ? '' : 's'}`
+            : `Workflow · ${action.name} · ${count} agent${count === 1 ? '' : 's'}`
+          openTasksBrowser('full', undefined, { kind: 'subagents', childIds: action.childIds }, header)
+          return
+        }
       }
     }
 
@@ -6716,6 +6800,11 @@ export function apply(ctx: Context, config: Config): void {
     let activeTaskBrowser: TaskBrowserHandle | undefined
     let taskBrowserRows: TaskBrowserRow[] = []
     let taskRuntime: TaskBrowserRuntime | undefined
+    /** The dataset scope of the OPEN task browser (PR2 plan §10.5): `all`
+     * for the ordinary Task Center, an exact child-id set for a Workflow
+     * phase/run scope. Reset to `all` on every close (see
+     * resetTaskBrowserScope) and on session switch. */
+    let taskBrowserScope: TaskBrowserDatasetScope = { kind: 'all' }
     /** Context retained only while the full center was promoted from Quick. */
     let quickTaskState: TaskBrowserViewState | undefined
     const jobs = ctx.get('jobs')

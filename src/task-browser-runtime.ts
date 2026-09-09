@@ -48,6 +48,15 @@ export interface TaskBrowserSummary {
   readonly failedTotal: number
 }
 
+/** The generic dataset scope of the OPEN task browser (PR2 plan §10.2):
+ * `all` is the ordinary Task Center; `subagents` restricts the browser to
+ * an EXACT child-id set (a Workflow phase/run scope). The scope is generic
+ * — the Task Browser never knows what a Workflow is, and the Workflow
+ * presentation never reaches into the browser's runtime. */
+export type TaskBrowserDatasetScope =
+  | { readonly kind: 'all' }
+  | { readonly kind: 'subagents'; readonly childIds: readonly string[] }
+
 /** The runtime hooks the coordinator drives (wired by the runner). */
 export interface TaskBrowserRuntimeHooks {
   /** Session-identity key of the CURRENT live root (undefined = no live
@@ -117,6 +126,11 @@ export class TaskBrowserRuntime {
    * (it never advances the committed epoch), while a successful newer
    * commit still supersedes every older in-flight response. */
   private committedEpoch = 0
+  /** The dataset scope of the OPEN browser (PR2 plan §10.5): applied at
+   * EVERY row commit — a refresh after the scope was set must never leak
+   * the global rows back into a scoped browser. Reset to `all` on close
+   * (the runner) and on session switch (reset). */
+  private scope: TaskBrowserDatasetScope = { kind: 'all' }
 
   constructor(hooks: TaskBrowserRuntimeHooks) {
     this.hooks = hooks
@@ -136,6 +150,16 @@ export class TaskBrowserRuntime {
    * any stale post-switch event) never repaint. */
   has(childId: string): boolean {
     return this.catalog.some(entry => entry.id === childId)
+  }
+
+  /** Set the dataset scope of the OPEN browser and re-commit the cached
+   * rows through it (PR2 plan §10.5/§10.8): the scope applies at EVERY
+   * commit, so a later refresh/status update can never leak global rows
+   * into a scoped browser. The runner resets to `all` when the browser
+   * closes. */
+  setScope(scope: TaskBrowserDatasetScope): void {
+    this.scope = scope
+    this.apply(this.catalog)
   }
 
   /** A CATALOG refresh: re-list the descendants, then — if the session
@@ -210,13 +234,16 @@ export class TaskBrowserRuntime {
    * re-reads from the new root, and stale-session status flips find no
    * membership. Every in-flight request is invalidated too (the fence
    * jumps past them), so an old-session listing can never commit even
-   * if its key check were somehow satisfied. */
+   * if its key check were somehow satisfied. The dataset scope resets to
+   * `all` with it (a switched-in session must never inherit a scoped
+   * browser). */
   reset(): void {
     this.committedEpoch = ++this.requestEpoch
     this.catalog = []
     this.lastRows = []
     this.acknowledgedFailures.clear()
     this.previousFailureIds = new Set()
+    this.scope = { kind: 'all' }
     // Invalidates any pending refresh-state token: the old session's
     // in-flight promises are state-silent (their key check fails against
     // the new session), and the new session's requests mint a fresh token.
@@ -240,6 +267,17 @@ export class TaskBrowserRuntime {
     const projected = projectSubagentActivity(entries, (childId) => this.hooks.agentStatusOf(childId))
     const jobs = this.hooks.readJobs()
     const rawRows = buildTaskRows(jobs, projected)
+    // The dataset scope (PR2 plan §10.5/§10.6): a scoped browser shows
+    // EXACTLY the scope's child ids — unrelated subagents and every job
+    // row are excluded, on EVERY commit (never just the first frame).
+    // The scope filters ONLY the visible rows: the failure-attention
+    // ledger and the summary stay GLOBAL, so opening and closing a scoped
+    // viewer never re-arms previously acknowledged unrelated failures
+    // (review finding).
+    const scope = this.scope
+    const scopedRows = scope.kind === 'all'
+      ? rawRows
+      : rawRows.filter(row => row.kind === 'subagent' && scope.childIds.includes(row.childId))
     const currentFailureIds = new Set(rawRows
       .filter(row => row.kind === 'job' && (row.status === 'failed' || row.status === 'timed_out' || row.status === 'lost'))
       .map(row => row.value))
@@ -253,7 +291,7 @@ export class TaskBrowserRuntime {
     }
     this.previousFailureIds = currentFailureIds
     const attentionIds = new Set([...currentFailureIds].filter(id => !this.acknowledgedFailures.has(id)))
-    const rows = rawRows.map(row => row.kind === 'job'
+    const rows = scopedRows.map(row => row.kind === 'job'
       ? { ...row, attention: attentionIds.has(row.value) }
       : row)
     this.lastRows = rows
