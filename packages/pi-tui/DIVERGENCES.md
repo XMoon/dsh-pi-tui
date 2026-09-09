@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `d69057717feb7d509e7d90c2a443bd5067063f21`
+- Audited local source commit: `077603ba53e564eea8c1676194966c4d1a8e8c6c`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
