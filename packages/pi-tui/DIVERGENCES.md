@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `077603ba53e564eea8c1676194966c4d1a8e8c6c`
+- Audited local source commit: `6b1fcbfb0276dfc5f56a55616aad4e73732c1e7d`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -3450,7 +3450,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 - SettingsList Focusable propagation reaches search Input and conditionally forwards to an open submenu
 - row-budget forwarding for nested submenu lists
-- SettingsList mouse hit-testing uses the FINAL painted rows (a render-time mouseRows map built after the description shrink), never a re-derived range from maxVisible — a click hits the row the user actually saw, resolved by item ID with pressed-identity click activation
+- SettingsList mouse hit-testing uses the FINAL painted rows (a render-time mouseRows map built after the description shrink AND the tail slice), never a re-derived range from maxVisible — a click hits the row the user actually saw, resolved by item ID with pressed-identity click activation; the search Input is reachable only where the LAST paint put it (the tail slice may drop it off-screen — a click on the row that replaced it must not reach the hidden input)
 
 #### Dependency map
 
