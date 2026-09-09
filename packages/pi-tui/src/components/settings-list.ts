@@ -374,12 +374,22 @@ export class SettingsList implements Component, Focusable {
 			return result ? { ...result, focus: true } : undefined;
 		}
 
+		// The hit map is the FINAL painted geometry (after the description
+		// shrink AND the tail slice): a click must hit the row the user
+		// actually saw, never a re-derived range from maxVisible.
+		const row = this.mouseRows[event.y];
+
+		// The search row is interactive only where the LAST paint put it:
+		// the tail slice may have dropped the search input off-screen, and
+		// a click on the row that replaced it must never reach the hidden
+		// input (last-painted fence) — otherwise the TUI would focus the
+		// list and typing would filter it through an invisible search box.
 		if (this.searchEnabled && this.searchInput) {
-			if (event.y === 0) {
+			if (row?.kind === "search") {
 				const result = this.searchInput.handleMouse?.(event);
 				return result ? { ...result, focus: true } : undefined;
 			}
-			if (event.y === 1) return undefined;
+			if (row?.kind === "inert") return undefined;
 		}
 
 		const displayItems = this.getDisplayItems();
@@ -393,10 +403,6 @@ export class SettingsList implements Component, Focusable {
 		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
 
-		// The hit map is the FINAL painted geometry (after the description
-		// shrink): a click must hit the row the user actually saw, never a
-		// re-derived range from maxVisible.
-		const row = this.mouseRows[event.y];
 		if (!row || row.kind !== "item") return undefined;
 		if (event.type === "press") {
 			// Every press starts a fresh gesture: clear any latched pressed

@@ -268,6 +268,43 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 			assert.deepStrictEqual(changes, [], `row ${row} (${JSON.stringify(rendered[row])}) must be inert`);
 		}
 	});
+
+	it("keeps the sliced-away search input out of mouse reach on a degenerate grant (Case E)", () => {
+		const rows = Array.from({ length: 12 }, (_, index) => ({
+			id: `setting-${index}`,
+			label: `setting ${index}`,
+			currentValue: "on",
+			values: ["on", "off"],
+		}));
+		const changes: Array<{ id: string; value: string }> = [];
+		const list = new SettingsList(rows, 10, testTheme, (id, value) => changes.push({ id, value }), () => {}, {
+			enableSearch: true,
+		});
+		// Same fixture as the "degenerate 5-row searchable grant" render
+		// test: search prefix(2) + item + indicator(1) + hint(2) exceed the
+		// grant, so the tail slice drops the search box and keeps the
+		// selected row + hint. The search Input is NOT painted.
+		list.setMaxRows(5);
+		const rendered = list.render(80);
+		assert.ok(rendered.length <= 5, `the grant must hold (${rendered.length})`);
+		assert.ok(rendered.some((line) => line.includes("setting 0")), "the selected row must survive the slice");
+		// A press on the row that replaced the search box must NOT reach the
+		// hidden search Input: no handled result, no focus claim — otherwise
+		// the TUI would focus the list and subsequent typing would filter it
+		// through a search box the user cannot see (last-painted fence).
+		assert.strictEqual(
+			list.handleMouse(mouse("press", 0)),
+			undefined,
+			"the sliced-away search row must be mouse-inert",
+		);
+		assert.strictEqual(list.handleMouse(mouse("click", 0)), undefined, "the click must not be handled either");
+		assert.deepStrictEqual(changes, [], "nothing may be activated");
+		// The item row that survived the slice stays clickable through the
+		// same final-painted map.
+		list.handleMouse(mouse("press", 1));
+		list.handleMouse(mouse("click", 1));
+		assert.deepStrictEqual(changes, [{ id: "setting-0", value: "off" }], "the surviving item row must stay clickable");
+	});
 });
 
 	it("keeps the mouse map in lockstep with the tail slice on a degenerate grant (Case D)", () => {
