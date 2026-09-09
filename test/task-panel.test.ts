@@ -1009,6 +1009,38 @@ test('task panel: tiny-budget hit map never references omitted rows (mouse parit
   assert.equal(panel.handleMouse(mouse('press', 10, 5, 100, 2)), undefined, 'omitted rows must be inert')
 })
 
+test('task panel: delegated search press replaces the stale pressed value (mouse parity)', () => {
+  const selected: string[] = []
+  const panel = new TaskBrowserPanel(
+    [runningJob(), doneJob(), subagent()],
+    10,
+    { header: 'tasks', enableSearch: true },
+    (value) => { selected.push(value) },
+    () => {},
+    () => {},
+  )
+  panel.render(100)
+  // Normal layout: search at row 2, item A (bash · lint) at row 7.
+  const rowA = panel.render(100).findIndex(line => line.includes('bash · lint'))
+  assert.ok(rowA >= 0, `item A row missing:\n${panel.render(100).join('\n')}`)
+  // 1. Press item A: the gesture latch is A.
+  panel.handleMouse(mouse('press', 10, rowA, 100, 24))
+  // 2. Press the search row: the Input handles it (handled+focus), but
+  //    the parent's gesture identity must be REPLACED — a delegated
+  //    press is a fresh gesture, not a continuation of the item press.
+  const searchPress = panel.handleMouse(mouse('press', 10, 2, 100, 24))
+  assert.ok(searchPress?.handled, 'press on the search row must be handled')
+  // 3. The terminal shrinks: the degraded layout moves item A (the
+  //    selected row) onto the search row's old cell (row 2).
+  panel.setMaxRows(4)
+  const degraded = panel.render(100)
+  assert.ok(degraded[2]?.includes('bash · lint'), `item A must move to row 2:\n${degraded.join('\n')}`)
+  // 4. Release on the same physical cell: the synthesized click must
+  //    NOT activate A — the stale latch was replaced by the search press.
+  panel.handleMouse(mouse('click', 10, 2, 100, 4))
+  assert.deepEqual(selected, [], 'the stale pressed value must not activate the moved item')
+})
+
 test('task panel: async enrichment WITHOUT a repaint between press and click cannot transfer activation (mouse parity)', () => {
   const selected: string[] = []
   const panel = new TaskBrowserPanel(

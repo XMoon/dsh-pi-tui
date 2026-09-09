@@ -724,6 +724,19 @@ export class TaskBrowserPanel implements Component, Focusable {
    * (clamping like the keyboard).
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // A click ends any gesture, and every left press starts a fresh
+    // one: release the pressed identity up front — BEFORE the width
+    // guard / hit lookup / search dispatch / inert return, so a
+    // delegated search press (or a press on stale-width or missing-hit
+    // geometry) still replaces the old latch. The TUI keeps the panel
+    // as the press target for a handled search press, so a later
+    // release on the same cell synthesizes a click that must not match
+    // a stale identity. The local copy still guards the valid-row
+    // comparison below.
+    const pressedValue = this.mousePressedValue
+    if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) {
+      this.mousePressedValue = undefined
+    }
     // The hit map is only valid for the last painted width: a resize
     // that has not been repainted must not dispatch against stale
     // geometry (last-painted geometry is authoritative).
@@ -781,8 +794,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       // between press and release may have reordered/replaced rows
       // WITHOUT a repaint yet, so the index in the stale hit map can
       // point at a different item). No match => drop.
-      if (this.mousePressedValue !== hit.value) return undefined
-      this.mousePressedValue = undefined
+      if (pressedValue !== hit.value) return undefined
       // A pending destructive confirmation is a modal state: the click
       // must not bypass it (keyboard Enter is ignored there).
       if (this.pendingStopValue !== undefined) return { handled: true }
