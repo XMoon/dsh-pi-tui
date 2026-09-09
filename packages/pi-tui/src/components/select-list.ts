@@ -121,6 +121,18 @@ export class SelectList implements Component {
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		// A click ends any gesture, and every left press starts a fresh
+		// one: release the pressed identity up front — BEFORE the empty
+		// guard, so a press/click on an empty (filtered-out) screen still
+		// replaces the old latch (the TUI keeps the old press target when
+		// the empty press returns undefined, so a later release on the
+		// same cell still synthesizes a click that must not match a stale
+		// identity). The local copy still guards the valid-row comparison
+		// below.
+		const pressedItem = this.mousePressedItem;
+		if (event.type === "click" || (event.type === "press" && event.button === "left")) {
+			this.mousePressedItem = undefined;
+		}
 		if (this.filteredItems.length === 0) return undefined;
 		if (event.type === "wheel" && event.wheelDelta) {
 			const delta = event.wheelDelta < 0 ? -1 : 1;
@@ -131,18 +143,6 @@ export class SelectList implements Component {
 		}
 		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
-
-		// A click ends any gesture, and every left press starts a fresh
-		// one: release the pressed identity up front — a click on
-		// inert/removed/width-mismatched geometry, or a press that lands
-		// on a row that was not painted, must not leave a stale latch
-		// that a later synthesized click could match (a repaint may have
-		// moved an item onto the pressed cell). The local copy still
-		// guards the valid-row comparison below.
-		const pressedItem = this.mousePressedItem;
-		if (event.type === "click" || (event.type === "press" && event.button === "left")) {
-			this.mousePressedItem = undefined;
-		}
 
 		// The hit map is the FINAL painted geometry: a press/click must
 		// hit the row the user actually saw, never a re-derived range

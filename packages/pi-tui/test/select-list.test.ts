@@ -171,4 +171,34 @@ describe("SelectList mouse parity (last-painted rows)", () => {
 		list.handleMouse(mouse("click", 0));
 		assert.strictEqual(selected, undefined, "the repainted row must not receive the pressed item's click");
 	});
+
+	it("clears the pressed identity when the filter empties the list", () => {
+		const items = [
+			{ value: "a", label: "A" },
+			{ value: "b", label: "B" },
+		];
+		const list = new SelectList(items, 5, testTheme);
+		let selected: string | undefined;
+		list.onSelect = (item) => {
+			selected = item.value;
+		};
+		list.render(40); // row 0 = A
+		// Press A: the gesture latch is A.
+		list.handleMouse(mouse("press", 0));
+		// The filter empties the list and repaints: a press on the empty
+		// screen is a fresh gesture and must REPLACE the old latch (the
+		// TUI keeps the old press target when the empty press returns
+		// undefined, so a later release on the same cell still
+		// synthesizes a click).
+		list.setFilter("zz");
+		list.render(40);
+		list.handleMouse(mouse("press", 0));
+		// The filter restores and repaints: row 0 is A again.
+		list.setFilter("");
+		list.render(40);
+		// A click without a fresh press on A must NOT activate it — the
+		// empty-state press cleared the old latch.
+		list.handleMouse(mouse("click", 0));
+		assert.strictEqual(selected, undefined, "the empty-state press must clear the old latch");
+	});
 });
