@@ -138,6 +138,7 @@ import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, text
 import {
   workflowCountsText,
   workflowPhasePresentations,
+  workflowRunMode,
   workflowRunSummaryText,
   workflowRunViewAllVisible,
   workflowStatusCounts,
@@ -7141,13 +7142,14 @@ export class TuiApp {
   }
 
   /** The effective Run disclosure of one Workflow card: the user's explicit
-   * choice wins forever once set; otherwise the CURRENT FACTS decide —
-   * a completed run closes, every other status opens (PR2 plan §7.4/§7.6,
-   * Web advanceDisclosureState parity). */
+   * choice wins forever once set; otherwise the CURRENT FACTS decide via
+   * the single {@link workflowRunMode} (Web runDisclosureFacts parity) —
+   * a clean run closes, a running/abnormal run opens. A completed run with
+   * a failed member is abnormal and stays open (PR2 goal: abnormal first). */
   private workflowRunOpen(message: Extract<TranscriptMessage, { kind: 'workflow' }>): boolean {
     const state = this.workflowDisclosure.get(message.runId)
     if (state?.userOpen !== undefined) return state.userOpen
-    return message.status !== 'completed'
+    return workflowRunMode(message.status, message.members) !== 'clean'
   }
 
   /** The effective Phase disclosure of one Workflow phase: user choice
@@ -7207,18 +7209,12 @@ export class TuiApp {
   private advanceWorkflowDisclosure(
     message: Extract<TranscriptMessage, { kind: 'workflow' }>,
   ): void {
-    const runCounts = workflowStatusCounts(message.members)
-    // The run's abnormal facts include the RUN status itself: a run can
-    // settle failed/cancelled/interrupted with zero members or only
-    // completed members — the abnormal edge must still open it once, and
-    // cold replay must pre-settle the mode.
-    const runStatusAbnormal = message.status === 'failed'
-      || message.status === 'cancelled'
-      || message.status === 'interrupted'
-    const runHasAbnormalMembers = runCounts.failed + runCounts.cancelled + runCounts.interrupted > 0
-    const runMode: 'clean' | 'running' | 'abnormal' = message.status === 'completed'
-      ? 'clean'
-      : (runStatusAbnormal || runHasAbnormalMembers) ? 'abnormal' : 'running'
+    // The run's disclosure mode is the SINGLE shared definition (Web
+    // runDisclosureFacts parity): abnormal when the run status OR any
+    // member is abnormal — a completed run with a failed member is
+    // abnormal, never clean. Cold replay pre-settles the mode so a
+    // terminal run never re-triggers an edge.
+    const runMode = workflowRunMode(message.status, message.members)
     let state = this.workflowDisclosure.get(message.runId)
     if (state === undefined) {
       // First sight: the current mode is the pre-settled edge baseline (a
