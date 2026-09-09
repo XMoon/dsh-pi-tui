@@ -1567,3 +1567,109 @@ test('PR D: a modified draft command never shows the old committed cache', async
   assert.ok(!view.includes('14:30'), 'the stale cache must not be shown for a modified draft')
   app.stop()
 })
+
+/** SGR press+release on a viewport row (1-based coordinates). */
+function mouseClick(vt: VirtualTerminal, row: number, leftBorder: number): void {
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${row + 1}m`)
+}
+
+test('configurator: rows page mouse click selects a row and Save changes saves (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let saved = 0
+  openWith(app, { onSave: () => { saved += 1 } })
+  await vt.waitForRender()
+  let viewport = vt.getViewport()
+  const row2 = viewport.findIndex(line => line.includes('Row 2'))
+  assert.ok(row2 >= 0, `Row 2 missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[row2]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'frame left border missing')
+  mouseClick(vt, row2, leftBorder)
+  await vt.waitForRender()
+  viewport = vt.getViewport()
+  assert.ok(viewport.some(line => line.includes('Left')), 'clicking Row 2 must open the row editor')
+  // Make the draft dirty (remove the cursor's item), then Esc back to the
+  // selector and click "Save changes".
+  vt.sendInput(' ')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  viewport = vt.getViewport()
+  const saveRow = viewport.findIndex(line => line.includes('Save changes'))
+  assert.ok(saveRow >= 0, `Save changes missing:\n${viewport.join('\n')}`)
+  mouseClick(vt, saveRow, leftBorder)
+  await vt.waitForRender()
+  assert.equal(saved, 1, 'clicking Save changes must use the single save path')
+  app.stop()
+})
+
+test('configurator: exit-confirm mouse click routes Discard & Exit (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let closed = 0
+  openWith(app, { onCancel: () => { closed += 1 } })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  vt.sendInput('\x1b') // dirty → exit-confirm
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  const discardRow = viewport.findIndex(line => line.includes('Discard & Exit'))
+  assert.ok(discardRow >= 0, `Discard & Exit missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[discardRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0)
+  mouseClick(vt, discardRow, leftBorder)
+  await vt.waitForRender()
+  assert.equal(closed, 1, 'clicking Discard & Exit must close without saving')
+  app.stop()
+})
+
+test('configurator: the preview block is inert (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  openWith(app)
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  const previewRow = viewport.findIndex(line => line.includes('Preview'))
+  assert.ok(previewRow >= 0, `Preview missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[previewRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0)
+  // A click on the preview must not move the selection or open anything.
+  mouseClick(vt, previewRow, leftBorder)
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok(after.some(line => line.includes('Select row to edit')), 'the selector must stay on the rows page')
+  app.stop()
+})
+
+test('configurator: a save in flight freezes mouse mutations (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let resolveSave!: () => void
+  const savePromise = new Promise<void>(resolve => { resolveSave = resolve })
+  openWith(app, { onSave: () => savePromise })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  const viewport = vt.getViewport()
+  const saveRow = viewport.findIndex(line => line.includes('Save changes'))
+  assert.ok(saveRow >= 0)
+  const leftBorder = viewport[saveRow]?.indexOf('│') ?? -1
+  mouseClick(vt, saveRow, leftBorder)
+  await vt.waitForRender()
+  // Saving… is painted; a click on a row must be ignored (no cursor move).
+  const savingView = vt.getViewport()
+  assert.ok(savingView.some(line => line.includes('Saving…')), 'the saving state must be painted')
+  const row1 = savingView.findIndex(line => line.includes('Row 1'))
+  assert.ok(row1 >= 0)
+  mouseClick(vt, row1, leftBorder)
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok(after.some(line => line.includes('Saving…')), 'the save must still be in flight')
+  resolveSave()
+  await vt.waitForRender()
+  app.stop()
+})

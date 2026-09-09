@@ -4929,3 +4929,102 @@ describe("protected autocomplete seam (X044)", () => {
 		assert.ok(editor instanceof Editor);
 	});
 });
+
+describe("Editor mouse click cursor mapping (X050)", () => {
+	it("places the cursor at the end of a wrapped segment when clicking past its text", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.setText("abcdef");
+		editor.render(6);
+		// The first visual line shows "abcde " (wrapped); clicking the
+		// blank cell after 'e' must place the cursor at the segment end
+		// (col 5), not before the last grapheme (col 4).
+		editor.handleMouse({
+			type: "click",
+			button: "left",
+			x: 5,
+			y: 1,
+			screenX: 5,
+			screenY: 1,
+			width: 6,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 }, "clicking past the wrapped segment text must land at the segment end");
+	});
+
+	it("keeps the last visual segment clamping to the line end", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.setText("abcdef");
+		editor.render(6);
+		// The second (last) visual line shows "f"; clicking past it must
+		// clamp to the line end (col 6).
+		editor.handleMouse({
+			type: "click",
+			button: "left",
+			x: 5,
+			y: 2,
+			screenX: 5,
+			screenY: 2,
+			width: 6,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 6 }, "clicking past the last segment must clamp to the line end");
+	});
+});
+
+describe("Editor slash autocomplete mouse click (mouse parity)", () => {
+	it("submits a slash-prefix completion on mouse click, like keyboard Enter", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/help", label: "/help" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+
+		editor.handleInput("/");
+		editor.handleInput("h");
+		editor.handleInput("e");
+		editor.handleInput("\t"); // trigger autocomplete
+		await flushAutocomplete();
+		assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+		// Click the first suggestion: the autocomplete list starts at
+		// renderedVisibleLineCount + 2 (row 0 = the editor line, row 1 =
+		// blank, row 2 = the first suggestion).
+		const rendered = editor.render(80);
+		const suggestionRow = rendered.findIndex((line) => line.includes("/help"));
+		assert.ok(suggestionRow >= 0, `suggestion row missing:\n${rendered.join("\n")}`);
+		const result = editor.handleMouse({
+			type: "click",
+			button: "left",
+			x: 2,
+			y: suggestionRow,
+			screenX: 2,
+			screenY: 2,
+			width: 80,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.ok(result?.handled, "clicking a slash suggestion must be handled");
+		assert.strictEqual(submitted, "/help", "clicking a slash suggestion must submit the completed command");
+		assert.strictEqual(editor.getText(), "", "the editor must clear after the slash submit");
+	});
+});

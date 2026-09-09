@@ -409,3 +409,77 @@ test('a model WITHOUT effort options keeps the overlay open (Esc still walks bac
   assert.ok(view.includes('m1'), `the model list (overlay) must stay open without effort options:\n${view}`)
   assert.deepEqual(applied, [{ provider: 'p', model: 'm1' }], 'the model still applies')
 })
+
+/** A minimal left-button mouse event for direct component tests. */
+function mouse(type: 'press' | 'click', x: number, y: number, width = 80, height = 24): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type,
+    button: 'left',
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width,
+    height,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+  }
+}
+
+/** A ModelSubmenu with a silent owned-task runner (no diag sink). */
+function directModelSubmenu(
+  llm: { listModels: () => Promise<readonly { id: string }[]>; resolveModelInfo: () => Promise<{ reasoning?: { efforts?: readonly { id: string; name: string }[] } }> },
+  applied: ModelSelection[],
+  done: (selected?: string) => void,
+): ModelSubmenu {
+  return new ModelSubmenu('p', 'm0', undefined, {
+    listModels: llm.listModels as never,
+    resolveModelInfo: llm.resolveModelInfo as never,
+    apply: (next) => { applied.push(next) },
+    requestRender: () => {},
+    done,
+    runOwned: (label, task, options) => {
+      runOwned(label, task, { ...options, diag: createDiag({ filePath: undefined, stderrLevel: 'off' }) })
+    },
+  })
+}
+
+test('ModelSubmenu mouse click applies a model with no effort options (mouse parity)', async () => {
+  const applied: ModelSelection[] = []
+  const menu = directModelSubmenu(fakeLlm({ models: [{ id: 'm0' }, { id: 'm1' }], efforts: undefined }), applied, () => {})
+  await settle()
+  menu.render(80)
+  // The model list has enableSearch: item rows start at y=2.
+  const press = menu.handleMouse(mouse('press', 5, 2, 80, 24))
+  assert.ok(press?.handled, 'press on a model row must be handled')
+  menu.handleMouse(mouse('click', 5, 2, 80, 24))
+  await settle()
+  assert.deepEqual(applied, [{ provider: 'p', model: 'm0' }], 'clicking a model row must apply the model')
+})
+
+test('ModelSubmenu mouse click selects an effort (mouse parity)', async () => {
+  const applied: ModelSelection[] = []
+  let doneValue: string | undefined
+  const menu = directModelSubmenu(
+    fakeLlm({ models: [{ id: 'm0' }], efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] }),
+    applied,
+    (selected) => { doneValue = selected },
+  )
+  await settle()
+  menu.render(80)
+  // Open the effort level by clicking the first model row (y=2).
+  menu.handleMouse(mouse('press', 5, 2, 80, 24))
+  menu.handleMouse(mouse('click', 5, 2, 80, 24))
+  await settle()
+  // The effort list has no search: item rows start at y=0; the first row
+  // is "Default" (__default), the second is "Low".
+  menu.render(80)
+  const press = menu.handleMouse(mouse('press', 5, 1, 80, 24))
+  assert.ok(press?.handled, 'press on an effort row must be handled')
+  menu.handleMouse(mouse('click', 5, 1, 80, 24))
+  await settle()
+  assert.deepEqual(applied, [{ provider: 'p', model: 'm0', reasoningEffort: 'low' }], 'clicking an effort row must apply it')
+  assert.equal(doneValue, 'low', 'the effort selection must close the submenu with the effort id')
+})

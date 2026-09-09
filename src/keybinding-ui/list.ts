@@ -5,6 +5,8 @@
 
 import { matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { Input } from '@xmoon76/pi-tui'
+import { dispatchMouseEvent } from '@xmoon76/pi-tui'
+import type { TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { color } from '../theme.ts'
 import { formatKeyId } from '../keybindings/hints.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
@@ -89,6 +91,14 @@ function renderLeaderRow(model: KeybindingEditorModel, selected: boolean, width:
   return truncateToWidth(text, Math.max(1, width))
 }
 
+/** One physical row of the last painted panel frame (mouse hit-testing).
+ * The map is built from the EXACT final rows render() returns, so a
+ * click can only act on last-painted geometry. (Mouse parity.) */
+type KeybindingMouseHit =
+  | { kind: 'search' }
+  | { kind: 'select'; index: number; id: string }
+  | { kind: 'inert' }
+
 export class KeybindingEditorPanel implements Component {
   private model: KeybindingEditorModel
   private readonly runMutation: KeybindingMutationRunner
@@ -115,6 +125,15 @@ export class KeybindingEditorPanel implements Component {
   private mutationGeneration = 0
   private disposed = false
   private message: string | undefined
+  /** Physical row → hit entry from the LAST render (mouse parity). */
+  private hitMap: KeybindingMouseHit[] = []
+  /** The pressed action/leader ID (mouse parity): a synthesized click may
+   * only activate the exact identity that was pressed — a query/model
+   * change between press and release must never activate a different
+   * action. */
+  private mousePressedId: string | undefined
+  /** The width the hit map was painted at; a stale-width event is rejected. */
+  private lastRenderWidth = 0
 
   constructor(options: KeybindingEditorPanelOptions) {
     this.model = options.model
@@ -128,6 +147,7 @@ export class KeybindingEditorPanel implements Component {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
+    this.lastRenderWidth = safeWidth
     if (this.actionEditor !== undefined) return this.actionEditor.render(safeWidth)
     if (this.leaderEditing) return this.renderLeaderEditor(safeWidth)
 
@@ -142,6 +162,13 @@ export class KeybindingEditorPanel implements Component {
       color.textDim(`Search actions, descriptions, IDs, categories, or keys · ${this.model.summary}`),
       this.searchRow(safeWidth),
       '',
+    ]
+    const hits: KeybindingMouseHit[] = [
+      { kind: 'inert' },
+      ...(this.model.leader.safeMode ? [{ kind: 'inert' }, { kind: 'inert' }] as KeybindingMouseHit[] : []),
+      { kind: 'inert' },
+      { kind: 'search' },
+      { kind: 'inert' },
     ]
     const entries = this.displayEntries()
     const selectable = this.selectableEntries(entries)
@@ -158,21 +185,41 @@ export class KeybindingEditorPanel implements Component {
     const end = Math.min(entries.length, start + listBudget)
     if (entries.length === 0) {
       lines.push(color.textDim('No matching shortcuts.'))
+      hits.push({ kind: 'inert' })
     } else {
       for (const entry of entries.slice(start, end)) {
-        if (entry.kind === 'header') lines.push(color.textStrong(entry.label))
-        else if (entry.kind === 'leader') lines.push(renderLeaderRow(this.model, this.selectedId === 'leader', safeWidth))
-        else lines.push(renderActionRow(entry.row, this.selectedId === entry.row.id, safeWidth))
+        if (entry.kind === 'header') {
+          lines.push(color.textStrong(entry.label))
+          hits.push({ kind: 'inert' })
+        } else {
+          const selectableIndex = selectable.indexOf(entry)
+          lines.push(entry.kind === 'leader'
+            ? renderLeaderRow(this.model, this.selectedId === 'leader', safeWidth)
+            : renderActionRow(entry.row, this.selectedId === entry.row.id, safeWidth))
+          hits.push({ kind: 'select', index: selectableIndex, id: this.entryId(entry) })
+        }
       }
     }
-    if (start > 0) lines.push(color.textDim(`↑ ${start} more`))
-    if (end < entries.length) lines.push(color.textDim(`↓ ${entries.length - end} more`))
-    if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, safeWidth)))
+    if (start > 0) {
+      lines.push(color.textDim(`↑ ${start} more`))
+      hits.push({ kind: 'inert' })
+    }
+    if (end < entries.length) {
+      lines.push(color.textDim(`↓ ${entries.length - end} more`))
+      hits.push({ kind: 'inert' })
+    }
+    if (this.message !== undefined) {
+      lines.push(color.error(truncateToWidth(this.message, safeWidth)))
+      hits.push({ kind: 'inert' })
+    }
     // The Esc verb follows the two-stage lifecycle: a non-empty query
     // clears first, an empty query closes the panel.
     const escVerb = this.query === '' ? 'close' : 'clear'
     lines.push('', color.textDim(`Enter: details · type: search · ←→: edit · ↑↓: move · Esc: ${escVerb}`))
-    return lines.slice(0, Math.max(1, this.maxRows()))
+    hits.push({ kind: 'inert' }, { kind: 'inert' })
+    const limit = Math.max(1, this.maxRows())
+    this.hitMap = hits.slice(0, limit)
+    return lines.slice(0, limit)
   }
 
   /** The search row: the `Search: ` label combined with the shared
@@ -251,6 +298,84 @@ export class KeybindingEditorPanel implements Component {
       this.message = undefined
       this.requestRender()
     }
+  }
+
+  /**
+   * Mouse parity: the hit map from the LAST render decides what a pointer
+   * event may act on — the search Input row, a selectable row (leader or
+   * action; press selects, click opens like Enter), or inert chrome
+   * (headers, scroll markers, message, hint). Wheel moves the selection.
+   * While the leader recorder is capturing, mouse events are NOT
+   * interpreted as keybindings: the TUI mouse path consumes SGR bytes
+   * before they can reach the recorder, and this handler stays inert.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // The hit map is only valid for the last painted width: a resize
+    // that has not been repainted must not dispatch against stale
+    // geometry (last-painted geometry is authoritative).
+    if (event.width !== this.lastRenderWidth) return undefined
+    if (this.actionEditor !== undefined) return this.actionEditor.handleMouse?.(event)
+    if (this.leaderEditing) return undefined
+    const hit = this.hitMap[event.y]
+    if (!hit) return undefined
+
+    if (hit.kind === 'search') {
+      if (event.type !== 'press') return undefined
+      // The search Input starts after the "Search: " label; translate to
+      // its local coordinates.
+      const result = dispatchMouseEvent(this.searchInput, { ...event, x: event.x - 8, y: 0 })
+      return result ? { ...result, focus: true } : undefined
+    }
+
+    if (hit.kind === 'select') {
+      if (event.type === 'wheel' && event.wheelDelta) {
+        const selectable = this.selectableEntries(this.displayEntries())
+        if (selectable.length === 0) return undefined
+        const delta = event.wheelDelta < 0 ? -1 : 1
+        this.moveSelection(delta, selectable)
+        return { handled: true, render: true }
+      }
+      if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+      if (event.type === 'press') {
+        // Every press starts a fresh gesture: clear any latched pressed
+        // identity first (a rejected stale press must not leave an old
+        // ID that a later synthetic click could match).
+        this.mousePressedId = undefined
+        // The hit map is last-painted geometry: resolve the CURRENT
+        // selectable index by the stable action/leader ID (a query or
+        // model change between paint and press may have reordered or
+        // shrunk the list WITHOUT a repaint, so the stale ordinal can
+        // point at a different action — or past the end). No match =>
+        // reject the press.
+        const selectable = this.selectableEntries(this.displayEntries())
+        const currentIndex = selectable.findIndex(entry => this.entryId(entry) === hit.id)
+        if (currentIndex === -1) return undefined
+        this.mousePressedId = hit.id
+        if (this.selectedIndex !== currentIndex) {
+          this.selectedIndex = currentIndex
+          this.selectedId = hit.id
+          this.message = undefined
+        }
+        return { handled: true, focus: true }
+      }
+      // click: the same action as Enter, but only for the exact pressed
+      // identity — a query/model change between press and release must
+      // not activate a different action.
+      if (this.mousePressedId !== hit.id) {
+        this.mousePressedId = undefined
+        return undefined
+      }
+      this.mousePressedId = undefined
+      const selectable = this.selectableEntries(this.displayEntries())
+      const currentIndex = selectable.findIndex(entry => this.entryId(entry) === hit.id)
+      if (currentIndex === -1) return undefined
+      this.selectedIndex = currentIndex
+      this.selectedId = hit.id
+      this.openSelected(selectable)
+      return { handled: true }
+    }
+
+    return undefined
   }
 
   invalidate(): void {

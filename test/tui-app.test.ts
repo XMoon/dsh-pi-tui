@@ -2918,3 +2918,31 @@ test('categorized picker onFilterChange never fires after the app is disposed', 
   await vt.waitForRender()
   assert.deepEqual(changes, ['foo'], 'a disposed app must not report filter changes')
 })
+
+test('fullscreen openPicker responds to mouse clicks (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const picked: string[] = []
+  app.openPicker(
+    [
+      { value: 'first', label: 'first choice' },
+      { value: 'second', label: 'second choice' },
+      { value: 'third', label: 'third choice' },
+    ],
+    (value) => { picked.push(value) },
+    () => {},
+    { header: 'Choices', showHint: true },
+  )
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  const secondRow = viewport.findIndex(line => line.includes('second choice'))
+  assert.ok(secondRow >= 0, `second choice row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[secondRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'picker frame left border missing')
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${secondRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${secondRow + 1}m`)
+  await vt.waitForRender()
+  assert.deepEqual(picked, ['second'], 'clicking the second item must activate it')
+  app.dispose()
+})

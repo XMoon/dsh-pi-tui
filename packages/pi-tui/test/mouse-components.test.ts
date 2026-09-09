@@ -734,6 +734,11 @@ describe("nested selection-fallback snapshot isolation (X018)", () => {
 				// it falls to the selection path and must NOT overwrite the
 				// outer gesture's press snapshot.
 				tuiInternal.handleTerminalInput("\x1b[<0;1;2M");
+				// The nested event must have restored the OUTER snapshot
+				// (the gesture is still in flight here — the release clears
+				// it only when the gesture ends).
+				const t = tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined };
+				assert.ok(t.selectionPressDispatchComponents !== undefined, "the outer press snapshot must persist after the nested event");
 				return { handled: true };
 			},
 		};
@@ -758,10 +763,6 @@ describe("nested selection-fallback snapshot isolation (X018)", () => {
 		terminal.sendInput("\x1b[<0;1;1m");
 		await terminal.waitForRender();
 		assert.deepStrictEqual(aEvents, ["click"], "the first click must reach A");
-		// The outer press snapshot must persist (the nested selection press
-		// must neither wipe nor overwrite it).
-		const t = tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined };
-		assert.ok(t.selectionPressDispatchComponents !== undefined, "the outer press snapshot must persist after the nested event");
 
 		// Second gesture on A: its press snapshot must be the OUTER one
 		// ({root, A}), not the nested one ({root, B}) — otherwise the

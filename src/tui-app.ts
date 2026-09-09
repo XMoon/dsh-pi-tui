@@ -979,6 +979,26 @@ class MarqueeFilterAdapter implements Component, Focusable {
     }
   }
 
+  /** Transparent mouse forwarding (mouse parity): the picker owns the hit
+   * map; the gesture/focus target is rewritten to THIS adapter — the
+   * picker is a private field not reachable from the mounted tree, so
+   * X018 gesture liveness tracks the mounted unit. */
+  handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
+    const result = this.list.handleMouse?.(event)
+    if (!result) return undefined
+    return {
+      ...result,
+      ...(result.focus ? { focusTarget: this } : {}),
+      target: {
+        component: this,
+        originX: event.screenX - event.x,
+        originY: event.screenY - event.y,
+        width: event.width,
+        height: event.height,
+      },
+    }
+  }
+
   render(width: number): string[] {
     return this.list.render(width)
   }
@@ -1034,6 +1054,31 @@ class ExternalSearchList implements Component, Focusable {
     const before = this.input.getValue()
     this.input.handleInput(data)
     if (this.input.getValue() !== before) this.onFilterChange(this.input.getValue())
+  }
+
+  /** Transparent mouse forwarding (mouse parity): row 0 is the external
+   * search Input, row 1 is the blank spacer, rows 2+ are the picker's
+   * own hit-mapped rows (translated by the spacer). Both children are
+   * private fields, so the gesture/focus target is rewritten to THIS
+   * composite — X018 gesture liveness tracks the mounted unit. */
+  handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
+    const result = event.y === 0
+      ? dispatchMouseEvent(this.input, { ...event, y: 0 })
+      : event.y >= 2
+        ? this.list.handleMouse?.({ ...event, y: event.y - 2 })
+        : undefined
+    if (!result) return undefined
+    return {
+      ...result,
+      ...(result.focus ? { focusTarget: this } : {}),
+      target: {
+        component: this,
+        originX: event.screenX - event.x,
+        originY: event.screenY - event.y,
+        width: event.width,
+        height: event.height,
+      },
+    }
   }
 
   render(width: number): string[] {
@@ -6964,7 +7009,10 @@ export class TuiApp {
         // Inside the frame: its side borders + padding occupy columns 0-1
         // and the last two; content rows start below the top border.
         if (x >= 2 && x <= width - 3) {
-          question.flow.clickRow(y - seatTop - 1)
+          // The flow's content starts at seat column 2 (side borders +
+          // padding); pass the flow-local column so the free-text Input
+          // can position its cursor on a click while editing.
+          question.flow.clickRow(y - seatTop - 1, x - 2)
           this.requestRender()
         }
       }

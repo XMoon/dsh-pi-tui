@@ -10,12 +10,16 @@
 
 import {
   Input,
+  dispatchMouseEvent,
   getKeybindings,
   truncateToWidth,
   visibleWidth,
   type Component,
   type Focusable,
   type SelectListTheme,
+  type TuiMouseDispatchResult,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32
@@ -24,6 +28,15 @@ const MIN_DESCRIPTION_WIDTH = 10
 
 const normalizeToSingleLine = (text: string): string => text.replace(/[\r\n]+/g, ' ').trim()
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max))
+
+/** One physical row of the last painted picker frame (mouse hit-testing).
+ * The map is built from the EXACT final rows render() returns (including
+ * the tiny-budget slicing paths), so a click can only ever act on
+ * last-painted geometry. (Mouse parity.) */
+type PickerMouseHit =
+  | { kind: 'search'; width: number }
+  | { kind: 'item'; value: string; index: number }
+  | { kind: 'inert' }
 
 /** One picker row; `group` renders a workspace-style header before the group. */
 export interface SearchablePickerItem {
@@ -103,6 +116,15 @@ export class SearchablePicker implements Component, Focusable {
   private options: SearchablePickerOptions
   private searchInput?: Input
   private searchEnabled: boolean
+  /** Physical row → hit entry from the LAST render (mouse parity). */
+  private hitMap: PickerMouseHit[] = []
+  /** The width the hit map was painted at; a stale-width event is rejected. */
+  private lastRenderWidth = 0
+  /** The pressed item's VALUE (mouse parity): a synthesized click may only
+   * activate the exact logical item that was pressed — an async setItems()
+   * between press and release must never transfer activation to whatever
+   * moved into the same physical row. */
+  private mousePressedValue: string | undefined
 
   public onSelect?: (item: SearchablePickerItem) => void
   public onCancel?: () => void
@@ -226,24 +248,33 @@ export class SearchablePicker implements Component, Focusable {
 
   render(width: number): string[] {
     const lines: string[] = []
+    const hits: PickerMouseHit[] = []
+    const push = (line: string, hit: PickerMouseHit): void => {
+      lines.push(line)
+      hits.push(hit)
+    }
 
     if (this.options.header !== undefined) {
       const countSuffix = this.searchEnabled ? `  ${this.filteredItems.length}/${this.items.length}` : ''
       const headerText = truncateToWidth(`${this.options.header}${countSuffix}`, width, '')
-      lines.push((this.theme.groupHeader ?? this.theme.description)(headerText))
-      lines.push('')
+      push((this.theme.groupHeader ?? this.theme.description)(headerText), { kind: 'inert' })
+      push('', { kind: 'inert' })
     }
 
     if (this.searchEnabled && this.searchInput) {
-      lines.push(...this.searchInput.render(width))
-      lines.push('')
+      const searchLine = this.searchInput.render(width)[0] ?? ''
+      push(searchLine, { kind: 'search', width })
+      push('', { kind: 'inert' })
     }
 
     // If no items match filter, show message
     if (this.filteredItems.length === 0) {
-      lines.push(this.theme.noMatch(this.options.noMatchText ?? '  No matching commands'))
-      if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, width)
-      return this.finalizeEmpty(lines)
+      push(this.theme.noMatch(this.options.noMatchText ?? '  No matching commands'), { kind: 'inert' })
+      if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, hits, width)
+      const result = this.finalizeEmpty(lines, hits)
+      this.hitMap = result.hits
+      this.lastRenderWidth = width
+      return result.lines
     }
 
     const primaryColumnWidth = this.getPrimaryColumnWidth()
@@ -262,19 +293,26 @@ export class SearchablePicker implements Component, Focusable {
     // baseline, so a later selection move can use the full grant again
     // (a render-time ratchet would permanently shrink PageUp/PageDown).
     while (Number.isFinite(this.maxRows)
-      && lines.length + window.length + hintRows > this.maxRows
+      && lines.length + window.lines.length + hintRows > this.maxRows
       && visibleCount > 1) {
       visibleCount -= 1
       window = this.renderItemWindow(width, primaryColumnWidth, visibleCount)
     }
-    lines.push(...window)
-    if (showHint) this.addHintLine(lines, width)
+    for (let index = 0; index < window.lines.length; index += 1) {
+      push(window.lines[index]!, window.hits[index]!)
+    }
+    if (showHint) this.addHintLine(lines, hits, width)
     if (Number.isFinite(this.maxRows) && lines.length > this.maxRows) {
       // Degenerate tiny grants: keep the tail (the hint plus as many
       // trailing rows as fit) instead of letting the compositor slice
-      // the hint away.
-      return lines.slice(lines.length - this.maxRows)
+      // the hint away. The hit map is sliced identically.
+      const sliced = lines.slice(lines.length - this.maxRows)
+      this.hitMap = hits.slice(hits.length - this.maxRows)
+      this.lastRenderWidth = width
+      return sliced
     }
+    this.hitMap = hits
+    this.lastRenderWidth = width
     return lines
   }
 
@@ -282,30 +320,44 @@ export class SearchablePicker implements Component, Focusable {
    * setMaxRows contract covers every path: `render().length <= maxRows`
    * with the semantic priority search input > no-match message > hint >
    * header > blank spacers, so the hint survives whenever the grant
-   * physically allows it. */
-  private finalizeEmpty(lines: string[]): string[] {
-    if (!Number.isFinite(this.maxRows)) return lines
+   * physically allows it. The hit map is transformed identically. */
+  private finalizeEmpty(lines: string[], hits: PickerMouseHit[]): { lines: string[]; hits: PickerMouseHit[] } {
+    if (!Number.isFinite(this.maxRows)) return { lines, hits }
     const limit = Math.max(1, Math.floor(this.maxRows))
-    if (lines.length <= limit) return lines
+    if (lines.length <= limit) return { lines, hits }
     // Blank spacers are the lowest-value rows: drop them first (the
     // content stays together and keeps its visual order).
-    const compact = lines.filter(line => line !== '')
-    if (compact.length <= limit) return compact
+    const compact: string[] = []
+    const compactHits: PickerMouseHit[] = []
+    for (let index = 0; index < lines.length; index += 1) {
+      if (lines[index] !== '') {
+        compact.push(lines[index]!)
+        compactHits.push(hits[index]!)
+      }
+    }
+    if (compact.length <= limit) return { lines: compact, hits: compactHits }
     // The header is chrome: yield it before any content (priority:
     // hint > header).
     const withoutHeader = this.options.header === undefined ? compact : compact.slice(1)
-    if (withoutHeader.length <= limit) return withoutHeader
+    const withoutHeaderHits = this.options.header === undefined ? compactHits : compactHits.slice(1)
+    if (withoutHeader.length <= limit) return { lines: withoutHeader, hits: withoutHeaderHits }
     // Extreme grant: keep the head of the HEADER-FREE rows — the search
     // input, then the no-match message. Slicing `compact` here would
     // re-introduce the header and drop the message, which the declared
     // priority places ABOVE the header.
-    return withoutHeader.slice(0, limit)
+    return { lines: withoutHeader.slice(0, limit), hits: withoutHeaderHits.slice(0, limit) }
   }
 
   /** Render the item window (group headers + item rows + scroll indicator)
-   * at `visibleCount`, centered on the selected row. */
-  private renderItemWindow(width: number, primaryColumnWidth: number, visibleCount: number): string[] {
+   * at `visibleCount`, centered on the selected row, with the matching
+   * mouse hit entries. */
+  private renderItemWindow(
+    width: number,
+    primaryColumnWidth: number,
+    visibleCount: number,
+  ): { lines: string[]; hits: PickerMouseHit[] } {
     const lines: string[] = []
+    const hits: PickerMouseHit[] = []
 
     // Calculate visible range with scrolling
     const startIndex = Math.max(
@@ -336,6 +388,7 @@ export class SearchablePicker implements Component, Focusable {
           const count = groupCounts.get(group) ?? 0
           const headerText = truncateToWidth(`  ${group} · ${count}`, width, '')
           lines.push((this.theme.groupHeader ?? this.theme.description)(headerText))
+          hits.push({ kind: 'inert' })
         }
         lastGroup = group
       }
@@ -343,6 +396,7 @@ export class SearchablePicker implements Component, Focusable {
       const isSelected = i === this.selectedIndex
       const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined
       lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth))
+      hits.push({ kind: 'item', value: item.value, index: i })
     }
 
     // Add scroll indicators if needed
@@ -350,9 +404,10 @@ export class SearchablePicker implements Component, Focusable {
       const scrollText = `  (${this.selectedIndex + 1}/${this.filteredItems.length})`
       // Truncate if too long for terminal
       lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, '')))
+      hits.push({ kind: 'inert' })
     }
 
-    return lines
+    return { lines, hits }
   }
 
   handleInput(keyData: string): void {
@@ -416,6 +471,92 @@ export class SearchablePicker implements Component, Focusable {
     }
   }
 
+  /**
+   * Mouse parity (v0.85.1 SelectList-style interaction on the Host
+   * picker): the hit map from the LAST render decides what a pointer
+   * event may act on — the search Input row, an item row, or inert
+   * chrome (headers, group headers, blank spacers, scroll indicator,
+   * hint, no-match text). A press records the pressed item's VALUE; a
+   * synthesized click only activates when the same physical row still
+   * resolves to that exact value, so an async setItems() between press
+   * and release can never transfer activation to a different item.
+   * Wheel moves one logical selection step (wrapping like the keyboard).
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
+    // The hit map is only valid for the last painted width: a resize
+    // that has not been repainted must not dispatch against stale
+    // geometry (last-painted geometry is authoritative).
+    if (event.width !== this.lastRenderWidth) return undefined
+    const hit = this.hitMap[event.y]
+    if (!hit) return undefined
+
+    if (hit.kind === 'search') {
+      if (event.type !== 'press') return undefined
+      if (this.searchInput === undefined) return undefined
+      // The search Input occupies the full row; translate to its local
+      // coordinates and rewrite the gesture/focus target to THIS picker
+      // (the Input is a private field not reachable from the mounted
+      // tree — X018 liveness tracks the mounted unit).
+      const result = dispatchMouseEvent(this.searchInput, { ...event, y: 0 })
+      if (!result) return undefined
+      return {
+        ...result,
+        ...(result.focus ? { focusTarget: this } : {}),
+        target: {
+          component: this,
+          originX: event.screenX - event.x,
+          originY: event.screenY - event.y,
+          width: event.width,
+          height: event.height,
+        },
+      }
+    }
+
+    if (hit.kind === 'item') {
+      if (event.type === 'wheel' && event.wheelDelta) {
+        if (this.filteredItems.length === 0) return undefined
+        const delta = event.wheelDelta < 0 ? -1 : 1
+        const previousIndex = this.selectedIndex
+        if (delta < 0) {
+          this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1
+        } else {
+          this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1
+        }
+        if (this.selectedIndex !== previousIndex) this.notifySelectionChange()
+        return { handled: true, render: this.selectedIndex !== previousIndex }
+      }
+      if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+      if (event.type === 'press') {
+        // The hit map is last-painted geometry: resolve the CURRENT
+        // index by the pressed VALUE (a setItems() between paint and
+        // press may have reordered rows WITHOUT a repaint, so the stale
+        // index can point at a different item). No match => reject the
+        // press — the pressed row no longer exists.
+        const currentIndex = this.filteredItems.findIndex(candidate => candidate.value === hit.value)
+        if (currentIndex === -1) return undefined
+        this.mousePressedValue = hit.value
+        if (this.selectedIndex !== currentIndex) {
+          this.selectedIndex = currentIndex
+          this.notifySelectionChange()
+        }
+        return { handled: true, focus: true }
+      }
+      // click: activation must not transfer to a different logical item
+      // after an async refresh. The hit map is last-painted geometry, so
+      // the pressed VALUE is the identity — resolve the CURRENT item by
+      // that value (a setItems() between press and release may have
+      // reordered/replaced rows WITHOUT a repaint yet, so the index in
+      // the stale hit map can point at a different item). No match => drop.
+      if (this.mousePressedValue !== hit.value) return undefined
+      this.mousePressedValue = undefined
+      const item = this.filteredItems.find(candidate => candidate.value === hit.value)
+      if (item && this.onSelect) this.onSelect(item)
+      return { handled: true }
+    }
+
+    return undefined
+  }
+
   /** Re-derive the filtered list from the current query and clamp selection.
    * `preserveSelection` keeps the currently selected row (by value) when it
    * survives the filter — used by setItems, where the query did not change
@@ -455,12 +596,14 @@ export class SearchablePicker implements Component, Focusable {
     ]))
   }
 
-  private addHintLine(lines: string[], width: number): void {
+  private addHintLine(lines: string[], hits: PickerMouseHit[], width: number): void {
     const hint = this.searchEnabled
       ? 'type to filter · ↑↓ navigate · enter select · esc close'
       : '↑↓ navigate · enter select · esc close'
     lines.push('')
+    hits.push({ kind: 'inert' })
     lines.push(this.theme.scrollInfo(truncateToWidth(`  ${hint}`, width - 2, '')))
+    hits.push({ kind: 'inert' })
   }
 
   private renderItem(

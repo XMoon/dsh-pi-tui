@@ -1299,3 +1299,107 @@ test('uncommitted edit is dropped on a real tab change regardless of the next qu
     assert.ok(!back.includes('abcX'), `${scenario.label} — the uncommitted X must be dropped on a REAL tab change:\n${back}`)
   }
 })
+
+test('free-text row click enters edit and positions the cursor (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick or type', options: [{ label: 'A' }, { label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  let rendered = f.render(100)
+  const otherRow = rendered.findIndex(line => line.includes('Type something.'))
+  assert.ok(otherRow >= 0, 'free-text row missing')
+  // Click the free-text row → enters edit mode (an EMPTY input still
+  // renders the dimmed row label, so prove the mode by typing).
+  f.clickRow(otherRow, 5)
+  f.handleInput('h')
+  rendered = f.render(100)
+  assert.ok(rendered.some(line => line.includes('h')), 'click must enter edit mode (typed text renders)')
+  // Type the rest of "hello".
+  for (const ch of 'ello') f.handleInput(ch)
+  rendered = f.render(100)
+  assert.ok(rendered.some(line => line.includes('hello')), 'typed text must render')
+  // Click between e and l: the prefix is "→ [ ] " (pointer + marker +
+  // space = 6 columns) and the Input prompt "> " is 2 columns, so value
+  // column 2 is at flow-local x = 6 + 2 + 2 = 10.
+  f.clickRow(otherRow, 10)
+  f.handleInput('X')
+  rendered = f.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('heXllo')), 'typing after the click must insert at the clicked column')
+})
+
+test('scrolled free-text row click still maps to the OTHER row (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Long question', options: Array.from({ length: 20 }, (_, i) => ({ label: `Option ${i}` })) },
+  ], () => {}, () => {})
+  f.setMaxRows(8)
+  // Walk the cursor down to the free-text row (20 options + the OTHER row
+  // = 21 rows; the cursor starts at 0, so 20 downs land on the OTHER row);
+  // the scrollport follows.
+  for (let i = 0; i < 20; i += 1) f.handleInput('\x1b[B')
+  const rendered = f.render(100)
+  const otherRow = rendered.findIndex(line => line.includes('Type something.'))
+  assert.ok(otherRow >= 0, 'free-text row must be visible after scrolling')
+  f.clickRow(otherRow, 5)
+  f.handleInput('h')
+  const after = f.render(100)
+  assert.ok(after.some(line => line.includes('h')), 'click must enter edit mode after scroll')
+})
+
+test('masked free-text click moves the real cursor while the render stays masked (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Secret', masked: true, options: [{ label: 'A' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  let rendered = f.render(100)
+  const otherRow = rendered.findIndex(line => line.includes('Type something.'))
+  assert.ok(otherRow >= 0, 'free-text row missing')
+  f.clickRow(otherRow, 5) // enter edit
+  for (const ch of 'hello') f.handleInput(ch)
+  rendered = f.render(100)
+  assert.ok(rendered.some(line => line.includes('•••••')), 'masked render must show one bullet per character')
+  assert.ok(!rendered.some(line => line.includes('hello')), 'the secret must never render')
+  // Click between e and l (flow-local x = 6 + 2 + 2 = 10) and type X.
+  f.clickRow(otherRow, 10)
+  f.handleInput('X')
+  rendered = f.render(100)
+  assert.ok(rendered.some(line => line.includes('••••••')), 'the real value must grow to 6 characters')
+  assert.ok(!rendered.some(line => line.includes('hello')), 'the secret must stay masked')
+})
+
+test('optionless pinned free-text row click positions the cursor (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Type your answer' },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  // The optionless flow edits from the start: type "hello".
+  for (const ch of 'hello') f.handleInput(ch)
+  const rendered = f.render(100)
+  // The exact pinned row recorded by the render (not a text search).
+  const pinnedRow = (f as unknown as { pinnedOtherRow: number }).pinnedOtherRow
+  assert.ok(pinnedRow >= 0, 'pinned input row must be recorded')
+  assert.ok(rendered[pinnedRow]?.includes('hello'), `pinned input row missing:\n${rendered.join('\n')}`)
+  // The pinned row is " hello" (no pointer/marker prefix): the value
+  // starts at row col 1, so value column 2 (between e and l) is at row
+  // col 3 and the Input-local x = 3 + 1 = 4.
+  f.clickRow(pinnedRow, 3)
+  f.handleInput('X')
+  const after = f.render(100).map(strip)
+  assert.ok(after.some(line => line.includes('heXllo')), 'typing after the pinned-row click must insert at the clicked column')
+})
+
+test('optionless pinned row click re-enters edit from navigation state (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Type your answer' },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  for (const ch of 'hello') f.handleInput(ch)
+  f.handleInput('\x1b') // Esc: leave the edit → navigation state
+  let rendered = f.render(100)
+  assert.ok(rendered.some(line => line.includes('↵ edit')), 'the navigation hint must show after Esc')
+  const pinnedRow = (f as unknown as { pinnedOtherRow: number }).pinnedOtherRow
+  assert.ok(pinnedRow >= 0, 'pinned input row must be recorded')
+  f.clickRow(pinnedRow, 1)
+  rendered = f.render(100)
+  assert.ok(rendered.some(line => line.includes('↵ confirm')), 'clicking the pinned row must re-enter edit mode')
+  assert.ok(rendered.some(line => line.includes('hello')), 'the draft must be preserved across the re-entry')
+})

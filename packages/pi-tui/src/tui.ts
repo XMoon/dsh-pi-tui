@@ -367,9 +367,39 @@ type OverlayFocusRestorePolicy = "clear" | "preserve";
 /**
  * Container - a component that contains other components
  */
-export class Container implements Component {
+export class Container implements Component, Focusable {
 	children: Component[] = [];
 	private mouseLayout?: { width: number; children: Array<{ component: Component; height: number }> };
+	/** The child the last mouse press focused (dsh-pi-tui divergence
+	 * X051): focus/input forward to THIS child only — never broadcast to
+	 * all children (a multi-Input Container must not show every cursor
+	 * or consume every key). */
+	private focusedChild: Component | undefined;
+
+	/**
+	 * Focusable (dsh-pi-tui divergence X051): a Container used as an
+	 * overlay root (showOverlay accepts any Component) must forward the
+	 * focused flag to the child the mouse press hit — the overlay focus
+	 * state tracks the mounted root, so without forwarding an Input
+	 * inside a plain Container root never receives focused=true (no IME
+	 * cursor).
+	 */
+	get focused(): boolean {
+		return this.focusedChild !== undefined && isFocusable(this.focusedChild) && this.focusedChild.focused;
+	}
+
+	set focused(value: boolean) {
+		if (this.focusedChild !== undefined && isFocusable(this.focusedChild)) {
+			this.focusedChild.focused = value;
+		}
+	}
+
+	/** Transparent input forwarding (dsh-pi-tui divergence X051): a
+	 * Container overlay root must reach the interactive child the mouse
+	 * press focused. */
+	handleInput(data: string): void {
+		this.focusedChild?.handleInput?.(data);
+	}
 
 	addChild(component: Component): void {
 		this.children.push(component);
@@ -379,6 +409,7 @@ export class Container implements Component {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
+			if (this.focusedChild === component) this.focusedChild = undefined;
 			// Removal ends ownership: release the child's resources.
 			// (dsh-pi-tui divergence X007.)
 			component.dispose?.();
@@ -386,10 +417,13 @@ export class Container implements Component {
 	}
 
 	clear(): void {
-		// Release every child's resources before dropping the references.
-		// (dsh-pi-tui divergence X007.)
-		for (const child of this.children) child.dispose?.();
+		// Detach FIRST (X007 exactly-once): a reentrant child.dispose()
+		// that calls back into this Container must not double-dispose or
+		// skip the remaining children.
+		const children = this.children;
 		this.children = [];
+		this.focusedChild = undefined;
+		for (const child of children) child.dispose?.();
 	}
 
 	/**
@@ -403,6 +437,7 @@ export class Container implements Component {
 	dispose(): void {
 		const children = this.children;
 		this.children = [];
+		this.focusedChild = undefined;
 		for (const child of children) child.dispose?.();
 	}
 
@@ -439,7 +474,17 @@ export class Container implements Component {
 					y: event.y - childY,
 					height: childHeight,
 				});
-				if (result?.focus && (this as Component).handleInput) return { ...result, focusTarget: this };
+				// The press that requests focus names the child the
+				// overlay root must forward focus/input to (X051).
+				if (result?.focus) this.focusedChild = child;
+				// Focus promotion to the container root applies to plain
+				// Container/Box overlay roots only — NEVER to the TUI root
+				// itself (TuiBase extends Container, so without this guard
+				// a TUI-root mouse dispatch would steal the focus target
+				// from the clicked child).
+				if (result?.focus && !(this instanceof TuiBase) && (this as Component).handleInput) {
+					return { ...result, focusTarget: this };
+				}
 				return result;
 			}
 			childY += childHeight;
@@ -595,13 +640,6 @@ export abstract class TuiBase extends Container implements TUI {
 		const entry = this.overlayStack.find((candidate) => candidate.component === component);
 		return entry !== undefined && this.isOverlayVisible(entry);
 	}
-
-	/** The deepest component the most recent component dispatch delivered
-	 * to (set by dispatchMouseToOverlay and TuiAltScreen's
-	 * dispatchMouseToLayout). TuiAltScreen snapshots it at selection-press
-	 * time so a release's synthesized click cannot transfer to a control
-	 * painted after the press. (dsh-pi-tui divergence X018 hardening.) */
-	protected lastMouseDispatchComponent: Component | undefined = undefined;
 
 	/** Whether a component is inside a mounted, visible overlay's subtree
 	 * (Container children reachable through `children`). Gesture targets
@@ -803,9 +841,11 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	private containsComponent(root: Component, target: Component): boolean {
-		if (root === target) return true;
-		if (!(root instanceof Container)) return false;
-		return root.children.some((child) => this.containsComponent(child, target));
+		// Structural walk over public `children` (X051): Box is a public
+		// overlay root with children + Focusable forwarding, so the
+		// instanceof Container gate would report an Input under a Box root
+		// as unmounted and miss the Box subtree in focus resolution.
+		return this.componentTreeContains(root, target);
 	}
 
 	/**
@@ -978,7 +1018,6 @@ export abstract class TuiBase extends Container implements TUI {
 			) {
 				continue;
 			}
-			this.lastMouseDispatchComponent = layout.entry.component;
 			const result = dispatchMouseEvent(layout.entry.component, {
 				...event,
 				x: event.screenX - layout.col,

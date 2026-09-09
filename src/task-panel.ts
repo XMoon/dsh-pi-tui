@@ -10,7 +10,8 @@
  */
 
 import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import type { Component, Focusable } from '@xmoon76/pi-tui'
+import { dispatchMouseEvent } from '@xmoon76/pi-tui'
+import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { componentKeymap } from './keybindings/component-keymap.ts'
 import { color, taskStatusColor } from './theme.ts'
 import { SelectedMarquee } from './marquee.ts'
@@ -23,6 +24,15 @@ import {
 } from './task-presentation.ts'
 
 export type { TaskPanelItem, TaskScope } from './task-presentation.ts'
+
+/** One physical row of the last painted panel frame (mouse hit-testing).
+ * The map is built from the EXACT final rows render() returns (including
+ * the fit-loop and degraded paths), so a click can only act on
+ * last-painted geometry. (Mouse parity.) */
+type TaskMouseHit =
+  | { kind: 'search' }
+  | { kind: 'item'; value: string; index: number; listWidth?: number }
+  | { kind: 'inert' }
 
 /** The state carried when Quick Tasks opens the full Task Center. */
 export interface TaskBrowserViewState {
@@ -160,6 +170,15 @@ export class TaskBrowserPanel implements Component, Focusable {
   private readonly options: TaskPanelOptions
   private readonly searchInput = new Input()
   private searchEnabled: boolean
+  /** Physical row → hit entry from the LAST render (mouse parity). */
+  private hitMap: TaskMouseHit[] = []
+  /** The width the hit map was painted at; a stale-width event is rejected. */
+  private lastRenderWidth = 0
+  /** The pressed item's VALUE (mouse parity): a synthesized click may only
+   * activate the exact logical item that was pressed — an async
+   * enrichment repaint between press and release must never activate
+   * whatever moved into the same physical row. */
+  private mousePressedValue: string | undefined
   private readonly onSelect: (value: string) => void
   private readonly onCancel: () => void
   private readonly onAction: ((value: string, action: 'interrupt') => void) | undefined
@@ -693,6 +712,87 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (componentKeymap.matches(data, 'tasks.search.exit')) this.onCancel()
   }
 
+  /**
+   * Mouse parity: the hit map from the LAST render decides what a pointer
+   * event may act on — the search row, a task/subagent row (left list
+   * cell only in the wide layout; the detail pane is inert), or chrome
+   * (header, group headers, inline details, indicator, error, hint). A
+   * press records the pressed item's VALUE; a synthesized click activates
+   * only when the same physical row still resolves to that exact value,
+   * so an async enrichment repaint between press and release can never
+   * activate whatever moved into the row. Wheel moves the selection
+   * (clamping like the keyboard).
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // The hit map is only valid for the last painted width: a resize
+    // that has not been repainted must not dispatch against stale
+    // geometry (last-painted geometry is authoritative).
+    if (event.width !== this.lastRenderWidth) return undefined
+    const hit = this.hitMap[event.y]
+    if (!hit) return undefined
+
+    if (hit.kind === 'search') {
+      if (event.type !== 'press') return undefined
+      // The search row is ' ' + the Input's render (prompt stripped): the
+      // Input's local x = event.x + 1 (the leading space maps to the
+      // prompt's first column).
+      const result = dispatchMouseEvent(this.searchInput, { ...event, x: event.x + 1, y: 0 })
+      return result ? { ...result, focus: true } : undefined
+    }
+
+    if (hit.kind === 'item') {
+      // The wide layout's detail pane is inert: a click there must never
+      // activate the row merely because it shares the y.
+      if (hit.listWidth !== undefined && event.x >= hit.listWidth) return undefined
+      if (event.type === 'wheel' && event.wheelDelta) {
+        if (this.filtered.length === 0) return undefined
+        const delta = event.wheelDelta < 0 ? -1 : 1
+        this.pendingStopValue = undefined
+        this.selectionTouched = true
+        this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + delta))
+        this.ensureVisible()
+        return { handled: true, render: true }
+      }
+      if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+      if (event.type === 'press') {
+        // The hit map is last-painted geometry: resolve the CURRENT
+        // index by the pressed VALUE (a setItems() between paint and
+        // press may have reordered rows WITHOUT a repaint, so the stale
+        // index can point at a different item). No match => reject the
+        // press — the pressed row no longer exists.
+        const currentIndex = this.filtered.findIndex(candidate => candidate.value === hit.value)
+        if (currentIndex === -1) return undefined
+        this.mousePressedValue = hit.value
+        if (this.selected !== currentIndex) {
+          this.selected = currentIndex
+          this.selectionTouched = true
+          this.ensureVisible()
+        }
+        return { handled: true, focus: true }
+      }
+      // click: activate only the exact pressed item (async enrichment
+      // safety — press A → repaint → release must not activate B). The
+      // hit map is last-painted geometry, so the pressed VALUE is the
+      // identity — resolve the CURRENT item by that value (a setItems()
+      // between press and release may have reordered/replaced rows
+      // WITHOUT a repaint yet, so the index in the stale hit map can
+      // point at a different item). No match => drop.
+      if (this.mousePressedValue !== hit.value) return undefined
+      this.mousePressedValue = undefined
+      const item = this.filtered.find(candidate => candidate.value === hit.value)
+      if (item !== undefined) {
+        if (item.kind === 'view-full') {
+          this.onViewFull?.(this.getViewState())
+        } else {
+          this.onSelect(item.value)
+        }
+      }
+      return { handled: true }
+    }
+
+    return undefined
+  }
+
   private ensureVisible(): void {
     if (this.selected < this.scroll) this.scroll = this.selected
     else if (this.selected >= this.scroll + this.maxVisible) this.scroll = this.selected - this.maxVisible + 1
@@ -733,7 +833,13 @@ export class TaskBrowserPanel implements Component, Focusable {
   render(width: number): string[] {
     this.now = Date.now()
     const safeWidth = Math.max(1, width)
+    this.lastRenderWidth = safeWidth
     const lines: string[] = []
+    const hits: TaskMouseHit[] = []
+    const push = (line: string, hit: TaskMouseHit): void => {
+      lines.push(line)
+      hits.push(hit)
+    }
     const explicit = this.explicitMode
     const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
     const hintLine = color.textMuted(`  ${this.hint()}`)
@@ -750,100 +856,129 @@ export class TaskBrowserPanel implements Component, Focusable {
     })()
 
     if (headerText !== undefined) {
-      lines.push(color.textStrong(headerText))
-      lines.push('')
+      push(color.textStrong(headerText), { kind: 'inert' })
+      push('', { kind: 'inert' })
     }
 
     if (this.loading && this.items.length === 0) {
-      lines.push(color.textDim('Loading tasks…'))
-      if (this.refreshError !== undefined) lines.push(color.textMuted(`${this.refreshError} · R retry`))
-      lines.push('')
-      lines.push(hintLine)
+      push(color.textDim('Loading tasks…'), { kind: 'inert' })
+      if (this.refreshError !== undefined) push(color.textMuted(`${this.refreshError} · R retry`), { kind: 'inert' })
+      push('', { kind: 'inert' })
+      push(hintLine, { kind: 'inert' })
       this.lastRenderedStart = 0
       this.lastRenderedCount = 0
       this.hasRenderedViewport = true
-      return this.finalizeEmpty(lines)
+      const result = this.finalizeEmpty(lines, hits)
+      this.hitMap = result.hits
+      return result.lines
     }
 
     if (searchOn) {
-      lines.push(searchEmpty ? color.textDim(searchRowText) : searchRowText)
-      lines.push('')
+      // The search row: ' ' + the Input's render (prompt stripped). The
+      // Input's local x = event.x + 1 (the leading space maps to the
+      // prompt's first column).
+      push(searchEmpty ? color.textDim(searchRowText) : searchRowText, { kind: 'search' })
+      push('', { kind: 'inert' })
     }
 
     const rows = this.filtered
     if (rows.length === 0) {
-      lines.push(color.textDim(this.refreshError === undefined ? (this.options.noMatchText ?? 'No matching tasks') : 'Could not load tasks'))
-      if (this.refreshError !== undefined) lines.push(color.textMuted(`${this.refreshError} · R retry`))
-      lines.push('')
-      lines.push(hintLine)
+      push(color.textDim(this.refreshError === undefined ? (this.options.noMatchText ?? 'No matching tasks') : 'Could not load tasks'), { kind: 'inert' })
+      if (this.refreshError !== undefined) push(color.textMuted(`${this.refreshError} · R retry`), { kind: 'inert' })
+      push('', { kind: 'inert' })
+      push(hintLine, { kind: 'inert' })
       this.lastRenderedStart = 0
       this.lastRenderedCount = 0
       this.hasRenderedViewport = true
-      return this.finalizeEmpty(lines)
+      const result = this.finalizeEmpty(lines, hits)
+      this.hitMap = result.hits
+      return result.lines
     }
 
     this.ensureVisible()
     const listWidth = safeWidth >= 110 ? Math.max(40, Math.floor((safeWidth - 3) * 0.58)) : safeWidth
     let itemCount = Math.min(rows.length, this.maxVisible)
     let start = this.scroll
-    const buildWindow = (count: number, from: number): string[] => {
+    const buildWindow = (count: number, from: number): { lines: string[]; hits: TaskMouseHit[] } => {
       const end = Math.min(rows.length, from + count)
       const visibleRows = rows.slice(from, end)
       const listLines: string[] = []
+      const listHits: TaskMouseHit[] = []
       let lastGroup: string | undefined
       for (let i = 0; i < visibleRows.length; i += 1) {
         const item = visibleRows[i]!
         const group = displayGroup(item.group, this.options.groupLabels === true)
         if (group !== lastGroup) {
-          if (group !== undefined) listLines.push(color.textMuted(`── ${group} ──`))
+          if (group !== undefined) {
+            listLines.push(color.textMuted(`── ${group} ──`))
+            listHits.push({ kind: 'inert' })
+          }
           lastGroup = group
         }
         const selected = from + i === this.selected
         listLines.push(...this.renderRow(item, selected, listWidth))
+        listHits.push({ kind: 'item', value: item.value, index: from + i })
         if (safeWidth >= 70 && safeWidth < 110 && selected && item.kind !== 'view-full') {
-          listLines.push(...this.renderInlineDetail(item, safeWidth))
+          const detailLines = this.renderInlineDetail(item, safeWidth)
+          listLines.push(...detailLines)
+          listHits.push(...detailLines.map((): TaskMouseHit => ({ kind: 'inert' })))
         }
       }
-      return listLines
+      return { lines: listLines, hits: listHits }
     }
-    let listLines = buildWindow(itemCount, start)
-    const assemble = (): string[] => {
+    let window = buildWindow(itemCount, start)
+    const assemble = (): { lines: string[]; hits: TaskMouseHit[] } => {
       const out = [...lines]
+      const outHits = [...hits]
       if (safeWidth >= 110) {
         const detail = this.detailLines(this.selectedItem())
         const merged: string[] = []
+        const mergedHits: TaskMouseHit[] = []
         const detailWidth = Math.max(24, safeWidth - listWidth - 3)
-        const max = Math.max(listLines.length, detail.length)
+        const max = Math.max(window.lines.length, detail.length)
         for (let i = 0; i < max; i += 1) {
-          const left = truncateToWidth(listLines[i] ?? '', listWidth, '…')
+          const left = truncateToWidth(window.lines[i] ?? '', listWidth, '…')
           const leftPad = ' '.repeat(Math.max(0, listWidth - visibleWidth(left)))
           const right = truncateToWidth(detail[i] ?? '', detailWidth, '…')
           merged.push(`${left}${leftPad} ${color.border('│')} ${right}`)
+          // The left list cell is the item; the detail pane is inert.
+          const windowHit = window.hits[i]
+          mergedHits.push(windowHit !== undefined ? { ...windowHit, listWidth } as TaskMouseHit : { kind: 'inert' })
         }
         out.push(...merged)
+        outHits.push(...mergedHits)
       } else {
-        out.push(...listLines)
+        out.push(...window.lines)
+        outHits.push(...window.hits)
       }
-      if (rows.length > itemCount) out.push(color.textMuted(`  ${this.selected + 1}/${rows.length}`))
-      if (this.refreshError !== undefined) out.push(color.textMuted(`  ${this.refreshError} · R retry`))
+      if (rows.length > itemCount) {
+        out.push(color.textMuted(`  ${this.selected + 1}/${rows.length}`))
+        outHits.push({ kind: 'inert' })
+      }
+      if (this.refreshError !== undefined) {
+        out.push(color.textMuted(`  ${this.refreshError} · R retry`))
+        outHits.push({ kind: 'inert' })
+      }
       out.push('')
+      outHits.push({ kind: 'inert' })
       out.push(hintLine)
-      return out
+      outHits.push({ kind: 'inert' })
+      return { lines: out, hits: outHits }
     }
     let candidate = assemble()
     // Details, group headers and the detail pane consume physical rows
     // beyond the item count: shrink the selected-preserving window until
     // the whole component fits the live grant, instead of letting the
     // compositor clip the hint or the selected row.
-    while (candidate.length > limit && itemCount > 1) {
+    while (candidate.lines.length > limit && itemCount > 1) {
       itemCount -= 1
       const desired = Math.max(0, this.selected - Math.floor(itemCount / 2))
       start = Math.min(desired, Math.max(0, rows.length - itemCount))
       this.scroll = start
-      listLines = buildWindow(itemCount, start)
+      window = buildWindow(itemCount, start)
       candidate = assemble()
     }
-    if (candidate.length <= limit) {
+    if (candidate.lines.length <= limit) {
       // The ACTUAL viewport is the window the fit left. Record it BEFORE
       // the exposure ack so viewportItems()/onViewportExpose and the
       // PageUp/PageDown step agree with the rows physically painted — the
@@ -852,7 +987,8 @@ export class TaskBrowserPanel implements Component, Focusable {
       this.lastRenderedCount = itemCount
       this.hasRenderedViewport = true
       this.exposeViewport()
-      return candidate
+      this.hitMap = candidate.hits
+      return candidate.lines
     }
 
     // Very short grants: true semantic degradation — search input
@@ -879,6 +1015,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.lastRenderedCount = degraded.paintsSelectedMain ? 1 : 0
     this.hasRenderedViewport = true
     this.exposeViewport()
+    this.hitMap = degraded.hits
     return degraded.lines
   }
 
@@ -897,7 +1034,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     indicatorText: string | undefined,
     limit: number,
     hintLine: string,
-  ): { lines: string[]; paintsSelectedMain: boolean } {
+  ): { lines: string[]; hits: TaskMouseHit[]; paintsSelectedMain: boolean } {
     const mainRow = selectedEntry?.main
     const groupRow = selectedEntry !== undefined && selectedEntry.group !== undefined
       ? color.textMuted(`── ${selectedEntry.group} ──`)
@@ -908,11 +1045,19 @@ export class TaskBrowserPanel implements Component, Focusable {
     // Mandatory content (priority 1-2): search row, then the selected
     // main row; the hint text follows (priority 3).
     const content: string[] = []
-    if (searchShown !== '') content.push(searchShown)
-    if (mainRow !== undefined) content.push(mainRow)
+    const contentHits: TaskMouseHit[] = []
+    if (searchShown !== '') {
+      content.push(searchShown)
+      contentHits.push({ kind: 'search' })
+    }
+    if (mainRow !== undefined) {
+      content.push(mainRow)
+      contentHits.push({ kind: 'item', value: selectedEntry !== undefined ? this.filtered[this.selected]?.value ?? '' : '', index: this.selected })
+    }
     if (content.length >= limit) {
       const kept = content.slice(0, limit)
-      return { lines: kept, paintsSelectedMain: mainRow !== undefined && kept.includes(mainRow) }
+      const keptHits = contentHits.slice(0, limit)
+      return { lines: kept, hits: keptHits, paintsSelectedMain: mainRow !== undefined && kept.includes(mainRow) }
     }
     const hintIncluded = content.length + 1 <= limit
     let used = content.length + (hintIncluded ? 1 : 0)
@@ -932,16 +1077,36 @@ export class TaskBrowserPanel implements Component, Focusable {
     // Blank spacers last: only the hint's leading blank rides along.
     const hintBlank = used + 1 <= limit
     const out: string[] = []
-    if (headerShown) out.push(color.textStrong(headerText!))
-    if (searchShown !== '') out.push(searchShown)
-    if (groupShown) out.push(groupRow!)
-    if (mainRow !== undefined) out.push(mainRow)
+    const outHits: TaskMouseHit[] = []
+    if (headerShown) {
+      out.push(color.textStrong(headerText!))
+      outHits.push({ kind: 'inert' })
+    }
+    if (searchShown !== '') {
+      out.push(searchShown)
+      outHits.push({ kind: 'search' })
+    }
+    if (groupShown) {
+      out.push(groupRow!)
+      outHits.push({ kind: 'inert' })
+    }
+    if (mainRow !== undefined) {
+      out.push(mainRow)
+      outHits.push({ kind: 'item', value: this.filtered[this.selected]?.value ?? '', index: this.selected })
+    }
     out.push(...detailsShown)
-    if (indicatorShown) out.push(color.textMuted(indicatorText!))
-    if (hintIncluded) out.push(...(hintBlank ? ['', hintLine] : [hintLine]))
+    outHits.push(...detailsShown.map((): TaskMouseHit => ({ kind: 'inert' })))
+    if (indicatorShown) {
+      out.push(color.textMuted(indicatorText!))
+      outHits.push({ kind: 'inert' })
+    }
+    if (hintIncluded) {
+      out.push(...(hintBlank ? ['', hintLine] : [hintLine]))
+      outHits.push(...(hintBlank ? [{ kind: 'inert' }, { kind: 'inert' }] : [{ kind: 'inert' }]) as TaskMouseHit[])
+    }
     // The main row is always painted in this branch (the extreme branch
     // above was the only path that could drop it).
-    return { lines: out, paintsSelectedMain: mainRow !== undefined }
+    return { lines: out, hits: outHits, paintsSelectedMain: mainRow !== undefined }
   }
 
   /** The visible window as STRUCTURED rows (main + detail lines kept
@@ -978,22 +1143,31 @@ export class TaskBrowserPanel implements Component, Focusable {
    * (setMaxRows contract covers every path): `render().length <= maxRows`
    * with priority search input > no-match message > hint > header > blank
    * spacers, so the hint survives whenever the grant physically allows it
-   * (a head-keep slice would cut the hint on a short terminal). */
-  private finalizeEmpty(lines: string[]): string[] {
-    if (!Number.isFinite(this.maxRows)) return lines
+   * (a head-keep slice would cut the hint on a short terminal). The hit
+   * map is transformed identically. */
+  private finalizeEmpty(lines: string[], hits: TaskMouseHit[]): { lines: string[]; hits: TaskMouseHit[] } {
+    if (!Number.isFinite(this.maxRows)) return { lines, hits }
     const limit = Math.max(1, Math.floor(this.maxRows))
-    if (lines.length <= limit) return lines
+    if (lines.length <= limit) return { lines, hits }
     // Blank spacers are the lowest-value rows: drop them first.
-    const compact = lines.filter(line => line !== '')
-    if (compact.length <= limit) return compact
+    const compact: string[] = []
+    const compactHits: TaskMouseHit[] = []
+    for (let index = 0; index < lines.length; index += 1) {
+      if (lines[index] !== '') {
+        compact.push(lines[index]!)
+        compactHits.push(hits[index]!)
+      }
+    }
+    if (compact.length <= limit) return { lines: compact, hits: compactHits }
     // The header is chrome: yield it before any content.
     const withoutHeader = this.options.header === undefined ? compact : compact.slice(1)
-    if (withoutHeader.length <= limit) return withoutHeader
+    const withoutHeaderHits = this.options.header === undefined ? compactHits : compactHits.slice(1)
+    if (withoutHeader.length <= limit) return { lines: withoutHeader, hits: withoutHeaderHits }
     // Extreme grant: keep the head of the HEADER-FREE rows — the search
     // input, then the no-match message. Slicing `compact` here would
     // re-introduce the header and drop the message, which the declared
     // priority places ABOVE the header.
-    return withoutHeader.slice(0, limit)
+    return { lines: withoutHeader.slice(0, limit), hits: withoutHeaderHits.slice(0, limit) }
   }
 
 

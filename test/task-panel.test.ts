@@ -861,3 +861,194 @@ test('a search/type filter restarts the selected row marquee even when the SAME 
     `the filter must restart the marquee from the fresh anchor:\n${after}`)
   panel.dispose()
 })
+
+/** A minimal mouse event for direct component tests. */
+function mouse(
+  type: 'press' | 'click' | 'wheel',
+  x: number,
+  y: number,
+  width = 100,
+  height = 24,
+  wheelDelta?: number,
+): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type,
+    button: 'left',
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width,
+    height,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+    ...(type === 'wheel' ? { wheelDelta: wheelDelta ?? 1 } : {}),
+  }
+}
+
+test('task panel: mouse click activates the exact task (mouse parity)', () => {
+  const selected: string[] = []
+  const panel = new TaskBrowserPanel(
+    [runningJob(), doneJob(), subagent()],
+    10,
+    { header: 'tasks', enableSearch: false },
+    (value) => { selected.push(value) },
+    () => {},
+    () => {},
+  )
+  const rendered = panel.render(100)
+  const row = rendered.findIndex(line => line.includes('bash · lint'))
+  assert.ok(row >= 0, `done job row missing:\n${rendered.join('\n')}`)
+  const press = panel.handleMouse(mouse('press', 10, row, 100, 24))
+  assert.ok(press?.handled, 'press on a task row must be handled')
+  assert.equal(press?.focus, true, 'press must request focus')
+  panel.handleMouse(mouse('click', 10, row, 100, 24))
+  assert.deepEqual(selected, ['job:bash-2'], 'click must activate the exact task')
+})
+
+test('task panel: group headers and hint are inert (mouse parity)', () => {
+  const panel = new TaskBrowserPanel(
+    [runningJob(), doneJob(), subagent()],
+    10,
+    { header: 'tasks', enableSearch: false },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const rendered = panel.render(100)
+  const groupRow = rendered.findIndex(line => line.includes('── jobs ──'))
+  const hintRow = rendered.findIndex(line => line.includes('↑↓'))
+  assert.ok(groupRow >= 0 && hintRow >= 0, `chrome rows missing:\n${rendered.join('\n')}`)
+  assert.equal(panel.handleMouse(mouse('press', 10, groupRow, 100, 24)), undefined, 'group header must be inert')
+  assert.equal(panel.handleMouse(mouse('press', 10, hintRow, 100, 24)), undefined, 'hint must be inert')
+})
+
+test('task panel: search Input click repositions the query cursor (mouse parity)', () => {
+  const panel = new TaskBrowserPanel(
+    [runningJob(), doneJob()],
+    10,
+    { header: 'tasks', enableSearch: true },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.render(100)
+  panel.handleInput('ab')
+  panel.render(100)
+  // The search row is ' ' + the Input render (prompt stripped): the value
+  // starts at row x=1, so value column 1 (between a and b) is at x=2.
+  const result = panel.handleMouse(mouse('press', 2, 2, 100, 24))
+  assert.ok(result?.handled, 'press on the search row must be handled')
+  panel.handleInput('X')
+  const rendered = panel.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('aXb')), 'typing after the click must insert at the clicked query column')
+})
+
+test('task panel: wheel moves the selection (mouse parity)', () => {
+  const panel = new TaskBrowserPanel(
+    [runningJob(), doneJob(), subagent()],
+    10,
+    { header: 'tasks', enableSearch: false },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.render(100)
+  const firstRow = 3 // header 0, blank 1, group 2, first item 3
+  const down = panel.handleMouse(mouse('wheel', 10, firstRow, 100, 24, 1))
+  assert.ok(down?.handled, 'wheel must be handled')
+  const rendered = panel.render(100)
+  const marked = rendered.findIndex(line => line.includes('→'))
+  assert.ok(marked >= 0)
+  assert.ok(rendered[marked]?.includes('bash · lint'), 'wheel down must move the selection to the second task')
+})
+
+test('task panel: async enrichment between press and click cannot transfer activation (mouse parity)', () => {
+  const selected: string[] = []
+  const panel = new TaskBrowserPanel(
+    [runningJob()],
+    10,
+    { header: 'tasks', enableSearch: false },
+    (value) => { selected.push(value) },
+    () => {},
+    () => {},
+  )
+  let rendered = panel.render(100)
+  const row = rendered.findIndex(line => line.includes('bash · pnpm build'))
+  assert.ok(row >= 0)
+  panel.handleMouse(mouse('press', 10, row, 100, 24))
+  // Async enrichment: a different job moves into the same physical row.
+  panel.setItems([doneJob({ value: 'job:other', label: 'bash · other' })])
+  rendered = panel.render(100)
+  assert.ok(rendered.some(line => line.includes('bash · other')), 'the enriched row must be painted')
+  panel.handleMouse(mouse('click', 10, row, 100, 24))
+  assert.deepEqual(selected, [], 'activation must not transfer to the new item')
+})
+
+test('task panel: tiny-budget hit map never references omitted rows (mouse parity)', () => {
+  const selected: string[] = []
+  const panel = new TaskBrowserPanel(
+    [runningJob(), doneJob(), subagent()],
+    10,
+    { header: 'tasks', enableSearch: false },
+    (value) => { selected.push(value) },
+    () => {},
+    () => {},
+  )
+  panel.setMaxRows(2)
+  const rendered = panel.render(100)
+  assert.ok(rendered.length <= 2, `tiny budget must cap rows: ${rendered.length}`)
+  // The visible row is the selected main row: clicking it activates.
+  const press = panel.handleMouse(mouse('press', 10, 0, 100, 2))
+  assert.ok(press?.handled, 'the visible row must be clickable')
+  panel.handleMouse(mouse('click', 10, 0, 100, 2))
+  assert.deepEqual(selected, ['job:bash-1'], 'the visible row must activate the selected task')
+  // Rows beyond the painted frame are not in the hit map.
+  assert.equal(panel.handleMouse(mouse('press', 10, 5, 100, 2)), undefined, 'omitted rows must be inert')
+})
+
+test('task panel: async enrichment WITHOUT a repaint between press and click cannot transfer activation (mouse parity)', () => {
+  const selected: string[] = []
+  const panel = new TaskBrowserPanel(
+    [runningJob()],
+    10,
+    { header: 'tasks', enableSearch: false },
+    (value) => { selected.push(value) },
+    () => {},
+    () => {},
+  )
+  const rendered = panel.render(100)
+  const row = rendered.findIndex(line => line.includes('bash · pnpm build'))
+  assert.ok(row >= 0)
+  panel.handleMouse(mouse('press', 10, row, 100, 24))
+  // Async enrichment WITHOUT a repaint: the hit map is still last-painted
+  // geometry, but the CURRENT filtered list has a different item at the
+  // same index. The click must resolve by the pressed VALUE, not the
+  // stale index.
+  panel.setItems([doneJob({ value: 'job:other', label: 'bash · other' })])
+  panel.handleMouse(mouse('click', 10, row, 100, 24))
+  assert.deepEqual(selected, [], 'activation must not transfer to the replacement at the stale index')
+})
+
+test('task panel: async enrichment WITHOUT a repaint between paint and press cannot select the replacement (mouse parity)', () => {
+  const panel = new TaskBrowserPanel(
+    [runningJob()],
+    10,
+    { header: 'tasks', enableSearch: false },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const rendered = panel.render(100)
+  const row = rendered.findIndex(line => line.includes('bash · pnpm build'))
+  assert.ok(row >= 0)
+  // Async enrichment WITHOUT a repaint: the hit map is still last-painted
+  // geometry, but the CURRENT filtered list has a different item at the
+  // same index. The press must resolve by the pressed VALUE, not the
+  // stale index.
+  panel.setItems([doneJob({ value: 'job:other', label: 'bash · other' })])
+  const press = panel.handleMouse(mouse('press', 10, row, 100, 24))
+  assert.equal(press, undefined, 'a press on a row whose value no longer exists must be rejected')
+})

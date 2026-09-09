@@ -1,6 +1,6 @@
 import { Input } from "./components/input.ts";
 import { getKeybindings } from "./keybindings.ts";
-import type { Component, Focusable } from "./tui.ts";
+import { dispatchMouseEvent, type Component, type Focusable, type TuiMouseDispatchResult, type TuiMouseEvent, type TuiMouseEventResult } from "./tui.ts";
 import { getGraphemeSegmenter, stripTerminalSequences, truncateToWidth, visibleWidth } from "./utils.ts";
 
 const segmenter = getGraphemeSegmenter();
@@ -210,6 +210,10 @@ export class AltScreenSearchComponent implements Component, Focusable {
 	private nextButtonEnd = -1;
 	private hoveredNavigationDirection: -1 | 1 | undefined;
 	private _focused = false;
+	/** Input content width from the LAST render (mouse hit-testing; the
+	 * result-count suffix is not part of the Input). (dsh-pi-tui
+	 * divergence X049.) */
+	private lastInputWidth = 0;
 
 	constructor(
 		onQueryChange: (query: string) => void,
@@ -253,6 +257,47 @@ export class AltScreenSearchComponent implements Component, Focusable {
 		if (query !== previous) this.onQueryChange(query);
 	}
 
+	/**
+	 * Forward mouse events on the query-content row to the private Input
+	 * (dsh-pi-tui divergence X049): the Input is a private field not
+	 * reachable from the mounted tree, so the gesture target is rewritten
+	 * to THIS component (X018 liveness tracks the mounted unit) and a
+	 * focus request lands on the component, which forwards `focused` to
+	 * the Input. Only the last-painted Input range is hit-testable: the
+	 * result-count suffix, the borders, and the navigation-button row stay
+	 * inert here (TuiAltScreen owns the nav buttons).
+	 */
+	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
+		if (event.type !== "press") return undefined;
+		if (event.y !== 1) return undefined;
+		// Content starts after the left border (col 1); the result-count
+		// suffix is not part of the Input.
+		const localX = event.x - 1;
+		if (localX < 0 || localX >= this.lastInputWidth) return undefined;
+		const previous = this.input.getValue();
+		const result = dispatchMouseEvent(this.input, {
+			...event,
+			x: localX,
+			y: 0,
+			width: this.lastInputWidth,
+			height: 1,
+		});
+		if (!result) return undefined;
+		const query = this.input.getValue();
+		if (query !== previous) this.onQueryChange(query);
+		return {
+			...result,
+			...(result.focus ? { focusTarget: this } : {}),
+			target: {
+				component: this,
+				originX: event.screenX - event.x,
+				originY: event.screenY - event.y,
+				width: event.width,
+				height: event.height,
+			},
+		};
+	}
+
 	invalidate(): void {
 		this.input.invalidate();
 	}
@@ -283,6 +328,7 @@ export class AltScreenSearchComponent implements Component, Focusable {
 		const visibleResult = truncateToWidth(result, resultSpace, "");
 		const resultText = visibleResult ? `\x1b[2m ${visibleResult} \x1b[22m` : "";
 		const inputWidth = Math.max(0, innerWidth - visibleWidth(resultText));
+		this.lastInputWidth = inputWidth;
 		const inputLine = truncateToWidth(this.input.render(Math.max(1, inputWidth))[0] ?? "", inputWidth, "");
 		const inputPadding = " ".repeat(Math.max(0, inputWidth - visibleWidth(inputLine)));
 		const content = `${inputLine}${inputPadding}${resultText}`;

@@ -3,6 +3,7 @@
  */
 
 import { matchesKey, truncateToWidth, wrapTextWithAnsi, type Component, type KeyId } from '@xmoon76/pi-tui'
+import type { TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { color } from '../theme.ts'
 import { formatKeyId, formatLeaderSequence } from '../keybindings/hints.ts'
 import type {
@@ -62,6 +63,15 @@ function selectedLine(label: string, selected: boolean, width: number): string {
   return truncateToWidth(text, Math.max(1, width))
 }
 
+/** A selectable row in the final viewport: its PHYSICAL row and its
+ * ORIGINAL selectable ordinal. The ordinal is preserved across viewport
+ * scrolling — a scroll marker replacing the first viewport row must not
+ * shift the ordinal of the rows below it. (Mouse parity.) */
+interface SelectableRow {
+  row: number
+  ordinal: number
+}
+
 /** Keep the selected binding visible in a short terminal while retaining the
  * detail footer. The first/last visible content lines double as scroll
  * markers when they are not the selected line. */
@@ -69,13 +79,19 @@ function actionViewport(
   lines: readonly string[],
   selectedLineIndex: number | undefined,
   maxRows: number,
-): string[] {
+  selectableLineIndices: readonly number[] = [],
+): { lines: string[]; selectableRows: SelectableRow[] } {
   const limit = Math.max(1, maxRows)
-  if (lines.length <= limit) return [...lines]
+  if (lines.length <= limit) {
+    return {
+      lines: [...lines],
+      selectableRows: selectableLineIndices.map((row, ordinal) => ({ row, ordinal })),
+    }
+  }
   const footer = lines[lines.length - 1]!
-  if (limit === 1) return [footer]
+  if (limit === 1) return { lines: [footer], selectableRows: [] }
   const content = lines.slice(0, -1)
-  if (content.length === 0) return [footer]
+  if (content.length === 0) return { lines: [footer], selectableRows: [] }
   const windowSize = Math.max(1, limit - 1)
   const selected = selectedLineIndex === undefined
     ? Math.min(content.length - 1, Math.floor(windowSize / 2))
@@ -84,10 +100,27 @@ function actionViewport(
   const start = Math.min(maxStart, Math.max(0, selected - Math.floor(windowSize / 2)))
   const end = Math.min(content.length, start + windowSize)
   const viewport = content.slice(start, end)
-  if (start > 0 && selected > start) viewport[0] = color.textDim(`↑ ${start} more lines`)
-  if (end < content.length && selected < end - 1) viewport[viewport.length - 1] = color.textDim(`↓ ${content.length - end} more lines`)
-  return [...viewport, footer]
+  let selectableRows = selectableLineIndices
+    .map((index, ordinal) => ({ row: index - start, ordinal }))
+    .filter(entry => entry.row >= 0 && entry.row < viewport.length)
+  if (start > 0 && selected > start) {
+    viewport[0] = color.textDim(`↑ ${start} more lines`)
+    selectableRows = selectableRows.filter(entry => entry.row !== 0)
+  }
+  if (end < content.length && selected < end - 1) {
+    viewport[viewport.length - 1] = color.textDim(`↓ ${content.length - end} more lines`)
+    selectableRows = selectableRows.filter(entry => entry.row !== viewport.length - 1)
+  }
+  return { lines: [...viewport, footer], selectableRows }
 }
+
+/** One physical row of the last painted panel frame (mouse hit-testing).
+ * The map is built from the EXACT final rows render() returns (including
+ * the viewport slice), so a click can only act on last-painted geometry.
+ * (Mouse parity.) */
+type ActionEditorMouseHit =
+  | { kind: 'select'; index: number }
+  | { kind: 'inert' }
 
 export class ActionEditorPanel implements Component {
   private model: KeybindingEditorModel
@@ -104,6 +137,10 @@ export class ActionEditorPanel implements Component {
   private mutationGeneration = 0
   private disposed = false
   private message: string | undefined
+  /** Physical row → hit entry from the LAST render (mouse parity). */
+  private hitMap: ActionEditorMouseHit[] = []
+  /** The width the hit map was painted at; a stale-width event is rejected. */
+  private lastRenderWidth = 0
 
   constructor(options: ActionEditorOptions) {
     this.model = options.model
@@ -193,7 +230,13 @@ export class ActionEditorPanel implements Component {
     lines.push(color.textDim(this.row.fixed || this.row.reserved || this.row.safeMode
       ? 'Esc: back'
       : 'Enter: edit · a: add · Delete: remove · r: reset · d: disable · Esc: back'))
-    return actionViewport(lines, selectableLineIndices[this.selectedIndex], this.maxRows())
+    const viewport = actionViewport(lines, selectableLineIndices[this.selectedIndex], this.maxRows(), selectableLineIndices)
+    this.lastRenderWidth = safeWidth
+    this.hitMap = viewport.lines.map((_, row) => {
+      const selectable = viewport.selectableRows.find(candidate => candidate.row === row)
+      return selectable !== undefined ? { kind: 'select', index: selectable.ordinal } : { kind: 'inert' }
+    })
+    return viewport.lines
   }
 
   invalidate(): void {
@@ -290,6 +333,59 @@ export class ActionEditorPanel implements Component {
     }
   }
 
+  /**
+   * Mouse parity: the hit map from the LAST render decides what a pointer
+   * event may act on — a selectable row (a binding or "+ Add shortcut";
+   * press selects, click runs the same action as Enter) or inert chrome.
+   * Wheel moves the selection. While the recorder is capturing, mouse
+   * events are NOT interpreted as keybindings: the TUI mouse path
+   * consumes SGR bytes before they can reach the recorder, and this
+   * handler stays inert.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // The hit map is only valid for the last painted width: a resize
+    // that has not been repainted must not dispatch against stale
+    // geometry (last-painted geometry is authoritative).
+    if (event.width !== this.lastRenderWidth) return undefined
+    if (this.recorder !== undefined) return undefined
+    const hit = this.hitMap[event.y]
+    if (!hit || hit.kind === 'inert') return undefined
+
+    if (event.type === 'wheel' && event.wheelDelta) {
+      const configured = this.row.customized ? this.row.configured : []
+      const editable = this.row.customized ? this.row.configured : this.row.editableDefaults
+      const total = this.mode === 'choose-binding' ? 2 : editable.length + 1
+      if (total <= 0) return undefined
+      const delta = event.wheelDelta < 0 ? -1 : 1
+      this.selectedIndex = (this.selectedIndex + delta + total) % total
+      this.message = undefined
+      this.requestRender()
+      return { handled: true, render: true }
+    }
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+    if (event.type === 'press') {
+      this.selectedIndex = hit.index
+      this.message = undefined
+      return { handled: true, focus: true }
+    }
+    // click: the same action as Enter.
+    if (this.mode === 'choose-binding') {
+      this.handleBindingChoice(this.selectedIndex === 0 ? 'd' : 'l')
+      return { handled: true }
+    }
+    const configured = this.row.customized ? this.row.configured : []
+    const editable = this.row.customized ? this.row.configured : this.row.editableDefaults
+    if (this.selectedIndex >= editable.length) {
+      this.mode = 'choose-binding'
+      this.selectedIndex = 0
+      this.message = undefined
+      this.requestRender()
+    } else {
+      this.startRecorder(editable[this.selectedIndex]!.kind, editable[this.selectedIndex])
+    }
+    return { handled: true }
+  }
+
   private renderBindingChoice(width: number): string[] {
     const lines = [
       color.textStrong(`Add shortcut › ${this.row.label}`),
@@ -305,7 +401,11 @@ export class ActionEditorPanel implements Component {
     }
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, width)))
     lines.push('', color.textDim('Enter: choose · d/l: choose directly · Esc: back'))
-    return lines.slice(0, Math.max(1, this.maxRows()))
+    const limit = Math.max(1, this.maxRows())
+    this.lastRenderWidth = Math.max(1, width)
+    this.hitMap = lines.slice(0, limit).map((_, row) =>
+      row === 3 ? { kind: 'select', index: 0 } : row === 4 ? { kind: 'select', index: 1 } : { kind: 'inert' })
+    return lines.slice(0, limit)
   }
 
   private handleBindingChoice(data: string): void {

@@ -500,3 +500,174 @@ test('focused=true is inert without a search input', () => {
   const rendered = picker.render(80)
   assert.ok(!rendered.some((line) => line.includes(CURSOR_MARKER)), 'no search input means no marker')
 })
+
+/** A minimal mouse event for direct component tests. */
+function mouse(
+  type: 'press' | 'click' | 'wheel',
+  x: number,
+  y: number,
+  width = 80,
+  height = 10,
+  wheelDelta?: number,
+): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type,
+    button: 'left',
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width,
+    height,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+    ...(type === 'wheel' ? { wheelDelta: wheelDelta ?? 1 } : {}),
+  }
+}
+
+const plainItems = [
+  { value: 'a', label: 'alpha' },
+  { value: 'b', label: 'bravo' },
+  { value: 'c', label: 'charlie' },
+]
+
+test('mouse press selects a row and click activates the pressed value (mouse parity)', () => {
+  const selected: string[] = []
+  const activated: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelectionChange = (item) => { selected.push(item.value) }
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.render(80)
+  // Rows: 0=search, 1=blank, 2=alpha, 3=bravo, 4=charlie.
+  const press = picker.handleMouse(mouse('press', 5, 3, 80, 10))
+  assert.ok(press?.handled, 'press on an item row must be handled')
+  assert.equal(press?.focus, true, 'press must request focus')
+  assert.equal(picker.getSelectedIndex(), 1, 'press must select the pressed row')
+  assert.deepEqual(selected, ['b'], 'press must fire onSelectionChange on a real change')
+  picker.handleMouse(mouse('click', 5, 3, 80, 10))
+  assert.deepEqual(activated, ['b'], 'click must activate the pressed value')
+})
+
+test('async setItems between press and click cannot transfer activation (mouse parity)', () => {
+  const activated: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.render(80)
+  picker.handleMouse(mouse('press', 5, 2, 80, 10)) // press 'a'
+  // Async refresh: a different item moves into the same physical row.
+  picker.setItems([
+    { value: 'x', label: 'xray' },
+    { value: 'b', label: 'bravo' },
+    { value: 'c', label: 'charlie' },
+  ])
+  picker.render(80)
+  picker.handleMouse(mouse('click', 5, 2, 80, 10)) // click the same physical row
+  assert.deepEqual(activated, [], 'activation must not transfer to the new item')
+})
+
+test('group headers, scroll indicator, and hint are inert (mouse parity)', () => {
+  const items = [
+    { value: 'a', label: 'alpha', group: 'g1' },
+    { value: 'b', label: 'bravo', group: 'g1' },
+    { value: 'c', label: 'charlie', group: 'g2' },
+  ]
+  const picker = new SearchablePicker(items, 2, testTheme, {}, { enableSearch: true })
+  const rendered = picker.render(80)
+  const headerRow = rendered.findIndex(line => line.includes('g1'))
+  const hintRow = rendered.findIndex(line => line.includes('navigate'))
+  const scrollRow = rendered.findIndex(line => line.includes('(') && line.includes('/'))
+  assert.ok(headerRow >= 0 && hintRow >= 0 && scrollRow >= 0, `chrome rows missing:\n${rendered.join('\n')}`)
+  assert.equal(picker.handleMouse(mouse('press', 5, headerRow, 80, 10)), undefined, 'group header must be inert')
+  assert.equal(picker.handleMouse(mouse('press', 5, hintRow, 80, 10)), undefined, 'hint must be inert')
+  assert.equal(picker.handleMouse(mouse('press', 5, scrollRow, 80, 10)), undefined, 'scroll indicator must be inert')
+})
+
+test('wheel moves filtered selection (mouse parity)', () => {
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.render(80)
+  // Wheel up (negative delta) wraps to the last item like the keyboard.
+  const up = picker.handleMouse(mouse('wheel', 5, 2, 80, 10, -1))
+  assert.ok(up?.handled, 'wheel must be handled')
+  assert.equal(picker.getSelectedIndex(), 2, 'wheel up must wrap to the last item')
+  picker.handleMouse(mouse('wheel', 5, 2, 80, 10, 1))
+  assert.equal(picker.getSelectedIndex(), 0, 'wheel down must wrap to the first item')
+})
+
+test('search Input click repositions the search cursor (mouse parity)', () => {
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.render(80)
+  picker.handleInput('ab')
+  picker.render(80)
+  // Click between a and b: the search row is y=0 and the Input prompt
+  // "> " is 2 columns, so value column 1 is at x=3.
+  const result = picker.handleMouse(mouse('press', 3, 0, 80, 10))
+  assert.ok(result?.handled, 'press on the search row must be handled')
+  picker.handleInput('X')
+  const rendered = picker.render(80).map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  assert.ok(rendered.some(line => line.includes('aXb')), 'typing after the click must insert at the clicked filter column')
+})
+
+test('tiny-budget sliced rows keep hit-map alignment (mouse parity)', () => {
+  const items = Array.from({ length: 6 }, (_, index) => ({ value: `v${index}`, label: `item ${index}` }))
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { enableSearch: true })
+  picker.setMaxRows(4)
+  const rendered = picker.render(80)
+  assert.ok(rendered.length <= 4, `tiny budget must cap rows: ${rendered.length}`)
+  // The first visible row is an item (the tail slice keeps item + chrome).
+  const press = picker.handleMouse(mouse('press', 5, 0, 80, 4))
+  assert.ok(press?.handled, 'the sliced item row must still be clickable')
+  assert.equal(picker.getSelectedIndex(), 0, 'the sliced hit map must select the visible item')
+  // The hint (last row) stays inert.
+  const hintRow = rendered.findIndex(line => line.includes('navigate'))
+  if (hintRow >= 0) {
+    assert.equal(picker.handleMouse(mouse('press', 5, hintRow, 80, 4)), undefined, 'sliced hint must be inert')
+  }
+})
+
+test('stale-width events are rejected (mouse parity)', () => {
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.render(80)
+  // A resize that has not been repainted must not dispatch against the
+  // old hit map.
+  assert.equal(picker.handleMouse(mouse('press', 5, 2, 60, 10)), undefined, 'stale-width press must be rejected')
+})
+
+test('async setItems WITHOUT a repaint between press and click cannot transfer activation (mouse parity)', () => {
+  const activated: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.render(80)
+  picker.handleMouse(mouse('press', 5, 2, 80, 10)) // press 'a'
+  // Async refresh WITHOUT a repaint: the hit map is still last-painted
+  // geometry, but the CURRENT filtered list has a different item at the
+  // same index. The click must resolve by the pressed VALUE, not the
+  // stale index.
+  picker.setItems([
+    { value: 'x', label: 'xray' },
+    { value: 'b', label: 'bravo' },
+    { value: 'c', label: 'charlie' },
+  ])
+  picker.handleMouse(mouse('click', 5, 2, 80, 10)) // click the same physical row
+  assert.deepEqual(activated, [], 'activation must not transfer to the replacement at the stale index')
+})
+
+test('async setItems WITHOUT a repaint between paint and press cannot select the replacement (mouse parity)', () => {
+  const selected: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelectionChange = (item) => { selected.push(item.value) }
+  picker.render(80)
+  // Async refresh WITHOUT a repaint: the hit map is still last-painted
+  // geometry, but the CURRENT filtered list has a different item at the
+  // same index. The press must resolve by the pressed VALUE, not the
+  // stale index.
+  picker.setItems([
+    { value: 'x', label: 'xray' },
+    { value: 'b', label: 'bravo' },
+    { value: 'c', label: 'charlie' },
+  ])
+  const press = picker.handleMouse(mouse('press', 5, 2, 80, 10)) // press the old 'a' row
+  assert.equal(press, undefined, 'a press on a row whose value no longer exists must be rejected')
+  assert.deepEqual(selected, [], 'the press must not select the replacement at the stale index')
+})

@@ -5,6 +5,9 @@ import {
 	AltScreenSearchIndex,
 	findAltScreenSearchMatches,
 } from "../src/alt-screen-search.ts";
+import { Box } from "../src/components/box.ts";
+import { Container } from "../src/tui.ts";
+import { Input } from "../src/components/input.ts";
 import { HStack } from "../src/components/h-stack.ts";
 import { Image } from "../src/components/image.ts";
 import { MouseRegion } from "../src/components/mouse-region.ts";
@@ -594,6 +597,64 @@ describe("TuiAltScreen", () => {
 		assert.ok(!populated.some((line) => line.includes("Find in transcript")));
 	});
 
+	it("positions the search query cursor on mouse press (X049)", () => {
+		let query = "";
+		const component = new AltScreenSearchComponent((next) => {
+			query = next;
+		});
+		component.render(48);
+		component.handleInput("hello");
+		component.render(48);
+		// Content starts at col 1 (left border); the Input prompt " " is one
+		// column, so value column 2 (between e and l) is at component col 4.
+		const result = component.handleMouse({
+			type: "press",
+			button: "left",
+			x: 4,
+			y: 1,
+			screenX: 4,
+			screenY: 1,
+			width: 48,
+			height: 3,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.ok(result?.handled, "press on the query row must be handled");
+		assert.strictEqual(result?.focus, true, "press must request focus");
+		component.handleInput("X");
+		assert.strictEqual(query, "heXllo", "typing after the click must insert at the clicked column");
+	});
+
+	it("keeps the search result-count suffix and borders inert (X049)", () => {
+		const component = new AltScreenSearchComponent(() => {});
+		component.render(48);
+		component.handleInput("needle");
+		component.setResult(0, 2);
+		component.render(48);
+		const press = (x: number, y: number) =>
+			component.handleMouse({
+				type: "press",
+				button: "left",
+				x,
+				y,
+				screenX: x,
+				screenY: y,
+				width: 48,
+				height: 3,
+				shift: false,
+				alt: false,
+				ctrl: false,
+			});
+		// The result-count suffix (" 1/2 ") sits after the Input (which ends
+		// at component col 41 for this render); a press on the suffix must
+		// not reach the Input.
+		assert.strictEqual(press(45, 1), undefined, "result-count suffix must be inert");
+		// Top and bottom borders (rows 0 and 2) are inert.
+		assert.strictEqual(press(4, 0), undefined, "top border must be inert");
+		assert.strictEqual(press(4, 2), undefined, "navigation-button row must be inert here");
+	});
+
 	it("navigates transcript search with hoverable arrow buttons and toggles it with its shortcut", async () => {
 		const terminal = new RecordingTerminal(120, 6);
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {
@@ -638,6 +699,38 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[102;6u");
 		await terminal.waitForRender();
 		assert.ok(!terminal.getViewport().some((line) => line.includes("↑ Shift+Enter · ↓ Enter")));
+		tui.stop();
+	});
+
+	it("positions the fullscreen search query cursor on mouse click (X049)", async () => {
+		const terminal = new RecordingTerminal(120, 6);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("needle one\nmiddle\nneedle two\nend", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[102;6u");
+		terminal.sendInput("needle");
+		await terminal.waitForRender();
+		let viewport = terminal.getViewport();
+		const contentRow = viewport.findIndex((line) => line.includes("1/2"));
+		assert.ok(contentRow >= 0, "search overlay content row must be visible");
+		// The transcript may also contain "needle"; the overlay's query is
+		// the LAST occurrence on the content row.
+		const needleCol = viewport[contentRow]?.lastIndexOf("needle") ?? -1;
+		assert.ok(needleCol >= 0);
+		// Click on the "e" cell (between n and e): the overlay content starts
+		// at col 1 (border) plus the Input prompt " " (col 2 = n), so the e
+		// cell is needleCol + 2. SGR coordinates are 1-based.
+		terminal.sendInput(`\x1b[<0;${needleCol + 2};${contentRow + 1}M`);
+		await terminal.waitForRender();
+		terminal.sendInput("X");
+		await terminal.waitForRender();
+		viewport = terminal.getViewport();
+		assert.ok(
+			viewport.some((line) => line.includes("nXeedle")),
+			"typing after the click must insert at the clicked query column",
+		);
 		tui.stop();
 	});
 
@@ -1525,6 +1618,30 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("releases the selection press-time component snapshot when the selection ends (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const snapshotOf = (): Set<unknown> | undefined =>
+			(tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined }).selectionPressDispatchComponents;
+
+		// Press on empty space (row 4, below the text): the selection press
+		// snapshots the reached set.
+		terminal.sendInput("\x1b[<0;1;4M");
+		await terminal.waitForRender();
+		assert.ok(snapshotOf() !== undefined, "the selection press must snapshot the reached set");
+
+		// Drag + release: the gesture ends and the snapshot must be
+		// released (no dead component references retained).
+		terminal.sendInput("\x1b[<32;4;4M");
+		terminal.sendInput("\x1b[<3;4;4m");
+		await terminal.waitForRender();
+		assert.equal(snapshotOf(), undefined, "the press-time snapshot must be released when the selection ends");
+		tui.stop();
+	});
+
 	it("retains a completed visible selection across focus changes", async () => {
 		const terminal = new RecordingTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal);
@@ -1703,16 +1820,21 @@ describe("TuiAltScreen", () => {
 		};
 		tui.addChild(component);
 		tui.start();
-		await terminal.waitForRender();
+		try {
+			await terminal.waitForRender();
 
-		terminal.sendInput("\x1b[<0;1;1M");
-		terminal.sendInput("\x1b[<32;5;2M");
-		terminal.sendInput("\x1b[<0;5;2m");
-		await terminal.waitForRender();
+			terminal.sendInput("\x1b[<0;1;1M");
+			terminal.sendInput("\x1b[<32;5;2M");
+			terminal.sendInput("\x1b[<0;5;2m");
+			await terminal.waitForRender();
 
-		assert.deepStrictEqual(events, ["press", "drag", "release"]);
-		assert.strictEqual(tui.getFocusedComponent(), component);
-		tui.stop();
+			assert.deepStrictEqual(events, ["press", "drag", "release"]);
+			// Boolean identity assertion: a strictEqual failure would print
+			// the WHOLE TUI object in the diff and hang the test runner.
+			assert.ok(tui.getFocusedComponent() === component, "mouse focus must target the clicked component");
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("reports consecutive click counts to component-owned controls", async () => {
@@ -1931,30 +2053,6 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[<32;10;5M");
 		await terminal.waitForRender();
 		assert.deepStrictEqual(boundaries, [[1, "scrollbar"]]);
-		tui.stop();
-	});
-
-	it("keeps the scrollbar column selectable while the thumb is hidden", async () => {
-		const terminal = new RecordingTerminal(10, 2);
-		const tui = new TuiAltScreen(terminal);
-		const scrollView = new ScrollView(new Text("123456789A\nabcdefghij\nmore\nlines", 0, 0), {
-			scrollbar: "auto",
-		});
-		tui.setLayoutRoot(scrollView);
-		tui.start();
-		await terminal.waitForRender();
-		assert.strictEqual(scrollView.isScrollbarVisible, false);
-
-		terminal.sendInput("\x1b[<0;10;1M");
-		terminal.sendInput("\x1b[<32;10;2M");
-		terminal.sendInput("\x1b[<0;10;2m");
-		await terminal.waitForRender();
-
-		const expected = `\x1b]52;c;${Buffer.from("A\nabcdefghij").toString("base64")}\x07`;
-		assert.ok(
-			terminal.events.some((event) => event.type === "write" && event.data.includes(expected)),
-			JSON.stringify(terminal.events.filter((event) => event.type === "write" && event.data.includes("\x1b]52;c;"))),
-		);
 		tui.stop();
 	});
 
@@ -2334,3 +2432,365 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		tui.stop();
 	});
 });
+
+	it("releases the selection press-time snapshot on focus-out (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const snapshotOf = (): Set<unknown> | undefined =>
+			(tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined }).selectionPressDispatchComponents;
+
+		// Press on empty space (row 4, below the text): the selection press
+		// snapshots the reached set.
+		terminal.sendInput("\x1b[<0;1;4M");
+		await terminal.waitForRender();
+		assert.ok(snapshotOf() !== undefined, "the selection press must snapshot the reached set");
+
+		// Focus leaves mid-gesture: the snapshot must be released.
+		terminal.sendInput("\x1b[O");
+		await terminal.waitForRender();
+		assert.equal(snapshotOf(), undefined, "focus-out must release the press-time snapshot");
+		tui.stop();
+	});
+
+	it("releases the selection press-time snapshot on stop (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const snapshotOf = (): Set<unknown> | undefined =>
+			(tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined }).selectionPressDispatchComponents;
+
+		// Press on empty space (row 4, below the text): the selection press
+		// snapshots the reached set.
+		terminal.sendInput("\x1b[<0;1;4M");
+		await terminal.waitForRender();
+		assert.ok(snapshotOf() !== undefined, "the selection press must snapshot the reached set");
+
+		// Stop mid-gesture: the snapshot must be released.
+		tui.stop();
+		assert.equal(snapshotOf(), undefined, "stop must release the press-time snapshot");
+	});
+
+	it("blocks transcript selection under an inert capturing overlay (X018 modal isolation)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		// A plain Text overlay (no handleMouse) mounted over the transcript:
+		// it is a capturing overlay, so a drag over it must NOT select/copy
+		// the hidden underlying text.
+		tui.showOverlay(new Text("overlay", 0, 0));
+		await terminal.waitForRender();
+		// Press on the overlay, drag, release.
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;8;2M");
+		terminal.sendInput("\x1b[<3;8;2m");
+		await terminal.waitForRender();
+		const clipboardWrites = terminal.events.filter(
+			(event) => event.type === "write" && event.data.includes("\x1b]52;c;"),
+		);
+		assert.equal(clipboardWrites.length, 0, "a drag over an inert capturing overlay must not copy the hidden background");
+		tui.stop();
+	});
+
+	it("forwards focus and keyboard to an Input inside a plain Container overlay root (X051)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		// A plain Container (no FocusForwardingFrame) as the overlay root,
+		// containing a real Input: the public showOverlay contract must
+		// reach the interactive child.
+		const input = new Input();
+		const root = new Container();
+		root.addChild(input);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press on the Input (the overlay's content row — the overlay
+		// renders at screen row 1, so SGR row 2).
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(input.focused, true, "the Input inside the Container root must receive the focused flag");
+		// A key must reach the Input through the Container root.
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(input.getValue(), "x", "the Input must receive keyboard input through the Container root");
+		tui.stop();
+	});
+
+	it("forwards focus and keyboard to the CLICKED child only in a multi-child Container overlay root (X051)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const second = new Input();
+		const root = new Container();
+		root.addChild(first);
+		root.addChild(second);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press on the SECOND Input (the overlay renders two rows at screen
+		// rows 1-2, so SGR row 3 hits the second child).
+		terminal.sendInput("\x1b[<0;2;3M");
+		terminal.sendInput("\x1b[<0;2;3m");
+		await terminal.waitForRender();
+		assert.strictEqual(second.focused, true, "the clicked Input must receive the focused flag");
+		assert.strictEqual(first.focused, false, "the unclicked Input must NOT receive the focused flag");
+		// A key must reach ONLY the clicked child.
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(second.getValue(), "x", "the clicked Input must receive the key");
+		assert.strictEqual(first.getValue(), "", "the unclicked Input must NOT receive the key");
+		tui.stop();
+	});
+
+	it("forwards focus and keyboard to an Input inside a plain Box overlay root (X051)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const input = new Input();
+		const root = new Box();
+		root.addChild(input);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// The Box has default padding (1,1): the Input renders at the
+		// content area. Press on the Input row.
+		const viewport = terminal.getViewport();
+		const inputRow = viewport.findIndex(line => line.includes(">"));
+		assert.ok(inputRow >= 0, `input row missing:\n${viewport.join('\n')}`);
+		terminal.sendInput(`\x1b[<0;2;${inputRow + 1}M`);
+		terminal.sendInput(`\x1b[<0;2;${inputRow + 1}m`);
+		await terminal.waitForRender();
+		assert.strictEqual(input.focused, true, "the Input inside the Box root must receive the focused flag");
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(input.getValue(), "x", "the Input must receive keyboard input through the Box root");
+		tui.stop();
+	});
+
+	it("cancels an in-flight selection gesture when the drag lands on a capturing overlay (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		tui.showOverlay(new Text("overlay", 0, 0));
+		await terminal.waitForRender();
+		const snapshotOf = (): Set<unknown> | undefined =>
+			(tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined }).selectionPressDispatchComponents;
+
+		// Press OUTSIDE the overlay (row 0), drag INTO the overlay (row 1),
+		// release on the overlay: the in-flight selection gesture must be
+		// cancelled — no copy, no armed press state, no retained snapshot.
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;8;2M");
+		terminal.sendInput("\x1b[<3;8;2m");
+		await terminal.waitForRender();
+		const clipboardWrites = terminal.events.filter(
+			(event) => event.type === "write" && event.data.includes("\x1b]52;c;"),
+		);
+		assert.equal(clipboardWrites.length, 0, "a drag landing on a capturing overlay must not copy the background");
+		assert.equal(snapshotOf(), undefined, "the in-flight selection snapshot must be released");
+		const state = tui as unknown as { selectionPressActive: boolean };
+		assert.equal(state.selectionPressActive, false, "the in-flight selection gesture must be cancelled");
+		tui.stop();
+	});
+
+	it("clears children exactly once when a child dispose reenters clear (X007)", async () => {
+		const box = new Box();
+		const disposed: string[] = [];
+		const reentrant = {
+			render: () => [],
+			invalidate: () => {},
+			dispose: () => {
+				disposed.push("reentrant");
+				// Reenter: clear the box again while it is mid-clear.
+				box.clear();
+			},
+		};
+		const plain = {
+			render: () => [],
+			invalidate: () => {},
+			dispose: () => {
+				disposed.push("plain");
+			},
+		};
+		box.addChild(reentrant);
+		box.addChild(plain);
+		box.clear();
+		assert.deepStrictEqual(disposed, ["reentrant", "plain"], "each child must be disposed exactly once");
+		assert.strictEqual(box.children.length, 0, "the box must be empty after clear");
+	});
+
+	it("cancels an in-flight scrollbar drag when the pointer lands on a capturing overlay (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(10, 10);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 50 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "always" },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+		// Press on the track: starts a scrollbar drag.
+		terminal.sendInput("\x1b[<0;10;6M");
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.scrollTop, 20);
+		// A capturing overlay appears covering the scrollbar column; drag
+		// onto it: the in-flight drag must be cancelled.
+		tui.showOverlay(new Text("overlay", 9, 0));
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<32;5;4M");
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.scrollTop, 20, "the drag must not scroll while the pointer is on the overlay");
+		const state = tui as unknown as { scrollbarDrag: unknown };
+		assert.strictEqual(state.scrollbarDrag, undefined, "the in-flight scrollbar drag must be cancelled when the pointer lands on the overlay");
+		terminal.sendInput("\x1b[<0;5;4m");
+		await terminal.waitForRender();
+		tui.stop();
+	});
+
+	it("jumps a hidden auto scrollbar track on a stationary first press (X018)", async () => {
+		const terminal = new RecordingTerminal(10, 5);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "auto", scrollbarHideDelayMs: 20 },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.isScrollbarVisible, false);
+		const before = scrollView.scrollTop;
+
+		// A stationary FIRST press on the hidden track column must jump the
+		// scroll position immediately (includeHiddenAuto on the press path) —
+		// no hover reveal + second press needed.
+		terminal.sendInput("\x1b[<0;10;3M");
+		await terminal.waitForRender();
+		assert.ok(scrollView.scrollTop > before, "the first press must jump the hidden auto scrollbar track");
+		terminal.sendInput("\x1b[<0;10;3m");
+		await terminal.waitForRender();
+		tui.stop();
+	});
+
+	it("honors the showHardwareCursor constructor parameter (upstream v0.85.1 removed the PI_HARDWARE_CURSOR env knob)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, true);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(tui.getShowHardwareCursor(), true, "the constructor parameter must enable the hardware cursor");
+		tui.setShowHardwareCursor(false);
+		assert.strictEqual(tui.getShowHardwareCursor(), false, "setShowHardwareCursor must toggle the flag");
+		tui.stop();
+	});
+
+	it("treats an Input under a Box root as mounted (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.start();
+		await terminal.waitForRender();
+		const input = new Input();
+		const root = new Box();
+		root.addChild(input);
+		tui.setLayoutRoot(root);
+		await terminal.waitForRender();
+		// The blocked-overlay focus restore path calls isComponentMounted:
+		// an Input under a Box root must be reported as mounted (the
+		// structural walk covers Box children, not just Container).
+		const t = tui as unknown as { isComponentMounted(c: unknown): boolean };
+		assert.strictEqual(t.isComponentMounted(input), true, "an Input under a Box root must be reported as mounted");
+		tui.stop();
+	});
+
+	it("ignores the legacy PI_HARDWARE_CURSOR env knob (upstream v0.85.1 removed coding-agent config reads)", async () => {
+		process.env.PI_HARDWARE_CURSOR = "1";
+		try {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			assert.strictEqual(tui.getShowHardwareCursor(), false, "the legacy env knob must not control the default");
+			tui.stop();
+		} finally {
+			delete process.env.PI_HARDWARE_CURSOR;
+		}
+	});
+
+	it("keeps the replacement focused when an Input under a Box root blocks overlay focus (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.start();
+		await terminal.waitForRender();
+		const input = new Input();
+		const box = new Box();
+		box.addChild(input);
+		const a = new Text("a", 0, 0);
+		const c = new Text("c", 0, 0);
+		tui.addChild(box);
+		tui.addChild(a);
+		tui.addChild(c);
+		const overlay = new Text("overlay", 0, 0);
+		const r = new Text("r", 0, 0);
+		// r is the current focus when the overlay appears: it becomes the
+		// overlay's preFocus (the focus to restore when the overlay closes).
+		tui.setFocus(r);
+		tui.showOverlay(overlay);
+		await terminal.waitForRender();
+		// The overlay owns the focus while visible.
+		assert.strictEqual(tui.getFocusedComponent(), overlay, "the overlay must own the focus while visible");
+		// a blocks the overlay focus.
+		tui.setFocus(a);
+		assert.strictEqual(tui.getFocusedComponent(), a, "a must own the focus");
+		// The Input under the Box root blocks it too: it must be reported
+		// as MOUNTED (structural walk covers Box children), so the overlay
+		// focus restore must NOT hijack the next focus.
+		tui.setFocus(input);
+		assert.strictEqual(tui.getFocusedComponent(), input, "the Input under the Box root must own the focus");
+		// c must keep the focus — the blocked overlay must not regain it
+		// because the Input was (wrongly) considered unmounted.
+		tui.setFocus(c);
+		assert.strictEqual(tui.getFocusedComponent(), c, "the replacement must keep the focus (Box subtree is live)");
+		tui.stop();
+	});
+
+	it("releases the selection press-time snapshot when a scrollbar press ends the selection (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(10, 5);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "always" },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+		const snapshotOf = (): Set<unknown> | undefined =>
+			(tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined }).selectionPressDispatchComponents;
+
+		// A selection press on empty space snapshots the reached set.
+		terminal.sendInput("\x1b[<0;1;1M");
+		await terminal.waitForRender();
+		assert.ok(snapshotOf() !== undefined, "the selection press must snapshot the reached set");
+
+		// A scrollbar press ends the in-flight selection gesture: the
+		// snapshot must be released too.
+		terminal.sendInput("\x1b[<0;10;3M");
+		await terminal.waitForRender();
+		assert.equal(snapshotOf(), undefined, "the scrollbar press must release the selection press-time snapshot");
+		terminal.sendInput("\x1b[<0;10;3m");
+		await terminal.waitForRender();
+		tui.stop();
+	});

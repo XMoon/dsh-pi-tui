@@ -760,20 +760,21 @@ export class Editor implements Component, Focusable {
 		const targetColumn = Math.max(0, event.x - paddingX);
 		let visibleColumn = 0;
 		let targetIndex = chunk.length;
-		let lastGraphemeIndex = 0;
 		for (const grapheme of this.segment(chunk, "grapheme")) {
 			const nextColumn = visibleColumn + visibleWidth(grapheme.segment);
-			lastGraphemeIndex = grapheme.index;
 			if (targetColumn < nextColumn) {
 				targetIndex = grapheme.index;
 				break;
 			}
 			visibleColumn = nextColumn;
 		}
-		const isLastSegment =
-			visualLineIndex === visualLines.length - 1 ||
-			visualLines[visualLineIndex + 1]?.logicalLine !== visualLine.logicalLine;
-		if (!isLastSegment && targetIndex === chunk.length && chunk.length > 0) targetIndex = lastGraphemeIndex;
+		// NOTE: upstream v0.85.1 (and current upstream main) force
+		// targetIndex = lastGraphemeIndex when a click lands at/after the
+		// end of a NON-last wrapped segment, placing the cursor one
+		// grapheme BEFORE the segment end. The fork keeps the natural
+		// end-of-segment position (chunk.length), matching the Input
+		// clamp-to-end behavior. (dsh-pi-tui divergence X050
+		// BUGFIX_MISSING_UPSTREAM.)
 
 		this.state.cursorLine = visualLine.logicalLine;
 		this.setCursorCol(visualLine.startCol + targetIndex);
@@ -2561,8 +2562,16 @@ export class Editor implements Component, Focusable {
 			this.state.lines = result.lines;
 			this.state.cursorLine = result.cursorLine;
 			this.setCursorCol(result.cursorCol);
-			this.cancelAutocomplete();
-			this.onChange?.(this.getText());
+			if (this.autocompletePrefix.startsWith("/")) {
+				// Slash-prefix completions SUBMIT, exactly like the keyboard
+				// Enter path (apply → cancel → fall through to submit): a
+				// mouse click on a `/command` suggestion must behave like
+				// Enter, not just insert the text. (Mouse parity.)
+				this.submitValue();
+			} else {
+				this.cancelAutocomplete();
+				this.onChange?.(this.getText());
+			}
 		};
 		return list;
 	}

@@ -215,3 +215,53 @@ test('a write settling AFTER the submenu closed converges the outer row and stay
     'the outer row converges to the COMMITTED summary after the late failure')
   assert.equal(harness.notices.length, 0, 'a failure settling after close stays silent')
 })
+
+/** A minimal left-button mouse event for direct component tests. */
+function mouse(type: 'press' | 'click', x: number, y: number, width = 60, height = 10): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type,
+    button: 'left',
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width,
+    height,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+  }
+}
+
+test('allowlist provider mouse click opens level 2 (mouse parity)', async () => {
+  const harness = rig({ enabled: false, allowedModels: [] })
+  const menu = new SubagentModelAllowlistSubmenu(harness.deps)
+  menu.render(60)
+  // The provider list has no search: item rows start at y=0.
+  const press = menu.handleMouse(mouse('press', 5, 0, 60, 10))
+  assert.ok(press?.handled, 'press on a provider row must be handled')
+  menu.handleMouse(mouse('click', 5, 0, 60, 10))
+  await settle(harness, 0)
+  const rendered = menu.render(60).join('\n')
+  assert.ok(rendered.includes('m1'), 'clicking the provider row must open the model list')
+})
+
+test('allowlist model mouse click toggles the exact route (mouse parity)', async () => {
+  const harness = rig({ enabled: false, allowedModels: [] })
+  const menu = new SubagentModelAllowlistSubmenu(harness.deps)
+  menu.render(60)
+  // Open level 2 with Enter, then click the first model row.
+  menu.handleInput(ENTER)
+  await settle(harness, 0)
+  menu.render(60)
+  const press = menu.handleMouse(mouse('press', 5, 0, 60, 10))
+  assert.ok(press?.handled, 'press on a model row must be handled')
+  menu.handleMouse(mouse('click', 5, 0, 60, 10))
+  await settle(harness, 1)
+  assert.deepEqual(
+    harness.store.writes[0]?.allowedModels,
+    [{ provider: 'p', model: 'm1' }],
+    'clicking a model row must toggle the exact route',
+  )
+})

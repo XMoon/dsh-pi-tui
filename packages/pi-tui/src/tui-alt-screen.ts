@@ -460,6 +460,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	protected override afterTerminalStop(options: TuiStopOptions): void {
 		if (!this.altScreenActive) return;
 		this.altScreenActive = false;
+		// A stop during an in-flight selection must not retain the
+		// press-time dispatch snapshot (no stale component references
+		// across stop/restart). (dsh-pi-tui divergence X018 hardening.)
+		this.selectionPressDispatchComponents = undefined;
 		if (options.preserveScreen) {
 			this.terminal.write(`${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`);
 		} else {
@@ -787,6 +791,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.selectionDragged = false;
 			this.clearComponentMouseGesture();
 			this.lastComponentClick = undefined;
+			// A focus-out aborts any in-flight selection gesture: release
+			// the press-time dispatch snapshot too, so it cannot retain
+			// the press-time components until the next gesture. (dsh-pi-tui
+			// divergence X018 hardening.)
+			this.selectionPressDispatchComponents = undefined;
 			if (hadActiveSelection) {
 				this.selectionAnchor = undefined;
 				this.selectionFocus = undefined;
@@ -1037,6 +1046,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionInitialRange = undefined;
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
+		// The press-time dispatch snapshot is dead once the selection
+		// gesture ends: release the component references instead of
+		// retaining the whole press-time reached set until the next
+		// selection press or TUI disposal. (dsh-pi-tui divergence X018
+		// hardening.)
+		this.selectionPressDispatchComponents = undefined;
 	}
 
 	private mouseEventDepth = 0;
@@ -1156,6 +1171,23 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				this.mousePressMoved = false;
 			}
 			if (render) this.requestRender();
+			return;
+		}
+
+		// A mounted overlay owns the pointer even when its component
+		// returns undefined (inert chrome / a plain overlay without mouse
+		// handling): the modal must block right-click paste and transcript
+		// selection on the background — a drag over an inert overlay must
+		// never select/copy the hidden underlying text. (dsh-pi-tui
+		// divergence X018 hardening.)
+		if (overlay.hit) {
+			// A gesture that STARTED outside and lands on the overlay must
+			// be cancelled: an in-flight selection (or scrollbar drag) must
+			// not stay armed under the modal — the hidden selection must
+			// not reappear after the overlay closes, and the drag must not
+			// resume on release. A COMPLETED visible selection stays.
+			if (this.selectionPressActive) this.clearTextSelection();
+			if (this.scrollbarDrag !== undefined) this.stopScrollbarDrag();
 			return;
 		}
 
@@ -1343,7 +1375,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 
 		if (event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
-		const target = this.getScrollbarTargetAt(event.x, event.y);
+		// A stationary FIRST press on a hidden auto scrollbar must jump the
+		// track / start a drag immediately (includeHiddenAuto), exactly like
+		// the hover path — otherwise the press is a no-op until a second
+		// press after the hover revealed the bar. (dsh-pi-tui divergence
+		// X018 hardening.)
+		const target = this.getScrollbarTargetAt(event.x, event.y, true);
 		if (!target) return false;
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
@@ -1354,6 +1391,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.lastClick = undefined;
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
+		// The scrollbar press ends any in-flight selection gesture: release
+		// the press-time dispatch snapshot too (X018 lifecycle).
+		this.selectionPressDispatchComponents = undefined;
 		this.setScrollbarHover(target.scrollView);
 		this.scrollbarBoundaryNotified = undefined;
 		const onThumb =
@@ -1614,6 +1654,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					return;
 				}
 			}
+			// The press-time dispatch snapshot was consumed by the click
+			// synthesis above (or was never needed for a drag): release the
+			// component references now that the selection gesture ended.
+			// (dsh-pi-tui divergence X018 hardening.)
+			this.selectionPressDispatchComponents = undefined;
 			if (
 				!this.selectionDragged &&
 				clickedUrl === undefined &&

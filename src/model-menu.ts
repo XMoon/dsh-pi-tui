@@ -19,7 +19,7 @@
  * @module @xmoon76/dsh-pi-tui/model-menu
  */
 
-import { SettingsList, Text, matchesKey, type Component, type RowBudgetAware } from '@xmoon76/pi-tui'
+import { SettingsList, Text, matchesKey, type Component, type Focusable, type RowBudgetAware, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { OwnedTaskOptions } from './detached.ts'
@@ -87,7 +87,7 @@ class EscDismiss implements Component {
  * parent close latches `disposed` and aborts the info load; a resolve or
  * reject that settles afterwards is ignored (debug diagnostics only).
  */
-class EffortSubmenu implements Component, RowBudgetAware {
+class EffortSubmenu implements Component, RowBudgetAware, Focusable {
   private inner: Component
   private readonly requestRender: () => void
   /** Latched by every close path; late async results must not act after. */
@@ -95,6 +95,25 @@ class EffortSubmenu implements Component, RowBudgetAware {
   private readonly abort = new AbortController()
   /** The last host row grant, re-applied to each swapped-in inner list. */
   private rowGrant = Number.POSITIVE_INFINITY
+  /** Focus state for the CURRENT inner (re-applied after async swaps). */
+  private _focused = false
+
+  get focused(): boolean {
+    return this._focused
+  }
+
+  set focused(value: boolean) {
+    this._focused = value
+    this.applyFocused()
+  }
+
+  /** Forward the stored focus flag to the current inner when it is
+   * Focusable (mouse parity: a swapped-in SettingsList must receive the
+   * focused flag for its search Input's cursor/IME state). */
+  private applyFocused(): void {
+    const inner = this.inner as Focusable
+    if ('focused' in inner) inner.focused = this._focused
+  }
 
   /** Host row-budget seam: keep the grant and forward it to the inner
    * list, so a list swapped in asynchronously after a resize still
@@ -166,6 +185,7 @@ class EffortSubmenu implements Component, RowBudgetAware {
         )
         // The async list lands AFTER any resize: re-apply the last grant.
         this.setMaxRows(this.rowGrant)
+        this.applyFocused()
         this.requestRender()
       },
       onError: () => {
@@ -173,6 +193,7 @@ class EffortSubmenu implements Component, RowBudgetAware {
         // menu closed was already classified as a cancellation by the
         // disposed classifier and logged debug-only).
         this.inner = new EscDismiss(new Text('model info unavailable', 0, 0), () => close())
+        this.applyFocused()
         this.requestRender()
       },
     })
@@ -180,6 +201,14 @@ class EffortSubmenu implements Component, RowBudgetAware {
 
   handleInput(data: string): void {
     this.inner.handleInput?.(data)
+  }
+
+  /** Transparent mouse forwarding (mouse parity): the outer SettingsList
+   * dispatches submenu events here; the current inner (a SettingsList
+   * once loaded) owns row hit-testing, search-Input positioning, and
+   * wheel selection. Loading/error text rows stay inert. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    return this.inner.handleMouse?.(event)
   }
 
   invalidate(): void {
@@ -196,7 +225,7 @@ class EffortSubmenu implements Component, RowBudgetAware {
  * cancellation discipline as {@link EffortSubmenu}: a late model list must
  * neither repaint a closed menu nor swap in stale content.
  */
-export class ModelSubmenu implements Component, RowBudgetAware {
+export class ModelSubmenu implements Component, RowBudgetAware, Focusable {
   private inner: Component
   private readonly requestRender: () => void
   /** Latched by every close path; late async results must not act after. */
@@ -204,6 +233,25 @@ export class ModelSubmenu implements Component, RowBudgetAware {
   private readonly abort = new AbortController()
   /** The last host row grant, re-applied to each swapped-in inner list. */
   private rowGrant = Number.POSITIVE_INFINITY
+  /** Focus state for the CURRENT inner (re-applied after async swaps). */
+  private _focused = false
+
+  get focused(): boolean {
+    return this._focused
+  }
+
+  set focused(value: boolean) {
+    this._focused = value
+    this.applyFocused()
+  }
+
+  /** Forward the stored focus flag to the current inner when it is
+   * Focusable (mouse parity: a swapped-in SettingsList must receive the
+   * focused flag for its search Input's cursor/IME state). */
+  private applyFocused(): void {
+    const inner = this.inner as Focusable
+    if ('focused' in inner) inner.focused = this._focused
+  }
 
   /** Host row-budget seam: keep the grant and forward it to the inner
    * list, so a list swapped in asynchronously after a resize still
@@ -258,6 +306,7 @@ export class ModelSubmenu implements Component, RowBudgetAware {
         )
         // The async list lands AFTER any resize: re-apply the last grant.
         this.setMaxRows(this.rowGrant)
+        this.applyFocused()
         this.requestRender()
       },
       onError: () => {
@@ -265,6 +314,7 @@ export class ModelSubmenu implements Component, RowBudgetAware {
         // menu closed was already classified as a cancellation by the
         // disposed classifier and logged debug-only).
         this.inner = new EscDismiss(new Text('models unavailable', 0, 0), () => close())
+        this.applyFocused()
         this.requestRender()
       },
     })
@@ -272,6 +322,14 @@ export class ModelSubmenu implements Component, RowBudgetAware {
 
   handleInput(data: string): void {
     this.inner.handleInput?.(data)
+  }
+
+  /** Transparent mouse forwarding (mouse parity): the outer SettingsList
+   * dispatches submenu events here; the current inner (a SettingsList
+   * once loaded) owns row hit-testing, search-Input positioning, and
+   * wheel selection. Loading/error text rows stay inert. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    return this.inner.handleMouse?.(event)
   }
 
   invalidate(): void {

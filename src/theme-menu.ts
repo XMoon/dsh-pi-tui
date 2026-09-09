@@ -28,7 +28,7 @@
  * @module @xmoon76/dsh-pi-tui/theme-menu
  */
 
-import { SettingsList, type RowBudgetAware } from '@xmoon76/pi-tui'
+import { SettingsList, type Focusable, type RowBudgetAware, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { settingsListTheme } from './theme.ts'
 import type { ThemeRegistry } from './theme-registry.ts'
 import { themePickerRows, normalizePersistedTheme } from './theme-source.ts'
@@ -70,7 +70,7 @@ export function themeDisplayName(value: string | undefined, themes: ThemeRegistr
  * P3. The outer row's display string is presentational only and is never
  * consulted for identity.
  */
-export class ThemeSubmenu implements RowBudgetAware {
+export class ThemeSubmenu implements RowBudgetAware, Focusable {
   private readonly inner: SettingsList
 
   /** Host row-budget seam: forward the outer SettingsList's live grant so
@@ -78,6 +78,16 @@ export class ThemeSubmenu implements RowBudgetAware {
    * by the compositor (the outer forwards on open and on every change). */
   setMaxRows(rows: number): void {
     this.inner.setMaxRows(rows)
+  }
+
+  /** Focus forwarding (mouse parity): the search-enabled SettingsList
+   * needs the focused flag for its search Input's cursor/IME state. */
+  get focused(): boolean {
+    return this.inner.focused
+  }
+
+  set focused(value: boolean) {
+    this.inner.focused = value
   }
 
   constructor(
@@ -118,6 +128,13 @@ export class ThemeSubmenu implements RowBudgetAware {
 
   handleInput(data: string): void {
     this.inner.handleInput(data)
+  }
+
+  /** Transparent mouse forwarding (mouse parity): the outer SettingsList
+   * dispatches submenu events here; the inner list owns row hit-testing,
+   * search-Input positioning, and wheel selection. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    return this.inner.handleMouse?.(event)
   }
 
   invalidate(): void {

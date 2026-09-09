@@ -1,4 +1,4 @@
-import { type Component, dispatchMouseEvent, type TuiMouseDispatchResult, type TuiMouseEvent } from "../tui.ts";
+import { isFocusable, type Component, type Focusable, dispatchMouseEvent, type TuiMouseDispatchResult, type TuiMouseEvent } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth } from "../utils.ts";
 
 type RenderCache = {
@@ -11,11 +11,39 @@ type RenderCache = {
 /**
  * Box component - a container that applies padding and background to all children
  */
-export class Box implements Component {
+export class Box implements Component, Focusable {
 	children: Component[] = [];
 	private paddingX: number;
 	private paddingY: number;
 	private bgFn?: (text: string) => string;
+	/** The child the last mouse press focused (dsh-pi-tui divergence
+	 * X051): focus/input forward to THIS child only — never broadcast to
+	 * all children. */
+	private focusedChild: Component | undefined;
+
+	/**
+	 * Focusable (dsh-pi-tui divergence X051): a Box used as an overlay
+	 * root (showOverlay accepts any Component) must forward the focused
+	 * flag to the child the mouse press hit — the overlay focus state
+	 * tracks the mounted root, so without forwarding an Input inside a
+	 * plain Box root never receives focused=true (no IME cursor).
+	 */
+	get focused(): boolean {
+		return this.focusedChild !== undefined && isFocusable(this.focusedChild) && this.focusedChild.focused;
+	}
+
+	set focused(value: boolean) {
+		if (this.focusedChild !== undefined && isFocusable(this.focusedChild)) {
+			this.focusedChild.focused = value;
+		}
+	}
+
+	/** Transparent input forwarding (dsh-pi-tui divergence X051): a Box
+	 * overlay root must reach the interactive child the mouse press
+	 * focused. */
+	handleInput(data: string): void {
+		this.focusedChild?.handleInput?.(data);
+	}
 
 	// Cache for rendered output
 	private cache?: RenderCache;
@@ -36,6 +64,7 @@ export class Box implements Component {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
+			if (this.focusedChild === component) this.focusedChild = undefined;
 			this.invalidateCache();
 			// Removal ends ownership: release the child's resources, exactly
 			// like Container.removeChild (dsh-pi-tui divergence X007).
@@ -44,9 +73,14 @@ export class Box implements Component {
 	}
 
 	clear(): void {
-		for (const child of this.children) child.dispose?.();
+		// Detach FIRST (X007 exactly-once): a reentrant child.dispose()
+		// that calls back into this Box must not double-dispose or skip
+		// the remaining children.
+		const children = this.children;
 		this.children = [];
+		this.focusedChild = undefined;
 		this.invalidateCache();
+		for (const child of children) child.dispose?.();
 	}
 
 	/**
@@ -112,13 +146,17 @@ export class Box implements Component {
 		let childY = 0;
 		for (const { component: child, height: childHeight } of mouseChildren) {
 			if (contentY >= childY && contentY < childY + childHeight) {
-				return dispatchMouseEvent(child, {
+				const result = dispatchMouseEvent(child, {
 					...event,
 					x: contentX,
 					y: contentY - childY,
 					width: contentWidth,
 					height: childHeight,
 				});
+				// The press that requests focus names the child the
+				// overlay root must forward focus/input to (X051).
+				if (result?.focus) this.focusedChild = child;
+				return result;
 			}
 			childY += childHeight;
 		}

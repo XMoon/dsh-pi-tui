@@ -264,6 +264,17 @@ export class QuestionFlow implements Component, Focusable {
   /** Hit map from the last render: content row -> option row key. Built each
    * render; drives fullscreen click-to-select. */
   private readonly hitMap = new Map<number, string>()
+  /** Visible width of the free-text row's prefix (pointer + marker +
+   * space) from the last render: a click while editing must translate to
+   * the Input's local column. (Mouse parity.) */
+  private otherPrefixWidth = 0
+  /** Content width from the last render (Input hit-testing). */
+  private lastContentWidth = 0
+  /** Physical row of the PINNED optionless free-text input from the last
+   * render (-1 = none): the optionless input renders below the scrollport
+   * and is not part of the page hit map, so a click on it must be routed
+   * to the Input explicitly. (Mouse parity.) */
+  private pinnedOtherRow = -1
   /** Content row of the scroll marker in the last render (-1 = none);
    * clicking it toggles the expanded panel. */
   private lastMarkerRow = -1
@@ -366,16 +377,51 @@ export class QuestionFlow implements Component, Focusable {
   /**
    * Primary-click routing (fullscreen): an option row selects it (single-
    * select advances, multi-select toggles, the "Type something." row enters
-   * free-text), and the scroll marker toggles the expanded panel. The hit
-   * map reflects the LAST rendered frame, which is what the user sees.
+   * free-text), and the scroll marker toggles the expanded panel. While the
+   * free-text row is already editing, `x` (the flow-local column) positions
+   * the Input cursor at the clicked value column — the input is never
+   * reset/reseeded. The hit map reflects the LAST rendered frame, which is
+   * what the user sees.
    */
-  clickRow(row: number): void {
+  clickRow(row: number, x?: number): void {
     if (row < 0 || this.tab >= this.questions.length) return
     const key = this.hitMap.get(row)
     if (key === OTHER_ROW) {
-      // Already typing into it: re-entering would reset the input from the
-      // draft and discard the in-progress text.
-      if (this.editingOther) return
+      // Already typing into it: position the Input cursor at the clicked
+      // value column (the prefix is pointer + marker + space). Re-entering
+      // would reset the input from the draft and discard the in-progress
+      // text. (Mouse parity.)
+      if (this.editingOther) {
+        if (x !== undefined) {
+          // The PINNED optionless row has no pointer/marker prefix: the
+          // value starts at row col 1 and the Input's prompt is stripped,
+          // so the Input-local x = row x + 1.
+          const localX = row === this.pinnedOtherRow ? x + 1 : x - this.otherPrefixWidth
+          if (localX >= 0) {
+            this.otherInput.handleMouse?.({
+              type: 'press',
+              button: 'left',
+              x: localX,
+              y: 0,
+              screenX: x,
+              screenY: row,
+              width: Math.max(1, this.lastContentWidth - this.otherPrefixWidth),
+              height: 1,
+              shift: false,
+              alt: false,
+              ctrl: false,
+            })
+          }
+        }
+        return
+      }
+      if (this.isOptionless()) {
+        // Optionless: the pinned input is the ONLY row (rows() is empty),
+        // so re-enter the edit directly, preserving the draft (mirror
+        // Enter). (Mouse parity.)
+        this.enterOther()
+        return
+      }
       const index = this.rows().findIndex(candidate => candidate.key === OTHER_ROW)
       if (index >= 0) {
         this.cursor = index
@@ -446,6 +492,7 @@ export class QuestionFlow implements Component, Focusable {
         : selected ? color.success(`[${Number(row.key) + 1}]`) : color.textDim(`[${Number(row.key) + 1}]`)
       const pointer = isCursor ? color.primary('→') : ' '
       const prefix = `${pointer} ${marker} `
+      if (row.key === OTHER_ROW && this.editingOther) this.otherPrefixWidth = visibleWidth(prefix)
       const indent = ' '.repeat(visibleWidth(prefix))
       const badge = row.recommended ? ` ${color.primary('[recommended]')}` : ''
       const label = isCursor ? color.textStrong(row.label) : row.label
@@ -924,10 +971,12 @@ export class QuestionFlow implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
+    this.lastContentWidth = safeWidth
     const lines: string[] = []
     // The hit map reflects THIS frame only (the review page populates none).
     this.hitMap.clear()
     this.lastMarkerRow = -1
+    this.pinnedOtherRow = -1
     // Tab strip: Q1(✓) Q2(○) … Submit — answered marks, current highlighted.
     // Tabs carry NO leading/trailing spaces of their own (the box border
     // provides the padding), so every content row starts at the same column.
@@ -1085,6 +1134,11 @@ export class QuestionFlow implements Component, Focusable {
       const inputLines = this.otherInput.render(Math.max(1, safeWidth - 2))
       const inputLine = inputLines[0] ?? ''
       const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
+      // The pinned row is the free-text input: route clicks on it to the
+      // Input (the page hit map only covers the scrollport). (Mouse
+      // parity.)
+      this.pinnedOtherRow = lines.length
+      this.hitMap.set(lines.length, OTHER_ROW)
       if (question.masked === true && this.otherInput.getValue() !== '') {
         // A MASKED question renders one bullet per character of the real
         // value (the input's render pads to the full width; the mask must
