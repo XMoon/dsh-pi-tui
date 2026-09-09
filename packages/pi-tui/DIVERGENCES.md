@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `96a400e540e6f8482ebd63388aeb3b0b402f54b6`
+- Audited local source commit: `848c4780c5a00fd0b882d7d0b6a582b03492bfa3`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -4244,7 +4244,7 @@ SelectList mouse hit-testing derived the pressed row from the LIVE selectedIndex
 
 - SelectList mouse hit-testing uses the FINAL painted rows (a render-time mouseRows map built in render), never a re-derived range from the live selectedIndex/filteredItems — a press/click hits the row the user actually saw
 - the pressed gesture identity is the ITEM (object identity), not an array index; a click may only activate the exact pressed identity (a repaint that moved a different item onto the cell rejects the click)
-- every left press replaces the pressed identity at handler entry (a press on an unpainted/inert row clears the old latch)
+- every left press replaces the pressed identity at handler entry, BEFORE the empty-filter guard (a press/click on an empty filtered-out screen still clears the old latch — the TUI keeps the old press target when the empty press returns undefined, so a later release on the same cell synthesizes a click that must not match a stale identity)
 
 #### Dependency map
 
@@ -4268,13 +4268,14 @@ SelectList mouse hit-testing derived the pressed row from the LIVE selectedIndex
 - a press on a painted row resolves to the painted item even when the live visible range moved (no repaint)
 - press A → filter change + repaint → release on the same cell does NOT activate the item that moved there
 - a press on the scroll-indicator row is inert
-- every left press replaces the pressed identity (no stale-latch activation)
+- every left press replaces the pressed identity (no stale-latch activation), including a press on an empty filtered-out screen (filter empties → press → filter restores → a click without a fresh press must not activate)
 - Audit note: Regression tests cover the no-repaint live-range case, the repaint transfer case (unit + real TUI click synthesis), and the existing press/click activation.
 
 #### Guarding tests
 
 - packages/pi-tui/test/select-list.test.ts: a press on a painted row resolves to the painted item even when the live visible range moved without a repaint (setSelectedIndex after render)
 - packages/pi-tui/test/select-list.test.ts: press A → setFilter + repaint → release on the same cell does NOT activate the item that moved there
+- packages/pi-tui/test/select-list.test.ts: press A → filter empties the list + repaint → press the empty screen → filter restores + repaint → a click without a fresh press must NOT activate A (the empty-state press cleared the old latch)
 - packages/pi-tui/test/mouse-components.test.ts: real TUI click synthesis — press row 0, filter change + repaint, release on the same cell: the repainted row must not receive the pressed item's click (mousePressTarget → repaint → same-component synthetic click contract)
 - packages/pi-tui/test/mouse-components.test.ts: existing press/click activation on painted rows (render first) and wheel-scroll press/click activation
 
