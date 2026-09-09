@@ -305,6 +305,50 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 		list.handleMouse(mouse("click", 1));
 		assert.deepStrictEqual(changes, [{ id: "setting-0", value: "off" }], "the surviving item row must stay clickable");
 	});
+
+	it("replaces the pressed identity on a delegated search press (no stale-latch activation)", () => {
+		const rows = [
+			{ id: "a", label: "A", currentValue: "on", values: ["on", "off"] },
+			{ id: "b", label: "B", currentValue: "on", values: ["on", "off"] },
+		];
+		const changes: Array<{ id: string; value: string }> = [];
+		const list = new SettingsList(rows, 10, testTheme, (id, value) => changes.push({ id, value }), () => {}, {
+			enableSearch: true,
+		});
+		const state = list as unknown as { mousePressedId: string | undefined };
+		list.render(80); // search y=0, blank y=1, item A y=2
+		// 1. Press item A: the gesture latch is A.
+		list.handleMouse(mouse("press", 2));
+		assert.strictEqual(state.mousePressedId, "a");
+		// 2. Press the search row: the Input handles it (handled+focus), but
+		//    the parent's gesture identity must be REPLACED — a delegated
+		//    press is a fresh gesture, not a continuation of the item press.
+		list.handleMouse(mouse("press", 0));
+		assert.strictEqual(state.mousePressedId, undefined, "a delegated search press must clear the old latch");
+		// 3. The terminal shrinks between press and release: the tail slice
+		//    drops the search box and item A moves to physical row 0.
+		list.setMaxRows(4);
+		list.render(80);
+		// 4. Release on the same physical cell: the TUI synthesizes a click
+		//    on row 0 — the stale latch (A) must NOT activate the item that
+		//    moved onto the pressed cell.
+		list.handleMouse(mouse("click", 0));
+		assert.deepStrictEqual(changes, [], "the stale pressed identity must not activate the moved item");
+	});
+
+	it("clears the pressed identity on an inert-row press", () => {
+		const rows = [
+			{ id: "a", label: "A", currentValue: "on", values: ["on", "off"] },
+			{ id: "b", label: "B", currentValue: "on", values: ["on", "off"] },
+		];
+		const list = new SettingsList(rows, 10, testTheme, () => {}, () => {}, { enableSearch: true });
+		const state = list as unknown as { mousePressedId: string | undefined };
+		list.render(80);
+		list.handleMouse(mouse("press", 2)); // item A
+		assert.strictEqual(state.mousePressedId, "a");
+		list.handleMouse(mouse("press", 1)); // inert blank row
+		assert.strictEqual(state.mousePressedId, undefined, "an inert-row press must clear the old latch");
+	});
 });
 
 	it("keeps the mouse map in lockstep with the tail slice on a degenerate grant (Case D)", () => {

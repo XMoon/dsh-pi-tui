@@ -363,12 +363,17 @@ export class SettingsList implements Component, Focusable {
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		// A click ends any gesture: release the pressed identity up front —
-		// a click on inert/removed/width-mismatched geometry must not
-		// leave a stale latch that a later click could match. The local
-		// copy still guards the valid-row comparison below.
+		// A click ends any gesture, and every left press starts a fresh
+		// one: release the pressed identity up front — a click on
+		// inert/removed/width-mismatched geometry, or a press that is
+		// delegated (search Input) or lands on inert rows, must not leave
+		// a stale latch that a later synthesized click could match (a
+		// repaint may have moved an item onto the pressed cell). The
+		// local copy still guards the valid-row comparison below.
 		const pressedId = this.mousePressedId;
-		if (event.type === "click") this.mousePressedId = undefined;
+		if (event.type === "click" || (event.type === "press" && event.button === "left")) {
+			this.mousePressedId = undefined;
+		}
 		if (this.submenuComponent) {
 			const result = this.submenuComponent.handleMouse?.(event);
 			return result ? { ...result, focus: true } : undefined;
@@ -405,9 +410,6 @@ export class SettingsList implements Component, Focusable {
 
 		if (!row || row.kind !== "item") return undefined;
 		if (event.type === "press") {
-			// Every press starts a fresh gesture: clear any latched pressed
-			// identity first.
-			this.mousePressedId = undefined;
 			// Resolve the CURRENT index by the painted item ID (a live
 			// items() change between paint and press may have reordered the
 			// list WITHOUT a repaint). No match => reject.
