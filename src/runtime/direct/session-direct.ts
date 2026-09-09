@@ -17,7 +17,6 @@
 
 import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-import { safeErrorMessage } from '../../error-boundary.ts'
 import {
   projectionBatch,
   type SessionProjectionCacheLike,
@@ -31,7 +30,7 @@ import {
   type SessionSearchProviderLike,
 } from './session-search-direct.ts'
 import { cancellationError } from '../../detached.ts'
-import type { ExportReadResult, SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../session-reader-port.ts'
+import type { SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../session-reader-port.ts'
 
 /**
  * The narrow session-query surface the reader's listing and semantic search
@@ -66,21 +65,6 @@ export interface SessionQueryLike {
    * never falls back to raw persistence search.
    */
   searchSessions?: SessionSearchProviderLike['searchSessions']
-}
-
-/** One read handle over the committed log (structural subset of the
- * official `SessionHandle` — the export plane reads ONLY committed
- * records, never cold-view synthesis). */
-export interface SessionReadHandleLike {
-  readonly header: SessionHeader
-  read(start?: number, end?: number): Promise<readonly SessionEvent[]>
-  close(): Promise<void>
-}
-
-/** The persistence service's public read-open (structural subset of
- * `@deepseek-ai/dsh-session-persistence`). */
-export interface SessionPersistenceReadLike {
-  open(sessionId: SessionId, mode: 'read'): Promise<SessionReadHandleLike>
 }
 
 /** The minimal Host context surface the adapter needs (structural — never
@@ -135,28 +119,6 @@ function activityTimestamp(
     // must never make the semantic session roster unavailable.
   }
   return Math.max(header.createdAt, lastPromptAt ?? 0)
-}
-
-/** Serialize one session's logical log as canonical JSONL text (the
- * upstream `session-log-export` contract): the header line, then one line
- * per event, with a trailing newline. The TUI never touches physical
- * artifacts or compression suffixes — the logical events come from the
- * committed read handle, so the export is provider-independent. */
-function serializeLogicalSessionLog(header: SessionHeader, events: readonly SessionEvent[]): string {
-  const lines = [JSON.stringify({
-    type: 'session',
-    version: header.version,
-    id: header.id,
-    createdAt: header.createdAt,
-    ...header.cwd === undefined ? {} : { cwd: header.cwd },
-    ...header.parentSession === undefined ? {} : { parentSession: header.parentSession },
-    isSeeded: header.isSeeded,
-    ...header.origin === undefined ? {} : { origin: header.origin },
-    delegationDepth: header.delegationDepth ?? 0,
-    ...header.agentPreset === undefined ? {} : { agentPreset: header.agentPreset },
-  })]
-  for (const event of events) lines.push(JSON.stringify(event))
-  return `${lines.join('\n')}\n`
 }
 
 /** The Direct backend's session reader: Host query/persistence services plus
@@ -359,59 +321,6 @@ export class DirectSessionReader implements SessionReader {
     } catch {
       // Measurement is best-effort; the /status row falls back to unmeasured.
       return undefined
-    }
-  }
-
-  async readExportData(sessionId: string): Promise<ExportReadResult> {
-    // The canonical export plane (upstream `session-log-export`):
-    //   1. flush the live session through the store's durability barrier;
-    //   2. open a persistence READ handle — the committed log ONLY. A cold
-    //      `observeSession` synthesizes interrupted-turn closers for
-    //      read-only UI balance; an export must never contain them, so the
-    //      export never reads through the observation seam. Absence is
-    //      `open`'s decision; every other failure stays fail-loud.
-    const id = SessionId(sessionId)
-    const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceReadLike | undefined
-    // The public read-handle seam is master-baseline vocabulary: a host
-    // without it (an older DSH) is an explicit unavailable, never a crash.
-    if (persistence === undefined || typeof persistence.open !== 'function') return { kind: 'unavailable' }
-    const live = this.liveSession(sessionId)
-    if (live !== undefined && this.liveResolvers?.flushSession !== undefined) {
-      try {
-        await this.liveResolvers.flushSession(live)
-      } catch (error) {
-        return { kind: 'error', message: safeErrorMessage(error) }
-      }
-    }
-    let handle: SessionReadHandleLike
-    try {
-      handle = await persistence.open(id, 'read')
-    } catch (error) {
-      // The official absence error is classified structurally (the class is
-      // master-only; its NAME is the stable surface).
-      if (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'SessionPersistenceNotFoundError') {
-        return { kind: 'none' }
-      }
-      return { kind: 'error', message: safeErrorMessage(error) }
-    }
-    try {
-      const events = await handle.read(0, undefined)
-      return {
-        kind: 'found',
-        data: {
-          filename: `${sessionId}.jsonl`,
-          content: serializeLogicalSessionLog(handle.header, events),
-        },
-      }
-    } catch (error) {
-      // A rejected committed logical Session read (corrupt log, validation,
-      // I/O) is a real failure with a diagnostic — never misclassified as
-      // absence.
-      return { kind: 'error', message: safeErrorMessage(error) }
-    } finally {
-      // A successful read with a failed close is still a failed export: do not
-      // return an artifact while hiding a persistence lifecycle error.
-      await handle.close()
     }
   }
 }

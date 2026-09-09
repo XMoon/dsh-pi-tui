@@ -99,7 +99,6 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
       return new Map(batch.map(({ id }) => [id, { title: `title-of-${id}`, preset: 'standard' }]))
     },
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   }
 
   const defs: { name: string; handler?: unknown }[] = []
