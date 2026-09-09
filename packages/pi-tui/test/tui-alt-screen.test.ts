@@ -2794,3 +2794,69 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		await terminal.waitForRender();
 		tui.stop();
 	});
+
+	it("forwards key releases to a wantsKeyRelease child through a Container overlay root (X051)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const received: string[] = [];
+		const child = {
+			wantsKeyRelease: true,
+			render: () => ["child"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => (event.type === "press" ? { handled: true, focus: true } : undefined),
+			handleInput: (data: string) => {
+				received.push(data);
+			},
+		};
+		const root = new Container();
+		root.addChild(child);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press on the child (the overlay renders at screen row 1).
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.getFocusedComponent(), root, "the Container root must own the focus");
+		// A Kitty key release must reach the child through the container
+		// root (the root forwards wantsKeyRelease).
+		terminal.sendInput("\x1b[97;1:3u");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(received, ["\x1b[97;1:3u"], "the wantsKeyRelease child must receive the key release");
+		tui.stop();
+	});
+
+	it("forwards key releases to a wantsKeyRelease child through a Box overlay root (X051)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const received: string[] = [];
+		const child = {
+			wantsKeyRelease: true,
+			render: () => ["child"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => (event.type === "press" ? { handled: true, focus: true } : undefined),
+			handleInput: (data: string) => {
+				received.push(data);
+			},
+		};
+		const root = new Box();
+		root.addChild(child);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press on the child (the Box has default padding (1,1): the child
+		// renders at screen row 1, col 1 = SGR row 2, col 2).
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.getFocusedComponent(), root, "the Box root must own the focus");
+		// A Kitty key release must reach the child through the Box root.
+		terminal.sendInput("\x1b[97;1:3u");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(received, ["\x1b[97;1:3u"], "the wantsKeyRelease child must receive the key release");
+		tui.stop();
+	});

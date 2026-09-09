@@ -45,6 +45,14 @@ export class Box implements Component, Focusable {
 		this.focusedChild?.handleInput?.(data);
 	}
 
+	/** Transparent key-release capability (dsh-pi-tui divergence X051): a
+	 * Box that becomes the keyboard focus owner must forward the child's
+	 * wantsKeyRelease, or the TUI filters Kitty key releases before they
+	 * reach the child. (Mirrors MouseRegion.) */
+	get wantsKeyRelease(): boolean | undefined {
+		return this.focusedChild?.wantsKeyRelease;
+	}
+
 	// Cache for rendered output
 	private cache?: RenderCache;
 	private mouseLayout?: { width: number; children: Array<{ component: Component; height: number }> };

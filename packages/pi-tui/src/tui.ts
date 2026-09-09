@@ -401,6 +401,14 @@ export class Container implements Component, Focusable {
 		this.focusedChild?.handleInput?.(data);
 	}
 
+	/** Transparent key-release capability (dsh-pi-tui divergence X051): a
+	 * Container that becomes the keyboard focus owner must forward the
+	 * child's wantsKeyRelease, or the TUI filters Kitty key releases
+	 * before they reach the child. (Mirrors MouseRegion.) */
+	get wantsKeyRelease(): boolean | undefined {
+		return this.focusedChild?.wantsKeyRelease;
+	}
+
 	addChild(component: Component): void {
 		this.children.push(component);
 	}
