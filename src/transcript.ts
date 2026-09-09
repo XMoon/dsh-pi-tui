@@ -192,6 +192,16 @@ export function workflowPhaseKey(phase: string | null): string {
   return phase === null ? 'missing' : `value:${phase.length}:${phase}`
 }
 
+/** The human-readable phase label (Web WorkflowRunPanel parity, plan §2.4):
+ * `null` (absent) and `''` (explicit empty) stay DISTINCT identities with
+ * distinct readable labels — the renderer and the search corpus share this
+ * single mapping so the two can never drift. */
+export function workflowReadablePhase(phase: string | null): string {
+  if (phase === null) return 'Unassigned'
+  if (phase === '') return 'Empty'
+  return phase
+}
+
 /** Strict member-outcome mapping (plan §6.3): exhaustive so a new official
  * union variant fails typecheck instead of collapsing into a generic error. */
 function workflowMemberStatus(outcome: 'completed' | 'failed' | 'cancelled'): WorkflowRunStatus {
@@ -311,7 +321,8 @@ export class WorkflowProjection {
   /** One member published: fold it into the run card (Web WorkflowRunPanel
    * parity). A member starting after its owner closed is interrupted from
    * birth (plan §6.2 — the projection comes from the current fold facts, no
-   * invented recovery flow). */
+   * invented recovery flow). The member's label/phase/status entered the
+   * search corpus (PR2 plan §13.3): the onChange hook marks it dirty. */
   onAgentStart(runId: WorkflowRunId, seq: number, label: string, phase: string | null, childId: WorkflowChildSessionId): void {
     const state = this.runs.get(runId)
     if (state === undefined) return
@@ -325,10 +336,13 @@ export class WorkflowProjection {
     // Replace the members array reference so render caches observe the live
     // append (plan §6.2 — never rely on in-place push).
     state.message.members = [...state.message.members, member]
+    this.onChange?.(runId)
   }
 
   /** One member settled: only the started member with the matching runId +
-   * seq settles (plan §6.3 — never infer a member outcome from run-end). */
+   * seq settles (plan §6.3 — never infer a member outcome from run-end).
+   * The member's status word changed in the search corpus (PR2 plan
+   * §13.3): the onChange hook marks it dirty. */
   onAgentEnd(runId: WorkflowRunId, seq: number, outcome: 'completed' | 'failed' | 'cancelled'): void {
     const state = this.runs.get(runId)
     if (state === undefined) return
@@ -340,6 +354,7 @@ export class WorkflowProjection {
     state.message.members = state.message.members.map(member =>
       member === target ? { ...member, status } : member,
     )
+    this.onChange?.(runId)
   }
 
   /** One run settled: set the terminal status, notify, and drop the fold
@@ -481,11 +496,18 @@ export function transcriptSearchText(message: TranscriptMessage, depth = 0): str
     return `${own} ${message.subCalls.map(child => transcriptSearchText(child, depth + 1)).join(' ')}`
   }
   if (message.kind === 'workflow') {
-    // The run's stable search identity: the kind, the run name, and the
-    // current status (the terminal reason's presentation equivalent — plan
-    // §7.3). Members are deliberately not indexed (PR1 keeps the legacy
-    // tool-card search surface; member/session search is PR2).
-    return `workflow ${message.name} ${message.status}`
+    // The run's search identity (PR2 plan §13): the kind, the run name, the
+    // current status, every phase's readable label (Unassigned/Empty stay
+    // distinct) and every member's label + status. Machine identities
+    // (childId/runId) are deliberately NOT indexed. A member hidden inside
+    // a large phase's summary still hits its Workflow card (plan §13.1).
+    const phases = new Set<string>()
+    const members: string[] = []
+    for (const member of message.members) {
+      phases.add(workflowReadablePhase(member.phase))
+      members.push(`${member.label} ${member.status}`)
+    }
+    return `workflow ${message.name} ${message.status} ${[...phases].join(' ')} ${members.join(' ')}`
   }
   return message.text ?? ''
 }

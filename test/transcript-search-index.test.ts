@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { TranscriptFolder, transcriptSearchText, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
+import { TranscriptFolder, transcriptSearchText, workflowReadablePhase, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
 import { refreshedSearchState, steppedSearchOverlayState } from '../src/search-overlay.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 
@@ -141,8 +141,21 @@ function compactionEvent(type: 'compaction/start' | 'compaction/summary' | 'comp
 function cardText(message: TranscriptMessage | undefined): string {
   if (message === undefined) return ''
   if (message.kind === 'tool') return `${message.name} ${message.args} ${message.result}`
-  if (message.kind === 'workflow') return `workflow ${message.name} ${message.status}`
+  if (message.kind === 'workflow') return workflowCorpus(message)
   return message.text ?? ''
+}
+
+/** The PR2 workflow search corpus (plan §13): kind + run name + run status +
+ * every phase's readable label + every member's label/status. Machine
+ * identities (childId/runId) are never indexed. */
+function workflowCorpus(message: Extract<TranscriptMessage, { kind: 'workflow' }>): string {
+  const phases = new Set<string>()
+  const members: string[] = []
+  for (const member of message.members) {
+    phases.add(workflowReadablePhase(member.phase))
+    members.push(`${member.label} ${member.status}`)
+  }
+  return `workflow ${message.name} ${message.status} ${[...phases].join(' ')} ${members.join(' ')}`
 }
 
 /**
@@ -155,7 +168,7 @@ function legacySearchForTest(folder: TranscriptFolder, query: string): Transcrip
   if (needle === '') return []
   return folder.messages().filter(message => {
     const text = message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}`
-      : message.kind === 'workflow' ? `workflow ${message.name} ${message.status}`
+      : message.kind === 'workflow' ? workflowCorpus(message)
         : message.text
     return text.toLowerCase().includes(needle)
   })
@@ -631,6 +644,45 @@ test('workflow search text follows the live run status (plan §8.12)', () => {
   folder.apply([rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 2)])
   assertCorpusParity(folder, ['workflow', 'audit', 'completed'])
   assert.equal(folder.search('running').length, 0, 'the settled run must not keep the start-time status in the corpus')
+})
+
+test('workflow search indexes phase labels and member labels/statuses (PR2 plan §13)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 0, label: 'dependency-scan', phase: 'Research', childId: 'session-x' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'schema-check', phase: '', childId: 'session-y' }, 3),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 2, label: 'orphan', phase: null, childId: 'session-z' }, 4),
+  ])
+  assertCorpusParity(folder, ['audit', 'Research', 'dependency-scan', 'running'])
+  // The readable phase labels are indexed: Unassigned (null) and Empty ('')
+  // are distinct searchable words.
+  assert.equal(folder.search('unassigned').length, 1, 'the null phase readable label must be searchable')
+  assert.equal(folder.search('empty').length, 1, 'the empty phase readable label must be searchable')
+  assert.equal(folder.search('schema-check').length, 1, 'a member label must be searchable')
+  // Machine identities are never indexed.
+  assert.equal(folder.search('session-x').length, 0, 'childId must never be indexed')
+  assert.equal(folder.search('run1').length, 0, 'runId must never be indexed')
+  // Member status words are indexed.
+  folder.apply([rawEvent('tool-workflow/agent-end', { runId: 'run1', seq: 0, outcome: 'failed' }, 5)])
+  assertCorpusParity(folder, ['failed'])
+  assert.equal(folder.search('failed').length, 1, 'a member status must be searchable')
+})
+
+test('a member hidden inside a large phase summary still hits its Workflow card (PR2 plan §13.1)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+    // 6 members: the phase renders as a summary; member 5 is never inline.
+    ...Array.from({ length: 6 }, (_, i) =>
+      rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: i, label: `shard-${i}`, phase: 'Migration', childId: `session-${i}` }, 2 + i)),
+  ])
+  const matches = folder.search('shard-5')
+  assert.equal(matches.length, 1, 'the hidden member must still hit the card')
+  assert.equal(folder.resolveSearchMatch(matches[0]!)?.kind, 'workflow', 'the hit must locate the Workflow card')
+  assertCorpusParity(folder, ['shard-5', 'Migration'])
 })
 
 test('a settled assistant message created WITHOUT chunks stays searchable after replacement', () => {
