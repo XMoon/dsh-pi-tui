@@ -22,7 +22,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { SubagentDescendantListEntry } from '@deepseek-ai/dsh-subagent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { TaskBrowserRuntime, type TaskBrowserRuntimeHooks } from '../src/task-browser-runtime.ts'
+import { TaskBrowserRuntime, type TaskBrowserRuntimeHooks, type TaskBrowserSummary } from '../src/task-browser-runtime.ts'
 import { AGENT_ROW_PREFIX, type TaskBrowserJobInput, type TaskBrowserRow } from '../src/tasks-browser.ts'
 
 const child = (overrides: Partial<SubagentDescendantListEntry> = {}): SubagentDescendantListEntry => ({
@@ -65,6 +65,7 @@ function makeHarness(): {
   commits(): readonly TaskBrowserRow[][]
   preferreds(): readonly (string | undefined)[]
   badges(): readonly ReadonlyArray<{ id: string; label: string }>[]
+  summaries(): readonly TaskBrowserSummary[]
   refreshStates(): readonly { state: 'loading' | 'ready' | 'stale'; error?: string }[]
   setKey(key: string | undefined): void
   setStatus(id: string, status: string | undefined): void
@@ -84,6 +85,7 @@ function makeHarness(): {
   const preferreds: (string | undefined)[] = []
   const badges: ReadonlyArray<{ id: string; label: string }>[] = []
   const refreshStates: { state: 'loading' | 'ready' | 'stale'; error?: string }[] = []
+  const summaries: TaskBrowserSummary[] = []
   const runtime = new TaskBrowserRuntime({
     currentKey: () => key,
     listDescendants: () => {
@@ -100,6 +102,7 @@ function makeHarness(): {
       preferreds.push(preferred)
     },
     commitBadge: (running) => badges.push([...running]),
+    commitSummary: (summary) => summaries.push(summary),
     commitRefreshState: (state, error) => refreshStates.push({ state, ...(error === undefined ? {} : { error }) }),
   })
   return {
@@ -108,6 +111,7 @@ function makeHarness(): {
     commits: () => commits,
     preferreds: () => preferreds,
     badges: () => badges,
+    summaries: () => summaries,
     refreshStates: () => refreshStates,
     setKey: (next) => { key = next },
     setStatus: (id, status) => { if (status === undefined) statuses.delete(id); else statuses.set(id, status) },
@@ -480,8 +484,8 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
   // real protection is binding the intent to the opening surface.
   assert.ok(handler.includes("sessionGeneration !== browserGeneration || liveAgent !== browserSession"),
     'the dispatch must compare the current generation/session against the OPEN-time capture')
-  const openMarker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
-  const openHead = indexSource.slice(indexSource.indexOf(openMarker), indexSource.indexOf(openMarker) + 900)
+  const openMarker = 'const openTasksBrowser = ('
+  const openHead = indexSource.slice(indexSource.indexOf(openMarker), indexSource.indexOf(openMarker) + 1200)
   assert.ok(openHead.includes('const browserGeneration = sessionGeneration'),
     'the browser must capture the generation at open')
   assert.ok(openHead.includes('const browserSession = liveAgent'),
@@ -499,7 +503,7 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
 })
 
 test('Esc from a promoted full view returns to Quick ONLY for the quick-opener stack (review round)', () => {
-  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const marker = 'const openTasksBrowser = ('
   const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
   const cancelBlock = open.slice(open.indexOf("() => {"), open.indexOf('},', open.indexOf('() => {')) + 3)
   assert.ok(cancelBlock.includes("viewMode === 'full' && restoreState !== undefined"),
@@ -511,7 +515,7 @@ test('Esc from a promoted full view returns to Quick ONLY for the quick-opener s
 })
 
 test('the Task Center surface never calls the consuming jobs read API (review round)', () => {
-  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const marker = 'const openTasksBrowser = ('
   const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
   assert.ok(!open.includes('jobs.read('),
     'the browser must never consume the model-owned job output cursor')
@@ -551,7 +555,7 @@ test('Case E2: the SAME session listing failure still surfaces stale (the fenced
 })
 
 test('the runner never sets refresh state outside the runtime fence (PR review P1)', () => {
-  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const marker = 'const openTasksBrowser = ('
   const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
   // The open-browser body is the ONLY owner of the panel: an unfenced
   // onError calling activeTaskBrowser.setRefreshState would let a stale
@@ -564,7 +568,7 @@ test('the runner never sets refresh state outside the runtime fence (PR review P
 })
 
 test('viewport exposure drives acknowledgement continuously, never whole-projection (PR review P1/P2)', () => {
-  const marker = 'const openTasksBrowser = (viewMode: \'quick\' | \'full\' = \'full\', restoreState?: TaskBrowserViewState): void => {'
+  const marker = 'const openTasksBrowser = ('
   const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
   // The runner wires the panel's first-time-viewport callback into the
   // coordinator's acknowledge — not a one-shot whole-projection read.
@@ -594,4 +598,155 @@ test('Case F: a cross-session overlap cannot strand the NEW session in loading (
   assert.equal(h.runtime.has('child-old'), false, 'A never lands on B')
   assert.equal(h.refreshStates()[h.refreshStates().length - 1]!.state, 'ready',
     'A settling late must not move B off ready (never a stuck loading)')
+})
+
+// ---------------------------------------------------------------------------
+// PR2: the generic dataset scope (plan §16.6)
+// ---------------------------------------------------------------------------
+
+test('PR2 scope: a subagents scope commits EXACTLY the scope child ids, jobs excluded', async () => {
+  const h = makeHarness()
+  h.setJobs([])
+  const listing = h.runtime.refreshCatalog()
+  h.settleListing(0, [
+    child({ id: 'child-1' as SessionId, label: 'phase-a-1', mode: 'one-shot', depth: 1 }),
+    child({ id: 'child-2' as SessionId, label: 'phase-a-2', mode: 'one-shot', depth: 1 }),
+    child({ id: 'child-3' as SessionId, label: 'phase-b', mode: 'one-shot', depth: 1 }),
+    child({ id: 'child-x' as SessionId, label: 'unrelated', mode: 'one-shot', depth: 1 }),
+  ])
+  await listing
+  h.setJobs([job({ id: 'job-y', label: 'unrelated job' })])
+  h.runtime.setScope({ kind: 'subagents', childIds: ['child-1', 'child-2'] })
+  const rows = h.commits().at(-1)!
+  assert.deepEqual(rowValue(rows), ['agent:child-1', 'agent:child-2'],
+    `the scoped browser must show exactly the scope child ids:\n${JSON.stringify(rows)}`)
+  assert.ok(!rows.some(row => row.kind === 'job'), 'jobs must never leak into a subagents scope')
+})
+
+test('PR2 scope: a live refresh keeps the scope (never a global leak)', async () => {
+  const h = makeHarness()
+  h.setJobs([])
+  const listing = h.runtime.refreshCatalog()
+  h.settleListing(0, [
+    child({ id: 'child-1' as SessionId, label: 'a', mode: 'one-shot', depth: 1 }),
+    child({ id: 'child-2' as SessionId, label: 'b', mode: 'one-shot', depth: 1 }),
+    child({ id: 'child-3' as SessionId, label: 'c', mode: 'one-shot', depth: 1 }),
+  ])
+  await listing
+  h.runtime.setScope({ kind: 'subagents', childIds: ['child-1', 'child-2'] })
+  // A runtime refresh (agent/status) and a CATALOG refresh (new global
+  // child arrives) must both commit through the scope.
+  h.setStatus('child-1', 'running')
+  h.runtime.refreshRuntime()
+  assert.deepEqual(rowValue(h.commits().at(-1)!), ['agent:child-1', 'agent:child-2'],
+    'a runtime refresh must keep the scope')
+  const refreshListing = h.runtime.refreshCatalog()
+  h.settleListing(1, [
+    child({ id: 'child-1' as SessionId, label: 'a', mode: 'one-shot', depth: 1 }),
+    child({ id: 'child-2' as SessionId, label: 'b', mode: 'one-shot', depth: 1 }),
+    child({ id: 'child-3' as SessionId, label: 'c', mode: 'one-shot', depth: 1 }),
+    child({ id: 'child-4' as SessionId, label: 'new-global', mode: 'one-shot', depth: 1 }),
+  ])
+  await refreshListing
+  assert.deepEqual(rowValue(h.commits().at(-1)!), ['agent:child-1', 'agent:child-2'],
+    'a catalog refresh must keep the scope (the new global child must not leak)')
+})
+
+test('PR2 scope: resetting to all restores the global dataset', async () => {
+  const h = makeHarness()
+  h.setJobs([])
+  const listing = h.runtime.refreshCatalog()
+  h.settleListing(0, [
+    child({ id: 'child-1' as SessionId, label: 'a', mode: 'one-shot', depth: 1 }),
+    child({ id: 'child-2' as SessionId, label: 'b', mode: 'one-shot', depth: 1 }),
+  ])
+  await listing
+  h.runtime.setScope({ kind: 'subagents', childIds: ['child-1'] })
+  assert.deepEqual(rowValue(h.commits().at(-1)!), ['agent:child-1'])
+  // The close path (the runner) resets to all: the next ordinary Task
+  // Center sees the global dataset again.
+  h.runtime.setScope({ kind: 'all' })
+  assert.deepEqual(rowValue(h.commits().at(-1)!), ['agent:child-1', 'agent:child-2'],
+    'the global dataset must be restored after the scope reset')
+})
+
+test('PR2 scope: reset() (session switch) clears the scope with the catalog', async () => {
+  const h = makeHarness()
+  h.setJobs([])
+  const listing = h.runtime.refreshCatalog()
+  h.settleListing(0, [
+    child({ id: 'child-1' as SessionId, label: 'a', mode: 'one-shot', depth: 1 }),
+    child({ id: 'child-2' as SessionId, label: 'b', mode: 'one-shot', depth: 1 }),
+  ])
+  await listing
+  h.runtime.setScope({ kind: 'subagents', childIds: ['child-1'] })
+  h.runtime.reset()
+  h.setKey('g2:sess-b')
+  const secondListing = h.runtime.refreshCatalog()
+  h.settleListing(1, [
+    child({ id: 'child-1' as SessionId, label: 'a', mode: 'one-shot', depth: 1 }),
+    child({ id: 'child-2' as SessionId, label: 'b', mode: 'one-shot', depth: 1 }),
+  ])
+  await secondListing
+  assert.deepEqual(rowValue(h.commits().at(-1)!), ['agent:child-1', 'agent:child-2'],
+    'a switched-in session must start from the global dataset')
+})
+
+// ---------------------------------------------------------------------------
+// PR2 review round 1: runner-level wiring regressions
+// ---------------------------------------------------------------------------
+
+test('PR2 review: the runner wires onWorkflowAction through the single authority resolver', () => {
+  assert.ok(indexSource.includes('onWorkflowAction: (action) => handleWorkflowAction(action)'),
+    'the app options must wire the workflow action sink')
+  const marker = 'const handleWorkflowAction = (action: WorkflowAction): void => {'
+  const start = indexSource.indexOf(marker)
+  assert.ok(start >= 0, 'the runner must define handleWorkflowAction')
+  const handler = indexSource.slice(start, start + 3000)
+  // The authority conditions live in ONE resolver — never copied in the runner.
+  assert.ok(handler.includes('workflowMemberViewerTarget('),
+    'the member open path must use the single authority resolver')
+  assert.ok(!handler.replace(/\/\/.*$/gm, '').includes("row.depth !== 1"),
+    'the runner must not re-implement the authority conditions')
+  assert.ok(handler.includes("openTasksBrowser('full', undefined, { kind: 'subagents', childIds: action.childIds }"),
+    'the scoped-agent actions must open the existing Task Browser with the exact child-id scope')
+})
+
+test('PR2 review: every task-browser close path resets the dataset scope', () => {
+  const marker = 'const openTasksBrowser = ('
+  const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
+  // Both close paths (row selection and Esc) must reset the scope so the
+  // next ordinary Task Center sees the global dataset (plan §10.8).
+  const selectBlock = open.slice(open.indexOf('(value) => {'), open.indexOf('},', open.indexOf('(value) => {')) + 3)
+  assert.ok(selectBlock.includes('resetTaskBrowserScope()'),
+    'the selection close path must reset the dataset scope')
+  const cancelBlock = open.slice(open.indexOf('() => {'), open.indexOf('},', open.indexOf('() => {')) + 3)
+  assert.ok(cancelBlock.includes('resetTaskBrowserScope()'),
+    'the Esc close path must reset the dataset scope')
+  // The Quick→Full transition must NOT reset the scope (it preserves it).
+  const viewFullBlock = open.slice(open.indexOf('onViewFull:'), open.indexOf('onStop:'))
+  assert.ok(!viewFullBlock.includes('resetTaskBrowserScope'),
+    'the Quick→Full promotion must preserve the dataset scope')
+})
+
+test('PR2 review: a scoped viewer never re-arms acknowledged global failures (review P2)', async () => {
+  const h = makeHarness()
+  h.setJobs([job({ id: 'j1', label: 'failed job', status: 'failed' })])
+  const listing = h.runtime.refreshCatalog()
+  h.settleListing(0, [
+    child({ id: 'child-1' as SessionId, label: 'a', mode: 'one-shot', depth: 1 }),
+  ])
+  await listing
+  // The user sees the failed job in the global browser and acknowledges it.
+  h.runtime.acknowledge(['job:j1'])
+  assert.equal(h.summaries().at(-1)!.failedAttention, 0, 'the acknowledged failure must be quiet')
+  // A workflow-scoped viewer opens (jobs are filtered out of the rows) and closes.
+  h.runtime.setScope({ kind: 'subagents', childIds: ['child-1'] })
+  assert.ok(!h.commits().at(-1)!.some(row => row.kind === 'job'), 'scoped rows must exclude jobs')
+  h.runtime.setScope({ kind: 'all' })
+  // The global browser returns: the previously acknowledged failure stays
+  // acknowledged — never re-armed by the scoped round-trip.
+  assert.equal(h.summaries().at(-1)!.failedAttention, 0,
+    'a scoped round-trip must not re-arm acknowledged global failures')
+  assert.equal(h.summaries().at(-1)!.failedTotal, 1, 'the global failure total stays intact')
 })

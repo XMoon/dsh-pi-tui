@@ -38,6 +38,8 @@
  * @module @xmoon76/dsh-pi-tui/tasks-browser
  */
 
+import type { WorkflowRunStatus } from './transcript.ts'
+
 /** Picker-value prefix for a subagent row. */
 export const AGENT_ROW_PREFIX = 'agent:'
 /** Picker-value prefix for a job row. */
@@ -340,4 +342,43 @@ export function subagentInterruptParent(
   rootSessionId: string,
 ): string {
   return row.parentId !== '' ? row.parentId : rootSessionId
+}
+
+/** The direct-navigation authority for one Workflow member row (PR2 plan
+ * §9.2/§14.6): the SINGLE resolver both the Workflow card action and its
+ * tests use — the 5 authority conditions are never copied twice. The
+ * member must still be RUNNING (the model-side fact), the catalog row
+ * must exist and be a subagent, the child must be a DIRECT child of the
+ * current root session (depth 1 + exact durable parent), and the child's
+ * Agent driver must be running right now. Returns the viewer-open facts
+ * (the same shape `enterView` consumes) or undefined when any condition
+ * fails — a terminal member, a missing catalog row, a wrong parent or a
+ * nested child never cold-opens from the Workflow card (plan §9.4/§9.5). */
+export function workflowMemberViewerTarget(
+  member: { readonly status: WorkflowRunStatus; readonly childId: string },
+  row: TaskBrowserRow | undefined,
+  rootSessionId: string,
+): { parentSessionId: string; childSessionId: string; label: string; mode: 'one-shot' | 'continuable'; activity: 'running' | 'inactive'; depth: number } | undefined {
+  if (member.status !== 'running') return undefined
+  if (row === undefined || row.kind !== 'subagent') return undefined
+  // The row must BE the member's row: a mismatched row would combine one
+  // child's label/mode/parent with another child's identity (review
+  // finding). Workflow `agent()` children are one-shot by contract (plan
+  // §2.6/§9.3) — a continuable catalog row is never a Workflow member
+  // target, so the viewer can never accidentally grant an interactive
+  // continuable editor.
+  if (row.childId !== member.childId) return undefined
+  if (row.mode !== 'one-shot') return undefined
+  if (row.activity !== 'running') return undefined
+  if (row.depth !== 1) return undefined
+  const parentSessionId = row.parentId !== '' ? row.parentId : rootSessionId
+  if (parentSessionId !== rootSessionId) return undefined
+  return {
+    parentSessionId,
+    childSessionId: member.childId,
+    label: row.label,
+    mode: row.mode,
+    activity: row.activity,
+    depth: row.depth,
+  }
 }

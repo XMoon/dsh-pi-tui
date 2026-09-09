@@ -9,6 +9,15 @@
 
 ### 新增
 
+- **Workflow 可扩展 UI。** Workflow 卡片自带 Run/Phase 两层展开：小 phase
+  （≤5 个 agent）在 transcript 内完整列出成员，大 phase 只显示聚合计数 +
+  最多 3 个异常预览 + `View N agents` 入口，100+ agent 的 run 不再线性撑大
+  transcript；completed run 默认收起但仍显示聚合摘要（如 `126 agents ·
+  completed`）。`cancelled`/`interrupted` 改用 warning 视觉（不再与 `failed`
+  混为 error），缺失/显式空 phase 显示为 `Unassigned`/`Empty`。运行中的直接
+  child 可从卡片进入现有只读 Subagent Viewer；`View N agents` 打开按
+  Workflow 数据集过滤的 Task Viewer（关闭后恢复全局任务列表）。搜索扩展到
+  phase/member 标签与状态，隐藏在大 phase 里的 member 仍可命中所属卡片。
 - **Workflow 生命周期/模型对齐 DSH alpha.2。** Workflow 从普通工具卡中拆出独立
   semantic model：run/member 状态完整保留 `running/completed/failed/cancelled/
   interrupted`（不再折叠成 ok/error），成员保留 `seq`/`childId` 与精确 phase
