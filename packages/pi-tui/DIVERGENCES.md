@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `5b7e7e21fdacc47687acdd4375e95f276d221dc6`
+- Audited local source commit: `d69057717feb7d509e7d90c2a443bd5067063f21`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -3450,6 +3450,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 - SettingsList Focusable propagation reaches search Input and conditionally forwards to an open submenu
 - row-budget forwarding for nested submenu lists
+- SettingsList mouse hit-testing uses the FINAL painted rows (a render-time mouseRows map built after the description shrink), never a re-derived range from maxVisible — a click hits the row the user actually saw, resolved by item ID with pressed-identity click activation
 
 #### Dependency map
 
@@ -3484,6 +3485,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 - test/extension-focus-seat.test.ts: SurfaceSnapshot.focusedSeat state only (not SettingsList or IME)
 - test/theme-picker.test.ts: ThemeSubmenu forwards focused state to the search Input (CURSOR_MARKER present when focused, absent when not)
 - test/model-menu.test.ts: ModelSubmenu retains focus across the async inner swap (CURSOR_MARKER on the swapped-in searchable list only when focused)
+- packages/pi-tui/test/settings-list.test.ts: description-shrink click identity (Case A), search+shrink row offset (Case B), inert chrome (Case C)
 
 #### Upstream comparison
 
@@ -4082,6 +4084,7 @@ Two upstream Editor mouse-path bugs: (1) handleMouse forces targetIndex = lastGr
 - Editor.handleMouse click-to-cursor on a wrapped non-last visual segment: clicking at/after the segment text places the cursor at the segment end, not one grapheme before it
 - Editor autocomplete onSelect (mouse click): a slash-prefix completion applies, cancels the autocomplete, and submits (submitValue), exactly like the keyboard Enter path
 - the slash-completion mouse click cancels the autocomplete and honors disableSubmit before submitting (exactly like the keyboard Enter path)
+- the autocomplete mouse dispatch is fenced to the PAINTED list instance (renderedAutocompleteList) and the press-time list instance — an async suggestion swap that has not repainted cannot receive a click aimed at the old screen (no unpainted slash submit)
 
 #### Dependency map
 
@@ -4112,6 +4115,7 @@ Two upstream Editor mouse-path bugs: (1) handleMouse forces targetIndex = lastGr
 
 - packages/pi-tui/test/editor.test.ts: X050 — clicking past the text of a wrapped non-last segment lands at the segment end, clicking past the last segment clamps to the line end, and clicking a slash-prefix autocomplete suggestion submits the completed command (like keyboard Enter)
 - packages/pi-tui/test/editor.test.ts: disableSubmit=true blocks the mouse slash-completion submit and cancels the autocomplete
+- packages/pi-tui/test/editor.test.ts: unpainted list replacement cannot receive a click; press A → repaint B → release must not activate B
 
 #### Upstream comparison
 
