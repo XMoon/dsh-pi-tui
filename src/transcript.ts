@@ -3969,7 +3969,7 @@ function markdownContent(blocks: readonly ContentBlock[]): string {
   return parts.join('\n\n')
 }
 
-/** Render one session's log as a readable markdown transcript for `/export md`. */
+/** Render one session's log as a readable markdown transcript for `/transcript`. */
 export function renderTranscriptMarkdown(session: {
   header: SessionHeader
   snapshotEvents(): readonly SessionEvent[]

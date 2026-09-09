@@ -19,9 +19,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { writeFileSync } from 'node:fs'
 import { scheduler } from 'node:timers/promises'
-import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -75,7 +73,7 @@ import { suggestPathArgument } from './mentions.ts'
 import { FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
-import { renderTranscriptMarkdown, textOf } from './transcript.ts'
+import { textOf } from './transcript.ts'
 import {
   CONTENT_SEARCH_DEBOUNCE_MS,
   PROJECTION_BATCH_SIZE,
@@ -3866,33 +3864,30 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'export',
-    description: 'Export this session log (JSONL by default, `md` for a readable transcript)',
-    input: { hint: '[md|<path>]' },
-    handler: async (invocation) => {
-      const liveAgent = await requireAgent()
-      const arg = invocation.rawInput.trim()
-      const shortId = liveAgent.session.id.replace(/^session-/, '').slice(0, 8)
-      const markdown = arg === 'md'
-      const target = arg !== '' && !markdown
-        ? arg
-        : join(cwd, markdown ? `dsh-session-${shortId}.md` : `dsh-session-${shortId}.jsonl`)
-      try {
-        if (markdown) {
-          writeFileSync(target, renderTranscriptMarkdown(liveAgent.session))
-          return { kind: 'success', text: `exported markdown transcript to ${target}` }
-        }
-        // The committed logical Session read is semantic and canonical: the
-        // Host supplies validated v2 JSONL, while only the FILE WRITE below
-        // remains client-local export behavior (migration M1.11).
-        const exportData = await runner.sessionReader.readExportData(liveAgent.session.id)
-        if (exportData.kind === 'unavailable') return { kind: 'error', text: 'session persistence unavailable' }
-        if (exportData.kind === 'none') return { kind: 'error', text: 'session is not present in the active persistence backend' }
-        if (exportData.kind === 'error') return { kind: 'error', text: exportData.message }
-        writeFileSync(target, exportData.data.content)
-        return { kind: 'success', text: `exported ${exportData.data.filename} to ${target}` }
-      } catch (error) {
-        return { kind: 'error', text: safeErrorMessage(error) }
+    description: 'Export this session as a full archive (ZIP with descendants and attachments)',
+    handler: (invocation) => {
+      // Pre-Stage-D export convergence: /export accepts NO arguments — the
+      // acknowledgement only; the Client-local save workflow starts AFTER
+      // the command lifecycle settles (the runner's post-success seam), never
+      // inside the handler.
+      if (invocation.rawInput.trim() !== '') {
+        return { kind: 'error', text: 'The /export command does not accept a path.' }
       }
+      return { kind: 'success', text: 'Session log download requested.' }
+    },
+  })
+
+  commands.register({
+    name: 'transcript',
+    description: 'Export a readable Markdown transcript of this session',
+    handler: (invocation) => {
+      // /transcript mirrors /export: no arguments, acknowledgement only; the
+      // Client-local save workflow starts after successful command
+      // settlement.
+      if (invocation.rawInput.trim() !== '') {
+        return { kind: 'error', text: 'The /transcript command does not accept a path.' }
+      }
+      return { kind: 'success', text: 'Transcript export requested.' }
     },
   })
 
