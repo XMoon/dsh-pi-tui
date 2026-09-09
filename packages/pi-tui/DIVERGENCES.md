@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `023117a3c8cbdef030628006b2da36983373639a`
+- Audited local source commit: `96a400e540e6f8482ebd63388aeb3b0b402f54b6`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -64,7 +64,7 @@
 - `NOT_MOVABLE`: `X048` — Input prompt mouse click geometry is a public component contract inside the vendored fork; a host wrapper cannot equivalently fix the Input's own coordinate mapping, and the fix depends on visibleWidth(this.prompt) which is vendor-internal.
 - `NOT_MOVABLE`: `X049` — AltScreenSearchComponent owns its PRIVATE query Input; the host cannot reach or rewire that Input, so the mouse-forwarding seam must live inside the vendored fork's alt-screen search component.
 - `NOT_MOVABLE`: `X050` — Editor visual-line/wrapped-segment cursor mapping and slash-autocomplete click-submit are internal Editor semantics (two distinct bugs confirmed against upstream v0.85.1 and main); they cannot be reproduced through the public Editor surface from a host wrapper.
-- `NOT_MOVABLE`: `X051` — Container/Box focus-ownership and input/key-release forwarding is a public component/framework contract inside the vendored fork (the TUI routes keyboard to the focused component and filters key releases by wantsKeyRelease); a host wrapper cannot change how the fork's own focus model resolves overlay roots.
+- `NOT_MOVABLE`: `X051`, `X052` — Container/Box focus-ownership and input/key-release forwarding is a public component/framework contract inside the vendored fork (the TUI routes keyboard to the focused component and filters key releases by wantsKeyRelease); a host wrapper cannot change how the fork's own focus model resolves overlay roots. X052: SelectList mouse hit-testing is a public built-in component contract inside the vendored fork (setFilter/setSelectedIndex + mouse click are documented capabilities); a host wrapper cannot change how the fork's own component resolves a press/click against its rows, and the fix depends on render-time row identity which is vendor-internal.
 
 ## Removed or superseded legacy surfaces
 
@@ -78,8 +78,8 @@
 
 ## Summary
 
-- Records: 52
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 41, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
+- Records: 53
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 42, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -135,6 +135,7 @@
 | X049 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X050 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X051 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT | NO |
+| X052 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 
 ## Divergences
 
@@ -4225,3 +4226,82 @@ showOverlay accepts any Component as the overlay root, and the overlay focus sta
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Confirmed upstream Container and Box lack focus/input forwarding; the fork tracks the mouse-focused child and forwards to it only, excluding the TUI root (TuiBase extends Container).
+
+### X052 — SelectList last-painted mouse identity
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `HIGH`
+- Files: `src/components/select-list.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+SelectList mouse hit-testing derived the pressed row from the LIVE selectedIndex/filteredItems (getVisibleRange) and latched a raw array INDEX as the gesture identity. A filter/selection change between paint and press (or between press and release) could therefore transfer a click on item A to whatever item repainted into the same physical row — onSelect can run a command/action, so this is a real activation bug, not a highlight offset. The fork now builds a render-time physical-row → item-identity map from the FINAL painted rows, latches the pressed ITEM identity, and a click may only activate the exact identity that was pressed (every left press replaces the latch at handler entry).
+
+#### Changed surface
+
+- SelectList mouse hit-testing uses the FINAL painted rows (a render-time mouseRows map built in render), never a re-derived range from the live selectedIndex/filteredItems — a press/click hits the row the user actually saw
+- the pressed gesture identity is the ITEM (object identity), not an array index; a click may only activate the exact pressed identity (a repaint that moved a different item onto the cell rejects the click)
+- every left press replaces the pressed identity at handler entry (a press on an unpainted/inert row clears the old latch)
+
+#### Dependency map
+
+**Vendor internal**
+- SelectList.render records physical row → item identity; handleMouse resolves the CURRENT index by the painted item identity (indexOf) and rejects when the painted item is no longer in the live list.
+- Audit note: The scroll-indicator row is recorded as inert (undefined) so a click on it never resolves to an item.
+
+**Inheritance / structural**
+- SelectList is a leaf component; no subclass overrides handleMouse.
+- Audit note: None.
+
+**Host**
+- Host SearchablePicker/openPicker wrap SelectList; the host mouse parity already resolves by VALUE/ID identity, and the fork-side fence closes the same-instance filter/selection swap.
+- Audit note: Host behavior is unchanged; the fork fence covers the public SelectList contract directly.
+
+**Public / extension**
+- SelectList is a public built-in component; setFilter/setSelectedIndex + mouse click are documented capabilities.
+- Audit note: No API change; the existing public surface is completed with last-painted identity semantics.
+
+**Behavioral coupling**
+- a press on a painted row resolves to the painted item even when the live visible range moved (no repaint)
+- press A → filter change + repaint → release on the same cell does NOT activate the item that moved there
+- a press on the scroll-indicator row is inert
+- every left press replaces the pressed identity (no stale-latch activation)
+- Audit note: Regression tests cover the no-repaint live-range case, the repaint transfer case (unit + real TUI click synthesis), and the existing press/click activation.
+
+#### Guarding tests
+
+- packages/pi-tui/test/select-list.test.ts: a press on a painted row resolves to the painted item even when the live visible range moved without a repaint (setSelectedIndex after render)
+- packages/pi-tui/test/select-list.test.ts: press A → setFilter + repaint → release on the same cell does NOT activate the item that moved there
+- packages/pi-tui/test/mouse-components.test.ts: real TUI click synthesis — press row 0, filter change + repaint, release on the same cell: the repainted row must not receive the pressed item's click (mousePressTarget → repaint → same-component synthetic click contract)
+- packages/pi-tui/test/mouse-components.test.ts: existing press/click activation on painted rows (render first) and wheel-scroll press/click activation
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/components/select-list.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream SelectList derives the pressed row from the live visible range and latches an array index; the fork builds a render-time physical-row → item-identity map and latches the pressed item identity, so a filter/selection change can never transfer a click to a different item.
+
+#### Retirement conditions
+
+- Retire only when upstream SelectList hit-tests against last-painted rows with item-identity gesture tracking (or the mouse model changes so the same-instance filter/selection swap cannot transfer a click), then run the no-repaint live-range, repaint-transfer (unit + TUI click synthesis), and inert scroll-indicator tests.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream SelectList (v0.85.1 and current main) still derives the pressed row from the live visible range and latches an array index; the fork fences mouse dispatch to the last-painted rows with item-identity gesture tracking.
