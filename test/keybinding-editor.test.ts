@@ -8,7 +8,7 @@ import { ActionEditorPanel } from '../src/keybinding-ui/action-editor.ts'
 import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../src/keybinding-ui/list.ts'
 import type { KeybindingMutationResult } from '../src/keybinding-ui/controller.ts'
 import { buildKeybindingEditorModel } from '../src/keybinding-ui/model.ts'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { CURSOR_MARKER, visibleWidth } from '@xmoon76/pi-tui'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -915,4 +915,53 @@ test('action editor: mouse input is frozen while a mutation is pending (mouse pa
     editor.dispose()
     manager.dispose()
   }
+})
+
+test('keybinding panel: the focused flag reaches the search Input (CURSOR_MARKER)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.focused = true
+    panel.handleInput('ab')
+    const rendered = panel.render(88).join('\n')
+    assert.ok(rendered.includes(CURSOR_MARKER), `the focused search Input must emit the cursor marker:\n${rendered}`)
+    panel.focused = false
+    const rendered2 = panel.render(88).join('\n')
+    assert.ok(!rendered2.includes(CURSOR_MARKER), 'an unfocused panel must not emit the marker')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('keybinding panel: openKeybindingEditor forwards focus to the search Input (CURSOR_MARKER)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const panel = new KeybindingEditorPanel({
+    model,
+    onClose: () => {},
+    runMutation: () => {},
+    maxRows: () => 18,
+  })
+  app.openKeybindingEditor(panel)
+  await vt.waitForRender()
+  // Type a query: the search row then renders the Input (with its fake
+  // cursor) instead of the empty-query placeholder.
+  vt.sendInput('a')
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  assert.ok(viewport.some(line => line.includes('Search: a')), `the search row must show the query:\n${viewport.join('\n')}`)
+  // The FocusForwardingFrame must forward the focused flag through the
+  // panel to the private search Input (the alt screen extracts the
+  // CURSOR_MARKER into the terminal cursor position, so the marker is
+  // not visible in the viewport rows).
+  const state = panel as unknown as { searchInput: { focused: boolean } }
+  assert.strictEqual(state.searchInput.focused, true, 'the mounted panel must forward focus to the search Input')
+  app.stop()
 })

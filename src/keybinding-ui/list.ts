@@ -3,7 +3,7 @@
  * the shared detail/editor child view.
  */
 
-import { matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
+import { matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable } from '@xmoon76/pi-tui'
 import { Input } from '@xmoon76/pi-tui'
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
@@ -99,7 +99,21 @@ type KeybindingMouseHit =
   | { kind: 'select'; index: number; id: string }
   | { kind: 'inert' }
 
-export class KeybindingEditorPanel implements Component {
+export class KeybindingEditorPanel implements Component, Focusable {
+  /**
+   * Focusable forwarding (the FocusForwardingFrame contract): the panel
+   * owns a real Input, so the focused flag must reach it — otherwise the
+   * Input never emits CURSOR_MARKER and the IME candidate window /
+   * hardware cursor stays at the previous position. Mirrors
+   * HistoryPanel / TaskBrowserPanel / SearchablePicker.
+   */
+  get focused(): boolean {
+    return this.searchInput.focused
+  }
+
+  set focused(value: boolean) {
+    this.searchInput.focused = value
+  }
   private model: KeybindingEditorModel
   private readonly runMutation: KeybindingMutationRunner
   private readonly onClose: () => void
