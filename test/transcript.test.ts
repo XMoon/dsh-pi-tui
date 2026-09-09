@@ -4998,6 +4998,53 @@ test('a workflow run without a terminal event still exports its current state', 
   assert.match(markdown, /checker — running/)
 })
 
+test('a workflow run whose step owner closed without a terminal event exports as interrupted', () => {
+  const markdown = renderTranscriptMarkdown({
+    header: { id: 'session-export' as never, cwd: '/workspace' },
+    snapshotEvents: () => [
+      rawEvent('turn/start', { turn: 0 }, 0),
+      rawEvent('step/start', { turn: 0, step: 0 }, 1),
+      rawEvent('tool-workflow/run-start', { runId: 'run-3', name: 'audit' }, 2),
+      rawEvent('tool-workflow/agent-start', { runId: 'run-3', seq: 0, label: 'checker', childId: 'session-x' }, 3),
+      // The step closes with no run-end: the run is interrupted, exactly
+      // like the visual Transcript projection (shared WorkflowProjection).
+      rawEvent('step/end', { turn: 0, step: 0 }, 4),
+    ],
+  } as never)
+  assert.match(markdown, /Workflow: audit — interrupted/)
+  assert.match(markdown, /checker — interrupted/)
+})
+
+test('a workflow run whose owning turn closed without a terminal event exports as interrupted', () => {
+  const markdown = renderTranscriptMarkdown({
+    header: { id: 'session-export' as never, cwd: '/workspace' },
+    snapshotEvents: () => [
+      rawEvent('turn/start', { turn: 0 }, 0),
+      rawEvent('tool-workflow/run-start', { runId: 'run-4', name: 'audit' }, 1),
+      rawEvent('tool-workflow/agent-start', { runId: 'run-4', seq: 0, label: 'checker', childId: 'session-x' }, 2),
+      rawEvent('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 3),
+    ],
+  } as never)
+  assert.match(markdown, /Workflow: audit — interrupted/)
+  assert.match(markdown, /checker — interrupted/)
+})
+
+test('a settled member keeps its durable outcome when the run is interrupted', () => {
+  const markdown = renderTranscriptMarkdown({
+    header: { id: 'session-export' as never, cwd: '/workspace' },
+    snapshotEvents: () => [
+      rawEvent('turn/start', { turn: 0 }, 0),
+      rawEvent('step/start', { turn: 0, step: 0 }, 1),
+      rawEvent('tool-workflow/run-start', { runId: 'run-5', name: 'audit' }, 2),
+      rawEvent('tool-workflow/agent-start', { runId: 'run-5', seq: 0, label: 'checker', childId: 'session-x' }, 3),
+      rawEvent('tool-workflow/agent-end', { runId: 'run-5', seq: 0, outcome: 'completed' }, 4),
+      rawEvent('step/end', { turn: 0, step: 0 }, 5),
+    ],
+  } as never)
+  assert.match(markdown, /Workflow: audit — interrupted/)
+  assert.match(markdown, /checker — completed/)
+})
+
 test('failed-attempt reasoning resets on retry and matches a cold replay', () => {
   const durable = [
     event('turn/start', { turn: 0 }, 0),
