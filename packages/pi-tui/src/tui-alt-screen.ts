@@ -774,8 +774,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	 * preceding sibling heights). Returns undefined when the target is not
 	 * painted under the root. (dsh-pi-tui divergence X018 hardening.) */
 	private overlayChildOrigin(root: Component, target: Component): { x: number; y: number } | undefined {
+		// The root itself is the target (a direct overlay-root press): its
+		// painted origin is the overlay origin, regardless of whether it
+		// has a cached child layout.
+		if (root === target) return { x: 0, y: 0 };
 		const layout = this.getContainerMouseLayout(root);
-		if (layout === undefined) return root === target ? { x: 0, y: 0 } : undefined;
+		if (layout === undefined) return undefined;
 		// Box padding: the child content starts after paddingX/paddingY.
 		const padding = (root as { getPadding?: () => { x: number; y: number } }).getPadding?.() ?? { x: 0, y: 0 };
 		let y = padding.y;
