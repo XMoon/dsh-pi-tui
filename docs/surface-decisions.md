@@ -438,8 +438,10 @@ name collision **fails loud — it never shadows**.
   displayed row can never execute a different command than it shows. The
   HOST CLAIMS are refreshed before the merge, so a failed synthesis never
   costs a host command its input authority; the collision is recorded on the
-  contribution's health (cleared only when it merges cleanly again, and never
-  over a handler-failure record in the same slot) and surfaced once per
+  contribution's health (cleared when it merges cleanly again, and only while
+  the record still shows that very collision message — so a handler failure
+  that OPENED the record is preserved; see the limitation note below for the
+  failure order that is not protected) and surfaced once per
   contribution identity and failure generation — one failed pass states EVERY
   collision it found in the single notice slot.
 - Everything unclaimed is an ordinary prompt; TUI-local commands
@@ -451,7 +453,8 @@ name collision **fails loud — it never shadows**.
   and the session command path that reports the HOST command executing under
   a colliding name. The ledger keeps ONE failure generation per record and
   deduplicates a repeat (the first message wins), so the record is not an
-  authoritative summary of every unrecovered failure:
+  authoritative summary of every unrecovered failure. The recovery rule above
+  is message-based, which protects one failure order only:
   - a client handler that fails while its name is colliding keeps its
     failure out of the record (the collision message wins), and the
     collision recovery then clears the record although the handler never
