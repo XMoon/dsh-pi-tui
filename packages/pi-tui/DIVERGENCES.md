@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `15d68691fa7feff6ada3703ca79943f7a05a14b5`
+- Audited local source commit: `dbb5236d31d867d0f8db71e46d975da4cf467284`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -4452,6 +4452,9 @@ A host that resolves a same-cell click against the frame the user actually SAW n
 - packages/pi-tui/test/tui-alt-screen.test.ts: fires onFramePainted after each painted frame and exposes the painted box of mounted components (X054)
 - test/editor-seat-non-owning.test.ts: a click before the seat repaint reaches neither the removed editor nor the not-yet-painted occupant (ghost click)
 - test/tui-app.test.ts: fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)
+- test/tui-app.test.ts: fullscreen transcript click: a press on a local card cannot transfer to a repainted local card (per-message identity token; kind+turn is not unique for local shell cards)
+- test/tui-app.test.ts: fullscreen transcript click: a resize between press and release cannot act against the stale frame (release-time geometry guard)
+- test/tui-app.test.ts: fullscreen transcript click: a resize + repaint between press and release cannot transfer the gesture (press-frame dimensions recorded in the gesture)
 
 #### Upstream comparison
 

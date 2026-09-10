@@ -9,7 +9,7 @@
  "verification": {
   "auditedAt": "2026-09-09",
   "branch": "chore/revendor-pi-tui-v0.85.1",
-  "auditedSourceCommit": "15d68691fa7feff6ada3703ca79943f7a05a14b5",
+  "auditedSourceCommit": "dbb5236d31d867d0f8db71e46d975da4cf467284",
   "referenceSnapshots": {
    "upstream": {
     "repository": "earendil-works/pi",
@@ -5427,7 +5427,10 @@
    "tests": [
     "packages/pi-tui/test/tui-alt-screen.test.ts: fires onFramePainted after each painted frame and exposes the painted box of mounted components (X054)",
     "test/editor-seat-non-owning.test.ts: a click before the seat repaint reaches neither the removed editor nor the not-yet-painted occupant (ghost click)",
-    "test/tui-app.test.ts: fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)"
+    "test/tui-app.test.ts: fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)",
+    "test/tui-app.test.ts: fullscreen transcript click: a press on a local card cannot transfer to a repainted local card (per-message identity token; kind+turn is not unique for local shell cards)",
+    "test/tui-app.test.ts: fullscreen transcript click: a resize between press and release cannot act against the stale frame (release-time geometry guard)",
+    "test/tui-app.test.ts: fullscreen transcript click: a resize + repaint between press and release cannot transfer the gesture (press-frame dimensions recorded in the gesture)"
    ],
    "upstream": {
     "equivalence": "NO",
