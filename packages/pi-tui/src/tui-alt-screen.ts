@@ -800,6 +800,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (this.currentLayout !== undefined) {
 			const boxes = getLayoutBoxesAt(this.currentLayout, target.originX, target.originY);
 			if (boxes.some(box => box.component === target.component)) return true;
+			// A nested descendant (e.g. an editor-seat occupant) is not a
+			// layout box itself: it is placement-live when its ancestor box
+			// still occupies the press-time origin.
+			if (boxes.some(box => this.componentTreeContains(box.component, target.component))) return true;
 			// Implicit-document children have no independent placement:
 			// they follow the implicit document (always at the screen
 			// origin), so a still-live direct child is placement-live.
