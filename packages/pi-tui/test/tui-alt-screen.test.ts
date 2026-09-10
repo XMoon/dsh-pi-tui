@@ -2977,3 +2977,81 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		assert.strictEqual(root.wantsKeyRelease, undefined, "a detached child's wantsKeyRelease must not leak");
 		tui.stop();
 	});
+
+	it("does not resurrect a stale focus owner after A→B→A replacement in a Container (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const second = new Input();
+		const root = new Container();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press the Input: the Container forwards focus/input to it.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		// A → B + repaint: the paint itself must invalidate the old
+		// forwarding identity (not lazily on the next keyboard event).
+		root.children = [second];
+		tui.requestRender();
+		await terminal.waitForRender();
+		// A → A again + repaint: the stale owner must NOT resurrect.
+		root.children = [first];
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "", "the stale focus owner must not resurrect on keyboard input");
+		assert.strictEqual(first.focused, false, "the detached child must not keep the focused flag");
+		// A fresh press names the new focus owner.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "x", "a fresh press must re-establish the focus owner");
+		tui.stop();
+	});
+
+	it("does not resurrect a stale focus owner after A→B→A replacement in a Box (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const second = new Input();
+		const root = new Box();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press the Input (the Box has default padding (1,1): the child
+		// renders at screen row 1, col 1 = SGR row 2, col 2).
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		root.children = [second];
+		tui.requestRender();
+		await terminal.waitForRender();
+		root.children = [first];
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "", "the stale focus owner must not resurrect on keyboard input");
+		assert.strictEqual(first.focused, false, "the detached child must not keep the focused flag");
+		// A fresh press names the new focus owner.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "x", "a fresh press must re-establish the focus owner");
+		tui.stop();
+	});

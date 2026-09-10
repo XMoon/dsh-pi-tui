@@ -61,10 +61,16 @@ export class Box implements Component, Focusable {
 	 * focused flag / wantsKeyRelease must never reach a detached child.
 	 * The reference is dropped until a new mouse press names a new focus
 	 * owner — replacement never silently transfers focus to the new
-	 * child. (dsh-pi-tui divergence X051 hardening.) */
+	 * child, and re-mounting the old child later can never resurrect the
+	 * stale identity. The detached child's focused flag is cleared too
+	 * (IME/hardware-cursor state must not survive a detach). (dsh-pi-tui
+	 * divergence X051 hardening.) */
 	private liveFocusedChild(): Component | undefined {
 		const child = this.focusedChild;
 		if (child !== undefined && this.children.includes(child)) return child;
+		if (child !== undefined && isFocusable(child)) {
+			child.focused = false;
+		}
 		this.focusedChild = undefined;
 		return undefined;
 	}
@@ -188,6 +194,12 @@ export class Box implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		// A paint is a focus-liveness observation point: a child that was
+		// replaced via direct `children` mutation is invalidated HERE (not
+		// lazily on the next keyboard event), so re-mounting it later can
+		// never resurrect the stale forwarding identity. (dsh-pi-tui
+		// divergence X051 hardening.)
+		this.liveFocusedChild();
 		if (this.children.length === 0) {
 			return [];
 		}
