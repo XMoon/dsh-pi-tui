@@ -6999,7 +6999,12 @@ export class TuiApp {
     // the click to a different target).
     const question = this.activeQuestions
     if (question?.frame !== undefined) {
-      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) return
+      // A stale-geometry press cannot name a valid target: consume any
+      // prior gesture so a later release can never match it.
+      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) {
+        this.questionPressGesture = undefined
+        return
+      }
       const width = this.terminal.columns
       const height = this.terminal.rows
       const footerHeight = this.footer.render(width).length
@@ -7029,8 +7034,12 @@ export class TuiApp {
       // Stale-geometry guard: between a terminal resize (rows OR columns —
       // a width change rewraps the body and shifts the flow's hit map) and
       // the next repaint, the frame's rendered height and hit map still
-      // reflect the OLD terminal.
-      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) return
+      // reflect the OLD terminal. A stale-geometry release cannot act:
+      // consume any prior gesture so it can never match a later click.
+      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) {
+        this.questionPressGesture = undefined
+        return
+      }
       const width = this.terminal.columns
       const height = this.terminal.rows
       const footerHeight = this.footer.render(width).length
