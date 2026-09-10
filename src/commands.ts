@@ -30,6 +30,7 @@ import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefini
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import { createForkedAgent } from './session-fork.ts'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
+import type { ComposerSubmitGesture } from './tui-app.ts'
 import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
@@ -362,28 +363,43 @@ export interface DefaultIntentRecord {
 /**
  * The effective mode ONE submission resolved at the submit boundary: whether
  * an agent-facing delivery steers into the running turn or queues behind it
- * (web `ComposerSubmissionPolicy` parity — the boundary resolves 'queue' for
- * a non-running agent, for `busyEnter=queue`, and for the Ctrl+Enter
- * force-queue chord).
+ * (web `ComposerSubmissionPolicy` parity — an idle agent queues, plain Enter
+ * takes the preference, and the accelerated chord takes its OPPOSITE).
  *
  * It is a property of the GESTURE, not of the persisted settings: a one-shot
- * chord exists only inside the dispatch that resolved it, so every
+ * gesture exists only inside the dispatch that resolved it, so every
  * downstream consumer (the TUI skill delivery) accepts this value instead of
  * re-deriving the mode from `busyEnter`.
  */
 export type SubmitDelivery = 'steer' | 'queue'
 
 /**
- * Whether an agent-facing delivery steers under the busy-Enter preference:
- * the agent is RUNNING and the preference says 'steer'. The submit gate adds
- * the local-command and one-shot-chord terms on top; the `/skill` picker — a
- * gesture with no dispatcher above it — resolves with this same rule, so the
- * preference has exactly ONE implementation.
+ * Resolve one submission's delivery mode — the DSH WEB
+ * `ComposerSubmissionPolicy.resolve()` contract (baseline 0.1.3-alpha.2,
+ * shared by every UI client):
+ *
+ * ```text
+ * !running              -> queue
+ * gesture === 'enter'   -> the preferred mode (busyEnter)
+ * accelerated           -> the OPPOSITE of the preferred mode
+ * ```
+ *
+ * The accelerated chord is therefore "the other behavior", never a fixed
+ * queue: with the default preference ('queue') it steers. A non-steering
+ * transport always queues (the TUI's Direct surface always steers).
  * @param running - whether the live agent reports running.
- * @param busyEnter - the persisted preference value (''/undefined = queue).
+ * @param gesture - the composer gesture that raised the submission.
+ * @param busyEnter - the persisted preference (''/undefined = queue).
  */
-export function prefersSteer(running: boolean, busyEnter: string | undefined): boolean {
-  return running && busyEnter === 'steer'
+export function resolveComposerDelivery(
+  running: boolean,
+  gesture: ComposerSubmitGesture,
+  busyEnter: string | undefined,
+): SubmitDelivery {
+  if (!running) return 'queue'
+  const preferred: SubmitDelivery = busyEnter === 'steer' ? 'steer' : 'queue'
+  if (gesture === 'enter') return preferred
+  return preferred === 'queue' ? 'steer' : 'queue'
 }
 
 /** Everything the TUI-owned commands read from the runner. */
@@ -1201,6 +1217,10 @@ export function registerTuiCommands(
   /** Whether one slash name is a HOST command in the current effective
    * catalog (advertised, owned by neither the TUI nor an extension). */
   isHostCommand(name: string): boolean
+  /** Whether one slash name is a LIVE TUI-owned skill wrapper (an
+   * agent-facing invocation whose `/name` line the host may resolve into an
+   * injected skill body). */
+  isSkillWrapper(name: string): boolean
   /** One synchronous catalog commit (the coordinator's install hook). */
   installSnapshot(snapshot: SurfaceCatalogSnapshot): void
   /** The revalidating transition (the coordinator's target-change hook). */
@@ -1228,7 +1248,7 @@ export function registerTuiCommands(
    * no attachments), so a TUI-owned skill handler captures its invocation's
    * mode before any await and passes it to the delivery — never re-deriving
    * the mode from the persisted preference, which cannot reconstruct a
-   * one-shot force-queue chord.
+   * one-shot gesture (the accelerated chord's opposite mode).
    */
   let boundDelivery: SubmitDelivery | undefined
   /**
@@ -1735,7 +1755,7 @@ export function registerTuiCommands(
           {
             id: 'busy-enter',
             label: 'Submit while busy',
-            description: `Steer injects the draft into the running turn; ${keyHint('app.input.queue')} uses the other behavior`,
+            description: `Steer injects the draft into the running turn; ${keyHint('app.input.submitAccelerated')} uses the other behavior`,
             currentValue: settingsDoc?.busyEnter ?? 'queue',
             values: ['queue', 'steer'],
           },
@@ -2977,9 +2997,9 @@ export function registerTuiCommands(
           // prompt — under the queue mode it QUEUES like a plain prompt
           // (web: session.prompt with the policy-resolved mode). The mode
           // was resolved ONCE at the gesture's own boundary and handed in;
-          // re-deriving it here from the persisted preference would lose
-          // the one-shot Ctrl+Enter force-queue chord, which exists only in
-          // the dispatch that resolved it.
+          // re-deriving it here from the persisted preference would lose the
+          // accelerated chord's opposite mode, which exists only in the
+          // dispatch that resolved it.
           // The queue delivery is only safe when the HOST injects the skill
           // body: the fallback body injection below rides next-step, so a
           // followup would let the body arrive before the user's words (the
@@ -3237,15 +3257,6 @@ export function registerTuiCommands(
       const catalog = await runner.catalog.skills.listHumanSkills(liveAgent.session.id)
       if (catalog === undefined) return { kind: 'error', text: 'skill service unavailable' }
       if (catalog.skills.length === 0) return { kind: 'error', text: 'no skills available' }
-      // A picker selection is its OWN delivery boundary (no dispatcher above
-      // it): choosing a row submits the skill like a plain Enter on the
-      // completed `/<name>` line, so the busy-Enter preference is resolved
-      // here — the one-shot Ctrl+Enter chord cannot exist for a modal
-      // selection. The resolved mode is handed to the delivery, which never
-      // re-derives it.
-      const pickerDelivery: SubmitDelivery = prefersSteer(liveAgent.status === 'running', runner.tuiSettings?.get().busyEnter)
-        ? 'steer'
-        : 'queue'
       // SettingsList rows: Enter cycles the value, which fires onChange.
       app.openSettings(
         catalog.skills.map(skill => ({
@@ -3256,7 +3267,19 @@ export function registerTuiCommands(
           values: ['✓'],
         })),
         (id) => {
-          detach('skill load', () => loadSkill(liveAgent, id, '', runner.signal, pickerDelivery).then(result => {
+          // The SELECTION is the delivery boundary (choosing a row submits
+          // the skill like a plain Enter on the completed `/<name>` line), so
+          // the mode is resolved HERE — the picker may have been open while
+          // the agent went idle (or busy) and while the preference was
+          // edited; a mode frozen at picker-open time would be stale. The
+          // resolved mode is handed to the delivery, which never re-derives
+          // it.
+          const delivery = resolveComposerDelivery(
+            liveAgent.status === 'running',
+            'enter',
+            runner.tuiSettings?.get().busyEnter,
+          )
+          detach('skill load', () => loadSkill(liveAgent, id, '', runner.signal, delivery).then(result => {
             if (result.kind === 'error') app.notify(result.text)
           }), { notify: true })
         },
@@ -4324,7 +4347,7 @@ export function registerTuiCommands(
         return label === '' ? '—' : label
       }
       const rows: SettingItem[] = [        { id: 'k-enter', label: keysLabel('app.input.submit'), description: 'Submit the draft; while the agent is busy, delivery follows the "Submit while busy" preference (skill commands steer too, UI commands run locally)', currentValue: '' },
-        { id: 'k-queue', label: keysLabel('app.input.queue'), description: 'Queue the draft while the agent is busy (the opposite of "Submit while busy")', currentValue: '' },
+        { id: 'k-queue', label: keysLabel('app.input.submitAccelerated'), description: 'Submit with the OPPOSITE of the "Submit while busy" behavior (the web accelerated-submit chord)', currentValue: '' },
         { id: 'k-exit', label: keysLabel('app.exit.request'), description: 'Quit the TUI (flushes the session)', currentValue: '' },
         { id: 'k-cancel', label: keysLabel('app.agent.interrupt'), description: 'Cancel the active turn / tool / shell command (one interrupt while the agent is busy; press the interrupt action twice while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
         { id: 'k-fold', label: keysLabel('app.transcript.toggleExpand'), description: `Expand/collapse recent tool and system output; in regular Focus it reveals the recent Thoughts; in fullscreen Focus it bulk-expands the recent Thoughts or collapses them all (per-card detail stays mouse-owned). Thinking detail is ${keysLabel('app.transcript.toggleThinking')}`, currentValue: '' },
@@ -4512,6 +4535,9 @@ export function registerTuiCommands(
      * TUI as a skill wrapper nor an extension contribution (the dispatch
      * caller excludes TUI-local commands itself via LOCAL_COMMANDS). */
     isHostCommand,
+    /** Whether one slash name is a LIVE TUI-owned skill wrapper (the
+     * revalidating transition wrappers included). */
+    isSkillWrapper: (name: string): boolean => skillDisposers.has(name),
     /** One synchronous catalog commit (the coordinator's install hook). */
     installSnapshot: (snapshot: SurfaceCatalogSnapshot): void => installSurfaceSnapshot(snapshot),
     /** The revalidating transition (the coordinator's target-change hook). */

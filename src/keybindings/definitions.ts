@@ -40,10 +40,15 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     // disabled — not just the hints (PR review finding).
     hostResolved: false,
   },
-  'app.input.queue': {
-    id: 'app.input.queue',
+  'app.input.submitAccelerated': {
+    id: 'app.input.submitAccelerated',
     defaultKeys: ['ctrl+enter'],
-    description: 'Queue input (the busy-Enter opposite chord)',
+    // The web composer's accelerated submit gesture: it resolves to the
+    // OPPOSITE of the busy-Enter preference (never a fixed queue mode). The
+    // historical id `app.input.queue` was named for the old fixed-queue
+    // behavior and remains accepted as a settings alias (see
+    // parseUserKeybindings).
+    description: 'Submit with the opposite busy-Enter behavior',
     category: 'Input',
     scope: 'editor',
     configurable: true,
@@ -521,7 +526,7 @@ export const PROTECTED_HOST_ACTIONS: ReadonlySet<AppKeybindingId> = new Set([
  * remap automatically stays blocked. */
 export const VIEWER_BLOCKED_PARENT_ACTIONS: ReadonlySet<AppKeybindingId> = new Set([
   'app.input.steer',
-  'app.input.queue',
+  'app.input.submitAccelerated',
   'app.input.dequeue',
   'app.permission.cycle',
   'app.transcript.search',

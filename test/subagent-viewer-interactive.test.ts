@@ -54,17 +54,21 @@ async function startApp(
     onExit?: () => void
     onSingleEscape?: () => boolean | void
     onSteer?: (text: string) => void
-    onQueueSubmit?: (text: string) => void
+    onAcceleratedSubmit?: (text: string) => void
     onSubagentSubmit?: (request: { parentSessionId: string; childSessionId: string; text: string }) => void
   } = {},
 ): Promise<{ vt: VirtualTerminal; app: TuiApp }> {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, {
-    onSubmit: events.onSubmit ?? (() => {}),
+    // The accelerated chord is a submission REQUEST (the runner resolves its
+    // delivery mode): the harness splits it out for the chord assertions.
+    onSubmit: (text, request) => {
+      if (request === 'accelerated') { events.onAcceleratedSubmit?.(text); return }
+      events.onSubmit?.(text)
+    },
     onExit: events.onExit ?? (() => {}),
     onSingleEscape: events.onSingleEscape,
     onSteer: events.onSteer,
-    onQueueSubmit: events.onQueueSubmit,
     onSubagentSubmit: events.onSubagentSubmit,
   })
   app.start()
@@ -145,14 +149,15 @@ test('the main session chords are inert inside the interactive viewer', async ()
   const singleEscapes: number[] = []
   const { vt, app } = await startApp({
     onSteer: (text) => steered.push(text),
-    onQueueSubmit: (text) => queued.push(text),
+    onAcceleratedSubmit: (text) => queued.push(text),
     onSingleEscape: () => { singleEscapes.push(1); return true },
   })
   app.setViewerMode(continuable())
   await vt.waitForRender()
   vt.sendInput('draft text')
   await vt.waitForRender()
-  // Ctrl+S (steer) and Ctrl+Enter (queue) must be consumed, never parent.
+  // Ctrl+S (steer) and Ctrl+Enter (the accelerated submit) must be
+  // consumed, never parent.
   vt.sendInput('\x13') // ctrl+s
   await vt.waitForRender()
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
@@ -165,7 +170,7 @@ test('the main session chords are inert inside the interactive viewer', async ()
   vt.sendInput('\x03') // ctrl+c
   await vt.waitForRender()
   assert.deepEqual(steered, [], 'Ctrl+S must never steer the parent from the viewer')
-  assert.deepEqual(queued, [], 'Ctrl+Enter must never queue the parent from the viewer')
+  assert.deepEqual(queued, [], 'Ctrl+Enter must never submit to the parent from the viewer')
   assert.equal(singleEscapes.length, 0, 'Ctrl+C must not exit (and no accidental Esc)')
   // The child draft is untouched by the blocked chords.
   assert.equal(app.getDraft(), 'draft text')
@@ -190,7 +195,7 @@ test('a one-shot viewer cannot submit through the host path either (hard reject)
   vt.sendInput('x')
   vt.sendInput('\r')
   await vt.waitForRender()
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(parentSubmits, [])
   assert.deepEqual(childSubmits, [])
@@ -223,7 +228,7 @@ test('a NESTED continuable child is read-only from the root (plan §6.10)', asyn
   vt.sendInput('x')
   vt.sendInput('\r')
   await vt.waitForRender()
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(parentSubmits, [], 'nested viewer must never submit to the parent')
   assert.deepEqual(childSubmits, [], 'nested viewer must never submit to the grandchild from the root')
@@ -360,7 +365,7 @@ test('a replacement (plugin) editor receives the child draft and the follow-up t
   await vt.waitForRender()
   assert.equal(app.getDraft(), 'child draft via runner', 'the child draft must not leak to the main draft')
   // The host-owned submit routes to the subagent even with a plugin editor.
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submits, [{
     parentSessionId: 'session-main',
@@ -407,7 +412,7 @@ test('a replacement editor submit clears the child slot EXPLICITLY (no resurrect
   // Submit through the host path (the plugin editor never fires the host
   // onChange): the slot must clear even though the plugin's setText is
   // what cleared the visible buffer.
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submits, [{
     parentSessionId: 'session-main',
@@ -470,7 +475,7 @@ test('a replacement editor that edits through its OWN handleInput submits the LA
   vt.sendInput('x')
   await vt.waitForRender()
   assert.equal(app.getDraft(), 'oldx', 'getDraft must read the VISIBLE editor in a continuable viewer')
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submits, [{ text: 'oldx' }], 'the submission must carry the LATEST visible text, never the stale slot')
   app.setViewerMode(undefined)

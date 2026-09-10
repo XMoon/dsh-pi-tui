@@ -70,7 +70,7 @@ function stubRunner(
   app: TuiApp,
   state: { agent: Agent | undefined },
   diag: ReturnType<typeof createDiag> = createDiag({ filePath: undefined, stderrLevel: 'off' }),
-  options: { transitionPending?: boolean } = {},
+  options: { transitionPending?: boolean; busyEnter?: string } = {},
 ): TuiCommandRunner {
   return {
     ctx,
@@ -84,7 +84,12 @@ function stubRunner(
     setDefaultIntent: () => {},
     defaultIntentRecord: undefined,
     settleIntent: () => {},
-    tuiSettings: undefined,
+    tuiSettings: options.busyEnter === undefined
+      ? undefined
+      : {
+          get: () => ({ busyEnter: options.busyEnter }),
+          replace: async () => undefined,
+        } as never,
     applyFooterSettings: () => {},
     agents: {} as never,
     sessionReader: {
@@ -918,5 +923,59 @@ test('the transition fence does NOT refuse skill invocations when no transition 
   const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
   assert.equal(result.kind, 'success')
   assert.equal(delivered.length, 2, 'the skill delivers the line and the body as usual')
+  app.stop()
+})
+
+// ── review P2: the picker resolves the delivery mode at SELECTION time ─────
+
+test('the /skill picker resolves the delivery mode at SELECTION time, not at open time', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const agent = fakeAgent('session-a', delivered, 'running')
+  const summary = {
+    name: 'glab',
+    description: 'GitLab CLI',
+    content: 'body',
+    invocation: { modelInvocable: true, userInvocable: true },
+    source: 'bundled',
+    provider: 't',
+  }
+  ctx.provide('skills', {
+    list: async () => [summary],
+    get: async () => summary,
+  } as never)
+  // The host's dsh-tool-skill pre-step listener IS visible: the queue mode
+  // then really queues (without it loadSkill keeps its order-preserving
+  // steer, which would make this assertion mode-blind).
+  ctx.provide('tools', {
+    get: (name: string) => name === 'skill' ? { name: 'skill', execute: async () => ({}) } : undefined,
+  } as never)
+  const { defs } = services
+  registerTuiCommands(stubRunner(ctx, app, { agent }, undefined, { busyEnter: 'steer' }))
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  // The picker opens while the agent is RUNNING with busyEnter=steer: a mode
+  // frozen at open time would be 'steer'.
+  const opened = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
+  assert.equal(opened.kind, 'success')
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('glab'), 'the picker must offer the skill')
+  // The agent finishes its turn while the modal is open: the selection is
+  // the delivery boundary — an idle plain-Enter selection queues.
+  ;(agent as unknown as { status: string }).status = 'idle'
+  vt.sendInput('\r') // toggle the selected row's value (fires onChange)
+  await vt.waitForRender()
+  for (let round = 0; round < 20 && delivered.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(delivered.map(entry => entry.kind), ['followup'],
+    'an idle selection must queue — a mode frozen at picker-open time would steer')
+  assert.equal(delivered[0]?.text, '/glab', 'the queued line is the /name form')
   app.stop()
 })

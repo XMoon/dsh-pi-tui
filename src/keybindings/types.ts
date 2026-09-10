@@ -43,7 +43,7 @@ import type { KeyId } from '@xmoon76/pi-tui'
 export type AppKeybindingId =
   // Input / Agent
   | 'app.input.submit'
-  | 'app.input.queue'
+  | 'app.input.submitAccelerated'
   | 'app.input.steer'
   | 'app.input.dequeue'
   | 'app.agent.interrupt'

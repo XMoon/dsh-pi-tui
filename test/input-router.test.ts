@@ -401,11 +401,10 @@ test('TuiApp: active host lifecycle keys never fire a plugin binding (action-dri
   const actions: string[] = []
   const queued: string[] = []
   const app = new TuiApp(vt, {
-    onSubmit: () => {},
+    // A real submit handler: with it wired, Ctrl+Enter is a live host action
+    // that CONSUMES (never declines) — the plugin must not see it.
+    onSubmit: (text, request) => { if (request === 'accelerated') queued.push(text) },
     onExit: () => {},
-    // A real queue handler: with it wired, Ctrl+Enter is a live host
-    // action that CONSUMES (never declines) — the plugin must not see it.
-    onQueueSubmit: (text) => { queued.push(text) },
     onExtensionAction: (action) => { actions.push(action) },
   }, {
     // A resolver that would claim EVERY key — the router must stop the
@@ -420,8 +419,9 @@ test('TuiApp: active host lifecycle keys never fire a plugin binding (action-dri
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.deepEqual(actions, [], 'Enter must never fire a plugin binding')
-  // Ctrl+Enter (app.input.queue) with a LIVE handler AND a non-empty
-  // draft: the host action CONSUMES (queues) — never a plugin binding.
+  // Ctrl+Enter (app.input.submitAccelerated) with a LIVE handler AND a
+  // non-empty draft: the host action CONSUMES (submits) — never a plugin
+  // binding.
   app.setDraft('queued text')
   await vt.waitForRender()
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
@@ -549,12 +549,12 @@ test('TuiApp: submitDraft clears the draft like a normal submit (round-1 P2)', a
   // Type a draft, then submit via the host-owned path.
   app.setDraft('hello from a plugin action')
   await vt.waitForRender()
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submitted, ['hello from a plugin action'])
   assert.equal(app.getDraft(), '', 'the draft must be cleared like a normal submit')
   // An empty draft submits nothing.
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submitted, ['hello from a plugin action'])
   app.stop()

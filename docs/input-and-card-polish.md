@@ -454,7 +454,8 @@ pre-mode behavior).
 
 **Boundaries** (the compatibility contract):
 
-- **Submission** — Enter, Ctrl+Enter (queue), Ctrl+S (steer), the plugin
+- **Submission** — Enter, the accelerated chord (Ctrl+Enter: the OPPOSITE of
+  the busy-Enter preference), Ctrl+S (steer), the plugin
   action sink and the subagent submit path all serialize the mode into the
   wire form before the text leaves the app; the mode resets to `prompt`
   BEFORE the dispatch (a synchronous rejection restores the serialized text

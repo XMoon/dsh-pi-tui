@@ -536,7 +536,7 @@ test('TuiApp: the EditorHost subscription is DRIVEN by host mutations (P1-11)', 
   // (With the plugin winner, host writes go through seat writes — the
   // listener sees the CURRENT seat occupant's text either way.)
   const before = snapshots.length
-  app.submitDraft(false)
+  app.submitDraft('enter')
   assert.ok(snapshots.length > before, 'a submit (draft clear) must notify subscribers')
   // Unsubscribe stops delivery (the ORIGINAL listener's disposer).
   unsubscribe!()
@@ -874,9 +874,9 @@ test('TuiApp: repeated declined Up events continue host history navigation', asy
   startedApps.add(app)
   await vt.waitForRender()
   app.setDraft('first')
-  app.submitDraft(false)
+  app.submitDraft('enter')
   app.setDraft('second')
-  app.submitDraft(false)
+  app.submitDraft('enter')
   let text = ''
   let cursor = 0
   registry.register({
@@ -1307,14 +1307,14 @@ test('TuiApp: a plugin editor survives a fullscreen toggle with focus intact (ro
   // input works — a submit after the toggle reads the plugin draft).
   app.setFullscreen(true)
   await vt.waitForRender()
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submitted, ['fs plugin draft'], 'submit works in fullscreen with a plugin occupant')
   // Fullscreen out: focus returns to the seat occupant.
   app.setFullscreen(false)
   await vt.waitForRender()
   app.setDraft('after fs')
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submitted, ['fs plugin draft', 'after fs'], 'submit works after returning to regular')
   app.stop()

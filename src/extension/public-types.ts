@@ -428,8 +428,12 @@ export interface TuiCommandContribution {
   /** The slash-command name WITHOUT the leading slash. */
   readonly name: string
   readonly description: string
-  /** Execution ownership: local (never steered) vs submission (session
-   * policy). Busy Enter classifies by the EFFECTIVE ownership. */
+  /** Execution ownership: `local` always runs the handler and never steers;
+   * `submission` is AGENT-FACING input — the command's LINE is delivered to
+   * the session in the busy-Enter-policy mode (steered or queued, like any
+   * skill invocation), and the commands-service handler is NOT run by the
+   * TUI ahead of that delivery. Busy Enter classifies by the EFFECTIVE
+   * ownership. */
   readonly execution: 'local' | 'submission'
   /** Whether the command may run without a live session. */
   readonly sessionless?: boolean

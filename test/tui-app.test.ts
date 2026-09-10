@@ -2871,7 +2871,7 @@ test('submitDraft with an empty draft and a staged image submits (image-only gat
   await vt.waitForRender()
   // The runner resolves the placeholders to image blocks (plan §11.1): an
   // empty-text draft with images is NOT empty.
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submitted, [''])
   app.stop()
@@ -2889,7 +2889,7 @@ test('submitDraft with an empty draft and no image stays a no-op even with the g
 
   startedApps.add(app)
   await vt.waitForRender()
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submitted, [])
   app.stop()

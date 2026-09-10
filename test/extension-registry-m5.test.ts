@@ -18,7 +18,7 @@ import { ThemeRegistry } from '../src/theme-registry.ts'
 import { SettingsRegistry } from '../src/settings-registry.ts'
 import { AutocompleteRegistry } from '../src/autocomplete-registry.ts'
 import { KeybindingRegistry } from '../src/keybinding-registry.ts'
-import { HOST_COMMAND_CATALOG, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldSteerOnEnter } from '../src/index.ts'
+import { HOST_COMMAND_CATALOG, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, resolveSubmitDelivery } from '../src/index.ts'
 
 /** A minimal valid structural autocomplete provider for tests. */
 function provider(getSuggestions: () => Promise<import('../src/extension/public-types.ts').TuiAutocompleteSuggestions | null>): import('../src/extension/public-types.ts').TuiAutocompleteProvider {
@@ -118,14 +118,14 @@ test('CommandBridge: dynamic unload makes the command submission again (busy-ent
   assert.equal(handle.kind, 'registered')
   // While registered: never steers.
   assert.equal(
-    shouldSteerOnEnter({ name: 'dyncmd' }, true, 'steer', false, name => bridge.isLocal(name, LOCAL_COMMANDS)),
-    false,
+    resolveSubmitDelivery({ name: 'dyncmd' }, true, 'enter', 'steer', name => bridge.isLocal(name, LOCAL_COMMANDS)),
+    'queue',
   )
   // After unload: submission policy applies.
   if (handle.kind === 'registered') handle.handle.dispose()
   assert.equal(
-    shouldSteerOnEnter({ name: 'dyncmd' }, true, 'steer', false, name => bridge.isLocal(name, LOCAL_COMMANDS)),
-    true,
+    resolveSubmitDelivery({ name: 'dyncmd' }, true, 'enter', 'steer', name => bridge.isLocal(name, LOCAL_COMMANDS)),
+    'steer',
   )
 })
 

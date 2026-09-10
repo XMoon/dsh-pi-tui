@@ -36,6 +36,17 @@ import type { AppKeybindingId, LeaderBinding, LeaderConfig, UserKeybindingValue,
 const LEADER_KEY = 'leader'
 const BINDINGS_KEY = 'bindings'
 
+/** Renamed action ids still accepted from a user keybinding document (the
+ * id is a settings-level public name — a stored override keeps applying to
+ * the action it was written for). A MAP, never an object literal: a
+ * document key like `toString` must stay an unknown action, not inherit a
+ * definition through the prototype. */
+const RENAMED_ACTION_IDS: ReadonlyMap<string, AppKeybindingId> = new Map([
+  // Named for the old fixed-queue chord; the gesture is now the web
+  // composer's accelerated submit (the opposite busy-Enter behavior).
+  ['app.input.queue', 'app.input.submitAccelerated'],
+])
+
 /** The leader sequence marker (`<leader>t`). */
 export const LEADER_PREFIX = '<leader>'
 
@@ -237,11 +248,20 @@ export function parseUserKeybindings(
   }
 
   for (const [actionId, value] of entries) {
-    if (!Object.prototype.hasOwnProperty.call(APP_KEYBINDINGS, actionId)) {
+    // A renamed action id (a settings-level public name) keeps applying to
+    // the action it was written for: `app.input.queue` was named for the old
+    // fixed-queue chord, which is now the web composer's accelerated submit
+    // gesture (the OPPOSITE of the busy-Enter preference).
+    const renamed = RENAMED_ACTION_IDS.get(actionId)
+    if (renamed !== undefined) {
+      diagnostics.push(`keybindings: action "${actionId}" was renamed to "${renamed}" — the override still applies`)
+    }
+    const resolvedId = renamed ?? actionId
+    if (!Object.prototype.hasOwnProperty.call(APP_KEYBINDINGS, resolvedId)) {
       diagnostics.push(`keybindings: unknown action "${actionId}" — ignored`)
       continue
     }
-    const action = actionId as AppKeybindingId
+    const action = resolvedId as AppKeybindingId
     if (NON_CONFIGURABLE_ACTIONS.has(action)) {
       diagnostics.push(`keybindings: action "${actionId}" is not user-configurable in this version — ignored`)
       continue

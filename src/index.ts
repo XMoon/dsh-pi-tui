@@ -143,8 +143,8 @@ import {
 } from './tasks-browser.ts'
 import type { TaskBrowserViewState, TaskPanelItem } from './task-panel.ts'
 import { TaskBrowserRuntime, type TaskBrowserDatasetScope } from './task-browser-runtime.ts'
-import type { TaskBrowserHandle, WorkflowAction } from './tui-app.ts'
-import { prefersSteer, registerTuiCommands, type DefaultIntentRecord, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
+import type { ComposerSubmitGesture, ComposerSubmitRequest, TaskBrowserHandle, WorkflowAction } from './tui-app.ts'
+import { resolveComposerDelivery, registerTuiCommands, type DefaultIntentRecord, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
@@ -370,35 +370,37 @@ export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
 ])
 
 /**
- * Whether one submission steers under the busy-Enter preference: NOT a
- * force-queued chord, NOT a TUI-owned local command, and the agent is
- * running with the preference set to 'steer'. Pure so the dispatch gate
- * (inside the runner closure) is testable headless.
+ * The TUI dispatch boundary's delivery resolution: the WEB composer policy
+ * ({@link resolveComposerDelivery}) applied to agent-facing input, with the
+ * TUI's own ownership terms on top. Pure so the dispatch gate (inside the
+ * runner closure) is testable headless.
  * @param parsed - the parsed slash command, undefined for a plain prompt.
  * @param running - whether the live agent reports running.
+ * @param gesture - the composer gesture that raised the submission.
  * @param busyEnter - the persisted preference value (''/undefined = queue).
- * @param forceQueue - the Ctrl+Enter chord: always queue, never steer.
  * @param isDynamicLocal - M5: the CommandBridge's effective-local check for
  *   plugin-declared local commands (absent = static set only).
  */
-export function shouldSteerOnEnter(
+export function resolveSubmitDelivery(
   parsed: { name: string; rawInput?: string } | undefined,
   running: boolean,
+  gesture: ComposerSubmitGesture,
   busyEnter: string | undefined,
-  forceQueue: boolean,
   isDynamicLocal?: (name: string) => boolean,
-): boolean {
-  if (forceQueue) return false
+): SubmitDelivery {
   if (parsed !== undefined) {
     // `/skill <name> [args...]` is an AGENT-facing invocation (loadSkill),
-    // NOT the local picker: it steers like any other prompt. Only the bare
-    // `/skill` picker counts as local (review finding — same classification
-    // as the image-rejection gate).
-    if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return prefersSteer(running, busyEnter)
-    if (LOCAL_COMMANDS.has(parsed.name)) return false
-    if (isDynamicLocal !== undefined && isDynamicLocal(parsed.name)) return false
+    // NOT the local picker: it follows the busy policy like any other
+    // prompt. Only the bare `/skill` picker counts as local (review finding
+    // — same classification as the image-rejection gate).
+    if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return resolveComposerDelivery(running, gesture, busyEnter)
+    // A TUI-owned local command (and a plugin-declared local one) executes
+    // through its own surface and never steers; its delivery value is only
+    // ever a placeholder for the (never taken) skill-delivery binding.
+    if (LOCAL_COMMANDS.has(parsed.name)) return 'queue'
+    if (isDynamicLocal !== undefined && isDynamicLocal(parsed.name)) return 'queue'
   }
-  return prefersSteer(running, busyEnter)
+  return resolveComposerDelivery(running, gesture, busyEnter)
 }
 
 /**
@@ -4386,8 +4388,17 @@ export function apply(ctx: Context, config: Config): void {
         // liveAgent: writing through a re-read closure variable could
         // target a session the identity check did not see (a switch
         // between the check and the write).
+        // An extension `submission` contribution is AGENT-FACING input, never
+        // a command-plane execution: its resolved mode delivers the LINE,
+        // exactly like an unclaimed slash prompt (web parity — an unclaimed
+        // line is a prompt). Running the plugin's command handler here would
+        // execute it immediately under a mode the user explicitly resolved to
+        // 'queue' — the ownership the contribution declared is the whole
+        // contract.
+        const submissionLine = parsedAtSubmit !== undefined
+          && extensionService?.commands.find(parsedAtSubmit.name)?.execution === 'submission'
         const commands = ctx.get('commands')
-        if (commands !== undefined) {
+        if (commands !== undefined && !submissionLine) {
           // Bare `/plan` toggles: when plan mode is already active it exits
           // instead of re-entering (the official command needs `/plan off`).
           const parsed = parseCommand(text)
@@ -4599,8 +4610,10 @@ export function apply(ctx: Context, config: Config): void {
           })
           return
         }
-        // No commands service: direct follow-up on the CAPTURED agent (see
-        // the note above — never a re-read closure variable). Images ride
+        // No commands service — or a submission-owned line, already
+        // classified as plain agent input above: direct follow-up on the
+        // CAPTURED agent (see the note above — never a re-read closure
+        // variable). Images ride
         // the same prepared message as every other path (§13). The WHOLE
         // write runs inside the operation barrier (convergence plan
         // phase 3): a transition started during the admission waits for
@@ -4938,15 +4951,31 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
     /**
+     * Whether one submission is a TUI-owned skill invocation: a LIVE skill
+     * wrapper, or the explicit `/skill <name>` form. Skill delivery belongs
+     * to loadSkill in BOTH modes — it builds the normalized `/name` line,
+     * steers or queues it with the resolved mode, and injects the body
+     * whenever the host's dsh-tool-skill pre-step does not (a composition
+     * without that loader). A bare steered line would silently skip the
+     * skill body, and a missing skill registry is reported there too.
+     * @param parsed - the parsed slash command, undefined for a plain prompt.
+     * @param text - the submitted line.
+     */
+    const isSkillInvocation = (parsed: { name: string } | undefined, text: string): boolean =>
+      parsed !== undefined && (parsed.name === 'skill'
+        ? normalizeSkillInvocation(text) !== undefined
+        : isSkillWrapperName?.(parsed.name) === true)
+    /**
      * Dispatch one user submission end to end: the viewer guard, the input-
      * history persistence, `!` local shells, sessionless commands, the
-     * busy-Enter preference, and the session dispatch. The Ctrl+Enter
-     * opposite chord forces the QUEUE mode (forceQueue), web busyEnter
-     * parity — the accelerated chord uses the other behavior.
+     * busy-Enter policy, and the session dispatch. The delivery mode is
+     * resolved ONCE below (web ComposerSubmissionPolicy parity — the
+     * accelerated chord is the OPPOSITE of the preference, and the explicit
+     * queue action is a fixed queue).
      * @param text - the submitted draft.
-     * @param forceQueue - the chord: never steer, queue instead.
+     * @param request - the request the submission was raised by.
      */
-    const dispatchUserInput = (text: string, forceQueue = false): void => {
+    const dispatchUserInput = (text: string, request: ComposerSubmitRequest = 'enter'): void => {
       // P0 (empty-submission semantics): an EMPTY serialized wire form is
       // a silent no-op — no history write, no session creation, no
       // followup/steer, no attachment admission, no queue mutation. Judged on
@@ -5112,22 +5141,26 @@ export function apply(ctx: Context, config: Config): void {
         || (extensionService?.commands.isSessionless(parsed.name, SESSIONLESS_COMMANDS) ?? false)
       )
       // The submission's effective delivery mode — resolved ONCE, here at
-      // the boundary (web ComposerSubmissionPolicy parity): a non-running
-      // agent, busyEnter=queue, and the Ctrl+Enter force-queue chord all
-      // resolve to 'queue'. The resolved mode rides into the command plane
-      // (dispatchViaSession → withDelivery → the TUI skill delivery), which
-      // never re-derives it from the persisted preference — a one-shot chord
-      // does not survive in settings. Commands that own their own busy
-      // semantics (Host commands, local UI commands) ignore it.
-      const delivery: SubmitDelivery = shouldSteerOnEnter(
-        parsed,
-        liveAgent?.status === 'running',
-        tuiSettings?.get().busyEnter,
-        forceQueue,
-        // M5: the CommandBridge's effective-local check (dynamic plugin
-        // local commands are local while registered).
-        name => extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false,
-      ) ? 'steer' : 'queue'
+      // the boundary (web ComposerSubmissionPolicy parity, DSH
+      // 0.1.3-alpha.2): an idle agent queues, plain Enter takes the
+      // preference, the accelerated chord takes its OPPOSITE, and the
+      // explicit queue action always queues. The resolved mode rides into
+      // the command plane (dispatchViaSession → withDelivery → the TUI skill
+      // delivery), which never re-derives it from the persisted preference —
+      // a one-shot gesture does not survive in settings. Commands that own
+      // their own busy semantics (Host commands, local UI commands) ignore
+      // it.
+      const delivery: SubmitDelivery = request === 'explicit-queue'
+        ? 'queue'
+        : resolveSubmitDelivery(
+            parsed,
+            liveAgent?.status === 'running',
+            request,
+            tuiSettings?.get().busyEnter,
+            // M5: the CommandBridge's effective-local check (dynamic plugin
+            // local commands are local while registered).
+            name => extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false,
+          )
       if (parsed !== undefined && isSessionless) {
         // A recognized sessionless command: its history row is sessionless
         // — it must NEVER appear in Current session, whether or not a
@@ -5161,25 +5194,29 @@ export function apply(ctx: Context, config: Config): void {
         dispatchViaSession(text, persistHistory, delivery)
         return
       }
-      // Busy-Enter preference (web busyEnter parity): while the agent is
-      // RUNNING and the preference is 'steer', agent-facing input steers
-      // into the running turn — plain prompts AND non-local commands. The
-      // per-skill slash commands steer as their raw `/name` line, which the
-      // host's pre-step listener resolves into the injected skill body
-      // (dsh-tool-skill) — exactly like the web's `session.prompt`, which
-      // has no command-execution wire for skills. TUI-owned LOCAL commands
+      // Busy-Enter policy (web parity): agent-facing input steers into the
+      // running turn under the resolved 'steer' mode — plain prompts AND
+      // non-local commands. The per-skill slash commands steer as the
+      // `/name` line the host's pre-step listener (dsh-tool-skill)
+      // recognizes — exactly like the web's `session.prompt`, which has no
+      // command-execution wire for skills. TUI-owned LOCAL commands
       // (/status, /settings, ...) always execute directly; plugin-declared
       // local commands (M5 CommandBridge) join the same set; `!` shells and
       // sessionless commands returned before this gate.
       if (delivery === 'steer') {
-        // An explicit `/skill <name>` invocation steers its NORMALIZED
-        // `/<name> <args>` line — the harness gesture recognizes the
-        // skill's own slash name and injects its body; the raw `/skill
-        // <name>` form would never match (review finding 2). Image
-        // placeholders ride the normalized line untouched. The history
-        // row is written inside steerNow AFTER the session exists (the
+        // Skill delivery belongs to loadSkill in BOTH modes: it builds the
+        // NORMALIZED `/<name> <args>` line (the harness gesture recognizes
+        // the skill's own slash name — the raw `/skill <name>` form would
+        // never match, review finding 2), steers it with this delivery, and
+        // injects the body when the host's pre-step listener does not.
+        // Image placeholders ride the line untouched; the history row is
+        // written by the dispatch AFTER the session exists (the
         // deferred-start gate), with the FINAL session id.
-        steerNow(normalizeSkillInvocation(text) ?? text, true, persistHistory)
+        if (isSkillInvocation(parsed, text)) {
+          dispatchViaSession(text, persistHistory, delivery)
+          return
+        }
+        steerNow(text, true, persistHistory)
         return
       }
       dispatchViaSession(text, persistHistory, delivery)
@@ -5252,7 +5289,10 @@ export function apply(ctx: Context, config: Config): void {
     if (lifecycleController.signal.aborted) return
     startupStatus.clear()
     app = startProcessTui({
-      onSubmit: (text) => dispatchUserInput(text),
+      // ONE submission entry: the request (the Enter gesture, the
+      // accelerated chord, or the explicit queue action) rides along — the
+      // boundary resolves its delivery mode.
+      onSubmit: (text, request) => dispatchUserInput(text, request),
       // The image-only submit gate (plan §11.1): an empty-text draft with
       // staged images is a real submission.
       isImageDraft: () => draftHasImages(app.getDraft(), draftImages),
@@ -5303,9 +5343,6 @@ export function apply(ctx: Context, config: Config): void {
           onError: (error) => app.notify(safeErrorMessage(error), 'error'),
         })
       },
-      // The Ctrl+Enter opposite chord (web busyEnter parity): force the
-      // QUEUE delivery mode regardless of the busyEnter preference.
-      onQueueSubmit: (input) => dispatchUserInput(input, true),
       // The owned-task entry for UI-layer one-shot flows (the external
       // editor): runOwned with the runner's diag pre-attached.
       runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
@@ -5351,11 +5388,15 @@ export function apply(ctx: Context, config: Config): void {
           case 'submit-draft': {
             // Host-owned submit path: history + notify clear + draft
             // clear, exactly like a normal Enter (round-1 P2).
-            app.submitDraft(false)
+            app.submitDraft('enter')
             break
           }
           case 'queue-draft': {
-            app.submitDraft(true)
+            // The PUBLIC queue action: an explicit delivery command, never a
+            // gesture — it queues regardless of the busy-Enter preference
+            // (the accelerated CHORD is the preference's opposite, see
+            // ComposerSubmitRequest).
+            app.submitDraft('explicit-queue')
             break
           }
           case 'steer-draft': {
@@ -7337,6 +7378,11 @@ export function apply(ctx: Context, config: Config): void {
      * TUI-owned skill wrapper)? The dispatch consults it BEFORE the busy
      * queue/steer policy (PR115-fix problem 1). */
     let isHostCommandName: ((name: string) => boolean) | undefined
+    /** The skill-wrapper test installed by registerTuiCommands: is a slash
+     * name a LIVE TUI-owned skill wrapper? The steer path consults it to
+     * decide whether a composition without the host skill-body loader must
+     * deliver through loadSkill instead of steering a bare line. */
+    let isSkillWrapperName: ((name: string) => boolean) | undefined
     /** The delivery binding installed by registerTuiCommands: bind one
      * submission's resolved queue/steer mode for the synchronous window that
      * launches a command execution (the TUI skill handlers consume it).
@@ -7686,6 +7732,7 @@ export function apply(ctx: Context, config: Config): void {
         const installed = registerTuiCommands(runner, initial)
         wasAdvertisedClaim = installed.wasAdvertised
         isHostCommandName = installed.isHostCommand
+        isSkillWrapperName = installed.isSkillWrapper
         withCommandDelivery = installed.withDelivery
         // The coordinator's surface hooks point INTO the command surface;
         // the runner's refreshCatalog routes every post-mount refresh here.
