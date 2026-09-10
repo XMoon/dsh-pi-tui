@@ -3057,6 +3057,14 @@ export class TuiApp {
    * switch with the other click overrides.
    */
   private readonly collapsedOccurrences = new Map<TranscriptMessage, Set<number>>()
+  /** The stable occurrence identity of every rendered collapsible thumbnail:
+   * the image block's rank among ALL image blocks of its message (open
+   * opaque image blocks reserve a rank too), so a live stream that closes
+   * blocks out of order never renumbers an occurrence under a pressed or
+   * collapsed identity. Written at thumbnail creation, read by
+   * {@link attachmentRangesOf} (which cannot see open opaque rows — they
+   * render as plain Text children). */
+  private readonly thumbnailOccurrence = new WeakMap<ImageThumbnail, number>()
   /** Rendered row heights per transcript block, for mouse hit-testing.
    * Message rows carry their message + attachment spans; Focus activity
    * rows carry the activity (the whole collapsed Thought block — and the
@@ -6641,11 +6649,12 @@ export class TuiApp {
    * child's height still advances the row counter, so the spans line up
    * with the rendered layout.
    *
-   * The ordinal among COLLAPSIBLE thumbnails IS the occurrence's image
-   * index: renderUserBlocks / renderBlockSequence create a collapsible
-   * thumbnail for EVERY image block of the message in content order, so
-   * the nth thumbnail ↔ the nth image block — the same index the host's
-   * collapsedRef getter reads. */
+   * The identity is the thumbnail's occurrence rank tag (written at
+   * creation by the renderers): the image block's position among ALL image
+   * blocks of the message — open opaque image blocks reserve a rank too —
+   * so a live stream that closes blocks out of order never renumbers an
+   * occurrence under a pressed or collapsed identity. The same rank the
+   * host's collapsedRef getter reads. */
   private attachmentRangesOf(
     component: Component,
     width: number,
@@ -6653,12 +6662,12 @@ export class TuiApp {
     if (!(component instanceof Container)) return []
     const ranges: Array<{ imageIndex: number; start: number; end: number }> = []
     let row = 0
-    let imageIndex = 0
     for (const child of component.children) {
       const height = child.render(width).length
       if (child instanceof ImageThumbnail && child.collapsible) {
-        ranges.push({ imageIndex, start: row, end: row + height })
-        imageIndex += 1
+        // Every collapsible thumbnail is created by the host renderers,
+        // which tag it with its stable occurrence rank.
+        ranges.push({ imageIndex: this.thumbnailOccurrence.get(child)!, start: row, end: row + height })
       }
       row += height
     }
@@ -10051,6 +10060,11 @@ export class TuiApp {
       if (displayBlock.kind === 'open-opaque') {
         flushText()
         container.addChild(new Text(color.textDim(openOpaqueBlockFallbackText(displayBlock.blockType)), 0, 0))
+        // An open image block RESERVES its occurrence rank: the ordinal is
+        // the block's position among ALL image blocks of the message, so a
+        // later block closing first (out-of-order block-end is legal in the
+        // DSH stream invariant) never renumbers an earlier occurrence.
+        if (displayBlock.blockType === 'image') imageIndex += 1
         continue
       }
       const block = displayBlock.block
@@ -10062,13 +10076,15 @@ export class TuiApp {
           textBlocks.push(block)
         } else {
           flushText()
-          container.addChild(new ImageThumbnail(
+          const thumbnail = new ImageThumbnail(
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
             this.imageLoader!,
             this.imageTheme!,
             () => this.requestRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
-          ))
+          )
+          this.thumbnailOccurrence.set(thumbnail, imageIndex)
+          container.addChild(thumbnail)
         }
         imageIndex += 1
       } else if (block.type === 'file') {
@@ -10131,13 +10147,15 @@ export class TuiApp {
       for (const block of content) {
         if (block.type === 'image') {
           if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
-            container.addChild(new ImageThumbnail(
+            const thumbnail = new ImageThumbnail(
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
               this.imageLoader,
               this.imageTheme,
               () => this.requestRender(),
               this.occurrenceCollapsedRef(message, imageIndex),
-            ))
+            )
+            this.thumbnailOccurrence.set(thumbnail, imageIndex)
+            container.addChild(thumbnail)
           }
           imageIndex += 1
         }
@@ -10160,13 +10178,15 @@ export class TuiApp {
         textBlocks.push(block)
         flushText()
         if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
-          container.addChild(new ImageThumbnail(
+          const thumbnail = new ImageThumbnail(
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
             this.imageLoader,
             this.imageTheme,
             () => this.requestRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
-          ))
+          )
+          this.thumbnailOccurrence.set(thumbnail, imageIndex)
+          container.addChild(thumbnail)
         }
         imageIndex += 1
       } else if (block.type === 'file') {
