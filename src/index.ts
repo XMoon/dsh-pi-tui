@@ -4673,13 +4673,17 @@ export function apply(ctx: Context, config: Config): void {
       })
     }
     /**
-     * Run a sessionless slash command locally — no session, no session
-     * log. The input-history row still persists, sessionless (Current
-     * directory / All directories, never Current session). The handler
-     * comes from the commands service's global layer (in-process lookup
-     * with no agent is safe: it reads the global layer only). A
-     * sessionless command that failed to register falls back to the
-     * session dispatch, which reports unknown commands as messages.
+     * Run a LOCAL slash command in-process, with or without a live session.
+     * The route is chosen by the caller: a sessionless command (no session
+     * is created, its history row stays sessionless — Current directory /
+     * All directories, never Current session) or a plugin-declared local
+     * command whose contribution owns a bridge handler (it runs locally even
+     * inside a live session, and its row follows the command's OWN
+     * sessionless classification via `historyKind`). The handler comes from
+     * the bridge FIRST (rawInput verbatim), then from the commands service's
+     * global layer (in-process lookup with no agent is safe: it reads the
+     * global layer only). A command with neither falls back to the session
+     * dispatch, which reports unknown commands as messages.
      */
     const runLocalCommand = (
       parsed: { name: string; rawInput: string },
