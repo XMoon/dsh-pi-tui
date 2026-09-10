@@ -7327,7 +7327,13 @@ export class TuiApp {
     // render() in particular would refresh its mouseLayout cache and
     // defeat the pre-repaint fence for the NEXT gesture.
     const snapshot = this.fullscreenPaintSnapshot
-    if (snapshot === undefined) return
+    if (snapshot === undefined) {
+      // The identity-fence invariant is literal: every click consumes the
+      // stale latch before any early return (a retained latch must never
+      // survive a click that could not resolve it).
+      this.fullscreenCellGesture = undefined
+      return
+    }
     // Stale-geometry guard (mirrors the press path): the snapshot is the
     // LAST PAINTED frame — a release at a terminal size no frame has been
     // drawn at yet (a resize between press and release, before the next
@@ -7415,7 +7421,13 @@ export class TuiApp {
       viewportHeight: snapshot.viewportHeight,
       rows: this.messageRows,
     })
-    if (cell === undefined) return
+    if (cell === undefined) {
+      // The identity-fence invariant is literal: a click that resolves to
+      // no cell consumes the stale latch (a retained latch must never
+      // survive a click that could not resolve it).
+      this.fullscreenCellGesture = undefined
+      return
+    }
     const entry = this.messageRows[cell.entryIndex]!
     const inMessage = cell.inMessage
     // The release may only act on the EXACT press-time identity: an async

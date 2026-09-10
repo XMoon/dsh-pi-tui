@@ -1107,6 +1107,36 @@ test('fullscreen todo: a dock press cannot toggle the panel across a session swi
   app.stop()
 })
 
+test('fullscreen transcript click: a click that resolves to no cell consumes the stale latch (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release): the press-time identity is A.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  const gesture = (app as unknown as { fullscreenCellGesture: unknown }).fullscreenCellGesture
+  assert.ok(gesture !== undefined, 'the press must record a gesture')
+  // Remove the message: the release cell now resolves to no transcript
+  // cell.
+  app.setTranscript([])
+  await vt.waitForRender()
+  // Release on the same cell: the click resolves to nothing and must
+  // consume the stale latch (the identity-fence invariant is literal).
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const after = (app as unknown as { fullscreenCellGesture: unknown }).fullscreenCellGesture
+  assert.equal(after, undefined, 'a click that resolves to no cell must consume the stale latch')
+  app.stop()
+})
+
 test('fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
