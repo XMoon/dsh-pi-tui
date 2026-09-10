@@ -8,25 +8,19 @@
 
 - Upstream repository: `earendil-works/pi`
 - Package: `packages/tui`
-- Tag: `v0.84.4`
-- Pinned commit: `b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Tag: `v0.85.1`
+- Pinned commit: `d981de1229ef899957bbe968bc8dcda02a21f477`
 
 ## Audit snapshot
 
-- Audited local source commit: `6a5857dd5c0b8ab1242a32fbcc428196eecf3e5e`
-- Branch audited: `chore/retire-pi-divergences-x012-x019`
-- Audit date: `2026-09-07`
-- Upstream reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Audited local source commit: `d9cfef25b9a9b98ce6b7818bcd14601538d1f1de`
+- Branch audited: `chore/revendor-pi-tui-v0.85.1`
+- Audit date: `2026-09-09`
+- Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Kimi reference snapshot: `MoonshotAI/kimi-code@9e881528a89945a373002b0b229f91735e8f2c4f`
 - Snapshot policy: Reference snapshots and auditedSourceCommit are audit evidence, not continuous views of repository HEAD. Refresh them only during an explicit re-vendor, divergence re-audit, retirement evaluation, or upstream-equivalence review.
 
-- Compared every local packages/pi-tui/src file with the pinned upstream blob.
-- Audited vendor-internal, inheritance/structural, host, public/extension, behavioral, and test/runtime ownership evidence.
-- Compared recorded Pi and Kimi reference snapshots for semantic comparison; issue and PR references are background only.
-- Ran focused deletion experiments for X019, X030, X037, X038, X043, and X044; existing checks caught the first five, while X044 required a compile-only subclass fixture.
-- Historical removed and absorbed records were retained as explicit records instead of disappearing from the manifest.
-- PR1 relocation audit: X001/X002/X041 moved to the Host SearchablePicker (src/searchable-picker.ts) with the vendored SelectList restored to the pinned baseline; X042 narrowed to the SettingsList seam. The audit was performed against the immutable local source snapshot recorded in verification.auditedSourceCommit.
-- PR2 retirement audit: X012's explicit fuzzy tie-break was removed in favor of the supported stable-sort runtime contract; X019's Text no-op dispose shim was removed while Loader-owned X007 timer cleanup remained direct and guarded.
+- PR3 re-vendor audit: replaced the Earendil packages/tui baseline with exact v0.85.1 (d981de1), re-audited every source-active divergence against the new baseline, re-applied only retained DSH seams, adopted the upstream renderer, mouse, search, Loader and terminal changes, and validated the current Host question/transcript/focus/input surfaces against the immutable source snapshot recorded in verification.auditedSourceCommit.
 
 ## Audit rules
 
@@ -63,9 +57,16 @@
 - `DELIBERATELY_KEPT`: `X030` — A host copy of decodePrintableKey would duplicate the implementation; the package exports map exposes only the root entry.
 - `MOVED_TO_HOST`: `X001`, `X002`, `X041` — The DSH searchable picker behavior moved to the Host-owned src/searchable-picker.ts SearchablePicker (guarded by test/searchable-picker.test.ts); the vendored SelectList is restored to the pinned upstream baseline.
 - `NOT_MOVABLE`: `X042` — The remaining X042 seam is SettingsList focus/row-budget propagation inside the vendored fork; the SelectList-side Input focus ownership moved to the Host SearchablePicker.
-- `NOT_MOVABLE`: `X004A`, `X004B`, `X005`, `X006`, `X007`, `X008`, `X009`, `X010`, `X011`, `X014`, `X016`, `X018`, `X020`, `X021`, `X022`, `X023`, `X024`, `X025`, `X027`, `X028`, `X029`, `X031`, `X032`, `X033`, `X034`, `X035`, `X036`, `X037`, `X038`, `X039`, `X040`, `X043`, `X044`, `X045`, `X046`, `X047` — The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary.
-- `UPSTREAM_LEVER`: `X005`, `X006`, `X007`, `X008`, `X014`, `X016`, `X021`, `X033`, `X035` — Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence.
+- `NOT_MOVABLE`: `X004A`, `X004B`, `X005`, `X006`, `X007`, `X008`, `X009`, `X010`, `X014`, `X016`, `X018`, `X020`, `X021`, `X022`, `X023`, `X024`, `X025`, `X027`, `X028`, `X029`, `X031`, `X032`, `X033`, `X034`, `X035`, `X036`, `X037`, `X038`, `X039`, `X040`, `X043`, `X044`, `X045`, `X046`, `X047` — The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary.
+- `UPSTREAM_LEVER`: `X005`, `X006`, `X007`, `X008`, `X014`, `X016`, `X021`, `X033`, `X035`, `X048`, `X049`, `X050`, `X051` — Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence.
 - `SUPERSEDED`: `X012`, `X019` — X012's explicit fuzzy tie-break is redundant under the supported stable-sort runtime contract; X019's Text no-op dispose shim is replaced by Loader-owned X007 cleanup without a base super call.
+- `ABSORBED_UPSTREAM`: `X011` — Earendil v0.85.1 clips Input prompts at extremely narrow widths; direct width-0/1 regressions guard the absorbed behavior.
+- `NOT_MOVABLE`: `X048` — Input prompt mouse click geometry is a public component contract inside the vendored fork; a host wrapper cannot equivalently fix the Input's own coordinate mapping, and the fix depends on visibleWidth(this.prompt) which is vendor-internal.
+- `NOT_MOVABLE`: `X049` — AltScreenSearchComponent owns its PRIVATE query Input; the host cannot reach or rewire that Input, so the mouse-forwarding seam must live inside the vendored fork's alt-screen search component.
+- `NOT_MOVABLE`: `X050` — Editor visual-line/wrapped-segment cursor mapping and slash-autocomplete click-submit are internal Editor semantics (two distinct bugs confirmed against upstream v0.85.1 and main); they cannot be reproduced through the public Editor surface from a host wrapper.
+- `NOT_MOVABLE`: `X051`, `X052` — Container/Box focus-ownership and input/key-release forwarding is a public component/framework contract inside the vendored fork (the TUI routes keyboard to the focused component and filters key releases by wantsKeyRelease); a host wrapper cannot change how the fork's own focus model resolves overlay roots. X052: SelectList mouse hit-testing is a public built-in component contract inside the vendored fork (setFilter/setSelectedIndex + mouse click are documented capabilities); a host wrapper cannot change how the fork's own component resolves a press/click against its rows, and the fix depends on render-time row identity which is vendor-internal.
+- `NOT_MOVABLE`: `X053` — Input cursor placement and viewport origin are internal Input state; a host wrapper cannot set the cursor or read the render-time viewport without a fork seam, and the masked display must align with the SAME viewport the Input renders.
+- `NOT_MOVABLE`: `X054` — The host has no public entry point after the layout pass (a render probe runs during the measurement pass and would commit a cross-frame mix); the frame-completion boundary and the painted-box query must live in the fork.
 
 ## Removed or superseded legacy surfaces
 
@@ -79,8 +80,8 @@
 
 ## Summary
 
-- Records: 48
-- Statuses: `ABSORBED_UPSTREAM`: 3, `ACTIVE`: 38, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
+- Records: 55
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 44, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -95,7 +96,7 @@
 | X008 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 | X009 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X010 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
-| X011 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X011 | ABSORBED_UPSTREAM | MEDIUM | BUGFIX_MISSING_UPSTREAM | YES |
 | X012 | SUPERSEDED | LOW | BUGFIX_MISSING_UPSTREAM | YES |
 | X013 | REMOVED_UNUSED | MEDIUM | BUGFIX_MISSING_UPSTREAM | YES |
 | X014 | ACTIVE | MEDIUM | PERF_HOST_DEPENDENT | NO |
@@ -132,6 +133,13 @@
 | X045 | ACTIVE | CRITICAL | HARD_HOST_API | NO |
 | X046 | ACTIVE | CRITICAL | HARD_HOST_API | NO |
 | X047 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
+| X048 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X049 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X050 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X051 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT | NO |
+| X052 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
+| X053 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
+| X054 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
 
 ## Divergences
 
@@ -142,7 +150,7 @@
 - Risk: `HIGH`
 - Files: `src/components/select-list.ts`
 - Last audited: `2026-09-07`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -191,9 +199,9 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/select-list.ts
 - Relevant issues/PRs:
@@ -230,7 +238,7 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 - Risk: `HIGH`
 - Files: `src/components/select-list.ts`
 - Last audited: `2026-09-07`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -275,9 +283,9 @@ Open host pickers receive asynchronously enriched rows and must refresh without 
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/select-list.ts
 - Relevant issues/PRs:
@@ -312,7 +320,7 @@ Open host pickers receive asynchronously enriched rows and must refresh without 
 - Risk: `HIGH`
 - Files: `src/components/editor.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -350,9 +358,9 @@ The former patch wrote a grapheme count into a code-unit cursor field. That coul
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `YES`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
@@ -385,7 +393,7 @@ The former patch wrote a grapheme count into a code-unit cursor field. That coul
 - Risk: `HIGH`
 - Files: `src/components/editor.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -427,9 +435,9 @@ Large bracketed pastes must not retain an unbounded duplicate registry in memory
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
@@ -461,7 +469,7 @@ Large bracketed pastes must not retain an unbounded duplicate registry in memory
 - Risk: `HIGH`
 - Files: `src/components/editor.ts`, `src/undo-stack.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -502,9 +510,9 @@ Editor snapshots already detach their mutable containers. UndoStack must retain 
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - packages/tui/src/undo-stack.ts
@@ -536,7 +544,7 @@ Editor snapshots already detach their mutable containers. UndoStack must retain 
 - Risk: `HIGH`
 - Files: `src/components/editor.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -579,9 +587,9 @@ A provider that ignores AbortSignal must not block a newer completion request be
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `PARTIAL`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
@@ -613,7 +621,7 @@ A provider that ignores AbortSignal must not block a newer completion request be
 - Risk: `MEDIUM`
 - Files: `src/word-navigation.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -653,9 +661,9 @@ Forward word navigation should cross leading punctuation at the next word-like s
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/word-navigation.ts
 - Relevant issues/PRs:
@@ -684,9 +692,9 @@ Forward word navigation should cross leading punctuation at the next word-like s
 - Status: `ACTIVE`
 - Category: `HARD_HOST_API`, `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `CRITICAL`
-- Files: `src/tui.ts`, `src/components/scroll-view.ts`, `src/components/loader.ts`, `src/components/box.ts`, `src/components/settings-list.ts`, `src/components/stack.ts`
-- Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Files: `src/tui.ts`, `src/components/scroll-view.ts`, `src/components/loader.ts`, `src/components/box.ts`, `src/components/settings-list.ts`, `src/components/stack.ts`, `src/components/mouse-region.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -714,7 +722,8 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - src/tui-app.ts OverlayBroker.disposeAll and overlay leases
 - editor seat, panels, timers, and fullscreen surface teardown
 - test/pi-component-compat.test.ts public component compatibility
-- Audit note: Host final teardown relies on exactly-once release.
+- src/model-menu.ts ModelSubmenu/EffortSubmenu ownership-safe external dispose (latch/abort owned async work, dispose owned inner exactly once, never done/apply/navigation on teardown)
+- Audit note: Host final teardown relies on exactly-once release. Post-v0.85.1 audit: ModelSubmenu and EffortSubmenu now implement ownership-safe external dispose so the SettingsList's submenuComponent.dispose() chain (owner → ModelSubmenu → inner SettingsList → nested EffortSubmenu) latches/aborts every owned async workflow; late resolves cannot repaint or apply after teardown (regressions in test/model-menu.test.ts).
 
 **Public / extension**
 - Stable/Advanced/Unstable extension mounts and public component leases
@@ -734,12 +743,14 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - packages/pi-tui/test/dispose-lifecycle.test.ts: Container and ScrollView ownership
 - packages/pi-tui/test/layout.test.ts: Stack entries and disposed layout behavior
 - packages/pi-tui/test/overlay-options.test.ts: disposeOnHide ownership
+- packages/pi-tui/test/dispose-lifecycle.test.ts: MouseRegion dispose forwarding — owned child disposed exactly once, wrapped Loader timer cleared
+- test/model-menu.test.ts: ModelSubmenu/EffortSubmenu ownership-safe external dispose — dispose latches/aborts pending work without done/apply/navigation, and the owner → ModelSubmenu → inner SettingsList → nested EffortSubmenu chain terminates a late effort resolve
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui.ts
 - packages/tui/src/components/scroll-view.ts
@@ -768,25 +779,26 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Known ownership graph was re-read in the audited checkout. X007 remains KEEP HARD; no source deletion or upstream absorption experiment was attempted.
+- Notes: Known ownership graph was re-read in the audited checkout. X007 remains KEEP HARD; no source deletion or upstream absorption experiment was attempted. Re-audited after the v0.85.1 mouse-parity pass: the Model/Effort async submenu ownership chain is closed by external disposal.
 
-### X008 — Timed-out OSC 11 queries drop from the queue
+### X008 — Serialized OSC 11 queries with late-reply tombstone
 
 - Status: `ACTIVE`
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Risk: `HIGH`
 - Files: `src/tui.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
-A timed-out background-color query must leave the pending queue, preventing queue/counter drift when no newer query is pending; concurrent late replies remain ambiguous because OSC 11 has no request ID.
+OSC 11 replies carry no request id, so a reply that arrives after its query timed out cannot be paired by content. The fork serializes queries: at most one query is ever in flight, and a timed-out query stays as the active tombstone until a late reply consumes it — the next waiting query is sent only after consumption, so a late reply can never be misattributed to a different query.
 
 #### Changed surface
 
-- OSC 11 timeout removes the pending query
-- late OSC 11 replies are swallowed before generic counter handling when no pending query remains
+- OSC 11 queries are serialized through a single active slot plus a waiting queue
+- a timed-out in-flight query remains the active late-reply tombstone until consumed
+- late OSC 11 replies are swallowed by the tombstone (or the no-reply-expected path) before generic counter handling
 
 #### Dependency map
 
@@ -808,22 +820,22 @@ A timed-out background-color query must leave the pending queue, preventing queu
 - Audit note: No extension directly owns terminal protocol replies.
 
 **Behavioral coupling**
-- a sole late timed-out reply does not increment or shift the generic response counter
+- a sole late timed-out reply is swallowed by its tombstone and never resolves a different query
 - background autodetect remains ordered across retries
-- a late A reply while B is pending remains protocol-ambiguous because OSC 11 has no request ID
-- Audit note: The local patch fixes queue/counter drift but cannot distinguish late A from pending B; that limitation is recorded rather than overstated as complete ordering safety.
+- a terminal that never replies leaves the tombstone in place: every waiting query settles on its own referenced timeout (by-design liveness tradeoff — no future query is sent until the tombstone is consumed)
+- Audit note: Serialization removes the protocol ambiguity (a reply always pairs with the single in-flight query or its tombstone) at the cost of blocking later queries while a timed-out query awaits its late reply; that tradeoff is deliberate and documented.
 
 #### Guarding tests
 
 - packages/pi-tui/test/osc11-query.test.ts: timed-out query queue/counter alignment
 - packages/pi-tui/test/terminal-colors.test.ts: active-screen query routing
-- Missing A-timeout/B-pending/late-A ambiguity regression; add before retirement
+- packages/pi-tui/test/osc11-query.test.ts: serialized queries — a late reply to a timed-out query is swallowed by its tombstone and never resolves a concurrent or later query (A-timeout/B-pending and A-timeout-then-B-later regressions)
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui.ts
 - Relevant issues/PRs:
@@ -854,7 +866,7 @@ A timed-out background-color query must leave the pending queue, preventing queu
 - Risk: `MEDIUM`
 - Files: `src/tui-main-screen.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -894,9 +906,9 @@ Exit cleanup must not write a spacer when the cursor is already on the terminal'
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui-main-screen.ts
 - Relevant issues/PRs:
@@ -927,7 +939,7 @@ Exit cleanup must not write a spacer when the cursor is already on the terminal'
 - Risk: `MEDIUM`
 - Files: `src/stdin-buffer.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -968,9 +980,9 @@ An unbounded or corrupt ESC prefix must not trigger repeated large reslices. The
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/stdin-buffer.ts
 - Relevant issues/PRs:
@@ -996,12 +1008,12 @@ An unbounded or corrupt ESC prefix must not trigger repeated large reslices. The
 
 ### X011 — Input prompt clips on extremely narrow widths
 
-- Status: `ACTIVE`
+- Status: `ABSORBED_UPSTREAM`
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Risk: `MEDIUM`
 - Files: `src/components/input.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1036,22 +1048,23 @@ Input must render a clipped prompt at tiny widths instead of emitting an overwid
 
 #### Guarding tests
 
-- No dedicated X011-only test existed; narrow-width editor, settings, and component render suites exercise the behavior. Add a direct Input test before retirement.
+- packages/pi-tui/test/input.test.ts: direct tiny-width prompt clipping regressions (width 0 and width 1)
+- narrow-width editor, settings, and component render suites exercise the behavior through wrappers
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
-- Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `YES`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/input.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream returns the raw prompt when the width is too small; the local component clips it before composing the line.
+- Remaining semantic delta: The pinned v0.85.1 baseline (d981de1) already clips the prompt at tiny widths (availableWidth <= 0 returns truncateToWidth(this.prompt, width, "")); the local source matches the upstream baseline exactly for this behavior.
 
 #### Retirement conditions
 
-- Add direct tiny-width Input regressions and retire only when upstream has equivalent clipping and all wrapper surfaces remain aligned.
+- Keep the upstream prompt-clipping behavior and do not resurrect the raw-prompt fallback.
 
 #### Replacement mapping
 
@@ -1059,12 +1072,14 @@ Input must render a clipped prompt at tiny widths instead of emitting an overwid
 
 #### Retirement evidence
 
-- None recorded.
+- git blob comparison at the pinned commit shows no local source divergence for the prompt-clipping path.
+- The pinned v0.85.1 upstream input.ts returns truncateToWidth(this.prompt, width, "") when availableWidth <= 0.
+- Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record absorbed.
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Kept active. This is a component/layout contract and is not disproved by the lack of one dedicated test.
+- Notes: Absorbed upstream: the pinned v0.85.1 baseline (d981de1) already clips Input prompts at extremely narrow widths, so the fork keeps the pinned upstream behavior with no local source divergence; direct width-0/1 regressions guard the absorbed behavior (equivalence YES).
 
 ### X012 — Deterministic fuzzy tie sort
 
@@ -1073,7 +1088,7 @@ Input must render a clipped prompt at tiny widths instead of emitting an overwid
 - Risk: `LOW`
 - Files: `src/fuzzy.ts`
 - Last audited: `2026-09-07`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1112,9 +1127,9 @@ The local comparator explicitly preserved input order for equal fuzzy scores. Su
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `YES`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/fuzzy.ts
 - packages/tui/package.json
@@ -1150,7 +1165,7 @@ The local comparator explicitly preserved input order for equal fuzzy scores. Su
 - Risk: `MEDIUM`
 - Files: `src/components/loader.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1188,9 +1203,9 @@ The former patch changed setIndicator after stop, but the host uses its own Work
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `YES`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/loader.ts
 - Relevant issues/PRs:
@@ -1223,7 +1238,7 @@ The former patch changed setIndicator after stop, but the host uses its own Work
 - Risk: `MEDIUM`
 - Files: `src/layout.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1265,9 +1280,9 @@ Repeated measureWidth calls should reuse the maximum visible line width for a co
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/layout.ts
 - Relevant issues/PRs:
@@ -1299,7 +1314,7 @@ Repeated measureWidth calls should reuse the maximum visible line width for a co
 - Risk: `LOW`
 - Files: `src/keys.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1338,9 +1353,9 @@ The former local cleanup targeted _lastEventType. The field is still written by 
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `YES`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/keys.ts
 - Relevant issues/PRs:
@@ -1373,7 +1388,7 @@ The former local cleanup targeted _lastEventType. The field is still written by 
 - Risk: `CRITICAL`
 - Files: `src/terminal.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1418,9 +1433,9 @@ Restarting ProcessTerminal during fullscreen transitions must replace every owne
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/terminal.ts
 - Relevant issues/PRs:
@@ -1452,7 +1467,7 @@ Restarting ProcessTerminal during fullscreen transitions must replace every owne
 - Risk: `LOW`
 - Files: `src/tui-main-screen.ts`, `src/tui-alt-screen.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1492,9 +1507,9 @@ Mouse handling belongs to the alternate fullscreen screen; regular mode remains 
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `YES`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui-main-screen.ts
 - packages/tui/src/tui-alt-screen.ts
@@ -1521,23 +1536,36 @@ Mouse handling belongs to the alternate fullscreen screen; regular mode remains 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Historical absorbed record retained to prevent the old divergence from silently returning to the active manifest.
 
-### X018 — Click granularity guard and onCellClick
+### X018 — Click granularity guard, onCellClick, and stale mouse-target revalidation
 
 - Status: `ACTIVE`
 - Category: `HARD_HOST_API`
 - Risk: `HIGH`
-- Files: `src/tui-alt-screen.ts`
-- Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Files: `src/tui-alt-screen.ts`, `src/tui.ts`, `src/components/box.ts`, `src/components/mouse-region.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
-The host needs single-cell fullscreen clicks for click-to-expand. Double-click selection must remain native word selection, and single-click handling must not duplicate clipboard feedback.
+The host needs single-cell fullscreen clicks for click-to-expand. Double-click selection must remain native word selection, and single-click handling must not duplicate clipboard feedback. Pointer events must also never reach a stale target: an overlay hidden or removed since the last paint, a layout root replaced via setLayoutRoot, or a component removed from a Container mid-gesture must stop receiving press/drag/release events immediately (the cached layout frame only refreshes on the next paint).
 
 #### Changed surface
 
-- onCellClick callback for character-granularity clicks
+- onCellClick callback for character-granularity clicks, plus the onCellPress press-half callback (the host records a press-time semantic identity so the release click can reject targets that repainted onto the same cell)
 - single/double click branch ownership
+- overlay mouse dispatch skips entries no longer mounted or visible
+- gesture capture/press targets are revalidated against the live component tree (overlay roots AND their subtrees, layout root, direct children) and cleared when stale
+- Container/Box mouse-layout caches are validated against live children (length + identity) before reuse and never re-render un-painted children (no ghost clicks)
+- the selection fallback’s synthesized click is restricted to the press-time hit relationship (a control painted after a structural repaint between press and release cannot receive it)
+- the mouse-dispatch recorder/allow-set are per-event isolated with depth-based save/restore for BOTH SGR mouse and wheel events: no dead-instance retention, nested raw dispatches (including wheels) are not filtered by an outer allow-set, and nested selection gestures cannot overwrite the outer press snapshot; a full nested press+release pair is documented as unsupported and its click is safely dropped
+- wrapper gesture targets (MouseRegion, Host Frame) are rewritten to the mounted wrapper, with focus requests landing on the wrapper too
+- MouseRegion transparently forwards handleInput/wantsKeyRelease and the Focusable focused flag to its child
+- setLayoutRoot clears an in-flight component mouse gesture
+- the selection press-time dispatch snapshot is released when the selection gesture ends (no dead component references retained between gestures)
+- a stationary first press on a HIDDEN auto scrollbar jumps the track / starts a drag immediately (includeHiddenAuto on the press path, matching the hover path)
+- when a mounted overlay is hit, in-flight pointer gestures that started outside are cancelled (selection gesture + snapshot, scrollbar drag) — the hidden selection must not reappear after the overlay closes and the drag must not resume on release
+- the retained mouse-press target's click synthesis is painted-placement fenced: a still-mounted component whose overlay moved or reflowed (e.g. a centered overlay that grew after the press selected a described row) does not receive a synthetic click retargeted with the old origin
+- the painted-placement liveness check re-derives a nested descendant's CURRENT painted origin from the last-painted child layouts (Box padding + preceding sibling heights): a descendant that reflowed INSIDE a stable overlay root (a preceding sibling grew) no longer receives a synthetic click retargeted with the old origin
 
 #### Dependency map
 
@@ -1561,18 +1589,40 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - single click invokes host callback
 - double click selects a word and preserves copy-on-select semantics
 - selection feedback is not duplicated
-- Audit note: A callback with the wrong granularity is not equivalent.
+- a hidden/removed overlay or a replaced/removed layout target never receives pointer events, even before the next paint
+- a layout-root retained target's click synthesis is current-origin fenced: a descendant that reflowed inside its ancestor (sibling heights changed) does not receive a synthetic click retargeted with the old origin — containment of the old point is not enough
+- Audit note: A callback with the wrong granularity is not equivalent. Liveness is checked against the currently mounted component tree, never the cached layout frame, so structural changes take effect immediately.
 
 #### Guarding tests
 
 - packages/pi-tui/test/tui-alt-screen.test.ts: onCellClick and double-click selection
 - test/tui-app.test.ts, test/rendering.test.ts, and test/thinking-disclosure.test.ts: fullscreen click-to-expand host behavior
+- packages/pi-tui/test/mouse-components.test.ts: stale overlay mouse targets — hidden overlay clicks and captured drags after hide()
+- packages/pi-tui/test/mouse-components.test.ts: stale layout mouse targets — captured drags after setLayoutRoot swap and after removing a layout node mid-gesture
+- packages/pi-tui/test/mouse-components.test.ts: stale fresh-press dispatch — removed components and replaced seat children receive no new presses, and not-yet-painted replacements receive no ghost clicks
+- packages/pi-tui/test/mouse-components.test.ts: selection fallback click across a repaint — a click whose press was rejected before a repaint does not transfer to the newly painted child
+- packages/pi-tui/test/mouse-components.test.ts: mouse dispatch recorder lifecycle — the module recorder is cleared after each event (no dead-instance retention)
+- packages/pi-tui/test/mouse-components.test.ts: nested mouse dispatch isolation — a nested press or wheel triggered during a synthetic click is not filtered by the outer allow-set, and a nested selection gesture cannot overwrite the outer press snapshot
+- packages/pi-tui/test/mouse-components.test.ts: wheel event isolation — a top-level wheel leaves no residual components in the reached set, and a nested wheel is not filtered by the outer allow-set
+- packages/pi-tui/test/mouse-components.test.ts: nested gesture targets — SelectList inside an overlay-root Container and inside a MouseRegion still fire onSelect
+- packages/pi-tui/test/mouse-components.test.ts: MouseRegion transparent keyboard forwarding, wrapper focus ownership, and Focusable flag propagation (CURSOR_MARKER)
+- test/busy-enter.test.ts: fullscreen /settings SettingsList row responds to a mouse click through the Host Frame wrapper; frame borders/padding do not activate rows
+- test/editor-seat-non-owning.test.ts: ghost click and selection-fallback cross-repaint regressions on the production EditorSeatMount path
+- packages/pi-tui/test/tui-alt-screen.test.ts: selection press-time component snapshot lifecycle — the press snapshots the reached set and the release clears it
+- packages/pi-tui/test/tui-alt-screen.test.ts: hidden auto scrollbar track jumps on a stationary first press; in-flight selection gesture and scrollbar drag are cancelled when the pointer lands on a capturing overlay
+- test/tui-app.test.ts: press a question option → keyboard advance to the next question → release on the same cell must not activate the repainted option (onCellPress records the press-time identity; the release click rejects the question-id mismatch)
+- test/question-flow.test.ts: an inert press that repaints into the scroll-marker row must not toggle the expanded panel (the marker is a distinct semantic target via the MARKER_ROW sentinel)
+- packages/pi-tui/test/tui-alt-screen.test.ts: a centered SettingsList overlay that grows and moves after the press does not receive a ghost synthetic click at the original cell; a fresh press at the new row works
+- packages/pi-tui/test/tui-alt-screen.test.ts: a child nested inside a padded Box overlay root still receives the synthetic click (the painted-placement check compares the ROOT placement snapshot, not the child's padding-offset origin)
+- packages/pi-tui/test/tui-alt-screen.test.ts: a descendant that reflowed inside a stable overlay root (sibling heights changed, root bounds identical) does not receive a ghost synthetic click at the original cell; a fresh press at the new row works
+- packages/pi-tui/test/tui-alt-screen.test.ts: a layout-root descendant that reflowed inside its ancestor (header shrank, target moved) does not receive a ghost synthetic click at the original cell — the click fence compares the target's CURRENT painted origin (ancestor rect + last-painted child offset), not old-origin containment; a fresh press at the new row works
+- packages/pi-tui/test/tui-alt-screen.test.ts: an implicit-document child (legacy single-document mode, no setLayoutRoot) that reflowed after a sibling shrank does not receive a ghost synthetic click at the original cell — the click fence compares the target's CURRENT painted origin (implicit document box origin + TuiBase last-painted child offset), not mounted liveness; a fresh press at the new row works
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui-alt-screen.ts
 - Relevant issues/PRs:
@@ -1581,7 +1631,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 
 #### Retirement conditions
 
-- Retire only when upstream supplies a callback with the same single-cell/double-click and clipboard ordering semantics, then run fullscreen and selection compatibility tests.
+- Retire only when upstream supplies a callback with the same single-cell/double-click and clipboard ordering semantics, AND revalidates gesture targets against the live component tree (hidden/removed overlays, replaced layout roots, removed layout nodes must stop receiving pointer events before the next paint), AND a stale mouse-layout cache dispatches neither removed children nor not-yet-painted replacements until the next real render (no ghost clicks), AND the selection fallback’s synthesized click cannot transfer to a control painted after the press, AND mouse dispatch isolation covers wheel events as well as SGR mouse events (a top-level wheel leaves no residual components in the reached set, and a nested wheel is not filtered by an outer allow-set), then run fullscreen, selection, stale-target, ghost-click, cross-repaint, and wheel-isolation compatibility tests.
 
 #### Replacement mapping
 
@@ -1603,7 +1653,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - Risk: `HIGH`
 - Files: `src/components/text.ts`
 - Last audited: `2026-09-07`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1644,9 +1694,9 @@ Text.dispose was a no-op solely so Loader's dispose override and super.dispose c
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `PARTIAL`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/text.ts
 - packages/tui/src/components/loader.ts
@@ -1683,7 +1733,7 @@ Text.dispose was a no-op solely so Loader's dispose override and super.dispose c
 - Risk: `HIGH`
 - Files: `src/components/editor.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1726,9 +1776,9 @@ When a session or workspace changes, the host must replace the prompt-history co
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
@@ -1759,7 +1809,7 @@ When a session or workspace changes, the host must replace the prompt-history co
 - Risk: `HIGH`
 - Files: `src/utils.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1802,9 +1852,9 @@ Every wrapped physical line must close non-background ANSI attributes so styles 
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `PARTIAL`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/utils.ts
 - packages/tui/src/components/markdown.ts
@@ -1837,7 +1887,7 @@ Every wrapped physical line must close non-background ANSI attributes so styles 
 - Risk: `HIGH`
 - Files: `src/components/editor.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1879,9 +1929,9 @@ The host's replacement editor needs to restore a clamped line/column cursor with
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
@@ -1912,7 +1962,7 @@ The host's replacement editor needs to restore a clamped line/column cursor with
 - Risk: `CRITICAL`
 - Files: `src/components/editor.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -1961,9 +2011,9 @@ Declined editor replacement and seat handoffs need to install normalized text an
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
@@ -1995,7 +2045,7 @@ Declined editor replacement and seat handoffs need to install normalized text an
 - Risk: `HIGH`
 - Files: `src/tui-alt-screen.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2038,9 +2088,9 @@ Fullscreen transcript lines reserve leading columns for a bullet/emoji. Copying 
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui-alt-screen.ts
 - Relevant issues/PRs:
@@ -2072,7 +2122,7 @@ Fullscreen transcript lines reserve leading columns for a bullet/emoji. Copying 
 - Risk: `HIGH`
 - Files: `tsdown.config.ts`, `src/native-module-path.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2115,9 +2165,9 @@ The vendored package has an XMoon package shell and must build from its own CWD 
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/native-module-path.ts
 - packages/tui/package.json
@@ -2150,7 +2200,7 @@ The vendored package has an XMoon package shell and must build from its own CWD 
 - Risk: `MEDIUM`
 - Files: `src/tui-alt-screen.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2191,9 +2241,9 @@ The former local clipboard seam is now provided by Earendil 0.84.4 through copyS
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `YES`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui-alt-screen.ts
 - Relevant issues/PRs:
@@ -2226,7 +2276,7 @@ The former local clipboard seam is now provided by Earendil 0.84.4 through copyS
 - Risk: `MEDIUM`
 - Files: `src/autocomplete.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2270,9 +2320,9 @@ fd output can identify a directory without a trailing slash, including through s
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/autocomplete.ts
 - Relevant issues/PRs:
@@ -2304,7 +2354,7 @@ fd output can identify a directory without a trailing slash, including through s
 - Risk: `CRITICAL`
 - Files: `src/tui-alt-screen.ts`, `src/components/scroll-view.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2350,9 +2400,9 @@ The host virtual transcript owns paging and search while the fork owns viewport 
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui-alt-screen.ts
 - packages/tui/src/components/scroll-view.ts
@@ -2385,7 +2435,7 @@ The host virtual transcript owns paging and search while the fork owns viewport 
 - Risk: `HIGH`
 - Files: `src/components/editor.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2429,9 +2479,9 @@ The host must preserve !/!! input mode across prompt recall and history-draft br
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
@@ -2462,7 +2512,7 @@ The host must preserve !/!! input mode across prompt recall and history-draft br
 - Risk: `HIGH`
 - Files: `src/index.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2505,9 +2555,9 @@ The host imports decodePrintableKey from the package root for editor mode parsin
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/index.ts
 - packages/tui/src/keys.ts
@@ -2540,7 +2590,7 @@ The host imports decodePrintableKey from the package root for editor mode parsin
 - Risk: `MEDIUM`
 - Files: `src/components/markdown.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2582,9 +2632,9 @@ Marked GFM autolinks can absorb CJK or full-width punctuation after a bare URL. 
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/markdown.ts
 - Relevant issues/PRs:
@@ -2616,7 +2666,7 @@ Marked GFM autolinks can absorb CJK or full-width punctuation after a bare URL. 
 - Risk: `HIGH`
 - Files: `src/tui.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2657,9 +2707,9 @@ A non-positive width must be clamped before it reaches component repeat/padding 
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui.ts
 - Relevant issues/PRs:
@@ -2690,7 +2740,7 @@ A non-positive width must be clamped before it reaches component repeat/padding 
 - Risk: `HIGH`
 - Files: `src/tui-main-screen.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2732,9 +2782,9 @@ Host components can produce a line one or more columns wider than a transient te
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui-main-screen.ts
 - Relevant issues/PRs:
@@ -2766,7 +2816,7 @@ Host components can produce a line one or more columns wider than a transient te
 - Risk: `HIGH`
 - Files: `src/components/editor.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2807,9 +2857,9 @@ An atomic grapheme wider than the available width cannot be split. The guard pre
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
@@ -2840,7 +2890,7 @@ An atomic grapheme wider than the available width cannot be split. The guard pre
 - Risk: `HIGH`
 - Files: `src/tui-main-screen.ts`, `src/utils.ts`, `src/tui.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2889,9 +2939,9 @@ Steady transcript frames should process only changed rendered line values. The h
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui-main-screen.ts
 - packages/tui/src/utils.ts
@@ -2925,7 +2975,7 @@ Steady transcript frames should process only changed rendered line values. The h
 - Risk: `HIGH`
 - Files: `src/tui-alt-screen.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -2967,9 +3017,9 @@ Fullscreen focus reports must clean up native selection on FOCUS_OUT while still
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui-alt-screen.ts
 - Relevant issues/PRs:
@@ -3000,7 +3050,7 @@ Fullscreen focus reports must clean up native selection on FOCUS_OUT while still
 - Risk: `CRITICAL`
 - Files: `src/keybindings.ts`, `src/components/editor.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -3047,9 +3097,9 @@ Editor submission must be remappable without changing plain Input submission. Th
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/keybindings.ts
 - packages/tui/src/components/editor.ts
@@ -3082,7 +3132,7 @@ Editor submission must be remappable without changing plain Input submission. Th
 - Risk: `HIGH`
 - Files: `src/paste-burst.ts`, `src/components/editor.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -3127,9 +3177,9 @@ Terminals and tmux can lose bracketed-paste markers and deliver a paste as rapid
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
@@ -3161,7 +3211,7 @@ Terminals and tmux can lose bracketed-paste markers and deliver a paste as rapid
 - Risk: `MEDIUM`
 - Files: `src/utils.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -3203,9 +3253,9 @@ CJK-heavy host transcripts and width/theme invalidation bursts are intended to b
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/utils.ts
 - Relevant issues/PRs:
@@ -3237,7 +3287,7 @@ CJK-heavy host transcripts and width/theme invalidation bursts are intended to b
 - Risk: `HIGH`
 - Files: `src/components/input.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -3283,9 +3333,9 @@ Prefilled query and draft inputs should place the cursor at the end by default, 
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/input.ts
 - packages/tui/src/components/select-list.ts
@@ -3317,7 +3367,7 @@ Prefilled query and draft inputs should place the cursor at the end by default, 
 - Risk: `HIGH`
 - Files: `src/components/select-list.ts`
 - Last audited: `2026-09-07`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -3365,9 +3415,9 @@ filterQuery is the single source of truth for the rendered search box, getFilter
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/select-list.ts
 - packages/tui/src/components/input.ts
@@ -3404,8 +3454,8 @@ filterQuery is the single source of truth for the rendered search box, getFilter
 - Category: `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `HIGH`
 - Files: `src/components/settings-list.ts`
-- Last audited: `2026-09-07`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -3415,6 +3465,8 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 - SettingsList Focusable propagation reaches search Input and conditionally forwards to an open submenu
 - row-budget forwarding for nested submenu lists
+- SettingsList mouse hit-testing uses the FINAL painted rows (a render-time mouseRows map built after the description shrink AND the tail slice), never a re-derived range from maxVisible — a click hits the row the user actually saw, resolved by item ID with pressed-identity click activation; the search Input is reachable only where the LAST paint put it (the tail slice may drop it off-screen — a click on the row that replaced it must not reach the hidden input); every left press replaces the gesture identity at handler entry (a delegated search press or an inert-row press clears the old latch — a later synthesized click on the same cell must not activate an item that repainted there)
+- a live-but-unpainted submenu (opened by a click whose repaint is still queued) is mouse-inert: the painted submenu instance is recorded at render, and handleMouse only forwards to the submenu when it is the PAINTED owner
 
 #### Dependency map
 
@@ -3424,12 +3476,13 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 **Inheritance / structural**
 - SettingsList implements Focusable; SettingsList forwards only when a submenu structurally exposes focused.
-- Audit note: The conditional optional-method edge is real; host ThemeSubmenu, Model/EffortSubmenu, and SubagentModelAllowlistSubmenu currently do not all implement Focusable.
+- Audit note: The conditional optional-method edge is real; post-v0.85.1 audit: ALL four Host submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps), so the SettingsList propagateFocus() edge reaches every submenu's focus-sensitive child.
 
 **Host**
 - src/tui-app.ts FocusForwardingFrame and settings overlays
 - src/theme-menu.ts, src/model-menu.ts, and src/subagent-model-menu.ts submenu wrappers
-- Audit note: Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. The audit found a remaining IME/cursor gap for non-Focusable submenu wrappers.
+- test/theme-picker.test.ts and test/model-menu.test.ts CURSOR_MARKER regressions
+- Audit note: Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. Post-v0.85.1 audit: all four submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) forward Focusable state to their inner SettingsList/Input, including ModelSubmenu's async inner replacement (the swapped-in searchable list receives the already-active focus and emits CURSOR_MARKER); the non-searchable wrappers (EffortSubmenu, SubagentModelAllowlistSubmenu) forward the flag too, so no IME/cursor path is lost at any wrapper boundary.
 
 **Public / extension**
 - Focusable component interface and row-budget-aware submenu public shape.
@@ -3440,19 +3493,23 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 - IME candidate window follows top-level search focus
 - submenu receives focus only when it implements Focusable
 - selection/description tail remains within budget
-- Audit note: Current host submenu wrappers without focused do not receive the inner search focus; this is an identified follow-up gap, not proof that the vendor seam is unused.
+- Audit note: Post-v0.85.1 audit: ALL four Host submenu wrappers implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps), so the SettingsList propagateFocus() edge reaches every submenu's focus-sensitive child; no follow-up gap remains.
 
 #### Guarding tests
 
 - packages/pi-tui/test/settings-list.test.ts: focus/row-budget behavior
 - test/extension-focus-seat.test.ts: SurfaceSnapshot.focusedSeat state only (not SettingsList or IME)
-- Missing dedicated host submenu focus/IME integration regression for non-Focusable wrappers; add before retirement
+- test/theme-picker.test.ts: ThemeSubmenu forwards focused state to the search Input (CURSOR_MARKER present when focused, absent when not)
+- test/model-menu.test.ts: ModelSubmenu retains focus across the async inner swap (CURSOR_MARKER on the swapped-in searchable list only when focused)
+- packages/pi-tui/test/settings-list.test.ts: description-shrink click identity (Case A), search+shrink row offset (Case B), inert chrome (Case C)
+- packages/pi-tui/test/settings-list.test.ts: a main-list press cannot transfer into a newly-created submenu — the press-time submenu generation fences the release/click (a submenu opened by keyboard after the press never receives a fresh-looking activation)
+- packages/pi-tui/test/settings-list.test.ts: a fresh press+click on a live-but-unpainted submenu is rejected; after the submenu is painted, a fresh press+click activates
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/select-list.ts
 - packages/tui/src/components/settings-list.ts
@@ -3479,7 +3536,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam.
+- Notes: The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam. Re-audited after the v0.85.1 mouse-parity pass: ALL four Host submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps); CURSOR_MARKER regressions cover the searchable wrappers, and the non-searchable wrappers forward the flag too, so no IME/cursor path is lost at any wrapper boundary.
 
 ### X043 — Deferred viewport input listener registration
 
@@ -3488,7 +3545,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 - Risk: `CRITICAL`
 - Files: `src/tui-alt-screen.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -3535,9 +3592,9 @@ Fullscreen host routing must register before the viewport listener so raw captur
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui-alt-screen.ts
 - Relevant issues/PRs:
@@ -3569,7 +3626,7 @@ Fullscreen host routing must register before the viewport listener so raw captur
 - Risk: `HIGH`
 - Files: `src/components/editor.ts`
 - Last audited: `2026-09-06`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -3617,9 +3674,9 @@ The host TuiEditor subclass needs to drive explicit/context-gated completion, st
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
@@ -3651,7 +3708,7 @@ The host TuiEditor subclass needs to drive explicit/context-gated completion, st
 - Risk: `CRITICAL`
 - Files: `src/components/editor.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -3696,9 +3753,9 @@ Expanded draft handoffs need the cursor in getExpandedText coordinates. Every pa
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
@@ -3730,7 +3787,7 @@ Expanded draft handoffs need the cursor in getExpandedText coordinates. Every pa
 - Risk: `CRITICAL`
 - Files: `src/tui.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -3773,9 +3830,9 @@ Terminal cell-size replies must update image geometry even when a modal or raw c
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/tui.ts
 - Relevant issues/PRs:
@@ -3807,7 +3864,7 @@ Terminal cell-size replies must update image geometry even when a modal or raw c
 - Risk: `HIGH`
 - Files: `src/keys.ts`
 - Last audited: `2026-09-03`
-- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
@@ -3852,9 +3909,9 @@ Generic Terminal.start input callbacks may deliver arbitrary multi-character chu
 
 #### Upstream comparison
 
-- Baseline: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Semantic equivalence: `NO`
-- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 - Relevant upstream files:
 - packages/tui/src/keys.ts
 - packages/tui/src/tui.ts
@@ -3880,3 +3937,564 @@ Generic Terminal.start input callbacks may deliver arbitrary multi-character chu
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: KEEP HARD. The supported generic Terminal boundary accepts arbitrary chunks; root replay would duplicate inherited input ownership.
+
+### X048 — Input mouse click positioning under custom prompts
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `MEDIUM`
+- Files: `src/components/input.ts`
+- Last audited: `2026-09-08`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+Input supports arbitrary prompts (new Input({ prompt: ... })) and renders them with visibleWidth (width - visibleWidth(this.prompt)), but handleMouse offsets the click column by a hardcoded 2 (the default "> " prompt width). Custom prompts therefore misplace the cursor: a wider prompt shifts the cursor right, an empty prompt shifts it left, and CJK prompts break because string length != visible width.
+
+#### Changed surface
+
+- Input.handleMouse click column is offset by visibleWidth(this.prompt) instead of a fixed 2 columns
+
+#### Dependency map
+
+**Vendor internal**
+- Input.render lays out the value at width - visibleWidth(this.prompt); handleMouse now uses the same visibleWidth offset.
+- Audit note: Single-line arithmetic fix inside Input; no other component reads the click column.
+
+**Inheritance / structural**
+- Input does not override or extend another component's mouse handling.
+- Audit note: No override/super edge affected.
+
+**Host**
+- Host editor seat and search inputs use Input with default and custom prompts; click-to-position now matches the rendered prompt width.
+- Audit note: Host behavior improves for custom prompts; the default prompt (width 2) is unchanged.
+
+**Public / extension**
+- Input is a public component; custom prompt + mouse click positioning is part of its public contract.
+- Audit note: No extension API change; behavioral fix only.
+
+**Behavioral coupling**
+- click column = event.x - visibleWidth(prompt), clamped at 0
+- default prompt "> " (width 2) keeps the previous behavior
+- empty, wide, and CJK prompts position the cursor at the clicked value column
+- Audit note: Regression tests cover empty, wide, CJK, and default prompts.
+
+#### Guarding tests
+
+- packages/pi-tui/test/input.test.ts: X048 mouse click positioning — empty prompt, wide prompt (">>> "), CJK prompt (visible width != string length), and default prompt (width 2) click-to-cursor regressions
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/components/input.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream v0.85.1 (and current upstream main) hardcode event.x - 2 in Input.handleMouse, so custom prompts misplace the cursor; the fork offsets by visibleWidth(this.prompt).
+
+#### Retirement conditions
+
+- Retire only when upstream Input.handleMouse offsets the click column by the prompt's visible width (or otherwise positions the cursor correctly for arbitrary prompts), then run the empty/wide/CJK/default prompt click-position tests.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream v0.85.1 and current upstream main both use event.x - 2; the fork fix is a one-line arithmetic change with click-position regressions.
+
+### X049 — Fullscreen transcript-search query Input mouse forwarding
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `MEDIUM`
+- Files: `src/alt-screen-search.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+AltScreenSearchComponent renders a mouse-aware Input and forwards keyboard/focus to it, but had no component-level mouse forwarding: a click on the query Input fell through to the overlay component, which has no handleMouse(), so the fullscreen transcript-search query cursor could not be positioned by mouse. The Host cannot fix this cleanly because the component and its private Input are inside the vendored fork.
+
+#### Changed surface
+
+- AltScreenSearchComponent.handleMouse forwards press events on the last-painted query-content row to its private Input, with the gesture/focus target rewritten to the component (X018 liveness tracks the mounted unit); the result-count suffix and borders stay inert
+
+#### Dependency map
+
+**Vendor internal**
+- AltScreenSearchComponent owns the private Input; the component-level handleMouse uses the last-painted input width (cached in render) and the same previous/current query comparison as handleInput.
+- Audit note: Single-component forwarding inside the fork; no other component reads the search query row.
+
+**Inheritance / structural**
+- AltScreenSearchComponent implements Component and Focusable; the new handleMouse follows the MouseRegion/Frame wrapper pattern (dispatch to the private child, rewrite target/focus to the mounted unit).
+- Audit note: No override/super edge affected.
+
+**Host**
+- The built-in fullscreen transcript search relies on this vendor-owned component; TuiAltScreen.handleSearchMouseEvent still owns the navigation buttons.
+- Audit note: Host behavior improves for the query Input; navigation-button handling is unchanged.
+
+**Public / extension**
+- AltScreenSearchComponent is not part of the public extension surface; the change is vendor-internal.
+- Audit note: No extension API change.
+
+**Behavioral coupling**
+- press on the query-content row positions the Input cursor at the clicked value column
+- the result-count suffix, top/bottom borders, and the navigation-button row stay inert
+- typing after the click inserts at the clicked query position
+- Audit note: Regression tests cover cursor positioning, inert chrome, and the fullscreen integration path.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: X049 — query Input press positions the cursor, typing inserts at the clicked column, result-count suffix and borders inert, and the fullscreen TuiAltScreen click-to-position integration
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/alt-screen-search.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream v0.85.1 (d981de1) and current upstream main (aa23e784c) both lack component-level mouse forwarding for the transcript-search query Input; the fork forwards press events to the private Input with last-painted geometry and wrapper target/focus ownership.
+
+#### Retirement conditions
+
+- Retire only when pinned upstream includes semantically equivalent query-Input mouse forwarding in AltScreenSearchComponent (or the component is restructured so the Host can forward without changing the vendor surface), then run the query-cursor, inert-chrome, and fullscreen integration tests.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream v0.85.1 and current upstream main both lack the query-Input mouse forwarding; the fork fix is component-level forwarding with last-painted geometry and wrapper target/focus ownership.
+
+### X050 — Editor mouse click parity: wrapped-segment cursor placement and slash-completion submit
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `MEDIUM`
+- Files: `src/components/editor.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+Two upstream Editor mouse-path bugs: (1) handleMouse forces targetIndex = lastGraphemeIndex when a click lands at/after the end of a NON-last wrapped visual segment, placing the cursor one grapheme BEFORE the segment end instead of at the end; (2) the autocomplete list's onSelect (the mouse click path) applies a slash-prefix completion but does not submit, while the keyboard Enter path explicitly falls through to submit for slash prefixes — a click on a /command suggestion must behave like Enter. The fork fixes both: the natural end-of-segment position (chunk.length, matching the Input clamp-to-end behavior) and the slash submit fall-through. The slash-completion mouse click mirrors the keyboard Enter path INCLUDING the disableSubmit guard: a mouse click on a `/command` suggestion must not bypass the public 'submission disabled' contract.
+
+#### Changed surface
+
+- Editor.handleMouse click-to-cursor on a wrapped non-last visual segment: clicking at/after the segment text places the cursor at the segment end, not one grapheme before it
+- Editor autocomplete onSelect (mouse click): a slash-prefix completion applies, cancels the autocomplete, and submits (submitValue), exactly like the keyboard Enter path
+- the slash-completion mouse click cancels the autocomplete and honors disableSubmit before submitting (exactly like the keyboard Enter path)
+- the autocomplete mouse dispatch is fenced to the PAINTED list instance (renderedAutocompleteList) and the press-time list instance — an async suggestion swap that has not repainted cannot receive a click aimed at the old screen (no unpainted slash submit)
+
+#### Dependency map
+
+**Vendor internal**
+- Editor.handleMouse builds the visual line map and maps the click column to a grapheme index; the fork removed the upstream decrement that shifted the end-of-segment hit one grapheme back.
+- Editor.createAutocompleteList onSelect now mirrors the keyboard Enter path for slash prefixes (apply → cancel → submitValue).
+- Audit note: Two single-branch fixes inside Editor; no other component reads the wrapped-segment cursor mapping or the autocomplete onSelect.
+
+**Inheritance / structural**
+- Editor does not override another component's mouse handling; the host TuiEditor extends Editor and inherits the fixed mapping.
+- Audit note: No override/super edge affected.
+
+**Host**
+- The host editor seat uses Editor; wrapped-line click-to-position now lands at the segment end.
+- Audit note: Host behavior improves for wrapped lines; the last-segment clamp-to-end behavior is unchanged.
+
+**Public / extension**
+- Editor is a public component; wrapped-segment click cursor placement is part of its public contract.
+- Audit note: No extension API change; behavioral fix only.
+
+**Behavioral coupling**
+- click at/after the end of a non-last wrapped segment places the cursor at the segment end
+- click past the last segment still clamps to the line end
+- clicking a slash-prefix autocomplete suggestion submits the completed command and clears the editor
+- Audit note: Regression tests cover the wrapped non-last segment, the last-segment clamp, and the slash-completion click submit.
+
+#### Guarding tests
+
+- packages/pi-tui/test/editor.test.ts: X050 — clicking past the text of a wrapped non-last segment lands at the segment end, clicking past the last segment clamps to the line end, and clicking a slash-prefix autocomplete suggestion submits the completed command (like keyboard Enter)
+- packages/pi-tui/test/editor.test.ts: disableSubmit=true blocks the mouse slash-completion submit and cancels the autocomplete
+- packages/pi-tui/test/editor.test.ts: unpainted list replacement cannot receive a click; press A → repaint B → release must not activate B
+- packages/pi-tui/test/editor.test.ts: a keyboard document mutation cancels the pending autocomplete press — a stale /help release must not submit the newly changed draft (/he → /hex)
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/components/editor.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream v0.85.1 (d981de1) and current upstream main (aa23e784c) both force targetIndex = lastGraphemeIndex for clicks at/after the end of a non-last wrapped segment, and both apply slash-prefix autocomplete completions on click without submitting; the fork keeps the natural end-of-segment position and submits slash completions like the keyboard path.
+
+#### Retirement conditions
+
+- Retire only when upstream Editor.handleMouse places the cursor at the end of a wrapped non-last segment AND upstream autocomplete onSelect submits slash-prefix completions like the keyboard Enter path, then run the wrapped-segment, last-segment, and slash-completion click tests.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream v0.85.1 and current upstream main both keep the decrement and the non-submitting slash onSelect; the fork fixes both editor mouse paths.
+
+### X051 — Container/Box overlay-root focus and input forwarding
+
+- Status: `ACTIVE`
+- Category: `PUBLIC_COMPONENT_CONTRACT`
+- Risk: `MEDIUM`
+- Files: `src/tui.ts`, `src/components/box.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+showOverlay accepts any Component as the overlay root, and the overlay focus state tracks the mounted root (dispatchMouseToOverlay rewrites the focusTarget to the root). A plain Container or Box root containing an interactive child (e.g. an Input) therefore never forwarded the focused flag or keyboard input to that child: the child received the mouse press but stayed focused=false (no IME cursor) and never received keys. The fork tracks the child the mouse press focused and forwards focus/input to THAT child only — never broadcasting to all children (a multi-Input root must not show every cursor or consume every key). The focus promotion to the container root is excluded for the TUI root itself (TuiBase extends Container), so a TUI-root mouse dispatch never steals the focus target from the clicked child.
+
+#### Changed surface
+
+- Container and Box implement Focusable: the focused flag forwards to the child the last mouse press focused (tracked in handleMouse), and handleInput forwards to that child only
+- focus promotion to the container root applies to plain Container/Box overlay roots only, never to the TUI root (TuiBase extends Container)
+- focusedChild is cleared on removeChild/clear/dispose so a detached child never keeps receiving keyboard input
+- Container and Box forward the focused child's wantsKeyRelease (the TUI filters Kitty key releases by the focused component's wantsKeyRelease, so a Container/Box focus owner without forwarding drops releases aimed at the child)
+- the focused child is live-child fenced: a direct `children` replacement invalidates the old forwarding target at the NEXT PAINT (render is the liveness observation point, not the next keyboard event) — keyboard input / focused / wantsKeyRelease never reach a detached child, re-mounting the old child later can never resurrect the stale identity, the detached child's focused flag is cleared (IME/hardware-cursor state does not survive a detach), and replacement never silently transfers focus to the new child (a fresh mouse press names the new focus owner)
+
+#### Dependency map
+
+**Vendor internal**
+- Container.handleMouse and Box.handleMouse record the child whose dispatch result requested focus; the focused getter/setter and handleInput forward to that child only.
+- TuiBase extends Container; the focus-promotion guard excludes TuiBase instances so the TUI root never becomes the focus target of its own children's mouse presses.
+- Audit note: Two container classes share the same focusedChild pattern; the TUI-root exclusion is required because TuiBase inherits Container.
+
+**Inheritance / structural**
+- Container and Box are base container classes; subclasses (ScrollView, Stack, HStack/VStack) inherit the new Focusable surface and input forwarding.
+- TuiBase extends Container; the instanceof TuiBase guard in Container.handleMouse keeps the TUI root's focus behavior unchanged.
+- Audit note: The Focusable addition is additive; existing subclasses that override handleInput/handleMouse keep their behavior.
+
+**Host**
+- The Host wraps interactive overlays in FocusForwardingFrame, which already forwards focus/input; the Container/Box forwarding covers the public showOverlay(component) contract for direct roots.
+- Audit note: Host behavior is unchanged (FocusForwardingFrame remains the primary path); the public contract now works for plain Container/Box roots too.
+
+**Public / extension**
+- Extensions may call showOverlay with any Component; a plain Container/Box root with an interactive child now receives focus and keyboard input.
+- Audit note: No extension API change; the existing public showOverlay contract is completed.
+
+**Behavioral coupling**
+- a mouse press on an Input inside a plain Container/Box overlay root forwards focused=true and keyboard input to that Input
+- in a multi-child root only the CLICKED child receives focus and keys (no fan-out)
+- removing/clearing/disposing the focused child clears the forwarding reference
+- the TUI root (TuiBase) never promotes its own children's focus to itself
+- replacing `children` directly (the public structural mutation contract) drops the old focused child at the next paint: keyboard input / focused / wantsKeyRelease never reach it, the replacement does not implicitly inherit focus, re-mounting the old child later does not resurrect the stale identity, the detached child's focused flag is cleared, and a fresh press re-establishes the focus owner; removeChild/clear/dispose also clear the detached child's focused flag (a removed Input re-mounted elsewhere must not keep CURSOR_MARKER)
+- Audit note: Regression tests cover the single-child root, the multi-child no-fan-out case, the removal lifecycle, and the TUI-root focus identity.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: X051 — an Input inside a plain Container overlay root receives the focused flag and keyboard input; in a multi-child Container root only the clicked child receives focus and keys; an Input inside a plain Box overlay root receives focus and keyboard input; the TUI root keeps the clicked component as the focus target
+- packages/pi-tui/test/tui-alt-screen.test.ts: a wantsKeyRelease child receives Kitty key releases through a Container overlay root and through a Box overlay root
+- packages/pi-tui/test/tui-alt-screen.test.ts: direct `children` replacement in a Container and in a Box drops the old focused child (no keyboard input to the detached child, no implicit focus transfer, a fresh press re-establishes the owner); a detached focused child's wantsKeyRelease does not leak
+- packages/pi-tui/test/tui-alt-screen.test.ts: A→B→A direct `children` replacement in a Container and in a Box does not resurrect the stale focus owner (keyboard input after re-mounting the old child reaches nothing; the detached child's focused flag is cleared; a fresh press re-establishes the owner)
+- packages/pi-tui/test/tui-alt-screen.test.ts: removeChild/clear/dispose in a Container and removeChild/clear in a Box clear the detached focused child's focused flag (a re-mounted Input must not keep the IME/hardware-cursor state)
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/tui.ts
+- packages/tui/src/components/box.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream Container and Box are not Focusable and do not forward input; the fork adds focusedChild tracking so a plain overlay root reaches its interactive child, with the TUI root excluded from focus promotion.
+
+#### Retirement conditions
+
+- Retire only when upstream Container/Box forward focus and input to the child the mouse press focused (or the overlay focus model changes so the root no longer needs to forward), then run the single-child, multi-child no-fan-out, removal lifecycle, and TUI-root focus identity tests.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream Container and Box lack focus/input forwarding; the fork tracks the mouse-focused child and forwards to it only, excluding the TUI root (TuiBase extends Container).
+
+### X052 — SelectList last-painted mouse identity
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `HIGH`
+- Files: `src/components/select-list.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+SelectList mouse hit-testing derived the pressed row from the LIVE selectedIndex/filteredItems (getVisibleRange) and latched a raw array INDEX as the gesture identity. A filter/selection change between paint and press (or between press and release) could therefore transfer a click on item A to whatever item repainted into the same physical row — onSelect can run a command/action, so this is a real activation bug, not a highlight offset. The fork now builds a render-time physical-row → item-identity map from the FINAL painted rows, latches the pressed ITEM identity, and a click may only activate the exact identity that was pressed (every left press replaces the latch at handler entry).
+
+#### Changed surface
+
+- SelectList mouse hit-testing uses the FINAL painted rows (a render-time mouseRows map built in render), never a re-derived range from the live selectedIndex/filteredItems — a press/click hits the row the user actually saw
+- the pressed gesture identity is the ITEM (object identity), not an array index; a click may only activate the exact pressed identity (a repaint that moved a different item onto the cell rejects the click)
+- every left press replaces the pressed identity at handler entry, BEFORE the empty-filter guard (a press/click on an empty filtered-out screen still clears the old latch — the TUI keeps the old press target when the empty press returns undefined, so a later release on the same cell synthesizes a click that must not match a stale identity)
+
+#### Dependency map
+
+**Vendor internal**
+- SelectList.render records physical row → item identity; handleMouse resolves the CURRENT index by the painted item identity (indexOf) and rejects when the painted item is no longer in the live list.
+- Audit note: The scroll-indicator row is recorded as inert (undefined) so a click on it never resolves to an item.
+
+**Inheritance / structural**
+- SelectList is a leaf component; no subclass overrides handleMouse.
+- Audit note: None.
+
+**Host**
+- Host SearchablePicker/openPicker wrap SelectList; the host mouse parity already resolves by VALUE/ID identity, and the fork-side fence closes the same-instance filter/selection swap.
+- Audit note: Host behavior is unchanged; the fork fence covers the public SelectList contract directly.
+
+**Public / extension**
+- SelectList is a public built-in component; setFilter/setSelectedIndex + mouse click are documented capabilities.
+- Audit note: No API change; the existing public surface is completed with last-painted identity semantics.
+
+**Behavioral coupling**
+- a press on a painted row resolves to the painted item even when the live visible range moved (no repaint)
+- press A → filter change + repaint → release on the same cell does NOT activate the item that moved there
+- a press on the scroll-indicator row is inert
+- every left press replaces the pressed identity (no stale-latch activation), including a press on an empty filtered-out screen (filter empties → press → filter restores → a click without a fresh press must not activate)
+- Audit note: Regression tests cover the no-repaint live-range case, the repaint transfer case (unit + real TUI click synthesis), and the existing press/click activation.
+
+#### Guarding tests
+
+- packages/pi-tui/test/select-list.test.ts: a press on a painted row resolves to the painted item even when the live visible range moved without a repaint (setSelectedIndex after render)
+- packages/pi-tui/test/select-list.test.ts: press A → setFilter + repaint → release on the same cell does NOT activate the item that moved there
+- packages/pi-tui/test/select-list.test.ts: press A → filter empties the list + repaint → press the empty screen → filter restores + repaint → a click without a fresh press must NOT activate A (the empty-state press cleared the old latch)
+- packages/pi-tui/test/mouse-components.test.ts: real TUI click synthesis — press row 0, filter change + repaint, release on the same cell: the repainted row must not receive the pressed item's click (mousePressTarget → repaint → same-component synthetic click contract)
+- packages/pi-tui/test/mouse-components.test.ts: existing press/click activation on painted rows (render first) and wheel-scroll press/click activation
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/components/select-list.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream SelectList derives the pressed row from the live visible range and latches an array index; the fork builds a render-time physical-row → item-identity map and latches the pressed item identity, so a filter/selection change can never transfer a click to a different item.
+
+#### Retirement conditions
+
+- Retire only when upstream SelectList hit-tests against last-painted rows with item-identity gesture tracking (or the mouse model changes so the same-instance filter/selection swap cannot transfer a click), then run the no-repaint live-range, repaint-transfer (unit + TUI click synthesis), and inert scroll-indicator tests.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream SelectList (v0.85.1 and current main) still derives the pressed row from the live visible range and latches an array index; the fork fences mouse dispatch to the last-painted rows with item-identity gesture tracking.
+
+### X053 — Input cursor seam for host-painted value displays
+
+- Status: `ACTIVE`
+- Category: `PUBLIC_COMPONENT_CONTRACT`
+- Risk: `LOW`
+- Files: `src/components/input.ts`, `src/index.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+A host that paints its own display of an Input's value (e.g. QuestionFlow's masked bullet row) must be able to place the Input's cursor at a grapheme boundary and align its click mapping with the SAME horizontal-scroll viewport the Input renders. The fork exposes the minimal seam: setCursor(index) (UTF-16 index, clamped) and getRenderedStartColumn() (the viewport origin in cells), plus the getGraphemeSegmenter export so the host segments graphemes with the SAME segmenter the Input uses.
+
+#### Changed surface
+
+- Input.setCursor(index) places the cursor at a UTF-16 index (clamped to the value); the caller lands on a grapheme boundary
+- Input.getRenderedStartColumn() exposes the horizontal-scroll viewport origin (in cells) so a host-painted display (masked bullets) shows and maps the SAME visible graphemes the Input renders
+- getGraphemeSegmenter is exported from the package entry so a host segments graphemes identically to the Input
+
+#### Dependency map
+
+**Vendor internal**
+- Input.setCursor writes the private cursor field; getRenderedStartColumn reads the render-time viewport origin.
+- Audit note: Both are read/write seams over existing private state; no behavior change.
+
+**Inheritance / structural**
+- Input is a leaf component; no subclass overrides the new methods.
+- Audit note: None.
+
+**Host**
+- QuestionFlow's masked free-text row uses setCursor + getRenderedStartColumn to map a clicked bullet to the real grapheme boundary, aligned with the Input's viewport.
+- Audit note: The host paints its own prefix and mask; the Input's prompt is empty so its local column 0 IS the first painted value cell.
+
+**Public / extension**
+- Input is a public built-in component; the new methods are additive.
+- Audit note: No existing API changes.
+
+**Behavioral coupling**
+- setCursor clamps to [0, value.length] and lands on the caller-chosen grapheme boundary
+- getRenderedStartColumn reflects the last render's viewport origin
+- masked CJK / emoji / combining clicks place the cursor at the exact grapheme boundary (never splitting a ZWJ sequence)
+- Audit note: Regression tests cover masked CJK, masked ZWJ emoji, and the viewport-aligned mask window.
+
+#### Guarding tests
+
+- test/question-flow.test.ts: masked CJK click places the cursor between graphemes (界a → 界Xa)
+- test/question-flow.test.ts: masked ZWJ emoji click never splits the grapheme (👨‍💻a → 👨‍💻Xa)
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/components/input.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream Input exposes no cursor setter or viewport-origin getter; the fork adds the minimal host seam for host-painted value displays.
+
+#### Retirement conditions
+
+- Retire only when upstream Input exposes a cursor setter and viewport-origin getter (or the host stops painting its own value displays), then run the masked CJK / ZWJ emoji regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream Input has no cursor setter or viewport-origin getter; the fork exposes the minimal seam for host-painted value displays (QuestionFlow masked rows).
+
+### X054 — Frame-completion boundary and painted-box query for host mouse parity
+
+- Status: `ACTIVE`
+- Category: `PUBLIC_COMPONENT_CONTRACT`
+- Risk: `LOW`
+- Files: `src/tui-alt-screen.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+A host that resolves a same-cell click against the frame the user actually SAW needs a reliable frame-completion boundary and the painted geometry of that frame. The fork's layout pass measures components and commits the scroll viewport state only at the END of a painted frame; a host-side render probe runs during the MEASUREMENT pass and would commit a cross-frame mix (an un-laid-out viewport height, the previous frame's scroll state). The fork exposes the minimal seam: onFramePainted fires after every painted frame (the layout has committed), and getPaintedBox(component) returns the last-painted screen rect of a mounted component — never the internal layout tree.
+
+#### Changed surface
+
+- TuiAltScreenOptions.onFramePainted fires at the END of every painted frame, after the layout pass has committed (the scroll viewport state and every component's painted placement are final)
+- TuiAltScreen.getPaintedBox(component) returns the last-painted screen rect {x, y, width, height} of a mounted component, or undefined when the component is not part of the last painted layout
+
+#### Dependency map
+
+**Vendor internal**
+- onFramePainted is invoked at the end of doRender after currentLayout is committed; getPaintedBox walks the committed LayoutFrame box tree.
+- Audit note: Both are read-only seams over the existing layout state; no behavior change.
+
+**Inheritance / structural**
+- TuiAltScreen is a leaf subclass of TuiBase; the new option and method do not alter the class hierarchy.
+- Audit note: None.
+
+**Host**
+- TuiApp commits its last-painted fullscreen geometry snapshot in onFramePainted (chrome heights via getPaintedBox, scroll state, transcript projection) so the press path of a same-cell click resolves against the frame the user actually saw.
+- Audit note: The press path never re-measures live components between paint and press.
+
+**Public / extension**
+- TuiAltScreen is a public built-in screen; the new option and method are additive.
+- Audit note: No existing API changes.
+
+**Behavioral coupling**
+- onFramePainted fires once per painted frame (the search-refresh double layout re-fires it — the LAST pass is the painted one)
+- getPaintedBox reflects the last committed frame's layout, never a re-measurement
+- a component inside a leaf Container (no layout box of its own) has no painted box
+- Audit note: Regression tests cover the callback cadence and the painted-box values.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: fires onFramePainted after each painted frame and exposes the painted box of mounted components (X054)
+- test/editor-seat-non-owning.test.ts: a click before the seat repaint reaches neither the removed editor nor the not-yet-painted occupant (ghost click)
+- test/tui-app.test.ts: fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)
+- test/tui-app.test.ts: fullscreen transcript click: a press on a local card cannot transfer to a repainted local card (per-message identity token; kind+turn is not unique for local shell cards)
+- test/tui-app.test.ts: fullscreen transcript click: a resize between press and release cannot act against the stale frame (release-time geometry guard)
+- test/tui-app.test.ts: fullscreen transcript click: a resize + repaint between press and release cannot transfer the gesture (press-frame dimensions recorded in the gesture)
+- test/focus-anchor.test.ts: a press on a Thought cannot transfer across a session switch (per-activity identity token + session-boundary gesture clear; turn numbers are session-local)
+- test/tui-app.test.ts: fullscreen todo: a dock press cannot run the panel action after a keyboard toggle (todo:dock vs todo:panel press identities)
+- test/tui-app.test.ts: fullscreen todo: a dock press cannot toggle the panel across a session switch (the session-boundary gesture clear in clearSessionOverrides; the generic todo identities have no object to tokenize)
+- test/tui-app.test.ts: fullscreen transcript click: a click that resolves to no cell consumes the stale latch (the identity-fence invariant is literal before every early return)
+- test/tui-app.test.ts: fullscreen todo: a session switch resets the click-coalescing window (a fresh click in the new session must never be swallowed by the old session's window)
+- test/workflow-ui.test.ts: a workflow member press cannot transfer to the aggregate View row after a 5→6 switch (per-row semantic hit identity)
+- test/rendering.test.ts: a PTC sub-call press cannot transfer after a sibling settle reflow (per-row semantic hit identity)
+- test/image-collapse.test.ts: an attachment press cannot transfer to a sibling after an async image growth (per-row semantic hit identity)
+- test/image-collapse.test.ts: an async image load that settles between frames repaints automatically (the thumbnail's loader-notify clears the cache AND schedules the next frame)
+- test/image-collapse.test.ts: a live out-of-order image close cannot transfer collapse state to the earlier occurrence (stable occurrence rank: open opaque image blocks reserve a rank)
+- test/image-collapse.test.ts: a live out-of-order image close cannot transfer a press to the earlier occurrence (the press fence shares the stable occurrence rank)
+- test/transcript.test.ts: live projection follows first-seen stream order, not numeric index order (canonical BlockAssembler parity)
+- test/image-collapse.test.ts: a later first-seen lower-index image cannot inherit an earlier occurrence's collapse (first-seen occurrence rank)
+- test/image-collapse.test.ts: a later first-seen lower-index image cannot receive a stale press (first-seen occurrence rank)
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/tui-alt-screen.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream TuiAltScreen exposes no frame-completion boundary and no painted-geometry query; the fork adds the minimal host seam for mouse parity.
+
+#### Retirement conditions
+
+- Retire only when upstream exposes a frame-completion boundary and a painted-geometry query (or the host stops resolving clicks against the painted frame), then run the ghost-click and repainted-message regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed the host has no public entry point after the layout pass (a render probe runs during the measurement pass); the fork exposes the narrow frame-completion boundary + painted-box query.

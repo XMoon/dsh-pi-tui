@@ -136,6 +136,13 @@ function findRow(view: readonly string[], needle: string): number {
   return view.findIndex(line => line.includes(needle))
 }
 
+/** True when the row is visually blank. The v0.85.1 full-track scrollbar
+ * paints `│`/`┃`/`█` on the last column of every scroll-pane row, so a
+ * blank row carries that char when the transient scrollbar is visible. */
+function isBlankRow(line: string): boolean {
+  return line.replace(/[│┃█]$/, '').trim() === ''
+}
+
 /** SGR click on one viewport cell (the fork converts to 0-based). */
 function click(vt: VirtualTerminal, x: number, y: number): void {
   vt.sendInput(`\x1b[<0;${x};${y}M`)
@@ -1726,7 +1733,7 @@ test('blank-row collapse works when the Thought header scrolled OUT of view (pla
   // the new fallback.
   const echoY = findRow(view, 'Bash echo done')
   assert.ok(echoY >= 0, `the second tool card must be visible at the tail:\n${view.join('\n')}`)
-  assert.equal(view[echoY - 1].trim(), '', `the clicked row must be a blank visual row:\n${view.join('\n')}`)
+  assert.ok(isBlankRow(view[echoY - 1]), `the clicked row must be a blank visual row:\n${view.join('\n')}`)
   // Click the blank row (0-based `echoY - 1`): the Thought collapses and
   // its header anchors back into view — the existing collapse anchor, no
   // new scrolling (plan §18).
@@ -1777,7 +1784,7 @@ test('a secondary content row toggles only the secondary; the adjacent blank row
   const topView = vt.getViewport()
   const topBashY = findRow(topView, 'Bash cmd 1')
   assert.ok(topBashY >= 0, `Bash card missing at the top:\n${topView.join('\n')}`)
-  assert.equal(topView[topBashY - 1].trim(), '', `the clicked row must be a blank visual row:\n${topView.join('\n')}`)
+  assert.ok(isBlankRow(topView[topBashY - 1]), `the clicked row must be a blank visual row:\n${topView.join('\n')}`)
   click(vt, 3, topBashY)
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
@@ -1844,7 +1851,7 @@ test('a blank-row click collapses ONLY the owning Thought (plan §23.4)', async 
   // only turn 2 collapses.
   const bash2Y = findRow(view, 'Bash cmd 2')
   assert.ok(bash2Y >= 0, `turn-2 Bash card missing:\n${joined}`)
-  assert.equal(view[bash2Y - 1].trim(), '', `the clicked row must be a blank spacer row:\n${joined}`)
+  assert.ok(isBlankRow(view[bash2Y - 1]), `the clicked row must be a blank spacer row:\n${joined}`)
   click(vt, 3, bash2Y)
   await vt.waitForRender()
   assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1], 'only the OWNING Thought collapses')
@@ -1874,7 +1881,7 @@ test('clicking a blank row that belongs to NO Thought is a no-op (plan §23.5)',
   const finalY = findRow(vt.getViewport(), 'done 1')
   assert.ok(finalY >= 0, `final assistant missing:\n${vt.getViewport().join('\n')}`)
   const blankView = vt.getViewport()
-  assert.equal(blankView[finalY + 2].trim(), '', `the clicked row must be blank and outside every Thought region:\n${blankView.join('\n')}`)
+  assert.ok(isBlankRow(blankView[finalY + 2]), `the clicked row must be blank and outside every Thought region:\n${blankView.join('\n')}`)
   const before = [...app.focusExpandedTurnsForTest()]
   click(vt, 3, finalY + 3) // two blank rows below the final
   await vt.waitForRender()
@@ -1937,7 +1944,7 @@ test('the blank-row fallback never pierces an open overlay (plan §23.7)', async
   const overlayView = vt.getViewport()
   const bashY = findRow(overlayView, 'Bash cmd 1')
   assert.ok(bashY >= 0, `Bash card missing:\n${overlayView.join('\n')}`)
-  assert.equal(overlayView[bashY - 1].trim(), '', `the clicked row must be blank:\n${overlayView.join('\n')}`)
+  assert.ok(isBlankRow(overlayView[bashY - 1]), `the clicked row must be blank:\n${overlayView.join('\n')}`)
   click(vt, 3, bashY)
   await vt.waitForRender()
   assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'an open overlay must block the blank-row collapse')
@@ -1988,7 +1995,7 @@ test('resize keeps the blank-row click map aligned (plan §23.8)', async () => {
   view = vt.getViewport()
   const echoY = findRow(view, 'Bash echo done')
   assert.ok(echoY >= 0, `the second tool card missing after resize:\n${view.join('\n')}`)
-  assert.equal(view[echoY - 1].trim(), '', `the clicked row must still be the interior blank after resize:\n${view.join('\n')}`)
+  assert.ok(isBlankRow(view[echoY - 1]), `the clicked row must still be the interior blank after resize:\n${view.join('\n')}`)
   // The frame painted at the new size (the paint probe stamped it), so
   // the interior blank above the second tool card collapses the Thought
   // with the header anchored — no stale frame involved.
@@ -2041,7 +2048,7 @@ test('a blank-row click BEFORE the first paint after a resize is dropped — reb
   view = vt.getViewport()
   const echoY = findRow(view, 'Bash echo done')
   assert.ok(echoY >= 0, `second tool card missing after the paint:\n${view.join('\n')}`)
-  assert.equal(view[echoY - 1].trim(), '', 'the clicked row must be blank')
+  assert.ok(isBlankRow(view[echoY - 1]), 'the clicked row must be blank')
   click(vt, 3, echoY)
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
@@ -2176,7 +2183,7 @@ test('a zero-height trailing process row must not turn the boundary spacer into 
   // clicking it must be a no-op, never a collapse.
   const doneY = findRow(view, 'Done.')
   assert.ok(doneY >= 0, `final missing:\n${view.join('\n')}`)
-  assert.equal(view[doneY - 1].trim(), '', 'precondition: the clicked row is blank')
+  assert.ok(isBlankRow(view[doneY - 1]), 'precondition: the clicked row is blank')
   click(vt, 3, doneY)
   await vt.waitForRender()
   assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'the boundary spacer must stay a no-op')
@@ -2209,7 +2216,7 @@ test('a Thought with NO process cards: the header trailing spacer stays a no-op'
   assert.ok(headerY >= 0, `expanded header missing:\n${view.join('\n')}`)
   // No process rows follow the header: its trailing spacer is the
   // boundary before the final — a no-op, never a collapse.
-  assert.equal(view[headerY + 1].trim(), '', 'precondition: the row below the header is blank')
+  assert.ok(isBlankRow(view[headerY + 1]), 'precondition: the row below the header is blank')
   click(vt, 3, headerY + 2)
   await vt.waitForRender()
   assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'the no-card Thought blank must be a no-op')
@@ -2241,7 +2248,7 @@ test('the boundary spacer between two adjacent Thoughts is a no-op', async () =>
   // never touch turn 2 (its header row is not the click target).
   const t2y = findRow(view, '🐋 Thought')
   assert.ok(t2y >= 0, `turn-2 header missing:\n${view.join('\n')}`)
-  assert.equal(view[t2y - 1].trim(), '', 'precondition: the clicked row is blank')
+  assert.ok(isBlankRow(view[t2y - 1]), 'precondition: the clicked row is blank')
   click(vt, 3, t2y)
   await vt.waitForRender()
   assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1], 'the boundary blank must not collapse the neighbor')
@@ -2268,7 +2275,7 @@ test('the collapsed header block trailing spacer stays a no-op — never expands
   // expanded, so nothing collapses; it must not toggle-open either).
   const toolY = findRow(view, 'Tool:')
   assert.ok(toolY >= 0, `collapsed preview missing:\n${view.join('\n')}`)
-  assert.equal(view[toolY + 1].trim(), '', 'precondition: the clicked row is blank')
+  assert.ok(isBlankRow(view[toolY + 1]), 'precondition: the clicked row is blank')
   click(vt, 3, toolY + 2)
   await vt.waitForRender()
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'the collapsed block blank must not expand the Thought')

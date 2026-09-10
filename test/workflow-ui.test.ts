@@ -903,3 +903,42 @@ test('a clean phase manually opened then batch-grown closes while the run reopen
   assert.equal(runChevron(view), '▼', `a new clean cycle must reopen the run:\n${view}`)
   assert.ok(view.includes('▶ Unassigned 2 agents'), `the clean phase must fold despite the explicit open:\n${view}`)
 })
+
+test('a workflow member press cannot transfer to the aggregate View row after a 5→6 switch (mouse parity)', async () => {
+  const actions: WorkflowAction[] = []
+  const { vt, app } = startApp({ onWorkflowAction: action => actions.push(action) })
+  app.setFullscreen(true)
+  const message = workflow({ members: [
+    ...Array.from({ length: 5 }, (_, i) => member(i, `a${i}`, 'A', 'running')),
+  ] })
+  app.setTranscript([message])
+  let view = await viewport(vt)
+  const memberRow = rowOf(view, 'a1 — running')
+  // Press the second member (no release): the press identity is
+  // workflow:member:run-1:1:child-1 — the cell the aggregate View row
+  // takes over after the 5→6 switch.
+  vt.sendInput(`\x1b[<0;10;${memberRow + 1}M`)
+  await vt.waitForRender()
+  // The SIXTH member arrives: the SAME message object mutates in place
+  // (the object token is unchanged) and the phase switches to the
+  // aggregate summary layout — the pressed cell becomes the View row.
+  message.members = [...message.members, member(5, 'a5', 'A', 'running')]
+  app.setTranscript([message])
+  await vt.waitForRender()
+  view = await viewport(vt)
+  const viewRow = rowOf(view, 'View 6 agents')
+  assert.equal(viewRow, memberRow, `the aggregate View row must occupy the pressed cell:\n${view}`)
+  // Release on the same cell: the click must NOT emit the phase-agents
+  // action (the press identity is the member, not the aggregate row).
+  vt.sendInput(`\x1b[<0;10;${memberRow + 1}m`)
+  await vt.waitForRender()
+  assert.deepEqual(actions, [], `the stale member press must not open the aggregate view:\n${vt.getViewport().join('\n')}`)
+  // A fresh click on the aggregate row emits the scoped action.
+  await clickCell(vt, 10, viewRow)
+  await vt.waitForRender()
+  assert.deepEqual(actions, [{
+    kind: 'open-phase-agents', runId: 'run-1', name: 'audit', phaseLabel: 'A',
+    childIds: ['child-0', 'child-1', 'child-2', 'child-3', 'child-4', 'child-5'],
+  }], `a fresh aggregate click must emit the scoped action`)
+  app.stop()
+})

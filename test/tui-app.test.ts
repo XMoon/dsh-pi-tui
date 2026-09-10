@@ -1014,6 +1014,341 @@ test('fullscreen click on the todo summary dock row opens the todo panel', async
   app.stop()
 })
 
+test('fullscreen todo: a dock press cannot run the panel action after a keyboard toggle (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 9 }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? ('in_progress' as const) : i % 3 === 1 ? ('pending' as const) : ('completed' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
+  assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal; the closed panel renders
+  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
+  // row).
+  const dockY = 18
+  // Press the dock row (no release): the press identity is todo:dock.
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  await vt.waitForRender()
+  // Keyboard todo-toggle (Ctrl+T) while the mouse is held: the panel
+  // opens, the dock vanishes, and the same physical cell becomes a panel
+  // row.
+  vt.sendInput('\x14')
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(app.isTodoPanelVisible(), 'the keyboard toggle must open the panel')
+  assert.ok(!app.isTodoPanelExpanded(), 'opens compact')
+  assert.ok((view[dockY] ?? '').includes('todo item'), `the pressed cell must now be a panel row:\n${view.join('\n')}`)
+  // Release on the same cell: the click must NOT run the panel action
+  // (the press identity is todo:dock, the current surface is the panel).
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'the panel must stay open')
+  assert.ok(!app.isTodoPanelExpanded(), `the dock press must not expand the panel:\n${vt.getViewport().join('\n')}`)
+  // A fresh panel press/release runs the panel action (compact → full).
+  await sleepBeyondTodoCoalesce()
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelExpanded(), `a fresh panel press must expand the panel:\n${vt.getViewport().join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen todo: a dock press cannot toggle the panel across a session switch (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 9 }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? ('in_progress' as const) : i % 3 === 1 ? ('pending' as const) : ('completed' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
+  assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal; the closed panel renders
+  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
+  // row).
+  const dockY = 18
+  // Press the dock row (no release): the press identity is todo:dock.
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  await vt.waitForRender()
+  // Session switch while the mouse is held: the new session reuses the
+  // same dock geometry, and the todo identities are generic (todo:dock /
+  // todo:panel) — only the session-boundary gesture clear rejects the
+  // stale press.
+  app.clearSessionOverrides()
+  app.setTodoSummary(todos)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `the dock must still render after the switch:\n${view.join('\n')}`)
+  // Release on the same cell: the click must NOT toggle the panel (the
+  // session boundary cancelled the in-flight gesture).
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), `the stale session press must not toggle the panel:\n${vt.getViewport().join('\n')}`)
+  // A fresh dock press/release opens the panel (the identity works).
+  await sleepBeyondTodoCoalesce()
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), `a fresh dock press must open the panel:\n${vt.getViewport().join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen transcript click: a click that resolves to no cell consumes the stale latch (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release): the press-time identity is A.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  const gesture = (app as unknown as { fullscreenCellGesture: unknown }).fullscreenCellGesture
+  assert.ok(gesture !== undefined, 'the press must record a gesture')
+  // Remove the message: the release cell now resolves to no transcript
+  // cell.
+  app.setTranscript([])
+  await vt.waitForRender()
+  // Release on the same cell: the click resolves to nothing and must
+  // consume the stale latch (the identity-fence invariant is literal).
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const after = (app as unknown as { fullscreenCellGesture: unknown }).fullscreenCellGesture
+  assert.equal(after, undefined, 'a click that resolves to no cell must consume the stale latch')
+  app.stop()
+})
+
+test('fullscreen todo: a session switch resets the click-coalescing window (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 9 }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? ('in_progress' as const) : i % 3 === 1 ? ('pending' as const) : ('completed' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
+  assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
+  const dockY = 18
+  // A completed todo click in session A opens the panel AND sets the
+  // click-coalescing window.
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'the click must open the panel')
+  // Session switch while the coalescing window is still active.
+  app.clearSessionOverrides()
+  app.setTodoSummary(todos)
+  await vt.waitForRender()
+  // Close the panel (keyboard toggle — it does not touch the mouse
+  // coalescing window).
+  vt.sendInput('\x14')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'the panel must close')
+  // A fresh dock press/release in session B IMMEDIATELY (inside the old
+  // session's coalescing window; a different column so the fork never
+  // reads a double-click): the panel must open — the new session must not
+  // inherit the old click-coalescing window.
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), `a fresh click in the new session must open the panel:\n${vt.getViewport().join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press on the tool message row (no release yet): the press-time
+  // identity is msg:tool:0.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // Replace the transcript with a DIFFERENT message (turn 1) and repaint:
+  // the same physical row now shows the new message.
+  app.setTranscript([{
+    kind: 'tool', turn: 1, name: 'grep', args: '{"pattern":"BBB"}',
+    result: 'BBB', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok((after[row] ?? '').includes('BBB'), `new message must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the synthesized click must NOT toggle the
+  // new message (press identity msg:tool:0 ≠ current identity msg:tool:1).
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  // The new message must stay FOLDED (exactly its one header row): a
+  // stale press must not expand whatever repainted onto the cell.
+  assert.equal(final.filter(line => line.includes('BBB')).length, 1, `the repainted message must not be expanded by the stale press:\n${final.join('\n')}`)
+  app.stop()
+})
+
+test('fullscreen transcript click: a press on a local card cannot transfer to a repainted local card (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Two local shell cards share kind 'tool' AND turn Infinity — the
+  // content-derived identity is not unique; only the per-message token
+  // distinguishes them.
+  app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: '!first', result: 'FIRST_RESULT', status: 'ok',
+  })
+  app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: '!second', result: '', status: 'running',
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('!first'))
+  assert.ok(row >= 0, `first card row missing:\n${view.join('\n')}`)
+  // Press the first card's row (no release yet): the press-time identity
+  // is first's per-message token.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // clearSettledLocalMessages removes the settled first card; the running
+  // second card survives and shifts onto the pressed cell.
+  app.clearSettledLocalMessages()
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok((after[row] ?? '').includes('!second'), `the running card must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the synthesized click must NOT expand the
+  // running card (press identity = first's token ≠ current = second's token).
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const overrides = (app as unknown as { expandedOverride: Map<unknown, boolean> }).expandedOverride
+  assert.equal(overrides.size, 0, `the stale press must not expand the repainted card:\n${vt.getViewport().join('\n')}`)
+  app.stop()
+})
+
+test('fullscreen transcript click: a resize between press and release cannot act against the stale frame (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release yet).
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // Resize WITHOUT repainting: the snapshot still reflects the old frame,
+  // so the release must not act against it (the release-time geometry
+  // guard consumes the gesture).
+  vt.resize(100, 30)
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  assert.equal(final.filter(line => line.includes('AAA')).length, 1, `the stale-frame release must not expand the message:\n${final.join('\n')}`)
+  app.stop()
+})
+
+test('fullscreen transcript click: a resize + repaint between press and release cannot transfer the gesture (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release yet): the press resolved
+  // against the 80x24 frame.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // Resize AND repaint: the new frame commits a snapshot at the new
+  // dimensions — the same owner/row may sit on the release cell, but the
+  // press began on the OLD geometry, so the gesture must not transfer.
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  assert.equal(final.filter(line => line.includes('AAA')).length, 1, `the cross-frame release must not expand the message:\n${final.join('\n')}`)
+  app.stop()
+})
+
+test('fullscreen transcript click: a question-frame press clears the stale background gesture (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release): the press-time identity is A.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // A question takes over the seat (its frame covers the bottom rows).
+  const answers = app.askQuestions([{ id: 'q1', question: 'Q1', options: [{ label: 'Yes' }] }])
+  answers.catch(() => {})
+  await vt.waitForRender()
+  // Press the SAME row again while the question is up — at a DIFFERENT
+  // column (a different word, so the fork never reads a double-click):
+  // the question branch must clear the stale background gesture — a
+  // release after the question closes must not resurrect it.
+  vt.sendInput(`\x1b[<0;20;${row + 1}M`)
+  await vt.waitForRender()
+  // Esc closes the question before the mouse release.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  // Release on the same cell: the click must NOT toggle the background
+  // message (the stale gesture was cleared by the question-frame press).
+  vt.sendInput(`\x1b[<0;20;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  assert.equal(final.filter(line => line.includes('AAA')).length, 1, `the stale background gesture must not toggle the message:\n${final.join('\n')}`)
+  answers.catch(() => {})
+  app.stop()
+})
+
 test('the footer badge combines tasks and live agents, hint only on an empty editor', async () => {
   const { vt, app } = startApp()
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
@@ -2917,4 +3252,166 @@ test('categorized picker onFilterChange never fires after the app is disposed', 
   handle.setFilter?.('bar')
   await vt.waitForRender()
   assert.deepEqual(changes, ['foo'], 'a disposed app must not report filter changes')
+})
+
+test('fullscreen openPicker responds to mouse clicks (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const picked: string[] = []
+  app.openPicker(
+    [
+      { value: 'first', label: 'first choice' },
+      { value: 'second', label: 'second choice' },
+      { value: 'third', label: 'third choice' },
+    ],
+    (value) => { picked.push(value) },
+    () => {},
+    { header: 'Choices', showHint: true },
+  )
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  const secondRow = viewport.findIndex(line => line.includes('second choice'))
+  assert.ok(secondRow >= 0, `second choice row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[secondRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'picker frame left border missing')
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${secondRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${secondRow + 1}m`)
+  await vt.waitForRender()
+  assert.deepEqual(picked, ['second'], 'clicking the second item must activate it')
+  app.dispose()
+})
+
+test('question: press Q1 option → keyboard advance → release same cell must not activate Q2 (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Q2', options: [{ label: 'C' }, { label: 'D' }] },
+  ])
+  await vt.waitForRender()
+  // Q1: option A on some row.
+  const view = vt.getViewport()
+  const rowA = view.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, `option A missing:\n${view.join('\n')}`)
+  // Press option A (no release yet): the press-time identity is Q1/A.
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}M`)
+  await vt.waitForRender()
+  // Keyboard Enter advances to Q2.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  // Q2: option C now occupies the same physical row.
+  const after = vt.getViewport()
+  assert.ok((after[rowA] ?? '').includes('[1] C'), `option C must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the synthesized click must NOT activate C
+  // (press identity Q1/A ≠ current identity Q2/C).
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}m`)
+  await vt.waitForRender()
+  // Q2 must not be answered: the flow stays on Q2 (not advanced to submit).
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('?  Q2')), `the flow must still be on Q2:\n${final.join('\n')}`)
+  // stop() cancels the still-open flow: consume the rejection.
+  answers.catch(() => {})
+  app.stop()
+})
+
+test('question: a queued flow cannot consume the previous flow press (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers1 = app.askQuestions([
+    { id: 'q1', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+  ])
+  const answers2 = app.askQuestions([
+    { id: 'q1', question: 'Q1', options: [{ label: 'C' }, { label: 'D' }] },
+  ])
+  await vt.waitForRender()
+  // F1: option A on some row. Press it (no release): the press-time
+  // identity belongs to F1's flow instance.
+  const view = vt.getViewport()
+  const rowA = view.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, `option A missing:\n${view.join('\n')}`)
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}M`)
+  await vt.waitForRender()
+  // Keyboard completes F1: Enter confirms A, Enter submits the review.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  // F2 (queued, same question id) takes over: option C on the same row.
+  const after = vt.getViewport()
+  assert.ok((after[rowA] ?? '').includes('[1] C'), `option C must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: F2 must NOT consume F1's press (the
+  // gesture object belongs to F1's flow instance).
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}m`)
+  await vt.waitForRender()
+  // F2 must not be answered: the flow stays on F2's Q1.
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('?  Q1')), `the flow must still be on F2's Q1:\n${final.join('\n')}`)
+  answers1.catch(() => {})
+  answers2.catch(() => {})
+  app.stop()
+})
+
+test('question: a press cannot transfer to the next question with a duplicate id (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'same', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'same', question: 'Q2', options: [{ label: 'C' }, { label: 'D' }] },
+  ])
+  await vt.waitForRender()
+  // Q1: option A on some row. Press it (no release): the press-time
+  // identity is Q1's question INDEX + option A.
+  const view = vt.getViewport()
+  const rowA = view.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, `option A missing:\n${view.join('\n')}`)
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}M`)
+  await vt.waitForRender()
+  // Keyboard Enter confirms A and advances to Q2 (same caller id).
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  // Q2: option C now occupies the same physical row.
+  const after = vt.getViewport()
+  assert.ok((after[rowA] ?? '').includes('[1] C'), `option C must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the press from Q1 must NOT activate Q2's C
+  // (the question INDEX changed even though the caller id is duplicated).
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}m`)
+  await vt.waitForRender()
+  // Q2 must not be answered: the flow stays on Q2.
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('?  Q2')), `the flow must still be on Q2:\n${final.join('\n')}`)
+  answers.catch(() => {})
+  app.stop()
+})
+
+test('question: Esc between press and release cannot re-enter the free-text edit (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Type your answer' },
+  ])
+  await vt.waitForRender()
+  // Enter the free-text edit.
+  vt.sendInput('h')
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const pinnedRow = view.findIndex(line => line.includes('h') && !line.includes('dsh'))
+  assert.ok(pinnedRow >= 0, `pinned input row missing:\n${view.join('\n')}`)
+  // ONE continuous batch: press the input row, Esc (exits the edit),
+  // release the same cell — all before the next repaint. The stale
+  // edit-state press must NOT re-enter the edit.
+  vt.sendInput(`\x1b[<0;3;${pinnedRow + 1}M`)
+  vt.sendInput('\x1b')
+  vt.sendInput(`\x1b[<0;3;${pinnedRow + 1}m`)
+  await vt.waitForRender()
+  // The flow must stay in the navigation state.
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('↵ edit')), `the flow must stay in the navigation state:\n${final.join('\n')}`)
+  assert.ok(!final.some(line => line.includes('↵ confirm')), 'the release must not re-enter the edit')
+  answers.catch(() => {})
+  app.stop()
 })

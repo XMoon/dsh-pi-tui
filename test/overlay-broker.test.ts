@@ -40,6 +40,7 @@ function fakeHandle(label: string): OverlayHandle & { label: string; hiddenLog: 
     focus() {},
     unfocus() {},
     isFocused() { return false },
+    getBounds() { return undefined },
   }
   return handle
 }

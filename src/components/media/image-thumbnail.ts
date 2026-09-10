@@ -42,6 +42,7 @@ export class ImageThumbnail implements Component {
   private readonly theme: ImageThumbnailTheme
   private readonly ref: ImageAttachmentRefLike
   private readonly collapsedRef: (() => boolean) | undefined
+  private readonly requestRender: () => void
   private unsubscribe: (() => void) | undefined
   private instance: Image | undefined
   private cachedLines: string[] | undefined
@@ -51,17 +52,25 @@ export class ImageThumbnail implements Component {
     ref: ImageAttachmentRefLike,
     loader: ImageLoader,
     theme: ImageThumbnailTheme,
+    requestRender: () => void,
     collapsedRef?: () => boolean,
   ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.ref = ref
     this.loader = loader
     this.theme = theme
+    this.requestRender = requestRender
     this.collapsedRef = collapsedRef
     // Subscribe to THIS attachment's settles only: N thumbnails loading in
     // parallel never invalidate each other (review finding 8 — no O(N²)
-    // repaint churn, no kitty image-id churn).
-    this.unsubscribe = loader.subscribe(ref.attachmentId, () => this.invalidate())
+    // repaint churn, no kitty image-id churn). A settle clears the render
+    // cache AND schedules the next frame: an async load that resolves
+    // between frames must repaint with the resolved bytes (the loader
+    // itself never schedules a frame).
+    this.unsubscribe = loader.subscribe(ref.attachmentId, () => {
+      this.invalidate()
+      this.requestRender()
+    })
   }
 
   /** Whether this thumbnail participates in the fullscreen collapse

@@ -14,6 +14,7 @@ import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { ImageLoader } from '../src/image/loader.ts'
+import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
@@ -360,6 +361,297 @@ test('the same attachment twice in ONE message collapses per block index', async
   await settleClick(vt)
   const reExpanded = await rowOf(vt, 'NEXT', 'after re-expanding the first block')
   assert.equal(reExpanded, afterSecond + (before - afterFirst), 'only the first block re-expanded')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('an attachment press cannot transfer to a sibling after an async image growth (mouse parity)', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const vt = new VirtualTerminal(100, 24)
+  const pending: Array<() => void> = []
+  const loader = new ImageLoader(() => new Promise(resolve => { pending.push(() => resolve({ ref: {}, data: pngBytes() })) }))
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    imageLoader: loader,
+    imageTheme: { fallbackColor: (text) => text },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', seq: 1, time: 1, data: { content: [
+      { type: 'text', text: 'check' },
+      { type: 'image', attachment: IMAGE_REF },
+      { type: 'image', attachment: IMAGE_REF_2 },
+    ], source: { kind: 'user' } } },
+  ] as never[])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  // Both images are still loading (info bar only).
+  const bRow = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar row')
+  // Press B's info bar (no release): the press identity is
+  // attachment:<token>:1.
+  vt.sendInput(`\x1b[<0;4;${bRow}M`)
+  await vt.waitForRender()
+  // Image A loads and grows: the SAME message object is unchanged, A's
+  // rows insert below A, and the old B cell falls inside A's range. The
+  // loader settle only invalidates the thumbnail (it does not schedule a
+  // frame), so the test waits for the settle notification and drives the
+  // repaint explicitly.
+  const settled = new Promise<void>(resolve => {
+    const unsubscribe = loader.subscribe(IMAGE_REF.attachmentId, () => { unsubscribe(); resolve() })
+  })
+  pending[0]!()
+  await settled
+  app.requestRender()
+  await vt.waitForRender()
+  const after = await viewport(vt)
+  const aInfo = await rowOf(vt, '🖼️ shot.png · 800×100', 'A info bar row')
+  assert.ok(aInfo < bRow, `A's growth must push B down:\n${after}`)
+  // Release on the old cell: the click must NOT toggle A (the press
+  // identity is B's attachment).
+  vt.sendInput(`\x1b[<0;4;${bRow}m`)
+  await vt.waitForRender()
+  const collapsed = (app as unknown as { collapsedOccurrences: Map<unknown, Set<number>> }).collapsedOccurrences
+  assert.equal(collapsed.size, 0, `the stale attachment press must not toggle a sibling:\n${vt.getViewport().join('\n')}`)
+  app.stop()
+})
+
+test('an async image load that settles between frames repaints automatically (host load-notify gap)', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const vt = new VirtualTerminal(100, 24)
+  const pending: Array<() => void> = []
+  const loader = new ImageLoader(() => new Promise(resolve => { pending.push(() => resolve({ ref: {}, data: pngBytes() })) }))
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    imageLoader: loader,
+    imageTheme: { fallbackColor: (text) => text },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', seq: 1, time: 1, data: { content: [
+      { type: 'text', text: 'check' },
+      { type: 'image', attachment: IMAGE_REF },
+    ], source: { kind: 'user' } } },
+    { type: 'user/message', seq: 2, time: 2, data: { content: [
+      { type: 'text', text: 'NEXT' },
+    ], source: { kind: 'user' } } },
+  ] as never[])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  // The image is still loading (info bar only): the NEXT message sits
+  // right below it.
+  const before = await rowOf(vt, 'NEXT', 'loading layout')
+  // The deferred read resolves BETWEEN frames: the loader settle only
+  // invalidates the thumbnail — the thumbnail's own requestRender must
+  // schedule the repaint with the resolved bytes (no explicit
+  // app.requestRender in this test).
+  pending[0]!()
+  await vt.waitForRender()
+  const after = await viewport(vt)
+  const afterRow = await rowOf(vt, 'NEXT', 'grown layout')
+  assert.ok(afterRow > before, `the image growth must repaint automatically:\n${after}`)
+  app.stop()
+})
+
+test('a live out-of-order image close cannot transfer collapse state to the earlier occurrence', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } },
+    { type: 'step/start', seq: 1, time: 2, data: { turn: 0, step: 0 } },
+  ] as never[])
+  const input = (chunk: AssistantLiveChunk, time: number): void => folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time, chunk,
+  })
+  // Block 0 (image A) starts and stays OPEN while block 1 (image B) starts
+  // AND closes first — the DSH stream invariant allows out-of-order closes.
+  input({ type: 'block-start', index: 0, blockType: 'image' }, 3)
+  input({ type: 'block-start', index: 1, blockType: 'image' }, 4)
+  input({ type: 'block-end', index: 1, block: { type: 'image', attachment: IMAGE_REF_2 } }, 5)
+  folder.apply([
+    { type: 'user/message', seq: 2, time: 6, data: { content: [
+      { type: 'text', text: 'NEXT' },
+    ], source: { kind: 'user' } } },
+  ] as never[])
+  app.setTranscript(folder.messages())
+  // B renders as the FIRST thumbnail (A is still an open opaque row): the
+  // old ordinal identity would give B index 0.
+  const bInfo = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar')
+  click(vt, 4, bInfo)
+  await settleClick(vt)
+  // A closes AFTER B was collapsed: A must NOT inherit B's collapse state.
+  input({ type: 'block-end', index: 0, block: { type: 'image', attachment: IMAGE_REF } }, 7)
+  app.setTranscript(folder.messages())
+  const view = await viewport(vt)
+  const aInfo = await rowOf(vt, '🖼️ shot.png · 800×100', 'A info bar')
+  const bInfoAfter = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar after A closes')
+  const nextRow = await rowOf(vt, 'NEXT', 'NEXT row')
+  // A is expanded: its image rows sit between the two info bars.
+  assert.ok(bInfoAfter - aInfo > 1, `A must stay expanded (its image rows sit between the info bars):\n${view}`)
+  // B is collapsed: only the trailing spacer separates B's info bar from NEXT.
+  assert.equal(nextRow - bInfoAfter, 2, `B must stay collapsed (only the spacer between B and NEXT):\n${view}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a live out-of-order image close cannot transfer a press to the earlier occurrence', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const vt = new VirtualTerminal(100, 24)
+  const pending: Array<() => void> = []
+  // Only A's load defers: B resolves immediately, so `pending[0]` is A's
+  // read (the same single-deferred pattern as the sibling growth test).
+  const loader = new ImageLoader((ref) => ref.attachmentId === IMAGE_REF.attachmentId
+    ? new Promise(resolve => { pending.push(() => resolve({ ref: {}, data: pngBytes() })) })
+    : Promise.resolve({ ref: {}, data: pngBytes() }))
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    imageLoader: loader,
+    imageTheme: { fallbackColor: (text) => text },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } },
+    { type: 'step/start', seq: 1, time: 2, data: { turn: 0, step: 0 } },
+  ] as never[])
+  const input = (chunk: AssistantLiveChunk, time: number): void => folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time, chunk,
+  })
+  input({ type: 'block-start', index: 0, blockType: 'image' }, 3)
+  input({ type: 'block-start', index: 1, blockType: 'image' }, 4)
+  input({ type: 'block-end', index: 1, block: { type: 'image', attachment: IMAGE_REF_2 } }, 5)
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  // B is the first rendered thumbnail (A is still an open opaque row) and
+  // still loading (info bar only).
+  const bRow = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar row')
+  // Press B's info bar (no release): the press identity is B's occurrence.
+  vt.sendInput(`\x1b[<0;4;${bRow}M`)
+  await vt.waitForRender()
+  // A closes and grows: the old B cell falls inside A's range. The loader
+  // settle only invalidates the thumbnail (it does not schedule a frame),
+  // so the test waits for the settle notification and drives the repaint
+  // explicitly.
+  input({ type: 'block-end', index: 0, block: { type: 'image', attachment: IMAGE_REF } }, 6)
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const settled = new Promise<void>(resolve => {
+    const unsubscribe = loader.subscribe(IMAGE_REF.attachmentId, () => { unsubscribe(); resolve() })
+  })
+  pending[0]!()
+  await settled
+  app.requestRender()
+  await vt.waitForRender()
+  const after = await viewport(vt)
+  const aInfo = await rowOf(vt, '🖼️ shot.png · 800×100', 'A info bar row')
+  assert.ok(aInfo < bRow, `A's growth must push B down past the old cell:\n${after}`)
+  // Release on the old cell: the click must NOT toggle A (the press
+  // identity is B's occurrence, not the ordinal that A now owns).
+  vt.sendInput(`\x1b[<0;4;${bRow}m`)
+  await vt.waitForRender()
+  const collapsed = (app as unknown as { collapsedOccurrences: Map<unknown, Set<number>> }).collapsedOccurrences
+  assert.equal(collapsed.size, 0, `the stale live press must not toggle the earlier occurrence:\n${vt.getViewport().join('\n')}`)
+  app.stop()
+})
+
+test('a later first-seen lower-index image cannot inherit an earlier occurrence\'s collapse', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } },
+    { type: 'step/start', seq: 1, time: 2, data: { turn: 0, step: 0 } },
+  ] as never[])
+  const input = (chunk: AssistantLiveChunk, time: number): void => folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time, chunk,
+  })
+  // index 1 (image B) is FIRST-SEEN and closes before index 0 (image A)
+  // ever appears: the canonical DSH BlockAssembler order is first-seen
+  // stream order, so B is occurrence 0 and stays occurrence 0.
+  input({ type: 'block-start', index: 1, blockType: 'image' }, 3)
+  input({ type: 'block-end', index: 1, block: { type: 'image', attachment: IMAGE_REF_2 } }, 4)
+  folder.apply([
+    { type: 'user/message', seq: 2, time: 5, data: { content: [
+      { type: 'text', text: 'NEXT' },
+    ], source: { kind: 'user' } } },
+  ] as never[])
+  app.setTranscript(folder.messages())
+  const bInfo = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar')
+  click(vt, 4, bInfo)
+  await settleClick(vt)
+  // A first-seen AFTER B was collapsed: A must NOT inherit B's collapse.
+  input({ type: 'block-start', index: 0, blockType: 'image' }, 6)
+  input({ type: 'block-end', index: 0, block: { type: 'image', attachment: IMAGE_REF } }, 7)
+  app.setTranscript(folder.messages())
+  const view = await viewport(vt)
+  const aInfo = await rowOf(vt, '🖼️ shot.png · 800×100', 'A info bar')
+  const bInfoAfter = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar after A first-seen')
+  const nextRow = await rowOf(vt, 'NEXT', 'NEXT row')
+  // B stays the FIRST block (first-seen order) and stays collapsed (only
+  // the info bar, A right below it).
+  assert.ok(bInfoAfter < aInfo, `B must stay the first block (first-seen order):\n${view}`)
+  assert.equal(aInfo - bInfoAfter, 1, `B must stay collapsed (only the info bar above A):\n${view}`)
+  // A is expanded: its image rows sit between A's info bar and NEXT.
+  assert.ok(nextRow - aInfo > 2, `A must stay expanded (its image rows sit between A and NEXT):\n${view}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a later first-seen lower-index image cannot receive a stale press', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } },
+    { type: 'step/start', seq: 1, time: 2, data: { turn: 0, step: 0 } },
+  ] as never[])
+  const input = (chunk: AssistantLiveChunk, time: number): void => folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time, chunk,
+  })
+  input({ type: 'block-start', index: 1, blockType: 'image' }, 3)
+  input({ type: 'block-end', index: 1, block: { type: 'image', attachment: IMAGE_REF_2 } }, 4)
+  folder.apply([
+    { type: 'user/message', seq: 2, time: 5, data: { content: [
+      { type: 'text', text: 'NEXT' },
+    ], source: { kind: 'user' } } },
+  ] as never[])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const bRow = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar row')
+  // Press B's info bar (no release): the press identity is B's occurrence.
+  vt.sendInput(`\x1b[<0;4;${bRow}M`)
+  await vt.waitForRender()
+  // A first-seen + closes: B stays the first block (first-seen order), so
+  // the old cell is still B's — the release must act on B, never on A.
+  input({ type: 'block-start', index: 0, blockType: 'image' }, 6)
+  input({ type: 'block-end', index: 0, block: { type: 'image', attachment: IMAGE_REF } }, 7)
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;4;${bRow}m`)
+  await vt.waitForRender()
+  const view = await viewport(vt)
+  const aInfo = await rowOf(vt, '🖼️ shot.png · 800×100', 'A info bar')
+  const bInfoAfter = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar after release')
+  const nextRow = await rowOf(vt, 'NEXT', 'NEXT row')
+  // The release collapsed B (the pressed target), never A: B is the first
+  // block and collapsed; A is expanded below it.
+  assert.ok(bInfoAfter < aInfo, `B must stay the first block (first-seen order):\n${view}`)
+  assert.equal(aInfo - bInfoAfter, 1, `the release must collapse B (only the info bar above A):\n${view}`)
+  assert.ok(nextRow - aInfo > 2, `A must stay expanded (its image rows sit between A and NEXT):\n${view}`)
   app.setFullscreen(false)
   app.stop()
 })

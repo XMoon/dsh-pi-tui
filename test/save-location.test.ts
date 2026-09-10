@@ -16,7 +16,8 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationResult } from '../src/save-location.ts'
 import type { DirectoryCompletionItem } from '../src/file-completion/directory-completion.ts'
-import { TuiApp } from '../src/tui-app.ts'
+import { Frame, TuiApp } from '../src/tui-app.ts'
+import { TuiAltScreen } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
@@ -501,4 +502,245 @@ test('app: a Save Location request while a Host question is active is refused', 
   } finally {
     app.dispose()
   }
+})
+
+test('mouse parity: clicking the Directory row positions the private Input cursor', (t) => {
+  const { deps } = fixtureDeps(testLifecycle(t))
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  prompt.handleInput('a')
+  prompt.handleInput('b')
+  prompt.handleInput('c') // value = './abc'
+  const rendered = prompt.render(60)
+  const row = rendered.findIndex(line => line.includes('Directory:'))
+  assert.ok(row >= 0, `directory row missing:\n${rendered.join('\n')}`)
+  // 'Directory: ' occupies 11 columns; the Input's value starts at row
+  // col 11 ('.' at col 11, '/' at col 12, 'a' at col 13, 'b' at col 14).
+  // Input-local x = row x - 9; Input subtracts its '> ' prompt, so
+  // clicking col 14 places the cursor after 'a' (cursor 3).
+  prompt.handleMouse({
+    type: 'press', button: 'left', x: 14, y: row, screenX: 14, screenY: row,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+  })
+  prompt.handleInput('X')
+  assert.equal(prompt.getValue(), './aXbc', 'the click must position the Input cursor')
+})
+
+test('mouse parity: a suggestion press selects and a click accepts it (Tab semantic)', async (t) => {
+  const { deps } = fixtureDeps(testLifecycle(t))
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  assert.equal(prompt.getSuggestions().length, 1, 'precondition — suggestion landed')
+  const rendered = prompt.render(60)
+  const row = rendered.findIndex(line => line.includes('src/'))
+  assert.ok(row >= 0, `suggestion row missing:\n${rendered.join('\n')}`)
+  prompt.handleMouse({
+    type: 'press', button: 'left', x: 2, y: row, screenX: 2, screenY: row,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+  })
+  prompt.handleMouse({
+    type: 'click', button: 'left', x: 2, y: row, screenX: 2, screenY: row,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false, clickCount: 1,
+  })
+  assert.equal(prompt.getValue(), 'src/', 'the click must accept the suggestion like Tab')
+})
+
+test('mouse parity: title, file, error, and hint rows are inert', (t) => {
+  const { deps } = fixtureDeps(testLifecycle(t))
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  const rendered = prompt.render(60)
+  const titleRow = rendered.findIndex(line => line.includes('Save session archive'))
+  const fileRow = rendered.findIndex(line => line.includes('dsh-session-session-abc.zip'))
+  const hintRow = rendered.findIndex(line => line.includes('esc cancel'))
+  assert.ok(titleRow >= 0 && fileRow >= 0 && hintRow >= 0)
+  const event = (y: number) => ({
+    type: 'press' as const, button: 'left' as const, x: 5, y, screenX: 5, screenY: y,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(prompt.handleMouse(event(titleRow)), undefined, 'title must be inert')
+  assert.equal(prompt.handleMouse(event(fileRow)), undefined, 'file row must be inert')
+  assert.equal(prompt.handleMouse(event(hintRow)), undefined, 'hint must be inert')
+})
+
+test('mouse parity: a stale pressed VALUE is released on click mismatch (no ghost accept)', async (t) => {
+  const deps = {
+    resolveDirectory: (input: string) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async (raw: string) =>
+      raw === './' ? [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }] : null,
+  }
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  let rendered = prompt.render(60)
+  const srcRow = rendered.findIndex(line => line.includes('src/'))
+  const libRow = rendered.findIndex(line => line.includes('lib/'))
+  assert.ok(srcRow >= 0 && libRow >= 0, `suggestion rows missing:\n${rendered.join('\n')}`)
+  const press = (y: number) => ({
+    type: 'press' as const, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+  })
+  const click = (y: number) => ({
+    type: 'click' as const, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false, clickCount: 1,
+  })
+  prompt.handleMouse(press(srcRow)) // pressed identity = 'src/'
+  const p = prompt as unknown as { suggestions: Array<{ value: string; label: string }>; mousePressedValue: string | undefined }
+  assert.equal(p.mousePressedValue, 'src/', 'precondition — pressed identity latched')
+  // An async completion refresh reorders the list WITHOUT a repaint.
+  p.suggestions = [{ value: 'lib/', label: 'lib/' }]
+  // The release click lands on a DIFFERENT row: the mismatch must
+  // RELEASE the pressed identity (no stale latch for a later click).
+  prompt.handleMouse(click(libRow))
+  assert.equal(p.mousePressedValue, undefined, 'the pressed identity must be released on click mismatch')
+  assert.equal(prompt.getValue(), './', 'the mismatched click must not accept anything')
+  // The pressed suggestion returns; a click WITHOUT a fresh press must NOT accept.
+  p.suggestions = [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }]
+  rendered = prompt.render(60)
+  const srcRow2 = rendered.findIndex(line => line.includes('src/'))
+  assert.ok(srcRow2 >= 0)
+  prompt.handleMouse(click(srcRow2))
+  assert.equal(prompt.getValue(), './', 'a click without a fresh press must not accept')
+})
+
+test('mouse parity: the collision confirmation blocks directory-row editing (inert while confirming)', (t) => {
+  const { deps } = fixtureDeps(testLifecycle(t))
+  let result: SaveLocationResult | undefined
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    (value) => { result = value },
+  )
+  prompt.handleInput('out')
+  prompt.handleInput('\r') // target exists → confirmation state
+  assert.equal(prompt.isConfirming(), true, 'precondition — confirmation state')
+  const rendered = prompt.render(60)
+  const directoryRow = rendered.findIndex(line => line.includes('Directory:'))
+  assert.ok(directoryRow >= 0)
+  const before = prompt.getValue()
+  const handled = prompt.handleMouse({
+    type: 'press', button: 'left', x: 14, y: directoryRow, screenX: 14, screenY: directoryRow,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(handled, undefined, 'the confirmation must be inert to mouse input')
+  assert.equal(prompt.getValue(), before, 'the directory value must not change')
+  assert.equal(result, undefined, 'the confirmation must not settle')
+})
+
+test('mouse parity: a REAL wheel event (button "none") moves the suggestion selection', async (t) => {
+  const deps = {
+    resolveDirectory: (input: string) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async (raw: string) =>
+      raw === './' ? [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }] : null,
+  }
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  const rendered = prompt.render(60)
+  const libRow = rendered.findIndex(line => line.includes('lib/'))
+  assert.ok(libRow >= 0, `suggestion rows missing:\n${rendered.join('\n')}`)
+  // The TUI normalizes wheel events with button "none" — the wheel must
+  // move the suggestion cursor despite the left-button gate.
+  const result = prompt.handleMouse({
+    type: 'wheel', button: 'none', x: 2, y: libRow, screenX: 2, screenY: libRow,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false, wheelDelta: 1,
+  })
+  assert.ok(result?.handled, 'the wheel over a suggestion must be handled')
+  const state = prompt as unknown as { suggestionCursor: number }
+  assert.strictEqual(state.suggestionCursor, 1, 'the wheel must move the suggestion selection')
+})
+
+test('alt-screen integration: a real SGR wheel reaches the prompt through the frame (button "none")', async (t) => {
+  const deps = {
+    resolveDirectory: (input: string) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async (raw: string) =>
+      raw === './' ? [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }] : null,
+  }
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  const frame = new Frame(prompt, true)
+  const vt = new VirtualTerminal(100, 24)
+  const tui = new TuiAltScreen(vt)
+  tui.start()
+  try {
+    tui.showOverlay(frame)
+    await vt.waitForRender()
+    await new Promise<void>(resolve => setTimeout(resolve, 10)) // suggestions land
+    await vt.waitForRender()
+    const viewport = vt.getViewport()
+    const srcRow = viewport.findIndex(line => line.includes('src/'))
+    assert.ok(srcRow >= 0, `suggestion row missing:\n${viewport.join('\n')}`)
+    const state = prompt as unknown as { suggestionCursor: number }
+    assert.strictEqual(state.suggestionCursor, 0, 'precondition — first suggestion selected')
+    // SGR wheel down (button 65) over the suggestion row INSIDE the
+    // overlay (the overlay starts at col 10): the alt screen normalizes
+    // it to { type: 'wheel', button: 'none' } and the frame forwards it
+    // to the prompt.
+    vt.sendInput(`\x1b[<65;13;${srcRow + 1}M`)
+    await vt.waitForRender()
+    assert.strictEqual(state.suggestionCursor, 1, 'the real SGR wheel must move the suggestion selection')
+  } finally {
+    tui.stop()
+  }
+})
+
+test('mouse parity: a click on an inert row releases the pressed identity (no stale accept)', async (t) => {
+  const deps = {
+    resolveDirectory: (input: string) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async (raw: string) =>
+      raw === './' ? [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }] : null,
+  }
+  const prompt = new SaveLocationPrompt(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+    () => {},
+  )
+  await new Promise<void>(resolve => setTimeout(resolve, 10))
+  const rendered = prompt.render(60)
+  const srcRow = rendered.findIndex(line => line.includes('src/'))
+  assert.ok(srcRow >= 0, `suggestion row missing:\n${rendered.join('\n')}`)
+  const press = (y: number) => ({
+    type: 'press' as const, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false,
+  })
+  const click = (y: number) => ({
+    type: 'click' as const, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
+    width: 60, height: 24, shift: false, alt: false, ctrl: false, clickCount: 1,
+  })
+  prompt.handleMouse(press(srcRow))
+  const state = prompt as unknown as { mousePressedValue: string | undefined }
+  assert.strictEqual(state.mousePressedValue, 'src/', 'precondition — pressed identity latched')
+  // A click on an INERT row (the title) must release the pressed identity.
+  prompt.handleMouse(click(0))
+  assert.strictEqual(state.mousePressedValue, undefined, 'the pressed identity must be released on an inert click')
+  // A later click on the suggestion WITHOUT a fresh press must not accept.
+  prompt.handleMouse(click(srcRow))
+  assert.strictEqual(prompt.getValue(), './', 'a click without a fresh press must not accept')
 })

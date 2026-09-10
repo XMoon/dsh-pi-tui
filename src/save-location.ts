@@ -20,7 +20,15 @@
  * @module @xmoon76/dsh-pi-tui/save-location
  */
 
-import { Input, matchesKey, type Component, type Focusable } from '@xmoon76/pi-tui'
+import {
+  Input,
+  dispatchMouseEvent,
+  matchesKey,
+  type Component,
+  type Focusable,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+} from '@xmoon76/pi-tui'
 import { componentKeymap } from './keybindings/component-keymap.ts'
 import { color } from './theme.ts'
 import type { DirectoryCompletionItem } from './file-completion/directory-completion.ts'
@@ -95,6 +103,16 @@ export class SaveLocationPrompt implements Component, Focusable {
   private _focused = false
   /** Latched by settle (onDone) or dispose: in-flight completions are fenced. */
   private settled = false
+  /** Physical row of the Directory input line from the last render (-1). */
+  private directoryRow = -1
+  /** Physical row → suggestion VALUE from the last render (mouse parity:
+   * stable identity — a completion refresh between paint and press/release
+   * must not select/accept a different row). */
+  private suggestionRows: Array<{ row: number; value: string }> = []
+  /** The pressed suggestion VALUE (mouse parity). */
+  private mousePressedValue: string | undefined
+  /** Render width from the last paint (stale-geometry guard). */
+  private lastRenderWidth = 0
   /** Called when the prompt needs a re-render (async completion results). */
   onChange: (() => void) | undefined
 
@@ -227,6 +245,81 @@ export class SaveLocationPrompt implements Component, Focusable {
     this.onDone({ kind: 'cancelled' })
   }
 
+  /**
+   * Mouse parity (same capability audit as QuestionFlow/History private
+   * Inputs): the Directory row click-positions the private Input; a
+   * suggestion row press selects (resolved by stable VALUE, so an async
+   * completion refresh between paint and press cannot select a different
+   * row) and a click accepts it (the Tab semantic). Title/File/error/
+   * collision/hint rows stay inert.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // A click ends any gesture: release the pressed identity up front —
+    // a click on inert/width-mismatched geometry must not leave a stale
+    // latch that a later click could match. The local copy still guards
+    // the valid-row comparison below.
+    const pressedValue = this.mousePressedValue
+    if (event.type === 'click') this.mousePressedValue = undefined
+    // The row map is only valid for the last painted width.
+    if (event.width !== this.lastRenderWidth) return undefined
+    // Collision confirmation is a modal state (y/Enter replaces, n/Esc
+    // returns): the directory/suggestion rows are inert while it shows.
+    if (this.confirming) return undefined
+    // Wheel is normalized by the TUI with button "none" (never "left"):
+    // it must be handled BEFORE the left-button gate, or a real wheel
+    // over a suggestion never reaches moveSuggestion.
+    if (event.type === 'wheel') {
+      if (!event.wheelDelta) return undefined
+      const suggestion = this.suggestionRows.find(entry => entry.row === event.y)
+      if (!suggestion) return undefined
+      this.moveSuggestion(event.wheelDelta < 0 ? -1 : 1)
+      return { handled: true, render: true }
+    }
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) {
+      return undefined
+    }
+    // Directory row: click-to-position the private Input. The row is
+    // 'Directory: ' + the Input's render with the prompt stripped; the
+    // Input's value starts at ITS OWN local x=2 (the '> ' prompt), at
+    // row column 11, so the Input-local x = row x - 11 + 2 = row x - 9.
+    if (event.y === this.directoryRow) {
+      const localX = event.x - 9
+      if (localX < 0) return { handled: true }
+      const result = dispatchMouseEvent(this.input, { ...event, x: localX, y: 0, height: 1 })
+      return result ? { ...result, focus: true } : undefined
+    }
+    const suggestion = this.suggestionRows.find(entry => entry.row === event.y)
+    if (suggestion !== undefined) {
+      if (event.type === 'press') {
+        // Every press starts a fresh gesture: clear any latched pressed
+        // identity first (a rejected stale press must not leave an old
+        // VALUE that a later synthetic click could match).
+        this.mousePressedValue = undefined
+        // Resolve the CURRENT cursor by the pressed VALUE (a completion
+        // refresh between paint and press may have reordered the list
+        // WITHOUT a repaint). No match => reject.
+        const currentIndex = this.suggestions.findIndex(item => item.value === suggestion.value)
+        if (currentIndex === -1) return undefined
+        this.mousePressedValue = suggestion.value
+        this.suggestionCursor = currentIndex
+        return { handled: true, focus: true }
+      }
+      // click = Tab accept, but only the exact pressed identity (press A
+      // → refresh → release must not accept whatever moved into the row).
+      if (pressedValue !== suggestion.value) {
+        // A mismatch (or a click without a fresh press) is rejected; the
+        // identity was already released at handler entry.
+        return undefined
+      }
+      const currentIndex = this.suggestions.findIndex(item => item.value === suggestion.value)
+      if (currentIndex === -1) return undefined
+      this.suggestionCursor = currentIndex
+      this.acceptSuggestion()
+      return { handled: true }
+    }
+    return undefined
+  }
+
   handleInput(data: string): void {
     if (data === '\u0000') return
     if (this.confirming) {
@@ -270,6 +363,9 @@ export class SaveLocationPrompt implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    this.lastRenderWidth = width
+    this.directoryRow = -1
+    this.suggestionRows = []
     const safeWidth = Math.max(1, width)
     const lines: string[] = []
     lines.push(color.textStrong(this.request.title))
@@ -278,6 +374,7 @@ export class SaveLocationPrompt implements Component, Focusable {
     const inputLines = this.input.render(safeWidth)
     const inputLine = inputLines[0] ?? ''
     const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
+    this.directoryRow = lines.length
     lines.push(`${color.textDim('Directory:')} ${stripped}`)
     if (this.validationError !== undefined) {
       lines.push(color.textDim(` ${this.validationError}`))
@@ -297,11 +394,13 @@ export class SaveLocationPrompt implements Component, Focusable {
     if (this.suggestions.length > 0) {
       lines.push('')
       const visible = this.suggestions.slice(0, VISIBLE_SUGGESTIONS)
+      this.suggestionRows = []
       for (let i = 0; i < visible.length; i++) {
         const item = visible[i]
         if (item === undefined) continue
         const pointer = i === this.suggestionCursor ? color.primary('→') : ' '
         const label = i === this.suggestionCursor ? color.textStrong(item.label) : item.label
+        this.suggestionRows.push({ row: lines.length, value: item.value })
         lines.push(`${pointer} ${label}`)
       }
       if (this.suggestions.length > VISIBLE_SUGGESTIONS) {

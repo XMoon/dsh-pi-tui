@@ -28,6 +28,15 @@ export const ADVANCED_API_LEVEL = 1 as const
  * sees. The Host has already decoded the terminal protocol (legacy + Kitty
  * CSI-u + modifyOtherKeys encodings, bracketed paste, key release/repeat
  * filtering), so an advanced plugin behaves identically on every terminal.
+ *
+ * EXPLICIT NON-EXPANSION (v0.85.1 mouse parity audit): this contract
+ * deliberately does NOT carry pointer/mouse events. Advanced interactive
+ * custom surfaces remain keyboard-input surfaces by contract; no raw
+ * mouse bytes are exposed and no API-level mouse feature is added here.
+ * A pointer-capable Advanced plugin API would require normalized mouse
+ * event design, capture ordering, docs, packed declaration checks and
+ * plugin migration semantics — a dedicated follow-up design, not a
+ * side effect of Host v0.85.1 integration.
  */
 export type AdvancedInputEvent =
   /** One key press, normalized to the semantic identity. */

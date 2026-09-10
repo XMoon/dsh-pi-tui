@@ -36,7 +36,8 @@
 
 import { matchesKey } from '@xmoon76/pi-tui'
 import { Input } from '@xmoon76/pi-tui'
-import type { Component, Focusable } from '@xmoon76/pi-tui'
+import { dispatchMouseEvent } from '@xmoon76/pi-tui'
+import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { HistorySearchResult, HistorySearchSource, HistoryScope } from './history-search.ts'
 import { HISTORY_SEARCH_RESULT_LIMIT } from './history-search.ts'
@@ -129,6 +130,14 @@ interface HistoryPanelState {
   generation: number
 }
 
+/** One physical row of the last painted panel frame (mouse hit-testing).
+ * The map is built from the EXACT final rows render() returns, so a click
+ * can only act on last-painted geometry. (Mouse parity.) */
+type HistoryMouseHit =
+  | { kind: 'search'; xOffset: number }
+  | { kind: 'item'; id: string; index: number; listWidth?: number }
+  | { kind: 'inert' }
+
 /** The shortest distinctive cwd suffix (parent + name). */
 function shortCwd(cwd: string): string {
   const parts = cwd.split('/').filter(part => part !== '')
@@ -187,6 +196,15 @@ export class HistoryPanel implements Component, Focusable {
   private disposed = false
   private timer: ReturnType<typeof setTimeout> | undefined
   private controller: AbortController | undefined
+  /** Physical row → hit entry from the LAST render (mouse parity). */
+  private hitMap: HistoryMouseHit[] = []
+  /** The width the hit map was painted at; a stale-width event is rejected. */
+  private lastRenderWidth = 0
+  /** The pressed result's ID (mouse parity): a synthesized click may only
+   * accept the exact result that was pressed — an async search repaint
+   * between press and release must never accept whatever moved into the
+   * same physical row. */
+  private mousePressedId: string | undefined
 
   constructor(options: HistoryPanelOptions) {
     this.source = options.source
@@ -277,6 +295,87 @@ export class HistoryPanel implements Component, Focusable {
       this.state.selectedIndex = 0
       this.scheduleSearch()
     }
+  }
+
+  /**
+   * Mouse parity: the hit map from the LAST render decides what a pointer
+   * event may act on — the query Input row, a result row (left list cell
+   * only in the split layout; the detail column is inert), or chrome
+   * (title/tabs, blank rows, counter, divider, detail, footer). A press
+   * records the pressed result's ID; a synthesized click accepts only
+   * when the same physical row still resolves to that exact ID, so an
+   * async search repaint between press and release can never accept a
+   * different result. Wheel moves the selection (wrapping like the
+   * keyboard).
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // The hit map is only valid for the last painted width: a resize
+    // that has not been repainted must not dispatch against stale
+    // geometry (last-painted geometry is authoritative).
+    if (event.width !== this.lastRenderWidth) return undefined
+    const hit = this.hitMap[event.y]
+    if (!hit) return undefined
+
+    if (hit.kind === 'search') {
+      if (event.type !== 'press') return undefined
+      // The query Input starts after the "Search: " label; translate to
+      // its local coordinates.
+      const result = dispatchMouseEvent(this.input, {
+        ...event,
+        x: event.x - hit.xOffset,
+        y: 0,
+      })
+      return result ? { ...result, focus: true } : undefined
+    }
+
+    if (hit.kind === 'item') {
+      // The split layout's detail column is inert: a click there must
+      // never accept the row merely because it shares the y.
+      if (hit.listWidth !== undefined && event.x >= hit.listWidth) return undefined
+      if (event.type === 'wheel' && event.wheelDelta) {
+        const count = this.state.results.length
+        if (count === 0) return undefined
+        const delta = event.wheelDelta < 0 ? -1 : 1
+        const index = this.state.selectedIndex
+        this.state.selectedIndex = delta < 0
+          ? index === 0 ? count - 1 : index - 1
+          : index === count - 1 ? 0 : index + 1
+        return { handled: true, render: true }
+      }
+      if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+      if (event.type === 'press') {
+        // The hit map is last-painted geometry: resolve the CURRENT
+        // index by the pressed ID (an async results commit between paint
+        // and press may have replaced rows WITHOUT a repaint, so the
+        // stale index can point at a different result). No match =>
+        // reject the press — the pressed row no longer exists.
+        const currentIndex = this.state.results.findIndex(candidate => candidate.id === hit.id)
+        if (currentIndex === -1) return undefined
+        this.mousePressedId = hit.id
+        if (this.state.selectedIndex !== currentIndex) {
+          this.state.selectedIndex = currentIndex
+          this.onResultsChanged?.()
+        }
+        return { handled: true, focus: true }
+      }
+      // click: accept only the exact pressed result (async refresh
+      // safety — press A → repaint → release must not accept B). The hit
+      // map is last-painted geometry, so the pressed ID is the identity —
+      // resolve the CURRENT result by that ID (a search commit between
+      // press and release may have replaced rows WITHOUT a repaint yet,
+      // so the index in the stale hit map can point at a different
+      // result). No match => drop.
+      if (this.mousePressedId !== hit.id) return undefined
+      this.mousePressedId = undefined
+      const result = this.state.results.find(candidate => candidate.id === hit.id)
+      if (result !== undefined) {
+        this.dispose()
+        this.onAccept(result.content)
+      }
+      return { handled: true }
+    }
+
+    return undefined
   }
 
   /** Open-time init: run the initial (empty-query) search immediately. */
@@ -402,25 +501,38 @@ export class HistoryPanel implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
+    this.lastRenderWidth = safeWidth
     const lines: string[] = []
+    const hits: HistoryMouseHit[] = []
+    const push = (line: string, hit: HistoryMouseHit): void => {
+      lines.push(line)
+      hits.push(hit)
+    }
     // Title + scope tabs.
-    lines.push(this.renderTitle(safeWidth))
-    if (this.maxRows <= 1) return lines
+    push(this.renderTitle(safeWidth), { kind: 'inert' })
+    if (this.maxRows <= 1) {
+      this.hitMap = hits
+      return lines
+    }
     // Query row.
-    lines.push(this.renderSearchRow(safeWidth))
-    if (this.maxRows <= 2) return lines
+    push(this.renderSearchRow(safeWidth), { kind: 'search', xOffset: visibleWidth('Search: ') })
+    if (this.maxRows <= 2) {
+      this.hitMap = hits
+      return lines
+    }
     // Chrome is adaptive on tiny budgets: the blank row yields first, the
     // footer next — the render NEVER exceeds maxRows (plan §51), so a
     // small overlay height cannot clip the panel.
     let chrome = 2 // title + search
     if (this.maxRows >= 5) {
-      lines.push('')
+      push('', { kind: 'inert' })
       chrome = 3
     }
     const bodyBudget = Math.max(1, this.maxRows - chrome - 1) // -1 footer
     const split = safeWidth >= HISTORY_PANEL_SPLIT_WIDTH
-    this.renderBody(lines, safeWidth, split, bodyBudget)
-    if (this.maxRows >= 4) lines.push(this.renderFooter(safeWidth))
+    this.renderBody(lines, hits, safeWidth, split, bodyBudget)
+    if (this.maxRows >= 4) push(this.renderFooter(safeWidth), { kind: 'inert' })
+    this.hitMap = hits
     return lines
   }
 
@@ -463,46 +575,61 @@ export class HistoryPanel implements Component, Focusable {
     return `${label}${first}${' '.repeat(Math.max(0, width - labelWidth - visibleWidth(first)))}`
   }
 
-  private renderBody(lines: string[], width: number, split: boolean, bodyBudget: number): void {
+  private renderBody(lines: string[], hits: HistoryMouseHit[], width: number, split: boolean, bodyBudget: number): void {
     if (this.state.error !== undefined) {
       lines.push(`  ${this.state.error}`)
+      hits.push({ kind: 'inert' })
       return
     }
     if (this.state.loading && this.state.results.length === 0) {
       lines.push(`  Loading history…`)
+      hits.push({ kind: 'inert' })
       return
     }
     if (this.state.results.length === 0) {
       lines.push(`  ${this.state.query === '' ? 'No history yet' : 'No matching history'}`)
+      hits.push({ kind: 'inert' })
       return
     }
     if (split) {
       const listWidth = Math.max(20, Math.floor(width * HISTORY_PANEL_LIST_RATIO))
       const detailWidth = Math.max(10, width - listWidth - 3)
-      this.renderSplit(lines, listWidth, detailWidth, bodyBudget)
+      this.renderSplit(lines, hits, listWidth, detailWidth, bodyBudget)
     } else {
-      this.renderStacked(lines, width, bodyBudget)
+      this.renderStacked(lines, hits, width, bodyBudget)
     }
   }
 
-  private renderSplit(lines: string[], listWidth: number, detailWidth: number, bodyBudget: number): void {
-    const listLines = this.renderList(listWidth, bodyBudget)
+  private renderSplit(
+    lines: string[],
+    hits: HistoryMouseHit[],
+    listWidth: number,
+    detailWidth: number,
+    bodyBudget: number,
+  ): void {
+    const list = this.renderList(listWidth, bodyBudget)
     const detailLines = this.renderDetail(detailWidth, this.selected(), bodyBudget)
     if (detailLines.length === 0) {
       // The detail was suppressed (its metadata cannot fit the budget):
       // render the list alone — a stray `│` separator must not appear.
-      lines.push(...listLines)
+      lines.push(...list.lines)
+      hits.push(...list.hits)
       return
     }
-    const rowCount = Math.max(listLines.length, detailLines.length)
+    const rowCount = Math.max(list.lines.length, detailLines.length)
     for (let row = 0; row < rowCount; row += 1) {
-      const left = listLines[row] ?? ''
+      const left = list.lines[row] ?? ''
       const right = detailLines[row] ?? ''
       lines.push(`${left}${' '.repeat(Math.max(1, listWidth - visibleWidth(left)))}│${right}`)
+      // The left list cell is the item; the detail cell (and the
+      // separator) are inert — a click in the detail column must never
+      // accept the row merely because it shares the y.
+      const listHit = list.hits[row]
+      hits.push(listHit !== undefined ? { ...listHit, listWidth } as HistoryMouseHit : { kind: 'inert' })
     }
   }
 
-  private renderStacked(lines: string[], width: number, bodyBudget: number): void {
+  private renderStacked(lines: string[], hits: HistoryMouseHit[], width: number, bodyBudget: number): void {
     // The stacked layout splits the body budget with NO unconditional
     // minimums: the detail is shown ONLY when it can keep its full
     // metadata (header + blank + Directory/Time/Session — 5 rows); below
@@ -518,13 +645,17 @@ export class HistoryPanel implements Component, Focusable {
       : 0
     const divider = detailBudget > 0 ? dividerRows : 0
     const listBudget = Math.max(1, bodyBudget - divider - detailBudget)
-    const listLines = this.renderList(width, listBudget)
+    const list = this.renderList(width, listBudget)
     const detailLines = this.renderDetail(width, this.selected(), detailBudget)
-    lines.push(...listLines)
+    lines.push(...list.lines)
+    hits.push(...list.hits)
     if (detailLines.length > 0) {
       lines.push('')
+      hits.push({ kind: 'inert' })
       lines.push(`─`.repeat(width))
+      hits.push({ kind: 'inert' })
       lines.push(...detailLines)
+      hits.push(...detailLines.map((): HistoryMouseHit => ({ kind: 'inert' })))
     }
   }
 
@@ -537,10 +668,11 @@ export class HistoryPanel implements Component, Focusable {
    * Every rendered line is truncated to `width` INCLUDING the row prefix
    * (`› age dir label`), so a split layout never overflows the column.
    */
-  private renderList(width: number, budget: number): string[] {
+  private renderList(width: number, budget: number): { lines: string[]; hits: HistoryMouseHit[] } {
     const out: string[] = []
+    const hits: HistoryMouseHit[] = []
     const count = this.state.results.length
-    if (count === 0 || budget <= 0) return out
+    if (count === 0 || budget <= 0) return { lines: out, hits }
     // The "(N results)" counter row (when it appears) occupies one row of
     // the budget too — the list NEVER exceeds `budget` rows, even at
     // budget 1 (the counter wins that row rather than overflowing).
@@ -572,11 +704,13 @@ export class HistoryPanel implements Component, Focusable {
       }
       // The full row (prefix + content) must never exceed the column.
       out.push(truncateToWidth(line, width, '…'))
+      hits.push({ kind: 'item', id: result.id, index })
     }
     if (needsCounter) {
       out.push(`  (${count} results)`)
+      hits.push({ kind: 'inert' })
     }
-    return out
+    return { lines: out, hits }
   }
 
   /**

@@ -8,7 +8,7 @@ import { ActionEditorPanel } from '../src/keybinding-ui/action-editor.ts'
 import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../src/keybinding-ui/list.ts'
 import type { KeybindingMutationResult } from '../src/keybinding-ui/controller.ts'
 import { buildKeybindingEditorModel } from '../src/keybinding-ui/model.ts'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { CURSOR_MARKER, visibleWidth } from '@xmoon76/pi-tui'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -648,4 +648,491 @@ test('editor search row never overflows the panel width (narrow terminals)', () 
       manager.dispose()
     }
   }
+})
+
+/** A minimal mouse event for direct component tests. */
+function mouse(
+  type: 'press' | 'click' | 'wheel',
+  x: number,
+  y: number,
+  width = 88,
+  height = 30,
+  wheelDelta?: number,
+): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type,
+    button: 'left',
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width,
+    height,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+    ...(type === 'wheel' ? { wheelDelta: wheelDelta ?? 1 } : {}),
+  }
+}
+
+test('keybinding list: mouse click selects and activates a row (mouse parity)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    const rendered = panel.render(88)
+    const row = rendered.findIndex(line => line.includes('Submit draft'))
+    assert.ok(row >= 0, `Submit draft row missing:\n${rendered.join('\n')}`)
+    const press = panel.handleMouse(mouse('press', 10, row, 88, 30))
+    assert.ok(press?.handled, 'press on an action row must be handled')
+    assert.equal(press?.focus, true, 'press must request focus')
+    panel.handleMouse(mouse('click', 10, row, 88, 30))
+    const after = panel.render(88).join('\n')
+    assert.ok(after.includes('Keyboard shortcuts ›'), 'clicking an action row must open the action editor')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('keybinding list: wheel moves the selection (mouse parity)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.render(88)
+    // Wheel on a selectable row (row 6: Submit draft — rows 0-4 are
+    // title/hint/search/blank/leader, row 5 is the Input header).
+    const down = panel.handleMouse(mouse('wheel', 10, 6, 88, 30, 1))
+    assert.ok(down?.handled, 'wheel must be handled')
+    const rendered = panel.render(88)
+    const marked = rendered.findIndex(line => line.includes('›'))
+    assert.ok(marked >= 0)
+    assert.ok(!rendered[marked]?.includes('Leader key'), 'wheel down must move past the leader row')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('keybinding list: headers and hint are inert (mouse parity)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    const rendered = panel.render(88).map(plain)
+    const headerRow = rendered.findIndex(line => line.trim() === 'Input')
+    const hintRow = rendered.findIndex(line => line.includes('Enter: details'))
+    assert.ok(headerRow >= 0 && hintRow >= 0, `chrome rows missing:\n${rendered.join('\n')}`)
+    assert.equal(panel.handleMouse(mouse('press', 10, headerRow, 88, 30)), undefined, 'category header must be inert')
+    assert.equal(panel.handleMouse(mouse('press', 10, hintRow, 88, 30)), undefined, 'hint must be inert')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('keybinding list: search Input click repositions the query cursor (mouse parity)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.render(88)
+    panel.handleInput('ab')
+    let rendered = panel.render(88).map(plain)
+    // The search row is "Search: " (8 cols) + the query directly (the
+    // Input has an EMPTY prompt): rendered geometry == mouse geometry ==
+    // the Input's own geometry. Locate the visible column of 'a' and
+    // click ONE column AFTER it (between a and b).
+    const searchRow = rendered.findIndex(line => line.startsWith('Search:'))
+    assert.ok(searchRow >= 0, `search row missing:\n${rendered.join('\n')}`)
+    // Locate the QUERY text (the first 'a' is inside the 'Search' label).
+    const abCol = rendered[searchRow]!.indexOf('ab')
+    assert.ok(abCol >= 0, 'query text missing in the search row')
+    // Click one column after 'a' (between a and b).
+    const result = panel.handleMouse(mouse('press', abCol + 1, searchRow, 88, 30))
+    assert.ok(result?.handled, 'press on the search row must be handled')
+    panel.handleInput('X')
+    rendered = panel.render(88).map(plain)
+    assert.ok(rendered.some(line => line.includes('aXb')), `typing after the click must insert at the clicked query column:\n${rendered.join('\n')}`)
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('keybinding recorder never records SGR mouse bytes as a keybinding (mouse parity)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const panel = new KeybindingEditorPanel({
+    model,
+    onClose: () => {},
+    runMutation: () => {},
+    maxRows: () => 18,
+  })
+  app.openKeybindingEditor(panel)
+  await vt.waitForRender()
+  // Open the first action's editor and start recording a direct shortcut.
+  let viewport = vt.getViewport()
+  const actionRow = viewport.findIndex(line => line.includes('Submit draft'))
+  assert.ok(actionRow >= 0, `action row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[actionRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${actionRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${actionRow + 1}m`)
+  await vt.waitForRender()
+  viewport = vt.getViewport()
+  const bindingRow = viewport.findIndex(line => line.includes('(default)'))
+  assert.ok(bindingRow >= 0, `binding row missing:\n${viewport.join('\n')}`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${bindingRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${bindingRow + 1}m`)
+  await vt.waitForRender()
+  viewport = vt.getViewport()
+  assert.ok(viewport.some(line => line.includes('Record shortcut')), 'the recorder must be active')
+  // An SGR mouse press+release must NOT become a recorded binding.
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${bindingRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${bindingRow + 1}m`)
+  await vt.waitForRender()
+  viewport = vt.getViewport()
+  assert.ok(viewport.some(line => line.includes('Record shortcut')), 'the recorder must still be waiting (mouse bytes are not a key)')
+  // A real (non-printable) key still records — printable keys are
+  // reserved for typing and rejected by the recorder.
+  vt.sendInput('\x18') // Ctrl+X
+  await vt.waitForRender()
+  viewport = vt.getViewport()
+  assert.ok(!viewport.some(line => line.includes('Record shortcut')), 'a real key must complete the recording')
+  app.dispose()
+})
+
+test('action editor: scrolled viewport preserves the selectable ordinal on click (mouse parity)', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': ['alt+1', 'alt+2', 'alt+3', 'alt+4', 'alt+5', 'alt+6'],
+  })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 6,
+  })
+  try {
+    // Move the selection to the LAST binding (Alt+6) so the viewport
+    // scrolls and the "↑ N more" marker REPLACES the first visible
+    // binding (Alt+5) — the case that shifts the selectable ordinal.
+    for (let i = 0; i < 5; i += 1) editor.handleInput('\x1b[B')
+    const rendered = editor.render(88)
+    const markerRow = rendered.findIndex(line => line.includes('↑'))
+    assert.ok(markerRow >= 0, `scroll marker missing:\n${rendered.join('\n')}`)
+    // Click the Alt+6 row (the LAST binding): the press must select
+    // ordinal 5, not 0 (the marker must not shift the ordinal).
+    const alt6Row = rendered.findIndex(line => line.includes('Alt+6'))
+    assert.ok(alt6Row >= 0, `Alt+6 row missing:\n${rendered.join('\n')}`)
+    const press = editor.handleMouse(mouse('press', 10, alt6Row, 88, 6))
+    assert.ok(press?.handled, 'press on a binding row must be handled')
+    // The press must select the LAST binding (ordinal 5), not the
+    // first: the scroll marker must not shift the selectable ordinal.
+    assert.equal(
+      (editor as unknown as { selectedIndex: number }).selectedIndex,
+      5,
+      'clicking Alt+6 must select the last binding, not the first',
+    )
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding list: query change WITHOUT a repaint between press and click cannot activate a different action (mouse parity)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    const rendered = panel.render(88)
+    const row = rendered.findIndex(line => line.includes('Submit draft'))
+    assert.ok(row >= 0, `Submit draft row missing:\n${rendered.join('\n')}`)
+    panel.handleMouse(mouse('press', 10, row, 88, 30))
+    // Query change WITHOUT a repaint: the hit map is still last-painted
+    // geometry, but the current selectable list no longer contains the
+    // pressed action. The click must be dropped, not activate whatever
+    // moved into the stale row.
+    panel.handleInput('q')
+    panel.handleMouse(mouse('click', 10, row, 88, 30))
+    const after = panel.render(88).join('\n')
+    assert.ok(!after.includes('Keyboard shortcuts ›'), 'the click must not open an action editor for a different action')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('keybinding list: query shrink WITHOUT a repaint between paint and press rejects the stale press (mouse parity)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    const rendered = panel.render(88)
+    const row = rendered.findIndex(line => line.includes('Submit draft'))
+    assert.ok(row >= 0)
+    // Query shrink WITHOUT a repaint: the pressed action is no longer in
+    // the current selectable list, so the press must be rejected.
+    panel.handleInput('q')
+    const press = panel.handleMouse(mouse('press', 10, row, 88, 30))
+    assert.equal(press, undefined, 'a press on a row whose action no longer exists must be rejected')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('action editor: mouse input is frozen while a mutation is pending (mouse parity)', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => { /* never resolves: the mutation stays pending */ },
+    onModelChange: () => {},
+    onBack: () => {},
+  })
+  try {
+    // Start an async mutation that never settles: the edit surface freezes.
+    const startMutation = (editor as unknown as { startMutation(m: { kind: string }): void }).startMutation
+    startMutation.call(editor, { kind: 'disable-action', action: row.id })
+    let rendered = editor.render(88)
+    assert.ok(rendered.map(plain).join('\n').includes('Saving…'), `precondition — pending mutation:\n${rendered.map(plain).join('\n')}`)
+
+    // wheel: the selection must not move.
+    const before = (editor as unknown as { selectedIndex: number }).selectedIndex
+    editor.handleMouse(mouse('wheel', 10, 9, 88, 30, 1))
+    assert.strictEqual((editor as unknown as { selectedIndex: number }).selectedIndex, before, 'wheel must be frozen while pending')
+
+    // press / click: rejected — no selection move, no recorder start.
+    assert.strictEqual(editor.handleMouse(mouse('press', 10, 9, 88, 30)), undefined, 'press must be rejected while pending')
+    assert.strictEqual(editor.handleMouse(mouse('click', 10, 9, 88, 30)), undefined, 'click must be rejected while pending')
+    const state = editor as unknown as { recorder: unknown; pending: boolean }
+    assert.strictEqual(state.recorder, undefined, 'a click while pending must not start a recorder')
+    assert.strictEqual(state.pending, true, 'the pending mutation must stay armed')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding panel: the focused flag reaches the search Input (CURSOR_MARKER)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.focused = true
+    panel.handleInput('ab')
+    const rendered = panel.render(88).join('\n')
+    assert.ok(rendered.includes(CURSOR_MARKER), `the focused search Input must emit the cursor marker:\n${rendered}`)
+    panel.focused = false
+    const rendered2 = panel.render(88).join('\n')
+    assert.ok(!rendered2.includes(CURSOR_MARKER), 'an unfocused panel must not emit the marker')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('keybinding panel: openKeybindingEditor forwards focus to the search Input (CURSOR_MARKER)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const panel = new KeybindingEditorPanel({
+    model,
+    onClose: () => {},
+    runMutation: () => {},
+    maxRows: () => 18,
+  })
+  app.openKeybindingEditor(panel)
+  await vt.waitForRender()
+  // Type a query: the search row then renders the Input (with its fake
+  // cursor) instead of the empty-query placeholder.
+  vt.sendInput('a')
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  assert.ok(viewport.some(line => line.includes('Search: a')), `the search row must show the query:\n${viewport.join('\n')}`)
+  // The FocusForwardingFrame must forward the focused flag through the
+  // panel to the private search Input (the alt screen extracts the
+  // CURSOR_MARKER into the terminal cursor position, so the marker is
+  // not visible in the viewport rows).
+  const state = panel as unknown as { searchInput: { focused: boolean } }
+  assert.strictEqual(state.searchInput.focused, true, 'the mounted panel must forward focus to the search Input')
+  app.stop()
+})
+
+test('action editor: an async model replacement cannot transfer a click to another binding (mouse parity)', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+  })
+  try {
+    const lines = editor.render(88).map(plain)
+    const bindingRow = lines.findIndex(line => line.includes('Ctrl+T'))
+    assert.ok(bindingRow >= 0, `binding row missing:\n${lines.join('\n')}`)
+    // An async model replacement swaps the row to a DIFFERENT binding
+    // WITHOUT a repaint: the screen still shows Ctrl+T.
+    const parsed2 = parseUserKeybindings({ 'app.todo.toggle': 'ctrl+y' })
+    const model2 = buildKeybindingEditorModel(manager, parsed2)
+    const row2 = model2.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+    ;(editor as unknown as { row: unknown }).row = row2
+    // A press+click on the stale Ctrl+T row must NOT start a recorder for
+    // the replacement binding (Ctrl+Y).
+    editor.handleMouse(mouse('press', 10, bindingRow, 88, 30))
+    const click = editor.handleMouse(mouse('click', 10, bindingRow, 88, 30))
+    assert.equal(click, undefined, 'the click must not transfer to the replacement binding')
+    const state = editor as unknown as { recorder: unknown }
+    assert.equal(state.recorder, undefined, 'no recorder must start from the stale row')
+    // After the repaint the painted binding works normally.
+    const lines2 = editor.render(88).map(plain)
+    const yRow = lines2.findIndex(line => line.includes('Ctrl+Y'))
+    assert.ok(yRow >= 0, `replacement binding row missing:\n${lines2.join('\n')}`)
+    editor.handleMouse(mouse('press', 10, yRow, 88, 30))
+    editor.handleMouse(mouse('click', 10, yRow, 88, 30))
+    assert.ok((editor as unknown as { recorder: unknown }).recorder !== undefined, 'the painted binding must start the recorder')
+    // The stale-latch release: the OLD binding returns and repaints; a
+    // click WITHOUT a fresh press must not start a recorder (the pressed
+    // identity was released on the mismatch). Esc cancels the recorder
+    // through the real onCancel path (exactly-once lifecycle).
+    editor.handleInput('\x1b')
+    assert.strictEqual((editor as unknown as { recorder: unknown }).recorder, undefined, 'Esc must cancel the recorder')
+    ;(editor as unknown as { row: unknown }).row = row
+    const lines3 = editor.render(88).map(plain)
+    const tRow = lines3.findIndex(line => line.includes('Ctrl+T'))
+    assert.ok(tRow >= 0, `restored binding row missing:\n${lines3.join('\n')}`)
+    editor.handleMouse(mouse('click', 10, tRow, 88, 30))
+    assert.strictEqual((editor as unknown as { recorder: unknown }).recorder, undefined, 'a click without a fresh press must not start a recorder')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding list: a click on an inert row releases the pressed identity (no stale activation)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    const rendered = panel.render(88)
+    const row = rendered.findIndex(line => line.includes('Submit draft'))
+    assert.ok(row >= 0, `action row missing:\n${rendered.join('\n')}`)
+    panel.handleMouse(mouse('press', 10, row, 88, 30))
+    // A click on an INERT row (the header) must release the pressed
+    // identity.
+    const headerRow = rendered.findIndex(line => line.includes('Keyboard shortcuts'))
+    assert.ok(headerRow >= 0)
+    panel.handleMouse(mouse('click', 10, headerRow, 88, 30))
+    const state = panel as unknown as { mousePressedId: string | undefined }
+    assert.strictEqual(state.mousePressedId, undefined, 'the pressed identity must be released on an inert click')
+    // A later click on the action row WITHOUT a fresh press must not
+    // activate it.
+    panel.handleMouse(mouse('click', 10, row, 88, 30))
+    const opened = panel.render(88).map(plain)
+    assert.ok(!opened.some(line => line.includes('Record shortcut')), 'a click without a fresh press must not open the recorder')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('keyboard mode transition cancels a pending mouse identity (mouse parity)', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+  })
+  try {
+    // Edit mode: find the "+ Add shortcut" row.
+    const rendered = plain(editor.render(88).join('\n'))
+    const addRow = rendered.split('\n').findIndex(line => line.includes('Add shortcut'))
+    assert.ok(addRow >= 0, 'Add shortcut row missing')
+    // Press "+ Add shortcut" (no release yet): the press-time identity
+    // is the edit-mode "add" key.
+    const press = editor.handleMouse(mouse('press', 10, addRow, 88, 30))
+    assert.ok(press?.handled, 'press on Add must be handled')
+    // Keyboard Enter: the current selection is Add → mode switches to
+    // choose-binding. The keyboard transition must CANCEL the pending
+    // mouse identity (an edit-mode press must never be reinterpreted as
+    // a choose-binding choice on release).
+    editor.handleInput('\r')
+    // DO NOT render: the hit map is still the edit-mode paint.
+    // Release on the same cell: the click must NOT start a leader
+    // recorder from the stale edit-mode press.
+    editor.handleMouse(mouse('click', 10, addRow, 88, 30))
+    const state = editor as unknown as { mode: string; recorder: unknown }
+    assert.equal(state.mode, 'choose-binding', 'the mode must stay choose-binding')
+    assert.equal(state.recorder, undefined, 'no recorder may start from the stale press')
+    // A fresh press on a choose-binding row still works.
+    const directRow = plain(editor.render(88).join('\n')).split('\n').findIndex(line => line.includes('Direct shortcut'))
+    assert.ok(directRow >= 0, 'Direct shortcut row missing')
+    editor.handleMouse(mouse('press', 10, directRow, 88, 30))
+    editor.handleMouse(mouse('click', 10, directRow, 88, 30))
+    assert.ok((editor as unknown as { recorder: unknown }).recorder !== undefined, 'a fresh press must start the recorder')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: keyboard mode transition before repaint cannot start a leader recorder (mouse parity)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ leader: 'ctrl+q' })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const panel = new KeybindingEditorPanel({
+    model,
+    onClose: () => {},
+    runMutation: () => {},
+    maxRows: () => 18,
+  })
+  app.openKeybindingEditor(panel)
+  await vt.waitForRender()
+  // Open the first action's editor (edit mode).
+  let viewport = vt.getViewport()
+  const actionRow = viewport.findIndex(line => line.includes('Submit draft'))
+  assert.ok(actionRow >= 0, `action row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[actionRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${actionRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${actionRow + 1}m`)
+  await vt.waitForRender()
+  // The ActionEditor is open in edit mode: find "+ Add shortcut".
+  viewport = vt.getViewport()
+  const addRow = viewport.findIndex(line => line.includes('Add shortcut'))
+  assert.ok(addRow >= 0, `Add shortcut row missing:\n${viewport.join('\n')}`)
+  // ONE continuous input batch: press Add, Enter (mode → choose-binding),
+  // release Add — all BEFORE the next repaint. The stale edit-mode
+  // press must NOT be reinterpreted as a choose-binding leader choice.
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${addRow + 1}M`)
+  vt.sendInput('\r')
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${addRow + 1}m`)
+  await vt.waitForRender()
+  // The editor stays on the choose-binding page; no recorder starts.
+  viewport = vt.getViewport()
+  assert.ok(viewport.some(line => line.includes('Choose what to record')), `the choose-binding page must show:\n${viewport.join('\n')}`)
+  assert.ok(!viewport.some(line => line.includes('Record shortcut')), 'no recorder may start from the stale press')
+  app.stop()
 })

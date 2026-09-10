@@ -512,3 +512,172 @@ test('UI3c: the title renders the scope tabs responsively', async () => {
   assert.ok(twoTabs.some(line => line.includes('Current directory') && line.includes('All directories')))
   assert.ok(!twoTabs.some(line => line.includes('Current session')), 'no session tab without a session identity')
 })
+/** A minimal mouse event for direct component tests. */
+function mouse(
+  type: 'press' | 'click' | 'wheel',
+  x: number,
+  y: number,
+  width = 100,
+  height = 24,
+  wheelDelta?: number,
+): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type,
+    button: 'left',
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width,
+    height,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+    ...(type === 'wheel' ? { wheelDelta: wheelDelta ?? 1 } : {}),
+  }
+}
+
+test('history: mouse click accepts the pressed result (mouse parity)', async () => {
+  const source = new FakeSource()
+  source.rows = [row('first result', 1000), row('second result', 2000), row('third result', 3000)]
+  const { panel, accepted } = makePanel(source)
+  panel.start()
+  await settle()
+  const rendered = panel.render(100)
+  // Rows: 0=title, 1=search, 2=blank, 3+=results.
+  const secondRow = rendered.findIndex(line => line.includes('second result'))
+  assert.ok(secondRow >= 0, `second result row missing:\n${rendered.join('\n')}`)
+  const press = panel.handleMouse(mouse('press', 10, secondRow, 100, 24))
+  assert.ok(press?.handled, 'press on a result row must be handled')
+  assert.equal(press?.focus, true, 'press must request focus')
+  panel.handleMouse(mouse('click', 10, secondRow, 100, 24))
+  assert.equal(accepted(), 'second result', 'click must accept the pressed result')
+})
+
+test('history: async repaint between press and click cannot transfer acceptance (mouse parity)', async () => {
+  const source = new FakeSource()
+  source.manual = true
+  const { panel, accepted } = makePanel(source)
+  panel.start()
+  source.resolveNext([row('result A', 1000, '/a', 'id-a')])
+  await flushMicrotasks()
+  let rendered = panel.render(100)
+  const rowA = rendered.findIndex(line => line.includes('result A'))
+  assert.ok(rowA >= 0, 'result A row missing')
+  panel.handleMouse(mouse('press', 10, rowA, 100, 24))
+  // Async refresh: typing re-searches; B replaces A in the same row.
+  panel.handleInput('x')
+  await settle()
+  source.resolveNext([row('result B', 2000, '/a', 'id-b')])
+  await flushMicrotasks()
+  rendered = panel.render(100)
+  assert.ok(rendered.some(line => line.includes('result B')), 'result B must be painted')
+  panel.handleMouse(mouse('click', 10, rowA, 100, 24))
+  assert.equal(accepted(), undefined, 'acceptance must not transfer to the new result')
+})
+
+test('history: wide split detail column is inert (mouse parity)', async () => {
+  const source = new FakeSource()
+  source.rows = [row('first result', 1000, '/a', 'id-1')]
+  const { panel, accepted } = makePanel(source)
+  panel.start()
+  await settle()
+  const rendered = panel.render(100)
+  const firstRow = rendered.findIndex(line => line.includes('first result'))
+  assert.ok(firstRow >= 0, 'result row missing')
+  const separator = rendered[firstRow]?.indexOf('│') ?? -1
+  assert.ok(separator >= 0, 'split separator missing')
+  // A click in the detail column (right of the separator) must be inert.
+  assert.equal(panel.handleMouse(mouse('press', separator + 5, firstRow, 100, 24)), undefined, 'detail column must be inert')
+  panel.handleMouse(mouse('click', separator + 5, firstRow, 100, 24))
+  assert.equal(accepted(), undefined, 'detail click must not accept the row')
+})
+
+test('history: search Input click repositions the query cursor (mouse parity)', async () => {
+  const source = new FakeSource()
+  const { panel } = makePanel(source)
+  panel.start()
+  await settle()
+  panel.handleInput('ab')
+  await settle()
+  panel.render(100)
+  // Search row y=1: "Search: " (8 cols) + Input prompt "> " (2), so value
+  // column 1 (between a and b) is at x = 8 + 2 + 1 = 11.
+  const result = panel.handleMouse(mouse('press', 11, 1, 100, 24))
+  assert.ok(result?.handled, 'press on the search row must be handled')
+  panel.handleInput('X')
+  const rendered = panel.render(100).map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  assert.ok(rendered.some(line => line.includes('aXb')), 'typing after the click must insert at the clicked query column')
+})
+
+test('history: wheel moves the result selection (mouse parity)', async () => {
+  const source = new FakeSource()
+  source.rows = [row('r1', 1000), row('r2', 2000), row('r3', 3000)]
+  const { panel } = makePanel(source)
+  panel.start()
+  await settle()
+  panel.render(100)
+  const firstRow = 3 // title 0, search 1, blank 2, first result 3
+  const up = panel.handleMouse(mouse('wheel', 10, firstRow, 100, 24, -1))
+  assert.ok(up?.handled, 'wheel must be handled')
+  assert.equal(panel.selected()?.content, 'r3', 'wheel up must wrap to the last result')
+  panel.handleMouse(mouse('wheel', 10, firstRow, 100, 24, 1))
+  assert.equal(panel.selected()?.content, 'r1', 'wheel down must wrap to the first result')
+})
+
+test('history: narrow stacked layout maps physical rows (mouse parity)', async () => {
+  const source = new FakeSource()
+  source.rows = [row('first result', 1000), row('second result', 2000)]
+  const { panel, accepted } = makePanel(source)
+  panel.start()
+  await settle()
+  const rendered = panel.render(60) // narrow: stacked layout
+  const secondRow = rendered.findIndex(line => line.includes('second result'))
+  assert.ok(secondRow >= 0, `second result row missing:\n${rendered.join('\n')}`)
+  panel.handleMouse(mouse('press', 10, secondRow, 60, 24))
+  panel.handleMouse(mouse('click', 10, secondRow, 60, 24))
+  assert.equal(accepted(), 'second result', 'stacked click must accept the pressed result')
+})
+
+test('history: async repaint-free results commit between press and click cannot transfer acceptance (mouse parity)', async () => {
+  const source = new FakeSource()
+  source.manual = true
+  const { panel, accepted } = makePanel(source)
+  panel.start()
+  source.resolveNext([row('result A', 1000, '/a', 'id-a')])
+  await flushMicrotasks()
+  const rendered = panel.render(100)
+  const rowA = rendered.findIndex(line => line.includes('result A'))
+  assert.ok(rowA >= 0, 'result A row missing')
+  panel.handleMouse(mouse('press', 10, rowA, 100, 24))
+  // Async refresh WITHOUT a repaint: the hit map is still last-painted
+  // geometry, but the CURRENT results have a different result at the same
+  // index. The click must resolve by the pressed ID, not the stale index.
+  panel.handleInput('x')
+  await settle()
+  source.resolveNext([row('result B', 2000, '/a', 'id-b')])
+  await flushMicrotasks()
+  panel.handleMouse(mouse('click', 10, rowA, 100, 24))
+  assert.equal(accepted(), undefined, 'acceptance must not transfer to the replacement at the stale index')
+})
+
+test('history: async repaint-free results commit between paint and press cannot select the replacement (mouse parity)', async () => {
+  const source = new FakeSource()
+  source.manual = true
+  const { panel } = makePanel(source)
+  panel.start()
+  source.resolveNext([row('result A', 1000, '/a', 'id-a')])
+  await flushMicrotasks()
+  panel.render(100)
+  // Async refresh WITHOUT a repaint: the hit map is still last-painted
+  // geometry, but the CURRENT results have a different result at the same
+  // index. The press must resolve by the pressed ID, not the stale index.
+  panel.handleInput('x')
+  await settle()
+  source.resolveNext([row('result B', 2000, '/a', 'id-b')])
+  await flushMicrotasks()
+  const press = panel.handleMouse(mouse('press', 10, 3, 100, 24)) // press the old 'result A' row
+  assert.equal(press, undefined, 'a press on a row whose id no longer exists must be rejected')
+  assert.equal(panel.selected()?.content, 'result B', 'the selection must stay on the committed result, not the stale index')
+})

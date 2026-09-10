@@ -6,6 +6,7 @@ import { Container, type TUI } from "../src/tui.ts";
 import { SettingsList } from "../src/components/settings-list.ts";
 import { Text } from "../src/components/text.ts";
 import { Loader } from "../src/components/loader.ts";
+import { MouseRegion } from "../src/components/mouse-region.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -360,6 +361,39 @@ describe("Component dispose lifecycle completeness (X007)", () => {
 			assert.equal(renders, rendersAfterDispose, "dispose must clear the animation timer");
 
 			loader.dispose(); // repeated dispose stays safe
+		} finally {
+			mock.timers.reset();
+		}
+	});
+});
+
+describe("MouseRegion dispose forwarding (X007)", () => {
+	it("disposes the owned child exactly once when the region is disposed", () => {
+		const counter = new DisposeCounter();
+		const region = new MouseRegion(counter.toComponent(), () => undefined);
+		region.dispose();
+		assert.equal(counter.disposeCount, 1, "the owned child must be disposed exactly once");
+		region.dispose();
+		assert.equal(counter.disposeCount, 1, "a repeated region dispose must not dispose the child again");
+	});
+
+	it("a Container removing a MouseRegion releases the wrapped Loader's animation timer", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		try {
+			let renders = 0;
+			const ui = { requestRender: () => { renders += 1; } } as unknown as TUI;
+			const loader = new Loader(ui, (s) => s, (s) => s, "Loading...", { frames: ["⠋", "⠙"], intervalMs: 10 });
+			const region = new MouseRegion(loader, () => undefined);
+			const container = new Container();
+			container.addChild(region);
+			container.removeChild(region);
+
+			// Behavior check: the wrapped Loader's interval must be cleared —
+			// a stale timer would keep requesting renders (and could keep the
+			// process alive).
+			const rendersAfterRemove = renders;
+			mock.timers.tick(1000);
+			assert.equal(renders, rendersAfterRemove, "removing the MouseRegion must clear the wrapped Loader's animation timer");
 		} finally {
 			mock.timers.reset();
 		}

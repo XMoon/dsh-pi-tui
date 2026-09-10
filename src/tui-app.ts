@@ -49,6 +49,10 @@ import {
   type Terminal,
   type TuiInputListenerResult,
   type KeyId,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+  type TuiMouseDispatchResult,
+  dispatchMouseEvent,
 } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
@@ -402,6 +406,11 @@ function preview(text: string, lines: number): string {
 export class Frame implements Component {
   private readonly child: Component
   private readonly fillWidth: boolean
+  /** Child content offset/width/height from the LAST render (mouse hit-testing). */
+  protected childOffsetX = 2
+  protected childOffsetY = 1
+  protected childWidth = 0
+  protected childHeight = 0
 
   constructor(child: Component, fillWidth = false) {
     this.child = child
@@ -420,6 +429,48 @@ export class Frame implements Component {
     return this.child.wantsKeyRelease
   }
 
+  /**
+   * Transparent mouse wrapper (v0.85.1 mouse integration): translate the
+   * event into the child's content box (borders + one padding cell each
+   * side) and forward. The gesture target is rewritten to THIS frame — the
+   * child is a private field not reachable from the mounted tree, so the
+   * fork's X018 gesture-liveness check tracks the frame (the mounted
+   * unit), and drag/release re-enter through it with the same translation.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
+    const x = event.x - this.childOffsetX
+    const y = event.y - this.childOffsetY
+    // Reject clicks outside the child content box: the borders (and any
+    // row below the rendered content) must never reach the child as a
+    // valid row/column.
+    if (this.childWidth === 0 || this.childHeight === 0 || x < 0 || y < 0 || x >= this.childWidth || y >= this.childHeight) {
+      return undefined
+    }
+    const result = dispatchMouseEvent(this.child, {
+      ...event,
+      x,
+      y,
+      width: this.childWidth,
+      height: this.childHeight,
+    })
+    if (!result) return undefined
+    return {
+      ...result,
+      // A focus request from the child must land on THIS frame: the child
+      // is a private field the focus resolver cannot see, and the overlay
+      // focus state (isOverlayFocused) tracks the mounted root — otherwise
+      // the alt-screen viewport listener preempts modal keyboard input.
+      ...(result.focus ? { focusTarget: this } : {}),
+      target: {
+        component: this,
+        originX: event.screenX - event.x,
+        originY: event.screenY - event.y,
+        width: event.width,
+        height: event.height,
+      },
+    }
+  }
+
   render(width: number): string[] {
     const inner = Math.max(1, Math.floor(width) - 4)
     const lines = this.child.render(inner).map(line => truncateToWidth(line, inner, '…'))
@@ -427,6 +478,10 @@ export class Frame implements Component {
       ? inner
       : Math.min(inner, Math.max(1, ...lines.map(line => visibleWidth(line))))
     const frameWidth = contentWidth + 4
+    this.childOffsetX = 2
+    this.childOffsetY = 1
+    this.childWidth = contentWidth
+    this.childHeight = lines.length
     const b = color.border
     const out = [b(`╭${'─'.repeat(frameWidth - 2)}╮`)]
     for (const line of lines) {
@@ -626,6 +681,9 @@ class ResponsiveOverlayFrame extends FocusForwardingFrame {
     const lines = super.render(frameWidth)
     if (frameWidth === availableWidth) return lines
     const left = Math.max(0, Math.floor((availableWidth - frameWidth) / 2))
+    // The centered frame shifts the child content box right by `left`
+    // (Frame.handleMouse hit-testing reads this offset).
+    this.childOffsetX = left + 2
     return lines.map(line => `${' '.repeat(left)}${line}${' '.repeat(Math.max(0, availableWidth - left - visibleWidth(line)))}`)
   }
 }
@@ -711,6 +769,11 @@ class WelcomeCard implements Component {
   private idle = false
   private lastWidth = -1
   private cached: string[] = []
+  /** The height of the LAST render — the frame's layout measurement (the
+   * welcome card lives INSIDE the scroll content, so it has no layout
+   * box of its own and the host's fullscreen paint snapshot reads this
+   * at the onFramePainted boundary instead of re-measuring). */
+  lastRenderedHeight = 0
   /** The picked whale variant index; -1 until the first render. Picked
    * once per process — resize and facts changes keep it, only a restart
    * re-picks. */
@@ -738,7 +801,10 @@ class WelcomeCard implements Component {
   }
 
   render(width: number): string[] {
-    if (this.lastWidth === width && this.cached.length > 0) return this.cached
+    if (this.lastWidth === width && this.cached.length > 0) {
+      this.lastRenderedHeight = this.cached.length
+      return this.cached
+    }
     if (this.whaleVariant < 0) {
       // First render of this process: pick the variant for the whole
       // session. Resize and facts changes keep it; only a restart re-picks.
@@ -750,6 +816,7 @@ class WelcomeCard implements Component {
     // No facts and not idle: nothing to frame (an empty box would shift
     // fullscreen row mapping by two rows).
     this.cached = rows.length === 0 ? [] : this.frame(rows, width)
+    this.lastRenderedHeight = this.cached.length
     return this.cached
   }
 
@@ -921,6 +988,26 @@ class MarqueeFilterAdapter implements Component, Focusable {
     }
   }
 
+  /** Transparent mouse forwarding (mouse parity): the picker owns the hit
+   * map; the gesture/focus target is rewritten to THIS adapter — the
+   * picker is a private field not reachable from the mounted tree, so
+   * X018 gesture liveness tracks the mounted unit. */
+  handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
+    const result = this.list.handleMouse?.(event)
+    if (!result) return undefined
+    return {
+      ...result,
+      ...(result.focus ? { focusTarget: this } : {}),
+      target: {
+        component: this,
+        originX: event.screenX - event.x,
+        originY: event.screenY - event.y,
+        width: event.width,
+        height: event.height,
+      },
+    }
+  }
+
   render(width: number): string[] {
     return this.list.render(width)
   }
@@ -976,6 +1063,31 @@ class ExternalSearchList implements Component, Focusable {
     const before = this.input.getValue()
     this.input.handleInput(data)
     if (this.input.getValue() !== before) this.onFilterChange(this.input.getValue())
+  }
+
+  /** Transparent mouse forwarding (mouse parity): row 0 is the external
+   * search Input, row 1 is the blank spacer, rows 2+ are the picker's
+   * own hit-mapped rows (translated by the spacer). Both children are
+   * private fields, so the gesture/focus target is rewritten to THIS
+   * composite — X018 gesture liveness tracks the mounted unit. */
+  handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
+    const result = event.y === 0
+      ? dispatchMouseEvent(this.input, { ...event, y: 0 })
+      : event.y >= 2
+        ? this.list.handleMouse?.({ ...event, y: event.y - 2 })
+        : undefined
+    if (!result) return undefined
+    return {
+      ...result,
+      ...(result.focus ? { focusTarget: this } : {}),
+      target: {
+        component: this,
+        originX: event.screenX - event.x,
+        originY: event.screenY - event.y,
+        width: event.width,
+        height: event.height,
+      },
+    }
   }
 
   render(width: number): string[] {
@@ -2422,6 +2534,22 @@ interface ExitConfirmationTrigger {
   readonly clearsDraft: boolean
 }
 
+/** One rendered transcript block in the fullscreen row map (mouse
+ * hit-testing): the message/activity owner, the painted height, the
+ * attachment spans, the PTC sub-call header spans, the Workflow card hit
+ * spans, and the Focus owner mark. The per-row SEMANTIC hit identity
+ * (fullscreenRowHitIdentity) is derived from these spans. */
+type FullscreenRowEntry = {
+  message?: TranscriptMessage
+  activity?: TurnActivity
+  height: number
+  attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+  collapseFocusOwnerOnClick?: number
+  subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
+  workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
+  hasTrailingSpacer: boolean
+}
+
 export class TuiApp {
   private readonly terminal: Terminal
   /** The extension surface host (M2), when the runner attached one. */
@@ -2496,6 +2624,25 @@ export class TuiApp {
   private activeApproval: PendingApproval | undefined
   /** The active user-questions flow, if any (one on screen at a time). */
   private activeQuestions: QuestionState | undefined
+  /** The press-time question gesture (mouse parity): the release click
+   * validates it before acting — a question advance / repaint between
+   * press and release must never transfer the click. */
+  private questionPressGesture: import('./question.ts').QuestionMouseGesture | undefined
+  /** The press-time semantic identity of a fullscreen transcript/todo
+   * cell (mouse parity): the release click may only act on the EXACT
+   * identity that was pressed — an async transcript projection change
+   * between press and release must not transfer the click to whatever
+   * repainted onto the same cell. The press-time frame dimensions are
+   * recorded too: a resize + repaint between press and release changes
+   * the frame, and the release must not act against it (the press began
+   * on the OLD geometry). `hitId` is the pressed row's per-row SEMANTIC
+   * hit identity (the row's actual action target — card toggle / PTC
+   * sub-call / Workflow run-phase-member / attachment / Focus owner
+   * collapse): a repaint that reinterprets the row can never pass the
+   * fence even when the card object and the relative row are unchanged. */
+  private fullscreenCellGesture:
+    | { ownerId: string; row: number; hitId: string; columns: number; termRows: number }
+    | undefined
   /** Flows waiting behind the active one (FIFO; shown on settle). */
   private readonly questionQueue: QuestionState[] = []
   /** The active Save Location prompt, if any (one on screen at a time). */
@@ -2910,35 +3057,19 @@ export class TuiApp {
    * switch with the other click overrides.
    */
   private readonly collapsedOccurrences = new Map<TranscriptMessage, Set<number>>()
+  /** The stable occurrence identity of every rendered collapsible thumbnail:
+   * the image block's rank among ALL image blocks of its message (open
+   * opaque image blocks reserve a rank too), so a live stream that closes
+   * blocks out of order never renumbers an occurrence under a pressed or
+   * collapsed identity. Written at thumbnail creation, read by
+   * {@link attachmentRangesOf} (which cannot see open opaque rows — they
+   * render as plain Text children). */
+  private readonly thumbnailOccurrence = new WeakMap<ImageThumbnail, number>()
   /** Rendered row heights per transcript block, for mouse hit-testing.
    * Message rows carry their message + attachment spans; Focus activity
    * rows carry the activity (the whole collapsed Thought block — and the
    * expanded header — is the toggle hit area, plan §17.1). */
-  private messageRows: ReadonlyArray<{
-    message?: TranscriptMessage
-    activity?: TurnActivity
-    height: number
-    /** The row span (block-relative) of every attachment's click region. */
-    attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
-    /** Set ONLY on process rows revealed by an EXPANDED Focus Thought
-     * (plan §8.8 / review P2): the fullscreen click handler collapses the
-     * owner turn when this is set. The user's own rows and the FINAL
-     * assistant never carry it — clicking them must not collapse the
-     * Thought. */
-    collapseFocusOwnerOnClick?: number
-    /** The row span (block-relative) of every PTC sub-call header's click
-     * region, keyed by the durable subCallId. */
-    subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
-    /** The row span (block-relative) of every Workflow card hit target
-     * (run/phase headers, running members, scoped-agent entries — PR2
-     * plan §12.5). */
-    workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
-    /** Whether this entry's height includes the trailing inter-block
-     * spacer (a blank visual row — the plan §9 blank-row collapse
-     * target). Never set on the projection's LAST block or on skipped
-     * zero-row blocks, mirroring the rendered layout exactly. */
-    hasTrailingSpacer: boolean
-  }> = []
+  private messageRows: ReadonlyArray<FullscreenRowEntry> = []
   /** The terminal geometry of the LAST PAINTED frame (fullscreen only):
    * a zero-row probe rides the fullscreen layout root, and the fork
    * renders every layout child on EVERY frame, so these fields record
@@ -2962,6 +3093,41 @@ export class TuiApp {
     },
     invalidate: () => {},
   }
+  /** The last-painted fullscreen frame snapshot (mouse parity): committed
+   * at the fork's onFramePainted boundary — the END of every painted
+   * frame, after the layout pass has committed — so the press path can
+   * resolve a click against the geometry the user actually SAW, never
+   * re-measured live state (a re-measure between paint and press would
+   * hand the click to a target the user never saw). The snapshot keeps
+   * STABLE values only (heights, scroll state, per-row semantic
+   * identities) — never references to objects that a later rebuild can
+   * mutate. */
+  private fullscreenPaintSnapshot:
+    | {
+        columns: number
+        termRows: number
+        headerHeight: number
+        welcomeHeight: number
+        footerHeight: number
+        editorHeight: number
+        workingHeight: number
+        queueHeight: number
+        goalHeight: number
+        todoHeight: number
+        dockHeight: number
+        scrollTop: number
+        viewportHeight: number
+        /** The painted transcript projection: per-block semantic identity
+         * + painted height + the per-row SEMANTIC hit identity (the
+         * stable values the press-time identity record needs — the live
+         * messageRows entries are mutable). The hit identity names the
+         * row's actual action target (card toggle / PTC sub-call /
+         * workflow run-phase-member / attachment / Focus owner collapse),
+         * so a repaint that reinterprets the pressed row can never pass
+         * the release fence. */
+        rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
+      }
+    | undefined
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
   private externalEditorInFlight = false
@@ -4901,7 +5067,7 @@ export class TuiApp {
     // caller — a stopped screen's showOverlay would otherwise revive a
     // dead surface's overlay stack).
     if (this.disposed) {
-      return { hide: () => {}, setHidden: () => {}, isHidden: () => true, focus: () => {}, unfocus: () => {}, isFocused: () => false }
+      return { hide: () => {}, setHidden: () => {}, isHidden: () => true, focus: () => {}, unfocus: () => {}, isFocused: () => false, getBounds: () => undefined }
     }
     // Mounting an overlay is a focus transition; an armed keyboard exit
     // confirmation must not survive while the overlay is active.
@@ -5106,6 +5272,11 @@ export class TuiApp {
       this.expandedOverride.delete(message)
       this.expandedOverride.set(next, override)
     }
+    // The press-time identity token follows the logical card across the
+    // running → settled object replacement: a press on the running card
+    // must still match the settled card at release (mouse parity).
+    const token = this.identityTokens.get(message)
+    if (token !== undefined) this.identityTokens.set(next, token)
     this.localMessages[index] = next
     this.rebuildMessages()
     return next
@@ -5115,6 +5286,10 @@ export class TuiApp {
   updateLastLocalMessage(message: TranscriptMessage): void {
     const index = this.localMessages.length - 1
     if (index < 0) return
+    // The press-time identity token follows the logical card across the
+    // running → settled object replacement (mouse parity).
+    const token = this.identityTokens.get(this.localMessages[index]!)
+    if (token !== undefined) this.identityTokens.set(message, token)
     this.localMessages[index] = message
     this.rebuildMessages()
   }
@@ -5234,6 +5409,17 @@ export class TuiApp {
         // active applies on the next re-entry.
         wheelScrollLines: this.wheelScrollLines,
         onCellClick: (x, y) => this.handleFullscreenClick(x, y),
+        // The press half of a same-cell click: record the question's
+        // press-time semantic identity so the release click can reject
+        // targets that repainted onto the same cell (a question advance
+        // between press and release must never transfer the click).
+        onCellPress: (x, y) => this.handleFullscreenPress(x, y),
+        // The frame-completion boundary (X054): the layout pass has
+        // committed and the frame is painted — commit the last-painted
+        // geometry snapshot here, so the press path resolves a click
+        // against the frame the user actually SAW (never re-measured
+        // live state between paint and press).
+        onFramePainted: () => this.commitFullscreenPaintSnapshot(),
         // Host transcript actions must win before the fork's own viewport
         // key handling. In particular, the fork's Ctrl+Shift+F search only
         // sees rendered lines, while the host search queries the full fold.
@@ -5325,6 +5511,12 @@ export class TuiApp {
       alt.addInputListener((data) => this.routeInput(data))
       alt.installViewportListener()
       this.tui.stop()
+      // The new alt's first paint is scheduled asynchronously: drop the
+      // PREVIOUS alt instance's last-painted snapshot (and any in-flight
+      // gesture) BEFORE start, so a press immediately after re-entry can
+      // never resolve against a frame the new surface never drew.
+      this.fullscreenPaintSnapshot = undefined
+      this.fullscreenCellGesture = undefined
       alt.start()
       // The alt screen starts with NO focused component: without this, every
       // key after Ctrl+F is dropped (the app-level listener still sees
@@ -6457,11 +6649,12 @@ export class TuiApp {
    * child's height still advances the row counter, so the spans line up
    * with the rendered layout.
    *
-   * The ordinal among COLLAPSIBLE thumbnails IS the occurrence's image
-   * index: renderUserBlocks / renderBlockSequence create a collapsible
-   * thumbnail for EVERY image block of the message in content order, so
-   * the nth thumbnail ↔ the nth image block — the same index the host's
-   * collapsedRef getter reads. */
+   * The identity is the thumbnail's occurrence rank tag (written at
+   * creation by the renderers): the image block's position among ALL image
+   * blocks of the message — open opaque image blocks reserve a rank too —
+   * so a live stream that closes blocks out of order never renumbers an
+   * occurrence under a pressed or collapsed identity. The same rank the
+   * host's collapsedRef getter reads. */
   private attachmentRangesOf(
     component: Component,
     width: number,
@@ -6469,12 +6662,12 @@ export class TuiApp {
     if (!(component instanceof Container)) return []
     const ranges: Array<{ imageIndex: number; start: number; end: number }> = []
     let row = 0
-    let imageIndex = 0
     for (const child of component.children) {
       const height = child.render(width).length
       if (child instanceof ImageThumbnail && child.collapsible) {
-        ranges.push({ imageIndex, start: row, end: row + height })
-        imageIndex += 1
+        // Every collapsible thumbnail is created by the host renderers,
+        // which tag it with its stable occurrence rank.
+        ranges.push({ imageIndex: this.thumbnailOccurrence.get(child)!, start: row, end: row + height })
       }
       row += height
     }
@@ -6872,6 +7065,209 @@ export class TuiApp {
     return this.sessionTitleText
   }
 
+  /** Commit the last-painted fullscreen geometry snapshot (called at the
+   * fork's onFramePainted boundary — the END of every painted frame,
+   * after the layout pass has committed). Reads the painted chrome
+   * heights through the fork's narrow getPaintedBox query (the frame the
+   * user actually SAW — never a re-measure), the welcome card height
+   * from its last-painted render (it lives inside the scroll content, so
+   * it has no layout box of its own), the scroll state from the
+   * ScrollView (final after the layout pass), and the transcript
+   * projection from a FRESH re-measure (the layout engine re-measures
+   * every component every frame, but the messageRows map is only rebuilt
+   * on transcript changes — an async image load that repainted between
+   * rebuilds would leave the map stale; the re-measure at this boundary
+   * is the painted projection). The snapshot keeps STABLE values only. */
+  private commitFullscreenPaintSnapshot(): void {
+    const scroll = this.fullscreenScroll
+    const paintedHeight = (component: Component): number => this.fullscreen?.getPaintedBox(component)?.height ?? 0
+    this.refreshMessageRows()
+    this.fullscreenPaintSnapshot = {
+      columns: this.terminal.columns,
+      termRows: this.terminal.rows,
+      headerHeight: paintedHeight(this.header),
+      welcomeHeight: this.welcomeCard.lastRenderedHeight,
+      footerHeight: paintedHeight(this.footer),
+      editorHeight: paintedHeight(this.editorSeat),
+      workingHeight: paintedHeight(this.working),
+      queueHeight: paintedHeight(this.queuePane),
+      goalHeight: paintedHeight(this.goalLine),
+      todoHeight: paintedHeight(this.todoPanel),
+      dockHeight: paintedHeight(this.dock),
+      scrollTop: scroll?.scrollTop ?? 0,
+      viewportHeight: scroll?.viewportHeight ?? 0,
+      rows: this.messageRows.map((entry, index) => ({
+        ownerId: this.fullscreenRowOwnerId(entry, index),
+        height: entry.height,
+        hits: this.fullscreenRowHits(entry, index),
+      })),
+    }
+  }
+
+  /** The per-row SEMANTIC hit identities of one painted transcript block
+   * (mouse parity): one immutable string per row, naming the row's
+   * ACTUAL action target at the last paint — the card toggle, a PTC
+   * sub-call header, a Workflow run/phase/member/agents row, an
+   * attachment, or a Focus owner collapse. The release click recomputes
+   * the CURRENT identity of the pressed cell and requires equality, so a
+   * repaint that reinterprets the row (a Workflow 5→6 aggregate switch, a
+   * PTC settle reflow, an async image growth) can never pass the fence. */
+  private fullscreenRowHits(entry: FullscreenRowEntry, index: number): ReadonlyArray<string> {
+    const nextVisible = this.nextVisibleRowEntry(index)
+    return Array.from({ length: entry.height }, (_, row) => this.fullscreenRowHitIdentity(entry, row, nextVisible))
+  }
+
+  /** The next VISIBLE transcript block after `index` (the blank-row
+   * escape hatch's boundary test needs it: a spacer whose following
+   * entries are all zero-height is the Thought's BOUNDARY spacer). */
+  private nextVisibleRowEntry(index: number): FullscreenRowEntry | undefined {
+    for (let next = index + 1; next < this.messageRows.length; next += 1) {
+      const candidate = this.messageRows[next]!
+      if (candidate.height > 0) return candidate
+    }
+    return undefined
+  }
+
+  /** The per-row SEMANTIC hit identity of one transcript row (mouse
+   * parity): the row's ACTUAL action target, following the click-path
+   * priority EXACTLY (blank-row escape hatch > Focus activity > PTC
+   * sub-call > Workflow > attachment > Focus-secondary/card). A row
+   * inside a Workflow card that matches no hit is INERT (the card
+   * consumes every click — it must never fall through to the owner/card
+   * branch). Shared by the paint-snapshot commit and the release-click
+   * validation so both sides compute the EXACT same identity string. */
+  private fullscreenRowHitIdentity(
+    entry: FullscreenRowEntry,
+    inMessage: number,
+    nextVisible: FullscreenRowEntry | undefined,
+  ): string {
+    // The blank-row escape hatch: the click collapses the owner Thought
+    // (the boundary spacer is unclaimed → inert).
+    if (entry.hasTrailingSpacer && inMessage === entry.height - 1) {
+      const owner = this.blankRowFocusCollapseOwner(entry, nextVisible)
+      return owner !== undefined ? `focus:collapse:${owner}` : 'inert'
+    }
+    // A Focus Thought block: the whole rendered block toggles the turn.
+    if (entry.activity !== undefined) {
+      return `focus:toggle:${entry.activity.turn}`
+    }
+    const message = entry.message
+    if (message === undefined) return 'inert'
+    const token = this.identityToken(message)
+    // PTC sub-call header rows win FIRST (their own disclosure is
+    // independent of the root card).
+    if (entry.subCallHits !== undefined) {
+      const hit = entry.subCallHits.find(candidate => inMessage >= candidate.top && inMessage < candidate.top + candidate.height)
+      if (hit !== undefined) return `ptc:${token}:${hit.subCallId}`
+    }
+    // Workflow card rows: EVERY row of the card consumes the click — a
+    // row matching no hit is inert (it must never fall through to the
+    // owner/card branch).
+    if (entry.workflowHits !== undefined) {
+      const hit = entry.workflowHits.find(candidate => inMessage >= candidate.top && inMessage < candidate.top + candidate.height)
+      if (hit !== undefined) return this.workflowHitIdentity(hit.hit)
+      return 'inert'
+    }
+    // Attachment rows.
+    for (const attachment of entry.attachments) {
+      if (inMessage >= attachment.start && inMessage < attachment.end) {
+        return `attachment:${token}:${attachment.imageIndex}`
+      }
+    }
+    // Focus owner-marked rows: a SECONDARY card toggles ITSELF (the
+    // card-level identity); a NON-secondary process row collapses the
+    // owner turn.
+    if (entry.collapseFocusOwnerOnClick !== undefined) {
+      if (isFocusSecondaryDisclosure(message)) return `message:toggle:${token}`
+      return `focus:collapse:${entry.collapseFocusOwnerOnClick}`
+    }
+    // The card-level toggle.
+    return `message:toggle:${token}`
+  }
+
+  /** The semantic identity of one Workflow card row hit (the durable
+   * run/phase/member/agents target the click acts on). */
+  private workflowHitIdentity(hit: WorkflowHit): string {
+    switch (hit.kind) {
+      case 'run':
+        return `workflow:run:${hit.runId}`
+      case 'phase':
+        return `workflow:phase:${hit.runId}:${hit.phaseKey}`
+      case 'member':
+        return `workflow:member:${hit.runId}:${hit.seq}:${hit.childId}`
+      case 'phase-agents':
+        return `workflow:phase-agents:${hit.runId}:${hit.phaseKey}`
+      case 'run-agents':
+        return `workflow:run-agents:${hit.runId}`
+    }
+  }
+
+  /** Stable per-object identity tokens for the fullscreen press-time
+   * identity (mouse parity): content-derived kind+turn is NOT unique —
+   * local shell cards all carry turn Infinity, parallel/sequential tool
+   * calls can share kind+turn, and a NEW session can reuse the same turn
+   * numbers — and the projection index shifts when a card is removed.
+   * The token is assigned to the message/activity OBJECT (stable across
+   * rebuilds, which reuse the same objects; activities are mutated in
+   * place) and transferred on a running → settled replacement
+   * (updateLocalMessage / updateLastLocalMessage), so the same logical
+   * card keeps its identity across the object swap. */
+  private readonly identityTokens = new WeakMap<object, number>()
+  private identityTokenCounter = 0
+
+  private identityToken(target: object): number {
+    let token = this.identityTokens.get(target)
+    if (token === undefined) {
+      token = this.identityTokenCounter
+      this.identityTokenCounter += 1
+      this.identityTokens.set(target, token)
+    }
+    return token
+  }
+
+  /** The press-time semantic identity of a transcript row (mouse parity):
+   * the message/activity owner (kind + turn + the per-object identity
+   * token, or the entry index for ownerless rows). Shared by the
+   * paint-snapshot commit and the release-click validation so both sides
+   * compute the EXACT same identity string. */
+  private fullscreenRowOwnerId(entry: { message?: TranscriptMessage; activity?: TurnActivity }, entryIndex: number): string {
+    return entry.message !== undefined
+      ? `msg:${entry.message.kind}:${'turn' in entry.message ? entry.message.turn : 0}:${this.identityToken(entry.message)}`
+      : entry.activity !== undefined
+        ? `activity:${entry.activity.turn}:${this.identityToken(entry.activity)}`
+        : `entry:${entryIndex}`
+  }
+
+  /** Resolve a fullscreen physical row to a transcript cell (the entry
+   * index + its block-relative row) against a GIVEN projection — a pure
+   * map query over stable values (heights + scroll state), never a
+   * re-measure. The press path queries the committed paint snapshot; the
+   * release click refreshes the live projection first and queries that. */
+  private resolveFullscreenTranscriptCell(
+    y: number,
+    projection: {
+      headerHeight: number
+      welcomeHeight: number
+      scrollTop: number
+      viewportHeight: number
+      rows: ReadonlyArray<{ height: number }>
+    },
+  ): { entryIndex: number; inMessage: number } | undefined {
+    const rowInScroll = y - projection.headerHeight
+    if (rowInScroll < 0 || rowInScroll >= projection.viewportHeight) return undefined
+    const messageRow = rowInScroll + projection.scrollTop - projection.welcomeHeight
+    if (messageRow < 0) return undefined
+    let row = 0
+    for (let index = 0; index < projection.rows.length; index += 1) {
+      const entry = projection.rows[index]!
+      if (messageRow < row + entry.height) {
+        return { entryIndex: index, inMessage: messageRow - row }
+      }
+      row += entry.height
+    }
+    return undefined
+  }
+
   /**
    * Map a fullscreen click (0-based screen cell, from the alt screen's
    * onCellClick) onto a transcript message and toggle its individual
@@ -6879,6 +7275,104 @@ export class TuiApp {
    * Fullscreen Focus disclosures are mouse-owned: the per-card override
    * decides, and the Ctrl+O keyboard fold does not pierce them.
    */
+  private handleFullscreenPress(x: number, y: number): void {
+    // The press half of a same-cell click: while a question owns the
+    // modal front, record the flow's press-time semantic identity (the
+    // release click in handleFullscreenClick validates it — a question
+    // advance / repaint between press and release must never transfer
+    // the click to a different target).
+    const question = this.activeQuestions
+    if (question?.frame !== undefined) {
+      // The question owns the modal front: any pre-question todo/transcript
+      // gesture is dead — a press inside the frame must not leave a stale
+      // background identity that a later release (after the question
+      // closes) could resurrect.
+      this.fullscreenCellGesture = undefined
+      // A stale-geometry press cannot name a valid target: consume any
+      // prior gesture so a later release can never match it.
+      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) {
+        this.questionPressGesture = undefined
+        return
+      }
+      const width = this.terminal.columns
+      const height = this.terminal.rows
+      const footerHeight = this.footer.render(width).length
+      const seatHeight = question.frame.rows
+      const seatBottom = height - footerHeight
+      const seatTop = seatBottom - seatHeight
+      if (y >= seatTop && y < seatBottom && x >= 2 && x <= width - 3) {
+        this.questionPressGesture = question.flow.beginMousePress(y - seatTop - 1)
+      }
+      return
+    }
+    this.questionPressGesture = undefined
+    // Any OTHER managed overlay owns the press: no transcript / dock /
+    // todo identity below is reachable (the click is inert behind it).
+    if (this.activeScreen.hasOverlayEntries) {
+      this.fullscreenCellGesture = undefined
+      return
+    }
+    // The press resolves ONLY against the last-painted frame snapshot
+    // (committed by the trailing paint-commit probe at the frame
+    // boundary): no render() call, no refresh — a re-measure between
+    // paint and press would hand the click to a target the user never
+    // saw (the seat's render() in particular would refresh its
+    // mouseLayout cache and defeat the pre-repaint fence).
+    const snapshot = this.fullscreenPaintSnapshot
+    if (snapshot === undefined) {
+      this.fullscreenCellGesture = undefined
+      return
+    }
+    // Stale-geometry guard: the snapshot is the LAST PAINTED frame; a
+    // press at a terminal size no frame has been drawn at yet cannot
+    // name a target (the release would resolve a projection the user
+    // never saw).
+    if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) {
+      this.fullscreenCellGesture = undefined
+      return
+    }
+    // The todo dock/panel is ONE semantic target (the first click MUTATES
+    // the layout — the dock vanishes, the panel takes its rows): record
+    // the todo identity so a release on the repainted panel still acts.
+    // The dock and the panel are DISTINCT press identities (they run
+    // different actions — toggleTodoPanel vs handleTodoPanelClick): a
+    // keyboard todo-toggle between press and release repaints the dock
+    // into the panel, and the same cell must not run the panel action
+    // for a dock press.
+    const height = snapshot.termRows
+    const todoBottom = Math.max(0, Math.min(height, height - snapshot.footerHeight - snapshot.editorHeight - snapshot.workingHeight - snapshot.queueHeight - snapshot.goalHeight))
+    const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
+    const inDock = snapshot.dockHeight > 0 && y >= todoTop - snapshot.dockHeight && y < todoTop
+    const inPanel = todoTop < todoBottom && y >= todoTop && y < todoBottom
+    if (inDock || inPanel) {
+      this.fullscreenCellGesture = {
+        ownerId: inDock ? 'todo:dock' : 'todo:panel',
+        row: 0,
+        hitId: 'todo',
+        columns: snapshot.columns,
+        termRows: snapshot.termRows,
+      }
+      return
+    }
+    // Transcript cells: record the press-time semantic identity (the
+    // message/activity owner + the block-relative row + the row's per-row
+    // SEMANTIC hit identity) so a release on a repainted projection
+    // cannot activate whatever moved onto the cell.
+    const cell = this.resolveFullscreenTranscriptCell(y, snapshot)
+    if (cell !== undefined) {
+      const painted = snapshot.rows[cell.entryIndex]!
+      this.fullscreenCellGesture = {
+        ownerId: painted.ownerId,
+        row: cell.inMessage,
+        hitId: painted.hits[cell.inMessage] ?? 'inert',
+        columns: snapshot.columns,
+        termRows: snapshot.termRows,
+      }
+      return
+    }
+    this.fullscreenCellGesture = undefined
+  }
+
   private handleFullscreenClick(x: number, y: number): void {
     // A question owns the modal front: clicks inside its frame (the editor
     // seat, pinned above the footer) route to the flow — option rows select,
@@ -6890,12 +7384,21 @@ export class TuiApp {
       // The question owns the modal front: EVERY click while a question is
       // up is captured here (in-frame clicks route to the flow; out-of-frame
       // clicks and the stale-geometry window are ignored) — background todo/
-      // transcript interaction must not be reachable behind the modal.
+      // transcript interaction must not be reachable behind the modal. Any
+      // pre-question todo/transcript gesture is dead at branch entry (a
+      // cross-mode close before the release must not resurrect it on the
+      // background surface) — cleared BEFORE the stale-geometry guard, so
+      // a release that hits the resize-mismatch early return also drops it.
+      this.fullscreenCellGesture = undefined
       // Stale-geometry guard: between a terminal resize (rows OR columns —
       // a width change rewraps the body and shifts the flow's hit map) and
       // the next repaint, the frame's rendered height and hit map still
-      // reflect the OLD terminal.
-      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) return
+      // reflect the OLD terminal. A stale-geometry release cannot act:
+      // consume any prior gesture so it can never match a later click.
+      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) {
+        this.questionPressGesture = undefined
+        return
+      }
       const width = this.terminal.columns
       const height = this.terminal.rows
       const footerHeight = this.footer.render(width).length
@@ -6906,48 +7409,105 @@ export class TuiApp {
         // Inside the frame: its side borders + padding occupy columns 0-1
         // and the last two; content rows start below the top border.
         if (x >= 2 && x <= width - 3) {
-          question.flow.clickRow(y - seatTop - 1)
+          // The flow's content starts at seat column 2 (side borders +
+          // padding); pass the flow-local column so the free-text Input
+          // can position its cursor on a click while editing. The click
+          // may only act on the EXACT press-time identity (a question
+          // advance / repaint between press and release must not
+          // transfer it to a different target).
+          const gesture = this.questionPressGesture
+          this.questionPressGesture = undefined
+          question.flow.completeMouseClick(gesture, y - seatTop - 1, x - 2)
           this.requestRender()
         }
       }
       return
     }
+    this.questionPressGesture = undefined
     // Any OTHER managed overlay (search / settings / approvals / extension
     // overlays) owns the click: with one up, NO transcript / dock / todo
     // interaction below is reachable — concrete rows AND the blank-row
     // fallback stay inert behind it (plan §17/§23.7). The question frame
-    // above is the only overlay that routes clicks itself.
-    if (this.activeScreen.hasOverlayEntries) return
+    // above is the only overlay that routes clicks itself. Any pre-overlay
+    // todo/transcript gesture is dead (a cross-mode close before the
+    // release must not resurrect it on the background surface).
+    if (this.activeScreen.hasOverlayEntries) {
+      this.fullscreenCellGesture = undefined
+      return
+    }
     void x
-    const width = this.terminal.columns
-    const height = this.terminal.rows
-    const footerHeight = this.footer.render(width).length
-    const editorHeight = this.editorSeat.render(width).length
-    const workingHeight = this.working.render(width).length
-    const queueHeight = this.queuePane.render(width).length
-    const goalHeight = this.goalLine.render(width).length
-    const todoHeight = this.todoPanel.render(width).length
-    const todoBottom = Math.max(0, Math.min(height, height - footerHeight - editorHeight - workingHeight - queueHeight - goalHeight))
-    const todoTop = Math.max(0, todoBottom - todoHeight)
+    // The region determination uses the SAME last-painted snapshot as the
+    // press (the fork's click detection already restricted the release to
+    // the pressed cell): no render() call here either — the seat's
+    // render() in particular would refresh its mouseLayout cache and
+    // defeat the pre-repaint fence for the NEXT gesture.
+    const snapshot = this.fullscreenPaintSnapshot
+    if (snapshot === undefined) {
+      // The identity-fence invariant is literal: every click consumes the
+      // stale latch before any early return (a retained latch must never
+      // survive a click that could not resolve it).
+      this.fullscreenCellGesture = undefined
+      return
+    }
+    // Stale-geometry guard (mirrors the press path): the snapshot is the
+    // LAST PAINTED frame — a release at a terminal size no frame has been
+    // drawn at yet (a resize between press and release, before the next
+    // repaint) must not act against the stale frame. Consume any prior
+    // gesture so it can never match a later click.
+    if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) {
+      this.fullscreenCellGesture = undefined
+      return
+    }
+    // Press-frame guard: the release may only act on the frame the press
+    // resolved against. A resize + repaint between press and release
+    // commits a NEW snapshot at the new dimensions — the same owner/row
+    // may sit on the release cell, but the press began on the OLD
+    // geometry, so the gesture must not transfer to the new frame.
+    if (
+      this.fullscreenCellGesture !== undefined &&
+      (snapshot.columns !== this.fullscreenCellGesture.columns || snapshot.termRows !== this.fullscreenCellGesture.termRows)
+    ) {
+      this.fullscreenCellGesture = undefined
+      return
+    }
+    const height = snapshot.termRows
+    const todoBottom = Math.max(0, Math.min(height, height - snapshot.footerHeight - snapshot.editorHeight - snapshot.workingHeight - snapshot.queueHeight - snapshot.goalHeight))
+    const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
     // The dock strip (the todo summary row) sits directly above the panel:
     // clicking it opens the panel (mouse parity with the todo-toggle
     // action). The summary
     // is hidden while the panel is open, so the dock renders zero rows and
     // this branch is inert — the two regions never fight.
-    const dockHeight = this.dock.render(width).length
+    const dockHeight = snapshot.dockHeight
     const inDock = dockHeight > 0 && y >= todoTop - dockHeight && y < todoTop
     // A click on the todo panel's own rows runs the state loop (compact →
     // full list → back to the summary row), so the mouse opens AND closes
     // the panel without the todo-toggle action.
     const inPanel = todoTop < todoBottom && y >= todoTop && y < todoBottom
     if (inDock || inPanel) {
-      // The dock and the panel are ONE semantic target, and the first
+      // The dock and the panel are ONE coalescing family, and the first
       // click MUTATES the layout (the dock vanishes, the panel takes its
       // rows): a rapid second click at the same coordinate would land on
       // the panel and immediately undo the first — the todo "flashes and
       // vanishes". Pi's double-click detection cannot see the pair (the
       // word range under the coordinate changed), so coalesce the whole
-      // target here: a second todo click inside the window is one gesture.
+      // family here: a second todo click inside the window is one gesture.
+      // The release may only act on the EXACT surface it pressed: a dock
+      // press must still be on the dock, a panel press on the panel (a
+      // keyboard todo-toggle between press and release repaints the dock
+      // into the panel — the same cell must not run the panel action for
+      // a dock press). The coalescing identity and the press semantic
+      // identity are different concepts.
+      const pressed = this.fullscreenCellGesture
+      if (pressed === undefined || (pressed.ownerId !== 'todo:dock' && pressed.ownerId !== 'todo:panel')) {
+        this.fullscreenCellGesture = undefined
+        return
+      }
+      if ((pressed.ownerId === 'todo:dock') !== inDock) {
+        this.fullscreenCellGesture = undefined
+        return
+      }
+      this.fullscreenCellGesture = undefined
       const now = Date.now()
       if (now < this.todoClickCoalesceUntil) return
       this.todoClickCoalesceUntil = now + TODO_CLICK_COALESCE_MS
@@ -6960,33 +7520,53 @@ export class TuiApp {
     // click must never be swallowed).
     this.todoClickCoalesceUntil = 0
     // Fullscreen layout: header row(s), then the transcript scroll pane.
-    const scroll = this.fullscreenScroll
-    if (scroll === undefined) return
-    const headerHeight = this.header.render(width).length
-    const rowInScroll = y - headerHeight
-    // STRICT viewport clip (review P1): the transcript hit-test is valid
-    // ONLY inside the ScrollView's rows. Below the pane (working row /
-    // editor seat / footer) `y - headerHeight + scrollTop` would fabricate
-    // a transcript row — with the view scrolled up that fake row can land
-    // on REAL but off-screen content and toggle a Tool card or even
-    // collapse a Thought via the blank-row fallback. Editor / footer /
-    // chrome clicks must stay no-ops (plan §17/§23.6).
-    if (rowInScroll < 0 || rowInScroll >= scroll.viewportHeight) return
-    const welcomeHeight = this.welcomeCard.render(width).length
-    const messageRow = rowInScroll + scroll.scrollTop - welcomeHeight
-    if (messageRow < 0) return
-    // Re-measure first: a thumbnail that just finished loading grew from
-    // its 1-row info bar to info + image rows — a stale map would misplace
-    // the click (cached renders make this cheap). The re-measure also
-    // guarantees the y-regions below never go stale after a resize (plan
-    // §23.8): every click reads the CURRENT projection.
+    // The STRICT viewport clip (review P1) lives inside the resolver: the
+    // transcript hit-test is valid ONLY inside the ScrollView's rows.
+    // The release click REFRESHES the live projection (a thumbnail that
+    // just finished loading, a turn settling) and resolves the CURRENT
+    // cell against the last-painted frame geometry — the press-time
+    // identity recorded from the paint snapshot must match the CURRENT
+    // identity, or the click is rejected (a repaint between press and
+    // release must not transfer it to whatever moved onto the cell).
     this.refreshMessageRows()
-    let row = 0
-    for (let index = 0; index < this.messageRows.length; index += 1) {
-      const entry = this.messageRows[index]!
-      if (messageRow < row + entry.height) {
-        const inMessage = messageRow - row
-        // NEW: the Thought internal blank-row escape hatch (plan §9/§23)
+    const cell = this.resolveFullscreenTranscriptCell(y, {
+      headerHeight: snapshot.headerHeight,
+      welcomeHeight: snapshot.welcomeHeight,
+      scrollTop: snapshot.scrollTop,
+      viewportHeight: snapshot.viewportHeight,
+      rows: this.messageRows,
+    })
+    if (cell === undefined) {
+      // The identity-fence invariant is literal: a click that resolves to
+      // no cell consumes the stale latch (a retained latch must never
+      // survive a click that could not resolve it).
+      this.fullscreenCellGesture = undefined
+      return
+    }
+    const entry = this.messageRows[cell.entryIndex]!
+    const inMessage = cell.inMessage
+    // The release may only act on the EXACT press-time identity: an async
+    // transcript projection change between press and release (a thumbnail
+    // finishing its load, a turn settling, a reflow) must not transfer
+    // the click to whatever repainted onto the same cell. The per-row
+    // SEMANTIC hit identity is the decisive check: the card object and
+    // the relative row can both be unchanged while the row's ACTUAL
+    // action target changed (a Workflow 5→6 aggregate switch, a PTC
+    // settle reflow, an async image growth) — the release recomputes the
+    // CURRENT hit identity and requires equality.
+    const ownerId = this.fullscreenRowOwnerId(entry, cell.entryIndex)
+    const hitId = this.fullscreenRowHitIdentity(entry, inMessage, this.nextVisibleRowEntry(cell.entryIndex))
+    if (
+      this.fullscreenCellGesture?.ownerId !== ownerId ||
+      this.fullscreenCellGesture?.row !== inMessage ||
+      this.fullscreenCellGesture?.hitId !== hitId
+    ) {
+      this.fullscreenCellGesture = undefined
+      return
+    }
+    this.fullscreenCellGesture = undefined
+    {
+      // NEW: the Thought internal blank-row escape hatch (plan §9/§23)
         // — a click on a blank visual row (the inter-block spacer charged
         // to this entry) that sits INSIDE an expanded Thought collapses
         // that Thought, even when its header scrolled out of view. The
@@ -7012,7 +7592,7 @@ export class TuiApp {
           // VISIBLE block decides (a reasoning-only process row at the
           // tail must not make the boundary look interior).
           let next: Readonly<{ activity?: TurnActivity; collapseFocusOwnerOnClick?: number }> | undefined
-          for (let nextIndex = index + 1; nextIndex < this.messageRows.length; nextIndex += 1) {
+          for (let nextIndex = cell.entryIndex + 1; nextIndex < this.messageRows.length; nextIndex += 1) {
             const candidate = this.messageRows[nextIndex]!
             if (candidate.height > 0) {
               next = candidate
@@ -7097,9 +7677,7 @@ export class TuiApp {
         this.toggleMessageExpanded(message)
         return
       }
-      row += entry.height
     }
-  }
 
   /** The expanded Thought that OWNS a blank visual row — the inter-block
    * spacer charged to `entry` (plan §9/§14): the row is INSIDE the
@@ -7385,6 +7963,17 @@ export class TuiApp {
    * session switch must not leak the old session's click toggles). */
   clearSessionOverrides(): void {
     this.expandedOverride.clear()
+    // A session switch is a pointer-gesture boundary too: the new session
+    // can reuse the same turn numbers AND the same todo dock/panel
+    // geometry, so an in-flight press from the old session must never
+    // resolve against the new session's projection (the per-object
+    // identity token already rejects message/activity transfers; the
+    // generic todo identities need this explicit cancellation). The todo
+    // click-coalescing window is equally session-scoped: a fresh click in
+    // the new session must never be swallowed by the old session's
+    // window.
+    this.fullscreenCellGesture = undefined
+    this.todoClickCoalesceUntil = 0
     // The Focus disclosures are session-scoped transient state too: a
     // switched-in session must never inherit the old session's turn
     // numbers (plan §16.3). The persisted Focus preference survives. The
@@ -9471,6 +10060,11 @@ export class TuiApp {
       if (displayBlock.kind === 'open-opaque') {
         flushText()
         container.addChild(new Text(color.textDim(openOpaqueBlockFallbackText(displayBlock.blockType)), 0, 0))
+        // An open image block RESERVES its occurrence rank: the ordinal is
+        // the block's position among ALL image blocks of the message, so a
+        // later block closing first (out-of-order block-end is legal in the
+        // DSH stream invariant) never renumbers an earlier occurrence.
+        if (displayBlock.blockType === 'image') imageIndex += 1
         continue
       }
       const block = displayBlock.block
@@ -9482,12 +10076,15 @@ export class TuiApp {
           textBlocks.push(block)
         } else {
           flushText()
-          container.addChild(new ImageThumbnail(
+          const thumbnail = new ImageThumbnail(
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
             this.imageLoader!,
             this.imageTheme!,
+            () => this.requestRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
-          ))
+          )
+          this.thumbnailOccurrence.set(thumbnail, imageIndex)
+          container.addChild(thumbnail)
         }
         imageIndex += 1
       } else if (block.type === 'file') {
@@ -9550,12 +10147,15 @@ export class TuiApp {
       for (const block of content) {
         if (block.type === 'image') {
           if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
-            container.addChild(new ImageThumbnail(
+            const thumbnail = new ImageThumbnail(
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
               this.imageLoader,
               this.imageTheme,
+              () => this.requestRender(),
               this.occurrenceCollapsedRef(message, imageIndex),
-            ))
+            )
+            this.thumbnailOccurrence.set(thumbnail, imageIndex)
+            container.addChild(thumbnail)
           }
           imageIndex += 1
         }
@@ -9578,12 +10178,15 @@ export class TuiApp {
         textBlocks.push(block)
         flushText()
         if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
-          container.addChild(new ImageThumbnail(
+          const thumbnail = new ImageThumbnail(
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
             this.imageLoader,
             this.imageTheme,
+            () => this.requestRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
-          ))
+          )
+          this.thumbnailOccurrence.set(thumbnail, imageIndex)
+          container.addChild(thumbnail)
         }
         imageIndex += 1
       } else if (block.type === 'file') {
@@ -10602,6 +11205,7 @@ export class TuiApp {
                     block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
                     this.imageLoader,
                     this.imageTheme,
+                    () => this.requestRender(),
                   ))
                 } else {
                   // Known process blocks keep their legacy JSON form;
@@ -10754,6 +11358,7 @@ export class TuiApp {
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
               this.imageLoader,
               this.imageTheme,
+              () => this.requestRender(),
             ))
           } else {
             // Known process blocks keep their legacy JSON form; file and
@@ -10799,6 +11404,7 @@ export class TuiApp {
           block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
           this.imageLoader,
           this.imageTheme,
+          () => this.requestRender(),
         ))
       }
     }

@@ -13,9 +13,11 @@
 
 import { Input, matchesKey, type KeyId } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
-import { visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { getGraphemeSegmenter, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { componentKeymap } from './keybindings/component-keymap.ts'
 import { color } from './theme.ts'
+
+const segmenter = getGraphemeSegmenter()
 
 /** One question in a user-questions ask (dsh shape mirrored for testability). */
 export interface QuestionFlowQuestion {
@@ -59,6 +61,11 @@ interface Draft {
 
 /** The "type your own answer" row shown below options (pi isOther parity). */
 const OTHER_ROW = '\u0000other'
+/** The scroll-marker row's hit identity (mouse parity): the marker is a
+ * DISTINCT semantic target from inert chrome — a press on an inert row
+ * that repaints into the marker row must not toggle the expanded panel
+ * (and vice versa). */
+const MARKER_ROW = '\u0000marker'
 
 /**
  * Default total physical-row budget of the question flow itself. The
@@ -202,6 +209,29 @@ interface Row {
 }
 
 /**
+ * The press-time semantic identity of a QuestionFlow mouse gesture
+ * (mouse parity): the release click may only act on the EXACT target
+ * that was pressed — a question advance / repaint between press and
+ * release must not transfer the click to whatever repainted onto the
+ * same cell.
+ */
+export interface QuestionMouseGesture {
+  /** The question INDEX within this flow at press time (the flow's own
+   * unique in-flow identity — the caller-provided question id is NOT
+   * guaranteed unique within a batch, so a duplicate id must not let a
+   * press from Q[n] activate Q[n+1] after a keyboard advance). */
+  questionIndex: number
+  /** The question id at press time (a question advance rejects the
+   * release). */
+  questionId: string
+  /** The LAST-PAINTED hit at the pressed row: an option key, OTHER_ROW,
+   * the MARKER_ROW sentinel (the scroll marker is a distinct semantic
+   * target — an inert press that repaints into the marker row must not
+   * toggle the expanded panel), or undefined for inert chrome. */
+  hit: string | undefined
+}
+
+/**
  * The interactive question flow. Renders one question at a time with a tab
  * strip (answered marks), a navigable option list (↑↓/digits/Enter), a real
  * Input for free text, and a final REVIEW page with NO two-choice control:
@@ -227,7 +257,7 @@ export class QuestionFlow implements Component, Focusable {
    * editing history leak into the next row (round-3 finding — Ctrl+-
    * undo / Ctrl+Y yank resurrected the previous question's text).
    */
-  private otherInput = new Input()
+  private otherInput = new Input({ prompt: '' })
   /**
    * The tab whose draft/in-progress text the {@link otherInput} currently
    * holds. Entering a DIFFERENT question's edit replaces the Input and
@@ -264,9 +294,25 @@ export class QuestionFlow implements Component, Focusable {
   /** Hit map from the last render: content row -> option row key. Built each
    * render; drives fullscreen click-to-select. */
   private readonly hitMap = new Map<number, string>()
+  /** Visible width of the free-text row's prefix (pointer + marker +
+   * space) from the last render: a click while editing must translate to
+   * the Input's local column. (Mouse parity.) */
+  private otherPrefixWidth = 0
+  /** Content width from the last render (Input hit-testing). */
+  private lastContentWidth = 0
+  /** Physical row of the PINNED optionless free-text input from the last
+   * render (-1 = none): the optionless input renders below the scrollport
+   * and is not part of the page hit map, so a click on it must be routed
+   * to the Input explicitly. (Mouse parity.) */
+  private pinnedOtherRow = -1
   /** Content row of the scroll marker in the last render (-1 = none);
    * clicking it toggles the expanded panel. */
   private lastMarkerRow = -1
+  /** The press-time semantic identity of a mouse gesture (mouse parity):
+   * the release click may only act on the EXACT target that was pressed
+   * — a question advance / repaint between press and release must not
+   * transfer the click to whatever repainted onto the same cell. */
+  private mousePressGesture: QuestionMouseGesture | undefined
   /** Scrollport height from the last render (scroll page math). */
   private lastRegionHeight = 0
   /** Wrapped page content length from the last render. */
@@ -364,18 +410,110 @@ export class QuestionFlow implements Component, Focusable {
   }
 
   /**
+   * Record the press-time semantic identity of a mouse gesture (mouse
+   * parity): the release click may only act on the EXACT target that was
+   * pressed. The identity is the question id + the LAST-PAINTED hit
+   * (option key / OTHER_ROW / undefined chrome) — never the physical
+   * row alone, so a question advance or repaint between press and
+   * release can never transfer the click to a different target.
+   */
+  beginMousePress(row: number): QuestionMouseGesture | undefined {
+    const question = this.questions[this.tab]
+    if (question === undefined) return undefined
+    const gesture: QuestionMouseGesture = {
+      questionIndex: this.tab,
+      questionId: question.id,
+      hit: this.hitMap.get(row),
+    }
+    this.mousePressGesture = gesture
+    return gesture
+  }
+
+  /**
+   * Complete a mouse gesture: the release click may only run the action
+   * for the EXACT press-time identity. The gesture OBJECT itself is part
+   * of the identity — a queued flow that took over the seat after the
+   * previous flow settled can never consume the previous flow's press
+   * (its own mousePressGesture is undefined or a different object). A
+   * mismatch (question advanced, the cell repainted to a different
+   * target, the gesture was never started) is a no-op — the stale
+   * identity is always consumed.
+   */
+  completeMouseClick(gesture: QuestionMouseGesture | undefined, row: number, x?: number): void {
+    const pressedGesture = this.mousePressGesture
+    this.mousePressGesture = undefined
+    if (gesture === undefined || gesture !== pressedGesture) return
+    const question = this.questions[this.tab]
+    if (question === undefined) return
+    // The question INDEX is the flow's own unique in-flow identity: the
+    // caller-provided id is not guaranteed unique within a batch, so a
+    // duplicate id must not let a press from Q[n] activate Q[n+1] after
+    // a keyboard advance.
+    if (gesture.questionIndex !== this.tab) return
+    if (gesture.questionId !== question.id) return
+    if (this.hitMap.get(row) !== gesture.hit) return
+    this.clickRow(row, x)
+  }
+
+  /**
    * Primary-click routing (fullscreen): an option row selects it (single-
    * select advances, multi-select toggles, the "Type something." row enters
-   * free-text), and the scroll marker toggles the expanded panel. The hit
-   * map reflects the LAST rendered frame, which is what the user sees.
+   * free-text), and the scroll marker toggles the expanded panel. While the
+   * free-text row is already editing, `x` (the flow-local column) positions
+   * the Input cursor at the clicked value column — the input is never
+   * reset/reseeded. The hit map reflects the LAST rendered frame, which is
+   * what the user sees.
    */
-  clickRow(row: number): void {
+  clickRow(row: number, x?: number): void {
     if (row < 0 || this.tab >= this.questions.length) return
     const key = this.hitMap.get(row)
     if (key === OTHER_ROW) {
-      // Already typing into it: re-entering would reset the input from the
-      // draft and discard the in-progress text.
-      if (this.editingOther) return
+      // Already typing into it: position the Input cursor at the clicked
+      // value column (the prefix is pointer + marker + space). Re-entering
+      // would reset the input from the draft and discard the in-progress
+      // text. (Mouse parity.)
+      if (this.editingOther) {
+        if (x !== undefined) {
+          const question = this.questions[this.tab]
+          const masked = question?.masked === true && this.otherInput.getValue() !== ''
+          // The Input has an EMPTY prompt: its local column 0 IS the
+          // first painted value cell. The optioned row's prefix is
+          // pointer + marker + space; the pinned row's leading space is
+          // the only offset — no hidden "> " prompt to compensate.
+          const localX = row === this.pinnedOtherRow ? x - 1 : x - this.otherPrefixWidth
+          if (localX >= 0) {
+            if (masked) {
+              // Masked: the painted row shows one bullet per visible
+              // grapheme. Map the clicked bullet column to the grapheme
+              // boundary and place the real cursor there (the mask never
+              // exposes the value's real cell geometry).
+              this.maskedClick(localX)
+              return
+            }
+            this.otherInput.handleMouse?.({
+              type: 'press',
+              button: 'left',
+              x: localX,
+              y: 0,
+              screenX: x,
+              screenY: row,
+              width: Math.max(1, this.lastContentWidth - this.otherPrefixWidth),
+              height: 1,
+              shift: false,
+              alt: false,
+              ctrl: false,
+            })
+          }
+        }
+        return
+      }
+      if (this.isOptionless()) {
+        // Optionless: the pinned input is the ONLY row (rows() is empty),
+        // so re-enter the edit directly, preserving the draft (mirror
+        // Enter). (Mouse parity.)
+        this.enterOther()
+        return
+      }
       const index = this.rows().findIndex(candidate => candidate.key === OTHER_ROW)
       if (index >= 0) {
         this.cursor = index
@@ -384,15 +522,61 @@ export class QuestionFlow implements Component, Focusable {
       }
       return
     }
+    if (key === MARKER_ROW) {
+      this.toggleExpanded()
+      return
+    }
     if (key !== undefined) {
       this.cursor = Number(key)
       this.pendingCursorScroll = true
       this.confirm()
       return
     }
-    if (row === this.lastMarkerRow) {
-      this.toggleExpanded()
+  }
+
+  /** One bullet per GRAPHEME of the real value (the mask contract: 1
+   * visible grapheme = 1 mask glyph, never UTF-16 code units). Used by
+   * the review page and the multi-select custom suffix so the mask
+   * semantics match the editing state. */
+  private maskedValue(value: string): string {
+    return '•'.repeat([...segmenter.segment(value)].length)
+  }
+
+  /** One bullet per GRAPHEME of the real value, aligned with the Input's
+   * horizontal-scroll viewport: the visible mask window shows the SAME
+   * logical graphemes the Input renders, so a click on a visible bullet
+   * maps to the visible grapheme (never the absolute value start). */
+  private maskedBullets(): string {
+    const value = this.otherInput.getValue()
+    const graphemes = [...segmenter.segment(value)]
+    const startIndex = this.maskedStartGrapheme(graphemes)
+    return '•'.repeat(graphemes.length - startIndex)
+  }
+
+  /** The first grapheme index visible in the Input's horizontal-scroll
+   * viewport (the mask window and the Input render the same graphemes). */
+  private maskedStartGrapheme(graphemes: Array<{ index: number; segment: string }>): number {
+    const startCol = this.otherInput.getRenderedStartColumn()
+    let col = 0
+    for (let i = 0; i < graphemes.length; i++) {
+      if (col >= startCol) return i
+      col += visibleWidth(graphemes[i]!.segment)
     }
+    return graphemes.length
+  }
+
+  /** Map a clicked mask column to the real cursor: one visible bullet =
+   * one logical grapheme (never split by UTF-16 code units), placed at
+   * the grapheme boundary's UTF-16 index. */
+  private maskedClick(localX: number): void {
+    const value = this.otherInput.getValue()
+    const graphemes = [...segmenter.segment(value)]
+    const startIndex = this.maskedStartGrapheme(graphemes)
+    const targetIndex = Math.min(graphemes.length, startIndex + localX)
+    const cursor = targetIndex >= graphemes.length
+      ? value.length
+      : graphemes[targetIndex]!.index
+    this.otherInput.setCursor(cursor)
   }
 
   /**
@@ -446,6 +630,7 @@ export class QuestionFlow implements Component, Focusable {
         : selected ? color.success(`[${Number(row.key) + 1}]`) : color.textDim(`[${Number(row.key) + 1}]`)
       const pointer = isCursor ? color.primary('→') : ' '
       const prefix = `${pointer} ${marker} `
+      if (row.key === OTHER_ROW && this.editingOther) this.otherPrefixWidth = visibleWidth(prefix)
       const indent = ' '.repeat(visibleWidth(prefix))
       const badge = row.recommended ? ` ${color.primary('[recommended]')}` : ''
       const label = isCursor ? color.textStrong(row.label) : row.label
@@ -455,19 +640,18 @@ export class QuestionFlow implements Component, Focusable {
       if (row.key === OTHER_ROW && this.editingOther) {
         const inputLines = this.otherInput.render(Math.max(1, width - visibleWidth(prefix)))
         const inputLine = inputLines[0] ?? ''
-        const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
         if (question.masked === true && this.otherInput.getValue() !== '') {
           // A secret prompt: replace the rendered content with one bullet
-          // per CHARACTER of the real value (the input's own render pads to
+          // per GRAPHEME of the real value (the input's own render pads to
           // the full width; the mask must not). The input's real value and
           // cursor are untouched — editing keeps working — only the display
           // is masked, and the value never reaches the transcript, history,
           // or any log.
-          lines.push(prefix + color.textDim('•'.repeat(this.otherInput.getValue().length)))
+          lines.push(prefix + color.textDim(this.maskedBullets()))
           hits.push(OTHER_ROW)
           continue
         }
-        lines.push(prefix + (this.otherInput.getValue() === '' ? color.textDim(row.label) : stripped))
+        lines.push(prefix + (this.otherInput.getValue() === '' ? color.textDim(row.label) : inputLine))
         hits.push(OTHER_ROW)
         continue
       }
@@ -681,7 +865,11 @@ export class QuestionFlow implements Component, Focusable {
    * Ctrl+- (undo) / Ctrl+Y (yank) resurrect the previous question's text
    * in the new row (round-3 finding). */
   private resetOtherInput(value: string): void {
-    const input = new Input()
+    // The Input has an EMPTY prompt: QuestionFlow paints its own prefix
+    // (pointer + marker + space) and the pinned row's leading space, so
+    // the Input's local column 0 IS the first painted value cell — no
+    // hidden "> " prompt to strip or compensate in mouse translation.
+    const input = new Input({ prompt: '' })
     input.onSubmit = (next) => this.commitOther(next)
     input.onEscape = () => this.handleOtherEscape()
     input.setValue(value)
@@ -740,6 +928,14 @@ export class QuestionFlow implements Component, Focusable {
 
   handleInput(data: string): void {
     if (data === '\u0000') return
+    // Any keyboard input terminates an unfinished mouse gesture: the
+    // semantic state machine (Esc exits the free-text edit, Enter
+    // advances, digits/arrows move the cursor, e toggles the expanded
+    // panel) can reinterpret a pressed hit as a different action on
+    // release — an edit-state press on the OTHER_ROW followed by Esc
+    // must never re-enter the edit when the release lands before the
+    // repaint.
+    this.mousePressGesture = undefined
     // Text mode: printable/cursor keys go to the real Input; Enter/Esc are
     // the flow's own verbs. PageUp/PageDown scroll the body even while
     // typing ('e' stays a letter here — expand is a list-mode verb).
@@ -924,10 +1120,12 @@ export class QuestionFlow implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
+    this.lastContentWidth = safeWidth
     const lines: string[] = []
     // The hit map reflects THIS frame only (the review page populates none).
     this.hitMap.clear()
     this.lastMarkerRow = -1
+    this.pinnedOtherRow = -1
     // Tab strip: Q1(✓) Q2(○) … Submit — answered marks, current highlighted.
     // Tabs carry NO leading/trailing spaces of their own (the box border
     // provides the padding), so every content row starts at the same column.
@@ -978,10 +1176,15 @@ export class QuestionFlow implements Component, Focusable {
           : draft.custom !== '' && question.multiSelect !== true
             ? question.masked === true
               // A masked secret stays masked on the review page too: the
-              // answer is confirmed as "typed", never re-shown in plaintext.
-              ? '•'.repeat(draft.custom.length)
+              // answer is confirmed as "typed", never re-shown in
+              // plaintext — one bullet per GRAPHEME, matching the
+              // editing-state mask contract.
+              ? this.maskedValue(draft.custom)
               : draft.custom
-            : [...draft.selected].join(', ') + (draft.custom !== '' ? ` + ${draft.custom}` : '')
+            : [...draft.selected].join(', ')
+                + (draft.custom !== ''
+                  ? ` + ${question.masked === true ? this.maskedValue(draft.custom) : draft.custom}`
+                  : '')
         reviewBudget = appendWrappedBudgeted(
           lines,
           `${color.textDim(`Q${qi + 1}`)}  `,
@@ -1071,6 +1274,10 @@ export class QuestionFlow implements Component, Focusable {
           ? `↑ ${above} up`
           : `↓ ${below} more lines`
       this.lastMarkerRow = lines.length
+      // The marker is a DISTINCT hit identity (mouse parity): a press on
+      // an inert row that repaints into the marker row must not toggle
+      // the expanded panel.
+      this.hitMap.set(lines.length, MARKER_ROW)
       lines.push(color.textDim(marker))
     } else {
       this.lastMarkerRow = -1
@@ -1084,15 +1291,19 @@ export class QuestionFlow implements Component, Focusable {
       // history, or any log — only the display is hidden).
       const inputLines = this.otherInput.render(Math.max(1, safeWidth - 2))
       const inputLine = inputLines[0] ?? ''
-      const stripped = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine
+      // The pinned row is the free-text input: route clicks on it to the
+      // Input (the page hit map only covers the scrollport). (Mouse
+      // parity.)
+      this.pinnedOtherRow = lines.length
+      this.hitMap.set(lines.length, OTHER_ROW)
       if (question.masked === true && this.otherInput.getValue() !== '') {
-        // A MASKED question renders one bullet per character of the real
+        // A MASKED question renders one bullet per GRAPHEME of the real
         // value (the input's render pads to the full width; the mask must
         // not). The value never reaches the transcript, history, or any
         // log — only the display is hidden.
-        lines.push(` ${color.textDim('•'.repeat(this.otherInput.getValue().length))}`)
+        lines.push(` ${color.textDim(this.maskedBullets())}`)
       } else {
-        lines.push(this.otherInput.getValue() === '' ? color.textDim(' Type your answer…') : ` ${stripped}`)
+        lines.push(this.otherInput.getValue() === '' ? color.textDim(' Type your answer…') : ` ${inputLine}`)
       }
     }
     if (draft.skipped) {

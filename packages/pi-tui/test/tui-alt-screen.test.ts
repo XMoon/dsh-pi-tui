@@ -1,9 +1,19 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { findAltScreenSearchMatches } from "../src/alt-screen-search.ts";
+import {
+	AltScreenSearchComponent,
+	AltScreenSearchIndex,
+	findAltScreenSearchMatches,
+} from "../src/alt-screen-search.ts";
+import { Box } from "../src/components/box.ts";
+import { Container } from "../src/tui.ts";
+import { Input } from "../src/components/input.ts";
 import { HStack } from "../src/components/h-stack.ts";
 import { Image } from "../src/components/image.ts";
+import { MouseRegion } from "../src/components/mouse-region.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
+import { SelectList } from "../src/components/select-list.ts";
+import { SettingsList } from "../src/components/settings-list.ts";
 import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "../src/keybindings.ts";
@@ -14,7 +24,9 @@ import {
 	resetCapabilitiesCache,
 	setCapabilities,
 } from "../src/terminal-image.ts";
+import type { TuiMouseEvent } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
+import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -85,6 +97,127 @@ describe("TuiAltScreen", () => {
 			["line 6", "line 7", "line 8", "line 9"],
 		);
 
+		tui.stop();
+	});
+
+	it("fires onFramePainted after each painted frame and exposes the painted box of mounted components (X054)", async () => {
+		const terminal = new VirtualTerminal(30, 6);
+		let paintedFrames = 0;
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onFramePainted: () => {
+				paintedFrames += 1;
+			},
+		});
+		const header = new Text("header", 0, 0);
+		const body = new Text("body line", 0, 0);
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: header, shrink: 0 },
+				{ component: body, shrink: 0 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+		assert.ok(paintedFrames >= 1, "onFramePainted must fire after the first painted frame");
+		// The painted box reflects the ACTUAL committed layout (the frame
+		// the user saw), not a re-measurement: the header's box is its
+		// rendered height at the top of the screen.
+		assert.deepStrictEqual(tui.getPaintedBox(header), { x: 0, y: 0, width: 30, height: 1 });
+		assert.deepStrictEqual(tui.getPaintedBox(body), { x: 0, y: 1, width: 30, height: 1 });
+		// A component that is not part of the layout has no painted box.
+		assert.strictEqual(tui.getPaintedBox(new Text("unmounted", 0, 0)), undefined);
+		// A repaint fires the callback again (the frame-completion boundary).
+		const before = paintedFrames;
+		tui.requestRender();
+		await terminal.waitForRender();
+		assert.ok(paintedFrames > before, "onFramePainted must fire on every painted frame");
+		tui.stop();
+	});
+
+	it("shows a clickable jump-to-end indicator on the transcript's last row while scrolled up", async () => {
+		const terminal = new VirtualTerminal(30, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			scrollToEndIndicator: () => "\x1b[7m ↓ Jump to end \x1b[27m",
+		});
+		const transcript = new ScrollView(
+			new Text(Array.from({ length: 8 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ follow: "end", primary: true },
+		);
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: new Text("editor\nfooter", 0, 0), basis: "auto", minSize: 1 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+		assert.ok(!terminal.getViewport().some((line) => line.includes("Jump to end")));
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.isFollowingEnd, false);
+		assert.strictEqual(terminal.getViewport()[3], "line 7  ↓ Jump to end         ");
+		assert.strictEqual(terminal.getViewport()[4]?.trimEnd(), "editor");
+
+		// Pressing next to the label starts a selection instead of jumping.
+		terminal.sendInput("\x1b[<0;2;4M");
+		terminal.sendInput("\x1b[<0;2;4m");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.isFollowingEnd, false);
+
+		terminal.sendInput("\x1b[<0;15;4M");
+		terminal.sendInput("\x1b[<0;15;4m");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.isFollowingEnd, true);
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 5", "line 6", "line 7", "line 8", "editor", "footer"],
+		);
+		tui.stop();
+	});
+
+	it("leaves the scrollbar clickable when the jump-to-end indicator spans the transcript", async () => {
+		const terminal = new VirtualTerminal(30, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			scrollToEndIndicator: () => "↓".repeat(30),
+		});
+		const transcript = new ScrollView(
+			new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ follow: "end", primary: true, scrollbar: "always" },
+		);
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: new Text("editor\nfooter", 0, 0), basis: "auto", minSize: 1 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.isFollowingEnd, false);
+
+		// The indicator must not intercept a press on the scrollbar's last column.
+		terminal.sendInput("\x1b[<0;30;4M");
+		terminal.sendInput("\x1b[<0;30;4m");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.isFollowingEnd, false);
+		tui.stop();
+	});
+
+	it("never shows the jump-to-end indicator for a primary scroll view without follow-end", async () => {
+		const terminal = new VirtualTerminal(30, 3);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			scrollToEndIndicator: () => " ↓ Jump to end ",
+		});
+		const transcript = new ScrollView(new Text("one\ntwo\nthree\nfour\nfive", 0, 0), { primary: true });
+		tui.setLayoutRoot(transcript);
+		tui.start();
+		await terminal.waitForRender();
+
+		assert.strictEqual(transcript.isFollowingEnd, false);
+		assert.ok(!terminal.getViewport().some((line) => line.includes("Jump to end")));
 		tui.stop();
 	});
 
@@ -178,6 +311,59 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("scrolls faster while Alt is held during wheel input", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		const text = new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0);
+		tui.addChild(text);
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(tui.viewportTop, 8);
+
+		// Alt modifier sets bit 8 on the wheel button (72 = 64 + 8).
+		terminal.sendInput("\x1b[<72;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.viewportTop, 3);
+		tui.stop();
+	});
+
+	it("does not vertically redispatch misses through horizontal layout containers", async () => {
+		const terminal = new VirtualTerminal(20, 2);
+		const tui = new TuiAltScreen(terminal);
+		let selections = 0;
+		const list = new SelectList(
+			[
+				{ value: "a", label: "A" },
+				{ value: "b", label: "B" },
+			],
+			2,
+			{
+				selectedPrefix: (text) => text,
+				selectedText: (text) => text,
+				description: (text) => text,
+				scrollInfo: (text) => text,
+				noMatch: (text) => text,
+			},
+		);
+		list.onSelect = () => {
+			selections += 1;
+		};
+		tui.setLayoutRoot(
+			new HStack([
+				{ component: list, basis: 10 },
+				{ component: new Text("plain", 0, 0), basis: 10 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;15;1M");
+		terminal.sendInput("\x1b[<0;15;1m");
+		await terminal.waitForRender();
+		assert.strictEqual(selections, 0);
+		tui.stop();
+	});
+
 	it("uses button-motion tracking inside terminal multiplexers", () => {
 		const environmentKeys = ["TMUX", "ZELLIJ", "STY", "TERM"] as const;
 		const previousEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));
@@ -260,62 +446,120 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
-	it("drags a visible scrollbar thumb and keeps it visible until release", async () => {
+	it("reveals an auto scrollbar when the pointer enters its hidden track", async () => {
 		const terminal = new RecordingTerminal(10, 5);
 		const tui = new TuiAltScreen(terminal);
 		const scrollView = new ScrollView(
 			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
-			{
-				primary: true,
-				scrollbar: "auto",
-				scrollbarHideDelayMs: 50,
-			},
+			{ primary: true, scrollbar: "auto", scrollbarHideDelayMs: 20 },
 		);
 		tui.setLayoutRoot(scrollView);
 		tui.start();
 		await terminal.waitForRender();
 		assert.strictEqual(scrollView.isScrollbarVisible, false);
 
-		terminal.sendInput("\x1b[<65;10;1M");
+		terminal.sendInput("\x1b[<35;10;3M");
 		await terminal.waitForRender();
-		assert.strictEqual(scrollView.scrollTop, 1);
 		assert.strictEqual(scrollView.isScrollbarVisible, true);
+		assert.strictEqual(scrollView.isScrollbarActive, true);
+		assert.ok(terminal.getViewport().some((line) => /[│█]/.test(line)));
 
-		terminal.sendInput("\x1b[<0;10;1M");
+		terminal.sendInput("\x1b[<35;9;3M");
+		await new Promise((resolve) => setTimeout(resolve, 40));
 		await terminal.waitForRender();
-		await new Promise((resolve) => setTimeout(resolve, 70));
-		assert.strictEqual(scrollView.isScrollbarVisible, true);
+		assert.strictEqual(scrollView.isScrollbarVisible, false);
+		tui.stop();
+	});
 
-		terminal.sendInput("\x1b[<32;10;4M");
-		await terminal.waitForRender();
-		assert.strictEqual(scrollView.scrollTop, 15);
-		assert.deepStrictEqual(
-			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 16", "line 17", "line 18", "line 19", "line 20"],
+	it("jumps to a scrollbar track position and continues dragging from there", async () => {
+		const terminal = new RecordingTerminal(10, 10);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 50 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "always" },
 		);
-
-		terminal.sendInput("\x1b[<0;10;4m");
+		tui.setLayoutRoot(scrollView);
+		tui.start();
 		await terminal.waitForRender();
-		assert.strictEqual(scrollView.isScrollbarVisible, true);
-		await new Promise((resolve) => setTimeout(resolve, 70));
-		assert.strictEqual(scrollView.isScrollbarVisible, true);
-		terminal.sendInput("\x1b[<35;9;4M");
-		await new Promise((resolve) => setTimeout(resolve, 70));
-		assert.strictEqual(scrollView.isScrollbarVisible, false);
+		assert.strictEqual(scrollView.scrollTop, 0);
 
-		terminal.sendInput("\x1b[<64;10;5M");
+		terminal.sendInput("\x1b[<0;10;6M");
 		await terminal.waitForRender();
-		assert.strictEqual(scrollView.scrollTop, 14);
-		await new Promise((resolve) => setTimeout(resolve, 70));
-		assert.strictEqual(scrollView.isScrollbarVisible, true);
-		terminal.sendInput("\x1b[<35;9;5M");
-		await new Promise((resolve) => setTimeout(resolve, 70));
-		assert.strictEqual(scrollView.isScrollbarVisible, false);
+		assert.strictEqual(scrollView.scrollTop, 20);
 
+		terminal.sendInput("\x1b[<32;10;10M");
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.scrollTop, 40);
+
+		terminal.sendInput("\x1b[<0;10;10m");
+		await terminal.waitForRender();
 		assert.ok(terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b]52;c;")));
 		tui.stop();
 	});
 
+	it("chains unused wheel delta to an outer scroll view", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { wheelScrollLines: 3 });
+		const inner = new ScrollView(new Text("i1\ni2\ni3\ni4\ni5\ni6", 0, 0));
+		const outer = new ScrollView(
+			new VStack([{ component: inner, basis: 2 }, new Text("tail1\ntail2\ntail3\ntail4\ntail5", 0, 0)]),
+			{ primary: true },
+		);
+		tui.setLayoutRoot(outer);
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<65;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(inner.scrollTop, 3);
+		assert.strictEqual(outer.scrollTop, 0);
+
+		terminal.sendInput("\x1b[<65;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(inner.scrollTop, 4);
+		assert.strictEqual(outer.scrollTop, 2);
+		tui.stop();
+	});
+
+	it("supports configurable keyboard viewport navigation with four rows of page overlap", async () => {
+		const terminal = new VirtualTerminal(20, 8);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[57421u");
+		terminal.sendInput("\x1b[57421;1:3u");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
+		);
+
+		terminal.sendInput("\x1b[57422u");
+		terminal.sendInput("\x1b[57422;1:3u");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
+		);
+
+		terminal.sendInput("\x1bOH");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
+		);
+
+		terminal.sendInput("\x1bOF");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
+		);
+
+		tui.stop();
+	});
 
 	it("searches normalized rendered transcript text across rows", () => {
 		assert.deepStrictEqual(findAltScreenSearchMatches(["alpha QUICK", "brown fox"], "quick brown"), [
@@ -326,6 +570,243 @@ describe("TuiAltScreen", () => {
 				],
 			},
 		]);
+	});
+
+	it("maps normalized ASCII and Unicode search matches back to rendered columns", () => {
+		assert.deepStrictEqual(findAltScreenSearchMatches(["\x1b[31mfoo  bar\x1b[0m", "A界🙂éZ"], "oo   bar\nA界🙂é"), [
+			{
+				segments: [
+					{ row: 0, startCol: 1, endCol: 3 },
+					{ row: 0, startCol: 5, endCol: 8 },
+					{ row: 1, startCol: 0, endCol: 6 },
+				],
+			},
+		]);
+	});
+
+	it("reuses indexed transcript matches until the query or rendered lines change", () => {
+		const index = new AltScreenSearchIndex();
+		const initial = index.search(["alpha needle", "omega"], "needle");
+		assert.strictEqual(initial.changed, true);
+		assert.strictEqual(initial.matches.length, 1);
+
+		const cached = index.search(["alpha needle", "omega"], "needle");
+		assert.strictEqual(cached.changed, false);
+		assert.strictEqual(cached.matches, initial.matches);
+
+		const changedQuery = index.search(["alpha needle", "omega"], "omega");
+		assert.strictEqual(changedQuery.changed, true);
+		assert.notStrictEqual(changedQuery.matches, initial.matches);
+		assert.deepStrictEqual(changedQuery.matches[0]?.segments, [{ row: 1, startCol: 0, endCol: 5 }]);
+
+		const changedLines = index.search(["alpha needle", "no match"], "omega");
+		assert.strictEqual(changedLines.changed, true);
+		assert.deepStrictEqual(changedLines.matches, []);
+	});
+
+	it("renders transcript search with a muted placeholder and right-aligned controls", () => {
+		const component = new AltScreenSearchComponent(() => {});
+		const rendered = component.render(48);
+		const lines = rendered.map((line) => stripTerminalSequences(line));
+
+		assert.strictEqual(lines.length, 3);
+		assert.ok(lines.every((line) => visibleWidth(line) === 48));
+		assert.match(lines[0] ?? "", /^┌─+┐$/);
+		assert.match(lines[1] ?? "", /^│ Find in transcript +│$/);
+		assert.ok(rendered[1]?.includes("\x1b[2m"));
+		assert.match(lines[2] ?? "", /^└─+ ↑ Shift\+Enter · ↓ Enter ─┘$/);
+		const controls = lines[2] ?? "";
+		assert.strictEqual(component.getNavigationDirectionAt(2, controls.indexOf("↑")), -1);
+		assert.strictEqual(component.getNavigationDirectionAt(2, controls.indexOf("Shift+Enter") + 5), -1);
+		assert.strictEqual(component.getNavigationDirectionAt(2, controls.indexOf("·")), undefined);
+		assert.strictEqual(component.getNavigationDirectionAt(2, controls.indexOf("↓")), 1);
+		assert.strictEqual(component.getNavigationDirectionAt(2, controls.lastIndexOf("Enter") + 2), 1);
+
+		component.handleInput("n");
+		component.setResult(0, 2);
+		const populatedRender = component.render(48);
+		const populated = populatedRender.map((line) => stripTerminalSequences(line));
+		assert.ok(populated[1]?.includes("n"));
+		assert.ok(populated[1]?.includes("1/2"));
+		assert.ok(populatedRender[1]?.includes("\x1b[2m 1/2 \x1b[22m"));
+		assert.ok(!populated.some((line) => line.includes("Find in transcript")));
+	});
+
+	it("positions the search query cursor on mouse press (X049)", () => {
+		let query = "";
+		const component = new AltScreenSearchComponent((next) => {
+			query = next;
+		});
+		component.render(48);
+		component.handleInput("hello");
+		component.render(48);
+		// Content starts at col 1 (left border); the Input prompt " " is one
+		// column, so value column 2 (between e and l) is at component col 4.
+		const result = component.handleMouse({
+			type: "press",
+			button: "left",
+			x: 4,
+			y: 1,
+			screenX: 4,
+			screenY: 1,
+			width: 48,
+			height: 3,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.ok(result?.handled, "press on the query row must be handled");
+		assert.strictEqual(result?.focus, true, "press must request focus");
+		component.handleInput("X");
+		assert.strictEqual(query, "heXllo", "typing after the click must insert at the clicked column");
+	});
+
+	it("keeps the search result-count suffix and borders inert (X049)", () => {
+		const component = new AltScreenSearchComponent(() => {});
+		component.render(48);
+		component.handleInput("needle");
+		component.setResult(0, 2);
+		component.render(48);
+		const press = (x: number, y: number) =>
+			component.handleMouse({
+				type: "press",
+				button: "left",
+				x,
+				y,
+				screenX: x,
+				screenY: y,
+				width: 48,
+				height: 3,
+				shift: false,
+				alt: false,
+				ctrl: false,
+			});
+		// The result-count suffix (" 1/2 ") sits after the Input (which ends
+		// at component col 41 for this render); a press on the suffix must
+		// not reach the Input.
+		assert.strictEqual(press(45, 1), undefined, "result-count suffix must be inert");
+		// Top and bottom borders (rows 0 and 2) are inert.
+		assert.strictEqual(press(4, 0), undefined, "top border must be inert");
+		assert.strictEqual(press(4, 2), undefined, "navigation-button row must be inert here");
+	});
+
+	it("navigates transcript search with hoverable arrow buttons and toggles it with its shortcut", async () => {
+		const terminal = new RecordingTerminal(120, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			searchNavigationButtonStyle: (text, hovered) => `${hovered ? "\x1b[45m" : "\x1b[44m"}${text}\x1b[49m`,
+		});
+		tui.addChild(new Text("needle one\nmiddle\nneedle two\nend", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[102;6u");
+		terminal.sendInput("needle");
+		await terminal.waitForRender();
+		let viewport = terminal.getViewport();
+		assert.ok(viewport.some((line) => line.includes("1/2")));
+		assert.ok(viewport.some((line) => line.includes("↑ Shift+Enter · ↓ Enter")));
+
+		let arrowRow = viewport.findIndex((line) => line.includes("↑") && line.includes("↓"));
+		let arrowColumn = viewport[arrowRow]?.lastIndexOf("Enter") ?? -1;
+		assert.ok(arrowRow >= 0 && arrowColumn >= 0);
+		const hoverEventCount = terminal.events.length;
+		terminal.sendInput(`\x1b[<35;${arrowColumn + 1};${arrowRow + 1}M`);
+		await terminal.waitForRender();
+		assert.ok(
+			terminal.events
+				.slice(hoverEventCount)
+				.some((event) => event.type === "write" && event.data.includes("\x1b[45m↓ Enter\x1b[49m")),
+		);
+		terminal.sendInput(`\x1b[<0;${arrowColumn + 1};${arrowRow + 1}M`);
+		await terminal.waitForRender();
+		viewport = terminal.getViewport();
+		assert.ok(viewport.some((line) => line.includes("2/2")));
+		assert.ok(viewport.some((line) => line.includes("↑ Shift+Enter · ↓ Enter")));
+
+		arrowRow = viewport.findIndex((line) => line.includes("↑") && line.includes("↓"));
+		arrowColumn = (viewport[arrowRow]?.indexOf("Shift+Enter") ?? -3) + 3;
+		assert.ok(arrowRow >= 0 && arrowColumn >= 0);
+		terminal.sendInput(`\x1b[<0;${arrowColumn + 1};${arrowRow + 1}M`);
+		await terminal.waitForRender();
+		assert.ok(terminal.getViewport().some((line) => line.includes("1/2")));
+		assert.ok(terminal.getViewport().some((line) => line.includes("↑ Shift+Enter · ↓ Enter")));
+
+		terminal.sendInput("\x1b[102;6u");
+		await terminal.waitForRender();
+		assert.ok(!terminal.getViewport().some((line) => line.includes("↑ Shift+Enter · ↓ Enter")));
+		tui.stop();
+	});
+
+	it("positions the fullscreen search query cursor on mouse click (X049)", async () => {
+		const terminal = new RecordingTerminal(120, 6);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("needle one\nmiddle\nneedle two\nend", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[102;6u");
+		terminal.sendInput("needle");
+		await terminal.waitForRender();
+		let viewport = terminal.getViewport();
+		const contentRow = viewport.findIndex((line) => line.includes("1/2"));
+		assert.ok(contentRow >= 0, "search overlay content row must be visible");
+		// The transcript may also contain "needle"; the overlay's query is
+		// the LAST occurrence on the content row.
+		const needleCol = viewport[contentRow]?.lastIndexOf("needle") ?? -1;
+		assert.ok(needleCol >= 0);
+		// Click on the "e" cell (between n and e): the overlay content starts
+		// at col 1 (border) plus the Input prompt " " (col 2 = n), so the e
+		// cell is needleCol + 2. SGR coordinates are 1-based.
+		terminal.sendInput(`\x1b[<0;${needleCol + 2};${contentRow + 1}M`);
+		await terminal.waitForRender();
+		terminal.sendInput("X");
+		await terminal.waitForRender();
+		viewport = terminal.getViewport();
+		assert.ok(
+			viewport.some((line) => line.includes("nXeedle")),
+			"typing after the click must insert at the clicked query column",
+		);
+		tui.stop();
+	});
+
+	it("does not treat transcript box drawing as search navigation buttons", async () => {
+		const terminal = new VirtualTerminal(80, 10);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(
+			new Text(
+				[
+					"needle one",
+					"middle",
+					"needle two",
+					"filler",
+					"┌────────────────────────────────────────┐",
+					"│ box                                    │",
+					"└────────────────────────────────────────┘",
+					"end",
+				].join("\n"),
+				0,
+				0,
+			),
+		);
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[102;6u");
+		terminal.sendInput("needle");
+		await terminal.waitForRender();
+		let viewport = terminal.getViewport();
+		assert.ok(viewport.some((line) => line.includes("1/2")));
+		assert.ok(!viewport.some((line) => line.includes("2/2")));
+
+		const boxBottomRow = viewport.findIndex((line) => line.startsWith("└"));
+		assert.ok(boxBottomRow >= 0);
+		terminal.sendInput(`\x1b[<0;24;${boxBottomRow + 1}M`);
+		await terminal.waitForRender();
+
+		viewport = terminal.getViewport();
+		assert.ok(viewport.some((line) => line.includes("1/2")));
+		assert.ok(!viewport.some((line) => line.includes("2/2")));
+		tui.stop();
 	});
 
 	it("uses configured styles for current and non-current search matches", async () => {
@@ -385,7 +866,8 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("needle");
 		await terminal.waitForRender();
 		assert.strictEqual(transcript.isFollowingEnd, false);
-		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript") && line.includes("2/2")));
+		assert.ok(terminal.getViewport().some((line) => line.includes("2/2")));
+		assert.ok(terminal.getViewport().some((line) => line.includes("↑ Shift+Enter · ↓ Enter")));
 		assert.ok(terminal.getViewport().some((line) => line.includes("line 10 needle two")));
 		assert.deepStrictEqual(editorInputs, []);
 		assert.ok(
@@ -395,49 +877,54 @@ describe("TuiAltScreen", () => {
 		for (let index = 0; index < 6; index++) terminal.sendInput("\x1b[<64;1;4M");
 		await terminal.waitForRender();
 		assert.strictEqual(transcript.scrollTop, 0);
-		assert.ok(terminal.getViewport().some((line) => line.includes("> needle")));
+		assert.ok(terminal.getViewport().some((line) => line.includes("needle") && line.includes("2/2")));
 
 		terminal.sendInput("\x07");
 		await terminal.waitForRender();
-		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript") && line.includes("1/2")));
+		assert.ok(terminal.getViewport().some((line) => line.includes("1/2")));
 		assert.ok(terminal.getViewport().some((line) => line.includes("line 5 needle one")));
 
 		terminal.sendInput("\x1b[103;6u");
 		await terminal.waitForRender();
-		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript") && line.includes("2/2")));
+		assert.ok(terminal.getViewport().some((line) => line.includes("2/2")));
 		assert.ok(terminal.getViewport().some((line) => line.includes("line 10 needle two")));
 
 		terminal.sendInput("\x1b");
 		terminal.sendInput("x");
 		await terminal.waitForRender();
-		assert.ok(!terminal.getViewport().some((line) => line.includes("Find transcript")));
+		assert.ok(!terminal.getViewport().some((line) => line.includes("↑ Shift+Enter · ↓ Enter")));
 		assert.deepStrictEqual(editorInputs, ["x"]);
 
 		tui.stop();
 	});
 
-
-	it("lets focus reports reach app-level input listeners", async () => {
+	it("scrolls the transcript by half a page with custom bindings", async () => {
+		const originalKeybindings = getKeybindings();
 		const terminal = new VirtualTerminal(20, 10);
 		const tui = new TuiAltScreen(terminal);
-		tui.addChild(new Text("content", 0, 0));
-		// App-level listeners install after the renderer's own viewport listener;
-		// focus reports must still fan out to them (the main-screen path lets them
-		// through, and notification/clipboard focus tracking depends on it).
-		const seenByApp: string[] = [];
-		tui.addInputListener((data) => {
-			seenByApp.push(data);
-			return undefined;
-		});
-		tui.start();
-		await terminal.waitForRender();
+		setKeybindings(
+			new KeybindingsManager(TUI_KEYBINDINGS, {
+				"tui.altScreen.halfPageUp": "ctrl+u",
+				"tui.altScreen.halfPageDown": "ctrl+d",
+			}),
+		);
+		try {
+			tui.addChild(new Text(Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportTop, 20);
 
-		terminal.sendInput("\x1b[O"); // FOCUS_OUT
-		terminal.sendInput("\x1b[I"); // FOCUS_IN
-		await terminal.waitForRender();
-		assert.deepStrictEqual(seenByApp, ["\x1b[O", "\x1b[I"]);
+			terminal.sendInput("\x15");
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportTop, 15);
 
-		tui.stop();
+			terminal.sendInput("\x04");
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportTop, 20);
+		} finally {
+			tui.stop();
+			setKeybindings(originalKeybindings);
+		}
 	});
 
 	it("scrolls the transcript by one line with custom bindings", async () => {
@@ -1166,6 +1653,30 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("releases the selection press-time component snapshot when the selection ends (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const snapshotOf = (): Set<unknown> | undefined =>
+			(tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined }).selectionPressDispatchComponents;
+
+		// Press on empty space (row 4, below the text): the selection press
+		// snapshots the reached set.
+		terminal.sendInput("\x1b[<0;1;4M");
+		await terminal.waitForRender();
+		assert.ok(snapshotOf() !== undefined, "the selection press must snapshot the reached set");
+
+		// Drag + release: the gesture ends and the snapshot must be
+		// released (no dead component references retained).
+		terminal.sendInput("\x1b[<32;4;4M");
+		terminal.sendInput("\x1b[<3;4;4m");
+		await terminal.waitForRender();
+		assert.equal(snapshotOf(), undefined, "the press-time snapshot must be released when the selection ends");
+		tui.stop();
+	});
+
 	it("retains a completed visible selection across focus changes", async () => {
 		const terminal = new RecordingTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal);
@@ -1302,6 +1813,142 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("dispatches clicks to nested mouse regions without breaking drag selection", async () => {
+		const terminal = new RecordingTerminal(20, 2);
+		const tui = new TuiAltScreen(terminal);
+		let clicks = 0;
+		tui.addChild(
+			new MouseRegion(new Text("clickable\nselectable", 0, 0), (event) => {
+				if (event.type !== "click") return undefined;
+				clicks += 1;
+				return { handled: true };
+			}),
+		);
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;2;1M");
+		terminal.sendInput("\x1b[<0;2;1m");
+		await terminal.waitForRender();
+		assert.strictEqual(clicks, 1);
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;4;2M");
+		terminal.sendInput("\x1b[<0;4;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(clicks, 1);
+		assert.ok(terminal.events.some((event) => event.type === "write" && event.data.includes("\x1b]52;c;")));
+		tui.stop();
+	});
+
+	it("focuses and captures drag gestures for mouse-aware components", async () => {
+		const terminal = new VirtualTerminal(20, 2);
+		const tui = new TuiAltScreen(terminal);
+		const events: string[] = [];
+		const component = {
+			render: () => ["control"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				events.push(event.type);
+				return event.type === "press" ? { handled: true, capture: true, focus: true } : { handled: true };
+			},
+		};
+		tui.addChild(component);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+
+			terminal.sendInput("\x1b[<0;1;1M");
+			terminal.sendInput("\x1b[<32;5;2M");
+			terminal.sendInput("\x1b[<0;5;2m");
+			await terminal.waitForRender();
+
+			assert.deepStrictEqual(events, ["press", "drag", "release"]);
+			// Boolean identity assertion: a strictEqual failure would print
+			// the WHOLE TUI object in the diff and hang the test runner.
+			assert.ok(tui.getFocusedComponent() === component, "mouse focus must target the clicked component");
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("reports consecutive click counts to component-owned controls", async () => {
+		const terminal = new VirtualTerminal(20, 1);
+		const tui = new TuiAltScreen(terminal);
+		const clickCounts: number[] = [];
+		tui.addChild({
+			render: () => ["control"],
+			invalidate: () => {},
+			handleMouse: (event) => {
+				if (event.type === "press") return { handled: true };
+				if (event.type === "click") {
+					clickCounts.push(event.clickCount ?? 0);
+					return { handled: true };
+				}
+				return undefined;
+			},
+		});
+		tui.start();
+		await terminal.waitForRender();
+
+		for (let count = 0; count < 3; count++) {
+			terminal.sendInput("\x1b[<0;1;1M");
+			terminal.sendInput("\x1b[<0;1;1m");
+		}
+		await terminal.waitForRender();
+		assert.deepStrictEqual(clickCounts, [1, 2, 3]);
+		tui.stop();
+	});
+
+	it("does not rerender for handled no-op pointer motion", async () => {
+		const terminal = new RecordingTerminal(20, 2);
+		const tui = new TuiAltScreen(terminal);
+		let renderCount = 0;
+		tui.addChild({
+			render: () => {
+				renderCount += 1;
+				return ["hover target"];
+			},
+			invalidate: () => {},
+			handleMouse: (event) => (event.type === "move" ? { handled: true } : undefined),
+		});
+		tui.start();
+		await terminal.waitForRender();
+		const renderedBeforeMotion = renderCount;
+		const writesBeforeMotion = terminal.events.filter((event) => event.type === "write").length;
+
+		terminal.sendInput("\x1b[<35;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(renderCount, renderedBeforeMotion);
+		assert.strictEqual(terminal.events.filter((event) => event.type === "write").length, writesBeforeMotion);
+		tui.stop();
+	});
+
+	it("lets mouse-aware components consume wheel events before viewport scrolling", async () => {
+		const terminal = new VirtualTerminal(20, 3);
+		const tui = new TuiAltScreen(terminal);
+		let wheelEvents = 0;
+		tui.addChild(
+			new MouseRegion(
+				new Text(Array.from({ length: 8 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+				(event) => {
+					if (event.type !== "wheel") return undefined;
+					wheelEvents += 1;
+					return { handled: true };
+				},
+			),
+		);
+		tui.start();
+		await terminal.waitForRender();
+		const viewportTop = tui.viewportTop;
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(wheelEvents, 1);
+		assert.strictEqual(tui.viewportTop, viewportTop);
+		tui.stop();
+	});
+
 	it("restores keyboard state before leaving alt mode and prints the full document", async () => {
 		const terminal = new RecordingTerminal(20, 3);
 		const tui = new TuiAltScreen(terminal);
@@ -1406,15 +2053,16 @@ describe("TuiAltScreen", () => {
 
 		terminal.sendInput("\x1b[102;6u");
 		await terminal.waitForRender();
-		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript")));
+		assert.ok(terminal.getViewport().some((line) => line.includes("↑ ↓")));
 
 		terminal.sendInput("\x1b[5~");
 		terminal.sendInput("\x1b[<64;1;4M");
 		await terminal.waitForRender();
 		assert.ok(tui.viewportTop < topBefore);
-		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript")));
+		assert.ok(terminal.getViewport().some((line) => line.includes("↑ ↓")));
 		tui.stop();
 	});
+});
 
 	it("notifies the host when dragging the primary scrollbar to an edge", async () => {
 		const terminal = new RecordingTerminal(10, 5);
@@ -1440,30 +2088,6 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[<32;10;5M");
 		await terminal.waitForRender();
 		assert.deepStrictEqual(boundaries, [[1, "scrollbar"]]);
-		tui.stop();
-	});
-
-	it("keeps the scrollbar column selectable while the thumb is hidden", async () => {
-		const terminal = new RecordingTerminal(10, 2);
-		const tui = new TuiAltScreen(terminal);
-		const scrollView = new ScrollView(new Text("123456789A\nabcdefghij\nmore\nlines", 0, 0), {
-			scrollbar: "auto",
-		});
-		tui.setLayoutRoot(scrollView);
-		tui.start();
-		await terminal.waitForRender();
-		assert.strictEqual(scrollView.isScrollbarVisible, false);
-
-		terminal.sendInput("\x1b[<0;10;1M");
-		terminal.sendInput("\x1b[<32;10;2M");
-		terminal.sendInput("\x1b[<0;10;2m");
-		await terminal.waitForRender();
-
-		const expected = `\x1b]52;c;${Buffer.from("A\nabcdefghij").toString("base64")}\x07`;
-		assert.ok(
-			terminal.events.some((event) => event.type === "write" && event.data.includes(expected)),
-			JSON.stringify(terminal.events.filter((event) => event.type === "write" && event.data.includes("\x1b]52;c;"))),
-		);
 		tui.stop();
 	});
 
@@ -1494,7 +2118,7 @@ describe("TuiAltScreen", () => {
 
 	it("notifies the host when PageUp and wheel reach viewport boundaries", async () => {
 		const terminal = new VirtualTerminal(20, 8);
-		const boundaries: Array<[-1 | 1, "wheel" | "page"]> = [];
+		const boundaries: Array<[-1 | 1, "wheel" | "page" | "scrollbar"]> = [];
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {
 			onScrollBoundary: (direction, source) => {
 				boundaries.push([direction, source]);
@@ -1576,12 +2200,15 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[102;6u");
 		terminal.sendInput("needle");
 		await terminal.waitForRender();
-		assert.ok(terminal.getViewport().some((line) => line.includes("Find transcript")));
+		// v0.85.1 renders the search query in the panel (the "Find in
+		// transcript" placeholder is replaced once text is typed), so the
+		// always-visible navigation hint proves the panel is open.
+		assert.ok(terminal.getViewport().some((line) => line.includes("Shift+Enter")));
 
 		terminal.sendInput("\x1b[1;5F");
 		await terminal.waitForRender();
 		assert.strictEqual(claimed, true);
-		assert.ok(!terminal.getViewport().some((line) => line.includes("Find transcript")));
+		assert.ok(!terminal.getViewport().some((line) => line.includes("Shift+Enter")));
 		tui.stop();
 	});
 
@@ -1724,7 +2351,6 @@ describe("TuiAltScreen", () => {
 		assert.deepStrictEqual(clicks, []);
 		tui.stop();
 	});
-});
 
 
 	it("copies line-head selections without the emoji-column indent", async () => {
@@ -1841,3 +2467,943 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		tui.stop();
 	});
 });
+
+	it("releases the selection press-time snapshot on focus-out (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const snapshotOf = (): Set<unknown> | undefined =>
+			(tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined }).selectionPressDispatchComponents;
+
+		// Press on empty space (row 4, below the text): the selection press
+		// snapshots the reached set.
+		terminal.sendInput("\x1b[<0;1;4M");
+		await terminal.waitForRender();
+		assert.ok(snapshotOf() !== undefined, "the selection press must snapshot the reached set");
+
+		// Focus leaves mid-gesture: the snapshot must be released.
+		terminal.sendInput("\x1b[O");
+		await terminal.waitForRender();
+		assert.equal(snapshotOf(), undefined, "focus-out must release the press-time snapshot");
+		tui.stop();
+	});
+
+	it("releases the selection press-time snapshot on stop (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const snapshotOf = (): Set<unknown> | undefined =>
+			(tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined }).selectionPressDispatchComponents;
+
+		// Press on empty space (row 4, below the text): the selection press
+		// snapshots the reached set.
+		terminal.sendInput("\x1b[<0;1;4M");
+		await terminal.waitForRender();
+		assert.ok(snapshotOf() !== undefined, "the selection press must snapshot the reached set");
+
+		// Stop mid-gesture: the snapshot must be released.
+		tui.stop();
+		assert.equal(snapshotOf(), undefined, "stop must release the press-time snapshot");
+	});
+
+	it("blocks transcript selection under an inert capturing overlay (X018 modal isolation)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		// A plain Text overlay (no handleMouse) mounted over the transcript:
+		// it is a capturing overlay, so a drag over it must NOT select/copy
+		// the hidden underlying text.
+		tui.showOverlay(new Text("overlay", 0, 0));
+		await terminal.waitForRender();
+		// Press on the overlay, drag, release.
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;8;2M");
+		terminal.sendInput("\x1b[<3;8;2m");
+		await terminal.waitForRender();
+		const clipboardWrites = terminal.events.filter(
+			(event) => event.type === "write" && event.data.includes("\x1b]52;c;"),
+		);
+		assert.equal(clipboardWrites.length, 0, "a drag over an inert capturing overlay must not copy the hidden background");
+		tui.stop();
+	});
+
+	it("forwards focus and keyboard to an Input inside a plain Container overlay root (X051)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		// A plain Container (no FocusForwardingFrame) as the overlay root,
+		// containing a real Input: the public showOverlay contract must
+		// reach the interactive child.
+		const input = new Input();
+		const root = new Container();
+		root.addChild(input);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press on the Input (the overlay's content row — the overlay
+		// renders at screen row 1, so SGR row 2).
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(input.focused, true, "the Input inside the Container root must receive the focused flag");
+		// A key must reach the Input through the Container root.
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(input.getValue(), "x", "the Input must receive keyboard input through the Container root");
+		tui.stop();
+	});
+
+	it("forwards focus and keyboard to the CLICKED child only in a multi-child Container overlay root (X051)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const second = new Input();
+		const root = new Container();
+		root.addChild(first);
+		root.addChild(second);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press on the SECOND Input (the overlay renders two rows at screen
+		// rows 1-2, so SGR row 3 hits the second child).
+		terminal.sendInput("\x1b[<0;2;3M");
+		terminal.sendInput("\x1b[<0;2;3m");
+		await terminal.waitForRender();
+		assert.strictEqual(second.focused, true, "the clicked Input must receive the focused flag");
+		assert.strictEqual(first.focused, false, "the unclicked Input must NOT receive the focused flag");
+		// A key must reach ONLY the clicked child.
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(second.getValue(), "x", "the clicked Input must receive the key");
+		assert.strictEqual(first.getValue(), "", "the unclicked Input must NOT receive the key");
+		tui.stop();
+	});
+
+	it("forwards focus and keyboard to an Input inside a plain Box overlay root (X051)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const input = new Input();
+		const root = new Box();
+		root.addChild(input);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// The Box has default padding (1,1): the Input renders at the
+		// content area. Press on the Input row.
+		const viewport = terminal.getViewport();
+		const inputRow = viewport.findIndex(line => line.includes(">"));
+		assert.ok(inputRow >= 0, `input row missing:\n${viewport.join('\n')}`);
+		terminal.sendInput(`\x1b[<0;2;${inputRow + 1}M`);
+		terminal.sendInput(`\x1b[<0;2;${inputRow + 1}m`);
+		await terminal.waitForRender();
+		assert.strictEqual(input.focused, true, "the Input inside the Box root must receive the focused flag");
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(input.getValue(), "x", "the Input must receive keyboard input through the Box root");
+		tui.stop();
+	});
+
+	it("cancels an in-flight selection gesture when the drag lands on a capturing overlay (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		tui.showOverlay(new Text("overlay", 0, 0));
+		await terminal.waitForRender();
+		const snapshotOf = (): Set<unknown> | undefined =>
+			(tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined }).selectionPressDispatchComponents;
+
+		// Press OUTSIDE the overlay (row 0), drag INTO the overlay (row 1),
+		// release on the overlay: the in-flight selection gesture must be
+		// cancelled — no copy, no armed press state, no retained snapshot.
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;8;2M");
+		terminal.sendInput("\x1b[<3;8;2m");
+		await terminal.waitForRender();
+		const clipboardWrites = terminal.events.filter(
+			(event) => event.type === "write" && event.data.includes("\x1b]52;c;"),
+		);
+		assert.equal(clipboardWrites.length, 0, "a drag landing on a capturing overlay must not copy the background");
+		assert.equal(snapshotOf(), undefined, "the in-flight selection snapshot must be released");
+		const state = tui as unknown as { selectionPressActive: boolean };
+		assert.equal(state.selectionPressActive, false, "the in-flight selection gesture must be cancelled");
+		tui.stop();
+	});
+
+	it("clears children exactly once when a child dispose reenters clear (X007)", async () => {
+		const box = new Box();
+		const disposed: string[] = [];
+		const reentrant = {
+			render: () => [],
+			invalidate: () => {},
+			dispose: () => {
+				disposed.push("reentrant");
+				// Reenter: clear the box again while it is mid-clear.
+				box.clear();
+			},
+		};
+		const plain = {
+			render: () => [],
+			invalidate: () => {},
+			dispose: () => {
+				disposed.push("plain");
+			},
+		};
+		box.addChild(reentrant);
+		box.addChild(plain);
+		box.clear();
+		assert.deepStrictEqual(disposed, ["reentrant", "plain"], "each child must be disposed exactly once");
+		assert.strictEqual(box.children.length, 0, "the box must be empty after clear");
+	});
+
+	it("cancels an in-flight scrollbar drag when the pointer lands on a capturing overlay (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(10, 10);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 50 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "always" },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+		// Press on the track: starts a scrollbar drag.
+		terminal.sendInput("\x1b[<0;10;6M");
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.scrollTop, 20);
+		// A capturing overlay appears covering the scrollbar column; drag
+		// onto it: the in-flight drag must be cancelled.
+		tui.showOverlay(new Text("overlay", 9, 0));
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<32;5;4M");
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.scrollTop, 20, "the drag must not scroll while the pointer is on the overlay");
+		const state = tui as unknown as { scrollbarDrag: unknown };
+		assert.strictEqual(state.scrollbarDrag, undefined, "the in-flight scrollbar drag must be cancelled when the pointer lands on the overlay");
+		terminal.sendInput("\x1b[<0;5;4m");
+		await terminal.waitForRender();
+		tui.stop();
+	});
+
+	it("jumps a hidden auto scrollbar track on a stationary first press (X018)", async () => {
+		const terminal = new RecordingTerminal(10, 5);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "auto", scrollbarHideDelayMs: 20 },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.isScrollbarVisible, false);
+		const before = scrollView.scrollTop;
+
+		// A stationary FIRST press on the hidden track column must jump the
+		// scroll position immediately (includeHiddenAuto on the press path) —
+		// no hover reveal + second press needed.
+		terminal.sendInput("\x1b[<0;10;3M");
+		await terminal.waitForRender();
+		assert.ok(scrollView.scrollTop > before, "the first press must jump the hidden auto scrollbar track");
+		terminal.sendInput("\x1b[<0;10;3m");
+		await terminal.waitForRender();
+		tui.stop();
+	});
+
+	it("honors the showHardwareCursor constructor parameter (upstream v0.85.1 removed the PI_HARDWARE_CURSOR env knob)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, true);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(tui.getShowHardwareCursor(), true, "the constructor parameter must enable the hardware cursor");
+		tui.setShowHardwareCursor(false);
+		assert.strictEqual(tui.getShowHardwareCursor(), false, "setShowHardwareCursor must toggle the flag");
+		tui.stop();
+	});
+
+	it("treats an Input under a Box root as mounted (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.start();
+		await terminal.waitForRender();
+		const input = new Input();
+		const root = new Box();
+		root.addChild(input);
+		tui.setLayoutRoot(root);
+		await terminal.waitForRender();
+		// The blocked-overlay focus restore path calls isComponentMounted:
+		// an Input under a Box root must be reported as mounted (the
+		// structural walk covers Box children, not just Container).
+		const t = tui as unknown as { isComponentMounted(c: unknown): boolean };
+		assert.strictEqual(t.isComponentMounted(input), true, "an Input under a Box root must be reported as mounted");
+		tui.stop();
+	});
+
+	it("ignores the legacy PI_HARDWARE_CURSOR env knob (upstream v0.85.1 removed coding-agent config reads)", async () => {
+		process.env.PI_HARDWARE_CURSOR = "1";
+		try {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			assert.strictEqual(tui.getShowHardwareCursor(), false, "the legacy env knob must not control the default");
+			tui.stop();
+		} finally {
+			delete process.env.PI_HARDWARE_CURSOR;
+		}
+	});
+
+	it("keeps the replacement focused when an Input under a Box root blocks overlay focus (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.start();
+		await terminal.waitForRender();
+		const input = new Input();
+		const box = new Box();
+		box.addChild(input);
+		const a = new Text("a", 0, 0);
+		const c = new Text("c", 0, 0);
+		tui.addChild(box);
+		tui.addChild(a);
+		tui.addChild(c);
+		const overlay = new Text("overlay", 0, 0);
+		const r = new Text("r", 0, 0);
+		// r is the current focus when the overlay appears: it becomes the
+		// overlay's preFocus (the focus to restore when the overlay closes).
+		tui.setFocus(r);
+		tui.showOverlay(overlay);
+		await terminal.waitForRender();
+		// The overlay owns the focus while visible.
+		assert.strictEqual(tui.getFocusedComponent(), overlay, "the overlay must own the focus while visible");
+		// a blocks the overlay focus.
+		tui.setFocus(a);
+		assert.strictEqual(tui.getFocusedComponent(), a, "a must own the focus");
+		// The Input under the Box root blocks it too: it must be reported
+		// as MOUNTED (structural walk covers Box children), so the overlay
+		// focus restore must NOT hijack the next focus.
+		tui.setFocus(input);
+		assert.strictEqual(tui.getFocusedComponent(), input, "the Input under the Box root must own the focus");
+		// c must keep the focus — the blocked overlay must not regain it
+		// because the Input was (wrongly) considered unmounted.
+		tui.setFocus(c);
+		assert.strictEqual(tui.getFocusedComponent(), c, "the replacement must keep the focus (Box subtree is live)");
+		tui.stop();
+	});
+
+	it("releases the selection press-time snapshot when a scrollbar press ends the selection (X018 lifecycle)", async () => {
+		const terminal = new RecordingTerminal(10, 5);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "always" },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+		const snapshotOf = (): Set<unknown> | undefined =>
+			(tui as unknown as { selectionPressDispatchComponents: Set<unknown> | undefined }).selectionPressDispatchComponents;
+
+		// A selection press on empty space snapshots the reached set.
+		terminal.sendInput("\x1b[<0;1;1M");
+		await terminal.waitForRender();
+		assert.ok(snapshotOf() !== undefined, "the selection press must snapshot the reached set");
+
+		// A scrollbar press ends the in-flight selection gesture: the
+		// snapshot must be released too.
+		terminal.sendInput("\x1b[<0;10;3M");
+		await terminal.waitForRender();
+		assert.equal(snapshotOf(), undefined, "the scrollbar press must release the selection press-time snapshot");
+		terminal.sendInput("\x1b[<0;10;3m");
+		await terminal.waitForRender();
+		tui.stop();
+	});
+
+	it("forwards key releases to a wantsKeyRelease child through a Container overlay root (X051)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const received: string[] = [];
+		const child = {
+			wantsKeyRelease: true,
+			render: () => ["child"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => (event.type === "press" ? { handled: true, focus: true } : undefined),
+			handleInput: (data: string) => {
+				received.push(data);
+			},
+		};
+		const root = new Container();
+		root.addChild(child);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press on the child (the overlay renders at screen row 1).
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.getFocusedComponent(), root, "the Container root must own the focus");
+		// A Kitty key release must reach the child through the container
+		// root (the root forwards wantsKeyRelease).
+		terminal.sendInput("\x1b[97;1:3u");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(received, ["\x1b[97;1:3u"], "the wantsKeyRelease child must receive the key release");
+		tui.stop();
+	});
+
+	it("forwards key releases to a wantsKeyRelease child through a Box overlay root (X051)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const received: string[] = [];
+		const child = {
+			wantsKeyRelease: true,
+			render: () => ["child"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => (event.type === "press" ? { handled: true, focus: true } : undefined),
+			handleInput: (data: string) => {
+				received.push(data);
+			},
+		};
+		const root = new Box();
+		root.addChild(child);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press on the child (the Box has default padding (1,1): the child
+		// renders at screen row 1, col 1 = SGR row 2, col 2).
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.getFocusedComponent(), root, "the Box root must own the focus");
+		// A Kitty key release must reach the child through the Box root.
+		terminal.sendInput("\x1b[97;1:3u");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(received, ["\x1b[97;1:3u"], "the wantsKeyRelease child must receive the key release");
+		tui.stop();
+	});
+
+	it("drops a focused child replaced via direct children mutation in a Container (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const second = new Input();
+		const root = new Container();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press the Input: the Container forwards focus/input to it.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		// Direct structural replacement (the public children mutation
+		// contract): the old focused child is detached.
+		root.children = [second];
+		tui.requestRender();
+		await terminal.waitForRender();
+		// Keyboard input must NOT reach the detached child, and the
+		// replacement must NOT silently inherit focus.
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "", "the detached child must not receive keyboard input");
+		assert.strictEqual(second.getValue(), "", "the replacement must not implicitly receive keyboard input");
+		assert.strictEqual(second.focused, false, "the replacement must not implicitly receive focus");
+		// A fresh press names the new focus owner.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(second.getValue(), "x", "a fresh press must re-establish the focus owner");
+		tui.stop();
+	});
+
+	it("drops a focused child replaced via direct children mutation in a Box (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const second = new Input();
+		const root = new Box();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press the Input (the Box has default padding (1,1): the child
+		// renders at screen row 1, col 1 = SGR row 2, col 2).
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		// Direct structural replacement (the public children mutation
+		// contract): the old focused child is detached.
+		root.children = [second];
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "", "the detached child must not receive keyboard input");
+		assert.strictEqual(second.getValue(), "", "the replacement must not implicitly receive keyboard input");
+		assert.strictEqual(second.focused, false, "the replacement must not implicitly receive focus");
+		// A fresh press names the new focus owner.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(second.getValue(), "x", "a fresh press must re-establish the focus owner");
+		tui.stop();
+	});
+
+	it("does not leak wantsKeyRelease from a detached focused child (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const received: string[] = [];
+		const first = {
+			wantsKeyRelease: true,
+			render: () => ["first"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => (event.type === "press" ? { handled: true, focus: true } : undefined),
+			handleInput: (data: string) => {
+				received.push(data);
+			},
+		};
+		const second = {
+			render: () => ["second"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => (event.type === "press" ? { handled: true, focus: true } : undefined),
+			handleInput: (data: string) => {
+				received.push(data);
+			},
+		};
+		const root = new Container();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(root.wantsKeyRelease, true, "the pressed child's capability must forward");
+		// Direct replacement: the detached child's capability must not leak.
+		root.children = [second];
+		tui.requestRender();
+		await terminal.waitForRender();
+		assert.strictEqual(root.wantsKeyRelease, undefined, "a detached child's wantsKeyRelease must not leak");
+		tui.stop();
+	});
+
+	it("does not resurrect a stale focus owner after A→B→A replacement in a Container (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const second = new Input();
+		const root = new Container();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press the Input: the Container forwards focus/input to it.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		// A → B + repaint: the paint itself must invalidate the old
+		// forwarding identity (not lazily on the next keyboard event).
+		root.children = [second];
+		tui.requestRender();
+		await terminal.waitForRender();
+		// A → A again + repaint: the stale owner must NOT resurrect.
+		root.children = [first];
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "", "the stale focus owner must not resurrect on keyboard input");
+		assert.strictEqual(first.focused, false, "the detached child must not keep the focused flag");
+		// A fresh press names the new focus owner.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "x", "a fresh press must re-establish the focus owner");
+		tui.stop();
+	});
+
+	it("does not resurrect a stale focus owner after A→B→A replacement in a Box (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const second = new Input();
+		const root = new Box();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// Press the Input (the Box has default padding (1,1): the child
+		// renders at screen row 1, col 1 = SGR row 2, col 2).
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		root.children = [second];
+		tui.requestRender();
+		await terminal.waitForRender();
+		root.children = [first];
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "", "the stale focus owner must not resurrect on keyboard input");
+		assert.strictEqual(first.focused, false, "the detached child must not keep the focused flag");
+		// A fresh press names the new focus owner.
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		terminal.sendInput("x");
+		await terminal.waitForRender();
+		assert.strictEqual(first.getValue(), "x", "a fresh press must re-establish the focus owner");
+		tui.stop();
+	});
+
+	it("clears the focused flag on removeChild/clear/dispose in a Container (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const root = new Container();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		// removeChild: the detached child must not keep the focused flag
+		// (IME/hardware-cursor state) — a re-mount elsewhere must not show
+		// a stale CURSOR_MARKER.
+		root.removeChild(first);
+		assert.strictEqual(first.focused, false, "removeChild must clear the focused flag");
+		// clear: same contract.
+		const second = new Input();
+		root.addChild(second);
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(second.focused, true, "the pressed Input must receive the focused flag");
+		root.clear();
+		assert.strictEqual(second.focused, false, "clear must clear the focused flag");
+		// dispose: same contract.
+		const third = new Input();
+		root.addChild(third);
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(third.focused, true, "the pressed Input must receive the focused flag");
+		root.dispose();
+		assert.strictEqual(third.focused, false, "dispose must clear the focused flag");
+		tui.stop();
+	});
+
+	it("clears the focused flag on removeChild/clear in a Box (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const root = new Box();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		root.removeChild(first);
+		assert.strictEqual(first.focused, false, "removeChild must clear the focused flag");
+		const second = new Input();
+		root.addChild(second);
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(second.focused, true, "the pressed Input must receive the focused flag");
+		root.clear();
+		assert.strictEqual(second.focused, false, "clear must clear the focused flag");
+		tui.stop();
+	});
+
+	it("does not synthesize a click on a still-mounted overlay that moved (X018 painted-placement liveness)", async () => {
+		const terminal = new RecordingTerminal(40, 20);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\niota\nkappa\nlambda\nmu\nnu\nxi\nomicron\npi\nrho\nsigma\ntau\nupsilon", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const changes: string[] = [];
+		const list = new SettingsList(
+			[
+				{ id: "a", label: "A", currentValue: "on", values: ["on", "off"] },
+				{
+					id: "b",
+					label: "B",
+					currentValue: "on",
+					values: ["on", "off"],
+					description: "long description " + "that wraps ".repeat(3),
+				},
+			],
+			10,
+			{
+				label: (text) => text,
+				value: (text) => text,
+				description: (text) => text,
+				cursor: "> ",
+				hint: (text) => text,
+			},
+			(id, value) => changes.push(`${id}:${value}`),
+			() => {},
+		);
+		tui.showOverlay(list, { anchor: "center" });
+		await terminal.waitForRender();
+		// Record B's absolute row.
+		const view = terminal.getViewport();
+		const rowB = view.findIndex(line => line.includes("B"));
+		assert.ok(rowB >= 0, `B row missing:\n${view.join("\n")}`);
+		// Press B: the press selects B, its description renders, and the
+		// CENTERED overlay grows and moves up.
+		terminal.sendInput(`\x1b[<0;2;${rowB + 1}M`);
+		await terminal.waitForRender();
+		const after = terminal.getViewport();
+		const rowB2 = after.findIndex(line => line.includes("B"));
+		assert.notEqual(rowB2, rowB, "B must move after the press repaint");
+		// Release at the ORIGINAL absolute row: the synthetic click must
+		// NOT activate B (the painted placement moved — the release cell
+		// is no longer the pressed cell).
+		terminal.sendInput(`\x1b[<0;2;${rowB + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(changes, [], "the moved overlay must not receive the ghost click");
+		// A fresh press+release at B's NEW row works.
+		terminal.sendInput(`\x1b[<0;2;${rowB2 + 1}M`);
+		terminal.sendInput(`\x1b[<0;2;${rowB2 + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(changes, ["b:off"], "a fresh press at the new row must activate B");
+		tui.stop();
+	});
+
+	it("synthesizes the click for a child nested inside a padded Box overlay root (X018 painted-placement)", async () => {
+		const terminal = new RecordingTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const received: string[] = [];
+		const child = {
+			render: () => ["child"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				if (event.type === "press") return { handled: true, focus: true };
+				if (event.type === "click") {
+					received.push("click");
+					return { handled: true };
+				}
+				return undefined;
+			},
+		};
+		const root = new Box();
+		root.addChild(child);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// The Box has default padding (1,1): the child renders at screen
+		// row 2, col 1 (0-based) = SGR row 3, col 2.
+		terminal.sendInput("\x1b[<0;2;3M");
+		terminal.sendInput("\x1b[<0;2;3m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(received, ["click"], "the padded Box child must receive the synthetic click");
+		tui.stop();
+	});
+
+	it("does not synthesize a click on a descendant that reflowed inside a stable overlay root (X018 painted-placement)", async () => {
+		const terminal = new RecordingTerminal(40, 20);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\niota\nkappa\nlambda\nmu\nnu\nxi\nomicron\npi\nrho\nsigma\ntau\nupsilon", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const actions: string[] = [];
+		const a = { render: () => ["A"], invalidate: () => {}, handleMouse: () => undefined };
+		const b = {
+			render: () => ["B"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				if (event.type === "press") return { handled: true };
+				if (event.type === "click") {
+					actions.push("B action");
+					return { handled: true };
+				}
+				return undefined;
+			},
+		};
+		const c = { render: () => ["C1", "C2"], invalidate: () => {}, handleMouse: () => undefined };
+		const root = new Container();
+		root.addChild(a);
+		root.addChild(b);
+		root.addChild(c);
+		tui.showOverlay(root, { anchor: "top-left" });
+		await terminal.waitForRender();
+		const rowB = terminal.getViewport().findIndex((line) => line.includes("B"));
+		// Press B.
+		terminal.sendInput(`\x1b[<0;2;${rowB + 1}M`);
+		await terminal.waitForRender();
+		// Repaint: A grows 1→2 rows, C shrinks 2→1 (the overlay ROOT
+		// bounds stay identical), so B moves down one row.
+		const a2 = { render: () => ["A1", "A2"], invalidate: () => {}, handleMouse: () => undefined };
+		const c2 = { render: () => ["C1"], invalidate: () => {}, handleMouse: () => undefined };
+		root.children = [a2, b, c2];
+		tui.requestRender();
+		await terminal.waitForRender();
+		const rowB2 = terminal.getViewport().findIndex((line) => line.includes("B"));
+		assert.notStrictEqual(rowB2, rowB, "B must have moved inside the stable root");
+		// Release at the ORIGINAL cell: B must NOT activate.
+		terminal.sendInput(`\x1b[<0;2;${rowB + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(actions, [], "a descendant that reflowed must not receive the ghost click");
+		// A fresh press+click at the NEW row works.
+		terminal.sendInput(`\x1b[<0;2;${rowB2 + 1}M`);
+		terminal.sendInput(`\x1b[<0;2;${rowB2 + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(actions, ["B action"], "a fresh press at the new row must activate");
+		tui.stop();
+	});
+
+	it("does not synthesize a click on a layout-root descendant that reflowed (X018 painted-placement)", async () => {
+		const terminal = new RecordingTerminal(40, 20);
+		const tui = new TuiAltScreen(terminal);
+		tui.start();
+		await terminal.waitForRender();
+		const actions: string[] = [];
+		let headerRows = 2;
+		const header = {
+			render: () => Array.from({ length: headerRows }, (_, index) => `H${index}`),
+			invalidate: () => {},
+			handleMouse: () => undefined,
+		};
+		const target = {
+			render: () => ["T0", "T1", "T2"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				if (event.type === "press") return { handled: true };
+				if (event.type === "click") {
+					actions.push(`row${event.y}`);
+					return { handled: true };
+				}
+				return undefined;
+			},
+		};
+		tui.setLayoutRoot(new VStack([header, target]));
+		await terminal.waitForRender();
+		const rowT1 = terminal.getViewport().findIndex((line) => line.includes("T1"));
+		// Press T1 (physical row rowT1).
+		terminal.sendInput(`\x1b[<0;2;${rowT1 + 1}M`);
+		await terminal.waitForRender();
+		// The header shrinks 2→1 rows: the target moves up one row.
+		headerRows = 1;
+		tui.requestRender();
+		await terminal.waitForRender();
+		const rowT1b = terminal.getViewport().findIndex((line) => line.includes("T1"));
+		assert.notStrictEqual(rowT1b, rowT1, "the target must have reflowed");
+		// Release at the ORIGINAL cell: the target must NOT receive a
+		// click (the release cell is now a DIFFERENT row of the target).
+		terminal.sendInput(`\x1b[<0;2;${rowT1 + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(actions, [], "a reflowed layout-root descendant must not receive the ghost click");
+		// A fresh press+click at the NEW row works.
+		terminal.sendInput(`\x1b[<0;2;${rowT1b + 1}M`);
+		terminal.sendInput(`\x1b[<0;2;${rowT1b + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(actions, ["row1"], "a fresh press at the new row must activate the right row");
+		tui.stop();
+	});
+
+	it("does not synthesize a click on an implicit-document child that reflowed (X018 painted-placement)", async () => {
+		const terminal = new RecordingTerminal(40, 20);
+		const tui = new TuiAltScreen(terminal);
+		const actions: string[] = [];
+		let headerRows = 2;
+		const header = {
+			render: () => Array.from({ length: headerRows }, (_, index) => `H${index}`),
+			invalidate: () => {},
+			handleMouse: () => undefined,
+		};
+		const target = {
+			render: () => ["T0", "T1", "T2"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				if (event.type === "press") return { handled: true };
+				if (event.type === "click") {
+					actions.push(`row${event.y}`);
+					return { handled: true };
+				}
+				return undefined;
+			},
+		};
+		// NO setLayoutRoot: the legacy implicit-document path — the direct
+		// children accumulate vertically inside the implicit document, so
+		// the target's screen origin is the document origin + its offset
+		// within the TuiBase's child layout.
+		tui.addChild(header);
+		tui.addChild(target);
+		tui.start();
+		await terminal.waitForRender();
+		const rowT1 = terminal.getViewport().findIndex((line) => line.includes("T1"));
+		// Press T1 (physical row rowT1).
+		terminal.sendInput(`\x1b[<0;2;${rowT1 + 1}M`);
+		await terminal.waitForRender();
+		// The header shrinks 2→1 rows: the target moves up one row.
+		headerRows = 1;
+		tui.requestRender();
+		await terminal.waitForRender();
+		const rowT1b = terminal.getViewport().findIndex((line) => line.includes("T1"));
+		assert.notStrictEqual(rowT1b, rowT1, "the target must have reflowed");
+		// Release at the ORIGINAL cell: the target must NOT receive a
+		// click (the release cell is now a DIFFERENT row of the target).
+		terminal.sendInput(`\x1b[<0;2;${rowT1 + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(actions, [], "a reflowed implicit-document child must not receive the ghost click");
+		// A fresh press+click at the NEW row works.
+		terminal.sendInput(`\x1b[<0;2;${rowT1b + 1}M`);
+		terminal.sendInput(`\x1b[<0;2;${rowT1b + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(actions, ["row1"], "a fresh press at the new row must activate the right row");
+		tui.stop();
+	});

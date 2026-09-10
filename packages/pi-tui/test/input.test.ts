@@ -1,7 +1,8 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Input } from "../src/components/input.ts";
-import { visibleWidth } from "../src/utils.ts";
+import { type TuiMouseEvent, type TuiMouseEventType } from "../src/tui.ts";
+import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 
 describe("Input component", () => {
 	it("submits value including backslash on Enter", () => {
@@ -35,6 +36,23 @@ describe("Input component", () => {
 	});
 
 	describe("render", () => {
+		it("supports a custom prompt and styled placeholder", () => {
+			const input = new Input({
+				prompt: "",
+				placeholder: "Find transcript",
+				placeholderStyle: (text) => `\x1b[2m${text}\x1b[22m`,
+			});
+			input.focused = true;
+
+			const [empty] = input.render(20);
+			assert.ok(empty?.includes("\x1b[2m"));
+			assert.strictEqual(stripTerminalSequences(empty ?? "").trimEnd(), "Find transcript");
+
+			input.handleInput("n");
+			const [populated] = input.render(20);
+			assert.strictEqual(stripTerminalSequences(populated ?? "").trimEnd(), "n");
+		});
+
 		it("does not overflow with wide CJK and fullwidth text", () => {
 			const width = 93;
 			const cases = [
@@ -671,5 +689,82 @@ describe("Input component", () => {
 			input.handleInput("!");
 			assert.strictEqual(input.getValue(), "ab!", "cursor clamps to the shorter value's end");
 		});
+	});
+});
+
+describe("Input prompt clipping at tiny widths (X011 absorbed upstream)", () => {
+	it("clips the prompt instead of emitting an overwide line at width 0", () => {
+		const input = new Input({ prompt: "> " });
+		const [line] = input.render(0);
+		assert.ok(line !== undefined);
+		assert.ok(visibleWidth(line) <= 1, `width-0 render must not exceed one column: ${JSON.stringify(line)}`);
+	});
+
+	it("clips the prompt instead of emitting an overwide line at width 1", () => {
+		const input = new Input({ prompt: "> " });
+		const [line] = input.render(1);
+		assert.ok(line !== undefined);
+		assert.ok(visibleWidth(line) <= 1, `width-1 render must not exceed one column: ${JSON.stringify(line)}`);
+	});
+});
+
+describe("Input mouse click positioning (X048 BUGFIX_MISSING_UPSTREAM)", () => {
+	function mouse(type: TuiMouseEventType, x: number, y: number, width = 20, height = 1): TuiMouseEvent {
+		return {
+			type,
+			button: "left",
+			x,
+			y,
+			screenX: x,
+			screenY: y,
+			width,
+			height,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		};
+	}
+
+	function clickAt(input: Input, x: number): void {
+		input.render(20);
+		input.handleMouse(mouse("press", x, 0, 20, 1));
+	}
+
+	it("places the cursor by the prompt's visible width, not a fixed 2 columns", () => {
+		// prompt "" — the value starts at screen column 0, so clicking
+		// screen column 3 (x=2) must land on the third value column.
+		const input = new Input({ prompt: "" });
+		input.setValue("hello");
+		clickAt(input, 2);
+		input.handleInput("X");
+		assert.strictEqual(input.getValue(), "heXllo", "empty prompt: click column 3 must land on value column 3");
+	});
+
+	it("offsets the click by a wide custom prompt", () => {
+		// prompt ">>> " (visible width 4) — the value starts at screen
+		// column 4, so clicking x=4 must land on the first value column.
+		const input = new Input({ prompt: ">>> " });
+		input.setValue("hello");
+		clickAt(input, 4);
+		input.handleInput("X");
+		assert.strictEqual(input.getValue(), "Xhello", "wide prompt: click at the first value column must land on column 0");
+	});
+
+	it("uses visible width, not string length, for CJK prompts", () => {
+		// prompt "提示 " — string length 3 but visible width 5; the value
+		// starts at screen column 5, so clicking x=5 must land on column 0.
+		const input = new Input({ prompt: "提示 " });
+		input.setValue("hello");
+		clickAt(input, 5);
+		input.handleInput("X");
+		assert.strictEqual(input.getValue(), "Xhello", "CJK prompt: click at the first value column must land on column 0");
+	});
+
+	it("keeps the default prompt (width 2) behavior", () => {
+		const input = new Input();
+		input.setValue("hello");
+		clickAt(input, 4);
+		input.handleInput("X");
+		assert.strictEqual(input.getValue(), "heXllo", "default prompt: click at value column 3 (screen column 5) must land on value column 3");
 	});
 });

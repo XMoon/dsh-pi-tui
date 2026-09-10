@@ -1541,6 +1541,59 @@ test('a click on a PTC sub-call header expands only that child body', async () =
   assert.ok(!view.includes('file content'), `the other child stays collapsed:\n${view}`)
 })
 
+test('a PTC sub-call press cannot transfer after a sibling settle reflow (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(true)
+  const message: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 0, name: 'run_code',
+    args: '{"code":"print(1)"}', result: 'program output', status: 'ok',
+    subCalls: [
+      {
+        kind: 'tool', turn: 0, name: 'bash', args: '{"command":"npm test"}',
+        result: 'running', status: 'running',
+        subCallId: 'code-1:code:1', parentCallId: 'code-1', rootCallId: 'code-1',
+      },
+      {
+        kind: 'tool', turn: 0, name: 'read', args: '{"file_path":"a.ts"}',
+        result: 'file content', status: 'ok',
+        subCallId: 'code-1:code:2', parentCallId: 'code-1', rootCallId: 'code-1',
+      },
+    ],
+  }
+  app.setTranscript([message])
+  await vt.waitForRender()
+  // Expand subcall A (the bash child) so its body rows show.
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const bashIdx = view.split('\n').findIndex(line => strip(line).includes('Bash'))
+  assert.ok(bashIdx >= 0, `bash child row missing:\n${view}`)
+  clickCell(vt, 10, bashIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  const readIdx = view.split('\n').findIndex(line => strip(line).includes('Read'))
+  assert.ok(readIdx >= 0, `read child row missing:\n${view}`)
+  // Press the Read (B) header (no release): the press identity is
+  // ptc:<token>:code-1:code:2.
+  vt.sendInput(`\x1b[<0;10;${readIdx + 1}M`)
+  await vt.waitForRender()
+  // Subcall A settles with a multiline result: the SAME root message
+  // object is unchanged, A's body grows, and B's header moves down.
+  message.subCalls![0]!.result = '1 failed\n2 failed\n3 failed\n4 failed\n[exit code: 2]'
+  app.setTranscript([message])
+  await vt.waitForRender()
+  view = await viewport(vt)
+  const readAfter = view.split('\n').findIndex(line => strip(line).includes('Read'))
+  assert.ok(readAfter > readIdx, `B's header must move down after A's growth:\n${view}`)
+  // Release on the old cell: the click must NOT toggle the root card
+  // (the press identity is B's sub-call; the cell is now A's body).
+  vt.sendInput(`\x1b[<0;10;${readIdx + 1}m`)
+  await vt.waitForRender()
+  const overrides = (app as unknown as { expandedOverride: Map<unknown, boolean> }).expandedOverride
+  assert.equal(overrides.size, 0, `the stale sub-call press must not toggle the root card:\n${vt.getViewport().join('\n')}`)
+  app.stop()
+})
+
 test('regular mode: the root disclosure reveals the full child bodies and the bash command', async () => {
   const { vt, app } = startApp()
   app.setToolOutputExpanded(true)

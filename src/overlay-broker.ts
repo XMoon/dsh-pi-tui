@@ -150,6 +150,7 @@ export class OverlayBroker {
       focus: () => handle.focus(),
       unfocus: (options?: Parameters<OverlayHandle['unfocus']>[0]) => handle.unfocus(options),
       isFocused: () => handle.isFocused(),
+      getBounds: () => handle.getBounds(),
     }
   }
 
