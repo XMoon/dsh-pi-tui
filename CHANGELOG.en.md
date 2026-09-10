@@ -55,12 +55,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compatibility
 
-- **Plugin command `execution: 'submission'` changed meaning (breaking).** It now declares a SUBMISSION
-  LINE rather than a command execution: the TUI delivers `/name args` verbatim with the resolved busy
-  mode (steer / queue) and **no longer runs the commands-service handler** — the web composer's
-  unclaimed-line semantics — leaving line expansion to the plugin's own pre-step. A plugin that needs
-  handler execution declares `execution: 'local'`; `submission` combined with `sessionless: true` is now
-  rejected at registration.
+- **Plugin command contributions now follow the DSH client command model (breaking).** The
+  `execution: 'local' | 'submission'` ownership metadata is REMOVED: a contribution IS a client-owned
+  command (a required `handler`, no host descriptor) that joins the `/` menu and executes locally, never
+  steered. A name that collides with the current host catalog FAILS the candidate synthesis as a whole
+  (no menu rows are installed, the collision is recorded on the contribution's health and surfaced once)
+  while the host command keeps its claim — it can never be downgraded to a model prompt. A contribution
+  used to advertise a prompt-style name should simply not be registered (an unclaimed `/name args` line
+  is already a prompt; the host-side skill owns discovery). `sessionless: true` runs the command before a
+  session exists; the default `false` resolves/creates the session first.
 
 ## [0.4.3-alpha.2] - 2026-09-08
 

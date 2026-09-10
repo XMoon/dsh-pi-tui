@@ -4388,19 +4388,8 @@ export function apply(ctx: Context, config: Config): void {
         // liveAgent: writing through a re-read closure variable could
         // target a session the identity check did not see (a switch
         // between the check and the write).
-        // An extension `submission` contribution is a SUBMISSION LINE, not a
-        // command execution (web parity — in the web composer only a CLAIM
-        // runs a command handler; a skill-style line is a plain prompt with
-        // the policy-resolved mode). The TUI therefore delivers the raw
-        // `/<name> args` line to the session and never runs the
-        // commands-service handler for it; `execution: 'local'` is the
-        // ownership that executes a handler. This is a deliberate BREAKING
-        // ownership change (see TuiCommandContribution.execution), not an
-        // accident of the busy policy.
-        const submissionLine = parsedAtSubmit !== undefined
-          && extensionService?.commands.find(parsedAtSubmit.name)?.execution === 'submission'
         const commands = ctx.get('commands')
-        if (commands !== undefined && !submissionLine) {
+        if (commands !== undefined) {
           // Bare `/plan` toggles: when plan mode is already active it exits
           // instead of re-entering (the official command needs `/plan off`).
           const parsed = parseCommand(text)
@@ -4612,10 +4601,8 @@ export function apply(ctx: Context, config: Config): void {
           })
           return
         }
-        // No commands service — or a submission-owned line, already
-        // classified as plain agent input above: direct follow-up on the
-        // CAPTURED agent (see the note above — never a re-read closure
-        // variable). Images ride
+        // No commands service: direct follow-up on the CAPTURED agent (see
+        // the note above — never a re-read closure variable). Images ride
         // the same prepared message as every other path (§13). The WHOLE
         // write runs inside the operation barrier (convergence plan
         // phase 3): a transition started during the admission waits for
@@ -5178,19 +5165,19 @@ export function apply(ctx: Context, config: Config): void {
             // local commands are local while registered).
             name => extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false,
           )
-      // A plugin-declared LOCAL command whose plugin implements it through
-      // the bridge handler executes locally — with or without a live
-      // session. The bridge handler IS the implementation (the
-      // commands-service definition is only the fallback when the
-      // contribution declares none): without this route the line would fall
-      // through to the command plane — or, for a contribution with no
-      // definition at all, to the MODEL, which must never receive a local UI
-      // command.
-      if (parsed !== undefined && extensionService?.commands.localHandlerFor(parsed.name) !== undefined) {
-        // The row identity follows the command's OWN sessionless
-        // classification: a sessionless local command never appears in
-        // Current session, even when it runs inside a live one.
-        runLocalCommand(parsed, text, persistHistory, delivery, isSessionless ? 'sessionless' : 'agent-facing')
+      // Host-command claim (HOST AUTHORITY): a slash name the CURRENT
+      // effective host catalog resolves is a host command — a client command
+      // contribution can never shadow it (the DSH client contribution rule:
+      // candidate synthesis fails loud, never shadows; the host command keeps
+      // its claim and its handler decides the busy outcome). TUI-owned names
+      // are excluded here: LOCAL_COMMANDS execute through their own surface
+      // and a TUI skill wrapper is agent-facing input. A claimed command the
+      // real session then lacks is consumed by the advertised-miss gate
+      // inside dispatchViaSession — never a plain model message.
+      if (parsed !== undefined
+        && !LOCAL_COMMANDS.has(parsed.name)
+        && isHostCommandName?.(parsed.name) === true) {
+        dispatchViaSession(text, persistHistory, delivery)
         return
       }
       if (parsed !== undefined && isSessionless) {
@@ -5209,21 +5196,39 @@ export function apply(ctx: Context, config: Config): void {
         }
         return
       }
-      // Host-command claim (PR115-fix problem 1): a slash name the CURRENT
-      // effective command catalog resolves — and that is neither a TUI-local
-      // command nor agent-facing input the TUI/extension layer owns (a
-      // TUI-owned skill wrapper, an extension contribution) — is a Host
-      // command. It executes through the command plane; the busy queue/steer
-      // policy applies only to agent-facing prompts, never to a confirmed Host
-      // command (the command handler itself decides the busy outcome). A
-      // claimed command that the real session then lacks is consumed by the
-      // advertised-miss gate inside dispatchViaSession — never a plain
-      // model message.
-      if (parsed !== undefined
-        && !LOCAL_COMMANDS.has(parsed.name)
-        && !(extensionService?.commands.isLocal(parsed.name, LOCAL_COMMANDS) ?? false)
-        && isHostCommandName?.(parsed.name) === true) {
-        dispatchViaSession(text, persistHistory, delivery)
+      // A CLIENT-OWNED command contribution (the DSH client contribution
+      // shape): its behavior lives entirely on the client, so it executes
+      // locally and never steers. `sessionless` decides whether it may run
+      // before a session exists: false (default) resolves/creates the
+      // session FIRST — the host command surface is session-keyed — and only
+      // then runs the handler; true runs immediately without creating one.
+      const contribution = parsed === undefined ? undefined : extensionService?.commands.find(parsed.name)
+      if (contribution !== undefined && parsed !== undefined) {
+        if (contribution.sessionless) {
+          runLocalCommand(parsed, text, persistHistory, delivery, 'sessionless')
+          return
+        }
+        // A session-backed client command: with a live session it runs NOW
+        // (its row carries that session id); on a deferred start the session
+        // is resolved/created FIRST — the host command surface is
+        // session-keyed — and only then does the handler run, through the
+        // owned flow (a failed creation restores the draft and reports).
+        if (liveAgent === undefined) {
+          runOwned('client command session', async () => {
+            await ensureSession()
+            if (liveAgent === undefined) return
+            runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
+          }, {
+            diag,
+            sessionId: () => liveAgent?.session.id,
+            onError: (error) => {
+              app.notify(safeErrorMessage(error), 'error')
+              restoreSubmissionDraft(text)
+            },
+          })
+          return
+        }
+        runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
         return
       }
       // Busy-Enter policy (web parity): agent-facing input steers into the
@@ -6499,8 +6504,10 @@ export function apply(ctx: Context, config: Config): void {
           // M2: registry invalidations (including plugin keybinding
           // register/unload) flush through the batcher into this callback
           // — sync the plugin rules into the effective keymap (a no-op
-          // when unchanged), then repaint.
+          // when unchanged), re-synthesize the slash completions (a late
+          // client command contribution joins the menu), then repaint.
           syncPluginKeybindings()
+          refreshCommandCompletions?.()
           app.requestRender(force)
         },
       )
@@ -7415,6 +7422,10 @@ export function apply(ctx: Context, config: Config): void {
      * decide whether a composition without the host skill-body loader must
      * deliver through loadSkill instead of steering a bare line. */
     let isSkillWrapperName: ((name: string) => boolean) | undefined
+    /** The completion re-synthesis installed by registerTuiCommands: a late
+     * CLIENT command contribution must join the `/` menu without waiting for
+     * a session refresh (the extension-invalidate hook calls it). */
+    let refreshCommandCompletions: (() => void) | undefined
     /** The delivery binding installed by registerTuiCommands: bind one
      * submission's resolved queue/steer mode for the synchronous window that
      * launches a command execution (the TUI skill handlers consume it).
@@ -7765,6 +7776,7 @@ export function apply(ctx: Context, config: Config): void {
         wasAdvertisedClaim = installed.wasAdvertised
         isHostCommandName = installed.isHostCommand
         isSkillWrapperName = installed.isSkillWrapper
+        refreshCommandCompletions = installed.refreshCommandCompletions
         withCommandDelivery = installed.withDelivery
         // The coordinator's surface hooks point INTO the command surface;
         // the runner's refreshCatalog routes every post-mount refresh here.

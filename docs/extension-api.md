@@ -157,37 +157,37 @@ capability — never parse the package version.
 
 ## Command ownership (M5)
 
-`registerCommand(contribution)` declares ownership over an EXISTING slash
-command (register the command itself through the commands service). The
-bridge never executes anything — `execution` decides the route the TUI
-takes for a submitted `/<name> args` line, mirroring the web composer's
-claim-vs-prompt split:
+`registerCommand(contribution)` declares a CLIENT-OWNED command — the DSH
+client command contribution shape: a slash name whose behavior lives
+entirely on the client (no host descriptor), carried by the required
+`handler`. It is merged into the `/` menu with the host catalog and runs
+locally, never steered.
 
-- `execution: 'local'` — the command executes whenever it is submitted,
-  with or without a live session: the contribution's `handler` (the bridge
-  handler) runs locally with the raw input verbatim, and the
-  commands-service definition handler is only the fallback when no bridge
-  handler is declared. The busy-Enter policy never applies and the line is
-  never steered, so a local command is never sent to the model. Use it for
-  UI/control commands; `sessionless: true` additionally lets it run before
-  any session exists.
-- `execution: 'submission'` — the command is a SUBMISSION LINE, not a
-  command execution: the TUI delivers the raw line to the session with the
-  busy-Enter-policy mode (steered into the running turn, or queued), like a
-  skill invocation, and does NOT run the commands-service handler. The
-  plugin's own pre-step owns any expansion of the line. A submission needs
-  a session, so `sessionless: true` with `submission` is rejected at
-  registration.
+- **Host authority.** A name the current host catalog resolves is a HOST
+  command: it executes through the command plane and a contribution can
+  never shadow it. Upstream's candidate synthesis throws on a
+  host/contribution name collision; here the synthesis pass FAILS (nothing
+  is installed, the collision is recorded on the contribution's health and
+  surfaced once) while the host command keeps its claim — the input can
+  never be downgraded to a model prompt.
+- **`sessionless`.** `true` lets the command run before a session exists
+  (pure client commands: an overlay toggle, a picker). `false` (default)
+  resolves/creates the session first — the host command surface is
+  session-keyed — and only then runs the handler.
+- **`handler`** receives `invocation.rawInput` verbatim, like every other
+  command surface.
 
-**Breaking change (Unreleased).** `submission` used to keep the
-commands-service handler authoritative: the handler ran in every non-steer
-mode while only the steer mode delivered a bare line — an asymmetry no
-other client shared. Migration: a contribution that needs handler execution
-declares `execution: 'local'`; a contribution that wants the line delivered
-as agent input keeps `submission` and expands the line in its own pre-step.
-Busy Enter classifies by the EFFECTIVE ownership (a dynamic local command is
-local while registered, submission after unload).
+**Breaking change (Unreleased).** The previous `execution: 'local' |
+'submission'` ownership metadata is REMOVED. A contribution is a client
+command, full stop: a `/name args` line that is not a command is an
+unclaimed prompt (the host pre-step owns skill expansion, and the inline
+skill lexicon owns its discovery), so a contribution no longer needs to
+declare that. Migration: drop `execution` (and declare `handler`, now
+required); a contribution that used `submission` to advertise a
+prompt-style name should instead not register a contribution at all — its
+line reaches the model as an ordinary prompt.
 
+## Theme registry (M5)
 ## Theme registry (M5)
 
 `registerTheme(contribution)` registers a named color palette into the

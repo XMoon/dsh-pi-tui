@@ -476,16 +476,14 @@ test('isHostCommand claims advertised non-skill commands and never skill wrapper
   t.app.stop()
 })
 
-test('isHostCommand never claims an extension contribution: advertised ≠ Host-owned (PR115-fix problem 2)', () => {
-  // An extension command is advertised in the effective catalog too (the
-  // plugin registers it through the commands service), but its
-  // `execution` metadata owns the classification: 'submission' flows
-  // through the busy queue/steer policy like a skill invocation, 'local'
-  // never steers. Claiming either as a Host command would bypass the busy
-  // policy (and the accelerated chord) before it is even consulted.
-  const contributions = new Map<string, { name: string; execution: 'local' | 'submission' }>([
-    ['deploy', { name: 'deploy', execution: 'submission' }],
-    ['panel', { name: 'panel', execution: 'local' }],
+test('isHostCommand keeps HOST AUTHORITY: a client contribution never removes a host claim', () => {
+  // A client command contribution only ADDS a client-owned name. When the
+  // host catalog resolves the same name, the host command keeps its claim —
+  // upstream's candidate synthesis fails loud on the collision instead of
+  // shadowing, so the dispatch can never downgrade it to a prompt.
+  const contributions = new Map<string, { name: string }>([
+    ['deploy', { name: 'deploy' }],
+    ['panel', { name: 'panel' }],
   ])
   const t = setup({
     extensions: {
@@ -493,17 +491,14 @@ test('isHostCommand never claims an extension contribution: advertised ≠ Host-
     },
   })
   t.commands.service.register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
-  t.commands.service.register({ name: 'panel', handler: () => ({ kind: 'success' }) })
   t.commands.service.register({ name: 'compact', handler: () => ({ kind: 'success' }) })
   t.installed.installSnapshot({ commands: [], scopedCommands: [], skills: [], issues: [] })
-  assert.equal(t.installed.isHostCommand('deploy'), false,
-    'an extension submission command must keep the session submission policy')
-  assert.equal(t.installed.isHostCommand('panel'), false,
-    'an extension local command is never Host-owned either')
-  // The genuine Host command is unaffected: the predicate stays
-  // catalog-driven for names no TUI/extension owner claims.
+  assert.equal(t.installed.isHostCommand('deploy'), true,
+    'a host command keeps its claim even when a client contribution shares the name')
   assert.equal(t.installed.isHostCommand('compact'), true,
-    'a real Host command must still be claimed')
+    'a real Host command stays claimed')
+  assert.equal(t.installed.isHostCommand('panel'), false,
+    'a client-only name is not a host claim (it never entered the host list)')
   t.app.stop()
 })
 

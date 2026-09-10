@@ -416,29 +416,27 @@ then only executed:
   command plane driven from outside the submit boundary) has no gesture to
   honor and delivers queued.
 
-## Advertised is not Host-owned
+## Host commands outrank client contributions
 
-The busy queue/steer policy is skipped only for a confirmed HOST command —
-a slash name the current effective catalog advertises and that neither the
-TUI nor an extension owns. Ownership, not advertising, decides:
+The command surface follows the DSH client contribution contract
+(`ui-commands` `CommandUiRuntime.candidates`): the host catalog is merged
+with the live CLIENT command contributions by name, and a host/contribution
+name collision **fails loud — it never shadows**.
 
-- a TUI-owned skill wrapper (agent-facing input built by `loadSkill`),
-- an extension contribution (`TuiCommandContribution.execution`): a
-  `submission` command is a SUBMISSION LINE (the web composer's
-  unclaimed-line semantics) — its line is delivered with the resolved mode
-  (steer / queue) and the commands-service handler is NOT run for it; a
-  `local` one always executes and never steers. A submission needs a live
-  session, so `submission + sessionless` is rejected at registration
-  (fail fast at the extension boundary). `submission` is a DELIBERATE
-  BREAKING ownership change (Unreleased): the handler used to stay
-  authoritative in every non-steer mode — see the migration note in
-  `docs/extension-api.md` and `TuiCommandContribution.execution`,
-- the TUI-local set (`LOCAL_COMMANDS` plus dynamic local contributions).
-
-Everything else that is advertised resolves through the command plane
-without consulting the busy policy (e.g. `/compact`), and a claimed
-command the real session then lacks is consumed by the advertised-miss
-gate — never a plain model message.
+- A name the current effective host catalog resolves is a HOST command: it
+  executes through the command plane, and neither a TUI nor an extension
+  contribution can remove that claim. A claimed command the real session
+  then lacks is consumed by the advertised-miss gate — never a plain model
+  message.
+- A contribution is a client-owned command (menu row + client handler); it
+  executes locally and never steers. `sessionless: true` runs it before a
+  session exists, otherwise the session resolves first.
+- A colliding contribution is NOT installed: the candidate synthesis pass
+  fails as a whole (no partial menu), the collision is recorded against the
+  contribution's health and surfaced once, and the previous list stays.
+- Everything unclaimed is an ordinary prompt; TUI-local commands
+  (`LOCAL_COMMANDS`) and TUI-owned skill wrappers keep their own routes
+  (local execution, `loadSkill`).
 
 ## Focus is surface-adaptive
 

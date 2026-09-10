@@ -269,7 +269,6 @@ export function apply(ctx: Context): void {
     id: 'vim-mode-cmd',
     name: 'vimmode',
     description: 'Vim fixture: show the mode and toggle the fixture overlay.',
-    execution: 'local',
     sessionless: true,
     handler: (invocation) => {
       void invocation

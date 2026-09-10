@@ -2878,6 +2878,9 @@ export class TuiApp {
   private notifyText = ''
   /** Lightweight, persistent transcript-window hint; empty in latest mode. */
   private transcriptWindowHint = ''
+  /** The last installed slash-command rows (host catalog + client command
+   * contributions) — the headless-test read of the `/` menu source. */
+  private installedCommandCompletions: readonly SlashCommand[] = []
   /** The latest window metadata, retained so remapped key hints stay live. */
   private transcriptWindow: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
   /** Styling of the current notify line: info (default) is dim with a ℹ,
@@ -7019,6 +7022,12 @@ export class TuiApp {
    * view (the same line count the frame paints); `maxScrollTop` is the
    * clamp — tests can then assert an anchored view is NOT at the max.
    * Undefined while not fullscreen. */
+  /** Headless-test hook: the installed slash-command rows (the host catalog
+   * merged with the live client command contributions). */
+  commandCompletionsForTest(): readonly SlashCommand[] {
+    return [...this.installedCommandCompletions]
+  }
+
   fullscreenScrollForTest(): { scrollTop: number; isFollowingEnd: boolean; viewportHeight: number; contentHeight: number; maxScrollTop: number } | undefined {
     if (this.fullscreenScroll === undefined) return undefined
     const contentHeight = this.messagesView.render(this.terminal.columns).length
@@ -12729,6 +12738,7 @@ export class TuiApp {
       localCwd,
       skillReferences,
     )
+    this.installedCommandCompletions = [...commands]
     if (extensionSuggest === undefined) {
       this.editor.setAutocompleteProvider(base)
       return

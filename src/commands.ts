@@ -1223,6 +1223,10 @@ export function registerTuiCommands(
   isSkillWrapper(name: string): boolean
   /** One synchronous catalog commit (the coordinator's install hook). */
   installSnapshot(snapshot: SurfaceCatalogSnapshot): void
+  /** Re-synthesize the slash completions from the CURRENT host catalog plus
+   * the live client contributions (the extension-invalidate hook: a late
+   * contribution joins the menu without waiting for a session refresh). */
+  refreshCommandCompletions(): void
   /** The revalidating transition (the coordinator's target-change hook). */
   enterTransition(): void
   /** Bind one submission's resolved delivery mode for the synchronous window
@@ -1409,17 +1413,57 @@ export function registerTuiCommands(
    * Host session cwd remains reserved for `@` via HostFilePort. */
   const PATH_ARGUMENT_COMMANDS = FILE_ARGUMENT_COMMANDS
   /**
+   * Candidate synthesis (the DSH `CommandUiRuntime.candidates` parity): the
+   * host catalog merged with the live CLIENT command contributions by name.
+   * A contribution whose name is already a host command (or a TUI-owned
+   * name) is a COLLISION: this pass FAILS — nothing is installed, the
+   * previous list stays, the collision is recorded against the contribution
+   * and surfaced once. Never a silent shadow, never a partial list.
+   * @param host - the host catalog rows for the current scope.
+   * @throws when a contribution collides with a host name.
+   */
+  const mergeContributions = (host: readonly SurfaceCommandSummary[]): readonly SurfaceCommandSummary[] => {
+    const bridge = runner.extensions?.commands
+    if (bridge === undefined) return host
+    const contributions = bridge.snapshot().entries
+    if (contributions.length === 0) return host
+    const byName = new Map(host.map(entry => [entry.name, entry] as const))
+    for (const contribution of contributions) {
+      if (!byName.has(contribution.name)) continue
+      const collision = new Error(`command contribution /${contribution.name} collides with a host command`)
+      recordExtensionError?.({ slot: 'command', id: contribution.id, owner: contribution.owner }, collision)
+      throw collision
+    }
+    for (const contribution of contributions) {
+      byName.set(contribution.name, { name: contribution.name, description: contribution.description })
+    }
+    return [...byName.values()]
+  }
+  /** One collision notice per contribution name (never a per-refresh spam). */
+  const notifiedCollisions = new Set<string>()
+  /**
    * Install one completion list (sorted, claims refreshed). The single
    * synchronous seam every catalog commit funnels through.
+   * @param entries - the HOST catalog rows; the client contributions are
+   *   merged in by {@link mergeContributions} (the installed DISPLAY list),
+   *   while `claims` stays host-only — a contribution is not a command-plane
+   *   claim.
    */
   const installCompletions = (entries: readonly SurfaceCommandSummary[]): void => {
     const sorted = [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
+    // HOST CLAIMS first: the claim set is the host's AUTHORITY record (the
+    // dispatch consults it), so it must never depend on the client merge — a
+    // failed synthesis must not cost a host command its claim.
+    claims = new Set(sorted.map(command => command.name))
+    // The display list carries the client contributions too; the CLAIM set
+    // never does (see the parameter doc).
+    const display = [...mergeContributions(sorted)].sort((left, right) => left.name < right.name ? -1 : 1)
     // M5: the plugin autocomplete chain (AutocompleteRegistry) is consulted
     // after the host's own provider returns null. The registry's suggest()
     // handles cancellation (latest-only commit) and per-provider isolation.
     const extensionAutocomplete = runner.extensions?.autocomplete
     app.setCommandCompletions(
-      sorted.map(command => ({
+      display.map(command => ({
         name: command.name,
         description: command.description,
         argumentHint: command.input?.hint,
@@ -1460,7 +1504,6 @@ export function registerTuiCommands(
       // list, never from the command registry.
       currentSkillReferences,
     )
-    claims = new Set(sorted.map(command => command.name))
   }
   /** The saved probed scoped overrides (see installSurfaceSnapshot). */
   let savedScopedCommands: readonly SurfaceCommandSummary[] = []
@@ -1485,9 +1528,35 @@ export function registerTuiCommands(
    * `commands.list(undefined)` safely returns the global layer only (the
    * remote RPC path's lookup guard does not apply in-process).
    */
+  /**
+   * The CONTAINING seam every catalog commit funnels through: a failed
+   * candidate synthesis (a contribution/host name collision) installs
+   * NOTHING — the previous completion list stays live, exactly like
+   * upstream's throwing candidate pass — while the collision is already
+   * recorded on the contribution's health and surfaced once to the user.
+   * The HOST CLAIMS were refreshed before the merge, so a collision never
+   * costs a host command its claim.
+   * @param entries - the host catalog rows for the current scope.
+   */
+  const installCompletionsContained = (entries: readonly SurfaceCommandSummary[]): void => {
+    try {
+      installCompletions(entries)
+    } catch (error) {
+      const message = safeErrorMessage(error)
+      if (!notifiedCollisions.has(message)) {
+        notifiedCollisions.add(message)
+        app.notify(message, 'error')
+      }
+      try {
+        ctx.logger.error(`tui-runner: ${message}`)
+      } catch {
+        // The cordis logger must not block the submission path.
+      }
+    }
+  }
   const refreshCompletions = (): void => {
     const liveAgent = runner.liveAgent
-    installCompletions(liveAgent === undefined
+    installCompletionsContained(liveAgent === undefined
       ? mergeGlobalAndSavedScoped()
       : commands.list(liveAgent).map(commandSummaryOf))
   }
@@ -3186,7 +3255,7 @@ export function registerTuiCommands(
       // mergePartial already retained it in `snapshot.skills`).
       if (!skillsFailed) currentSkillReferences = snapshot.skills
       savedScopedCommands = snapshot.scopedCommands
-      installCompletions(mergeGlobalAndSavedScoped())
+      installCompletionsContained(mergeGlobalAndSavedScoped())
     })
   }
   /**
@@ -3223,25 +3292,22 @@ export function registerTuiCommands(
           // Registration raced with another plugin; the picker still works.
         }
       }
-      installCompletions(mergeGlobalAndSavedScoped())
+      installCompletionsContained(mergeGlobalAndSavedScoped())
     })
   }
   /** Whether one command name is advertised by the CURRENT completion list
    * (the claim captured at submit time, before any session creation). */
   const wasAdvertised = (name: string): boolean => claims.has(name)
   /** Whether one slash name is a HOST command in the CURRENT effective
-   * catalog: advertised by the completion list, NOT a TUI-owned skill
-   * wrapper, and NOT an extension contribution. A skill wrapper is a thin
-   * agent-facing invocation (loadSkill builds a prompt), and an extension
-   * contribution's `execution` metadata owns its classification
-   * ('submission' flows through the busy queue/steer policy like a skill
-   * invocation; 'local' never steers) — so both keep the ordinary
-   * submission semantics. Only real Host commands (e.g. /compact) execute
-   * through the command plane regardless of the busy-Enter policy: being
-   * advertised never proves Host ownership. */
+   * catalog: advertised by the host list and NOT a TUI-owned skill wrapper.
+   * HOST AUTHORITY: a client command contribution never removes a name from
+   * this claim — upstream's candidate synthesis merges contributions with
+   * the host catalog and FAILS LOUD on a collision instead of shadowing, so
+   * a resolved host command always keeps its execution. A skill wrapper is a
+   * thin agent-facing invocation (loadSkill builds the prompt), never a host
+   * claim. */
   const isHostCommand = (name: string): boolean => {
     if (skillDisposers.has(name)) return false
-    if (runner.extensions?.commands.find(name) !== undefined) return false
     return claims.has(name)
   }
 
@@ -4517,7 +4583,7 @@ export function registerTuiCommands(
       replaceSkillCommands(initial.skills!.skills, new Set())
       currentSkillReferences = initial.skills!.skills
       savedScopedCommands = []
-      installCompletions(mergeGlobalAndSavedScoped())
+      installCompletionsContained(mergeGlobalAndSavedScoped())
     })
   } else {
     refreshCompletions()
@@ -4550,6 +4616,7 @@ export function registerTuiCommands(
     isSkillWrapper: (name: string): boolean => skillDisposers.has(name),
     /** One synchronous catalog commit (the coordinator's install hook). */
     installSnapshot: (snapshot: SurfaceCatalogSnapshot): void => installSurfaceSnapshot(snapshot),
+    refreshCommandCompletions: (): void => refreshCompletions(),
     /** The revalidating transition (the coordinator's target-change hook). */
     enterTransition: (): void => enterCatalogTransition(),
     withDelivery,
