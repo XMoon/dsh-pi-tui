@@ -41,6 +41,10 @@ test('the M0 gate: default keys match the pre-migration behavior', () => {
   const defaults = (id: AppKeybindingId): readonly string[] => APP_KEYBINDINGS[id].defaultKeys
   assert.deepEqual(defaults('app.input.submit'), ['enter'])
   assert.deepEqual(defaults('app.input.submitAccelerated'), ['ctrl+enter'])
+  // The deprecated fixed-queue action keeps NO default key: Ctrl+Enter
+  // belongs to the accelerated gesture, and the old action exists only so a
+  // stored remap keeps working.
+  assert.deepEqual(defaults('app.input.queue'), [])
   assert.deepEqual(defaults('app.input.steer'), ['ctrl+s'])
   assert.deepEqual(defaults('app.input.dequeue'), ['alt+up'])
   assert.deepEqual(defaults('app.agent.interrupt'), ['escape'])
@@ -101,6 +105,8 @@ test('viewer-blocked parent actions are all defined and configurable', () => {
   // implementation (M1 gate: the physical-key blacklist is fully replaced).
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.input.steer'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.input.submitAccelerated'))
+  assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.input.queue'),
+    'the deprecated queue action can still queue the parent draft — it must stay blocked too')
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.input.dequeue'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.permission.cycle'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.transcript.search'))

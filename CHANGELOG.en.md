@@ -45,6 +45,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Updated builtin default Footer layout.** The default statusline (no custom Footer) now uses two rows: row 1 keeps permission, model, tasks, cwd, branch and extension items on the left, with plan state and Focus Mode on the right; row 2 composes token usage, cache hit, TTFB, throughput and the turn/step counters on the left (the semantic decomposition of the stats line), with the full context pressure (`used/window (percent)`) on the right. Users with a saved custom `footerLayout` are unaffected.
 
+### Improved
+
+- **Ctrl+Enter now follows the web submission semantics.** While the agent is running, Ctrl+Enter takes
+  the **opposite** of the busy-Enter behavior: it steers under the default `busyEnter=queue` and queues
+  under `busyEnter=steer` (an idle agent always queues). The old `app.input.queue` action is kept as a
+  deprecated, key-less action, so a stored remap still means "queue" instead of being silently turned
+  into the opposite behavior; the new `app.input.submitAccelerated` owns Ctrl+Enter.
+
+### Compatibility
+
+- **Plugin command `execution: 'submission'` changed meaning (breaking).** It now declares a SUBMISSION
+  LINE rather than a command execution: the TUI delivers `/name args` verbatim with the resolved busy
+  mode (steer / queue) and **no longer runs the commands-service handler** — the web composer's
+  unclaimed-line semantics — leaving line expansion to the plugin's own pre-step. A plugin that needs
+  handler execution declares `execution: 'local'`; `submission` combined with `sessionless: true` is now
+  rejected at registration.
+
 ## [0.4.3-alpha.2] - 2026-09-08
 
 ### Installation and version pairing

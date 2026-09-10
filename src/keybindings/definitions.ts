@@ -44,11 +44,22 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     id: 'app.input.submitAccelerated',
     defaultKeys: ['ctrl+enter'],
     // The web composer's accelerated submit gesture: it resolves to the
-    // OPPOSITE of the busy-Enter preference (never a fixed queue mode). The
-    // historical id `app.input.queue` was named for the old fixed-queue
-    // behavior and remains accepted as a settings alias (see
-    // parseUserKeybindings).
+    // OPPOSITE of the busy-Enter preference (never a fixed queue mode).
     description: 'Submit with the opposite busy-Enter behavior',
+    category: 'Input',
+    scope: 'editor',
+    configurable: true,
+  },
+  'app.input.queue': {
+    id: 'app.input.queue',
+    // NO default key: Ctrl+Enter belongs to the accelerated gesture. The
+    // action itself is DEPRECATED but keeps its ORIGINAL fixed-queue
+    // semantic for stored remaps (`app.input.queue: alt+q` still queues) —
+    // re-interpreting an old action id as the new gesture would silently
+    // migrate a user's explicit choice. `/keybindings` lists it (and can
+    // reset/disable it) like any other action.
+    defaultKeys: [],
+    description: 'Queue the draft (deprecated: use the accelerated submit action)',
     category: 'Input',
     scope: 'editor',
     configurable: true,
@@ -527,6 +538,7 @@ export const PROTECTED_HOST_ACTIONS: ReadonlySet<AppKeybindingId> = new Set([
 export const VIEWER_BLOCKED_PARENT_ACTIONS: ReadonlySet<AppKeybindingId> = new Set([
   'app.input.steer',
   'app.input.submitAccelerated',
+  'app.input.queue',
   'app.input.dequeue',
   'app.permission.cycle',
   'app.transcript.search',

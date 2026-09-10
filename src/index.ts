@@ -4388,13 +4388,15 @@ export function apply(ctx: Context, config: Config): void {
         // liveAgent: writing through a re-read closure variable could
         // target a session the identity check did not see (a switch
         // between the check and the write).
-        // An extension `submission` contribution is AGENT-FACING input, never
-        // a command-plane execution: its resolved mode delivers the LINE,
-        // exactly like an unclaimed slash prompt (web parity — an unclaimed
-        // line is a prompt). Running the plugin's command handler here would
-        // execute it immediately under a mode the user explicitly resolved to
-        // 'queue' — the ownership the contribution declared is the whole
-        // contract.
+        // An extension `submission` contribution is a SUBMISSION LINE, not a
+        // command execution (web parity — in the web composer only a CLAIM
+        // runs a command handler; a skill-style line is a plain prompt with
+        // the policy-resolved mode). The TUI therefore delivers the raw
+        // `/<name> args` line to the session and never runs the
+        // commands-service handler for it; `execution: 'local'` is the
+        // ownership that executes a handler. This is a deliberate BREAKING
+        // ownership change (see TuiCommandContribution.execution), not an
+        // accident of the busy policy.
         const submissionLine = parsedAtSubmit !== undefined
           && extensionService?.commands.find(parsedAtSubmit.name)?.execution === 'submission'
         const commands = ctx.get('commands')
@@ -4679,7 +4681,17 @@ export function apply(ctx: Context, config: Config): void {
      * sessionless command that failed to register falls back to the
      * session dispatch, which reports unknown commands as messages.
      */
-    const runLocalCommand = (parsed: { name: string; rawInput: string }, text: string, persistHistory: (sessionId: string | undefined) => void, delivery: SubmitDelivery): void => {
+    const runLocalCommand = (
+      parsed: { name: string; rawInput: string },
+      text: string,
+      persistHistory: (sessionId: string | undefined) => void,
+      delivery: SubmitDelivery,
+      // The history identity of THIS call site: a sessionless command writes
+      // an unscoped row (Current directory / All directories), while a local
+      // command submitted inside a live session scopes its row to that
+      // session like every other local command (/status).
+      historyKind: 'agent-facing' | 'sessionless',
+    ): void => {
       // M5: a plugin-declared local command with a bridge handler routes
       // to the bridge FIRST (its rawInput is passed verbatim — never
       // re-parsed or rewritten, the skill rawInput regression gate); the
@@ -4712,10 +4724,11 @@ export function apply(ctx: Context, config: Config): void {
         dispatchViaSession(text, persistHistory, delivery)
         return
       }
-      // A truly local command: no session is created — the row persists
-      // sessionless (Current directory / All directories, never Current
-      // session).
-      persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id))
+      // A truly local command: the handler runs in-process, so no session is
+      // needed for the EXECUTION. The row follows the call site's identity
+      // (sessionless commands write an unscoped row; a local command inside
+      // a live session carries that session id).
+      persistHistory(historySessionIdFor(historyKind, liveAgent?.session.id))
       // An owned workflow: the result decides the notify, the failure lands
       // in diagnostics — runOwned (AGENTS.md), never a bare void. The
       // handler may be a SYNC implementation, so the factory must run inside
@@ -5161,6 +5174,21 @@ export function apply(ctx: Context, config: Config): void {
             // local commands are local while registered).
             name => extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false,
           )
+      // A plugin-declared LOCAL command whose plugin implements it through
+      // the bridge handler executes locally — with or without a live
+      // session. The bridge handler IS the implementation (the
+      // commands-service definition is only the fallback when the
+      // contribution declares none): without this route the line would fall
+      // through to the command plane — or, for a contribution with no
+      // definition at all, to the MODEL, which must never receive a local UI
+      // command.
+      if (parsed !== undefined && extensionService?.commands.localHandlerFor(parsed.name) !== undefined) {
+        // The row identity follows the command's OWN sessionless
+        // classification: a sessionless local command never appears in
+        // Current session, even when it runs inside a live one.
+        runLocalCommand(parsed, text, persistHistory, delivery, isSessionless ? 'sessionless' : 'agent-facing')
+        return
+      }
       if (parsed !== undefined && isSessionless) {
         // A recognized sessionless command: its history row is sessionless
         // — it must NEVER appear in Current session, whether or not a
@@ -5171,7 +5199,7 @@ export function apply(ctx: Context, config: Config): void {
         // it dispatches through the session's command service, but the
         // persist closure still supplies undefined.
         if (liveAgent === undefined) {
-          runLocalCommand(parsed, text, persistHistory, delivery)
+          runLocalCommand(parsed, text, persistHistory, delivery, 'sessionless')
         } else {
           dispatchViaSession(text, () => persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id)), delivery)
         }

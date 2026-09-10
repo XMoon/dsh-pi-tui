@@ -75,16 +75,16 @@ function startApp(
      * (fallback mode), the rest keep the unavailable default. */
     fileReferences?: import('../src/runtime/host-file-port.ts').HostFilePort
   } = {},
-): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; queued: string[]; cancels: number } {
+): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; accelerated: string[]; cancels: number } {
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
-  const queued: string[] = []
+  const accelerated: string[] = []
   let cancels = 0
   const app = new TuiApp(vt, {
     // The accelerated chord is a SUBMISSION request (the runner resolves its
     // delivery mode): the harness splits it out for the chord assertions.
     onSubmit: (text, request) => {
-      if (request === 'accelerated') { queued.push(text); options.onAcceleratedSubmit?.(text); return }
+      if (request === 'accelerated') { accelerated.push(text); options.onAcceleratedSubmit?.(text); return }
       submitted.push(text)
       options.onSubmit?.(text)
     },
@@ -95,7 +95,7 @@ function startApp(
   app.setCommandCompletions(options.commands ?? [], cwd, options.fileReferences ?? null)
   app.start()
   startedApps.add(app)
-  return { vt, app, submitted, queued, get cancels() { return cancels } }
+  return { vt, app, submitted, accelerated, get cancels() { return cancels } }
 }
 
 /** A continuable subagent viewer target (the editor stays live). */
@@ -609,16 +609,16 @@ test('a busy Esc keeps its Host-owned cancel priority over the shell-mode exit',
   app.setBusy(false)
 })
 
-test('a bare ! reaches the queue protocol via Ctrl+Enter', async (t) => {
+test('a bare ! reaches the accelerated submit with its wire form', async (t) => {
   const life = testLifecycle(t)
-  const { vt, app, queued } = startApp(fixtureWorkspace(life))
+  const { vt, app, accelerated } = startApp(fixtureWorkspace(life))
   life.defer(() => app.stop())
   await vt.waitForRender()
   vt.sendInput('!')
   await vt.waitForRender()
-  vt.sendInput('\x1b[13;5u') // kitty ctrl+enter: queue submit
-  assert.deepEqual(queued, ['!'], 'a bare ! shell mode must queue its wire form')
-  assert.equal(app.inputModeForTest(), 'prompt', 'mode resets after the queue submit')
+  vt.sendInput('\x1b[13;5u') // kitty ctrl+enter: the accelerated submit
+  assert.deepEqual(accelerated, ['!'], 'a bare ! shell mode must submit its wire form')
+  assert.equal(app.inputModeForTest(), 'prompt', 'mode resets after the accelerated submit')
 })
 
 test('a bare ! reaches the submit protocol via submitDraft', async (t) => {

@@ -295,9 +295,9 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   }
   if (onlyDraft) {
     // Busy-Enter steer: the DRAFT only — the queue (explicitly queued via
-    // Ctrl+Enter or notices) is never swept along; steered input cannot be
-    // pulled back, so a queued message must not be dragged into the turn
-    // behind the user's back.
+    // `queue-draft` / a queue-mode submission, or notices) is never swept
+    // along; steered input cannot be pulled back, so a queued message must
+    // not be dragged into the turn behind the user's back.
     const message = deps.createDraft(text)
     if (now.status === 'running') deliverSteer(deps, message)
     else deliverFollowup(deps, message)

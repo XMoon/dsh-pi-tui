@@ -1253,8 +1253,18 @@ export function registerTuiCommands(
   let boundDelivery: SubmitDelivery | undefined
   /**
    * Bind `delivery` for one synchronous window and run the launch. Commands
-   * that own their own busy semantics (Host commands, local UI commands)
-   * simply never consume it.
+   * that own their own busy semantics (Host commands, dispatched without a
+   * binding) simply never consume it.
+   *
+   * The binding belongs to the dispatch that armed it: it is consumed by the
+   * TUI-owned handler launched in the SAME synchronous window (a handler
+   * that awaits still captures it, because capture is its first statement).
+   * KNOWN LIMITATION: a command handler that SYNCHRONOUSLY re-enters the
+   * command service (`ctx.commands.execute`) for a TUI skill wrapper would
+   * inherit this delivery instead of resolving as "no submission" (queued) —
+   * no in-tree caller does that, and the public `CommandRuntime.execute`
+   * contract has no channel for a per-invocation mode, so such a caller must
+   * pass its own explicit mode rather than rely on the ambient one.
    * @param delivery - the mode the submit boundary resolved for this gesture.
    * @param run - the launch (the command execution) to run inside the window.
    */
@@ -1264,7 +1274,7 @@ export function registerTuiCommands(
     try {
       return run()
     } finally {
-      // Reentrancy-safe: a nested execution restores the outer window.
+      // Restore the enclosing window (undefined at the top level).
       boundDelivery = previous
     }
   }

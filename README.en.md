@@ -300,7 +300,7 @@ For the full `/footer` workflow, Custom Text / Command items, YAML reference, se
 | Key           | Action                                              |
 | ------------- | --------------------------------------------------- |
 | `Enter`       | Submit input                                        |
-| `Ctrl+Enter`  | Queue the draft while the agent is busy (the opposite of Enter while busy) |
+| `Ctrl+Enter`  | Submit with the OPPOSITE busy behavior (steers by default; queues when `busyEnter=steer`) |
 | `Shift+Enter` | Insert newline                                      |
 | `Esc`         | Cancel current interaction / interrupt running work |
 | `Esc Esc`     | Open Rewind while idle                              |

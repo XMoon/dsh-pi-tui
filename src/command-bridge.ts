@@ -1,17 +1,21 @@
 /**
  * The CommandBridge (M5, plan §10): the extension seam over the host's
- * slash-command execution. It does NOT re-implement command execution —
- * actual execution continues through the existing `ctx.commands` service
- * (register + execute). The bridge adds the TUI's OWNERSHIP metadata:
+ * slash-command execution. The bridge itself never executes a command — it
+ * carries the TUI's OWNERSHIP metadata, and the runner decides the route
+ * from it:
  *
  * - `execution: 'local'` — the command ALWAYS executes locally (TUI
- *   control commands like /status, /settings), never steered, regardless
- *   of the busyEnter preference. This is exactly the semantic of the
- *   static LOCAL_COMMANDS set, now extensible by plugins.
- * - `execution: 'submission'` — the command is AGENT-FACING input: its LINE
- *   flows through the session submission policy (steer/queue) like any skill
- *   invocation, and the TUI never runs the commands-service handler ahead of
- *   that delivery (the plugin's own pre-step owns any expansion).
+ *   control commands like /status, /settings), never steered, regardless of
+ *   the busyEnter preference: the contribution's own bridge handler when one
+ *   is declared, otherwise the `ctx.commands` definition handler. This is
+ *   exactly the semantic of the static LOCAL_COMMANDS set, now extensible by
+ *   plugins.
+ * - `execution: 'submission'` — the command is a SUBMISSION LINE, not a
+ *   command execution: it flows through the session submission policy
+ *   (steer/queue) like any skill invocation, the commands-service handler
+ *   is NOT run for it, and the plugin's own pre-step owns any expansion —
+ *   the web composer's unclaimed-line semantics. BREAKING (Unreleased): the
+ *   handler used to stay authoritative in every non-steer mode.
  *
  * Contract (plan §10):
  * - `/name args...` ALWAYS keeps `invocation.rawInput` verbatim — the
@@ -35,13 +39,18 @@
 import type { TuiAutocompleteProvider } from './extension/public-types.ts'
 import type { TuiCommandContribution, TuiCommandHandle, TuiLocalCommandHandler, TuiCommandBridgeSnapshot } from './extension/public-types.ts'
 
-/** One command contribution: ownership metadata over an existing command. */
+/**
+ * One command contribution: ownership metadata over a slash name — either a
+ * locally executed command (`local`) or an agent-facing submission line
+ * (`submission`).
+ */
 
 
-/** Conflict-detection outcome for a new registration. */
+/** Registration outcome for a new contribution. */
 type RegisterOutcome =
   | { kind: 'registered'; handle: TuiCommandHandle }
   | { kind: 'conflict'; existingOwner: string; nearSynonym?: string }
+  | { kind: 'invalid'; reason: string }
 
 /** The bridge's internal registration record. */
 interface Contribution {
@@ -92,6 +101,19 @@ export class CommandBridge {
       throw new Error(`duplicate command contribution id "${spec.id}" (owner "${this.contributions.get(spec.id)?.owner}")`)
     }
     if (spec.name === '') throw new Error('command contribution name must not be empty')
+    // A submission contribution is an AGENT-FACING line: it needs a live
+    // session to be delivered to, so `sessionless` (which lets a LOCAL
+    // command run before any session exists) is not a valid combination —
+    // accepting it would let the line fall into the local path and execute a
+    // handler the submission ownership explicitly does not run. Rejected at
+    // registration: fail fast at the extension boundary, never a silent
+    // reinterpretation at dispatch time.
+    if (spec.execution === 'submission' && spec.sessionless === true) {
+      return {
+        kind: 'invalid',
+        reason: 'a submission command is delivered to the session, so it cannot be sessionless — declare execution: \'local\' if the command must run without a live session',
+      }
+    }
     // P1-04: the host-owned catalog is authoritative — an EXACT collision
     // with a host command is rejected loudly (a plugin can never shadow
     // /status, /sessions, ...). Near-synonyms of host names are rejected
@@ -219,6 +241,16 @@ export class CommandBridge {
    * commands service). */
   handlerFor(name: string): TuiLocalCommandHandler | undefined {
     return this.find(name)?.handler
+  }
+
+  /** The LOCAL handler for one name: the bridge handler of a contribution
+   * whose EFFECTIVE ownership is `local`, or undefined. This is the
+   * implementation the TUI runs locally — a `submission` contribution's
+   * handler is never executed by the TUI, and a handler-less local
+   * contribution falls back to the commands-service definition. */
+  localHandlerFor(name: string): TuiLocalCommandHandler | undefined {
+    const contribution = this.find(name)
+    return contribution !== undefined && contribution.execution === 'local' ? contribution.handler : undefined
   }
 
   /** The argument autocomplete provider for one name, or undefined. */

@@ -155,6 +155,39 @@ construction or restore failure leaves the old seat available.
 Always `service.api().capabilities.has(...)` before relying on a
 capability — never parse the package version.
 
+## Command ownership (M5)
+
+`registerCommand(contribution)` declares ownership over an EXISTING slash
+command (register the command itself through the commands service). The
+bridge never executes anything — `execution` decides the route the TUI
+takes for a submitted `/<name> args` line, mirroring the web composer's
+claim-vs-prompt split:
+
+- `execution: 'local'` — the command executes whenever it is submitted,
+  with or without a live session: the contribution's `handler` (the bridge
+  handler) runs locally with the raw input verbatim, and the
+  commands-service definition handler is only the fallback when no bridge
+  handler is declared. The busy-Enter policy never applies and the line is
+  never steered, so a local command is never sent to the model. Use it for
+  UI/control commands; `sessionless: true` additionally lets it run before
+  any session exists.
+- `execution: 'submission'` — the command is a SUBMISSION LINE, not a
+  command execution: the TUI delivers the raw line to the session with the
+  busy-Enter-policy mode (steered into the running turn, or queued), like a
+  skill invocation, and does NOT run the commands-service handler. The
+  plugin's own pre-step owns any expansion of the line. A submission needs
+  a session, so `sessionless: true` with `submission` is rejected at
+  registration.
+
+**Breaking change (Unreleased).** `submission` used to keep the
+commands-service handler authoritative: the handler ran in every non-steer
+mode while only the steer mode delivered a bare line — an asymmetry no
+other client shared. Migration: a contribution that needs handler execution
+declares `execution: 'local'`; a contribution that wants the line delivered
+as agent input keeps `submission` and expands the line in its own pre-step.
+Busy Enter classifies by the EFFECTIVE ownership (a dynamic local command is
+local while registered, submission after unload).
+
 ## Theme registry (M5)
 
 `registerTheme(contribution)` registers a named color palette into the

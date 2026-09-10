@@ -914,6 +914,11 @@ async function bootCommandHarness(
       name: string
       description: string
       execution: 'local' | 'submission'
+      /** The contribution's LOCAL implementation (the bridge handler). */
+      bridgeHandler?: () => { kind: 'success' | 'error'; text?: string }
+      /** Whether the plugin ALSO registers a commands-service definition
+       * (default true; a bridge-only contribution is a real pattern). */
+      registerDefinition?: boolean
     }[]
   },
 ): Promise<{ harness: ReturnType<typeof makeHarness>; mounted: { dispose: () => Promise<void>; app: TuiApp } }> {
@@ -980,9 +985,13 @@ async function bootCommandHarness(
           execution: 'local' | 'submission'
         }): unknown
       }
-      for (const contribution of contributions) service.registerCommand(contribution)
+      for (const contribution of contributions) {
+        const { bridgeHandler, registerDefinition: _registerDefinition, ...spec } = contribution
+        service.registerCommand({ ...spec, ...bridgeHandler === undefined ? {} : { handler: bridgeHandler } })
+      }
     })
     for (const contribution of contributions) {
+      if (contribution.registerDefinition === false) continue
       // The plugin's own commands-service registration: the effective
       // completion surface (and with it the advertised claim) sees the
       // name, exactly like a real plugin's `ctx.commands.register`.
@@ -1191,7 +1200,7 @@ test('running + steer: an extension submission command keeps the busy steer, nev
   assert.equal(harness.executed.length, 0, 'an advertised extension command must never be claimed as a Host command')
 })
 
-test('running + steer: the accelerated chord queues an extension submission command as a PROMPT', async (t) => {
+test('running + steer: an extension submission command delivers its LINE, never the handler (declared ownership)', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'steer',
     status: 'running',
@@ -1278,6 +1287,56 @@ test('running + steer: a no-loader per-skill wrapper also injects its body', asy
   assert.equal(harness.executed[0]?.line, '/grilling args', 'the wrapper receives its own slash line')
   assert.equal(harness.host.steered.length, 1, 'the invocation steers into the running turn')
   assert.equal(harness.host.injected.length, 1, 'the TUI fallback injects the skill body exactly once')
+})
+
+test('a live LOCAL command runs its bridge handler — never the model', async (t) => {
+  // A bridge-only local contribution (no commands-service definition) is a
+  // real plugin pattern (e.g. the vim fixture): with a LIVE session the line
+  // used to fall through to the command plane, miss, and be delivered to the
+  // MODEL as a prompt — the plugin's handler never ran. A local command is
+  // in-process by contract.
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'running',
+    extensionCommands: [{
+      id: 'vimmode', name: 'vimmode', description: 'toggle vim mode', execution: 'local',
+      registerDefinition: false,
+      bridgeHandler: () => { calls.push('vimmode'); return { kind: 'success' } },
+    }],
+  })
+  mounted.app.setDraft('/vimmode')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && calls.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(calls, ['vimmode'], 'the live local command must run its bridge handler')
+  assert.equal(harness.host.followedUp.length, 0, 'a local command must never reach the model')
+  assert.equal(harness.host.steered.length, 0, 'a local command never steers')
+  assert.equal(harness.executed.length, 0, 'a bridge-only contribution has no command-plane definition')
+})
+
+test('a live LOCAL command prefers its bridge handler over the commands definition', async (t) => {
+  // When BOTH exist the bridge handler is the implementation (public-types:
+  // "absent = the commands service handler runs") — the commands plane is
+  // the fallback, not the first choice.
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'running',
+    extensionCommands: [{
+      id: 'panel', name: 'panel', description: 'toggle the panel', execution: 'local',
+      bridgeHandler: () => { calls.push('panel'); return { kind: 'success' } },
+    }],
+  })
+  mounted.app.setDraft('/panel')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && calls.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(calls, ['panel'], 'the bridge handler must run')
+  assert.equal(harness.executed.length, 0, 'the commands definition is only the fallback')
+  assert.equal(harness.host.followedUp.length, 0, 'a local command must never reach the model')
 })
 
 test('running + steer: an extension local command still executes directly under both chords', async (t) => {

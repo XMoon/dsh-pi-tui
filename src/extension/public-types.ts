@@ -428,20 +428,36 @@ export interface TuiCommandContribution {
   /** The slash-command name WITHOUT the leading slash. */
   readonly name: string
   readonly description: string
-  /** Execution ownership: `local` always runs the handler and never steers;
-   * `submission` is AGENT-FACING input — the command's LINE is delivered to
-   * the session in the busy-Enter-policy mode (steered or queued, like any
-   * skill invocation), and the commands-service handler is NOT run by the
-   * TUI ahead of that delivery. Busy Enter classifies by the EFFECTIVE
-   * ownership. */
+  /** Execution ownership over an existing command (TUI-owned metadata; the
+   * bridge never executes).
+   * - `local` — the command ALWAYS executes through the commands service
+   *   (its handler, or the bridge handler when one is declared); the busy
+   *   policy never applies and the line is never steered.
+   * - `submission` — the command is a SUBMISSION LINE, not a command
+   *   execution: the TUI delivers the raw `/<name> args` line to the session
+   *   with the busy-Enter-policy mode (steered into the running turn, or
+   *   queued), exactly like a skill invocation; the commands-service handler
+   *   is NOT run for that gesture (the plugin's own pre-step owns any
+   *   expansion of the line). It needs a live session — `sessionless: true`
+   *   with `submission` is rejected at registration.
+   *
+   * BREAKING (Unreleased): `submission` used to keep the commands-service
+   * handler authoritative, so the handler ran in every non-steer mode
+   * (`commands.execute`) while the steer mode delivered a bare line — an
+   * asymmetry no other client shared. It is now the web composer's
+   * unclaimed-line semantics on BOTH sides. A contribution that needs
+   * handler execution declares `local`. */
   readonly execution: 'local' | 'submission'
   /** Whether the command may run without a live session. */
   readonly sessionless?: boolean
   /** Optional autocomplete provider for this command's arguments
    * (the structural {@link TuiAutocompleteProvider}). */
   readonly argumentProvider?: TuiAutocompleteProvider
-  /** Optional local handler; absent = metadata-only ownership (the
-   * commands service handler runs). */
+  /** Optional LOCAL implementation. The TUI runs it whenever the EFFECTIVE
+   * ownership is `local` — with or without a live session — passing
+   * `invocation.rawInput` verbatim, and the commands-service definition is
+   * only the fallback when no bridge handler is declared. A `submission`
+   * contribution's handler is never run by the TUI. */
   readonly handler?: TuiLocalCommandHandler
 }
 

@@ -464,3 +464,46 @@ test('the invocation-time command health capture resolves a command registered A
     }
   }
 })
+
+test('a submission contribution cannot be sessionless — rejected loudly at registration', async () => {
+  // The TUI would otherwise run the line through its LOCAL path when no
+  // session exists yet, executing a handler the submission ownership
+  // explicitly does not run (and never delivering the agent-facing line).
+  const { Context } = await import('@deepseek-ai/cordis')
+  const Loader = (await import('@deepseek-ai/cordis-plugin-loader')).default
+  const { apply: applyExtensionHost } = await import('../src/extensions.ts')
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    await ctx.plugin((c) => { c.provide(TUI_STARTUP_SERVICE, {}) })
+    await ctx.plugin(applyExtensionHost)
+    const service = ctx.get('piTuiExtensions') as unknown as {
+      registerCommand(contribution: {
+        id: string; name: string; description: string
+        execution: 'local' | 'submission'
+        sessionless?: boolean
+      }): unknown
+      commands: { find(name: string): { execution: string } | undefined }
+    }
+    await assert.rejects(async () => {
+      await ctx.plugin({ name: 'bad-command', apply(c) {
+        const svc = c.get('piTuiExtensions') as unknown as {
+          registerCommand(contribution: {
+            id: string; name: string; description: string
+            execution: 'local' | 'submission'
+            sessionless?: boolean
+          }): unknown
+        }
+        svc.registerCommand({
+          id: 'deploy-cmd', name: 'deploy', description: 'deploy', execution: 'submission', sessionless: true,
+        })
+      } })
+    }, /sessionless/)
+    assert.equal(service.commands.find('deploy'), undefined, 'the invalid contribution is never installed')
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
