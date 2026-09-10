@@ -341,17 +341,40 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   switches reset it. The old `hideThinking` / `focusThinkingVisible`
   visibility pair is deleted.
 - **Focus separates turn foundation from process chronology
-  (projection-only)**: a LEADING injected/system context prefix that
-  wakes a turn is persistent input context and renders before the
-  Thought — expanded and collapsed. Only the leading prefix counts;
-  mid-turn injected context stays process content at its real position.
-  Collapsed Focus summarizes inputs: opening injected context + ALL
-  human user rows precede the Thought, even when a user row was a
-  same-turn steer. Expanded Focus preserves process chronology after
-  the foundation: later steers and mid-turn injected context return to
-  their real positions. The durable `steer`/source facts are never
-  rewritten, and injected context still does not occupy Think/Tool/
-  Message slots and never counts as a tool.
+  (projection-only)**: a LEADING injected-context prefix that wakes a
+  turn is persistent input context and renders before the Thought —
+  expanded and collapsed. Only the leading prefix counts; mid-turn
+  injected context stays process content at its real position. Collapsed
+  Focus summarizes inputs: opening injected context + ALL human user rows
+  precede the Thought, even when a user row was a same-turn steer.
+  Expanded Focus preserves process chronology after the foundation: later
+  steers and mid-turn injected context return to their real positions.
+  The durable `steer`/source facts are never rewritten, and injected
+  context still does not occupy Think/Tool/Message slots and never counts
+  as a tool.
+- **The foundation is identified by a source-derived `context` marker,
+  never by bare `kind: 'system'`**: the fold writes `context: true` only
+  on injected-context rows (the non-user `user/message` path); llm/retry
+  and max-tokens rows are also `kind: 'system'` but are orchestration and
+  stay inside the expanded process (owner-marked) and hidden under the
+  collapsed Thought. The original leading-`kind` heuristic was falsified
+  by the retry-before-any-visible-output case, so the presentation-only
+  marker was added to the system row (a plan deviation from
+  "projection-only": the marker is not a durable field and no new session
+  event, and the icon stays a display field, never a semantic signal).
+
+## Skill invocation delivery follows the busy-Enter preference
+
+A human skill invocation (`/skill <name>` or a per-skill wrapper) is an
+agent-facing prompt, not a Host command: while the agent is running it
+follows the busy-Enter preference like a plain prompt — `steer` steers
+into the turn, `queue` (and idle) queues. The queue delivery is only
+used when the HOST injects the skill body (the dsh-tool-skill pre-step
+listener): the TUI's fallback body injection rides next-step, so a
+followup would let the body arrive before the user's words (the driver
+claims next-step first). Without the host loader the invocation keeps
+the steer path to preserve the original-line-before-body order — the
+documented exception, confined to compositions without the loader.
 
 ## Focus is surface-adaptive
 
