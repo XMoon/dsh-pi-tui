@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `5ea22f43adc79823e5ba71e3018bd0e4a37a01d9`
+- Audited local source commit: `15d68691fa7feff6ada3703ca79943f7a05a14b5`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -1590,6 +1590,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - double click selects a word and preserves copy-on-select semantics
 - selection feedback is not duplicated
 - a hidden/removed overlay or a replaced/removed layout target never receives pointer events, even before the next paint
+- a layout-root retained target's click synthesis is current-origin fenced: a descendant that reflowed inside its ancestor (sibling heights changed) does not receive a synthetic click retargeted with the old origin — containment of the old point is not enough
 - Audit note: A callback with the wrong granularity is not equivalent. Liveness is checked against the currently mounted component tree, never the cached layout frame, so structural changes take effect immediately.
 
 #### Guarding tests
@@ -1614,6 +1615,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - packages/pi-tui/test/tui-alt-screen.test.ts: a centered SettingsList overlay that grows and moves after the press does not receive a ghost synthetic click at the original cell; a fresh press at the new row works
 - packages/pi-tui/test/tui-alt-screen.test.ts: a child nested inside a padded Box overlay root still receives the synthetic click (the painted-placement check compares the ROOT placement snapshot, not the child's padding-offset origin)
 - packages/pi-tui/test/tui-alt-screen.test.ts: a descendant that reflowed inside a stable overlay root (sibling heights changed, root bounds identical) does not receive a ghost synthetic click at the original cell; a fresh press at the new row works
+- packages/pi-tui/test/tui-alt-screen.test.ts: a layout-root descendant that reflowed inside its ancestor (header shrank, target moved) does not receive a ghost synthetic click at the original cell — the click fence compares the target's CURRENT painted origin (ancestor rect + last-painted child offset), not old-origin containment; a fresh press at the new row works
 
 #### Upstream comparison
 
