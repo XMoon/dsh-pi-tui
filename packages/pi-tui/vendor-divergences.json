@@ -188,6 +188,13 @@
     "X053"
    ],
    "reason": "Input cursor placement and viewport origin are internal Input state; a host wrapper cannot set the cursor or read the render-time viewport without a fork seam, and the masked display must align with the SAME viewport the Input renders."
+  },
+  {
+   "decision": "NOT_MOVABLE",
+   "records": [
+    "X054"
+   ],
+   "reason": "The host has no public entry point after the layout pass (a render probe runs during the measurement pass and would commit a cross-frame mix); the frame-completion boundary and the painted-box query must live in the fork."
   }
  ],
  "removedLegacy": [
@@ -5359,6 +5366,98 @@
      "tests"
     ],
     "notes": "Confirmed upstream Input has no cursor setter or viewport-origin getter; the fork exposes the minimal seam for host-painted value displays (QuestionFlow masked rows)."
+   }
+  },
+  "X054": {
+   "title": "Frame-completion boundary and painted-box query for host mouse parity",
+   "status": "ACTIVE",
+   "category": [
+    "PUBLIC_COMPONENT_CONTRACT"
+   ],
+   "risk": "LOW",
+   "files": [
+    "src/tui-alt-screen.ts"
+   ],
+   "why": "A host that resolves a same-cell click against the frame the user actually SAW needs a reliable frame-completion boundary and the painted geometry of that frame. The fork's layout pass measures components and commits the scroll viewport state only at the END of a painted frame; a host-side render probe runs during the MEASUREMENT pass and would commit a cross-frame mix (an un-laid-out viewport height, the previous frame's scroll state). The fork exposes the minimal seam: onFramePainted fires after every painted frame (the layout has committed), and getPaintedBox(component) returns the last-painted screen rect of a mounted component — never the internal layout tree.",
+   "changedSurface": [
+    "TuiAltScreenOptions.onFramePainted fires at the END of every painted frame, after the layout pass has committed (the scroll viewport state and every component's painted placement are final)",
+    "TuiAltScreen.getPaintedBox(component) returns the last-painted screen rect {x, y, width, height} of a mounted component, or undefined when the component is not part of the last painted layout"
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "onFramePainted is invoked at the end of doRender after currentLayout is committed; getPaintedBox walks the committed LayoutFrame box tree."
+     ],
+     "notes": "Both are read-only seams over the existing layout state; no behavior change."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "TuiAltScreen is a leaf subclass of TuiBase; the new option and method do not alter the class hierarchy."
+     ],
+     "notes": "None."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "TuiApp commits its last-painted fullscreen geometry snapshot in onFramePainted (chrome heights via getPaintedBox, scroll state, transcript projection) so the press path of a same-cell click resolves against the frame the user actually saw."
+     ],
+     "notes": "The press path never re-measures live components between paint and press."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "TuiAltScreen is a public built-in screen; the new option and method are additive."
+     ],
+     "notes": "No existing API changes."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "onFramePainted fires once per painted frame (the search-refresh double layout re-fires it — the LAST pass is the painted one)",
+      "getPaintedBox reflects the last committed frame's layout, never a re-measurement",
+      "a component inside a leaf Container (no layout box of its own) has no painted box"
+     ],
+     "notes": "Regression tests cover the callback cadence and the painted-box values."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/tui-alt-screen.test.ts: fires onFramePainted after each painted frame and exposes the painted box of mounted components (X054)",
+    "test/editor-seat-non-owning.test.ts: a click before the seat repaint reaches neither the removed editor nor the not-yet-painted occupant (ghost click)",
+    "test/tui-app.test.ts: fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)"
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
+     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+    },
+    "relevantFiles": [
+     "packages/tui/src/tui-alt-screen.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream TuiAltScreen exposes no frame-completion boundary and no painted-geometry query; the fork adds the minimal host seam for mouse parity."
+   },
+   "retirement": {
+    "conditions": [
+     "Retire only when upstream exposes a frame-completion boundary and a painted-geometry query (or the host stops resolving clicks against the painted frame), then run the ghost-click and repainted-message regressions."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-09-09",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Confirmed the host has no public entry point after the layout pass (a render probe runs during the measurement pass); the fork exposes the narrow frame-completion boundary + painted-box query."
    }
   }
  }

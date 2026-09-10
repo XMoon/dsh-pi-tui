@@ -100,6 +100,40 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("fires onFramePainted after each painted frame and exposes the painted box of mounted components (X054)", async () => {
+		const terminal = new VirtualTerminal(30, 6);
+		let paintedFrames = 0;
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onFramePainted: () => {
+				paintedFrames += 1;
+			},
+		});
+		const header = new Text("header", 0, 0);
+		const body = new Text("body line", 0, 0);
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: header, shrink: 0 },
+				{ component: body, shrink: 0 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+		assert.ok(paintedFrames >= 1, "onFramePainted must fire after the first painted frame");
+		// The painted box reflects the ACTUAL committed layout (the frame
+		// the user saw), not a re-measurement: the header's box is its
+		// rendered height at the top of the screen.
+		assert.deepStrictEqual(tui.getPaintedBox(header), { x: 0, y: 0, width: 30, height: 1 });
+		assert.deepStrictEqual(tui.getPaintedBox(body), { x: 0, y: 1, width: 30, height: 1 });
+		// A component that is not part of the layout has no painted box.
+		assert.strictEqual(tui.getPaintedBox(new Text("unmounted", 0, 0)), undefined);
+		// A repaint fires the callback again (the frame-completion boundary).
+		const before = paintedFrames;
+		tui.requestRender();
+		await terminal.waitForRender();
+		assert.ok(paintedFrames > before, "onFramePainted must fire on every painted frame");
+		tui.stop();
+	});
+
 	it("shows a clickable jump-to-end indicator on the transcript's last row while scrolled up", async () => {
 		const terminal = new VirtualTerminal(30, 6);
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {

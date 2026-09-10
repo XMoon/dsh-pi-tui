@@ -228,6 +228,17 @@ export interface TuiAltScreenOptions {
 	 */
 	onCellPress?: (x: number, y: number) => void;
 	/**
+	 * The frame-completion boundary: called at the END of every painted
+	 * frame, AFTER the frame's layout pass has committed (the scroll
+	 * viewport state and every component's painted placement are final).
+	 * dsh-pi-tui extension: the host commits its last-painted geometry
+	 * snapshot here — the press path of a same-cell click must resolve
+	 * against the frame the user actually SAW, never re-measured live
+	 * state (a re-measure between paint and press would hand the click to
+	 * a target the user never saw). (dsh-pi-tui divergence X054.)
+	 */
+	onFramePainted?: () => void;
+	/**
 	 * Defer the viewport input listener's registration out of the
 	 * constructor (dsh-pi-tui divergence X043). Input listeners run in
 	 * REGISTRATION order, and the constructor registers the viewport
@@ -310,6 +321,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly copySelection?: (text: string) => Promise<boolean>;
 	private readonly onCellClick?: (x: number, y: number) => void;
 	private readonly onCellPress?: (x: number, y: number) => void;
+	private readonly onFramePainted?: () => void;
 	private readonly onScrollBoundary?: (direction: -1 | 1, source: "wheel" | "page" | "scrollbar") => boolean | void;
 	private readonly onBeforeViewportInput?: (data: string) => boolean | void;
 	private scrollbarBoundaryNotified?: -1 | 1;
@@ -342,6 +354,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.copySelection = options.copySelection;
 		this.onCellClick = options.onCellClick;
 		this.onCellPress = options.onCellPress;
+		this.onFramePainted = options.onFramePainted;
 		this.onScrollBoundary = options.onScrollBoundary;
 		this.onBeforeViewportInput = options.onBeforeViewportInput;
 		if (options.deferViewportListener !== true) {
@@ -403,6 +416,29 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// X018 hardening.)
 		this.clearComponentMouseGesture();
 		this.requestRender();
+	}
+
+	/**
+	 * The last-painted screen rect of a mounted component — the frame the
+	 * user last SAW — or undefined when the component is not part of the
+	 * last painted layout. The narrow read-only painted-geometry query
+	 * (dsh-pi-tui divergence X054): a host that must resolve a click
+	 * against the painted frame (never re-measured live state) reads the
+	 * chrome heights here at the {@link TuiAltScreenOptions.onFramePainted}
+	 * boundary. Only the rect is exposed — never the internal layout tree.
+	 */
+	getPaintedBox(component: Component): { x: number; y: number; width: number; height: number } | undefined {
+		const frame = this.currentLayout;
+		if (frame === undefined) return undefined;
+		const visit = (box: LayoutBox): { x: number; y: number; width: number; height: number } | undefined => {
+			if (box.component === component) return { ...box.rect };
+			for (const child of box.children) {
+				const match = visit(child);
+				if (match) return match;
+			}
+			return undefined;
+		};
+		return visit(frame.root);
 	}
 
 	override render(width: number): string[] {
@@ -2205,5 +2241,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.previousScreenWidth = width;
 		this.previousScreenHeight = height;
 		this.currentLayout = nextLayout;
+		// The frame-completion boundary (dsh-pi-tui divergence X054): the
+		// layout pass has committed and the frame is painted — the host
+		// commits its last-painted geometry snapshot here (the press path
+		// of a same-cell click must resolve against the frame the user
+		// actually SAW, never re-measured live state).
+		this.onFramePainted?.();
 	}
 }
