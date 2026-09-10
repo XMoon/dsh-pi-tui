@@ -2880,6 +2880,81 @@ test('expanded and collapsed: multiple opening injected rows keep their order an
   }
 })
 
+test('expanded and collapsed: an llm/retry after the opening inject stays process content (never lifted to the lead)', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    // The opening injected trigger wakes the turn.
+    eventAt('user/message', {
+      id: MessageId('retry-inject'), role: 'user',
+      content: [{ type: 'text', text: 'system reminder' }],
+      source: { kind: 'plugin', plugin: 'agent-instructions' },
+    }, 1001, 1),
+    // The first model request fails BEFORE any visible output: the retry
+    // is orchestration, NOT turn foundation — it must never be lifted
+    // before the Thought.
+    eventAt('llm/retry', { turn: 0, step: 0, retry: 0, delayMs: 1000, failure: { code: 'E', message: 'boom' } }, 1002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1003, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('retry-a'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+  ])
+  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  // Only the injected context is the foundation; the retry stays in its
+  // chronological process position.
+  assert.deepEqual(blockKinds(expanded), ['system', 'activity', 'system', 'thinking', 'assistant'],
+    `the retry must stay inside the expanded process: ${blockKinds(expanded).join(',')}`)
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  // Collapsed Focus summarizes inputs only: the retry is process content
+  // and stays hidden under the Thought.
+  assert.deepEqual(blockKinds(collapsed), ['system', 'activity', 'assistant'],
+    `the retry must not surface before the collapsed Thought: ${blockKinds(collapsed).join(',')}`)
+  // The expanded retry row keeps the Thought owner click mark; the opening
+  // inject stays unmarked foundation.
+  const expandedRetry = expanded.find(block => block.kind === 'message' && block.message.kind === 'system' && block.message.text.includes('llm retry'))
+  assert.ok(expandedRetry !== undefined && expandedRetry.kind === 'message')
+  assert.equal(expandedRetry.collapseFocusOwnerOnClick, 0, 'the retry is process content: owner-marked')
+  const expandedInject = expanded.find(block => block.kind === 'message' && block.message.kind === 'system' && block.message.text === 'system reminder')
+  assert.ok(expandedInject !== undefined && expandedInject.kind === 'message')
+  assert.equal(expandedInject.collapseFocusOwnerOnClick, undefined, 'the opening inject is foundation: unmarked')
+})
+
+test('a system row with an icon but no context marker is never turn foundation (independent contracts)', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('ctx'), role: 'user',
+      content: [{ type: 'text', text: 'system reminder' }],
+      source: { kind: 'plugin', plugin: 'agent-instructions' },
+    }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1002, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('icon-a'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1003, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
+  ])
+  // A hand-built presentation row that carries an icon but NOT the context
+  // marker: the two contracts are independent — icon presence alone must
+  // never make a row part of the turn foundation.
+  const iconOnly: TranscriptMessage = { kind: 'system', turn: 0, text: 'icon without context', icon: 'context-generic' }
+  const messages = [folder.messages()[0]!, iconOnly, ...folder.messages().slice(1)]
+  const expanded = projectFocus(messages, folder.turnActivities(), new Set([0]), true)
+  // The real injected context is the foundation; the icon-only row stays
+  // in the process, after the Thought.
+  assert.deepEqual(blockKinds(expanded), ['system', 'activity', 'system', 'thinking', 'assistant'],
+    `the icon-only row must not extend the foundation prefix: ${blockKinds(expanded).join(',')}`)
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['system', 'activity', 'assistant'],
+    'the icon-only row is hidden under the collapsed Thought')
+  const iconRow = expanded.find(block => block.kind === 'message' && block.message.kind === 'system' && block.message.text === 'icon without context')
+  assert.ok(iconRow !== undefined && iconRow.kind === 'message')
+  assert.equal(iconRow.collapseFocusOwnerOnClick, 0, 'the icon-only row is process content: owner-marked')
+})
+
 test('fold → expand → fold projection is reversible (same collapsed output)', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, steeredTurn(0, 0, 1000))

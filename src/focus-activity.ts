@@ -383,7 +383,7 @@ export class FocusActivityComponent {
  * §12/§33): a turn with an initial prompt is grouped as
  * `user(s) → FocusActivity`; a turn with only same-turn steers starts with
  * `FocusActivity` and keeps those steers in process order. A turn woken by
- * injected/system context keeps that LEADING prefix as its foundation
+ * injected-context keeps that LEADING prefix as its foundation
  * before the Thought (expanded and collapsed). Expanded process/final and
  * compaction rows follow, so the raw TranscriptMessage union is never
  * polluted with a fake `focus-activity` kind and the session data stays
@@ -392,7 +392,7 @@ export class FocusActivityComponent {
  * Collapsed turns HIDE the process rows — thinking, tool, mid-turn
  * system/inject and intermediate-assistant — entirely: they cannot leak
  * through Ctrl+O/Alt+T because they are not in the rendered list at all
- * (plan §15.2). The LEADING injected/system prefix (the turn foundation)
+ * (plan §15.2). The LEADING injected-context prefix (the turn foundation)
  * and every human user row stay visible before the Thought. The final
  * assistant only appears after the authoritative `turn/end` (plan §13.1)
  * and never duplicates in the expanded view (it stays at its
@@ -464,13 +464,13 @@ export function projectFocus(
       // turn's `max tokens reached` system row must never land after the
       // final: the settled order is User → Thought → process → final).
       // The THOUGHT-LEAD boundary precedes the Thought: rows before the
-      // turn's FIRST non-steer user (injected/system context) stay in place
+      // turn's FIRST non-steer user (injected context) stay in place
       // and that initial user itself stays above the Thought; every later
       // user/steer returns to its chronological position in the process
       // (plan: expanded chronology — the projection reorders, never the
       // session events). With a non-steer user, the first such row is the
       // compatibility boundary; when every user is a steer, the boundary
-      // falls back to the end of the LEADING injected/system prefix, so an
+      // falls back to the end of the LEADING injected-context prefix, so an
       // inject-woken turn keeps its foundation before the Thought (never a
       // scan of mid-process system rows). Consecutive users after the
       // boundary stay in chronological order; they are not a multi-row
@@ -497,13 +497,14 @@ export function projectFocus(
       continue
     }
     // Collapsed Focus summarizes the turn's INPUTS before the Thought: the
-    // leading injected/system prefix (the turn foundation) and EVERY human
+    // leading injected-context prefix (the turn foundation) and EVERY human
     // user row (same-turn steers included) precede the Thought; the process
     // stays hidden inside it. This is a summary, not strict chronology — a
     // steer-only turn still shows its user input above the Thought. Only
-    // the LEADING system prefix is lifted; mid-turn injected context stays
-    // process content, hidden under the collapsed Thought.
-    for (const member of group.slice(0, leadingSystemPrefixEnd(group))) {
+    // the LEADING injected-context prefix is lifted; mid-turn injected
+    // context and orchestration rows (llm/retry, max-tokens) stay process
+    // content, hidden under the collapsed Thought.
+    for (const member of group.slice(0, leadingInjectedContextPrefixEnd(group))) {
       out.push({ kind: 'message', message: member })
     }
     for (const member of group) {
@@ -537,32 +538,40 @@ function assistantForStep(
   return undefined
 }
 
-/** The end of the turn's LEADING injected/system prefix: only consecutive
- * `kind === 'system'` rows at the very start of the group count as the
- * opening turn foundation. Mid-process system rows are never included, so a
- * later inject can never be lifted before the Thought. */
-function leadingSystemPrefixEnd(group: readonly TranscriptMessage[]): number {
+/** The end of the turn's LEADING injected-context prefix: only consecutive
+ * `kind === 'system'` rows carrying the source-derived `context` marker at
+ * the very start of the group count as the opening turn foundation. Other
+ * `kind: 'system'` rows (llm/retry, max-tokens) are orchestration, not
+ * foundation — they must stay process content, never lifted before the
+ * Thought. Mid-process system rows are never included either, so a later
+ * inject can never be lifted before the Thought. */
+function leadingInjectedContextPrefixEnd(group: readonly TranscriptMessage[]): number {
   let end = 0
-  while (group[end]?.kind === 'system') end += 1
+  while (true) {
+    const member = group[end]
+    if (member === undefined || member.kind !== 'system' || member.context !== true) break
+    end += 1
+  }
   return end
 }
 
 /** The Thought-lead boundary of one turn group: the index AFTER the
- * turn's FIRST unmarked user row. Rows before it (injected/system context)
+ * turn's FIRST unmarked user row. Rows before it (injected context)
  * and the initial user itself stay above the Thought; every later row
  * (same-turn steers included) returns to its chronological position. A turn
  * whose user rows are all marked same-turn steers has no opening human
- * prompt: the boundary falls back to the end of the LEADING injected/system
+ * prompt: the boundary falls back to the end of the LEADING injected-context
  * prefix, so an inject-woken turn keeps its foundation before the Thought
- * (never a scan of mid-process system rows). Without steer metadata, the
- * first user remains the initial-prompt fallback; consecutive users are
- * queue/steer input, not a multi-row initial prompt. */
+ * (never a scan of mid-process system rows, and never orchestration rows
+ * like llm/retry). Without steer metadata, the first user remains the
+ * initial-prompt fallback; consecutive users are queue/steer input, not a
+ * multi-row initial prompt. */
 function thoughtLeadBoundary(group: readonly TranscriptMessage[]): number {
   const firstInitialUserIndex = group.findIndex(
     member => member.kind === 'user' && member.steer !== true,
   )
   if (firstInitialUserIndex >= 0) return firstInitialUserIndex + 1
-  return leadingSystemPrefixEnd(group)
+  return leadingInjectedContextPrefixEnd(group)
 }
 
 /** Whether one Assistant entry has semantic/finalized content. Pending
