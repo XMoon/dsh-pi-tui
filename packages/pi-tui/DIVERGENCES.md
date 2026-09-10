@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `ba36a689d9bb8c90bf3ffdf5e210d818c2419cb8`
+- Audited local source commit: `ef4ce42f8918c1b418f9b0d9d6ddfc457b3c453e`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -65,6 +65,7 @@
 - `NOT_MOVABLE`: `X049` — AltScreenSearchComponent owns its PRIVATE query Input; the host cannot reach or rewire that Input, so the mouse-forwarding seam must live inside the vendored fork's alt-screen search component.
 - `NOT_MOVABLE`: `X050` — Editor visual-line/wrapped-segment cursor mapping and slash-autocomplete click-submit are internal Editor semantics (two distinct bugs confirmed against upstream v0.85.1 and main); they cannot be reproduced through the public Editor surface from a host wrapper.
 - `NOT_MOVABLE`: `X051`, `X052` — Container/Box focus-ownership and input/key-release forwarding is a public component/framework contract inside the vendored fork (the TUI routes keyboard to the focused component and filters key releases by wantsKeyRelease); a host wrapper cannot change how the fork's own focus model resolves overlay roots. X052: SelectList mouse hit-testing is a public built-in component contract inside the vendored fork (setFilter/setSelectedIndex + mouse click are documented capabilities); a host wrapper cannot change how the fork's own component resolves a press/click against its rows, and the fix depends on render-time row identity which is vendor-internal.
+- `NOT_MOVABLE`: `X053` — Input cursor placement and viewport origin are internal Input state; a host wrapper cannot set the cursor or read the render-time viewport without a fork seam, and the masked display must align with the SAME viewport the Input renders.
 
 ## Removed or superseded legacy surfaces
 
@@ -78,8 +79,8 @@
 
 ## Summary
 
-- Records: 53
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 42, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
+- Records: 54
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 43, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -136,6 +137,7 @@
 | X050 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X051 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT | NO |
 | X052 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
+| X053 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
 
 ## Divergences
 
@@ -1547,7 +1549,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 
 #### Changed surface
 
-- onCellClick callback for character-granularity clicks
+- onCellClick callback for character-granularity clicks, plus the onCellPress press-half callback (the host records a press-time semantic identity so the release click can reject targets that repainted onto the same cell)
 - single/double click branch ownership
 - overlay mouse dispatch skips entries no longer mounted or visible
 - gesture capture/press targets are revalidated against the live component tree (overlay roots AND their subtrees, layout root, direct children) and cleared when stale
@@ -1603,6 +1605,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - test/editor-seat-non-owning.test.ts: ghost click and selection-fallback cross-repaint regressions on the production EditorSeatMount path
 - packages/pi-tui/test/tui-alt-screen.test.ts: selection press-time component snapshot lifecycle — the press snapshots the reached set and the release clears it
 - packages/pi-tui/test/tui-alt-screen.test.ts: hidden auto scrollbar track jumps on a stationary first press; in-flight selection gesture and scrollbar drag are cancelled when the pointer lands on a capturing overlay
+- test/tui-app.test.ts: press a question option → keyboard advance to the next question → release on the same cell must not activate the repainted option (onCellPress records the press-time identity; the release click rejects the question-id mismatch)
 
 #### Upstream comparison
 
@@ -4310,3 +4313,79 @@ SelectList mouse hit-testing derived the pressed row from the LIVE selectedIndex
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Confirmed upstream SelectList (v0.85.1 and current main) still derives the pressed row from the live visible range and latches an array index; the fork fences mouse dispatch to the last-painted rows with item-identity gesture tracking.
+
+### X053 — Input cursor seam for host-painted value displays
+
+- Status: `ACTIVE`
+- Category: `PUBLIC_COMPONENT_CONTRACT`
+- Risk: `LOW`
+- Files: `src/components/input.ts`, `src/index.ts`
+- Last audited: `2026-09-09`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+A host that paints its own display of an Input's value (e.g. QuestionFlow's masked bullet row) must be able to place the Input's cursor at a grapheme boundary and align its click mapping with the SAME horizontal-scroll viewport the Input renders. The fork exposes the minimal seam: setCursor(index) (UTF-16 index, clamped) and getRenderedStartColumn() (the viewport origin in cells), plus the getGraphemeSegmenter export so the host segments graphemes with the SAME segmenter the Input uses.
+
+#### Changed surface
+
+- Input.setCursor(index) places the cursor at a UTF-16 index (clamped to the value); the caller lands on a grapheme boundary
+- Input.getRenderedStartColumn() exposes the horizontal-scroll viewport origin (in cells) so a host-painted display (masked bullets) shows and maps the SAME visible graphemes the Input renders
+- getGraphemeSegmenter is exported from the package entry so a host segments graphemes identically to the Input
+
+#### Dependency map
+
+**Vendor internal**
+- Input.setCursor writes the private cursor field; getRenderedStartColumn reads the render-time viewport origin.
+- Audit note: Both are read/write seams over existing private state; no behavior change.
+
+**Inheritance / structural**
+- Input is a leaf component; no subclass overrides the new methods.
+- Audit note: None.
+
+**Host**
+- QuestionFlow's masked free-text row uses setCursor + getRenderedStartColumn to map a clicked bullet to the real grapheme boundary, aligned with the Input's viewport.
+- Audit note: The host paints its own prefix and mask; the Input's prompt is empty so its local column 0 IS the first painted value cell.
+
+**Public / extension**
+- Input is a public built-in component; the new methods are additive.
+- Audit note: No existing API changes.
+
+**Behavioral coupling**
+- setCursor clamps to [0, value.length] and lands on the caller-chosen grapheme boundary
+- getRenderedStartColumn reflects the last render's viewport origin
+- masked CJK / emoji / combining clicks place the cursor at the exact grapheme boundary (never splitting a ZWJ sequence)
+- Audit note: Regression tests cover masked CJK, masked ZWJ emoji, and the viewport-aligned mask window.
+
+#### Guarding tests
+
+- test/question-flow.test.ts: masked CJK click places the cursor between graphemes (界a → 界Xa)
+- test/question-flow.test.ts: masked ZWJ emoji click never splits the grapheme (👨‍💻a → 👨‍💻Xa)
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/components/input.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream Input exposes no cursor setter or viewport-origin getter; the fork adds the minimal host seam for host-painted value displays.
+
+#### Retirement conditions
+
+- Retire only when upstream Input exposes a cursor setter and viewport-origin getter (or the host stops painting its own value displays), then run the masked CJK / ZWJ emoji regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream Input has no cursor setter or viewport-origin getter; the fork exposes the minimal seam for host-painted value displays (QuestionFlow masked rows).
