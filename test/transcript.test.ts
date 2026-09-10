@@ -4064,10 +4064,13 @@ test('live projection follows first-seen stream order, not numeric index order (
     { type: 'image', attachment: imageA },
   ])
   // The durable settlement carries the same canonical order: no jump.
+  // (The loose attachment refs are structural test fixtures — the official
+  // ImageAttachmentRef brands them, so the content is cast like the other
+  // attachment tests.)
   folder.apply([assistantMessageWithBlocks(6, [
     { type: 'image', attachment: imageB },
     { type: 'image', attachment: imageA },
-  ])])
+  ] as never)])
   const durable = folder.messages().find(message => message.kind === 'assistant')
   assert.ok(durable !== undefined && durable.kind === 'assistant')
   assert.deepEqual(durable.content, [
