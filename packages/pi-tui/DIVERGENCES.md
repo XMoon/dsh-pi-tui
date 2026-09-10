@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `74929d8648841a84f903e085d38e77c09340f287`
+- Audited local source commit: `81148e17c986a5f8c0b0ccf32a7b6ac8138662d3`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -4460,6 +4460,9 @@ A host that resolves a same-cell click against the frame the user actually SAW n
 - test/tui-app.test.ts: fullscreen todo: a dock press cannot toggle the panel across a session switch (the session-boundary gesture clear in clearSessionOverrides; the generic todo identities have no object to tokenize)
 - test/tui-app.test.ts: fullscreen transcript click: a click that resolves to no cell consumes the stale latch (the identity-fence invariant is literal before every early return)
 - test/tui-app.test.ts: fullscreen todo: a session switch resets the click-coalescing window (a fresh click in the new session must never be swallowed by the old session's window)
+- test/workflow-ui.test.ts: a workflow member press cannot transfer to the aggregate View row after a 5→6 switch (per-row semantic hit identity)
+- test/rendering.test.ts: a PTC sub-call press cannot transfer after a sibling settle reflow (per-row semantic hit identity)
+- test/image-collapse.test.ts: an attachment press cannot transfer to a sibling after an async image growth (per-row semantic hit identity)
 
 #### Upstream comparison
 
