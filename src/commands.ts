@@ -1505,9 +1505,13 @@ export function registerTuiCommands(
    * a fresh collision anywhere re-states the WHOLE current collision set.
    */
   const notifiedCollisions = new Set<string>()
-  /** The identity of one contribution across the bridge and the health
-   * ledger (the id alone is unique today, the owner keeps it honest). */
-  const contributionIdentity = (entry: { id: string; owner: string }): string => `${entry.id}\u0000${entry.owner}`
+  /** The identity of one contribution GENERATION (id + owner + registration
+   * generation): the owner keeps a reused id honest, and the generation keeps
+   * a dispose + re-register under the same id/owner apart — an HMR reload may
+   * coalesce both into ONE invalidate flush, so a purge that only observes
+   * absent identities can never see the gap. */
+  const contributionIdentity = (entry: { id: string; owner: string; generation: number }): string =>
+    `${entry.id}\u0000${entry.owner}\u0000${entry.generation}`
   /** The COLLISION records THIS synthesis wrote, by identity — the only
    * health entries a successful merge may clear, and only while the record
    * still shows that collision message (see the recovery loop). */
