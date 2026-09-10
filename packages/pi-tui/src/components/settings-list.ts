@@ -59,6 +59,10 @@ export class SettingsList implements Component, Focusable {
 	/** The pressed item ID (mouse parity): a click may only activate the
 	 * exact identity that was pressed. */
 	private mousePressedId: string | undefined;
+	/** The submenu generation at press time (mouse parity): a press that
+	 * started on the main list (or a previous submenu) must not be
+	 * forwarded to a submenu created AFTER the press. */
+	private mousePressedGeneration: number | undefined;
 	/** Caller-configured item cap; the host may lower it for a short frame. */
 	private configuredMaxVisible: number;
 	private maxVisible: number;
@@ -375,6 +379,18 @@ export class SettingsList implements Component, Focusable {
 			this.mousePressedId = undefined;
 		}
 		if (this.submenuComponent) {
+			// The submenu is a DIFFERENT semantic owner: a press that
+			// started on the main list (or a previous submenu) must not be
+			// forwarded to a submenu created AFTER the press — the
+			// submenuGeneration advances on every open/close/replacement,
+			// so a generation mismatch consumes the gesture. A FRESH left
+			// press on the open submenu records the current generation and
+			// forwards normally. (dsh-pi-tui divergence X042 mouse parity.)
+			if (event.type === "press" && event.button === "left") {
+				this.mousePressedGeneration = this.submenuGeneration;
+			} else if (this.mousePressedGeneration !== this.submenuGeneration) {
+				return undefined;
+			}
 			const result = this.submenuComponent.handleMouse?.(event);
 			return result ? { ...result, focus: true } : undefined;
 		}
@@ -416,6 +432,9 @@ export class SettingsList implements Component, Focusable {
 			const currentIndex = displayItems.findIndex(item => item.id === row.id);
 			if (currentIndex === -1) return undefined;
 			this.mousePressedId = row.id;
+			// The press-time owner generation: a submenu opened by keyboard
+			// AFTER this press must not receive the release/click.
+			this.mousePressedGeneration = this.submenuGeneration;
 			this.selectedIndex = currentIndex;
 			return { handled: true, focus: true };
 		}

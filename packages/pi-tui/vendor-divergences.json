@@ -4266,7 +4266,8 @@
     "test/extension-focus-seat.test.ts: SurfaceSnapshot.focusedSeat state only (not SettingsList or IME)",
     "test/theme-picker.test.ts: ThemeSubmenu forwards focused state to the search Input (CURSOR_MARKER present when focused, absent when not)",
     "test/model-menu.test.ts: ModelSubmenu retains focus across the async inner swap (CURSOR_MARKER on the swapped-in searchable list only when focused)",
-    "packages/pi-tui/test/settings-list.test.ts: description-shrink click identity (Case A), search+shrink row offset (Case B), inert chrome (Case C)"
+    "packages/pi-tui/test/settings-list.test.ts: description-shrink click identity (Case A), search+shrink row offset (Case B), inert chrome (Case C)",
+    "packages/pi-tui/test/settings-list.test.ts: a main-list press cannot transfer into a newly-created submenu — the press-time submenu generation fences the release/click (a submenu opened by keyboard after the press never receives a fresh-looking activation)"
    ],
    "upstream": {
     "equivalence": "NO",

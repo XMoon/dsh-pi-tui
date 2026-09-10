@@ -348,6 +348,45 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 		assert.strictEqual(state.mousePressedId, "a");
 		list.handleMouse(mouse("press", 1)); // inert blank row
 		assert.strictEqual(state.mousePressedId, undefined, "an inert-row press must clear the old latch");
+	it("a main-list press cannot transfer into a newly-created submenu (mouse parity)", () => {
+		const actions: string[] = [];
+		const submenu = {
+			render: () => ["submenu row"],
+			invalidate: () => {},
+			handleMouse: (event: import("../src/tui.ts").TuiMouseEvent) => {
+				if (event.type === "press") return { handled: true };
+				if (event.type === "click") {
+					actions.push("submenu action");
+					return { handled: true };
+				}
+				return undefined;
+			},
+		};
+		const list = new SettingsList(
+			[{ id: "s", label: "S", currentValue: "on", values: ["on", "off"], submenu: () => submenu }],
+			10,
+			testTheme,
+			() => {},
+			() => {},
+		);
+		list.render(80);
+		console.log('DEBUG submenu test start');
+		// Press the submenu row (main list): the press-time owner is the
+		// main list at the current submenu generation.
+		list.handleMouse(mouse("press", 0));
+		// Keyboard Enter opens the submenu (generation advances).
+		list.handleInput("\r");
+		// Release + click on the same cell WITHOUT a repaint: the
+		// newly-created submenu must NOT receive a fresh-looking activation
+		// (it never got its own press).
+		list.handleMouse(mouse("release", 0));
+		list.handleMouse(mouse("click", 0));
+		assert.deepStrictEqual(actions, [], "the newly-created submenu must not receive the stale main-list press");
+		// A fresh press+click on the submenu works.
+		list.handleMouse(mouse("press", 0));
+		list.handleMouse(mouse("click", 0));
+		assert.deepStrictEqual(actions, ["submenu action"], "a fresh submenu press must activate");
+	});
 	});
 });
 
@@ -401,3 +440,4 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 		list.handleMouse({ type: "click", button: "left", x: 2, y: 0, screenX: 2, screenY: 0, width: 80, height: 4, shift: false, alt: false, ctrl: false, clickCount: 1 });
 		assert.deepStrictEqual(changes, [], "a click without a fresh press must not activate");
 	});
+
