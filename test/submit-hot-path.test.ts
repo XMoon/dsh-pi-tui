@@ -198,7 +198,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   host: FakeAgentHost
   /** Every `commands.execute` call, in order (the command plane), with the
    * submitted attachments the client handed over. */
-  executed: { line: string; attachments: readonly unknown[] }[]
+  executed: { line: string; attachments: readonly unknown[]; outcome: 'executed' | 'rejected' }[]
   readonly session: LiveSession | undefined
   /** The session ids `agents.create` produced (the deferred-start gate). */
   createdSessionIds: string[]
@@ -1705,14 +1705,20 @@ test('a HOST command that does not declare input.attachments refuses an attachme
   await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
   const staged = await stageAttachmentDraft(mounted, path)
   assert.match(staged, /\[image #1/, `the image is staged through the real intake: ${JSON.stringify(staged)}`)
-  const executedBefore = harness.executed.length
   mounted.app.setDraft(`/compact ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   for (let round = 0; round < 40 && !/does not accept attachments/.test(mounted.app.notifyTextForTest()); round += 1) {
     await new Promise<void>(resolve => setImmediate(resolve))
   }
   assert.match(mounted.app.notifyTextForTest(), /\/compact does not accept attachments; remove them first/)
-  assert.equal(harness.executed.length, executedBefore, 'the undeclared command never executes')
+  // The COMPOSER refuses before dispatch: the host never sees the line, so
+  // there is neither an execution nor an admission rejection. (A rejected
+  // command-plane call would mean the gate let an undeclared invocation
+  // through and the executor had to catch it.)
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/compact')),
+    `the undeclared command never reaches the command plane: ${JSON.stringify(harness.executed)}`)
+  assert.ok(!harness.executed.some(entry => entry.outcome === 'rejected'),
+    'the refusal happened before dispatch, not at host admission')
   assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
   assert.deepEqual(imageSaves, [], 'nothing is admitted either')
   assert.match(mounted.app.getDraft(), /^\/compact /, 'the draft comes back')
@@ -1739,14 +1745,18 @@ test('a declared HOST command still refuses a FILE attachment (no host receipt s
   await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
   const staged = await stageAttachmentDraft(mounted, path)
   assert.match(staged, /\[file #1/)
-  const executedBefore = harness.executed.length
   mounted.app.setDraft(`/goal ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   for (let round = 0; round < 40 && !/cannot receive file attachments/.test(mounted.app.notifyTextForTest()); round += 1) {
     await new Promise<void>(resolve => setImmediate(resolve))
   }
   assert.match(mounted.app.notifyTextForTest(), /\/goal cannot receive file attachments in this client; remove them first/)
-  assert.equal(harness.executed.length, executedBefore, 'the command never executes with an undeliverable file')
+  // Same as above: an undeliverable file is refused by the composer, never
+  // handed to the host to reject.
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/goal ')),
+    `the file-bearing invocation never reaches the command plane: ${JSON.stringify(harness.executed)}`)
+  assert.ok(!harness.executed.some(entry => entry.outcome === 'rejected'),
+    'the refusal happened before dispatch, not at host admission')
   assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
   assert.match(mounted.app.getDraft(), /\[file #1/, 'the file draft comes back')
 })
