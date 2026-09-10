@@ -4158,7 +4158,11 @@ export function apply(ctx: Context, config: Config): void {
      * `CommandSubmitAttachment`): the draft store holds the exact bytes, and
      * the host admits them through its own store at execute time. Only a
      * declared host command reaches this builder — an undeclared command and
-     * any file attachment are refused before dispatch. */
+     * any file attachment are refused before dispatch. A RECALLED image
+     * carries no local bytes (it is already durable): the wire has no
+     * ref-based variant, so the host's admission rejects the empty payload
+     * and the command settles as an error — the draft and its attachments
+     * are kept for correction (never silently dropped). */
     const commandSubmitAttachments = (draft: string) => expandImagePlaceholders(draft, draftImages)
       .flatMap(segment => segment.type === 'image' ? [segment.image] : [])
       .map(image => ({
