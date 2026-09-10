@@ -420,49 +420,32 @@ export interface InputWidget {
 
 // ── M5: commands / themes / autocomplete / settings / keybindings ──────────
 
-/** One command contribution (plan §10): ownership metadata over a slash
- * name. The bridge itself never executes anything — the RUNNER routes from
- * `execution`: a local contribution runs its own bridge `handler` locally
- * (falling back to the commands-service definition handler when it declares
- * none), a submission contribution is delivered as an agent-facing line.
+/** One CLIENT-OWNED command contribution (plan §10) — the DSH client
+ * command contribution shape: a slash name whose behavior lives entirely on
+ * the client (no host descriptor). It appears in the `/` menu merged with
+ * the host catalog and executes through its own `handler`, never steered.
+ * A contribution whose name is a host command FAILS LOUD at candidate
+ * synthesis and never shadows it (the host command keeps its claim).
  * `/name args...` ALWAYS keeps `invocation.rawInput` verbatim. */
 export interface TuiCommandContribution {
   readonly id: string
   /** The slash-command name WITHOUT the leading slash. */
   readonly name: string
   readonly description: string
-  /** Execution ownership over an existing command (TUI-owned metadata; the
-   * bridge never executes).
-   * - `local` — the command ALWAYS executes locally, never steered: the
-   *   contribution's own bridge `handler` when one is declared (live session
-   *   or not), otherwise the commands-service definition handler; the busy
-   *   policy never applies and the line is never steered.
-   * - `submission` — the command is a SUBMISSION LINE, not a command
-   *   execution: the TUI delivers the raw `/<name> args` line to the session
-   *   with the busy-Enter-policy mode (steered into the running turn, or
-   *   queued), exactly like a skill invocation; the commands-service handler
-   *   is NOT run for that gesture (the plugin's own pre-step owns any
-   *   expansion of the line). It needs a live session — `sessionless: true`
-   *   with `submission` is rejected at registration.
-   *
-   * BREAKING (Unreleased): `submission` used to keep the commands-service
-   * handler authoritative, so the handler ran in every non-steer mode
-   * (`commands.execute`) while the steer mode delivered a bare line — an
-   * asymmetry no other client shared. It is now the web composer's
-   * unclaimed-line semantics on BOTH sides. A contribution that needs
-   * handler execution declares `local`. */
-  readonly execution: 'local' | 'submission'
-  /** Whether the command may run without a live session. */
+  /** Whether the command may run BEFORE a live session exists (default
+   * false). A sessionless contribution executes immediately; every other
+   * contribution resolves/creates the session first, then executes — the
+   * host command surface is session-keyed upstream, so this is an explicit
+   * TUI extension for pure client commands (an overlay toggle, a picker). */
   readonly sessionless?: boolean
+
   /** Optional autocomplete provider for this command's arguments
    * (the structural {@link TuiAutocompleteProvider}). */
   readonly argumentProvider?: TuiAutocompleteProvider
-  /** Optional LOCAL implementation. The TUI runs it whenever the EFFECTIVE
-   * ownership is `local` — with or without a live session — passing
-   * `invocation.rawInput` verbatim, and the commands-service definition is
-   * only the fallback when no bridge handler is declared. A `submission`
-   * contribution's handler is never run by the TUI. */
-  readonly handler?: TuiLocalCommandHandler
+  /** The command's client behavior (required): the TUI runs it locally,
+   * passing `invocation.rawInput` verbatim, with or without a live session
+   * according to {@link sessionless}. */
+  readonly handler: TuiLocalCommandHandler
 }
 
 /** The local command handler signature (invocation carries the VERBATIM
@@ -488,7 +471,6 @@ export interface TuiCommandBridgeSnapshot {
     readonly id: string
     readonly name: string
     readonly description: string
-    readonly execution: 'local' | 'submission'
     readonly sessionless: boolean
     readonly owner: string
   }[]

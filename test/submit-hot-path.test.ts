@@ -198,6 +198,8 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   /** Every `commands.execute` line, in call order (the command plane). */
   executed: { line: string }[]
   readonly session: LiveSession | undefined
+  /** The session ids `agents.create` produced (the deferred-start gate). */
+  createdSessionIds: string[]
   armCreateGate(): void
   releaseCreateGate(): void
 } {
@@ -239,8 +241,10 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   const armCreateGate = (): void => {
     createGate = new Promise<void>(resolve => { releaseCreateGate = resolve })
   }
+  const createdSessionIds: string[] = []
   const agents = {
     create: async ({ sessionId }: { sessionId: string }) => {
+      createdSessionIds.push(String(sessionId))
       if (createGate !== undefined) await createGate
       const session = makeLiveSession(String(sessionId), { id: String(sessionId), cwd: home, createdAt: Date.now(), version: 0 }, [])
       persisted.set(session.id, session)
@@ -296,6 +300,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   }
   return {
     counting,
+    createdSessionIds,
     agents,
     sessions,
     defaultModel,
@@ -907,17 +912,21 @@ async function bootCommandHarness(
      * service shaped like the dsh-tool-skill loader (hostLoadsSkillBody). */
     skills?: boolean
     hostLoadsSkillBody?: boolean
+    /** Mount WITHOUT a resumed session (the deferred-start gate). */
+    deferredStart?: boolean
     /** Extension command contributions to mount (owner metadata + the
      * plugin's own commands-service registration, like a real plugin). */
     extensionCommands?: readonly {
       id: string
       name: string
       description: string
-      execution: 'local' | 'submission'
-      /** The contribution's LOCAL implementation (the bridge handler). */
-      bridgeHandler?: () => { kind: 'success' | 'error'; text?: string }
-      /** Whether the plugin ALSO registers a commands-service definition
-       * (default true; a bridge-only contribution is a real pattern). */
+      /** The contribution's client behavior (the bridge handler). */
+      bridgeHandler: () => { kind: 'success' | 'error'; text?: string }
+      sessionless?: boolean
+      /** Whether the plugin ALSO registers a commands-service definition for
+       * the same name (a HOST-command collision: the host claim wins and the
+       * candidate synthesis fails loud). Default false — a client command is
+       * bridge-only, exactly like the vim fixture. */
       registerDefinition?: boolean
     }[]
   },
@@ -974,7 +983,7 @@ async function bootCommandHarness(
     // plugin fiber, exactly like a real plugin (registerCommand is
     // fiber-bound).
     const contributions = options.extensionCommands
-    context.provide(TUI_STARTUP_SERVICE, { sessionId: 'command-session', shippedPresetRoot: home })
+    context.provide(TUI_STARTUP_SERVICE, { ...options.deferredStart === true ? {} : { sessionId: 'command-session' }, shippedPresetRoot: home })
     await context.plugin(applyExtensionHost)
     await context.plugin((pluginCtx) => {
       const service = pluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as {
@@ -982,16 +991,19 @@ async function bootCommandHarness(
           id: string
           name: string
           description: string
-          execution: 'local' | 'submission'
+          sessionless?: boolean
+          handler: () => { kind: 'success' | 'error'; text?: string }
         }): unknown
       }
       for (const contribution of contributions) {
         const { bridgeHandler, registerDefinition: _registerDefinition, ...spec } = contribution
-        service.registerCommand({ ...spec, ...bridgeHandler === undefined ? {} : { handler: bridgeHandler } })
+        service.registerCommand({ ...spec, handler: bridgeHandler })
       }
     })
     for (const contribution of contributions) {
-      if (contribution.registerDefinition === false) continue
+      // Bridge-only by default (the client-command pattern); a test that
+      // wants the HOST-command collision opts in explicitly.
+      if (contribution.registerDefinition !== true) continue
       // The plugin's own commands-service registration: the effective
       // completion surface (and with it the advertised claim) sees the
       // name, exactly like a real plugin's `ctx.commands.register`.
@@ -1001,7 +1013,8 @@ async function bootCommandHarness(
       })
     }
   }
-  const mounted = await mountRunner(context, home, harness, { sessionId: 'command-session' })
+  const mounted = await mountRunner(context, home, harness,
+    options.deferredStart === true ? {} : { sessionId: 'command-session' })
   harness.host.status = options.status
   return { harness, mounted }
 }
@@ -1181,43 +1194,50 @@ test('a dynamic Host command never enters the ordinary inbox while running (PR11
 // ── extension command ownership (PR115-fix problem 2) ──────────────────────
 // An extension contribution declares its own `execution`: 'submission' flows
 // through the session submission policy (steer/queue) like a skill
-// invocation, 'local' never steers. Being advertised in the effective
-// catalog does NOT make either a Host command: the busy policy (and the
-// accelerated chord) must be consulted before any command plane execution.
+// The DSH client command contribution model: a contribution is a CLIENT-OWNED
+// command (menu row + client handler). A name that is also a host command is a
+// COLLISION: the host claim wins and the candidate synthesis fails loud —
+// never a silent shadow, never a downgrade to a model prompt.
 
-test('running + steer: an extension submission command keeps the busy steer, never the Host claim', async (t) => {
+test('a client command colliding with a host command never shadows it: the host runs, the client handler does not', async (t) => {
+  const calls: string[] = []
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'steer',
     status: 'running',
-    extensionCommands: [{ id: 'deploy', name: 'deploy', description: 'deploy the app', execution: 'submission' }],
+    extensionCommands: [{
+      id: 'deploy', name: 'deploy', description: 'deploy the app',
+      bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
+      // The plugin ALSO registers a commands-service definition: the host
+      // catalog resolves /deploy, so the client contribution collides.
+      registerDefinition: true,
+    }],
   })
   mounted.app.setDraft('/deploy now')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  await waitForDelivery(harness.host, 'extension submission steer')
-  assert.equal(harness.host.steered.length, 1, 'a submission command steers while the agent is running with busyEnter=steer')
-  const steered = harness.host.steered[0] as { content: { type: string; text: string }[] }
-  assert.equal(steered.content[0]?.text, '/deploy now', 'the raw command line travels as the agent prompt')
-  assert.equal(harness.executed.length, 0, 'an advertised extension command must never be claimed as a Host command')
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the HOST command keeps its claim and executes through the plane')
+  assert.equal(harness.executed[0]?.line, '/deploy now', 'the host command receives the raw line')
+  assert.deepEqual(calls, [], 'the client handler must not run for a host-owned name')
+  assert.equal(harness.host.steered.length, 0, 'a host command is never steered')
+  assert.equal(harness.host.followedUp.length, 0, 'a host command is never downgraded to a model prompt')
 })
 
-test('running + steer: an extension submission command delivers its LINE, never the handler (declared ownership)', async (t) => {
+test('a host/client name collision fails the candidate synthesis loud (never a partial menu)', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
-    busyEnter: 'steer',
-    status: 'running',
-    extensionCommands: [{ id: 'deploy', name: 'deploy', description: 'deploy the app', execution: 'submission' }],
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [{
+      id: 'deploy', name: 'deploy', description: 'deploy the app',
+      bridgeHandler: () => ({ kind: 'success' }),
+      registerDefinition: true,
+    }],
   })
-  mounted.app.setDraft('/deploy now')
-  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
-  await waitForDelivery(harness.host, 'queued extension submission')
-  // `execution: 'submission'` means the command flows through the session
-  // submission policy like a skill invocation: the resolved 'queue' mode
-  // delivers its LINE (exactly like an unclaimed slash prompt), and the
-  // plugin's command handler is NOT run ahead of the queue it asked to join.
-  assert.equal(harness.host.followedUp.length, 1, 'the queue mode delivers the line as a queued prompt')
-  const followed = harness.host.followedUp[0] as { content: { type: string; text: string }[] }
-  assert.equal(followed.content[0]?.text, '/deploy now', 'the raw line is the queued prompt')
-  assert.equal(harness.executed.length, 0, 'the queue mode must not execute the plugin command handler')
-  assert.equal(harness.host.steered.length, 0, 'the chord must never steer')
+  // The synthesis pass throws, so the contribution never reaches the menu and
+  // the previous list stays installed (no partial success).
+  const rows = mounted.app.commandCompletionsForTest()
+  assert.equal(rows.some(row => row.name === 'deploy'), false,
+    'a colliding contribution must never appear in the menu')
+  assert.ok(harness.host !== undefined, 'harness wired')
 })
 
 test('running + queue: the DEFAULT preference makes the accelerated chord STEER (web parity)', async (t) => {
@@ -1300,8 +1320,7 @@ test('a live LOCAL command runs its bridge handler — never the model', async (
     busyEnter: 'queue',
     status: 'running',
     extensionCommands: [{
-      id: 'vimmode', name: 'vimmode', description: 'toggle vim mode', execution: 'local',
-      registerDefinition: false,
+      id: 'vimmode', name: 'vimmode', description: 'toggle vim mode',
       bridgeHandler: () => { calls.push('vimmode'); return { kind: 'success' } },
     }],
   })
@@ -1325,7 +1344,7 @@ test('a live LOCAL command prefers its bridge handler over the commands definiti
     busyEnter: 'queue',
     status: 'running',
     extensionCommands: [{
-      id: 'panel', name: 'panel', description: 'toggle the panel', execution: 'local',
+      id: 'panel', name: 'panel', description: 'toggle the panel',
       bridgeHandler: () => { calls.push('panel'); return { kind: 'success' } },
     }],
   })
@@ -1339,24 +1358,88 @@ test('a live LOCAL command prefers its bridge handler over the commands definiti
   assert.equal(harness.host.followedUp.length, 0, 'a local command must never reach the model')
 })
 
-test('running + steer: an extension local command still executes directly under both chords', async (t) => {
+test('a bridge-only client command joins the `/` menu (discoverable without a host definition)', async (t) => {
+  const { mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [{
+      id: 'vimmode', name: 'vimmode', description: 'toggle vim mode',
+      bridgeHandler: () => ({ kind: 'success' }),
+    }],
+  })
+  const rows = mounted.app.commandCompletionsForTest()
+  const row = rows.find(entry => entry.name === 'vimmode')
+  assert.ok(row !== undefined, `the client command must appear in the menu: ${JSON.stringify(rows.map(r => r.name))}`)
+  assert.equal(row?.description, 'toggle vim mode', 'the menu row carries the contribution description')
+})
+
+test('a client command is session-backed by default: the session resolves BEFORE the handler', async (t) => {
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    extensionCommands: [{
+      id: 'deploy', name: 'deploy', description: 'deploy',
+      bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
+    }],
+  })
+  mounted.app.setDraft('/deploy')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && calls.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(calls, ['deploy'], 'the client handler runs')
+  assert.equal(harness.createdSessionIds.length, 1,
+    'a session-backed client command resolves the session first (the host command surface is session-keyed)')
+})
+
+test('a sessionless client command runs without creating a session', async (t) => {
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    extensionCommands: [{
+      id: 'vimmode', name: 'vimmode', description: 'toggle vim mode', sessionless: true,
+      bridgeHandler: () => { calls.push('vimmode'); return { kind: 'success' } },
+    }],
+  })
+  mounted.app.setDraft('/vimmode')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && calls.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(calls, ['vimmode'], 'the sessionless client handler runs immediately')
+  assert.deepEqual(harness.createdSessionIds, [], 'a sessionless client command never creates a session')
+})
+
+test('a client command executes locally under both chords (never the plane, never the model)', async (t) => {
+  const calls: string[] = []
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'steer',
     status: 'running',
-    extensionCommands: [{ id: 'panel', name: 'panel', description: 'toggle the panel', execution: 'local' }],
+    extensionCommands: [{
+      id: 'panel', name: 'panel', description: 'toggle the panel',
+      bridgeHandler: () => { calls.push('panel'); return { kind: 'success' } },
+    }],
   })
   mounted.app.setDraft('/panel')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  await waitForCommand(harness)
-  assert.equal(harness.executed.length, 1, 'an extension local command always executes locally')
-  // The Ctrl+Enter chord cannot change a local command's ownership either.
-  mounted.app.setDraft('/panel')
-  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
-  for (let round = 0; round < 20 && harness.executed.length < 2; round += 1) {
+  for (let round = 0; round < 40 && calls.length === 0; round += 1) {
     await new Promise<void>(resolve => setImmediate(resolve))
   }
-  assert.equal(harness.executed.length, 2, 'the chord keeps the local execution')
-  assert.equal(harness.host.steered.length, 0, 'local commands never steer')
+  assert.deepEqual(calls, ['panel'], 'a client command always runs its own handler')
+  // The accelerated chord cannot change a client command's route either.
+  mounted.app.setDraft('/panel')
+  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
+  for (let round = 0; round < 40 && calls.length < 2; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(calls, ['panel', 'panel'], 'the chord keeps the local execution')
+  assert.equal(harness.host.steered.length, 0, 'a client command never steers')
+  assert.equal(harness.host.followedUp.length, 0, 'a client command never reaches the model')
+  assert.equal(harness.executed.length, 0, 'a client command never enters the command plane')
 })
 
 test('running + steer: the Ctrl+Enter chord never turns a Host command into a queued prompt', async (t) => {

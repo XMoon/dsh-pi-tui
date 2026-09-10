@@ -219,12 +219,12 @@ export interface PiTuiExtensionService {
    */
   subscribeState(listener: (state: SurfaceStateValues) => void): () => void
   /**
-   * Register a TUI command contribution (M5): execution ownership metadata
-   * over a slash name. The bridge itself never executes anything — the
-   * runner runs a local contribution's own bridge `handler` locally (the
-   * commands-service definition handler is the fallback), while a
-   * submission contribution is delivered as an agent-facing line. Owned by
-   * the calling fiber.
+   * Register a CLIENT-OWNED command contribution (M5): a slash name whose
+   * behavior lives entirely on the client (the DSH client command
+   * contribution shape). It joins the `/` menu merged with the host catalog
+   * and the runner executes its own `handler` locally; a name that is also a
+   * host command fails loud at candidate synthesis and never shadows it.
+   * Owned by the calling fiber.
    * @param contribution - the command contribution.
    */
   registerCommand(contribution: TuiCommandContribution): TuiCommandHandle
@@ -867,9 +867,6 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
     const outcome = this.commands.register(contribution, owner)
-    if (outcome.kind === 'invalid') {
-      throw new Error(`command contribution "${contribution.name}" is invalid: ${outcome.reason}`)
-    }
     if (outcome.kind === 'conflict') {
       const detail = outcome.nearSynonym === undefined
         ? `owner "${outcome.existingOwner}" already holds it`

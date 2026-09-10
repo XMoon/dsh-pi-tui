@@ -70,7 +70,6 @@ export function apply(ctx: Context): void {
     id: 'example-questionnaire',
     name: 'questionnaire',
     description: 'Run the Phase-5 questionnaire example (imperative UI broker).',
-    execution: 'local',
     handler: runQuestionnaire,
   })
 }

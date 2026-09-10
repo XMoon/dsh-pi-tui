@@ -78,7 +78,7 @@ test('M11: extensionHealthRows reports the live registry counts', async () => {
   const { RendererRegistry } = await import('../src/renderer-registry.ts')
   const { EditorRegistry } = await import('../src/editor-registry.ts')
   const commands = new CommandBridge()
-  commands.register({ id: 'c1', name: 'vimmode', description: '', execution: 'local' }, 'owner')
+  commands.register({ id: 'c1', name: 'vimmode', description: '', handler: () => ({ kind: 'success' }) }, 'owner')
   const themes = new ThemeRegistry()
   const settings = new SettingsRegistry()
   const autocomplete = new AutocompleteRegistry()
@@ -436,7 +436,7 @@ test('the invocation-time command health capture resolves a command registered A
     await startup
     await ctx.plugin(applyExtensionHost)
     const service = ctx.get('piTuiExtensions') as unknown as {
-      registerCommand(contribution: { id: string; name: string; description: string; execution: 'local' }): unknown
+      registerCommand(contribution: { id: string; name: string; description: string; handler: () => { kind: 'success' } }): unknown
       commands: { idFor(name: string): string | undefined }
       _recordRegistryHealthRef(slot: string, id: string): { slot: string; id: string; owner: string } | undefined
     }
@@ -447,8 +447,8 @@ test('the invocation-time command health capture resolves a command registered A
     assert.equal(service._recordRegistryHealthRef('command', 'deploy'), undefined)
     // The plugin loads during the async phase (HMR / first registration).
     const fiber = ctx.plugin({ name: 'late-command', apply(c) {
-      const svc = c.get('piTuiExtensions') as unknown as { registerCommand(contribution: { id: string; name: string; description: string; execution: 'local' }): unknown }
-      svc.registerCommand({ id: 'deploy-cmd', name: 'deploy', description: 'deploy', execution: 'local' })
+      const svc = c.get('piTuiExtensions') as unknown as { registerCommand(contribution: { id: string; name: string; description: string; handler: () => { kind: 'success' } }): unknown }
+      svc.registerCommand({ id: 'deploy-cmd', name: 'deploy', description: 'deploy', handler: () => ({ kind: 'success' }) })
     } })
     await fiber
     // INVOCATION time: the re-capture resolves — the dispatched command
@@ -458,49 +458,6 @@ test('the invocation-time command health capture resolves a command registered A
     const ref = service._recordRegistryHealthRef('command', id)
     assert.ok(ref !== undefined, 'the invocation-time capture must resolve the late-registered command')
     assert.ok(ref.owner.endsWith(':late-command'), `the ref must name the late-registering owner: ${ref.owner}`)
-  } finally {
-    for (const runtime of [...ctx.registry.values()]) {
-      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
-    }
-  }
-})
-
-test('a submission contribution cannot be sessionless — rejected loudly at registration', async () => {
-  // The TUI would otherwise run the line through its LOCAL path when no
-  // session exists yet, executing a handler the submission ownership
-  // explicitly does not run (and never delivering the agent-facing line).
-  const { Context } = await import('@deepseek-ai/cordis')
-  const Loader = (await import('@deepseek-ai/cordis-plugin-loader')).default
-  const { apply: applyExtensionHost } = await import('../src/extensions.ts')
-  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
-  const ctx = new Context()
-  try {
-    await ctx.plugin(Loader)
-    await ctx.plugin((c) => { c.provide(TUI_STARTUP_SERVICE, {}) })
-    await ctx.plugin(applyExtensionHost)
-    const service = ctx.get('piTuiExtensions') as unknown as {
-      registerCommand(contribution: {
-        id: string; name: string; description: string
-        execution: 'local' | 'submission'
-        sessionless?: boolean
-      }): unknown
-      commands: { find(name: string): { execution: string } | undefined }
-    }
-    await assert.rejects(async () => {
-      await ctx.plugin({ name: 'bad-command', apply(c) {
-        const svc = c.get('piTuiExtensions') as unknown as {
-          registerCommand(contribution: {
-            id: string; name: string; description: string
-            execution: 'local' | 'submission'
-            sessionless?: boolean
-          }): unknown
-        }
-        svc.registerCommand({
-          id: 'deploy-cmd', name: 'deploy', description: 'deploy', execution: 'submission', sessionless: true,
-        })
-      } })
-    }, /sessionless/)
-    assert.equal(service.commands.find('deploy'), undefined, 'the invalid contribution is never installed')
   } finally {
     for (const runtime of [...ctx.registry.values()]) {
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())

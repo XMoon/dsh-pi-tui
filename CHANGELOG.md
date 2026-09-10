@@ -41,11 +41,13 @@
 
 ### 兼容性
 
-- **插件命令 `execution: 'submission'` 语义变更（破坏性）。** 它现在表示"提交行"而不是"执行命令"：
-  TUI 把 `/name args` 原样按解析出的模式投递给会话（steer / 入队），**不再调用 commands service 的
-  handler**（与 Web composer 未 claim 行的语义一致），行内展开交给插件自己的 pre-step。需要 handler
-  执行的插件请改声明 `execution: 'local'`；`submission` 与 `sessionless: true` 的组合现在会在注册时
-  被拒绝。
+- **插件命令 contribution 对齐 DSH 客户端命令模型（破坏性）。** `execution: 'local' | 'submission'`
+  已**移除**：contribution 就是"客户端自有的命令"（必有 `handler`，无 host descriptor），会进入 `/`
+  命令菜单并本地执行、永不 steer；名字与当前 host catalog 冲突时**候选合成整体失败**（不安装任何菜单
+  行、记录扩展健康并在界面提示一次），host 命令始终保留自己的 claim，**绝不会被降级成模型 prompt**。
+  用于广告 prompt 型名字的 `submission` 请直接不要注册 contribution（未 claim 的 `/name args` 本来就
+  是 prompt，发现渠道是 host 侧 skill）。`sessionless: true` 表示可在没有 session 时执行；默认
+  `false` 会先解析/创建 session 再执行。
 
 ## [0.4.3-alpha.2] - 2026-09-08
 
