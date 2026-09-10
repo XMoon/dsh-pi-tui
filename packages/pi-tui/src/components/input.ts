@@ -66,6 +66,24 @@ export class Input implements Component, Focusable {
 		return this.value;
 	}
 
+	/** The first rendered column of the value (horizontal-scroll viewport
+	 * origin, in terminal cells). A host that paints its own display of
+	 * the value (e.g. a masked bullet row) must align its click mapping
+	 * with the SAME viewport the Input renders. (dsh-pi-tui divergence
+	 * X053 HOST_COMPATIBILITY.) */
+	getRenderedStartColumn(): number {
+		return this.renderedStartColumn;
+	}
+
+	/** Place the cursor at a UTF-16 index, clamped to the value. The
+	 * caller is responsible for landing on a grapheme boundary (the
+	 * keyboard cursor moves and handleMouse already do). (dsh-pi-tui
+	 * divergence X053 HOST_COMPATIBILITY.) */
+	setCursor(index: number): void {
+		this.cursor = Math.max(0, Math.min(this.value.length, Math.floor(index)));
+		this.lastAction = null;
+	}
+
 	setValue(value: string, options?: InputSetValueOptions): void {
 		this.value = value;
 		// Prefill cursor semantics (dsh-pi-tui divergence X040; upstream and

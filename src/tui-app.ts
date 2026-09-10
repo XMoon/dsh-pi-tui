@@ -2599,6 +2599,10 @@ export class TuiApp {
   private activeApproval: PendingApproval | undefined
   /** The active user-questions flow, if any (one on screen at a time). */
   private activeQuestions: QuestionState | undefined
+  /** The press-time question gesture (mouse parity): the release click
+   * validates it before acting — a question advance / repaint between
+   * press and release must never transfer the click. */
+  private questionPressGesture: import('./question.ts').QuestionMouseGesture | undefined
   /** Flows waiting behind the active one (FIFO; shown on settle). */
   private readonly questionQueue: QuestionState[] = []
   /** The active Save Location prompt, if any (one on screen at a time). */
@@ -5337,6 +5341,11 @@ export class TuiApp {
         // active applies on the next re-entry.
         wheelScrollLines: this.wheelScrollLines,
         onCellClick: (x, y) => this.handleFullscreenClick(x, y),
+        // The press half of a same-cell click: record the question's
+        // press-time semantic identity so the release click can reject
+        // targets that repainted onto the same cell (a question advance
+        // between press and release must never transfer the click).
+        onCellPress: (x, y) => this.handleFullscreenPress(x, y),
         // Host transcript actions must win before the fork's own viewport
         // key handling. In particular, the fork's Ctrl+Shift+F search only
         // sees rendered lines, while the host search queries the full fold.
@@ -6982,6 +6991,29 @@ export class TuiApp {
    * Fullscreen Focus disclosures are mouse-owned: the per-card override
    * decides, and the Ctrl+O keyboard fold does not pierce them.
    */
+  private handleFullscreenPress(x: number, y: number): void {
+    // The press half of a same-cell click: while a question owns the
+    // modal front, record the flow's press-time semantic identity (the
+    // release click in handleFullscreenClick validates it — a question
+    // advance / repaint between press and release must never transfer
+    // the click to a different target).
+    const question = this.activeQuestions
+    if (question?.frame !== undefined) {
+      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) return
+      const width = this.terminal.columns
+      const height = this.terminal.rows
+      const footerHeight = this.footer.render(width).length
+      const seatHeight = question.frame.rows
+      const seatBottom = height - footerHeight
+      const seatTop = seatBottom - seatHeight
+      if (y >= seatTop && y < seatBottom && x >= 2 && x <= width - 3) {
+        this.questionPressGesture = question.flow.beginMousePress(y - seatTop - 1)
+      }
+      return
+    }
+    this.questionPressGesture = undefined
+  }
+
   private handleFullscreenClick(x: number, y: number): void {
     // A question owns the modal front: clicks inside its frame (the editor
     // seat, pinned above the footer) route to the flow — option rows select,
@@ -7011,13 +7043,19 @@ export class TuiApp {
         if (x >= 2 && x <= width - 3) {
           // The flow's content starts at seat column 2 (side borders +
           // padding); pass the flow-local column so the free-text Input
-          // can position its cursor on a click while editing.
-          question.flow.clickRow(y - seatTop - 1, x - 2)
+          // can position its cursor on a click while editing. The click
+          // may only act on the EXACT press-time identity (a question
+          // advance / repaint between press and release must not
+          // transfer it to a different target).
+          const gesture = this.questionPressGesture
+          this.questionPressGesture = undefined
+          question.flow.completeMouseClick(gesture, y - seatTop - 1, x - 2)
           this.requestRender()
         }
       }
       return
     }
+    this.questionPressGesture = undefined
     // Any OTHER managed overlay (search / settings / approvals / extension
     // overlays) owns the click: with one up, NO transcript / dock / todo
     // interaction below is reachable — concrete rows AND the blank-row

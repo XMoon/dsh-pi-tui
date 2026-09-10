@@ -1318,10 +1318,11 @@ test('free-text row click enters edit and positions the cursor (mouse parity)', 
   for (const ch of 'ello') f.handleInput(ch)
   rendered = f.render(100)
   assert.ok(rendered.some(line => line.includes('hello')), 'typed text must render')
-  // Click between e and l: the prefix is "→ [ ] " (pointer + marker +
-  // space = 6 columns) and the Input prompt "> " is 2 columns, so value
-  // column 2 is at flow-local x = 6 + 2 + 2 = 10.
-  f.clickRow(otherRow, 10)
+  // Click between e and l: the x must be derived from the ACTUAL painted
+  // value cells (the prefix is "→ [ ] " = 6 columns; the Input has an
+  // EMPTY prompt, so its local column 0 IS the first painted value
+  // cell). Value column 2 (between e and l) is at flow-local x = 8.
+  f.clickRow(otherRow, 8)
   f.handleInput('X')
   rendered = f.render(100).map(strip)
   assert.ok(rendered.some(line => line.includes('heXllo')), 'typing after the click must insert at the clicked column')
@@ -1358,8 +1359,9 @@ test('masked free-text click moves the real cursor while the render stays masked
   rendered = f.render(100)
   assert.ok(rendered.some(line => line.includes('•••••')), 'masked render must show one bullet per character')
   assert.ok(!rendered.some(line => line.includes('hello')), 'the secret must never render')
-  // Click between e and l (flow-local x = 6 + 2 + 2 = 10) and type X.
-  f.clickRow(otherRow, 10)
+  // Click between e and l (flow-local x = 6 prefix + 2 value columns = 8)
+  // and type X.
+  f.clickRow(otherRow, 8)
   f.handleInput('X')
   rendered = f.render(100)
   assert.ok(rendered.some(line => line.includes('••••••')), 'the real value must grow to 6 characters')
@@ -1402,4 +1404,119 @@ test('optionless pinned row click re-enters edit from navigation state (mouse pa
   rendered = f.render(100)
   assert.ok(rendered.some(line => line.includes('↵ confirm')), 'clicking the pinned row must re-enter edit mode')
   assert.ok(rendered.some(line => line.includes('hello')), 'the draft must be preserved across the re-entry')
+})
+
+test('masked CJK click maps to the grapheme boundary (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Secret', masked: true, options: [{ label: 'A' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  let rendered = f.render(100)
+  const otherRow = rendered.findIndex(line => line.includes('Type something.'))
+  assert.ok(otherRow >= 0, 'free-text row missing')
+  f.clickRow(otherRow, 5) // enter edit
+  for (const ch of '界a') f.handleInput(ch)
+  rendered = f.render(100)
+  assert.ok(rendered.some(line => line.includes('••')), 'masked render must show one bullet per grapheme')
+  assert.ok(!rendered.some(line => line.includes('界')), 'the secret must never render')
+  // Click between the two graphemes (flow-local x = 6 prefix + 1) and
+  // type X: the value must become 界Xa (never X界a or a split UTF-16
+  // sequence).
+  f.clickRow(otherRow, 7)
+  f.handleInput('X')
+  const input = (f as unknown as { otherInput: { getValue(): string } }).otherInput
+  assert.equal(input.getValue(), '界Xa', 'the cursor must land between the graphemes')
+  rendered = f.render(100)
+  assert.ok(rendered.some(line => line.includes('•••')), 'the mask must grow to 3 bullets')
+  assert.ok(!rendered.some(line => line.includes('界')), 'the secret must stay masked')
+})
+
+test('masked emoji click never splits a ZWJ grapheme (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Secret', masked: true, options: [{ label: 'A' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  let rendered = f.render(100)
+  const otherRow = rendered.findIndex(line => line.includes('Type something.'))
+  assert.ok(otherRow >= 0, 'free-text row missing')
+  f.clickRow(otherRow, 5) // enter edit
+  for (const ch of '👨‍💻a') f.handleInput(ch)
+  rendered = f.render(100)
+  assert.ok(rendered.some(line => line.includes('••')), 'one bullet per grapheme (a ZWJ sequence is ONE)')
+  assert.ok(!rendered.some(line => line.includes('👨')), 'the secret must never render')
+  // Click the second mask position (between the ZWJ grapheme and a) and
+  // type X: the cursor must land AFTER the whole ZWJ sequence.
+  f.clickRow(otherRow, 7)
+  f.handleInput('X')
+  const input = (f as unknown as { otherInput: { getValue(): string } }).otherInput
+  assert.equal(input.getValue(), '👨‍💻Xa', 'the cursor must land after the ZWJ grapheme')
+})
+
+test('question: press → keyboard advance → release must not activate the next question (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Q2', options: [{ label: 'C' }, { label: 'D' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  let rendered = f.render(100).map(strip)
+  const rowA = rendered.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, 'option A row missing')
+  // Press Q1/A: the press-time identity is Q1 + option A.
+  const gesture = f.beginMousePress(rowA)
+  assert.ok(gesture !== undefined, 'a press on an option must record a gesture')
+  // Keyboard Enter advances to Q2.
+  f.handleInput('\r')
+  rendered = f.render(100).map(strip)
+  const rowC = rendered.findIndex(line => line.includes('[1] C'))
+  assert.ok(rowC >= 0, 'option C row missing')
+  // Release on the SAME row: Q2/C must not activate (question id changed).
+  f.completeMouseClick(gesture, rowC)
+  rendered = f.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('?  Q2')), 'the flow must still be on Q2')
+})
+
+test('question: press option A → repaint moves B onto the cell → release must not activate B (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Q1', options: Array.from({ length: 12 }, (_, i) => ({ label: `Option ${i}` })) },
+  ], () => {}, () => {})
+  f.setMaxRows(8)
+  let rendered = f.render(100).map(strip)
+  const rowA = rendered.findIndex(line => line.includes('Option 0'))
+  assert.ok(rowA >= 0, 'option 0 row missing')
+  // Press option 0.
+  const gesture = f.beginMousePress(rowA)
+  assert.ok(gesture !== undefined)
+  // Keyboard scrolls the page: option 0 moves off, another option moves
+  // onto the pressed cell.
+  for (let i = 0; i < 4; i += 1) f.handleInput('\x1b[B')
+  rendered = f.render(100).map(strip)
+  const now = rendered[rowA] ?? ''
+  assert.ok(!now.includes('Option 0'), `the pressed cell must now show a different option:\n${rendered.join('\n')}`)
+  // Release on the same cell: the repainted option must not activate.
+  f.completeMouseClick(gesture, rowA)
+  // The flow must still be on Q1 (not advanced to Q2/submit): the tab
+  // strip still shows Q1 unanswered.
+  rendered = f.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('○ Q1')), 'the flow must still be on Q1')
+})
+
+test('question: inert press replaces the stale gesture (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  let rendered = f.render(100).map(strip)
+  const rowA = rendered.findIndex(line => line.includes('[1] A'))
+  const headerRow = rendered.findIndex(line => line.includes('?  Q1'))
+  assert.ok(rowA >= 0 && headerRow >= 0, 'option/header rows missing')
+  // Press option A.
+  f.beginMousePress(rowA)
+  // A NEW press on inert chrome replaces the gesture (the stale A
+  // identity must not survive).
+  const inertGesture = f.beginMousePress(headerRow)
+  assert.ok(inertGesture !== undefined && inertGesture.hit === undefined, 'inert chrome must record an undefined hit')
+  // Release on the inert cell: nothing may activate.
+  f.completeMouseClick(inertGesture, headerRow)
+  rendered = f.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('?  Q1')), 'the flow must still be on Q1')
 })

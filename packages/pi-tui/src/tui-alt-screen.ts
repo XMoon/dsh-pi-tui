@@ -219,6 +219,15 @@ export interface TuiAltScreenOptions {
 	 */
 	onCellClick?: (x: number, y: number) => void;
 	/**
+	 * A plain left press that starts a selection gesture (the press half
+	 * of the same-cell click that later fires {@link onCellClick}).
+	 * dsh-pi-tui extension: lets the host record a press-time semantic
+	 * identity (e.g. a modal's logical target) so the release click can
+	 * reject targets that repainted onto the same cell. (dsh-pi-tui
+	 * divergence X018.)
+	 */
+	onCellPress?: (x: number, y: number) => void;
+	/**
 	 * Defer the viewport input listener's registration out of the
 	 * constructor (dsh-pi-tui divergence X043). Input listeners run in
 	 * REGISTRATION order, and the constructor registers the viewport
@@ -294,6 +303,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private copyOnSelect: boolean;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
 	private readonly onCellClick?: (x: number, y: number) => void;
+	private readonly onCellPress?: (x: number, y: number) => void;
 	private readonly onScrollBoundary?: (direction: -1 | 1, source: "wheel" | "page" | "scrollbar") => boolean | void;
 	private readonly onBeforeViewportInput?: (data: string) => boolean | void;
 	private scrollbarBoundaryNotified?: -1 | 1;
@@ -325,6 +335,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.copyOnSelect = options.copyOnSelect ?? true;
 		this.copySelection = options.copySelection;
 		this.onCellClick = options.onCellClick;
+		this.onCellPress = options.onCellPress;
 		this.onScrollBoundary = options.onScrollBoundary;
 		this.onBeforeViewportInput = options.onBeforeViewportInput;
 		if (options.deferViewportListener !== true) {
@@ -1693,6 +1704,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = true;
 		this.selectionPressDispatchComponents = new Set(this.lastMouseDispatchComponents);
+		// The press half of a same-cell click: the host records a
+		// press-time semantic identity so the release click can reject
+		// targets that repainted onto the same cell. (dsh-pi-tui
+		// divergence X018.)
+		this.onCellPress?.(event.x, event.y);
 		const scrollView =
 			!this.hasOverlay() && this.currentLayout
 				? getScrollViewsAt(this.currentLayout, event.x, event.y)[0]

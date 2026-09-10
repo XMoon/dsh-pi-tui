@@ -2946,3 +2946,37 @@ test('fullscreen openPicker responds to mouse clicks (mouse parity)', async () =
   assert.deepEqual(picked, ['second'], 'clicking the second item must activate it')
   app.dispose()
 })
+
+test('question: press Q1 option → keyboard advance → release same cell must not activate Q2 (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Q2', options: [{ label: 'C' }, { label: 'D' }] },
+  ])
+  await vt.waitForRender()
+  // Q1: option A on some row.
+  const view = vt.getViewport()
+  const rowA = view.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, `option A missing:\n${view.join('\n')}`)
+  // Press option A (no release yet): the press-time identity is Q1/A.
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}M`)
+  await vt.waitForRender()
+  // Keyboard Enter advances to Q2.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  // Q2: option C now occupies the same physical row.
+  const after = vt.getViewport()
+  assert.ok((after[rowA] ?? '').includes('[1] C'), `option C must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the synthesized click must NOT activate C
+  // (press identity Q1/A ≠ current identity Q2/C).
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}m`)
+  await vt.waitForRender()
+  // Q2 must not be answered: the flow stays on Q2 (not advanced to submit).
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('?  Q2')), `the flow must still be on Q2:\n${final.join('\n')}`)
+  // stop() cancels the still-open flow: consume the rejection.
+  answers.catch(() => {})
+  app.stop()
+})
