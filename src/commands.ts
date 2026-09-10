@@ -1416,9 +1416,11 @@ export function registerTuiCommands(
    * Candidate synthesis (the DSH `CommandUiRuntime.candidates` parity): the
    * host catalog merged with the live CLIENT command contributions by name.
    * A contribution whose name is already a host command (or a TUI-owned
-   * name) is a COLLISION: this pass FAILS — nothing is installed, the
-   * previous list stays, the collision is recorded against the contribution
-   * and surfaced once. Never a silent shadow, never a partial list.
+   * name) is a COLLISION: this pass FAILS — no merged list is installed, the
+   * command source is marked failed downstream (`source-failed` parity
+   * withdraws its rows), and EVERY collision of the pass is recorded against
+   * its contribution and reported. Never a silent shadow, never a partial
+   * list.
    * @param host - the host catalog rows for the current scope.
    * @throws when a contribution collides with a host name.
    */
@@ -1431,15 +1433,14 @@ export function registerTuiCommands(
     // Record EVERY collision of this pass before failing it: the health
     // surface must list all offenders, not only the first one scanned.
     const colliding = new Set<string>()
+    const collisions: { identity: string; message: string }[] = []
     let firstCollision: Error | undefined
     for (const contribution of contributions) {
       if (!byName.has(contribution.name)) continue
       const identity = contributionIdentity(contribution)
       colliding.add(identity)
-      const collision = Object.assign(
-        new Error(`command contribution /${contribution.name} collides with a host command`),
-        { contributionIdentity: identity },
-      )
+      const collision = new Error(`command contribution /${contribution.name} collides with a host command`)
+      collisions.push({ identity, message: collision.message })
       const ref = { slot: 'command', id: contribution.id, owner: contribution.owner }
       collisionHealth.set(identity, { ref, message: collision.message })
       recordExtensionError?.(ref, collision)
@@ -1468,7 +1469,7 @@ export function registerTuiCommands(
       if (current === undefined || current.state !== 'failed' || current.lastError !== recorded.message) continue
       clearExtensionError?.(recorded.ref)
     }
-    if (firstCollision !== undefined) throw firstCollision
+    if (firstCollision !== undefined) throw Object.assign(firstCollision, { collisions })
     for (const contribution of contributions) {
       byName.set(contribution.name, { name: contribution.name, description: contribution.description })
     }
@@ -1478,7 +1479,8 @@ export function registerTuiCommands(
    * One collision notice per contribution IDENTITY and failure GENERATION
    * (the key is dropped when the collision recovers): a new owner reusing a
    * released name, or the same contribution colliding again after the host
-   * descriptor went away and came back, is surfaced again.
+   * descriptor went away and came back, is surfaced again. A pass that finds
+   * a fresh collision anywhere re-states the WHOLE current collision set.
    */
   const notifiedCollisions = new Set<string>()
   /** The identity of one contribution across the bridge and the health
@@ -1577,12 +1579,11 @@ export function registerTuiCommands(
    */
   /**
    * The CONTAINING seam every catalog commit funnels through: a failed
-   * candidate synthesis (a contribution/host name collision) installs
-   * NOTHING — the previous completion list stays live, exactly like
-   * upstream's throwing candidate pass — while the collision is already
-   * recorded on the contribution's health and surfaced once to the user.
-   * The HOST CLAIMS were refreshed before the merge, so a collision never
-   * costs a host command its claim.
+   * candidate synthesis (a contribution/host name collision) installs no
+   * merged list — the source's rows are withdrawn downstream — while every
+   * collision is already recorded on its contribution's health and reported
+   * to the user. The HOST CLAIMS were refreshed before the merge, so a
+   * collision never costs a host command its claim.
    * @param entries - the host catalog rows for the current scope.
    */
   const installCompletionsContained = (entries: readonly SurfaceCommandSummary[]): void => {
@@ -1597,14 +1598,19 @@ export function registerTuiCommands(
       // input authority of a host command is never lost while the menu is
       // empty.
       const message = safeErrorMessage(error)
-      // The notice identity is the FAILING contribution (the error carries
-      // its name; the health ref carries the owner) — a re-used name by a
-      // new owner notifies again.
-      const collision = error as { contributionIdentity?: string }
-      const noticeKey = collision.contributionIdentity ?? message
-      if (!notifiedCollisions.has(noticeKey)) {
-        notifiedCollisions.add(noticeKey)
-        app.notify(message, 'error')
+      // A failed pass surfaces EVERY collision it found, not only the first:
+      // with one notice slot, the aggregated text names all offenders. It
+      // notifies only while at least one identity is FRESH (per identity and
+      // failure generation), so a refresh re-failing on the same collisions
+      // stays silent instead of re-raising the notice. A throw carrying no
+      // collision list (a core bug, not a contribution) falls back to its own
+      // message as the notice identity.
+      const reported = (error as { collisions?: readonly { identity: string; message: string }[] })
+        .collisions ?? [{ identity: message, message }]
+      const fresh = reported.filter(entry => !notifiedCollisions.has(entry.identity))
+      if (fresh.length > 0) {
+        for (const entry of fresh) notifiedCollisions.add(entry.identity)
+        app.notify(reported.map(entry => entry.message).join(' · '), 'error')
       }
       try {
         ctx.logger.error(`tui-runner: ${message}`)

@@ -31,7 +31,6 @@
  * @module @xmoon76/dsh-pi-tui/command-bridge
  */
 
-import type { TuiAutocompleteProvider } from './extension/public-types.ts'
 import type { TuiCommandContribution, TuiCommandHandle, TuiLocalCommandHandler, TuiCommandBridgeSnapshot } from './extension/public-types.ts'
 
 /** One client command contribution: a slash name the client owns. */

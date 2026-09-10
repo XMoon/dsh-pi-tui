@@ -7028,6 +7028,11 @@ export class TuiApp {
     return [...this.installedCommandCompletions]
   }
 
+  /** Headless-test hook: the CURRENT transient notice text ('' = none). */
+  notifyTextForTest(): string {
+    return this.notifyText
+  }
+
   fullscreenScrollForTest(): { scrollTop: number; isFollowingEnd: boolean; viewportHeight: number; contentHeight: number; maxScrollTop: number } | undefined {
     if (this.fullscreenScroll === undefined) return undefined
     const contentHeight = this.messagesView.render(this.terminal.columns).length

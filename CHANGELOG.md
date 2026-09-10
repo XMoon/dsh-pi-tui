@@ -44,12 +44,12 @@
 - **插件命令 contribution 对齐 DSH 客户端命令模型（破坏性）。** `execution: 'local' | 'submission'`
   已**移除**：contribution 就是"客户端自有的命令"（必有 `handler`，无 host descriptor），会进入 `/`
   命令菜单并本地执行、永不 steer；名字与当前 host catalog 冲突时**候选合成整体失败**（不安装任何菜单
-  行、记录扩展健康并在界面提示一次），host 命令始终保留自己的 claim，**绝不会被降级成模型 prompt**。
+  行、记录扩展健康并在界面提示一次，提示中列出该轮全部冲突的 contribution），host 命令始终保留自己的 claim，**绝不会被降级成模型 prompt**。
   用于广告 prompt 型名字的 `submission` 请直接不要注册 contribution（未 claim 的 `/name args` 本来就
   是 prompt，发现渠道是 host 侧 skill）。`sessionless: true` 表示可在没有 session 时执行；默认
   `false` 会先解析/创建 session 再执行。与 **session 级 host catalog 同名**属于合成期冲突：整轮候选
   合成失败（对齐上游 `source-failed`，该 source 的命令行全部撤下，直到下一次成功合成），但 host claim
-  已先行刷新，输入归属不受影响，冲突记录在该 contribution 的健康上并按 identity/失败代次提示一次；
+  已先行刷新，输入归属不受影响，冲突记录在该 contribution 的健康上并按 identity/失败代次提示一次（提示列出该轮全部冲突）；
   TUI 静态命令名冲突则在注册时直接抛错。另外从未接线的 `argumentProvider` 字段一并移除（请用
   `registerAutocomplete`）。
 

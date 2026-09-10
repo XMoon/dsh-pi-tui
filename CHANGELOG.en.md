@@ -59,7 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `execution: 'local' | 'submission'` ownership metadata is REMOVED: a contribution IS a client-owned
   command (a required `handler`, no host descriptor) that joins the `/` menu and executes locally, never
   steered. A name that collides with the current host catalog FAILS the candidate synthesis as a whole
-  (no menu rows are installed, the collision is recorded on the contribution's health and surfaced once)
+  (no menu rows are installed, the collision is recorded on the contribution's health and surfaced once,
+  naming every colliding contribution of that failed pass)
   while the host command keeps its claim — it can never be downgraded to a model prompt. A contribution
   used to advertise a prompt-style name should simply not be registered (an unclaimed `/name args` line
   is already a prompt; the host-side skill owns discovery). `sessionless: true` runs the command before a
@@ -67,7 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host catalog fails the whole candidate pass at synthesis time (upstream `source-failed` parity: the
   source's command rows are withdrawn until a synthesis succeeds again) while the host claims stay
   refreshed — input authority is never lost — and the collision is recorded on the contribution's health
-  and surfaced once per identity/failure generation; a collision with the TUI's own static command names
+  and surfaced once per identity/failure generation (the notice names every collision of that pass); a
+  collision with the TUI's own static command names
   is rejected at registration. The never-wired `argumentProvider` field is removed too (use
   `registerAutocomplete`).
 

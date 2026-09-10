@@ -256,9 +256,9 @@ export function apply(ctx: Context): void {
     })
   }
 
-  // 4. COMMAND: a TUI-owned local command (execution ownership metadata —
-  //    the bridge carries it, the RUNNER executes this contribution's own
-  //    handler locally, live session or not). The command
+  // 4. COMMAND: a client-owned command (the bridge carries the handler, the
+  //    RUNNER executes this contribution's own handler locally, live session
+  //    or not; `sessionless: true` makes it work before a session exists). The command
   //    ALSO exposes the managed-overlay trigger (round-1 finding 4: the
   //    overlay must be actually reachable, not dead code). The overlay is
   //    a TOGGLE (round-2 finding 3: no timer at all — nothing can leak
