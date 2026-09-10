@@ -283,6 +283,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private selectionDragged = false;
 	private mouseCapture?: TuiMouseDispatchTarget;
 	private mousePressTarget?: TuiMouseDispatchTarget;
+	/** The overlay's painted placement at press time (painted-placement
+	 * liveness: the CURRENT overlay placement must still match it before a
+	 * synthetic click is synthesized). */
+	private mousePressOverlayPlacement:
+		| { entry: { component: Component }; col: number; row: number; width: number; height: number }
+		| undefined;
 	private mousePressPoint?: { x: number; y: number };
 	private mousePressMoved = false;
 	private lastComponentClick?: {
@@ -752,6 +758,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.mousePressTarget = undefined;
 		this.mousePressPoint = undefined;
 		this.mousePressMoved = false;
+		this.mousePressOverlayPlacement = undefined;
 	}
 
 	/** Whether a gesture target is still mounted and visible: an overlay
@@ -769,14 +776,21 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	 * retargeted with the OLD origin — the release cell is no longer the
 	 * pressed cell. (dsh-pi-tui divergence X018 hardening.) */
 	private isMouseTargetPlacementLive(target: TuiMouseDispatchTarget): boolean {
-		// Overlay targets AND their subtrees: the press-time originX/originY
-		// are the overlay's col/row at press time (dispatchMouseToOverlay
-		// sets x = screenX - layout.col, and nested dispatches keep the
-		// same x). The CURRENT rendered overlay layout must still place the
-		// component's overlay at the same absolute origin.
+		// Overlay targets AND their subtrees: the overlay's CURRENT painted
+		// placement must still match the press-time placement (a nested
+		// descendant's origin is offset by its wrapper's padding, so the
+		// ROOT placement is the stable identity).
 		for (const layout of this.renderedOverlayLayouts) {
 			if (this.componentTreeContains(layout.entry.component, target.component)) {
-				return layout.col === target.originX && layout.row === target.originY;
+				const press = this.mousePressOverlayPlacement;
+				return (
+					press !== undefined &&
+					press.entry === layout.entry &&
+					layout.col === press.col &&
+					layout.row === press.row &&
+					layout.width === press.width &&
+					layout.height === press.height
+				);
 			}
 		}
 		// Layout-root targets: the press-time origin is the box rect
@@ -1225,6 +1239,25 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				this.mousePressTarget = result.target;
 				this.mousePressPoint = { x: raw.x, y: raw.y };
 				this.mousePressMoved = false;
+				// The overlay's painted placement at press time: the
+				// painted-placement liveness check compares the CURRENT
+				// overlay placement against this (a nested descendant's
+				// origin is offset by its wrapper's padding, so the ROOT
+				// placement is the stable identity). (dsh-pi-tui divergence
+				// X018 hardening.)
+				this.mousePressOverlayPlacement = undefined;
+				for (const layout of this.renderedOverlayLayouts) {
+					if (this.componentTreeContains(layout.entry.component, result.target.component)) {
+						this.mousePressOverlayPlacement = {
+							entry: layout.entry,
+							col: layout.col,
+							row: layout.row,
+							width: layout.width,
+							height: layout.height,
+						};
+						break;
+					}
+				}
 			}
 			if (render) this.requestRender();
 			return;

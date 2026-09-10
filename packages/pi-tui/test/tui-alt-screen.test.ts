@@ -3187,3 +3187,35 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		assert.deepStrictEqual(changes, ["b:off"], "a fresh press at the new row must activate B");
 		tui.stop();
 	});
+
+	it("synthesizes the click for a child nested inside a padded Box overlay root (X018 painted-placement)", async () => {
+		const terminal = new RecordingTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const received: string[] = [];
+		const child = {
+			render: () => ["child"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				if (event.type === "press") return { handled: true, focus: true };
+				if (event.type === "click") {
+					received.push("click");
+					return { handled: true };
+				}
+				return undefined;
+			},
+		};
+		const root = new Box();
+		root.addChild(child);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		// The Box has default padding (1,1): the child renders at screen
+		// row 2, col 1 (0-based) = SGR row 3, col 2.
+		terminal.sendInput("\x1b[<0;2;3M");
+		terminal.sendInput("\x1b[<0;2;3m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(received, ["click"], "the padded Box child must receive the synthetic click");
+		tui.stop();
+	});

@@ -1609,6 +1609,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - test/tui-app.test.ts: press a question option → keyboard advance to the next question → release on the same cell must not activate the repainted option (onCellPress records the press-time identity; the release click rejects the question-id mismatch)
 - test/question-flow.test.ts: an inert press that repaints into the scroll-marker row must not toggle the expanded panel (the marker is a distinct semantic target via the MARKER_ROW sentinel)
 - packages/pi-tui/test/tui-alt-screen.test.ts: a centered SettingsList overlay that grows and moves after the press does not receive a ghost synthetic click at the original cell; a fresh press at the new row works
+- packages/pi-tui/test/tui-alt-screen.test.ts: a child nested inside a padded Box overlay root still receives the synthetic click (the painted-placement check compares the ROOT placement snapshot, not the child's padding-offset origin)
 
 #### Upstream comparison
 
