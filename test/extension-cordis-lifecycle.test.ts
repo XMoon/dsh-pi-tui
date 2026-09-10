@@ -642,6 +642,53 @@ test('a duplicate subscribeState listener is rejected loudly (round-4 finding)',
 // ── M5: fiber-bound registries (commands/themes/settings/autocomplete/ ─────
 // ── keybindings) ───────────────────────────────────────────────────────────
 
+test('M5: a STALE command handle never untracks a later registration (same owner + id)', async () => {
+  // The ledger health record is keyed (slot, owner, id) — it cannot tell two
+  // registrations of one id apart. A repeated/late cleanup of a disposed
+  // handle must therefore leave a NEWER generation (same owner, same id) both
+  // registered AND tracked.
+  const ctx = new Context()
+  try {
+    await ctx.plugin(Loader)
+    await mount(ctx, startupPlugin)
+    await mount(ctx, applyExtensionHost)
+    const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as unknown as {
+      registerCommand(contribution: {
+        id: string
+        name: string
+        description: string
+        handler: () => { kind: 'success' }
+      }): { id: string; dispose(): void }
+      commands: { isLocal(name: string, statics: ReadonlySet<string>): boolean }
+      _ledger(): { healthSnapshot(): readonly { id: string; state: string }[] }
+    }
+    const spec = {
+      id: 'stale-cmd',
+      name: 'stalecmd',
+      description: 'stale handle',
+      handler: () => ({ kind: 'success' as const }),
+    }
+    const first = service.registerCommand(spec)
+    first.dispose()
+    assert.equal(service.commands.isLocal('stalecmd', new Set()), false, 'the first disposal removed it')
+    const second = service.registerCommand(spec)
+    // The late/repeated cleanup of the OLD handle.
+    first.dispose()
+    first.dispose()
+    assert.equal(service.commands.isLocal('stalecmd', new Set()), true, 'the newer registration stays live')
+    assert.equal(service._ledger().healthSnapshot().some(entry => entry.id === 'stale-cmd'), true,
+      'the newer registration health record survives the stale cleanup')
+    second.dispose()
+    assert.equal(service.commands.isLocal('stalecmd', new Set()), false, 'the current handle disposes its own')
+    assert.equal(service._ledger().healthSnapshot().some(entry => entry.id === 'stale-cmd'), false,
+      'and untracks its own record')
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
+  }
+})
+
 test('M5: command/theme/setting registrations are fiber-bound (owner unload cleans up)', async () => {
   const ctx = new Context()
   try {

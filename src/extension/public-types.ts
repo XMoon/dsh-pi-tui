@@ -468,9 +468,13 @@ export interface TuiLocalCommandHandler {
     | Promise<{ readonly kind: 'success'; readonly text?: string; readonly sourceEventSeq?: number } | { readonly kind: 'error'; readonly text: string }>
 }
 
-/** A live handle on one command contribution. */
+/** A live handle on ONE command contribution REGISTRATION. */
 export interface TuiCommandHandle {
   readonly id: string
+  /** Dispose THIS registration (idempotent). A repeated or late call — e.g.
+   * a fiber disposer running after an HMR reload re-registered the same id —
+   * never removes a NEWER registration: the handle names one generation, not
+   * the id. */
   dispose(): void
 }
 
