@@ -61,6 +61,11 @@ interface Draft {
 
 /** The "type your own answer" row shown below options (pi isOther parity). */
 const OTHER_ROW = '\u0000other'
+/** The scroll-marker row's hit identity (mouse parity): the marker is a
+ * DISTINCT semantic target from inert chrome — a press on an inert row
+ * that repaints into the marker row must not toggle the expanded panel
+ * (and vice versa). */
+const MARKER_ROW = '\u0000marker'
 
 /**
  * Default total physical-row budget of the question flow itself. The
@@ -215,7 +220,9 @@ export interface QuestionMouseGesture {
    * release). */
   questionId: string
   /** The LAST-PAINTED hit at the pressed row: an option key, OTHER_ROW,
-   * or undefined for inert chrome. */
+   * the MARKER_ROW sentinel (the scroll marker is a distinct semantic
+   * target — an inert press that repaints into the marker row must not
+   * toggle the expanded panel), or undefined for inert chrome. */
   hit: string | undefined
 }
 
@@ -498,14 +505,15 @@ export class QuestionFlow implements Component, Focusable {
       }
       return
     }
+    if (key === MARKER_ROW) {
+      this.toggleExpanded()
+      return
+    }
     if (key !== undefined) {
       this.cursor = Number(key)
       this.pendingCursorScroll = true
       this.confirm()
       return
-    }
-    if (row === this.lastMarkerRow) {
-      this.toggleExpanded()
     }
   }
 
@@ -1228,6 +1236,10 @@ export class QuestionFlow implements Component, Focusable {
           ? `↑ ${above} up`
           : `↓ ${below} more lines`
       this.lastMarkerRow = lines.length
+      // The marker is a DISTINCT hit identity (mouse parity): a press on
+      // an inert row that repaints into the marker row must not toggle
+      // the expanded panel.
+      this.hitMap.set(lines.length, MARKER_ROW)
       lines.push(color.textDim(marker))
     } else {
       this.lastMarkerRow = -1

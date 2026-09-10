@@ -1520,3 +1520,27 @@ test('question: inert press replaces the stale gesture (mouse parity)', () => {
   rendered = f.render(100).map(strip)
   assert.ok(rendered.some(line => line.includes('?  Q1')), 'the flow must still be on Q1')
 })
+
+test('question: inert press → repaint moves the marker onto the cell → release must not toggle (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Q1', header: 'A header', options: Array.from({ length: 20 }, (_, i) => ({ label: `Option ${i}` })) },
+  ], () => {}, () => {})
+  f.setMaxRows(8)
+  let rendered = f.render(100).map(strip)
+  // Row 6 is inert (blank) at maxRows 8; the marker sits at row 5.
+  const row = 6
+  assert.equal((f as unknown as { hitMap: Map<number, string | undefined> }).hitMap.get(row), undefined, 'row 6 must be inert at maxRows 8')
+  // Press the inert row: the press-time identity is undefined chrome.
+  const gesture = f.beginMousePress(row)
+  assert.ok(gesture !== undefined && gesture.hit === undefined, 'an inert press must record an undefined hit')
+  // The budget changes: the marker moves onto row 6.
+  f.setMaxRows(9)
+  rendered = f.render(100).map(strip)
+  assert.equal((f as unknown as { lastMarkerRow: number }).lastMarkerRow, row, 'the marker must move onto the pressed row')
+  // Release on the same cell: the inert press must NOT toggle the
+  // expanded panel (the marker is a DIFFERENT semantic target).
+  const state = f as unknown as { bodyExpanded: boolean }
+  const before = state.bodyExpanded
+  f.completeMouseClick(gesture, row)
+  assert.equal(state.bodyExpanded, before, 'the inert press must not toggle the expanded panel')
+})

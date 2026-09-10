@@ -1606,6 +1606,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - packages/pi-tui/test/tui-alt-screen.test.ts: selection press-time component snapshot lifecycle — the press snapshots the reached set and the release clears it
 - packages/pi-tui/test/tui-alt-screen.test.ts: hidden auto scrollbar track jumps on a stationary first press; in-flight selection gesture and scrollbar drag are cancelled when the pointer lands on a capturing overlay
 - test/tui-app.test.ts: press a question option → keyboard advance to the next question → release on the same cell must not activate the repainted option (onCellPress records the press-time identity; the release click rejects the question-id mismatch)
+- test/question-flow.test.ts: an inert press that repaints into the scroll-marker row must not toggle the expanded panel (the marker is a distinct semantic target via the MARKER_ROW sentinel)
 
 #### Upstream comparison
 
