@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { ProcessTerminal } from '@xmoon76/pi-tui'
 import { MessageId } from '@deepseek-ai/dsh-llm'
@@ -190,6 +190,8 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   defaultModel: unknown
   commands: unknown
   host: FakeAgentHost
+  /** Every `commands.execute` line, in call order (the command plane). */
+  executed: { line: string }[]
   readonly session: LiveSession | undefined
   armCreateGate(): void
   releaseCreateGate(): void
@@ -255,6 +257,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     saveSelection: async () => {},
   }
   const definitions = new Map<string, { name: string; description?: string; handler: (...args: never[]) => unknown }>()
+  const executed: { line: string }[] = []
   const commands = {
     register: (definition: { name: string; handler: (...args: never[]) => unknown; description?: string; input?: { hint: string } }): (() => void) => {
       definitions.set(definition.name, definition)
@@ -264,9 +267,16 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     },
     list: () => [...definitions.values()].map(({ name, description }) => ({ name, description: description ?? '', input: { hint: '' } })),
     find: () => undefined,
-    // A plain prompt is NOT a command: undefined falls back to the
-    // follow-up delivery (the runner's real semantics).
-    execute: async () => undefined,
+    // A REGISTERED command executes through the command plane (the Host
+    // command semantics); a plain prompt is NOT a command: undefined falls
+    // back to the follow-up delivery (the runner's real semantics). Only
+    // ACTUAL executions are recorded — an attempted miss is not a command.
+    execute: async (_agent: unknown, line: string) => {
+      const name = line.trim().replace(/^\//, '').split(/\s+/)[0] ?? ''
+      if (!definitions.has(name)) return undefined
+      executed.push({ line })
+      return { result: { kind: 'success' } }
+    },
     handler: (name: string) => definitions.get(name)?.handler,
   }
   return {
@@ -276,6 +286,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     defaultModel,
     commands,
     host,
+    executed,
     get session() { return liveSession as LiveSession | undefined as LiveSession },
     armCreateGate,
     releaseCreateGate: () => { releaseCreateGate?.() },
@@ -832,4 +843,134 @@ test('a CANCELLED submit ends the ack through the onCancel sink (never stuck, no
   assert.ok(!settled.includes('submission failed'),
     'a CANCELLATION must not surface as a failure notice (runOwned routes it to onCancel only)')
   assert.equal(harness.host.followedUp.length, 0, 'nothing was written')
+})
+// ── Host-command arbitration (PR115-fix problem 1) ─────────────────────────
+// A registered Host command (e.g. /compact) must execute through the command
+// plane even while the agent is running: the busy queue/steer policy applies
+// only to agent-facing prompts, never to a confirmed Host command (the
+// command handler itself decides the busy outcome).
+
+/** Poll until the submission reaches the command plane. */
+async function waitForCommand(harness: ReturnType<typeof makeHarness>): Promise<void> {
+  for (let round = 0; round < 40; round += 1) {
+    if (harness.executed.length > 0) return
+    for (let index = 0; index < 50; index += 1) await Promise.resolve()
+    await new Promise<void>(resolve => process.nextTick(resolve))
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.ok(harness.executed.length > 0, 'the submission must reach the command plane')
+}
+
+/** Boot a runner with a resumed session, optional pre-registered Host
+ * commands, and a busyEnter preference. */
+async function bootCommandHarness(
+  t: TestContext,
+  options: { busyEnter: 'queue' | 'steer'; status: 'idle' | 'running'; hostCommands?: readonly string[] },
+): Promise<{ harness: ReturnType<typeof makeHarness>; mounted: { dispose: () => Promise<void>; app: TuiApp } }> {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-command-arb-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'command-session', events: sessionEvents('resumed answer') })
+  for (const name of options.hostCommands ?? []) {
+    ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void }).register({
+      name,
+      handler: () => ({ kind: 'success' }),
+    })
+  }
+  const doc: Record<string, unknown> = { busyEnter: options.busyEnter }
+  context.provide('settings', {
+    register: () => ({
+      get: () => ({ ...doc }),
+      replace: async (next: Record<string, unknown>) => { Object.assign(doc, next) },
+    }),
+  } as never)
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'command-session' })
+  harness.host.status = options.status
+  return { harness, mounted }
+}
+
+test('idle /compact executes as a Host command: no followup, no queue, no prompt (PR115-fix problem 1)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'idle', hostCommands: ['compact'] })
+  mounted.app.setDraft('/compact')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the Host command must be executed')
+  assert.equal(harness.executed[0]?.line, '/compact', 'the exact command line must reach the command plane')
+  assert.equal(harness.host.followedUp.length, 0, 'no ordinary followup')
+  assert.equal(harness.host.steered.length, 0, 'no steer')
+})
+
+test('running + queue: /compact executes, never enters the ordinary queue (PR115-fix problem 1)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running', hostCommands: ['compact'] })
+  mounted.app.setDraft('/compact')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the command path must be taken while running')
+  assert.equal(harness.host.followedUp.length, 0, 'no /compact may land in the ordinary inbox queue')
+  assert.equal(harness.host.steered.length, 0, 'no steer')
+  // The command handler owns the busy outcome (the TUI only routes to the
+  // command plane — the Host decides busy/unavailable presentation).
+})
+
+test('running + steer: /compact executes, never steers into the turn (PR115-fix problem 1)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'steer', status: 'running', hostCommands: ['compact'] })
+  mounted.app.setDraft('/compact')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the command path must be taken before the steer policy')
+  assert.equal(harness.host.steered.length, 0, '/compact must never be steered as a prompt')
+  assert.equal(harness.host.followedUp.length, 0, 'no followup')
+})
+
+test('running + queue: an ordinary prompt still queues (PR115-fix problem 1)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running' })
+  mounted.app.setDraft('hello world')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'queued prompt')
+  assert.equal(harness.host.followedUp.length, 1, 'a plain prompt must keep the queue delivery')
+  assert.equal(harness.host.steered.length, 0, 'queue preference never steers')
+  assert.equal(harness.executed.length, 0, 'a plain prompt is not a command')
+})
+
+test('running + steer: an ordinary prompt still steers (PR115-fix problem 1)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'steer', status: 'running' })
+  mounted.app.setDraft('hello world')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'steered prompt')
+  assert.equal(harness.host.steered.length, 1, 'a plain prompt must keep the steer delivery')
+  assert.equal(harness.host.followedUp.length, 0, 'steer preference never queues')
+  assert.equal(harness.executed.length, 0, 'a plain prompt is not a command')
+})
+
+test('running + steer: /skill <name> stays an agent-facing invocation (PR115-fix problem 1)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'steer', status: 'running' })
+  mounted.app.setDraft('/skill grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'skill steer')
+  assert.equal(harness.host.steered.length, 1, 'a skill invocation must keep the agent-facing steer')
+  const steered = harness.host.steered[0] as { content: { type: string; text: string }[] }
+  assert.equal(steered.content[0]?.text, '/grilling args', 'the skill line must steer in its normalized /name args form')
+  assert.equal(harness.executed.length, 0, 'a skill invocation must never be claimed as a Host command')
+})
+
+test('a dynamic Host command never enters the ordinary inbox while running (PR115-fix problem 1)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    hostCommands: ['test-host-command'],
+  })
+  mounted.app.setDraft('/test-host-command')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the dynamic Host command must execute')
+  assert.equal(harness.executed[0]?.line, '/test-host-command')
+  assert.equal(harness.host.steered.length, 0, 'no steer — the fix is architectural, not a /compact special case')
+  assert.equal(harness.host.followedUp.length, 0, 'no ordinary inbox entry')
 })

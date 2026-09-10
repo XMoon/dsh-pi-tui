@@ -5120,6 +5120,22 @@ export function apply(ctx: Context, config: Config): void {
         }
         return
       }
+      // Host-command claim (PR115-fix problem 1): a slash name the CURRENT
+      // effective command catalog resolves — and that is neither a TUI-local
+      // command nor a TUI-owned skill wrapper — is a Host command. It
+      // executes through the command plane; the busy queue/steer policy
+      // applies only to agent-facing prompts, never to a confirmed Host
+      // command (the command handler itself decides the busy outcome). A
+      // claimed command that the real session then lacks is consumed by the
+      // advertised-miss gate inside dispatchViaSession — never a plain
+      // model message.
+      if (parsed !== undefined
+        && !LOCAL_COMMANDS.has(parsed.name)
+        && !(extensionService?.commands.isLocal(parsed.name, LOCAL_COMMANDS) ?? false)
+        && isHostCommandName?.(parsed.name) === true) {
+        dispatchViaSession(text, persistHistory)
+        return
+      }
       // Busy-Enter preference (web busyEnter parity): while the agent is
       // RUNNING and the preference is 'steer', agent-facing input steers
       // into the running turn — plain prompts AND non-local commands. The
@@ -7294,6 +7310,11 @@ export function apply(ctx: Context, config: Config): void {
      * advertised by the CURRENT completion list? The dispatch captures it
      * BEFORE any session creation (see dispatchViaSession). */
     let wasAdvertisedClaim: ((name: string) => boolean) | undefined
+    /** The claim test installed by registerTuiCommands: is a slash name a
+     * HOST command in the current effective catalog (advertised, not a
+     * TUI-owned skill wrapper)? The dispatch consults it BEFORE the busy
+     * queue/steer policy (PR115-fix problem 1). */
+    let isHostCommandName: ((name: string) => boolean) | undefined
     /** The catalog refresh coordinator: the ONE post-mount refresh owner
      * (first session, switches, /preset, /reload). Built inside
      * registerCommands once the surface hooks exist. (Declared before
@@ -7636,6 +7657,7 @@ export function apply(ctx: Context, config: Config): void {
       try {
         const installed = registerTuiCommands(runner, initial)
         wasAdvertisedClaim = installed.wasAdvertised
+        isHostCommandName = installed.isHostCommand
         // The coordinator's surface hooks point INTO the command surface;
         // the runner's refreshCatalog routes every post-mount refresh here.
         catalogCoordinator = new CatalogRefreshCoordinator({
