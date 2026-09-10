@@ -9,7 +9,7 @@
  "verification": {
   "auditedAt": "2026-09-09",
   "branch": "chore/revendor-pi-tui-v0.85.1",
-  "auditedSourceCommit": "a773bbe6fb8beb13d352fc14a29419cf990d2e48",
+  "auditedSourceCommit": "763fc8ce674709133de4c66da15f7a31e8e3300a",
   "referenceSnapshots": {
    "upstream": {
     "repository": "earendil-works/pi",
@@ -5433,7 +5433,8 @@
     "test/tui-app.test.ts: fullscreen transcript click: a resize + repaint between press and release cannot transfer the gesture (press-frame dimensions recorded in the gesture)",
     "test/focus-anchor.test.ts: a press on a Thought cannot transfer across a session switch (per-activity identity token + session-boundary gesture clear; turn numbers are session-local)",
     "test/tui-app.test.ts: fullscreen todo: a dock press cannot run the panel action after a keyboard toggle (todo:dock vs todo:panel press identities)",
-    "test/tui-app.test.ts: fullscreen todo: a dock press cannot toggle the panel across a session switch (the session-boundary gesture clear in clearSessionOverrides; the generic todo identities have no object to tokenize)"
+    "test/tui-app.test.ts: fullscreen todo: a dock press cannot toggle the panel across a session switch (the session-boundary gesture clear in clearSessionOverrides; the generic todo identities have no object to tokenize)",
+    "test/tui-app.test.ts: fullscreen transcript click: a click that resolves to no cell consumes the stale latch (the identity-fence invariant is literal before every early return)"
    ],
    "upstream": {
     "equivalence": "NO",

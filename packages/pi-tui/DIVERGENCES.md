@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `a773bbe6fb8beb13d352fc14a29419cf990d2e48`
+- Audited local source commit: `763fc8ce674709133de4c66da15f7a31e8e3300a`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -4458,6 +4458,7 @@ A host that resolves a same-cell click against the frame the user actually SAW n
 - test/focus-anchor.test.ts: a press on a Thought cannot transfer across a session switch (per-activity identity token + session-boundary gesture clear; turn numbers are session-local)
 - test/tui-app.test.ts: fullscreen todo: a dock press cannot run the panel action after a keyboard toggle (todo:dock vs todo:panel press identities)
 - test/tui-app.test.ts: fullscreen todo: a dock press cannot toggle the panel across a session switch (the session-boundary gesture clear in clearSessionOverrides; the generic todo identities have no object to tokenize)
+- test/tui-app.test.ts: fullscreen transcript click: a click that resolves to no cell consumes the stale latch (the identity-fence invariant is literal before every early return)
 
 #### Upstream comparison
 
