@@ -3051,3 +3051,32 @@ test('question: a press cannot transfer to the next question with a duplicate id
   answers.catch(() => {})
   app.stop()
 })
+
+test('question: Esc between press and release cannot re-enter the free-text edit (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Type your answer' },
+  ])
+  await vt.waitForRender()
+  // Enter the free-text edit.
+  vt.sendInput('h')
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const pinnedRow = view.findIndex(line => line.includes('h') && !line.includes('dsh'))
+  assert.ok(pinnedRow >= 0, `pinned input row missing:\n${view.join('\n')}`)
+  // ONE continuous batch: press the input row, Esc (exits the edit),
+  // release the same cell — all before the next repaint. The stale
+  // edit-state press must NOT re-enter the edit.
+  vt.sendInput(`\x1b[<0;3;${pinnedRow + 1}M`)
+  vt.sendInput('\x1b')
+  vt.sendInput(`\x1b[<0;3;${pinnedRow + 1}m`)
+  await vt.waitForRender()
+  // The flow must stay in the navigation state.
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('↵ edit')), `the flow must stay in the navigation state:\n${final.join('\n')}`)
+  assert.ok(!final.some(line => line.includes('↵ confirm')), 'the release must not re-enter the edit')
+  answers.catch(() => {})
+  app.stop()
+})

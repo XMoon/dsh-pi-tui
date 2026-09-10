@@ -928,6 +928,14 @@ export class QuestionFlow implements Component, Focusable {
 
   handleInput(data: string): void {
     if (data === '\u0000') return
+    // Any keyboard input terminates an unfinished mouse gesture: the
+    // semantic state machine (Esc exits the free-text edit, Enter
+    // advances, digits/arrows move the cursor, e toggles the expanded
+    // panel) can reinterpret a pressed hit as a different action on
+    // release — an edit-state press on the OTHER_ROW followed by Esc
+    // must never re-enter the edit when the release lands before the
+    // repaint.
+    this.mousePressGesture = undefined
     // Text mode: printable/cursor keys go to the real Input; Enter/Esc are
     // the flow's own verbs. PageUp/PageDown scroll the body even while
     // typing ('e' stays a letter here — expand is a list-mode verb).

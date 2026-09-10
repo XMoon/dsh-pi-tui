@@ -1603,3 +1603,30 @@ test('question: the gesture identity includes the question index (duplicate ids)
   rendered = f.render(100).map(strip)
   assert.ok(rendered.some(line => line.includes('?  Q2')), 'the flow must still be on Q2')
 })
+
+test('question: keyboard exit of the free-text edit cancels the pending mouse gesture (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Type your answer' },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  // Enter the free-text edit.
+  f.handleInput('h')
+  let rendered = f.render(100).map(strip)
+  const pinnedRow = (f as unknown as { pinnedOtherRow: number }).pinnedOtherRow
+  assert.ok(pinnedRow >= 0, 'pinned input row must be recorded')
+  // Press the pinned input row (no release yet): the press-time identity
+  // is the OTHER_ROW hit in the EDITING state.
+  const gesture = f.beginMousePress(pinnedRow)
+  assert.ok(gesture !== undefined && gesture.hit === '\u0000other', 'the gesture must record the OTHER_ROW hit')
+  // Keyboard Esc exits the edit (navigation state) — the keyboard
+  // semantic-mode change must CANCEL the pending mouse gesture.
+  f.handleInput('\x1b')
+  rendered = f.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('↵ edit')), 'the navigation hint must show after Esc')
+  // Release on the same cell WITHOUT a repaint: the stale edit-state
+  // press must NOT re-enter the edit.
+  f.completeMouseClick(gesture, pinnedRow)
+  rendered = f.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('↵ edit')), 'the flow must stay in the navigation state')
+  assert.ok(!rendered.some(line => line.includes('↵ confirm')), 'the release must not re-enter the edit')
+})
