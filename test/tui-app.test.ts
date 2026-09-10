@@ -1051,6 +1051,100 @@ test('fullscreen transcript click: a press cannot transfer to a repainted messag
   app.stop()
 })
 
+test('fullscreen transcript click: a press on a local card cannot transfer to a repainted local card (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Two local shell cards share kind 'tool' AND turn Infinity — the
+  // content-derived identity is not unique; only the per-message token
+  // distinguishes them.
+  app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: '!first', result: 'FIRST_RESULT', status: 'ok',
+  })
+  app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: '!second', result: '', status: 'running',
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('!first'))
+  assert.ok(row >= 0, `first card row missing:\n${view.join('\n')}`)
+  // Press the first card's row (no release yet): the press-time identity
+  // is first's per-message token.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // clearSettledLocalMessages removes the settled first card; the running
+  // second card survives and shifts onto the pressed cell.
+  app.clearSettledLocalMessages()
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok((after[row] ?? '').includes('!second'), `the running card must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the synthesized click must NOT expand the
+  // running card (press identity = first's token ≠ current = second's token).
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const overrides = (app as unknown as { expandedOverride: Map<unknown, boolean> }).expandedOverride
+  assert.equal(overrides.size, 0, `the stale press must not expand the repainted card:\n${vt.getViewport().join('\n')}`)
+  app.stop()
+})
+
+test('fullscreen transcript click: a resize between press and release cannot act against the stale frame (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release yet).
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // Resize WITHOUT repainting: the snapshot still reflects the old frame,
+  // so the release must not act against it (the release-time geometry
+  // guard consumes the gesture).
+  vt.resize(100, 30)
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  assert.equal(final.filter(line => line.includes('AAA')).length, 1, `the stale-frame release must not expand the message:\n${final.join('\n')}`)
+  app.stop()
+})
+
+test('fullscreen transcript click: a resize + repaint between press and release cannot transfer the gesture (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release yet): the press resolved
+  // against the 80x24 frame.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // Resize AND repaint: the new frame commits a snapshot at the new
+  // dimensions — the same owner/row may sit on the release cell, but the
+  // press began on the OLD geometry, so the gesture must not transfer.
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  assert.equal(final.filter(line => line.includes('AAA')).length, 1, `the cross-frame release must not expand the message:\n${final.join('\n')}`)
+  app.stop()
+})
+
 test('the footer badge combines tasks and live agents, hint only on an empty editor', async () => {
   const { vt, app } = startApp()
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])

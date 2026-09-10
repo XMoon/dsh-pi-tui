@@ -2616,8 +2616,11 @@ export class TuiApp {
    * cell (mouse parity): the release click may only act on the EXACT
    * identity that was pressed — an async transcript projection change
    * between press and release must not transfer the click to whatever
-   * repainted onto the same cell. */
-  private fullscreenCellGesture: { ownerId: string; row: number } | undefined
+   * repainted onto the same cell. The press-time frame dimensions are
+   * recorded too: a resize + repaint between press and release changes
+   * the frame, and the release must not act against it (the press began
+   * on the OLD geometry). */
+  private fullscreenCellGesture: { ownerId: string; row: number; columns: number; termRows: number } | undefined
   /** Flows waiting behind the active one (FIFO; shown on settle). */
   private readonly questionQueue: QuestionState[] = []
   /** The active Save Location prompt, if any (one on screen at a time). */
@@ -5258,6 +5261,11 @@ export class TuiApp {
       this.expandedOverride.delete(message)
       this.expandedOverride.set(next, override)
     }
+    // The press-time identity token follows the logical card across the
+    // running → settled object replacement: a press on the running card
+    // must still match the settled card at release (mouse parity).
+    const token = this.messageIdentityTokens.get(message)
+    if (token !== undefined) this.messageIdentityTokens.set(next, token)
     this.localMessages[index] = next
     this.rebuildMessages()
     return next
@@ -5267,6 +5275,10 @@ export class TuiApp {
   updateLastLocalMessage(message: TranscriptMessage): void {
     const index = this.localMessages.length - 1
     if (index < 0) return
+    // The press-time identity token follows the logical card across the
+    // running → settled object replacement (mouse parity).
+    const token = this.messageIdentityTokens.get(this.localMessages[index]!)
+    if (token !== undefined) this.messageIdentityTokens.set(message, token)
     this.localMessages[index] = message
     this.rebuildMessages()
   }
@@ -5488,6 +5500,12 @@ export class TuiApp {
       alt.addInputListener((data) => this.routeInput(data))
       alt.installViewportListener()
       this.tui.stop()
+      // The new alt's first paint is scheduled asynchronously: drop the
+      // PREVIOUS alt instance's last-painted snapshot (and any in-flight
+      // gesture) BEFORE start, so a press immediately after re-entry can
+      // never resolve against a frame the new surface never drew.
+      this.fullscreenPaintSnapshot = undefined
+      this.fullscreenCellGesture = undefined
       alt.start()
       // The alt screen starts with NO focused component: without this, every
       // key after Ctrl+F is dropped (the app-level listener still sees
@@ -7073,14 +7091,36 @@ export class TuiApp {
     }
   }
 
+  /** Stable per-message identity tokens for the fullscreen press-time
+   * identity (mouse parity): content-derived kind+turn is NOT unique —
+   * local shell cards all carry turn Infinity, and parallel/sequential
+   * tool calls can share kind+turn — and the projection index shifts
+   * when a card is removed. The token is assigned to the message OBJECT
+   * (stable across rebuilds, which reuse the same objects) and
+   * transferred on a running → settled replacement (updateLocalMessage /
+   * updateLastLocalMessage), so the same logical card keeps its identity
+   * across the object swap. */
+  private readonly messageIdentityTokens = new WeakMap<TranscriptMessage, number>()
+  private messageIdentityCounter = 0
+
+  private messageIdentityToken(message: TranscriptMessage): number {
+    let token = this.messageIdentityTokens.get(message)
+    if (token === undefined) {
+      token = this.messageIdentityCounter
+      this.messageIdentityCounter += 1
+      this.messageIdentityTokens.set(message, token)
+    }
+    return token
+  }
+
   /** The press-time semantic identity of a transcript row (mouse parity):
-   * the message/activity owner (kind + turn, or the entry index for
-   * ownerless rows). Shared by the paint-snapshot commit and the
-   * release-click validation so both sides compute the EXACT same
-   * identity string. */
+   * the message/activity owner (kind + turn + the per-message identity
+   * token, or the entry index for ownerless rows). Shared by the
+   * paint-snapshot commit and the release-click validation so both sides
+   * compute the EXACT same identity string. */
   private fullscreenRowOwnerId(entry: { message?: TranscriptMessage; activity?: TurnActivity }, entryIndex: number): string {
     return entry.message !== undefined
-      ? `msg:${entry.message.kind}:${'turn' in entry.message ? entry.message.turn : 0}`
+      ? `msg:${entry.message.kind}:${'turn' in entry.message ? entry.message.turn : 0}:${this.messageIdentityToken(entry.message)}`
       : entry.activity !== undefined
         ? `turn:${entry.activity.turn}`
         : `entry:${entryIndex}`
@@ -7183,7 +7223,7 @@ export class TuiApp {
     const inDock = snapshot.dockHeight > 0 && y >= todoTop - snapshot.dockHeight && y < todoTop
     const inPanel = todoTop < todoBottom && y >= todoTop && y < todoBottom
     if (inDock || inPanel) {
-      this.fullscreenCellGesture = { ownerId: 'todo', row: 0 }
+      this.fullscreenCellGesture = { ownerId: 'todo', row: 0, columns: snapshot.columns, termRows: snapshot.termRows }
       return
     }
     // Transcript cells: record the press-time semantic identity (the
@@ -7194,6 +7234,8 @@ export class TuiApp {
       this.fullscreenCellGesture = {
         ownerId: snapshot.rows[cell.entryIndex]!.ownerId,
         row: cell.inMessage,
+        columns: snapshot.columns,
+        termRows: snapshot.termRows,
       }
       return
     }
@@ -7221,6 +7263,10 @@ export class TuiApp {
         this.questionPressGesture = undefined
         return
       }
+      // The question owns the modal front: any pre-question todo/transcript
+      // gesture is dead (a cross-mode close before the release must not
+      // resurrect it on the background surface).
+      this.fullscreenCellGesture = undefined
       const width = this.terminal.columns
       const height = this.terminal.rows
       const footerHeight = this.footer.render(width).length
@@ -7250,8 +7296,13 @@ export class TuiApp {
     // overlays) owns the click: with one up, NO transcript / dock / todo
     // interaction below is reachable — concrete rows AND the blank-row
     // fallback stay inert behind it (plan §17/§23.7). The question frame
-    // above is the only overlay that routes clicks itself.
-    if (this.activeScreen.hasOverlayEntries) return
+    // above is the only overlay that routes clicks itself. Any pre-overlay
+    // todo/transcript gesture is dead (a cross-mode close before the
+    // release must not resurrect it on the background surface).
+    if (this.activeScreen.hasOverlayEntries) {
+      this.fullscreenCellGesture = undefined
+      return
+    }
     void x
     // The region determination uses the SAME last-painted snapshot as the
     // press (the fork's click detection already restricted the release to
@@ -7260,6 +7311,27 @@ export class TuiApp {
     // defeat the pre-repaint fence for the NEXT gesture.
     const snapshot = this.fullscreenPaintSnapshot
     if (snapshot === undefined) return
+    // Stale-geometry guard (mirrors the press path): the snapshot is the
+    // LAST PAINTED frame — a release at a terminal size no frame has been
+    // drawn at yet (a resize between press and release, before the next
+    // repaint) must not act against the stale frame. Consume any prior
+    // gesture so it can never match a later click.
+    if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) {
+      this.fullscreenCellGesture = undefined
+      return
+    }
+    // Press-frame guard: the release may only act on the frame the press
+    // resolved against. A resize + repaint between press and release
+    // commits a NEW snapshot at the new dimensions — the same owner/row
+    // may sit on the release cell, but the press began on the OLD
+    // geometry, so the gesture must not transfer to the new frame.
+    if (
+      this.fullscreenCellGesture !== undefined &&
+      (snapshot.columns !== this.fullscreenCellGesture.columns || snapshot.termRows !== this.fullscreenCellGesture.termRows)
+    ) {
+      this.fullscreenCellGesture = undefined
+      return
+    }
     const height = snapshot.termRows
     const todoBottom = Math.max(0, Math.min(height, height - snapshot.footerHeight - snapshot.editorHeight - snapshot.workingHeight - snapshot.queueHeight - snapshot.goalHeight))
     const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
