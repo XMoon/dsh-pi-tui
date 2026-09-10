@@ -3887,12 +3887,6 @@ export class TuiApp {
     }
     this.terminalSchemeListeners.clear()
     this.expandedOverride.clear()
-    // A session switch is a pointer-gesture boundary too: the new session
-    // can reuse the same turn numbers, so an in-flight press from the old
-    // session must never resolve against the new session's projection
-    // (the per-object identity token already rejects it; the boundary
-    // clear makes the cancellation explicit).
-    this.fullscreenCellGesture = undefined
     this.disposeMessageComponents()
     this.localMessages.length = 0
     // The transcript-search overlay dies with the surface: stale handles
@@ -7832,6 +7826,13 @@ export class TuiApp {
    * session switch must not leak the old session's click toggles). */
   clearSessionOverrides(): void {
     this.expandedOverride.clear()
+    // A session switch is a pointer-gesture boundary too: the new session
+    // can reuse the same turn numbers AND the same todo dock/panel
+    // geometry, so an in-flight press from the old session must never
+    // resolve against the new session's projection (the per-object
+    // identity token already rejects message/activity transfers; the
+    // generic todo identities need this explicit cancellation).
+    this.fullscreenCellGesture = undefined
     // The Focus disclosures are session-scoped transient state too: a
     // switched-in session must never inherit the old session's turn
     // numbers (plan §16.3). The persisted Focus preference survives. The

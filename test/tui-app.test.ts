@@ -1061,6 +1061,52 @@ test('fullscreen todo: a dock press cannot run the panel action after a keyboard
   app.stop()
 })
 
+test('fullscreen todo: a dock press cannot toggle the panel across a session switch (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 9 }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? ('in_progress' as const) : i % 3 === 1 ? ('pending' as const) : ('completed' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
+  assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal; the closed panel renders
+  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
+  // row).
+  const dockY = 18
+  // Press the dock row (no release): the press identity is todo:dock.
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  await vt.waitForRender()
+  // Session switch while the mouse is held: the new session reuses the
+  // same dock geometry, and the todo identities are generic (todo:dock /
+  // todo:panel) — only the session-boundary gesture clear rejects the
+  // stale press.
+  app.clearSessionOverrides()
+  app.setTodoSummary(todos)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `the dock must still render after the switch:\n${view.join('\n')}`)
+  // Release on the same cell: the click must NOT toggle the panel (the
+  // session boundary cancelled the in-flight gesture).
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), `the stale session press must not toggle the panel:\n${vt.getViewport().join('\n')}`)
+  // A fresh dock press/release opens the panel (the identity works).
+  await sleepBeyondTodoCoalesce()
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), `a fresh dock press must open the panel:\n${vt.getViewport().join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
