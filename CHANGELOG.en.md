@@ -53,7 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no payload. A declaring command receives the submitted images as encoded attachments on the host command
   call, and a command submission consumes them only after handler success — a failed command restores the
   draft WITH its attachments. File attachments are refused for commands (the host expects an upload receipt
-  this client cannot produce yet).
+  this client cannot produce yet). Skill invocations are unaffected: an explicit `/skill <name> [image #1]`
+  and a skill wrapper stay agent-facing, so their images ride the delivered prompt instead of the command
+  wire.
 - **An attachment-bearing client command no longer refuses before the deferred authority resolves.**
   Before the first session exists, a line such as `/deploy [image #1]` first resolves the session-keyed
   authority: a host command or skill wrapper that appears with the session takes the line **with its

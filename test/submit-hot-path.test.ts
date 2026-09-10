@@ -313,6 +313,14 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
       const def = definitions.get(name)
       if (def === undefined) return undefined
       executed.push({ line, attachments: [...attachments] })
+      // The REAL host executor enforces the descriptor declaration at
+      // admission: attachments sent to a command that does not declare
+      // `input.attachments` settle as an error result BEFORE the handler runs
+      // (dsh-commands `execute`). The fake mirrors it, so an integration test
+      // cannot pass by handing the host a payload it would refuse.
+      if (attachments.length > 0 && def.input?.attachments !== true) {
+        return { result: { kind: 'error', text: `/${name} does not accept attachments` } }
+      }
       const rawInput = line.slice(line.indexOf(name) + name.length)
       const result = await (def.handler as (inv: unknown) => unknown)({
         commandId: CommandId('cmd-test'),
@@ -1619,6 +1627,50 @@ test('an attachment-bearing client command defers to a LATE declared host claim 
   const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
   assert.deepEqual([...delivered.content], [{ type: 'text', text: staged.trim() }], 'the line stays plain text')
 })
+
+// Both agent-facing skill forms: the explicit `/skill <name> ...` invocation
+// (`/skill` is itself a registered TUI command, so the policy must not treat
+// it as a non-declaring HOST command) and a live skill WRAPPER (TUI-owned,
+// no host declaration either). In both, the placeholder line stays on the
+// delivery path and the image is admitted there — never handed to the command
+// plane, whose executor rejects attachments for a command that does not
+// declare them.
+for (const form of [
+  { label: 'explicit /skill <name>', line: (staged: string) => `/skill grilling ${staged.trim()}` },
+  { label: 'skill wrapper', line: (staged: string) => `/grilling ${staged.trim()}` },
+] as const) {
+  test(`a skill invocation with an image stays agent-facing (${form.label})`, async (t) => {
+    const life = testLifecycle(t)
+    const root = life.tempDir('dsh-pi-tui-skill-attachment-')
+    const path = join(root, 'shot.png')
+    await writeFile(path, pngHeader(5, 5))
+    const { harness, mounted, imageSaves } = await bootCommandHarness(t, {
+      busyEnter: 'queue',
+      status: 'idle',
+      skills: true,
+      hostLoadsSkillBody: true,
+      attachments: true,
+    })
+    await waitForSkillWrapper(harness, 'grilling')
+    const staged = await stageAttachmentDraft(mounted, path)
+    assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+    mounted.app.setDraft(form.line(staged))
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    await waitForDelivery(harness.host, `${form.label} with an image`)
+    assert.equal(harness.host.followedUp.length, 1, 'the skill invocation is delivered')
+    assert.ok(!mounted.app.notifyTextForTest().includes('does not accept attachments'),
+      `a skill invocation is never refused as a command: ${mounted.app.notifyTextForTest()}`)
+    assert.equal(imageSaves.length, 1, 'the image is admitted through the agent-facing path')
+    const delivered = harness.host.followedUp[0] as { content: readonly { type: string }[] }
+    assert.ok([...delivered.content].some(block => block.type === 'image'),
+      `the image rides the skill prompt: ${JSON.stringify(delivered.content)}`)
+    // The command plane either never saw the line (wrapper) or carried it with
+    // NO attachments (`/skill`): the host executor would have rejected them.
+    for (const call of harness.executed) {
+      assert.equal(call.attachments.length, 0, `no command-plane payload for ${call.line}`)
+    }
+  })
+}
 
 test('a HOST command that does not declare input.attachments refuses an attachment (web composer parity)', async (t) => {
   // Upstream `CommandUiRuntime` refuses an attachment-bearing invocation of a

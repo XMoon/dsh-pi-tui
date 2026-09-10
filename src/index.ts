@@ -4126,8 +4126,9 @@ export function apply(ctx: Context, config: Config): void {
      * the staged attachments.
      * - a TUI/core local command and a client contribution are UI controls —
      *   refused;
-     * - a LIVE skill wrapper, a `/skill <name>` invocation and a plain prompt
-     *   are agent-facing — delivered to the model;
+     * - an explicit `/skill <name> ...` invocation and a LIVE skill wrapper
+     *   are agent-facing — loadSkill delivers them and their attachments to
+     *   the model (never classified as a command);
      * - a HOST command accepts attachments ONLY when its descriptor declares
      *   `input.attachments` (upstream refuses otherwise before dispatch);
      * - a declared command still refuses a FILE attachment: the host expects
@@ -4139,11 +4140,16 @@ export function apply(ctx: Context, config: Config): void {
       parsed: { name: string; rawInput?: string },
       draft: string,
       isLocalLine: (name: string) => boolean,
+      // The ONE skill-invocation predicate (`isSkillInvocation`: an explicit
+      // `/skill <name> ...` or a live skill wrapper) — TUI-owned agent-facing
+      // input that loadSkill owns. It is supplied rather than re-derived: the
+      // predicate applies the argued-`/skill` short-circuit, and WITHOUT it
+      // the line would fall into the HOST branch below (`/skill` is itself a
+      // registered TUI command) and be refused as a non-declaring command.
+      skillInvocation: boolean,
     ): string | undefined => {
       if (!draftHasAttachments(draft, draftImages, draftFiles)) return undefined
-      // A skill wrapper is TUI-owned agent-facing input even when a client
-      // contribution shares the name.
-      if (isSkillWrapperName?.(parsed.name) === true) return undefined
+      if (skillInvocation) return undefined
       if (!isLocalLine(parsed.name)) {
         if (isHostCommandName?.(parsed.name) === true) {
           if (isHostCommandAcceptingAttachments?.(parsed.name) !== true) {
@@ -4542,12 +4548,23 @@ export function apply(ctx: Context, config: Config): void {
             // same call stack, so a TUI-owned skill handler captures its
             // submission's mode before any await (see withDelivery).
             // The command plane receives the submitted attachments (DSH
-            // `CommandSubmitAttachment`): the gate already proved that the
-            // resolved command DECLARES `input.attachments` and that the line
-            // carries images only, so this is the web composer's
-            // `leadingClaim.submit(args, attachments)` path — the host admits
-            // them through its own store before the handler runs.
-            return withCommandDelivery(delivery, () => commands.execute(agent as Agent, toggled, commandSubmitAttachments(text), signal))
+            // `CommandSubmitAttachment`) ONLY for a HOST command that
+            // DECLARES `input.attachments` — the web composer's
+            // `leadingClaim.submit(args, attachments)` path; the host admits
+            // them through its own store before the handler runs. A
+            // TUI-owned command must never carry them on this wire: its
+            // descriptor does not declare attachments (`/skill <name>` is
+            // itself a registered TUI command, and a live skill wrapper is
+            // TUI-owned too), so the host executor would reject the
+            // invocation BEFORE the handler — their placeholder line is
+            // delivered as-is and the images are admitted by the delivery
+            // path (loadSkill → prepareUserMessage).
+            const submittedAttachments = parsedAtSubmit !== undefined
+              && isHostCommandName?.(parsedAtSubmit.name) === true
+              && isHostCommandAcceptingAttachments?.(parsedAtSubmit.name) === true
+              ? commandSubmitAttachments(text)
+              : []
+            return withCommandDelivery(delivery, () => commands.execute(agent as Agent, toggled, submittedAttachments, signal))
           }, {
             diag,
             sessionId: () => agent.session.id,
@@ -5265,7 +5282,7 @@ export function apply(ctx: Context, config: Config): void {
         && extensionService?.commands.find(parsed.name)?.sessionless === false
         && localForAttachments(parsed.name)
       if (!deferredClientAttachments && parsed !== undefined) {
-        const refusal = attachmentRefusal(parsed, text, localForAttachments)
+        const refusal = attachmentRefusal(parsed, text, localForAttachments, isSkillInvocation(parsed, text))
         if (refusal !== undefined) {
           app.setEditorText(mergeDraft(app.getDraft(), text))
           app.notify(refusal, 'error')
@@ -5349,7 +5366,7 @@ export function apply(ctx: Context, config: Config): void {
             // delivers to the model; a contribution that keeps the line
             // refuses as a local command — the synchronous gate's outcome,
             // only now final.
-            const refusal = attachmentRefusal(parsed, text, localForAttachments)
+            const refusal = attachmentRefusal(parsed, text, localForAttachments, isSkillInvocation(parsed, text))
             if (refusal !== undefined) {
               restoreSubmissionDraft(text)
               app.notify(refusal, 'error')
