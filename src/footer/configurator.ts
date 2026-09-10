@@ -172,6 +172,13 @@ export class FooterConfiguratorPanel implements Component {
     this.onSave = options.onSave
     this.onCancel = options.onCancel
     this.handleInput = (data: string): void => {
+      // Any keyboard input ends the mouse gesture identity: the
+      // layout/item semantic mutations (Enter/Space/A/M/F/arrows/Esc)
+      // can move a different item onto the pressed cell, so a later
+      // synthesized click must not match the stale ordinal target
+      // (press A → Space removes A → B moves onto the same cell →
+      // release must not activate B).
+      this.mousePressedAction = undefined
       const state = this.model.state()
       // A save in flight freezes INPUT (PR E §10): the draft captured for
       // the pending write must stay the draft on screen, duplicate

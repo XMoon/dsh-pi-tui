@@ -1664,6 +1664,36 @@ test('configurator: exit-confirm click cannot transfer to a different action aft
   app.stop()
 })
 
+test('configurator: keyboard mutation between press and release cannot transfer the click (mouse parity)', async () => {
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const model = openWith(app)
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1 (row mode)
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  const frameTop = viewport.findIndex(line => line.includes('╭'))
+  assert.ok(frameTop >= 0, `frame top missing:\n${viewport.join('\n')}`)
+  const screenRow = frameTop + 1 + 7 // panel local y 7 = first item (View scope)
+  const leftBorder = viewport[screenRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, `left border missing on row ${screenRow}`)
+  // Press the first item (no release yet): the gesture identity is the
+  // select semantic target.
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${screenRow + 1}M`)
+  await vt.waitForRender()
+  // Keyboard removes the pressed item: the next item moves onto the same
+  // physical row (and the same ordinal target).
+  vt.sendInput(' ')
+  await vt.waitForRender()
+  // Release on the SAME absolute cell: the synthesized click must NOT
+  // activate the item that moved onto the pressed cell.
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${screenRow + 1}m`)
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'row', 'the transferred click must not open the replacement item')
+  app.stop()
+})
+
 test('configurator: the preview block is inert (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
