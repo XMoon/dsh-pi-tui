@@ -559,3 +559,54 @@ test('resize keeps the click map aligned: secondary closes first, then the root 
   app.setFullscreen(false)
   app.stop()
 })
+
+test('a press on a Thought cannot transfer across a session switch (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  const folderA = new TranscriptFolder()
+  applyMixed(folderA, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', { id: MessageId('ua'), role: 'user', content: [{ type: 'text', text: 'alpha' }], source: { kind: 'user' } }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'alpha thinking' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('ca'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, T0 + 3, 3),
+  ])
+  const folderB = new TranscriptFolder()
+  applyMixed(folderB, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', { id: MessageId('ub'), role: 'user', content: [{ type: 'text', text: 'beta' }], source: { kind: 'user' } }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'beta thinking' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('cb'), name: 'read', arguments: JSON.stringify({ path: 'b.ts' }) }, T0 + 3, 3),
+  ])
+  app.setFocusMode(true)
+  show(app, folderA)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const headerY = findRow(view, '🐋 Thought')
+  assert.ok(headerY >= 0, `Thought A header missing:\n${view.join('\n')}`)
+  // Press Thought A's header (no release): the press-time identity is
+  // activity:1:<tokenA>.
+  vt.sendInput(`\x1b[<0;3;${headerY + 1}M`)
+  await vt.waitForRender()
+  // Session switch while the mouse is held: the new session reuses turn 1
+  // (the session boundary also cancels the in-flight gesture).
+  app.clearSessionOverrides()
+  show(app, folderB)
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  const headerB = findRow(after, '🐋 Thought')
+  assert.ok(headerB >= 0, `Thought B header missing:\n${after.join('\n')}`)
+  assert.equal(headerB, headerY, `Thought B must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the same cell: the click must NOT expand Thought B (the
+  // press identity belongs to session A's activity object).
+  vt.sendInput(`\x1b[<0;3;${headerY + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  assert.ok(final.join('\n').includes('🐋 Thought'), `the stale session press must not expand Thought B:\n${final.join('\n')}`)
+  // A fresh press/release on Thought B expands it (the identity is B's;
+  // a different column so the fork never reads a double-click).
+  click(vt, 20, headerY + 1)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('🐳 Thought'), `a fresh press must expand Thought B:\n${vt.getViewport().join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})

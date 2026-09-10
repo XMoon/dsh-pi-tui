@@ -1014,6 +1014,53 @@ test('fullscreen click on the todo summary dock row opens the todo panel', async
   app.stop()
 })
 
+test('fullscreen todo: a dock press cannot run the panel action after a keyboard toggle (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 9 }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? ('in_progress' as const) : i % 3 === 1 ? ('pending' as const) : ('completed' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
+  assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
+  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
+  // at the bottom on the 80x24 test terminal; the closed panel renders
+  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
+  // row).
+  const dockY = 18
+  // Press the dock row (no release): the press identity is todo:dock.
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  await vt.waitForRender()
+  // Keyboard todo-toggle (Ctrl+T) while the mouse is held: the panel
+  // opens, the dock vanishes, and the same physical cell becomes a panel
+  // row.
+  vt.sendInput('\x14')
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(app.isTodoPanelVisible(), 'the keyboard toggle must open the panel')
+  assert.ok(!app.isTodoPanelExpanded(), 'opens compact')
+  assert.ok((view[dockY] ?? '').includes('todo item'), `the pressed cell must now be a panel row:\n${view.join('\n')}`)
+  // Release on the same cell: the click must NOT run the panel action
+  // (the press identity is todo:dock, the current surface is the panel).
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'the panel must stay open')
+  assert.ok(!app.isTodoPanelExpanded(), `the dock press must not expand the panel:\n${vt.getViewport().join('\n')}`)
+  // A fresh panel press/release runs the panel action (compact → full).
+  await sleepBeyondTodoCoalesce()
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelExpanded(), `a fresh panel press must expand the panel:\n${vt.getViewport().join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -1142,6 +1189,45 @@ test('fullscreen transcript click: a resize + repaint between press and release 
   await vt.waitForRender()
   const final = vt.getViewport()
   assert.equal(final.filter(line => line.includes('AAA')).length, 1, `the cross-frame release must not expand the message:\n${final.join('\n')}`)
+  app.stop()
+})
+
+test('fullscreen transcript click: a question-frame press clears the stale background gesture (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release): the press-time identity is A.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // A question takes over the seat (its frame covers the bottom rows).
+  const answers = app.askQuestions([{ id: 'q1', question: 'Q1', options: [{ label: 'Yes' }] }])
+  answers.catch(() => {})
+  await vt.waitForRender()
+  // Press the SAME row again while the question is up — at a DIFFERENT
+  // column (a different word, so the fork never reads a double-click):
+  // the question branch must clear the stale background gesture — a
+  // release after the question closes must not resurrect it.
+  vt.sendInput(`\x1b[<0;20;${row + 1}M`)
+  await vt.waitForRender()
+  // Esc closes the question before the mouse release.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  // Release on the same cell: the click must NOT toggle the background
+  // message (the stale gesture was cleared by the question-frame press).
+  vt.sendInput(`\x1b[<0;20;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  assert.equal(final.filter(line => line.includes('AAA')).length, 1, `the stale background gesture must not toggle the message:\n${final.join('\n')}`)
+  answers.catch(() => {})
   app.stop()
 })
 

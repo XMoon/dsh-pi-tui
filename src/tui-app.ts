@@ -3887,6 +3887,12 @@ export class TuiApp {
     }
     this.terminalSchemeListeners.clear()
     this.expandedOverride.clear()
+    // A session switch is a pointer-gesture boundary too: the new session
+    // can reuse the same turn numbers, so an in-flight press from the old
+    // session must never resolve against the new session's projection
+    // (the per-object identity token already rejects it; the boundary
+    // clear makes the cancellation explicit).
+    this.fullscreenCellGesture = undefined
     this.disposeMessageComponents()
     this.localMessages.length = 0
     // The transcript-search overlay dies with the surface: stale handles
@@ -5264,8 +5270,8 @@ export class TuiApp {
     // The press-time identity token follows the logical card across the
     // running → settled object replacement: a press on the running card
     // must still match the settled card at release (mouse parity).
-    const token = this.messageIdentityTokens.get(message)
-    if (token !== undefined) this.messageIdentityTokens.set(next, token)
+    const token = this.identityTokens.get(message)
+    if (token !== undefined) this.identityTokens.set(next, token)
     this.localMessages[index] = next
     this.rebuildMessages()
     return next
@@ -5277,8 +5283,8 @@ export class TuiApp {
     if (index < 0) return
     // The press-time identity token follows the logical card across the
     // running → settled object replacement (mouse parity).
-    const token = this.messageIdentityTokens.get(this.localMessages[index]!)
-    if (token !== undefined) this.messageIdentityTokens.set(message, token)
+    const token = this.identityTokens.get(this.localMessages[index]!)
+    if (token !== undefined) this.identityTokens.set(message, token)
     this.localMessages[index] = message
     this.rebuildMessages()
   }
@@ -7091,38 +7097,39 @@ export class TuiApp {
     }
   }
 
-  /** Stable per-message identity tokens for the fullscreen press-time
+  /** Stable per-object identity tokens for the fullscreen press-time
    * identity (mouse parity): content-derived kind+turn is NOT unique —
-   * local shell cards all carry turn Infinity, and parallel/sequential
-   * tool calls can share kind+turn — and the projection index shifts
-   * when a card is removed. The token is assigned to the message OBJECT
-   * (stable across rebuilds, which reuse the same objects) and
-   * transferred on a running → settled replacement (updateLocalMessage /
-   * updateLastLocalMessage), so the same logical card keeps its identity
-   * across the object swap. */
-  private readonly messageIdentityTokens = new WeakMap<TranscriptMessage, number>()
-  private messageIdentityCounter = 0
+   * local shell cards all carry turn Infinity, parallel/sequential tool
+   * calls can share kind+turn, and a NEW session can reuse the same turn
+   * numbers — and the projection index shifts when a card is removed.
+   * The token is assigned to the message/activity OBJECT (stable across
+   * rebuilds, which reuse the same objects; activities are mutated in
+   * place) and transferred on a running → settled replacement
+   * (updateLocalMessage / updateLastLocalMessage), so the same logical
+   * card keeps its identity across the object swap. */
+  private readonly identityTokens = new WeakMap<object, number>()
+  private identityTokenCounter = 0
 
-  private messageIdentityToken(message: TranscriptMessage): number {
-    let token = this.messageIdentityTokens.get(message)
+  private identityToken(target: object): number {
+    let token = this.identityTokens.get(target)
     if (token === undefined) {
-      token = this.messageIdentityCounter
-      this.messageIdentityCounter += 1
-      this.messageIdentityTokens.set(message, token)
+      token = this.identityTokenCounter
+      this.identityTokenCounter += 1
+      this.identityTokens.set(target, token)
     }
     return token
   }
 
   /** The press-time semantic identity of a transcript row (mouse parity):
-   * the message/activity owner (kind + turn + the per-message identity
+   * the message/activity owner (kind + turn + the per-object identity
    * token, or the entry index for ownerless rows). Shared by the
    * paint-snapshot commit and the release-click validation so both sides
    * compute the EXACT same identity string. */
   private fullscreenRowOwnerId(entry: { message?: TranscriptMessage; activity?: TurnActivity }, entryIndex: number): string {
     return entry.message !== undefined
-      ? `msg:${entry.message.kind}:${'turn' in entry.message ? entry.message.turn : 0}:${this.messageIdentityToken(entry.message)}`
+      ? `msg:${entry.message.kind}:${'turn' in entry.message ? entry.message.turn : 0}:${this.identityToken(entry.message)}`
       : entry.activity !== undefined
-        ? `turn:${entry.activity.turn}`
+        ? `activity:${entry.activity.turn}:${this.identityToken(entry.activity)}`
         : `entry:${entryIndex}`
   }
 
@@ -7171,6 +7178,11 @@ export class TuiApp {
     // the click to a different target).
     const question = this.activeQuestions
     if (question?.frame !== undefined) {
+      // The question owns the modal front: any pre-question todo/transcript
+      // gesture is dead — a press inside the frame must not leave a stale
+      // background identity that a later release (after the question
+      // closes) could resurrect.
+      this.fullscreenCellGesture = undefined
       // A stale-geometry press cannot name a valid target: consume any
       // prior gesture so a later release can never match it.
       if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) {
@@ -7217,13 +7229,23 @@ export class TuiApp {
     // The todo dock/panel is ONE semantic target (the first click MUTATES
     // the layout — the dock vanishes, the panel takes its rows): record
     // the todo identity so a release on the repainted panel still acts.
+    // The dock and the panel are DISTINCT press identities (they run
+    // different actions — toggleTodoPanel vs handleTodoPanelClick): a
+    // keyboard todo-toggle between press and release repaints the dock
+    // into the panel, and the same cell must not run the panel action
+    // for a dock press.
     const height = snapshot.termRows
     const todoBottom = Math.max(0, Math.min(height, height - snapshot.footerHeight - snapshot.editorHeight - snapshot.workingHeight - snapshot.queueHeight - snapshot.goalHeight))
     const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
     const inDock = snapshot.dockHeight > 0 && y >= todoTop - snapshot.dockHeight && y < todoTop
     const inPanel = todoTop < todoBottom && y >= todoTop && y < todoBottom
     if (inDock || inPanel) {
-      this.fullscreenCellGesture = { ownerId: 'todo', row: 0, columns: snapshot.columns, termRows: snapshot.termRows }
+      this.fullscreenCellGesture = {
+        ownerId: inDock ? 'todo:dock' : 'todo:panel',
+        row: 0,
+        columns: snapshot.columns,
+        termRows: snapshot.termRows,
+      }
       return
     }
     // Transcript cells: record the press-time semantic identity (the
@@ -7253,7 +7275,12 @@ export class TuiApp {
       // The question owns the modal front: EVERY click while a question is
       // up is captured here (in-frame clicks route to the flow; out-of-frame
       // clicks and the stale-geometry window are ignored) — background todo/
-      // transcript interaction must not be reachable behind the modal.
+      // transcript interaction must not be reachable behind the modal. Any
+      // pre-question todo/transcript gesture is dead at branch entry (a
+      // cross-mode close before the release must not resurrect it on the
+      // background surface) — cleared BEFORE the stale-geometry guard, so
+      // a release that hits the resize-mismatch early return also drops it.
+      this.fullscreenCellGesture = undefined
       // Stale-geometry guard: between a terminal resize (rows OR columns —
       // a width change rewraps the body and shifts the flow's hit map) and
       // the next repaint, the frame's rendered height and hit map still
@@ -7263,10 +7290,6 @@ export class TuiApp {
         this.questionPressGesture = undefined
         return
       }
-      // The question owns the modal front: any pre-question todo/transcript
-      // gesture is dead (a cross-mode close before the release must not
-      // resurrect it on the background surface).
-      this.fullscreenCellGesture = undefined
       const width = this.terminal.columns
       const height = this.terminal.rows
       const footerHeight = this.footer.render(width).length
@@ -7347,17 +7370,25 @@ export class TuiApp {
     // the panel without the todo-toggle action.
     const inPanel = todoTop < todoBottom && y >= todoTop && y < todoBottom
     if (inDock || inPanel) {
-      // The dock and the panel are ONE semantic target, and the first
+      // The dock and the panel are ONE coalescing family, and the first
       // click MUTATES the layout (the dock vanishes, the panel takes its
       // rows): a rapid second click at the same coordinate would land on
       // the panel and immediately undo the first — the todo "flashes and
       // vanishes". Pi's double-click detection cannot see the pair (the
       // word range under the coordinate changed), so coalesce the whole
-      // target here: a second todo click inside the window is one gesture.
-      // The release may only act on a press that named the todo identity
-      // (a repaint between press and release must not transfer the click
-      // to whatever moved onto the cell).
-      if (this.fullscreenCellGesture?.ownerId !== 'todo') {
+      // family here: a second todo click inside the window is one gesture.
+      // The release may only act on the EXACT surface it pressed: a dock
+      // press must still be on the dock, a panel press on the panel (a
+      // keyboard todo-toggle between press and release repaints the dock
+      // into the panel — the same cell must not run the panel action for
+      // a dock press). The coalescing identity and the press semantic
+      // identity are different concepts.
+      const pressed = this.fullscreenCellGesture
+      if (pressed === undefined || (pressed.ownerId !== 'todo:dock' && pressed.ownerId !== 'todo:panel')) {
+        this.fullscreenCellGesture = undefined
+        return
+      }
+      if ((pressed.ownerId === 'todo:dock') !== inDock) {
         this.fullscreenCellGesture = undefined
         return
       }
