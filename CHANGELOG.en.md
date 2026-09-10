@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no-argument/save-location UX as `/export`.
 - **Welcome card visual refresh.** The session-head card now shows an original round-backed whale ASCII mascot (five variants, one picked per process) with three responsive layouts: side-by-side (whale left, facts right) at 72+ columns, stacked (whale centered above the facts) at 24–71 columns, and a compact text layout (🐋 title) below 24 columns. The whale keeps a fixed cyan → blue brand gradient that does not follow theme switches; facts still render in full (long values wrap, never truncate); the idle invitation, the `setWelcomeCard()` contract, and fullscreen scroll/anchor/click mapping are unchanged.
 
+### Changed
+
+- **Updated builtin default Footer layout.** The default statusline (no custom Footer) now uses two rows: row 1 keeps permission, model, tasks, cwd, branch and extension items on the left, with plan state and Focus Mode on the right; row 2 composes token usage, cache hit, TTFB, throughput and the turn/step counters on the left (the semantic decomposition of the stats line), with the full context pressure (`used/window (percent)`) on the right. Users with a saved custom `footerLayout` are unaffected.
+
 ## [0.4.3-alpha.2] - 2026-09-08
 
 ### Installation and version pairing
