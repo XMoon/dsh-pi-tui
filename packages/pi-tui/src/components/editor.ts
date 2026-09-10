@@ -844,6 +844,12 @@ export class Editor implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		// Any keyboard input terminates an unfinished autocomplete mouse
+		// gesture: the document mutation can change the slash prefix while
+		// the OLD suggestion list is still current and painted — a release
+		// on the old cell must never submit the newly changed draft (the
+		// stale /help onSelect would submit /hex).
+		this.mousePressedAutocompleteList = undefined;
 		const kb = getKeybindings();
 
 		// Handle character jump mode (awaiting next character to jump to)

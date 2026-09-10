@@ -5293,4 +5293,39 @@ describe("Editor autocomplete painted-list identity (mouse parity)", () => {
 		editor.handleMouse(mouse("click", row));
 		assert.strictEqual(submitted, "", "a click without a fresh press must not submit");
 	});
+
+	it("a keyboard document mutation cancels the pending autocomplete press (no stale slash submit)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/help", label: "help" }], prefix: "/he" };
+				}
+				if (prefix === "/hex") {
+					return { items: [{ value: "/hex", label: "hex" }], prefix: "/hex" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		const row = await openAutocomplete(editor, "help");
+		// Press the /help suggestion (no release yet).
+		editor.handleMouse(mouse("press", row));
+		// Keyboard mutates the document: /he → /hex. The new autocomplete
+		// request is async; the OLD list is still current and painted.
+		editor.handleInput("x");
+		// DO NOT await the new autocomplete / repaint.
+		// Release on the old suggestion cell: the stale press must NOT
+		// submit the mutated draft.
+		editor.handleMouse(mouse("click", row));
+		assert.strictEqual(submitted, "", "the stale autocomplete press must not submit");
+		assert.strictEqual(editor.getText(), "/hex", "the draft must stay /hex");
+	});
 });
