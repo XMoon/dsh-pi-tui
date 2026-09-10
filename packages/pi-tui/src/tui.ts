@@ -424,11 +424,20 @@ export class Container implements Component, Focusable {
 	private liveFocusedChild(): Component | undefined {
 		const child = this.focusedChild;
 		if (child !== undefined && this.children.includes(child)) return child;
+		this.clearFocusedChild();
+		return undefined;
+	}
+
+	/** Drop the focused-child reference and clear the child's focused
+	 * flag (IME/hardware-cursor state must not survive a detach — a
+	 * removed child re-mounted elsewhere must not keep CURSOR_MARKER).
+	 * (dsh-pi-tui divergence X051 hardening.) */
+	private clearFocusedChild(): void {
+		const child = this.focusedChild;
 		if (child !== undefined && isFocusable(child)) {
 			child.focused = false;
 		}
 		this.focusedChild = undefined;
-		return undefined;
 	}
 
 	addChild(component: Component): void {
@@ -439,7 +448,7 @@ export class Container implements Component, Focusable {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
-			if (this.focusedChild === component) this.focusedChild = undefined;
+			if (this.focusedChild === component) this.clearFocusedChild();
 			// Removal ends ownership: release the child's resources.
 			// (dsh-pi-tui divergence X007.)
 			component.dispose?.();
@@ -452,7 +461,7 @@ export class Container implements Component, Focusable {
 		// skip the remaining children.
 		const children = this.children;
 		this.children = [];
-		this.focusedChild = undefined;
+		this.clearFocusedChild();
 		for (const child of children) child.dispose?.();
 	}
 
@@ -467,7 +476,7 @@ export class Container implements Component, Focusable {
 	dispose(): void {
 		const children = this.children;
 		this.children = [];
-		this.focusedChild = undefined;
+		this.clearFocusedChild();
 		for (const child of children) child.dispose?.();
 	}
 

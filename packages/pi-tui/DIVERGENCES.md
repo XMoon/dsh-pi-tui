@@ -4196,7 +4196,7 @@ showOverlay accepts any Component as the overlay root, and the overlay focus sta
 - in a multi-child root only the CLICKED child receives focus and keys (no fan-out)
 - removing/clearing/disposing the focused child clears the forwarding reference
 - the TUI root (TuiBase) never promotes its own children's focus to itself
-- replacing `children` directly (the public structural mutation contract) drops the old focused child at the next paint: keyboard input / focused / wantsKeyRelease never reach it, the replacement does not implicitly inherit focus, re-mounting the old child later does not resurrect the stale identity, the detached child's focused flag is cleared, and a fresh press re-establishes the focus owner
+- replacing `children` directly (the public structural mutation contract) drops the old focused child at the next paint: keyboard input / focused / wantsKeyRelease never reach it, the replacement does not implicitly inherit focus, re-mounting the old child later does not resurrect the stale identity, the detached child's focused flag is cleared, and a fresh press re-establishes the focus owner; removeChild/clear/dispose also clear the detached child's focused flag (a removed Input re-mounted elsewhere must not keep CURSOR_MARKER)
 - Audit note: Regression tests cover the single-child root, the multi-child no-fan-out case, the removal lifecycle, and the TUI-root focus identity.
 
 #### Guarding tests
@@ -4205,6 +4205,7 @@ showOverlay accepts any Component as the overlay root, and the overlay focus sta
 - packages/pi-tui/test/tui-alt-screen.test.ts: a wantsKeyRelease child receives Kitty key releases through a Container overlay root and through a Box overlay root
 - packages/pi-tui/test/tui-alt-screen.test.ts: direct `children` replacement in a Container and in a Box drops the old focused child (no keyboard input to the detached child, no implicit focus transfer, a fresh press re-establishes the owner); a detached focused child's wantsKeyRelease does not leak
 - packages/pi-tui/test/tui-alt-screen.test.ts: A→B→A direct `children` replacement in a Container and in a Box does not resurrect the stale focus owner (keyboard input after re-mounting the old child reaches nothing; the detached child's focused flag is cleared; a fresh press re-establishes the owner)
+- packages/pi-tui/test/tui-alt-screen.test.ts: removeChild/clear/dispose in a Container and removeChild/clear in a Box clear the detached focused child's focused flag (a re-mounted Input must not keep the IME/hardware-cursor state)
 
 #### Upstream comparison
 

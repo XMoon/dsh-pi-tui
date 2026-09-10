@@ -3055,3 +3055,78 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		assert.strictEqual(first.getValue(), "x", "a fresh press must re-establish the focus owner");
 		tui.stop();
 	});
+
+	it("clears the focused flag on removeChild/clear/dispose in a Container (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const root = new Container();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		// removeChild: the detached child must not keep the focused flag
+		// (IME/hardware-cursor state) — a re-mount elsewhere must not show
+		// a stale CURSOR_MARKER.
+		root.removeChild(first);
+		assert.strictEqual(first.focused, false, "removeChild must clear the focused flag");
+		// clear: same contract.
+		const second = new Input();
+		root.addChild(second);
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(second.focused, true, "the pressed Input must receive the focused flag");
+		root.clear();
+		assert.strictEqual(second.focused, false, "clear must clear the focused flag");
+		// dispose: same contract.
+		const third = new Input();
+		root.addChild(third);
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(third.focused, true, "the pressed Input must receive the focused flag");
+		root.dispose();
+		assert.strictEqual(third.focused, false, "dispose must clear the focused flag");
+		tui.stop();
+	});
+
+	it("clears the focused flag on removeChild/clear in a Box (X051 liveness)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const first = new Input();
+		const root = new Box();
+		root.addChild(first);
+		tui.showOverlay(root);
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(first.focused, true, "the pressed Input must receive the focused flag");
+		root.removeChild(first);
+		assert.strictEqual(first.focused, false, "removeChild must clear the focused flag");
+		const second = new Input();
+		root.addChild(second);
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;2;2M");
+		terminal.sendInput("\x1b[<0;2;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(second.focused, true, "the pressed Input must receive the focused flag");
+		root.clear();
+		assert.strictEqual(second.focused, false, "clear must clear the focused flag");
+		tui.stop();
+	});

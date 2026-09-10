@@ -68,11 +68,20 @@ export class Box implements Component, Focusable {
 	private liveFocusedChild(): Component | undefined {
 		const child = this.focusedChild;
 		if (child !== undefined && this.children.includes(child)) return child;
+		this.clearFocusedChild();
+		return undefined;
+	}
+
+	/** Drop the focused-child reference and clear the child's focused
+	 * flag (IME/hardware-cursor state must not survive a detach — a
+	 * removed child re-mounted elsewhere must not keep CURSOR_MARKER).
+	 * (dsh-pi-tui divergence X051 hardening.) */
+	private clearFocusedChild(): void {
+		const child = this.focusedChild;
 		if (child !== undefined && isFocusable(child)) {
 			child.focused = false;
 		}
 		this.focusedChild = undefined;
-		return undefined;
 	}
 
 	// Cache for rendered output
@@ -94,7 +103,7 @@ export class Box implements Component, Focusable {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
-			if (this.focusedChild === component) this.focusedChild = undefined;
+			if (this.focusedChild === component) this.clearFocusedChild();
 			this.invalidateCache();
 			// Removal ends ownership: release the child's resources, exactly
 			// like Container.removeChild (dsh-pi-tui divergence X007).
@@ -108,7 +117,7 @@ export class Box implements Component, Focusable {
 		// the remaining children.
 		const children = this.children;
 		this.children = [];
-		this.focusedChild = undefined;
+		this.clearFocusedChild();
 		this.invalidateCache();
 		for (const child of children) child.dispose?.();
 	}
