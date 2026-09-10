@@ -1044,3 +1044,95 @@ test('keybinding list: a click on an inert row releases the pressed identity (no
     manager.dispose()
   }
 })
+
+test('keyboard mode transition cancels a pending mouse identity (mouse parity)', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+  })
+  try {
+    // Edit mode: find the "+ Add shortcut" row.
+    const rendered = plain(editor.render(88).join('\n'))
+    const addRow = rendered.split('\n').findIndex(line => line.includes('Add shortcut'))
+    assert.ok(addRow >= 0, 'Add shortcut row missing')
+    // Press "+ Add shortcut" (no release yet): the press-time identity
+    // is the edit-mode "add" key.
+    const press = editor.handleMouse(mouse('press', 10, addRow, 88, 30))
+    assert.ok(press?.handled, 'press on Add must be handled')
+    // Keyboard Enter: the current selection is Add → mode switches to
+    // choose-binding. The keyboard transition must CANCEL the pending
+    // mouse identity (an edit-mode press must never be reinterpreted as
+    // a choose-binding choice on release).
+    editor.handleInput('\r')
+    // DO NOT render: the hit map is still the edit-mode paint.
+    // Release on the same cell: the click must NOT start a leader
+    // recorder from the stale edit-mode press.
+    editor.handleMouse(mouse('click', 10, addRow, 88, 30))
+    const state = editor as unknown as { mode: string; recorder: unknown }
+    assert.equal(state.mode, 'choose-binding', 'the mode must stay choose-binding')
+    assert.equal(state.recorder, undefined, 'no recorder may start from the stale press')
+    // A fresh press on a choose-binding row still works.
+    const directRow = plain(editor.render(88).join('\n')).split('\n').findIndex(line => line.includes('Direct shortcut'))
+    assert.ok(directRow >= 0, 'Direct shortcut row missing')
+    editor.handleMouse(mouse('press', 10, directRow, 88, 30))
+    editor.handleMouse(mouse('click', 10, directRow, 88, 30))
+    assert.ok((editor as unknown as { recorder: unknown }).recorder !== undefined, 'a fresh press must start the recorder')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: keyboard mode transition before repaint cannot start a leader recorder (mouse parity)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ leader: 'ctrl+q' })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const panel = new KeybindingEditorPanel({
+    model,
+    onClose: () => {},
+    runMutation: () => {},
+    maxRows: () => 18,
+  })
+  app.openKeybindingEditor(panel)
+  await vt.waitForRender()
+  // Open the first action's editor (edit mode).
+  let viewport = vt.getViewport()
+  const actionRow = viewport.findIndex(line => line.includes('Submit draft'))
+  assert.ok(actionRow >= 0, `action row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[actionRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${actionRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${actionRow + 1}m`)
+  await vt.waitForRender()
+  // The ActionEditor is open in edit mode: find "+ Add shortcut".
+  viewport = vt.getViewport()
+  const addRow = viewport.findIndex(line => line.includes('Add shortcut'))
+  assert.ok(addRow >= 0, `Add shortcut row missing:\n${viewport.join('\n')}`)
+  // ONE continuous input batch: press Add, Enter (mode → choose-binding),
+  // release Add — all BEFORE the next repaint. The stale edit-mode
+  // press must NOT be reinterpreted as a choose-binding leader choice.
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${addRow + 1}M`)
+  vt.sendInput('\r')
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${addRow + 1}m`)
+  await vt.waitForRender()
+  // The editor stays on the choose-binding page; no recorder starts.
+  viewport = vt.getViewport()
+  assert.ok(viewport.some(line => line.includes('Choose what to record')), `the choose-binding page must show:\n${viewport.join('\n')}`)
+  assert.ok(!viewport.some(line => line.includes('Record shortcut')), 'no recorder may start from the stale press')
+  app.stop()
+})

@@ -269,6 +269,13 @@ export class ActionEditorPanel implements Component {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // Any keyboard input terminates an unfinished mouse gesture: the
+    // semantic state machine (Enter → choose-binding, a → choose-binding,
+    // Esc, mutations, recorder transitions) can reinterpret a pressed
+    // edit-mode key as a different action on release — an edit-mode
+    // "+ Add shortcut" press followed by Enter must never start a leader
+    // recorder when the release click lands before the repaint.
+    this.mousePressedKey = undefined
     if (this.recorder !== undefined) {
       if (this.row.safeMode) {
         this.recorder.handleInput('\x1b')
