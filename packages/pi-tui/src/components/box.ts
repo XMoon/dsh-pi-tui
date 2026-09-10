@@ -94,6 +94,13 @@ export class Box implements Component, Focusable {
 		this.bgFn = bgFn;
 	}
 
+	/** The box's padding (the TuiAltScreen painted-placement liveness
+	 * check re-derives a nested child's painted origin from it).
+	 * (dsh-pi-tui divergence X018 hardening.) */
+	getPadding(): { x: number; y: number } {
+		return { x: this.paddingX, y: this.paddingY };
+	}
+
 	addChild(component: Component): void {
 		this.children.push(component);
 		this.invalidateCache();

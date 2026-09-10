@@ -63,6 +63,10 @@ export class SettingsList implements Component, Focusable {
 	 * started on the main list (or a previous submenu) must not be
 	 * forwarded to a submenu created AFTER the press. */
 	private mousePressedGeneration: number | undefined;
+	/** The submenu instance the LAST paint actually drew (mouse parity):
+	 * a live-but-unpainted submenu must not receive a fresh mouse
+	 * gesture. */
+	private paintedSubmenuComponent: Component | null = null;
 	/** Caller-configured item cap; the host may lower it for a short frame. */
 	private configuredMaxVisible: number;
 	private maxVisible: number;
@@ -193,6 +197,11 @@ export class SettingsList implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		// The painted owner: a submenu that exists in live state but has
+		// not been painted yet must not receive mouse events (the user
+		// still sees the main list). (dsh-pi-tui divergence X042 mouse
+		// parity.)
+		this.paintedSubmenuComponent = this.submenuComponent;
 		// If submenu is active, render it instead
 		if (this.submenuComponent) {
 			return this.submenuComponent.render(width);
@@ -379,6 +388,11 @@ export class SettingsList implements Component, Focusable {
 			this.mousePressedId = undefined;
 		}
 		if (this.submenuComponent) {
+			// The submenu must be the PAINTED owner: a live-but-unpainted
+			// submenu (opened by a click whose repaint is still queued)
+			// must not receive a fresh mouse gesture — the user still sees
+			// the main list. (dsh-pi-tui divergence X042 mouse parity.)
+			if (this.submenuComponent !== this.paintedSubmenuComponent) return undefined;
 			// The submenu is a DIFFERENT semantic owner: a press that
 			// started on the main list (or a previous submenu) must not be
 			// forwarded to a submenu created AFTER the press — the

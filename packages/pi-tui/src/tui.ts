@@ -710,6 +710,18 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 		return false;
 	}
+
+	/** The last-painted child layout of a Container/Box (the cached child
+	 * heights from the most recent render). The TuiAltScreen
+	 * painted-placement liveness check walks this to re-derive a nested
+	 * descendant's CURRENT painted origin after an internal reflow.
+	 * (dsh-pi-tui divergence X018 hardening.) */
+	protected getContainerMouseLayout(
+		component: Component,
+	): { width: number; children: Array<{ component: Component; height: number }> } | undefined {
+		return (component as { mouseLayout?: { width: number; children: Array<{ component: Component; height: number }> } })
+			.mouseLayout;
+	}
 	private overlayFocusRestore: OverlayFocusRestoreState = { status: "inactive" };
 
 	constructor(terminal: Terminal, showHardwareCursor?: boolean, logDirectory?: string) {

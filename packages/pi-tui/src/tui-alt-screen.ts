@@ -769,6 +769,27 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return this.isComponentLive(target.component);
 	}
 
+	/** Re-derive a nested descendant's CURRENT painted origin inside an
+	 * overlay root from the last-painted child layouts (Box padding +
+	 * preceding sibling heights). Returns undefined when the target is not
+	 * painted under the root. (dsh-pi-tui divergence X018 hardening.) */
+	private overlayChildOrigin(root: Component, target: Component): { x: number; y: number } | undefined {
+		const layout = this.getContainerMouseLayout(root);
+		if (layout === undefined) return root === target ? { x: 0, y: 0 } : undefined;
+		// Box padding: the child content starts after paddingX/paddingY.
+		const padding = (root as { getPadding?: () => { x: number; y: number } }).getPadding?.() ?? { x: 0, y: 0 };
+		let y = padding.y;
+		for (const { component, height } of layout.children) {
+			if (component === target) return { x: padding.x, y };
+			if ((component as Container).children !== undefined) {
+				const nested = this.overlayChildOrigin(component, target);
+				if (nested !== undefined) return { x: padding.x + nested.x, y: y + nested.y };
+			}
+			y += height;
+		}
+		return undefined;
+	}
+
 	/** Whether the gesture target's CURRENT painted placement matches the
 	 * press-time placement: a still-mounted component whose overlay moved
 	 * or reflowed (e.g. a centered overlay that grew after the press
@@ -783,13 +804,26 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		for (const layout of this.renderedOverlayLayouts) {
 			if (this.componentTreeContains(layout.entry.component, target.component)) {
 				const press = this.mousePressOverlayPlacement;
+				if (
+					press === undefined ||
+					press.entry !== layout.entry ||
+					layout.col !== press.col ||
+					layout.row !== press.row ||
+					layout.width !== press.width ||
+					layout.height !== press.height
+				) {
+					return false;
+				}
+				// The ROOT placement is stable, but a descendant may have
+				// reflowed INSIDE it (a preceding sibling grew): the
+				// target's CURRENT painted origin (re-derived from the
+				// last-painted child layout) must still match the
+				// press-time origin.
+				const current = this.overlayChildOrigin(layout.entry.component, target.component);
 				return (
-					press !== undefined &&
-					press.entry === layout.entry &&
-					layout.col === press.col &&
-					layout.row === press.row &&
-					layout.width === press.width &&
-					layout.height === press.height
+					current !== undefined &&
+					current.x === target.originX - press.col &&
+					current.y === target.originY - press.row
 				);
 			}
 		}

@@ -1563,6 +1563,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - a stationary first press on a HIDDEN auto scrollbar jumps the track / starts a drag immediately (includeHiddenAuto on the press path, matching the hover path)
 - when a mounted overlay is hit, in-flight pointer gestures that started outside are cancelled (selection gesture + snapshot, scrollbar drag) — the hidden selection must not reappear after the overlay closes and the drag must not resume on release
 - the retained mouse-press target's click synthesis is painted-placement fenced: a still-mounted component whose overlay moved or reflowed (e.g. a centered overlay that grew after the press selected a described row) does not receive a synthetic click retargeted with the old origin
+- the painted-placement liveness check re-derives a nested descendant's CURRENT painted origin from the last-painted child layouts (Box padding + preceding sibling heights): a descendant that reflowed INSIDE a stable overlay root (a preceding sibling grew) no longer receives a synthetic click retargeted with the old origin
 
 #### Dependency map
 
@@ -1610,6 +1611,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - test/question-flow.test.ts: an inert press that repaints into the scroll-marker row must not toggle the expanded panel (the marker is a distinct semantic target via the MARKER_ROW sentinel)
 - packages/pi-tui/test/tui-alt-screen.test.ts: a centered SettingsList overlay that grows and moves after the press does not receive a ghost synthetic click at the original cell; a fresh press at the new row works
 - packages/pi-tui/test/tui-alt-screen.test.ts: a child nested inside a padded Box overlay root still receives the synthetic click (the painted-placement check compares the ROOT placement snapshot, not the child's padding-offset origin)
+- packages/pi-tui/test/tui-alt-screen.test.ts: a descendant that reflowed inside a stable overlay root (sibling heights changed, root bounds identical) does not receive a ghost synthetic click at the original cell; a fresh press at the new row works
 
 #### Upstream comparison
 
@@ -3459,6 +3461,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 - SettingsList Focusable propagation reaches search Input and conditionally forwards to an open submenu
 - row-budget forwarding for nested submenu lists
 - SettingsList mouse hit-testing uses the FINAL painted rows (a render-time mouseRows map built after the description shrink AND the tail slice), never a re-derived range from maxVisible — a click hits the row the user actually saw, resolved by item ID with pressed-identity click activation; the search Input is reachable only where the LAST paint put it (the tail slice may drop it off-screen — a click on the row that replaced it must not reach the hidden input); every left press replaces the gesture identity at handler entry (a delegated search press or an inert-row press clears the old latch — a later synthesized click on the same cell must not activate an item that repainted there)
+- a live-but-unpainted submenu (opened by a click whose repaint is still queued) is mouse-inert: the painted submenu instance is recorded at render, and handleMouse only forwards to the submenu when it is the PAINTED owner
 
 #### Dependency map
 
@@ -3495,6 +3498,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 - test/model-menu.test.ts: ModelSubmenu retains focus across the async inner swap (CURSOR_MARKER on the swapped-in searchable list only when focused)
 - packages/pi-tui/test/settings-list.test.ts: description-shrink click identity (Case A), search+shrink row offset (Case B), inert chrome (Case C)
 - packages/pi-tui/test/settings-list.test.ts: a main-list press cannot transfer into a newly-created submenu — the press-time submenu generation fences the release/click (a submenu opened by keyboard after the press never receives a fresh-looking activation)
+- packages/pi-tui/test/settings-list.test.ts: a fresh press+click on a live-but-unpainted submenu is rejected; after the submenu is painted, a fresh press+click activates
 
 #### Upstream comparison
 

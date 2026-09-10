@@ -383,7 +383,14 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 		list.handleMouse(mouse("release", 0));
 		list.handleMouse(mouse("click", 0));
 		assert.deepStrictEqual(actions, [], "the newly-created submenu must not receive the stale main-list press");
-		// A fresh press+click on the submenu works.
+		// A fresh press+click WITHOUT a repaint must also be rejected: the
+		// submenu is live but NOT painted — the user still sees the main
+		// list, so an unpainted owner must be mouse-inert.
+		list.handleMouse(mouse("press", 0));
+		list.handleMouse(mouse("click", 0));
+		assert.deepStrictEqual(actions, [], "a live-but-unpainted submenu must not receive a fresh mouse gesture");
+		// After the submenu is actually painted, a fresh press+click works.
+		list.render(80);
 		list.handleMouse(mouse("press", 0));
 		list.handleMouse(mouse("click", 0));
 		assert.deepStrictEqual(actions, ["submenu action"], "a fresh submenu press must activate");

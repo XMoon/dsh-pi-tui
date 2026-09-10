@@ -3219,3 +3219,55 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		assert.deepStrictEqual(received, ["click"], "the padded Box child must receive the synthetic click");
 		tui.stop();
 	});
+
+	it("does not synthesize a click on a descendant that reflowed inside a stable overlay root (X018 painted-placement)", async () => {
+		const terminal = new RecordingTerminal(40, 20);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\niota\nkappa\nlambda\nmu\nnu\nxi\nomicron\npi\nrho\nsigma\ntau\nupsilon", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const actions: string[] = [];
+		const a = { render: () => ["A"], invalidate: () => {}, handleMouse: () => undefined };
+		const b = {
+			render: () => ["B"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				if (event.type === "press") return { handled: true };
+				if (event.type === "click") {
+					actions.push("B action");
+					return { handled: true };
+				}
+				return undefined;
+			},
+		};
+		const c = { render: () => ["C1", "C2"], invalidate: () => {}, handleMouse: () => undefined };
+		const root = new Container();
+		root.addChild(a);
+		root.addChild(b);
+		root.addChild(c);
+		tui.showOverlay(root, { anchor: "top-left" });
+		await terminal.waitForRender();
+		const rowB = terminal.getViewport().findIndex((line) => line.includes("B"));
+		// Press B.
+		terminal.sendInput(`\x1b[<0;2;${rowB + 1}M`);
+		await terminal.waitForRender();
+		// Repaint: A grows 1→2 rows, C shrinks 2→1 (the overlay ROOT
+		// bounds stay identical), so B moves down one row.
+		const a2 = { render: () => ["A1", "A2"], invalidate: () => {}, handleMouse: () => undefined };
+		const c2 = { render: () => ["C1"], invalidate: () => {}, handleMouse: () => undefined };
+		root.children = [a2, b, c2];
+		tui.requestRender();
+		await terminal.waitForRender();
+		const rowB2 = terminal.getViewport().findIndex((line) => line.includes("B"));
+		assert.notStrictEqual(rowB2, rowB, "B must have moved inside the stable root");
+		// Release at the ORIGINAL cell: B must NOT activate.
+		terminal.sendInput(`\x1b[<0;2;${rowB + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(actions, [], "a descendant that reflowed must not receive the ghost click");
+		// A fresh press+click at the NEW row works.
+		terminal.sendInput(`\x1b[<0;2;${rowB2 + 1}M`);
+		terminal.sendInput(`\x1b[<0;2;${rowB2 + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(actions, ["B action"], "a fresh press at the new row must activate");
+		tui.stop();
+	});
