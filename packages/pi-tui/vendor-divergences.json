@@ -9,7 +9,7 @@
  "verification": {
   "auditedAt": "2026-09-09",
   "branch": "chore/revendor-pi-tui-v0.85.1",
-  "auditedSourceCommit": "ef4ce42f8918c1b418f9b0d9d6ddfc457b3c453e",
+  "auditedSourceCommit": "5ea22f43adc79823e5ba71e3018bd0e4a37a01d9",
   "referenceSnapshots": {
    "upstream": {
     "repository": "earendil-works/pi",
@@ -1922,7 +1922,8 @@
     "setLayoutRoot clears an in-flight component mouse gesture",
     "the selection press-time dispatch snapshot is released when the selection gesture ends (no dead component references retained between gestures)",
     "a stationary first press on a HIDDEN auto scrollbar jumps the track / starts a drag immediately (includeHiddenAuto on the press path, matching the hover path)",
-    "when a mounted overlay is hit, in-flight pointer gestures that started outside are cancelled (selection gesture + snapshot, scrollbar drag) — the hidden selection must not reappear after the overlay closes and the drag must not resume on release"
+    "when a mounted overlay is hit, in-flight pointer gestures that started outside are cancelled (selection gesture + snapshot, scrollbar drag) — the hidden selection must not reappear after the overlay closes and the drag must not resume on release",
+    "the retained mouse-press target's click synthesis is painted-placement fenced: a still-mounted component whose overlay moved or reflowed (e.g. a centered overlay that grew after the press selected a described row) does not receive a synthetic click retargeted with the old origin"
    ],
    "dependencies": {
     "vendorInternal": {
@@ -1981,7 +1982,8 @@
     "packages/pi-tui/test/tui-alt-screen.test.ts: selection press-time component snapshot lifecycle — the press snapshots the reached set and the release clears it",
     "packages/pi-tui/test/tui-alt-screen.test.ts: hidden auto scrollbar track jumps on a stationary first press; in-flight selection gesture and scrollbar drag are cancelled when the pointer lands on a capturing overlay",
     "test/tui-app.test.ts: press a question option → keyboard advance to the next question → release on the same cell must not activate the repainted option (onCellPress records the press-time identity; the release click rejects the question-id mismatch)",
-    "test/question-flow.test.ts: an inert press that repaints into the scroll-marker row must not toggle the expanded panel (the marker is a distinct semantic target via the MARKER_ROW sentinel)"
+    "test/question-flow.test.ts: an inert press that repaints into the scroll-marker row must not toggle the expanded panel (the marker is a distinct semantic target via the MARKER_ROW sentinel)",
+    "packages/pi-tui/test/tui-alt-screen.test.ts: a centered SettingsList overlay that grows and moves after the press does not receive a ghost synthetic click at the original cell; a fresh press at the new row works"
    ],
    "upstream": {
     "equivalence": "NO",
@@ -5025,7 +5027,8 @@
    "tests": [
     "packages/pi-tui/test/editor.test.ts: X050 — clicking past the text of a wrapped non-last segment lands at the segment end, clicking past the last segment clamps to the line end, and clicking a slash-prefix autocomplete suggestion submits the completed command (like keyboard Enter)",
     "packages/pi-tui/test/editor.test.ts: disableSubmit=true blocks the mouse slash-completion submit and cancels the autocomplete",
-    "packages/pi-tui/test/editor.test.ts: unpainted list replacement cannot receive a click; press A → repaint B → release must not activate B"
+    "packages/pi-tui/test/editor.test.ts: unpainted list replacement cannot receive a click; press A → repaint B → release must not activate B",
+    "packages/pi-tui/test/editor.test.ts: a keyboard document mutation cancels the pending autocomplete press — a stale /help release must not submit the newly changed draft (/he → /hex)"
    ],
    "upstream": {
     "equivalence": "NO",

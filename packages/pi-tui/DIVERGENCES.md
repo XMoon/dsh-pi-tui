@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `ef4ce42f8918c1b418f9b0d9d6ddfc457b3c453e`
+- Audited local source commit: `5ea22f43adc79823e5ba71e3018bd0e4a37a01d9`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -1562,6 +1562,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - the selection press-time dispatch snapshot is released when the selection gesture ends (no dead component references retained between gestures)
 - a stationary first press on a HIDDEN auto scrollbar jumps the track / starts a drag immediately (includeHiddenAuto on the press path, matching the hover path)
 - when a mounted overlay is hit, in-flight pointer gestures that started outside are cancelled (selection gesture + snapshot, scrollbar drag) — the hidden selection must not reappear after the overlay closes and the drag must not resume on release
+- the retained mouse-press target's click synthesis is painted-placement fenced: a still-mounted component whose overlay moved or reflowed (e.g. a centered overlay that grew after the press selected a described row) does not receive a synthetic click retargeted with the old origin
 
 #### Dependency map
 
@@ -1607,6 +1608,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - packages/pi-tui/test/tui-alt-screen.test.ts: hidden auto scrollbar track jumps on a stationary first press; in-flight selection gesture and scrollbar drag are cancelled when the pointer lands on a capturing overlay
 - test/tui-app.test.ts: press a question option → keyboard advance to the next question → release on the same cell must not activate the repainted option (onCellPress records the press-time identity; the release click rejects the question-id mismatch)
 - test/question-flow.test.ts: an inert press that repaints into the scroll-marker row must not toggle the expanded panel (the marker is a distinct semantic target via the MARKER_ROW sentinel)
+- packages/pi-tui/test/tui-alt-screen.test.ts: a centered SettingsList overlay that grows and moves after the press does not receive a ghost synthetic click at the original cell; a fresh press at the new row works
 
 #### Upstream comparison
 
@@ -4121,6 +4123,7 @@ Two upstream Editor mouse-path bugs: (1) handleMouse forces targetIndex = lastGr
 - packages/pi-tui/test/editor.test.ts: X050 — clicking past the text of a wrapped non-last segment lands at the segment end, clicking past the last segment clamps to the line end, and clicking a slash-prefix autocomplete suggestion submits the completed command (like keyboard Enter)
 - packages/pi-tui/test/editor.test.ts: disableSubmit=true blocks the mouse slash-completion submit and cancels the autocomplete
 - packages/pi-tui/test/editor.test.ts: unpainted list replacement cannot receive a click; press A → repaint B → release must not activate B
+- packages/pi-tui/test/editor.test.ts: a keyboard document mutation cancels the pending autocomplete press — a stale /help release must not submit the newly changed draft (/he → /hex)
 
 #### Upstream comparison
 
