@@ -27,7 +27,14 @@ import {
 export interface SurfaceCommandSummary {
   readonly name: string
   readonly description: string
-  readonly input?: { readonly hint: string }
+  readonly input?: {
+    readonly hint: string
+    /** The descriptor's attachment declaration (DSH
+     * `CommandInputDescriptor.attachments`): ONLY a command declaring it may
+     * be invoked with composer attachments (the composer-side half of the
+     * contract — the host executor enforces the other half at admission). */
+    readonly attachments?: boolean
+  }
 }
 
 /** One provider's detached failure text (never the thrown value itself). */
@@ -85,7 +92,12 @@ export function commandSummaryOf(descriptor: CommandDescriptor): SurfaceCommandS
     description: descriptor.description,
     ...descriptor.input === undefined
       ? {}
-      : { input: Object.freeze({ hint: descriptor.input.hint }) },
+      : {
+          input: Object.freeze({
+            hint: descriptor.input.hint,
+            ...descriptor.input.attachments === true ? { attachments: true } : {},
+          }),
+        },
   })
 }
 
@@ -96,6 +108,10 @@ function sameCommand(left: CommandDescriptor, right: CommandDescriptor): boolean
   return left.name === right.name
     && left.description === right.description
     && left.input?.hint === right.input?.hint
+    // The attachment DECLARATION is part of the effective behavior (it
+    // decides whether a composer may attach anything), so a scoped entry
+    // that differs only in it is NOT the identical visible result.
+    && (left.input?.attachments === true) === (right.input?.attachments === true)
 }
 
 /**

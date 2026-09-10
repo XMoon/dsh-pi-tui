@@ -1217,6 +1217,10 @@ export function registerTuiCommands(
   /** Whether one slash name is a HOST command in the current effective
    * catalog (advertised, owned by neither the TUI nor an extension). */
   isHostCommand(name: string): boolean
+  /** Whether the current host catalog's command for one name declares
+   * `input.attachments` (the composer-side attachment gate — only a
+   * declaring command may be invoked with staged attachments). */
+  isHostCommandAcceptingAttachments(name: string): boolean
   /** Whether one slash name is a LIVE TUI-owned skill wrapper (an
    * agent-facing invocation whose `/name` line the host may resolve into an
    * injected skill body). */
@@ -1397,6 +1401,13 @@ export function registerTuiCommands(
   // lacks must be consumed with an explicit error, never sent to the model.
   /** The advertised names of the currently installed completion list. */
   let claims = new Set<string>()
+  /** The advertised HOST command names whose descriptor DECLARES
+   * `input.attachments` (DSH `CommandInputDescriptor.attachments`): the
+   * composer-side half of the attachment contract — only these may be
+   * invoked with staged attachments, everything else refuses before
+   * dispatch (the host executor re-enforces at admission). Contributions are
+   * never in this set: a contribution has no host descriptor. */
+  let hostAttachmentCommands = new Set<string>()
   /**
    * The detached human skill catalog for INLINE skill reference completion
    * (the plain-text `/name` lexicon). A Client presentation cache: it owns
@@ -1525,6 +1536,9 @@ export function registerTuiCommands(
     // dispatch consults it), so it must never depend on the client merge — a
     // failed synthesis must not cost a host command its claim.
     claims = new Set(sorted.map(command => command.name))
+    hostAttachmentCommands = new Set(sorted
+      .filter(command => command.input?.attachments === true)
+      .map(command => command.name))
     // The display list carries the client contributions too; the CLAIM set
     // never does (see the parameter doc). 'none' is the FAILED-SOURCE state
     // (upstream `source-failed` removes the source's group): no command rows
@@ -3407,6 +3421,14 @@ export function registerTuiCommands(
     if (skillDisposers.has(name)) return false
     return claims.has(name)
   }
+  /** Whether the CURRENT host catalog's command for one name DECLARES
+   * `input.attachments` (see {@link hostAttachmentCommands}): the composer
+   * consults it before letting an attachment-bearing line through. A skill
+   * wrapper is never an attachment-declaring host command. */
+  const isHostCommandAcceptingAttachments = (name: string): boolean => {
+    if (skillDisposers.has(name)) return false
+    return hostAttachmentCommands.has(name)
+  }
 
   commands.register({
     name: 'skill',
@@ -4708,6 +4730,9 @@ export function registerTuiCommands(
      * TUI as a skill wrapper nor an extension contribution (the dispatch
      * caller excludes TUI-local commands itself via LOCAL_COMMANDS). */
     isHostCommand,
+    /** Whether the current host catalog's command for one name declares
+     * `input.attachments` (the composer-side attachment gate). */
+    isHostCommandAcceptingAttachments,
     /** Whether one slash name is a LIVE TUI-owned skill wrapper (the
      * revalidating transition wrappers included). */
     isSkillWrapper: (name: string): boolean => skillDisposers.has(name),

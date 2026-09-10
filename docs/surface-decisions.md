@@ -492,6 +492,34 @@ name collision **fails loud — it never shadows**.
   attributing a host execution to the contribution), which is deliberately
   out of scope here.
 
+## Command attachments follow the descriptor declaration
+
+The composer's attachment policy is the DSH client contract
+(`ui-commands` `CommandInputDescriptor.attachments` +
+`CommandUiRuntime`/leading-claim submit), not a TUI-local guess:
+
+- A command may be invoked with attachments ONLY when its descriptor declares
+  `input.attachments: true`. An attachment-bearing line for any other command
+  is refused before dispatch (`/<name> does not accept attachments; remove
+  them first`) and the draft — attachment placeholder included — comes back.
+  The host executor re-enforces the same declaration at admission.
+- A DECLARING command receives the submitted IMAGES as encoded
+  `CommandSubmitAttachment`s on `commands.execute`; the host admits them
+  through its own attachment store (the client never saves them locally for a
+  command invocation).
+- A FILE attachment is refused even for a declaring command: the host
+  contract carries files as upload receipts, and this client has no seam to
+  produce one — fail closed rather than hand the host a placeholder with no
+  payload (`/<name> cannot receive file attachments in this client; remove
+  them first`).
+- A command submission CONSUMES its attachments only after handler success
+  (web parity): an error outcome restores the draft and KEEPS the staged
+  attachments, so a failed command never swallows the user's image.
+- TUI/core local commands and client contributions keep refusing attachments
+  outright: their line is a UI control, never agent-facing input. A skill
+  wrapper, a `/skill <name>` invocation and a plain prompt stay agent-facing
+  and deliver their attachments to the model.
+
 ## Focus is surface-adaptive
 
 Two surfaces, two consistent detail paths — no mouse hit-map in regular
