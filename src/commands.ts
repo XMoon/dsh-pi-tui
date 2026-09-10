@@ -1171,6 +1171,9 @@ export function registerTuiCommands(
   initial?: InitialCommandCatalog,
 ): {
   wasAdvertised(name: string): boolean
+  /** Whether one slash name is a HOST command in the current effective
+   * catalog (advertised, not a TUI-owned skill wrapper). */
+  isHostCommand(name: string): boolean
   /** One synchronous catalog commit (the coordinator's install hook). */
   installSnapshot(snapshot: SurfaceCatalogSnapshot): void
   /** The revalidating transition (the coordinator's target-change hook). */
@@ -3089,6 +3092,16 @@ export function registerTuiCommands(
   /** Whether one command name is advertised by the CURRENT completion list
    * (the claim captured at submit time, before any session creation). */
   const wasAdvertised = (name: string): boolean => claims.has(name)
+  /** Whether one slash name is a HOST command in the CURRENT effective
+   * catalog: advertised by the completion list but NOT a TUI-owned skill
+   * wrapper. A skill wrapper is a thin agent-facing invocation (loadSkill
+   * builds a prompt), so it must keep the ordinary submission semantics —
+   * only real Host commands (e.g. /compact) execute through the command
+   * plane regardless of the busy-Enter policy. */
+  const isHostCommand = (name: string): boolean => {
+    if (skillDisposers.has(name)) return false
+    return claims.has(name)
+  }
 
   commands.register({
     name: 'skill',
@@ -4371,6 +4384,12 @@ export function registerTuiCommands(
   return {
     /** The claim test for the dispatch: is /name advertised right now? */
     wasAdvertised,
+    /** Whether one slash name is a HOST command in the CURRENT effective
+     * catalog: advertised by the completion list but NOT a TUI-owned skill
+     * wrapper (a skill invocation is agent-facing input, never a command
+     * claim). TUI-local commands are excluded by the dispatch caller
+     * (LOCAL_COMMANDS). */
+    isHostCommand,
     /** One synchronous catalog commit (the coordinator's install hook). */
     installSnapshot: (snapshot: SurfaceCatalogSnapshot): void => installSurfaceSnapshot(snapshot),
     /** The revalidating transition (the coordinator's target-change hook). */

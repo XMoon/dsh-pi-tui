@@ -120,7 +120,9 @@ function fakeCommands() {
         defs.push(def)
         return () => {}
       },
-      list: () => [{ name: 'builtin', description: 'a builtin', input: { hint: '' } }],
+      // The completion list mirrors the registry (like the real service's
+      // effective view), so the advertised-claim surface sees registrations.
+      list: () => defs.map(def => ({ name: def.name, description: 'a command', input: { hint: '' } })),
       find: () => undefined,
       execute: async () => undefined,
     },
@@ -213,7 +215,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     extensions: undefined,
     exit: () => {},
   }
-  registerTuiCommands(runner)
+  const installed = registerTuiCommands(runner)
   const def = commands.defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   const run = async (rawInput: string): Promise<unknown> =>
@@ -239,7 +241,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, run, runCommand, view, settings, registered: commands.defs.map(def => def.name) }
+  return { vt, app, run, runCommand, view, settings, installed, commands, registered: commands.defs.map(def => def.name) }
 }
 
 test('every command registerTuiCommands registers is in LOCAL_COMMANDS', () => {
@@ -433,5 +435,30 @@ test('/settings frame left padding does not activate SettingsList rows (v0.85.1 
   t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${rowY + 1}m`)
   await t.view()
   assert.equal(t.settings.writes.length, 0, 'a left-padding click must not toggle a row')
+  t.app.stop()
+})
+
+test('isHostCommand claims advertised non-skill commands and never skill wrappers (PR115-fix problem 1)', () => {
+  const t = setup()
+  // A Host command (e.g. /compact) registered by the Host joins the
+  // effective catalog; a snapshot commit refreshes the advertised claims.
+  t.commands.service.register({ name: 'compact', handler: () => ({ kind: 'success' }) })
+  t.installed.installSnapshot({ commands: [], scopedCommands: [], skills: [], issues: [] })
+  assert.equal(t.installed.isHostCommand('compact'), true,
+    'an advertised Host command must be claimed as a Host command')
+  // A TUI-owned skill wrapper is advertised too, but it is an agent-facing
+  // invocation — never a Host-command claim.
+  t.installed.installSnapshot({
+    commands: [],
+    scopedCommands: [],
+    skills: [{ name: 'grilling', description: 'a skill' }],
+    issues: [],
+  })
+  assert.equal(t.installed.isHostCommand('grilling'), false,
+    'a TUI-owned skill wrapper must never be claimed as a Host command')
+  // The claim is catalog-driven: a name absent from the effective catalog
+  // is not claimed (it keeps the ordinary prompt semantics).
+  assert.equal(t.installed.isHostCommand('not-a-command'), false,
+    'an unadvertised name must not be claimed')
   t.app.stop()
 })
