@@ -1137,6 +1137,48 @@ test('fullscreen transcript click: a click that resolves to no cell consumes the
   app.stop()
 })
 
+test('fullscreen todo: a session switch resets the click-coalescing window (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 9 }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? ('in_progress' as const) : i % 3 === 1 ? ('pending' as const) : ('completed' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
+  assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
+  const dockY = 18
+  // A completed todo click in session A opens the panel AND sets the
+  // click-coalescing window.
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'the click must open the panel')
+  // Session switch while the coalescing window is still active.
+  app.clearSessionOverrides()
+  app.setTodoSummary(todos)
+  await vt.waitForRender()
+  // Close the panel (keyboard toggle — it does not touch the mouse
+  // coalescing window).
+  vt.sendInput('\x14')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'the panel must close')
+  // A fresh dock press/release in session B IMMEDIATELY (inside the old
+  // session's coalescing window; a different column so the fork never
+  // reads a double-click): the panel must open — the new session must not
+  // inherit the old click-coalescing window.
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), `a fresh click in the new session must open the panel:\n${vt.getViewport().join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)

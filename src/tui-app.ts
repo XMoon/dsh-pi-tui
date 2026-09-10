@@ -7843,8 +7843,12 @@ export class TuiApp {
     // geometry, so an in-flight press from the old session must never
     // resolve against the new session's projection (the per-object
     // identity token already rejects message/activity transfers; the
-    // generic todo identities need this explicit cancellation).
+    // generic todo identities need this explicit cancellation). The todo
+    // click-coalescing window is equally session-scoped: a fresh click in
+    // the new session must never be swallowed by the old session's
+    // window.
     this.fullscreenCellGesture = undefined
+    this.todoClickCoalesceUntil = 0
     // The Focus disclosures are session-scoped transient state too: a
     // switched-in session must never inherit the old session's turn
     // numbers (plan §16.3). The persisted Focus preference survives. The
