@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `6b981cd4331b9d829dd55c780b18a99527525163`
+- Audited local source commit: `ba36a689d9bb8c90bf3ffdf5e210d818c2419cb8`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -4165,7 +4165,7 @@ showOverlay accepts any Component as the overlay root, and the overlay focus sta
 - focus promotion to the container root applies to plain Container/Box overlay roots only, never to the TUI root (TuiBase extends Container)
 - focusedChild is cleared on removeChild/clear/dispose so a detached child never keeps receiving keyboard input
 - Container and Box forward the focused child's wantsKeyRelease (the TUI filters Kitty key releases by the focused component's wantsKeyRelease, so a Container/Box focus owner without forwarding drops releases aimed at the child)
-- the focused child is live-child fenced: a direct `children` replacement invalidates the old forwarding target — keyboard input / focused / wantsKeyRelease never reach a detached child, and replacement never silently transfers focus to the new child (a fresh mouse press names the new focus owner)
+- the focused child is live-child fenced: a direct `children` replacement invalidates the old forwarding target at the NEXT PAINT (render is the liveness observation point, not the next keyboard event) — keyboard input / focused / wantsKeyRelease never reach a detached child, re-mounting the old child later can never resurrect the stale identity, the detached child's focused flag is cleared (IME/hardware-cursor state does not survive a detach), and replacement never silently transfers focus to the new child (a fresh mouse press names the new focus owner)
 
 #### Dependency map
 
@@ -4192,7 +4192,7 @@ showOverlay accepts any Component as the overlay root, and the overlay focus sta
 - in a multi-child root only the CLICKED child receives focus and keys (no fan-out)
 - removing/clearing/disposing the focused child clears the forwarding reference
 - the TUI root (TuiBase) never promotes its own children's focus to itself
-- replacing `children` directly (the public structural mutation contract) drops the old focused child: keyboard input / focused / wantsKeyRelease never reach it, the replacement does not implicitly inherit focus, and a fresh press re-establishes the focus owner
+- replacing `children` directly (the public structural mutation contract) drops the old focused child at the next paint: keyboard input / focused / wantsKeyRelease never reach it, the replacement does not implicitly inherit focus, re-mounting the old child later does not resurrect the stale identity, the detached child's focused flag is cleared, and a fresh press re-establishes the focus owner
 - Audit note: Regression tests cover the single-child root, the multi-child no-fan-out case, the removal lifecycle, and the TUI-root focus identity.
 
 #### Guarding tests
@@ -4200,6 +4200,7 @@ showOverlay accepts any Component as the overlay root, and the overlay focus sta
 - packages/pi-tui/test/tui-alt-screen.test.ts: X051 — an Input inside a plain Container overlay root receives the focused flag and keyboard input; in a multi-child Container root only the clicked child receives focus and keys; an Input inside a plain Box overlay root receives focus and keyboard input; the TUI root keeps the clicked component as the focus target
 - packages/pi-tui/test/tui-alt-screen.test.ts: a wantsKeyRelease child receives Kitty key releases through a Container overlay root and through a Box overlay root
 - packages/pi-tui/test/tui-alt-screen.test.ts: direct `children` replacement in a Container and in a Box drops the old focused child (no keyboard input to the detached child, no implicit focus transfer, a fresh press re-establishes the owner); a detached focused child's wantsKeyRelease does not leak
+- packages/pi-tui/test/tui-alt-screen.test.ts: A→B→A direct `children` replacement in a Container and in a Box does not resurrect the stale focus owner (keyboard input after re-mounting the old child reaches nothing; the detached child's focused flag is cleared; a fresh press re-establishes the owner)
 
 #### Upstream comparison
 
