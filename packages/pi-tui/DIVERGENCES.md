@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `dbb5236d31d867d0f8db71e46d975da4cf467284`
+- Audited local source commit: `e47b09e3db770dcaf75299545306fc07e0c83d69`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -4455,6 +4455,8 @@ A host that resolves a same-cell click against the frame the user actually SAW n
 - test/tui-app.test.ts: fullscreen transcript click: a press on a local card cannot transfer to a repainted local card (per-message identity token; kind+turn is not unique for local shell cards)
 - test/tui-app.test.ts: fullscreen transcript click: a resize between press and release cannot act against the stale frame (release-time geometry guard)
 - test/tui-app.test.ts: fullscreen transcript click: a resize + repaint between press and release cannot transfer the gesture (press-frame dimensions recorded in the gesture)
+- test/focus-anchor.test.ts: a press on a Thought cannot transfer across a session switch (per-activity identity token + session-boundary gesture clear; turn numbers are session-local)
+- test/tui-app.test.ts: fullscreen todo: a dock press cannot run the panel action after a keyboard toggle (todo:dock vs todo:panel press identities)
 
 #### Upstream comparison
 
