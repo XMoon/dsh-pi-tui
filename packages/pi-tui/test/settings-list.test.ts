@@ -348,6 +348,8 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 		assert.strictEqual(state.mousePressedId, "a");
 		list.handleMouse(mouse("press", 1)); // inert blank row
 		assert.strictEqual(state.mousePressedId, undefined, "an inert-row press must clear the old latch");
+	});
+
 	it("a main-list press cannot transfer into a newly-created submenu (mouse parity)", () => {
 		const actions: string[] = [];
 		const submenu = {
@@ -370,7 +372,6 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 			() => {},
 		);
 		list.render(80);
-		console.log('DEBUG submenu test start');
 		// Press the submenu row (main list): the press-time owner is the
 		// main list at the current submenu generation.
 		list.handleMouse(mouse("press", 0));
@@ -387,8 +388,6 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 		list.handleMouse(mouse("click", 0));
 		assert.deepStrictEqual(actions, ["submenu action"], "a fresh submenu press must activate");
 	});
-	});
-});
 
 	it("keeps the mouse map in lockstep with the tail slice on a degenerate grant (Case D)", () => {
 		const rows = Array.from({ length: 6 }, (_, index) => ({
@@ -441,3 +440,4 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 		assert.deepStrictEqual(changes, [], "a click without a fresh press must not activate");
 	});
 
+});
