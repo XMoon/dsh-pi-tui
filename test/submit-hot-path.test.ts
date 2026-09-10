@@ -1051,14 +1051,23 @@ test('running + steer: an ordinary prompt still steers (PR115-fix problem 1)', a
 })
 
 test('running + steer: /skill <name> stays an agent-facing invocation (PR115-fix problem 1)', async (t) => {
-  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'steer', status: 'running' })
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    skills: true,
+    hostLoadsSkillBody: true,
+  })
   mounted.app.setDraft('/skill grilling args')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   await waitForDelivery(harness.host, 'skill steer')
+  // Agent-facing input, never a Host command: it STEERS (a Host command
+  // would execute and never steer), through loadSkill's normalized
+  // `/<name> <args>` line, and the host's pre-step listener owns the body.
   assert.equal(harness.host.steered.length, 1, 'a skill invocation must keep the agent-facing steer')
   const steered = harness.host.steered[0] as { content: { type: string; text: string }[] }
   assert.equal(steered.content[0]?.text, '/grilling args', 'the skill line must steer in its normalized /name args form')
-  assert.equal(harness.executed.length, 0, 'a skill invocation must never be claimed as a Host command')
+  assert.equal(harness.host.followedUp.length, 0, 'the steer mode never queues')
+  assert.equal(harness.host.injected.length, 0, 'the host loader owns the body injection')
 })
 
 test('running + queue: /skill <name> queues like a plain prompt when the host injects the body (web parity)', async (t) => {
@@ -1103,7 +1112,7 @@ test('running + queue: /skill <name> keeps the steer path when the TUI must inje
   assert.equal(harness.host.followedUp.length, 0, 'no followup — the body order contract forbids it')
 })
 
-test('running + steer: the Ctrl+Enter chord force-queues /skill <name> (delivery mode resolved once)', async (t) => {
+test('running + steer: the accelerated chord queues /skill <name> (delivery mode resolved once)', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'steer',
     status: 'running',
@@ -1111,13 +1120,13 @@ test('running + steer: the Ctrl+Enter chord force-queues /skill <name> (delivery
     hostLoadsSkillBody: true,
   })
   mounted.app.setDraft('/skill grilling args')
-  // The Ctrl+Enter opposite chord: force the QUEUE delivery regardless of
-  // the busyEnter preference. The chord is a property of THIS submission —
-  // the skill delivery accepts the mode the submit boundary resolved and
-  // must never re-derive it from the persisted preference (busyEnter=steer
-  // here), because a one-shot chord does not survive in settings.
-  ;(mounted.app as unknown as { submitDraft(forceQueue?: boolean): void }).submitDraft(true)
-  await waitForDelivery(harness.host, 'force-queued skill')
+  // The accelerated chord is the OPPOSITE of the busyEnter preference: with
+  // busyEnter=steer it QUEUES. It is a property of THIS submission — the
+  // skill delivery accepts the mode the submit boundary resolved and must
+  // never re-derive it from the persisted preference, because a one-shot
+  // gesture does not survive in settings.
+  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
+  await waitForDelivery(harness.host, 'accelerated skill')
   assert.equal(harness.host.followedUp.length, 1, 'the chord must force the queue delivery')
   const followed = harness.host.followedUp[0] as { content: { type: string; text: string }[] }
   assert.equal(followed.content[0]?.text, '/grilling args', 'the queued line is the normalized /name args form')
@@ -1125,7 +1134,7 @@ test('running + steer: the Ctrl+Enter chord force-queues /skill <name> (delivery
   assert.equal(harness.host.injected.length, 0, 'the host owns the body injection — no TUI fallback body')
 })
 
-test('running + steer: the Ctrl+Enter chord force-queues a per-skill wrapper (/grilling args)', async (t) => {
+test('running + steer: the accelerated chord queues a per-skill wrapper (/grilling args)', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'steer',
     status: 'running',
@@ -1134,8 +1143,8 @@ test('running + steer: the Ctrl+Enter chord force-queues a per-skill wrapper (/g
   })
   await waitForSkillWrapper(harness, 'grilling')
   mounted.app.setDraft('/grilling args')
-  ;(mounted.app as unknown as { submitDraft(forceQueue?: boolean): void }).submitDraft(true)
-  await waitForDelivery(harness.host, 'force-queued skill wrapper')
+  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
+  await waitForDelivery(harness.host, 'accelerated skill wrapper')
   assert.equal(harness.executed.length, 1, 'the wrapper is a TUI command: it executes through the command plane')
   assert.equal(harness.executed[0]?.line, '/grilling args', 'the wrapper receives its own slash line')
   assert.equal(harness.host.followedUp.length, 1, 'the chord must force the queue delivery')
@@ -1165,7 +1174,7 @@ test('a dynamic Host command never enters the ordinary inbox while running (PR11
 // through the session submission policy (steer/queue) like a skill
 // invocation, 'local' never steers. Being advertised in the effective
 // catalog does NOT make either a Host command: the busy policy (and the
-// force-queue chord) must be consulted before any command plane execution.
+// accelerated chord) must be consulted before any command plane execution.
 
 test('running + steer: an extension submission command keeps the busy steer, never the Host claim', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
@@ -1182,21 +1191,93 @@ test('running + steer: an extension submission command keeps the busy steer, nev
   assert.equal(harness.executed.length, 0, 'an advertised extension command must never be claimed as a Host command')
 })
 
-test('running + steer: the Ctrl+Enter chord force-queues an extension submission command', async (t) => {
+test('running + steer: the accelerated chord queues an extension submission command as a PROMPT', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'steer',
     status: 'running',
     extensionCommands: [{ id: 'deploy', name: 'deploy', description: 'deploy the app', execution: 'submission' }],
   })
   mounted.app.setDraft('/deploy now')
-  ;(mounted.app as unknown as { submitDraft(forceQueue?: boolean): void }).submitDraft(true)
-  await waitForCommand(harness)
-  // The chord resolves 'queue' at the submit boundary; the submission route
-  // hands the line to the command plane (the plugin's own handler owns the
-  // session write), and the TUI never steers it into the running turn.
-  assert.equal(harness.executed.length, 1, 'the queue-side submission route reaches the command plane')
-  assert.equal(harness.executed[0]?.line, '/deploy now')
+  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
+  await waitForDelivery(harness.host, 'queued extension submission')
+  // `execution: 'submission'` means the command flows through the session
+  // submission policy like a skill invocation: the resolved 'queue' mode
+  // delivers its LINE (exactly like an unclaimed slash prompt), and the
+  // plugin's command handler is NOT run ahead of the queue it asked to join.
+  assert.equal(harness.host.followedUp.length, 1, 'the queue mode delivers the line as a queued prompt')
+  const followed = harness.host.followedUp[0] as { content: { type: string; text: string }[] }
+  assert.equal(followed.content[0]?.text, '/deploy now', 'the raw line is the queued prompt')
+  assert.equal(harness.executed.length, 0, 'the queue mode must not execute the plugin command handler')
   assert.equal(harness.host.steered.length, 0, 'the chord must never steer')
+})
+
+test('running + queue: the DEFAULT preference makes the accelerated chord STEER (web parity)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running' })
+  mounted.app.setDraft('hello world')
+  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
+  await waitForDelivery(harness.host, 'accelerated prompt')
+  // The web ComposerSubmissionPolicy (0.1.3-alpha.2) resolves the
+  // accelerated gesture to the OPPOSITE of the preference: with the DEFAULT
+  // busyEnter=queue it steers. A fixed "always queue" chord would get the
+  // default configuration exactly backwards.
+  assert.equal(harness.host.steered.length, 1, 'the accelerated chord steers under busyEnter=queue')
+  const steered = harness.host.steered[0] as { content: { type: string; text: string }[] }
+  assert.equal(steered.content[0]?.text, 'hello world', 'the draft rides the steer')
+  assert.equal(harness.host.followedUp.length, 0, 'the chord must not queue under busyEnter=queue')
+})
+
+test('running + steer: an accelerated skill invocation queues (the opposite of the preference)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    skills: true,
+    hostLoadsSkillBody: true,
+  })
+  mounted.app.setDraft('/skill grilling args')
+  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
+  await waitForDelivery(harness.host, 'accelerated skill')
+  assert.equal(harness.host.followedUp.length, 1, 'the chord queues the skill invocation under busyEnter=steer')
+  const followed = harness.host.followedUp[0] as { content: { type: string; text: string }[] }
+  assert.equal(followed.content[0]?.text, '/grilling args', 'the queued line is the normalized /name args form')
+  assert.equal(harness.host.steered.length, 0, 'the chord must never steer')
+})
+
+test('running + steer: a skill invocation WITHOUT the host loader still injects its body', async (t) => {
+  // The stripped composition: the skills registry exists, the host's
+  // dsh-tool-skill pre-step listener does not — so the TUI owns the body
+  // injection (loadSkill's fallback). The steer path must therefore reach
+  // loadSkill: a bare steered line would leave the model with no skill body
+  // at all (the skill would silently not load).
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    skills: true,
+  })
+  mounted.app.setDraft('/skill grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'no-loader skill steer')
+  assert.equal(harness.host.steered.length, 1, 'the invocation steers into the running turn')
+  const steered = harness.host.steered[0] as { content: { type: string; text: string }[] }
+  assert.equal(steered.content[0]?.text, '/grilling args', 'the steered line is the normalized /name args form')
+  assert.equal(harness.host.injected.length, 1, 'the TUI fallback injects the skill body exactly once')
+  const injected = harness.host.injected[0] as { content: { type: string; text: string }[] }
+  assert.match(injected.content[0]?.text ?? '', /<skill_content name="grilling">/, 'the injected body is the official rendering')
+})
+
+test('running + steer: a no-loader per-skill wrapper also injects its body', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    skills: true,
+  })
+  await waitForSkillWrapper(harness, 'grilling')
+  mounted.app.setDraft('/grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'no-loader wrapper steer')
+  assert.equal(harness.executed.length, 1, 'the wrapper executes through the command plane')
+  assert.equal(harness.executed[0]?.line, '/grilling args', 'the wrapper receives its own slash line')
+  assert.equal(harness.host.steered.length, 1, 'the invocation steers into the running turn')
+  assert.equal(harness.host.injected.length, 1, 'the TUI fallback injects the skill body exactly once')
 })
 
 test('running + steer: an extension local command still executes directly under both chords', async (t) => {
@@ -1211,7 +1292,7 @@ test('running + steer: an extension local command still executes directly under 
   assert.equal(harness.executed.length, 1, 'an extension local command always executes locally')
   // The Ctrl+Enter chord cannot change a local command's ownership either.
   mounted.app.setDraft('/panel')
-  ;(mounted.app as unknown as { submitDraft(forceQueue?: boolean): void }).submitDraft(true)
+  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
   for (let round = 0; round < 20 && harness.executed.length < 2; round += 1) {
     await new Promise<void>(resolve => setImmediate(resolve))
   }
@@ -1226,7 +1307,7 @@ test('running + steer: the Ctrl+Enter chord never turns a Host command into a qu
     hostCommands: ['compact'],
   })
   mounted.app.setDraft('/compact')
-  ;(mounted.app as unknown as { submitDraft(forceQueue?: boolean): void }).submitDraft(true)
+  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
   await waitForCommand(harness)
   assert.equal(harness.executed.length, 1, 'a Host command owns its execution regardless of the chord')
   assert.equal(harness.host.followedUp.length, 0, 'the chord must not queue a Host command as a prompt')

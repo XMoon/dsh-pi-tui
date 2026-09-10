@@ -1,12 +1,11 @@
 /**
  * Headless tests for the busy-Enter preference surface (web busyEnter
  * parity): the /settings row reflects the persisted value and its Enter
- * toggle persists the other behavior, and the pure dispatch gate
- * (shouldSteerOnEnter) separates LOCAL commands (always execute) from
- * everything else (plain prompts AND per-skill slash commands steer while
- * the agent is running). The steer-side semantics (steerAll onlyDraft)
- * live in steer.test.ts; the Ctrl+Enter chord lives in
- * input-experience.test.ts.
+ * toggle persists the other behavior, and the pure dispatch boundary
+ * (resolveSubmitDelivery) applies the web ComposerSubmissionPolicy to
+ * agent-facing input while LOCAL commands always execute. The steer-side
+ * semantics (steerAll onlyDraft) live in steer.test.ts; the accelerated
+ * chord lives in input-experience.test.ts.
  * @module @xmoon76/dsh-pi-tui/busy-enter.test
  */
 
@@ -15,7 +14,7 @@ import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
-import { LOCAL_COMMANDS, shouldSteerOnEnter } from '../src/index.ts'
+import { LOCAL_COMMANDS, resolveSubmitDelivery } from '../src/index.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -61,28 +60,42 @@ test('LOCAL_COMMANDS covers every TUI-owned command and nothing else', () => {
   }
 })
 
-test('shouldSteerOnEnter: plain prompts and skill commands steer; local commands never do', () => {
+test('resolveSubmitDelivery: plain prompts and skill commands follow the policy; local commands never do', () => {
   const cmd = (name: string) => ({ name })
-  // Plain prompt (no slash command): steers while running with the
-  // preference set — the web parity baseline.
-  assert.equal(shouldSteerOnEnter(undefined, true, 'steer', false), true, 'plain prompt + running + steer')
-  assert.equal(shouldSteerOnEnter(undefined, true, 'queue', false), false, 'queue preference queues')
-  assert.equal(shouldSteerOnEnter(undefined, false, 'steer', false), false, 'idle never steers')
-  assert.equal(shouldSteerOnEnter(undefined, true, undefined, false), false, 'absent preference queues')
+  // Plain prompt (no slash command): the web ComposerSubmissionPolicy
+  // baseline — an idle agent queues, plain Enter takes the preference.
+  assert.equal(resolveSubmitDelivery(undefined, true, 'enter', 'steer'), 'steer', 'plain prompt + running + steer')
+  assert.equal(resolveSubmitDelivery(undefined, true, 'enter', 'queue'), 'queue', 'queue preference queues')
+  assert.equal(resolveSubmitDelivery(undefined, false, 'enter', 'steer'), 'queue', 'idle never steers')
+  assert.equal(resolveSubmitDelivery(undefined, true, 'enter', undefined), 'queue', 'absent preference queues')
+  // The ACCELERATED chord is the OPPOSITE of the preference (never a fixed
+  // queue): with the DEFAULT preference it steers, with 'steer' it queues.
+  assert.equal(resolveSubmitDelivery(undefined, true, 'accelerated', 'queue'), 'steer',
+    'the accelerated chord steers under the default queue preference')
+  assert.equal(resolveSubmitDelivery(undefined, true, 'accelerated', 'steer'), 'queue',
+    'the accelerated chord queues under the steer preference')
+  assert.equal(resolveSubmitDelivery(undefined, true, 'accelerated', undefined), 'steer',
+    'an absent preference reads as queue, so the chord steers')
+  assert.equal(resolveSubmitDelivery(undefined, false, 'accelerated', 'queue'), 'queue',
+    'an idle agent queues every gesture')
   // Local commands ALWAYS execute, even with the preference set.
-  assert.equal(shouldSteerOnEnter(cmd('status'), true, 'steer', false), false, '/status must execute')
-  assert.equal(shouldSteerOnEnter(cmd('settings'), true, 'steer', false), false, '/settings must execute')
-  assert.equal(shouldSteerOnEnter(cmd('subagents'), true, 'steer', false), false, '/subagents alias must execute (alias of /tasks)')
-  assert.equal(shouldSteerOnEnter(cmd('skill'), true, 'steer', false), false, '/skill picker must execute')
-  // Non-local commands (per-skill slash commands) steer like plain prompts:
-  // the raw `/name` line lands in the running turn and the host's pre-step
-  // listener (dsh-tool-skill) resolves the skill body — web parity.
-  assert.equal(shouldSteerOnEnter(cmd('grilling'), true, 'steer', false), true, 'skill command steers while running')
-  assert.equal(shouldSteerOnEnter(cmd('grilling'), true, 'queue', false), false, 'queue preference queues the skill')
-  assert.equal(shouldSteerOnEnter(cmd('grilling'), false, 'steer', false), false, 'idle skill executes normally')
-  // The Ctrl+Enter chord forces queue mode for EVERYTHING.
-  assert.equal(shouldSteerOnEnter(undefined, true, 'steer', true), false, 'the chord never steers')
-  assert.equal(shouldSteerOnEnter(cmd('grilling'), true, 'steer', true), false, 'the chord queues skill commands')
+  assert.equal(resolveSubmitDelivery(cmd('status'), true, 'enter', 'steer'), 'queue', '/status must execute')
+  assert.equal(resolveSubmitDelivery(cmd('settings'), true, 'enter', 'steer'), 'queue', '/settings must execute')
+  assert.equal(resolveSubmitDelivery(cmd('subagents'), true, 'enter', 'steer'), 'queue', '/subagents alias must execute (alias of /tasks)')
+  assert.equal(resolveSubmitDelivery(cmd('skill'), true, 'enter', 'steer'), 'queue', '/skill picker must execute')
+  // A local command's delivery value is never consumed, so the accelerated
+  // chord must not turn one into a steer either.
+  assert.equal(resolveSubmitDelivery(cmd('status'), true, 'accelerated', 'queue'), 'queue',
+    'a local command never steers, whatever the gesture')
+  // Non-local commands (per-skill slash commands) follow the policy like
+  // plain prompts: under steer the raw `/name` line lands in the running
+  // turn and the host's pre-step listener (dsh-tool-skill) resolves the
+  // skill body — web parity.
+  assert.equal(resolveSubmitDelivery(cmd('grilling'), true, 'enter', 'steer'), 'steer', 'skill command steers while running')
+  assert.equal(resolveSubmitDelivery(cmd('grilling'), true, 'enter', 'queue'), 'queue', 'queue preference queues the skill')
+  assert.equal(resolveSubmitDelivery(cmd('grilling'), false, 'enter', 'steer'), 'queue', 'idle skill executes normally')
+  assert.equal(resolveSubmitDelivery(cmd('grilling'), true, 'accelerated', 'steer'), 'queue', 'the chord queues skill commands')
+  assert.equal(resolveSubmitDelivery(cmd('grilling'), true, 'accelerated', 'queue'), 'steer', 'the chord steers skill commands under the default preference')
 })
 
 // themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /
@@ -338,13 +351,13 @@ test('the local-shell-sandbox row Enter toggle persists the other behavior', asy
   t.app.stop()
 })
 
-test('shouldSteerOnEnter: /skill <name> with args steers; the bare picker does not (review finding)', () => {
-  const withArgs = shouldSteerOnEnter({ name: 'skill', rawInput: 'grilling [image #1 (800×600)]' }, true, 'steer', false)
-  assert.equal(withArgs, true, '/skill <name> [image ...] is agent input while running')
-  const bare = shouldSteerOnEnter({ name: 'skill', rawInput: '' }, true, 'steer', false)
-  assert.equal(bare, false, 'the bare /skill picker stays local')
-  const idle = shouldSteerOnEnter({ name: 'skill', rawInput: 'grilling x' }, false, 'steer', false)
-  assert.equal(idle, false, 'idle never steers')
+test('resolveSubmitDelivery: /skill <name> with args follows the policy; the bare picker does not (review finding)', () => {
+  const withArgs = resolveSubmitDelivery({ name: 'skill', rawInput: 'grilling [image #1 (800×600)]' }, true, 'enter', 'steer')
+  assert.equal(withArgs, 'steer', '/skill <name> [image ...] is agent input while running')
+  const bare = resolveSubmitDelivery({ name: 'skill', rawInput: '' }, true, 'enter', 'steer')
+  assert.equal(bare, 'queue', 'the bare /skill picker stays local')
+  const idle = resolveSubmitDelivery({ name: 'skill', rawInput: 'grilling x' }, false, 'enter', 'steer')
+  assert.equal(idle, 'queue', 'idle never steers')
 })
 
 test('/help copy is key-neutral after a remap — no stale bare Esc/Enter claims (review round 37)', async () => {
@@ -469,7 +482,7 @@ test('isHostCommand never claims an extension contribution: advertised ≠ Host-
   // `execution` metadata owns the classification: 'submission' flows
   // through the busy queue/steer policy like a skill invocation, 'local'
   // never steers. Claiming either as a Host command would bypass the busy
-  // policy (and the force-queue chord) before it is even consulted.
+  // policy (and the accelerated chord) before it is even consulted.
   const contributions = new Map<string, { name: string; execution: 'local' | 'submission' }>([
     ['deploy', { name: 'deploy', execution: 'submission' }],
     ['panel', { name: 'panel', execution: 'local' }],
@@ -492,4 +505,18 @@ test('isHostCommand never claims an extension contribution: advertised ≠ Host-
   assert.equal(t.installed.isHostCommand('compact'), true,
     'a real Host command must still be claimed')
   t.app.stop()
+})
+
+test('a stored app.input.queue override still applies after the id rename (settings aliases)', () => {
+  // The id is a settings-level public name: a user document written before
+  // the rename (the chord became the web accelerated-submit gesture) must
+  // keep applying to the action it was written for — never be dropped as
+  // "unknown action".
+  const parsed = parseUserKeybindings({ 'app.input.queue': 'ctrl+y' })
+  assert.equal(parsed.bindings['app.input.submitAccelerated'], 'ctrl+y',
+    'the legacy id must apply to the renamed action')
+  assert.ok(parsed.diagnostics.some(entry => entry.includes('app.input.queue') && entry.includes('renamed')),
+    `the rename must be diagnosed, got: ${JSON.stringify(parsed.diagnostics)}`)
+  // The new id is the documented one.
+  assert.equal(parseUserKeybindings({ 'app.input.submitAccelerated': 'ctrl+y' }).bindings['app.input.submitAccelerated'], 'ctrl+y')
 })

@@ -40,7 +40,7 @@ test('every definition carries description, category and scope', () => {
 test('the M0 gate: default keys match the pre-migration behavior', () => {
   const defaults = (id: AppKeybindingId): readonly string[] => APP_KEYBINDINGS[id].defaultKeys
   assert.deepEqual(defaults('app.input.submit'), ['enter'])
-  assert.deepEqual(defaults('app.input.queue'), ['ctrl+enter'])
+  assert.deepEqual(defaults('app.input.submitAccelerated'), ['ctrl+enter'])
   assert.deepEqual(defaults('app.input.steer'), ['ctrl+s'])
   assert.deepEqual(defaults('app.input.dequeue'), ['alt+up'])
   assert.deepEqual(defaults('app.agent.interrupt'), ['escape'])
@@ -100,7 +100,7 @@ test('viewer-blocked parent actions are all defined and configurable', () => {
   // The viewer guard must cover every parent-owned chord of the current
   // implementation (M1 gate: the physical-key blacklist is fully replaced).
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.input.steer'))
-  assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.input.queue'))
+  assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.input.submitAccelerated'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.input.dequeue'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.permission.cycle'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.transcript.search'))

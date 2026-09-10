@@ -89,7 +89,7 @@ export interface KeybindingEditorModel {
 const LABELS: Readonly<Partial<Record<AppKeybindingId, string>>> = {
   'app.input.submit': 'Submit draft',
   'app.input.steer': 'Steer running turn',
-  'app.input.queue': 'Queue draft while busy',
+  'app.input.submitAccelerated': 'Submit (opposite busy behavior)',
   'app.input.dequeue': 'Pull queued draft back',
   'app.agent.interrupt': 'Interrupt active turn',
   'app.exit.request': 'Quit the TUI',

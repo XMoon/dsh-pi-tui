@@ -67,7 +67,7 @@ function startApp(
   cwd: string,
   options: {
     onSubmit?: (text: string) => void
-    onQueueSubmit?: (text: string) => void
+    onAcceleratedSubmit?: (text: string) => void
     onSubagentSubmit?: (request: { parentSessionId: string; childSessionId: string; text: string }) => void
     commands?: { name: string; description: string }[]
     /** The Host-file seam (migration M1.10): `@`-mention completion is
@@ -81,8 +81,13 @@ function startApp(
   const queued: string[] = []
   let cancels = 0
   const app = new TuiApp(vt, {
-    onSubmit: (text) => { submitted.push(text); options.onSubmit?.(text) },
-    onQueueSubmit: (text) => { queued.push(text); options.onQueueSubmit?.(text) },
+    // The accelerated chord is a SUBMISSION request (the runner resolves its
+    // delivery mode): the harness splits it out for the chord assertions.
+    onSubmit: (text, request) => {
+      if (request === 'accelerated') { queued.push(text); options.onAcceleratedSubmit?.(text); return }
+      submitted.push(text)
+      options.onSubmit?.(text)
+    },
     onSubagentSubmit: options.onSubagentSubmit,
     onExit: () => {},
     onCancel: () => { cancels += 1 },
@@ -623,7 +628,7 @@ test('a bare ! reaches the submit protocol via submitDraft', async (t) => {
   await vt.waitForRender()
   vt.sendInput('!')
   await vt.waitForRender()
-  app.submitDraft(false)
+  app.submitDraft('enter')
   assert.deepEqual(submitted, ['!'], 'a bare ! shell mode must submit its wire form')
   assert.equal(app.inputModeForTest(), 'prompt')
 })

@@ -363,35 +363,57 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   "projection-only": the marker is not a durable field and no new session
   event, and the icon stays a display field, never a semantic signal).
 
-## Skill invocation delivery follows the busy-Enter preference
+## The composer submission policy is the WEB policy
+
+The busy-Enter preference (`busyEnter`, default `queue`) is owned by the
+gesture, not by the command: the boundary applies the WEB
+`ComposerSubmissionPolicy.resolve()` contract (baseline
+`dsh-v0.1.3-alpha.2`) verbatim and resolves ONCE per submission.
+
+```text
+!running              -> queue
+gesture === 'enter'   -> the preferred mode (busyEnter)
+accelerated           -> the OPPOSITE of the preferred mode
+```
+
+The Cmd/Ctrl-accelerated chord (Ctrl+Enter) is therefore "the other
+behavior", never a fixed queue: with the DEFAULT `busyEnter=queue` it
+STEERS, and under `busyEnter=steer` it queues. The public `queue-draft` /
+`submit-draft` extension actions and the replacement editor's
+`queue-submit` are EXPLICIT delivery commands, not gestures — they deliver
+exactly what they say (the app raises `explicit-queue`). Those two
+semantics must never be merged again: a fixed-queue chord gets the default
+configuration backwards.
+
+## Skill invocation delivery follows the resolved mode
 
 A human skill invocation (`/skill <name>` or a per-skill wrapper) is an
-agent-facing prompt, not a Host command: while the agent is running it
-follows the busy-Enter preference like a plain prompt — `steer` steers
-into the turn, `queue` (and idle) queues. The queue delivery is only
-used when the HOST injects the skill body (the dsh-tool-skill pre-step
-listener): the TUI's fallback body injection rides next-step, so a
-followup would let the body arrive before the user's words (the driver
-claims next-step first). Without the host loader the invocation keeps
-the steer path to preserve the original-line-before-body order — the
-documented exception, confined to compositions without the loader.
+agent-facing prompt, not a Host command: it follows the resolved mode.
+`loadSkill` owns the delivery in BOTH modes — it builds the NORMALIZED
+`/<name> <args>` line, steers or queues it, and injects the body whenever
+the HOST's `dsh-tool-skill` pre-step listener does not (a composition
+without that loader, where the TUI fallback rides next-step). Without the
+loader the invocation keeps the order-preserving steer even under a queue
+mode: a followup would let the body arrive before the user's words (the
+driver claims next-step first) — the documented exception, confined to
+compositions without the loader.
 
-The mode is resolved ONCE, at the submitting gesture's own boundary, and
+The mode is resolved once, at the submitting gesture's own boundary, and
 then only executed:
 
-- The dispatch boundary resolves `queue | steer` from the agent's liveness,
-  the persisted preference, and the one-shot Ctrl+Enter force-queue chord,
-  and binds it for the command execution that launches the delivery
+- The dispatch boundary resolves `queue | steer` (the policy above) and
+  binds it for the command execution that launches the delivery
   (`withDelivery`). The skill delivery accepts that value; it never
-  re-reads `busyEnter` or `agent.status`, because a chord is a property of
-  the gesture that settings cannot reconstruct — and an async draft
+  re-reads `busyEnter` or `agent.status` — a gesture is a property of the
+  dispatch that settings cannot reconstruct, and an async draft
   preparation must not let a concurrent settings edit or status change
   re-decide the mode.
 - The `/skill` picker (a modal selection with no dispatcher above it) is
-  its own boundary: it resolves the same preference rule at picker open
-  (`prefersSteer`) and hands the result to the delivery.
+  its own boundary, and its SELECTION is the boundary moment: the mode is
+  resolved when a row is chosen, never when the modal opened (the agent
+  may have gone idle, or busy, while it was up).
 - A TUI-owned skill command executed with no submission behind it (the
-  command plane driven from outside the submit boundary) has no chord to
+  command plane driven from outside the submit boundary) has no gesture to
   honor and delivers queued.
 
 ## Advertised is not Host-owned
@@ -403,7 +425,9 @@ TUI nor an extension owns. Ownership, not advertising, decides:
 - a TUI-owned skill wrapper (agent-facing input built by `loadSkill`),
 - an extension contribution (`TuiCommandContribution.execution`): a
   `submission` command flows through the busy policy like a skill
-  invocation, a `local` one never steers,
+  invocation — its LINE is delivered (steer / queue) and the plugin's
+  command handler is never run ahead of the queue it asked to join; a
+  `local` one always executes and never steers,
 - the TUI-local set (`LOCAL_COMMANDS` plus dynamic local contributions).
 
 Everything else that is advertised resolves through the command plane

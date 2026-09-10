@@ -1598,6 +1598,22 @@ export interface SubagentViewerTarget {
   readonly access?: ViewerAccess
 }
 
+/**
+ * The WEB composer submit gestures (DSH `ComposerSubmitGesture`): plain
+ * Enter, or the Cmd/Ctrl-accelerated chord. The busy-Enter policy resolves
+ * each to a delivery mode — plain Enter to the preferred mode, the
+ * accelerated chord to its OPPOSITE — so the chord is never a fixed mode.
+ */
+export type ComposerSubmitGesture = 'enter' | 'accelerated'
+
+/**
+ * One submission request raised at the editor seat. The two gestures are
+ * resolved by the busy-Enter policy; `explicit-queue` is the public
+ * `queue-draft` action — an explicit delivery command, NOT a gesture: it
+ * queues regardless of the preference (and of the agent's liveness).
+ */
+export type ComposerSubmitRequest = ComposerSubmitGesture | 'explicit-queue'
+
 /** A semantic follow-up submit from the interactive subagent viewer: the
  * runner's write path is the official `ctx.subagents.prompt(…)` human
  * prompt (a distinct FIFO turn in the child's inbox), NEVER
@@ -1656,8 +1672,10 @@ export interface SubagentViewerFooter {
 /** Base callbacks every TuiApp host must provide; the external-editor
  * pair is bound on top of this (see {@link TuiAppEvents}). */
 export interface TuiAppEventsBase {
-  /** The user submitted a line in the editor. */
-  onSubmit: (text: string) => void
+  /** The user submitted a line in the editor, with the request it was
+   * raised by (the delivery mode is the RUNNER's to resolve — see
+   * {@link ComposerSubmitRequest}). */
+  onSubmit: (text: string, request: ComposerSubmitRequest) => void
   /**
    * Clipboard paste with image intake (the paste-media action, plan M3):
    * the host consumed the key and asks the runner to probe the clipboard — an image lands as a draft
@@ -1707,14 +1725,6 @@ export interface TuiAppEventsBase {
    * alone otherwise. Optional.
    */
   onSteer?: (text: string) => void
-  /**
-   * The busy-Enter opposite chord (the queue action, default: Ctrl+Enter):
-   * submit the draft in the
-   * QUEUE delivery mode regardless of the busyEnter preference (web
-   * busyEnter parity — the accelerated chord uses the other behavior).
-   * Optional.
-   */
-  onQueueSubmit?: (text: string) => void
   /**
    * A follow-up submit from the INTERACTIVE subagent viewer (Enter while
    * viewing a `continuable` child): the runner delivers the text through
@@ -3428,7 +3438,7 @@ export class TuiApp {
       // does the same later. Resetting after the dispatch would clobber a
       // synchronous restore.
       this.resetEditorMode()
-      this.events.onSubmit(serialized)
+      this.events.onSubmit(serialized, 'enter')
     }
     this.editor.onChange = () => {
       // Ordinary editor input is an intervening action, so it disarms a
@@ -3508,12 +3518,12 @@ export class TuiApp {
             // non-empty wire form, and must reach the existing protocol
             // like the literal prefix did before the mode feature.
             if (!serializedDraftHasPayload(this.expandedSeatWireDraft())) return false
-            this.submitDraft(false)
+            this.submitDraft('enter')
             return true
           }
           case 'queue-submit': {
             if (!serializedDraftHasPayload(this.expandedSeatWireDraft())) return false
-            this.submitDraft(true)
+            this.submitDraft('explicit-queue')
             return true
           }
           case 'steer': {
@@ -4032,7 +4042,7 @@ export class TuiApp {
       return { consume: true }
     }
     if (this.isSubmitKey(data)) {
-      this.submitDraft(false)
+      this.submitDraft('enter')
       return { consume: true }
     }
     // ExtensionEditor's false result follows the public contract: let the
@@ -4777,23 +4787,22 @@ export class TuiApp {
    * must fall through (e.g. pasteMedia without a clipboard handler). */
   private buildActionHost(): AppActionHost {
     return {
-      submitDraft: (forceQueue = false) => {
-        if (forceQueue) {
-          // The busy-Enter opposite chord (web busyEnter parity): without
-          // a wired onQueueSubmit, or with an EMPTY draft, the chord is a
-          // HOST-GUARDED NO-OP — the host OWNS Ctrl+Enter and consumes it
-          // (an empty chord would otherwise dispatch a session-creating
-          // empty followup). Guard no-ops stay host-owned; only GENUINE
-          // feature absence (pasteMedia with no handler) declines to the
-          // remainder (convergence §4.9).
-          if (this.events.onQueueSubmit === undefined) return true
+      submitDraft: (request: ComposerSubmitRequest = 'enter') => {
+        if (request !== 'enter') {
+          // The accelerated chord and the explicit queue action are
+          // HOST-OWNED: with an EMPTY draft they are a HOST-GUARDED NO-OP —
+          // the host owns the key and consumes it (an empty one would
+          // otherwise dispatch a session-creating empty followup). Guard
+          // no-ops stay host-owned; only GENUINE feature absence
+          // (pasteMedia with no handler) declines to the remainder
+          // (convergence §4.9).
           // Emptiness is judged on the SERIALIZED wire form: a bare
           // `!` / `!!` shell mode has an empty BODY but a non-empty wire
-          // form, and must reach the queue protocol like the literal
-          // prefix did before the mode feature.
+          // form, and must reach the protocol like the literal prefix did
+          // before the mode feature.
           if (!serializedDraftHasPayload(this.expandedSeatWireDraft())) return true
         }
-        this.submitDraft(forceQueue)
+        this.submitDraft(request)
         return true
       },
       steerDraft: () => {
@@ -12273,12 +12282,12 @@ export class TuiApp {
    * M6 host-owned draft submission (the semantic actions submit-draft /
    * queue-draft route through this, NOT a raw dispatch): mirrors the
    * editor's Enter-submit path exactly — history, notify clear and draft
-   * clear — then fires the submit/queue event through the runner. The
-   * plugin never touches the editor directly.
-   * @param forceQueue - Ctrl+Enter parity: queue delivery regardless of
-   *   the busyEnter preference.
+   * clear — then fires the submit event with the request through the
+   * runner. The plugin never touches the editor directly.
+   * @param request - the request this submission was raised by (see
+   *   {@link ComposerSubmitRequest}); the RUNNER resolves its delivery mode.
    */
-  submitDraft(forceQueue = false): void {
+  submitDraft(request: ComposerSubmitRequest = 'enter'): void {
     // Submission is an explicit intervening action even when the draft is
     // empty or a viewer guard rejects it.
     this.clearExitConfirmation()
@@ -12335,11 +12344,7 @@ export class TuiApp {
     // Reset BEFORE the dispatch: a synchronous rejection restores the
     // serialized text (and with it the mode) through setEditorText.
     this.resetEditorMode()
-    if (forceQueue) {
-      this.events.onQueueSubmit?.(serialized)
-    } else {
-      this.events.onSubmit(serialized)
-    }
+    this.events.onSubmit(serialized, request)
     this.requestRender()
   }
 

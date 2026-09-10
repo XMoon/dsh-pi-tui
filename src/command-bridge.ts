@@ -8,8 +8,10 @@
  *   control commands like /status, /settings), never steered, regardless
  *   of the busyEnter preference. This is exactly the semantic of the
  *   static LOCAL_COMMANDS set, now extensible by plugins.
- * - `execution: 'submission'` — the command flows through the session
- *   submission policy (steer/queue) like any skill invocation.
+ * - `execution: 'submission'` — the command is AGENT-FACING input: its LINE
+ *   flows through the session submission policy (steer/queue) like any skill
+ *   invocation, and the TUI never runs the commands-service handler ahead of
+ *   that delivery (the plugin's own pre-step owns any expansion).
  *
  * Contract (plan §10):
  * - `/name args...` ALWAYS keeps `invocation.rawInput` verbatim — the
