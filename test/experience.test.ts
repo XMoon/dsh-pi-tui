@@ -38,7 +38,7 @@ async function viewport(vt: VirtualTerminal): Promise<string> {
   return vt.getViewport().join('\n')
 }
 
-test('footer shows model, cwd, branch, counters, context bar, and stats', async () => {
+test('footer shows model, cwd, branch, counters, context pressure, and stats', async () => {
   const { vt, app } = startApp()
   app.setStatus({
     model: 'opencode-go/deepseek-v4-flash',
@@ -64,8 +64,11 @@ test('footer shows model, cwd, branch, counters, context bar, and stats', async 
   assert.ok(view.includes('me/dsh-pi-tui'), `cwd missing:\n${view}`)
   assert.ok(view.includes(' main '), `branch missing:\n${view}`)
   assert.ok(view.includes('t2/s5'), `counters missing:\n${view}`)
-  assert.ok(view.includes('] 25%'), `context bar missing:\n${view}`)
-  assert.ok(view.includes('↑1.2k ↓3.4k · TTFB 8.1s · 0 tok/s'), `stats line missing:\n${view}`)
+  // The default layout renders the context pressure in its FULL form at
+  // the stats row's right edge (the legacy bar style stays available to
+  // custom layouts).
+  assert.ok(view.includes('25k/100k (25%)'), `context pressure missing:\n${view}`)
+  assert.ok(view.includes('↑1.2k ↓3.4k  TTFB 8.1s  0 tok/s'), `stats line missing:\n${view}`)
 })
 
 test('plan mode shows badges in header and footer and tints the editor border', async () => {

@@ -989,24 +989,25 @@ test('fullscreen click on the todo summary dock row opens the todo panel', async
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('☑'), `todo summary must render in the dock:\n${view}`)
   assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
-  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
-  // at the bottom on the 80x24 test terminal; the closed panel renders
-  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
-  // row).
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer; the closed
+  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // exactly the dock row).
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'click on the summary row must open the panel')
   assert.ok(!app.isTodoPanelExpanded(), 'opens compact')
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('todo item 0'), `compact panel must show after the click:\n${view}`)
   // With the panel open the summary is hidden and the panel owns rows
-  // 12..19 — the same cell is now a panel row, so the next click runs the
+  // 13..19 — the same cell is now a panel row, so the next click runs the
   // compact → full step of the loop. Paced beyond the todo click-coalescing
   // window: a DELIBERATE second gesture, not a rapid double-click.
   await sleepBeyondTodoCoalesce()
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'panel must stay open (the cell is now a panel row)')
   assert.ok(app.isTodoPanelExpanded(), 'the click now expands the panel (compact → full)')
@@ -1028,11 +1029,12 @@ test('fullscreen todo: a dock press cannot run the panel action after a keyboard
   let view = vt.getViewport()
   assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
   assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
-  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
-  // at the bottom on the 80x24 test terminal; the closed panel renders
-  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
-  // row).
-  const dockY = 18
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer; the closed
+  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // exactly the dock row).
+  const dockY = 19
   // Press the dock row (no release): the press identity is todo:dock.
   vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
   await vt.waitForRender()
@@ -1075,11 +1077,12 @@ test('fullscreen todo: a dock press cannot toggle the panel across a session swi
   let view = vt.getViewport()
   assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
   assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
-  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
-  // at the bottom on the 80x24 test terminal; the closed panel renders
-  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
-  // row).
-  const dockY = 18
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer; the closed
+  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // exactly the dock row).
+  const dockY = 19
   // Press the dock row (no release): the press identity is todo:dock.
   vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
   await vt.waitForRender()
@@ -1151,7 +1154,10 @@ test('fullscreen todo: a session switch resets the click-coalescing window (mous
   let view = vt.getViewport()
   assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
   assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
-  const dockY = 18
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer).
+  const dockY = 19
   // A completed todo click in session A opens the panel AND sets the
   // click-coalescing window.
   vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
@@ -1420,23 +1426,24 @@ test('todo state machine: ≤5 items is a two-state summary ↔ list (no redunda
   app.setTodoSummary(todos)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
-  // at the bottom on the 80x24 test terminal; the closed panel renders
-  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
-  // row). Click it: summary → list.
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer; the closed
+  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // exactly the dock row). Click it: summary → list.
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
   assert.ok(!app.isTodoPanelExpanded(), 'opens compact (visually identical to full at ≤5)')
-  // With the panel open (border + title + 5 rows = rows 15..21) the same
+  // With the panel open (border + title + 5 rows = rows 14..19) the same
   // cell is a panel row: a DELIBERATE second click (paced beyond the
   // coalescing window) must close the panel DIRECTLY — the second click
   // returns to the summary, no third click needed, and no intermediate
   // todoExpanded state exists.
   await sleepBeyondTodoCoalesce()
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelVisible(), 'second click closes the panel (list → summary)')
   assert.ok(!app.isTodoPanelExpanded(), 'no ghost expanded state at ≤5')
@@ -1454,20 +1461,22 @@ test('todo rapid double-click at the SAME coordinate is ONE gesture (no flash op
   app.setTodoSummary(todos)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // The dock summary row sits at 0-based row 18. Two press/release groups
-  // at the SAME coordinate, the first render landing between them, both
-  // inside the double-click window (no pacing): the first click opens the
-  // panel, the layout mutates (the dock vanishes, the panel takes its
-  // rows), and the second click would land on a panel row — WITHOUT the
-  // todo coalescing it would immediately close the panel (the todo
-  // "flashes and vanishes"). The coalesced pair must leave the todo in
-  // the state the FIRST click produced.
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer). Two
+  // press/release groups at the SAME coordinate, the first render landing
+  // between them, both inside the double-click window (no pacing): the
+  // first click opens the panel, the layout mutates (the dock vanishes,
+  // the panel takes its rows), and the second click would land on a panel
+  // row — WITHOUT the todo coalescing it would immediately close the panel
+  // (the todo "flashes and vanishes"). The coalesced pair must leave the
+  // todo in the state the FIRST click produced.
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'fixture: the first click opens the panel')
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'the rapid second click must be coalesced — the panel stays open')
   assert.ok(!app.isTodoPanelExpanded(), 'and stays in the first click\'s state (compact)')
@@ -1476,8 +1485,8 @@ test('todo rapid double-click at the SAME coordinate is ONE gesture (no flash op
   vt.sendInput('\x1b[<0;40;5M')
   vt.sendInput('\x1b[<0;40;5m')
   await vt.waitForRender()
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelVisible(), 'after a different-target click the next todo click works')
   app.setFullscreen(false)
@@ -1490,14 +1499,16 @@ test('todo state machine: 1 item also closes on the second click (boundary)', as
   app.setTodoSummary([{ content: 'only todo', status: 'in_progress' }])
   app.setFullscreen(true)
   await vt.waitForRender()
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  // The dock summary row: 0-based 19 (editor seat 3 + footer 1 on the
+  // 80x24 terminal with an all-unavailable status row).
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
   // Deliberate second gesture (paced beyond the coalescing window).
   await sleepBeyondTodoCoalesce()
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelVisible(), 'second click closes the 1-item panel')
   assert.ok(!app.isTodoPanelExpanded(), 'no expanded state with 1 item')

@@ -73,11 +73,14 @@ test('the Row Selector moves between rows; Enter enters the highlighted row', ()
   assert.equal(m.state().rowIndex, 1)
   assert.equal(m.state().cursor, 0)
   // The default layout's second row is the semantic stats row: the usage
-  // pair leads, then cache hit, then the two performance placements.
+  // pair leads (the stats-line facts), then cache hit and the two
+  // performance placements, then the turn/step counters.
   assert.deepEqual(
     m.state().layout.rows[1]!.left.map(ref => ref.id),
-    ['token-usage', 'cache-hit', 'performance', 'performance'],
+    ['token-usage', 'cache-hit', 'performance', 'performance', 'turns-steps'],
   )
+  // ...and its right zone is the full context pressure.
+  assert.deepEqual(m.state().layout.rows[1]!.right.map(ref => ref.id), ['context'])
 })
 
 test('Available is reachable ONLY through the Add picker (no cursor section)', () => {
@@ -87,7 +90,12 @@ test('Available is reachable ONLY through the Add picker (no cursor section)', (
   // it never enters an "available" section.
   for (let i = 0; i < 32; i += 1) m.moveDown()
   assert.equal(m.state().mode, 'row')
-  assert.equal(m.state().cursor, 9, 'the cursor stays within the row items')
+  const row = m.state().layout.rows[0]!
+  assert.equal(
+    m.state().cursor,
+    row.left.length + row.right.length - 1,
+    'the cursor stays within the row items',
+  )
   m.startAdd()
   assert.equal(m.state().mode, 'add')
   assert.ok(m.addMatches().includes('cache-hit'), 'the picker pools the non-layout items')
@@ -96,10 +104,15 @@ test('Available is reachable ONLY through the Add picker (no cursor section)', (
 test('the flat cursor spans Left then Right; ←/→ move between zones', () => {
   const m = model()
   m.activate()
-  walkTo(m, 'ext:*') // the LAST left item (the right zone starts empty)
+  walkTo(m, 'ext:*') // the LAST left item
   m.moveDown()
-  const leftCount = m.state().layout.rows[0]!.left.length
-  assert.equal(m.state().cursor, leftCount - 1, 'the cursor clamps at the row end — no available section')
+  const row = m.state().layout.rows[0]!
+  // ↓ continues into the row's RIGHT zone (plan state, focus mode) — there
+  // is no "available" section after the items.
+  assert.equal(m.state().cursor, row.left.length, 'the cursor moves into the right zone')
+  for (let i = 0; i < 8; i += 1) m.moveDown()
+  assert.equal(m.state().cursor, row.left.length + row.right.length - 1, 'the cursor clamps at the row end')
+  walkTo(m, 'ext:*')
   m.moveZone('right')
   let state = m.state()
   assert.ok(!state.layout.rows[0]!.left.some(ref => ref.id === 'ext:*'))
@@ -117,11 +130,12 @@ test('the flat cursor spans Left then Right; ←/→ move between zones', () => 
 
 test('Space removes the active item; it returns to the Add pool', () => {
   const m = model()
+  m.moveDown() // → Row 2 (the context item lives in its right zone)
   m.activate()
   walkTo(m, 'context')
   m.removeActive()
   const state = m.state()
-  assert.ok(!state.layout.rows[0]!.left.some(ref => ref.id === 'context'))
+  assert.ok(!state.layout.rows[1]!.right.some(ref => ref.id === 'context'))
   assert.ok(m.availableIds().includes('context'), 'removed items return to Available')
   // The cursor clamped onto the next item.
   assert.equal(idAtCursor(m), 'turns-steps')
@@ -229,13 +243,13 @@ test('Move Mode: M enters, ↑↓ reorder within the zone, Enter/Esc exits', () 
   assert.equal(m.state().mode, 'row-move')
   m.moveDown() // reorder: model swaps with tasks
   const left = m.state().layout.rows[0]!.left
-  assert.equal(left[3]!.id, 'tasks')
-  assert.equal(left[4]!.id, 'model')
+  assert.equal(left[2]!.id, 'tasks')
+  assert.equal(left[3]!.id, 'model')
   // Keep walking down: the item slides to the zone end, then stops.
   for (let i = 0; i < 12; i += 1) m.moveDown()
   const state = m.state()
   assert.equal(state.layout.rows[0]!.left.at(-1)!.id, 'model', 'the item stops at the zone end')
-  assert.deepEqual(state.layout.rows[0]!.right.map(ref => ref.id), [], 'the right zone is untouched')
+  assert.deepEqual(state.layout.rows[0]!.right.map(ref => ref.id), ['plan-state', 'focus-mode'], 'the right zone is untouched')
   m.activate()
   assert.equal(m.state().mode, 'row')
   // Esc exits Move Mode back to the row editor (the plan's "Enter/Esc
@@ -249,18 +263,21 @@ test('Move Mode: M enters, ↑↓ reorder within the zone, Enter/Esc exits', () 
 
 test('F cycles the finite format on the Edit Row page (default removes the override)', () => {
   const m = model()
+  m.moveDown() // → Row 2 (the context item lives in its right zone)
   m.activate()
-  walkTo(m, 'context') // formats: bar + percent + full
+  walkTo(m, 'context') // formats: bar + percent + full (persisted: full)
+  // full → bar: the definition default DROPS the persisted override.
   m.cycleFormat()
-  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'percent')
+  assert.equal(m.state().layout.rows[1]!.right.find(ref => ref.id === 'context')!.format, undefined)
   m.cycleFormat()
-  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
+  assert.equal(m.state().layout.rows[1]!.right.find(ref => ref.id === 'context')!.format, 'percent')
   m.cycleFormat()
-  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, undefined)
+  assert.equal(m.state().layout.rows[1]!.right.find(ref => ref.id === 'context')!.format, 'full')
 })
 
 test('the Item Editor shows Style for multi-format items and hides it for single-format items', () => {
   const m = model()
+  m.moveDown() // → Row 2 (the context item lives in its right zone)
   m.activate()
   walkTo(m, 'context') // formats: bar + percent + full
   m.activate()
@@ -290,6 +307,7 @@ test('the Item Editor shows Style for multi-format items and hides it for single
 
 test('Esc walks the hierarchy ONE level at a time (row → item → picker → item → row)', () => {
   const m = model()
+  m.moveDown() // → Row 2 (the context item lives in its right zone)
   m.activate()
   walkTo(m, 'context')
   m.activate()
@@ -316,26 +334,29 @@ test('Esc walks the hierarchy ONE level at a time (row → item → picker → i
 
 test('the Style picker applies a format; the inline ←→ change cycles too', () => {
   const m = model()
+  m.moveDown() // → Row 2 (the context item lives in its right zone)
   m.activate()
   walkTo(m, 'context')
+  const contextFormat = (): string | undefined =>
+    m.state().layout.rows[1]!.right.find(ref => ref.id === 'context')!.format
   m.activate() // item editor
-  m.activate() // Style picker (opens on the current format: bar)
+  m.activate() // Style picker (opens on the persisted format: full)
   assert.equal(m.state().mode, 'style')
-  m.moveDown() // Percent
-  m.moveDown() // Full
+  m.moveDown() // clamps at Full
   m.activate()
-  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
+  assert.equal(contextFormat(), 'full')
   assert.equal(m.state().mode, 'item')
-  // Inline ←→ cycles without opening the picker: full → percent → bar.
+  // Inline ←→ cycles without opening the picker: full → percent → bar
+  // (the default drops the override).
   m.moveZone('left')
-  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'percent')
+  assert.equal(contextFormat(), 'percent')
   m.moveZone('left')
-  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, undefined)
+  assert.equal(contextFormat(), undefined)
   // → cycles to percent, then full.
   m.moveZone('right')
-  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'percent')
+  assert.equal(contextFormat(), 'percent')
   m.moveZone('right')
-  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
+  assert.equal(contextFormat(), 'full')
 })
 
 test('format changes preserve item ids, zones, and order', () => {
@@ -368,21 +389,24 @@ test('format changes preserve item ids, zones, and order', () => {
 
 test('the Tone picker persists the semantic token; Auto removes the override', () => {
   const m = model()
+  m.moveDown() // → Row 2 (the context item lives in its right zone)
   m.activate()
   walkTo(m, 'context')
+  const contextTone = (): string | undefined =>
+    m.state().layout.rows[1]!.right.find(ref => ref.id === 'context')!.tone
   m.activate()
   m.moveDown() // Tone
   m.activate()
   assert.equal(m.state().mode, 'tone')
   m.moveDown() // Primary
   m.activate()
-  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.tone, 'primary')
+  assert.equal(contextTone(), 'primary')
   // Reopen: the picker opens on the current tone; Auto (index 0) removes it.
   m.activate() // tone picker again (menu cursor still on Tone)
   m.moveUp()
   m.moveUp()
   m.activate()
-  assert.equal(m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!.tone, undefined)
+  assert.equal(contextTone(), undefined)
   assert.equal(m.state().mode, 'item')
 })
 
@@ -444,6 +468,7 @@ test('Advanced: prefix/suffix/importance round-trip; empty removes the override'
 
 test('Advanced: Reset to default clears every ref override', () => {
   const m = model()
+  m.moveDown() // → Row 2 (the context item lives in its right zone)
   m.activate()
   walkTo(m, 'context')
   m.cycleFormat()
@@ -459,7 +484,7 @@ test('Advanced: Reset to default clears every ref override', () => {
   m.moveDown()
   assert.equal(m.state().advancedField, 'reset')
   m.activate()
-  const ref = m.state().layout.rows[0]!.left.find(ref => ref.id === 'context')!
+  const ref = m.state().layout.rows[1]!.right.find(ref => ref.id === 'context')!
   assert.equal(ref.format, undefined)
   assert.equal(ref.tone, undefined)
   assert.equal(ref.prefix, undefined)
@@ -684,7 +709,7 @@ test('PR E: item order is dirty; the order round-trip is clean (Move Mode)', () 
 test('PR E: a zone round-trip of the last left item restores clean', () => {
   const m = model()
   m.activate()
-  walkToId(m, 'ext:*') // the right zone starts empty; ext:* is the last left ref
+  walkToId(m, 'ext:*') // ext:* is the last left ref
   m.moveZone('right')
   assert.equal(m.isDirty(), true, 'the zone move is dirty')
   m.moveZone('left')

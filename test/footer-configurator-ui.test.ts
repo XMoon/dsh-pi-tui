@@ -279,7 +279,9 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
   const model = openDefault(app)
   await vt.waitForRender()
-  vt.sendInput('\r') // → Edit Row 1
+  vt.sendInput('\x1b[B') // ↓ Row 2 (the context item lives in its right zone)
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 2
   await vt.waitForRender()
   // Walk onto the context item (multi-format) and open the item editor.
   while (idAt(model) !== 'context') vt.sendInput('\x1b[B')
@@ -292,14 +294,18 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   assert.ok(view.includes('Tone'), `the tone row missing:\n${view}`)
   assert.ok(view.includes('Advanced…'), `the advanced row missing:\n${view}`)
   assert.ok(view.includes('↑↓ Select · Enter Open · ←→ Change · Esc Back'), `item help missing:\n${view}`)
-  // ←→ cycles the style inline: bar → percent → full.
+  const contextFormat = (): string | undefined =>
+    model.preview().rows[1]!.right.find(ref => ref.id === 'context')!.format
+  // ←→ cycles the style inline: full → bar (the definition default drops
+  // the override) → percent.
   vt.sendInput('\x1b[C')
   await vt.waitForRender()
-  assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'context')!.format, 'percent')
+  assert.equal(contextFormat(), undefined)
   vt.sendInput('\x1b[C')
   await vt.waitForRender()
-  assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
-  // Enter opens the Style picker with live examples.
+  assert.equal(contextFormat(), 'percent')
+  // Enter opens the Style picker with live examples (it opens on the
+  // CURRENT format: percent — the two ↓ presses below clamp on Full).
   vt.sendInput('\r')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
@@ -312,7 +318,7 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   vt.sendInput('\x1b[B')
   vt.sendInput('\r')
   await vt.waitForRender()
-  assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
+  assert.equal(contextFormat(), 'full')
   assert.equal(model.state().mode, 'item')
   app.stop()
 })
@@ -1087,9 +1093,9 @@ for (const cols of [40, 80, 120]) {
       assert.ok(text.includes('Preview'), `the preview must stay visible at ${cols}x${rows}:\n${text}`)
       assert.ok(text.includes('A Add'), `the contextual help must not scroll away at ${cols}x${rows}:\n${text}`)
       // THE key guarantee: the EDITABLE body survives — the cursor's item
-      // (the last one: Extension items) must be on screen, never eaten by
+      // (the last one: Focus mode) must be on screen, never eaten by
       // the fixed preview.
-      assert.ok(text.includes('Extension items'), `the active item must stay visible at ${cols}x${rows}:\n${text}`)
+      assert.ok(text.includes('Focus mode'), `the active item must stay visible at ${cols}x${rows}:\n${text}`)
       // A long label must not break the layout (ANSI-safe truncation).
       assert.ok(!text.split('\n').some(line => line.length > cols + 20), `no line may overflow the frame at ${cols}x${rows}`)
       app.stop()
@@ -1117,7 +1123,7 @@ test('a 4-physical-row preview cannot eat the editable body (10-row terminal)', 
   const text = view.join('\n')
   assert.ok(text.includes('A Add'), `the help must stay visible:\n${text}`)
   assert.ok(text.includes('Preview'), `the preview must stay visible:\n${text}`)
-  assert.ok(text.includes('Extension items'), `the ACTIVE item must stay visible (the body must never be eaten):\n${text}`)
+  assert.ok(text.includes('Focus mode'), `the ACTIVE item must stay visible (the body must never be eaten):\n${text}`)
   app.stop()
 })
 

@@ -45,10 +45,11 @@ function startApp(columns: number): { vt: VirtualTerminal; app: TuiApp } {
   return { vt, app }
 }
 
-/** Realistic status: at 40 columns the status row's preferred form exceeds
- * the 2-line row cap, so the overflow resolves by IMPORTANCE — the pin
- * keeps permission/model/stats; branch and the counters are DESIGNED to
- * compact/drop first, not "must survive". */
+/** Realistic status: at 40 columns the STATUS row's preferred form exceeds
+ * the 2-line row cap, so its overflow resolves by IMPORTANCE — the pin
+ * keeps permission/model; branch is DESIGNED to compact/drop first, not
+ * "must survive". The stats facts live on row 2 (its own single-line
+ * right-zone fit), so they are unaffected by the status row's squeeze. */
 const SHORT_STATUS: StatusData = {
   model: 'deepseek/flash',
   cwd: '/home/x/proj',
@@ -126,16 +127,16 @@ test('runaway host content is capped at the 4-line capacity, tail cut', async ()
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   const rows = footerRows(app)
-  // The composer hard capacity is FOUR physical lines now (2 lines per
-  // logical row × 2 rows) — the extreme state spends it as 2 + 2: the
-  // wrapped rows are never sliced; the overflow resolves by importance
-  // and the remnants cut with '…'.
+  // The composer hard capacity is FOUR physical lines (2 lines per logical
+  // row × 2 rows). At 40 columns the runaway branch (43 cells) cannot fit
+  // a line even alone, so the status row resolves by IMPORTANCE: the
+  // branch drops, the permission/model/cwd floor survives, and nothing is
+  // sliced. The stats row stays its single-line right-zone row — 2 rows
+  // total, inside the capacity.
   assert.ok(rows.length <= FOOTER_MAX_PHYSICAL_LINES, `the footer must never exceed ${FOOTER_MAX_PHYSICAL_LINES} rows, saw ${rows.length}:\n${view}`)
-  assert.ok(rows.length >= 3, `the extreme state must still wrap to multiple rows, saw ${rows.length}:\n${view}`)
-  // The extreme state spends the capacity as 2 status rows + 2 stats
-  // rows; the overflow resolves by IMPORTANCE (highest facts survive)
-  // with no viewport overflow. '…' only appears when the ANSI-safe
-  // truncate (not drops) settles the row — drops may fit without it.
+  assert.ok(rows.length >= 2, `the extreme state must keep both logical rows, saw ${rows.length}:\n${view}`)
+  assert.ok(view.includes('deepseek-v4-flash'), `the model must survive the runaway branch:\n${view}`)
+  assert.ok(!view.includes('pluginization-phase2-5'), `the runaway branch must drop by importance:\n${view}`)
   for (const row of rows) {
     assert.ok(visibleWidth(row.replace(/\x1b\[[0-9;]*m/g, '')) <= 40, `row overflows:\n${view}`)
   }
@@ -177,10 +178,10 @@ test('extension footer segments still merge into the wrapped footer', async () =
   } finally {
     wide.app.dispose()
   }
-  // Narrower: the responsive compact pass shortens the host items FIRST
-  // (ww/flash/proj/ctx 10%) — at 40 columns that frees enough room for
-  // the segment (importance 0) to SURVIVE; the compact-before-drop
-  // discipline only sacrifices it when compact alone cannot fit the row.
+  // Narrower: the responsive compact pass shortens the ROW-1 host items
+  // FIRST (ww/flash/proj) — at 40 columns that frees enough room for the
+  // segment (importance 0) to SURVIVE; the compact-before-drop discipline
+  // only sacrifices it when compact alone cannot fit the row.
   const narrow = await startExtApp(40)
   try {
     const view = narrow.vt.getViewport().join('\n')
@@ -191,13 +192,17 @@ test('extension footer segments still merge into the wrapped footer', async () =
     narrow.app.dispose()
   }
   // Extreme narrow: the segment (importance 0) drops FIRST (importance
-  // order), never overflowing or breaking the composed rows.
-  const extreme = await startExtApp(30)
+  // order), never overflowing or breaking the composed rows. The status
+  // row's item set is smaller than the legacy one, so the squeeze point
+  // moved in from 30 to 24 columns.
+  const extreme = await startExtApp(24)
   try {
     const view = extreme.vt.getViewport().join('\n')
     assert.ok(!view.includes('[EXT-SEG]'), `the low-importance segment must drop under extreme pressure:\n${view}`)
     assert.ok(view.includes('workspace-write') || view.includes('ww'), `high-importance state must survive:\n${view}`)
-    assert.ok(view.includes('12.3s'), `the stats row must survive:\n${view}`)
+    // The stats row survives with its usage-pair floor (the latency
+    // placement legitimately drops at this width).
+    assert.ok(view.includes('↑0 ↓0'), `the stats row must survive:\n${view}`)
   } finally {
     extreme.app.dispose()
   }
@@ -240,10 +245,11 @@ test('below-editor widget rows are NEVER counted as footer rows', async () => {
     const view = vt.getViewport().join('\n')
     assert.ok(view.includes('below-widget-row-1'), `the below-widget zone must render:\n${view}`)
     const rows = footerRows(app)
-    // 80 columns: the status row's preferred form (89 cells) wraps into
-    // exactly TWO lines + the stats row = 3 — the budget, unaffected by
-    // the widget zone (the old viewport heuristic would have counted 5+).
-    assert.equal(rows.length, 3, `a populated widgetsBelow must not inflate the footer count, saw ${rows.length}:\n${rows.join('\n')}`)
+    // 80 columns: the status row fits ONE line (its preferred form is 64
+    // cells and the responsive pass keeps it there) + the stats row = 2 —
+    // the demand, unaffected by the widget zone (the old viewport
+    // heuristic would have counted 5+).
+    assert.equal(rows.length, 2, `a populated widgetsBelow must not inflate the footer count, saw ${rows.length}:\n${rows.join('\n')}`)
     assert.ok(!rows.some(row => row.includes('below-widget')), `widget rows must not land in the footer component:\n${rows.join('\n')}`)
   } finally {
     app.stop()

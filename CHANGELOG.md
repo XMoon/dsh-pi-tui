@@ -28,6 +28,10 @@
 - **新增 `/transcript` 命令。** 将当前 Session 保存为可读的 Markdown 对话记录到 Client 本地目录,与 `/export` 相同的无参数/保存位置交互。
 - **Welcome Card 视觉重构。** 首屏欢迎卡引入原创圆润鲸鱼 ASCII mascot(5 种变体,每次启动随机一个),按终端宽度使用三档响应式布局:72 列以上鲸鱼与 session facts 左右并排,24～71 列鲸鱼居中、facts 在下,24 列以下切换为紧凑文本布局(🐋 标题)。鲸鱼保留 cyan → blue 品牌渐变,不随主题切换改色;facts 继续完整显示(长值 wrap、不截断),idle 邀请、`setWelcomeCard()` 契约、fullscreen 滚动/锚点/点击映射均保持不变。
 
+### 变更
+
+- **内置 Footer 默认布局更新。** 未自定义 Footer 的默认 statusline 现在是两行:第一行左侧为权限、Model、Tasks、目录、分支与扩展条目,右侧为 Plan 状态和 Focus Mode;第二行左侧为 token 用量、cache 命中、TTFB、吞吐与 turn/step 计数(stats-line 的语义拆解),右侧为完整 Context 用量(`已用/窗口 (百分比)`)。已保存自定义 `footerLayout` 的用户不受影响。
+
 ## [0.4.3-alpha.2] - 2026-09-08
 
 ### 安装与版本对应

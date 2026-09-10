@@ -981,8 +981,9 @@ function formatDuration(ms: number): string {
  * The performance tail keeps BOTH windows, each labeled: the LIFETIME
  * `LLM ...` wall (this is the detail surface that still shows it — the
  * footer's stats row dropped it) beside the RECENT TTFB and throughput.
- * Context pressure lives in the footer's first line (progress bar), so it
- * is not repeated here. Turn/step counters live there too.
+ * Context pressure and the turn/step counters live in the FOOTER (the
+ * default layout renders them on its stats row), so they are not repeated
+ * here.
  * @param stats - the folded statistics.
  * @returns the display line.
  */
