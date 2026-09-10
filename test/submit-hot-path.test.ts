@@ -928,7 +928,7 @@ async function bootCommandHarness(
       name: string
       description: string
       /** The contribution's client behavior (the bridge handler). */
-      bridgeHandler: () => { kind: 'success' | 'error'; text?: string }
+      bridgeHandler: () => { kind: 'success' | 'error'; text?: string } | Promise<{ kind: 'success'; text?: string } | { kind: 'error'; text: string }>
       sessionless?: boolean
       /** Whether the plugin ALSO registers a commands-service definition for
        * the same name (a HOST-command collision: the host claim wins and the
@@ -1001,14 +1001,14 @@ async function bootCommandHarness(
     name: string
     description: string
     sessionless?: boolean
-    bridgeHandler: () => { kind: 'success' | 'error'; text?: string }
+    bridgeHandler: () => { kind: 'success' | 'error'; text?: string } | Promise<{ kind: 'success'; text?: string } | { kind: 'error'; text: string }>
   }): Promise<void> => {
     const { bridgeHandler, ...spec } = contribution
     await context.plugin((pluginCtx) => {
       const service = pluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as {
         registerCommand(contribution: {
           id: string; name: string; description: string; sessionless?: boolean
-          handler: () => { kind: 'success' | 'error'; text?: string }
+          handler: () => { kind: 'success' | 'error'; text?: string } | Promise<{ kind: 'success'; text?: string } | { kind: 'error'; text: string }>
         }): unknown
       }
       service.registerCommand({ ...spec, handler: bridgeHandler })
@@ -1035,7 +1035,7 @@ async function bootCommandHarness(
           name: string
           description: string
           sessionless?: boolean
-          handler: () => { kind: 'success' | 'error'; text?: string }
+          handler: () => { kind: 'success' | 'error'; text?: string } | Promise<{ kind: 'success'; text?: string } | { kind: 'error'; text: string }>
         }): unknown
       }
       for (const contribution of contributions) {
@@ -1687,6 +1687,158 @@ test('a collision health record clears on recovery, while a HANDLER failure reco
   await registerContribution({ id: 'omega-cmd', name: 'omega', description: 'omega', bridgeHandler: () => ({ kind: 'success' }) })
   assert.equal(healthOf(extensionService, 'deploy-cmd')?.state, 'active', 'the recovered collision clears')
   assert.equal(healthOf(extensionService, 'boom-cmd')?.state, 'failed', 'the handler failure is untouched by the recovery')
+})
+
+// ── the KNOWN diagnostic limits of the shared command health record ────────
+// ONE contribution identity has THREE writers of its single extension-health
+// record: the candidate synthesis (a host claim on the name), the client
+// handler settlement, and the session command path reporting the HOST command
+// that runs under a colliding name — while the ledger keeps one failure
+// generation per record and DEDUPLICATES a repeat (the first message wins).
+// The tests below CHARACTERIZE the resulting limitations; they are accepted
+// and documented in `docs/surface-decisions.md`, NOT a specification of
+// desired behavior: health is a lossy diagnostic, not an authoritative
+// summary of every unrecovered failure. Routing, claims and the immediate
+// notices are unaffected and are asserted alongside.
+
+test('known limitation: a handler failure under a colliding name is masked, then cleared, by the collision record', async (t) => {
+  const healthOf = (id: string): { state: string; lastError?: string } | undefined =>
+    extensionServiceOf().find(entry => entry.id === id)
+  let releaseHandler: ((error: Error) => void) | undefined
+  let started = false
+  const { harness, mounted, registerContribution, extensionService } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [{
+      id: 'deploy-cmd', name: 'deploy', description: 'client deploy',
+      bridgeHandler: () => {
+        started = true
+        return new Promise((_resolve, reject) => { releaseHandler = reject })
+      },
+    }],
+  })
+  const extensionServiceOf = (): readonly { id: string; state: string; lastError?: string }[] =>
+    extensionService._ledger().healthSnapshot()
+  const registerHost = (name: string): (() => void) =>
+    (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
+      .register({ name, handler: () => ({ kind: 'success' }) })
+  // 1. The async client handler is IN FLIGHT (no claim yet: the local route).
+  mounted.app.setDraft('/deploy')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && !started; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(started, true, 'the async client handler started')
+  // 2. A same-named Host claim appears while the handler runs: the candidate
+  // synthesis fails and records the collision on the SAME health record.
+  const disposeHost = registerHost('deploy')
+  await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
+  assert.equal(healthOf('deploy-cmd')?.state, 'failed', 'the collision is recorded while the handler is in flight')
+  assert.match(healthOf('deploy-cmd')?.lastError ?? '', /collides with a host command/)
+  // 3. The in-flight handler REJECTS: the user is told immediately, but the
+  // ledger's first-message-wins dedupe keeps the collision text. (The routing
+  // assertions live in the resolve/limit tests below — a host-plane
+  // submission would settle this record first and change the very state
+  // characterized here.)
+  releaseHandler?.(new Error('handler boom'))
+  for (let round = 0; round < 40 && !/handler boom/.test(mounted.app.notifyTextForTest()); round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.match(mounted.app.notifyTextForTest(), /handler boom/, 'the handler failure reaches the user immediately')
+  assert.match(healthOf('deploy-cmd')?.lastError ?? '', /collides with a host command/, 'the health record still shows the collision')
+  // 4. The claim goes away: the collision recovery clears the record, and the
+  // UNRECOVERED handler failure is not in health any more.
+  disposeHost()
+  await registerContribution({ id: 'omega-cmd', name: 'omega', description: 'omega', bridgeHandler: () => ({ kind: 'success' }) })
+  assert.equal(healthOf('deploy-cmd')?.state, 'active', 'the collision recovery clears the record although the handler never recovered')
+})
+
+test('known limitation: a handler success clears the still-active collision record', async (t) => {
+  const healthOf = (id: string): { state: string; lastError?: string } | undefined =>
+    extensionServiceOf().find(entry => entry.id === id)
+  let releaseHandler: (() => void) | undefined
+  let started = false
+  const { harness, mounted, registerContribution, extensionService } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [{
+      id: 'deploy-cmd', name: 'deploy', description: 'client deploy',
+      bridgeHandler: () => {
+        started = true
+        return new Promise(resolve => { releaseHandler = () => resolve({ kind: 'success' }) })
+      },
+    }],
+  })
+  const extensionServiceOf = (): readonly { id: string; state: string; lastError?: string }[] =>
+    extensionService._ledger().healthSnapshot()
+  const registerHost = (name: string): (() => void) =>
+    (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
+      .register({ name, handler: () => ({ kind: 'success' }) })
+  // 1. The async client handler is IN FLIGHT.
+  mounted.app.setDraft('/deploy')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && !started; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  // 2. The same-named Host claim appears: the collision is recorded.
+  const disposeHost = registerHost('deploy')
+  await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
+  assert.equal(healthOf('deploy-cmd')?.state, 'failed', 'the collision is recorded while the handler is in flight')
+  // 3. The handler SETTLES SUCCESSFULLY while the collision stays active: the
+  // settlement clears the collision record (a handler success is not a
+  // collision recovery).
+  releaseHandler?.()
+  for (let round = 0; round < 40 && healthOf('deploy-cmd')?.state !== 'active'; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(healthOf('deploy-cmd')?.state, 'active', 'the handler success cleared the collision record')
+  // 4. The collision itself is untouched: the claim still owns the name and
+  // the failed source still offers no rows.
+  mounted.app.setDraft('/deploy from-host')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the host command still owns the name')
+  const names = mounted.app.commandCompletionsForTest().map(row => row.name)
+  assert.deepEqual(names, [], `the failed source still offers no rows: ${names.join(',')}`)
+  // 5. A successful synthesis restores the client row.
+  disposeHost()
+  await registerContribution({ id: 'omega-cmd', name: 'omega', description: 'omega', bridgeHandler: () => ({ kind: 'success' }) })
+  const recovered = mounted.app.commandCompletionsForTest().map(row => row.name)
+  assert.ok(recovered.includes('deploy'), `the client row returns: ${recovered.join(',')}`)
+})
+
+test('known limitation: a HOST command run under a colliding name settles the contribution health record', async (t) => {
+  // No async handler involved: the claim owns the name, a submission executes
+  // the HOST command through the session path, and that settlement is written
+  // to the CONTRIBUTION's health record (its ref resolves by contribution id).
+  const healthOf = (id: string): { state: string; lastError?: string } | undefined =>
+    extensionServiceOf().find(entry => entry.id === id)
+  const { harness, mounted, registerContribution, extensionService } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [
+      { id: 'deploy-cmd', name: 'deploy', description: 'client deploy', bridgeHandler: () => ({ kind: 'success' }) },
+    ],
+  })
+  const extensionServiceOf = (): readonly { id: string; state: string; lastError?: string }[] =>
+    extensionService._ledger().healthSnapshot()
+  const registerHost = (name: string): (() => void) =>
+    (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
+      .register({ name, handler: () => ({ kind: 'success' }) })
+  const disposeHost = registerHost('deploy')
+  await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
+  assert.equal(healthOf('deploy-cmd')?.state, 'failed', 'the collision is recorded')
+  mounted.app.setDraft('/deploy from-host')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the host command runs')
+  for (let round = 0; round < 40 && healthOf('deploy-cmd')?.state !== 'active'; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(healthOf('deploy-cmd')?.state, 'active', "the HOST command's success settled the contribution health record")
+  assert.equal(mounted.app.commandCompletionsForTest().length, 0, 'the claim still withdraws the whole source')
+  disposeHost()
+  await registerContribution({ id: 'omega-cmd', name: 'omega', description: 'omega', bridgeHandler: () => ({ kind: 'success' }) })
 })
 
 test('a client command executes locally under both chords (never the plane, never the model)', async (t) => {

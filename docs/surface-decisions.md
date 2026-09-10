@@ -445,6 +445,30 @@ name collision **fails loud — it never shadows**.
 - Everything unclaimed is an ordinary prompt; TUI-local commands
   (`LOCAL_COMMANDS`) and TUI-owned skill wrappers keep their own routes
   (local execution, `loadSkill`).
+- **Known diagnostic limitation — the health record is lossy.** One
+  contribution identity has THREE writers of its single extension-health
+  record: the candidate synthesis above, the client handler's settlement,
+  and the session command path that reports the HOST command executing under
+  a colliding name. The ledger keeps ONE failure generation per record and
+  deduplicates a repeat (the first message wins), so the record is not an
+  authoritative summary of every unrecovered failure:
+  - a client handler that fails while its name is colliding keeps its
+    failure out of the record (the collision message wins), and the
+    collision recovery then clears the record although the handler never
+    recovered;
+  - a client handler that succeeds while its name is colliding clears the
+    still-active collision record;
+  - a HOST command's own settlement under a colliding name is attributed to
+    the contribution's health record.
+
+  The user-visible behavior is unaffected and is asserted alongside: the
+  handler failure is notified and logged when it happens, the collision is
+  notified and withdraws the menu rows, and dispatch, claims and the menu
+  never consult health. The three flows are pinned by the `known limitation`
+  regressions in `test/submit-hot-path.test.ts`. Making the record
+  authoritative requires separating the failure SOURCES (and no longer
+  attributing a host execution to the contribution), which is deliberately
+  out of scope here.
 
 ## Focus is surface-adaptive
 

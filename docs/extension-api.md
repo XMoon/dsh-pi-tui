@@ -176,7 +176,9 @@ locally, never steered.
   until a synthesis succeeds again — while the host claims stay refreshed
   (input authority is never lost) and the collision is recorded on the
   contribution's health and surfaced once, naming every collision of that
-  failed pass.
+  failed pass. That health record is a best-effort diagnostic: a handler
+  failure overlapping a live collision can be masked or cleared by it (see
+  the diagnostic-limitation note in `docs/surface-decisions.md`).
 - **`sessionless`.** `true` lets the command run before a session exists
   (pure client commands: an overlay toggle, a picker). `false` (default)
   resolves/creates the session first — the host command surface is

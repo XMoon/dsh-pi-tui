@@ -352,13 +352,16 @@ function commandRejectsAttachments(
 }
 
 /**
- * The AUTHORITATIVE host-owned command catalog (P1-04): every command name
- * the TUI registers itself (registerTuiCommands in commands.ts) plus the
- * ownership sets (LOCAL_COMMANDS and SESSIONLESS_COMMANDS — /kill and
- * other core commands the TUI does not register but dispatches locally).
- * A plugin command contribution is validated against this catalog at
- * register time: an exact or near-synonym collision is rejected loudly,
- * so a plugin can never shadow a built-in command.
+ * The STATIC host-owned command catalog (P1-04): the ownership sets
+ * (LOCAL_COMMANDS and SESSIONLESS_COMMANDS — the TUI's own local/UI command
+ * names, including the ones `registerTuiCommands` registers, plus core
+ * commands such as /kill that the TUI does not register but dispatches
+ * locally) and `/plan`. A plugin command contribution is validated against
+ * this fixed catalog at register time: an exact or near-synonym collision is
+ * rejected loudly, so a plugin can never shadow a built-in command. Names
+ * that only the CURRENT host catalog owns (session-scoped or dynamically
+ * registered commands) are not in this set — those collisions surface at
+ * candidate synthesis time instead.
  */
 export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
   ...LOCAL_COMMANDS,
