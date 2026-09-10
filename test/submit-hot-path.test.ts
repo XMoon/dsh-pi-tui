@@ -279,7 +279,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     input?: { hint: string; attachments?: boolean }
     handler: (...args: never[]) => unknown
   }>()
-  const executed: { line: string; attachments: readonly unknown[] }[] = []
+  const executed: { line: string; attachments: readonly unknown[]; outcome: 'executed' | 'rejected' }[] = []
   const commands = {
     register: (definition: {
       name: string
@@ -311,16 +311,23 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     execute: async (agent: unknown, line: string, attachments: readonly unknown[] = []) => {
       const name = line.trim().replace(/^\//, '').split(/\s+/)[0] ?? ''
       const def = definitions.get(name)
+      // A name that does not resolve is NOT a command-plane call (the submit
+      // falls back to the ordinary delivery). A RESOLVED invocation is
+      // recorded WITH its settled outcome: the real host executor appends its
+      // lifecycle pair even when admission refuses it — the handler just
+      // never runs — so a refusal must stay visible as a refusal, never
+      // counted as an execution. The REAL executor enforces the descriptor
+      // declaration at admission: attachments sent to a command that does not
+      // declare `input.attachments` settle as an error result BEFORE the
+      // handler runs (dsh-commands `execute`). The fake mirrors it, so an
+      // integration test cannot pass by handing the host a payload it would
+      // refuse.
       if (def === undefined) return undefined
-      executed.push({ line, attachments: [...attachments] })
-      // The REAL host executor enforces the descriptor declaration at
-      // admission: attachments sent to a command that does not declare
-      // `input.attachments` settle as an error result BEFORE the handler runs
-      // (dsh-commands `execute`). The fake mirrors it, so an integration test
-      // cannot pass by handing the host a payload it would refuse.
       if (attachments.length > 0 && def.input?.attachments !== true) {
+        executed.push({ line, attachments: [...attachments], outcome: 'rejected' })
         return { result: { kind: 'error', text: `/${name} does not accept attachments` } }
       }
+      executed.push({ line, attachments: [...attachments], outcome: 'executed' })
       const rawInput = line.slice(line.indexOf(name) + name.length)
       const result = await (def.handler as (inv: unknown) => unknown)({
         commandId: CommandId('cmd-test'),
@@ -1608,6 +1615,7 @@ test('an attachment-bearing client command defers to a LATE declared host claim 
   await waitForCommand(harness)
   assert.equal(harness.executed.length, 1, 'the LATE declared host claim owns the line')
   assert.match(harness.executed[0]?.line ?? '', /^\/deploy /, 'the host command receives the raw line')
+  assert.equal(harness.executed[0]?.outcome, 'executed', 'the declared command is admitted by the executor')
   const submitted = harness.executed[0]?.attachments[0] as { type: string; mediaType: string; data: string; name?: string }
   assert.equal(harness.executed[0]?.attachments.length, 1, 'the declared command receives the submitted image')
   assert.equal(submitted.type, 'image')
@@ -1665,8 +1673,10 @@ for (const form of [
     assert.ok([...delivered.content].some(block => block.type === 'image'),
       `the image rides the skill prompt: ${JSON.stringify(delivered.content)}`)
     // The command plane either never saw the line (wrapper) or carried it with
-    // NO attachments (`/skill`): the host executor would have rejected them.
+    // NO attachments (`/skill`): the host executor would have rejected them,
+    // and the fake mirrors that rejection as a recorded outcome.
     for (const call of harness.executed) {
+      assert.equal(call.outcome, 'executed', `${call.line} must not be refused by the executor`)
       assert.equal(call.attachments.length, 0, `no command-plane payload for ${call.line}`)
     }
   })
@@ -1771,6 +1781,7 @@ test('a FAILED declared command keeps its attachment (consume only after handler
     await new Promise<void>(resolve => setImmediate(resolve))
   }
   const goalCall = harness.executed.find(entry => entry.line.startsWith('/goal '))
+  assert.equal(goalCall?.outcome, 'executed', 'the declared command is admitted by the executor')
   assert.equal(goalCall?.attachments.length, 1, 'the declared command receives the image')
   for (let round = 0; round < 40 && !/^\/goal /.test(mounted.app.getDraft()); round += 1) {
     await new Promise<void>(resolve => setImmediate(resolve))
