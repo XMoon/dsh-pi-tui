@@ -1014,6 +1014,43 @@ test('fullscreen click on the todo summary dock row opens the todo panel', async
   app.stop()
 })
 
+test('fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press on the tool message row (no release yet): the press-time
+  // identity is msg:tool:0.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // Replace the transcript with a DIFFERENT message (turn 1) and repaint:
+  // the same physical row now shows the new message.
+  app.setTranscript([{
+    kind: 'tool', turn: 1, name: 'grep', args: '{"pattern":"BBB"}',
+    result: 'BBB', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok((after[row] ?? '').includes('BBB'), `new message must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the synthesized click must NOT toggle the
+  // new message (press identity msg:tool:0 ≠ current identity msg:tool:1).
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  // The new message must stay FOLDED (exactly its one header row): a
+  // stale press must not expand whatever repainted onto the cell.
+  assert.equal(final.filter(line => line.includes('BBB')).length, 1, `the repainted message must not be expanded by the stale press:\n${final.join('\n')}`)
+  app.stop()
+})
+
 test('the footer badge combines tasks and live agents, hint only on an empty editor', async () => {
   const { vt, app } = startApp()
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
