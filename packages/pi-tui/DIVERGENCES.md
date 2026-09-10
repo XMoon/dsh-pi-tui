@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `35d50f7ad349dc068a05a62ef2ff59efb15a011d`
+- Audited local source commit: `ecc851dc9c4f6a46a5ae6724163e26f1373172fc`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -4466,6 +4466,9 @@ A host that resolves a same-cell click against the frame the user actually SAW n
 - test/image-collapse.test.ts: an async image load that settles between frames repaints automatically (the thumbnail's loader-notify clears the cache AND schedules the next frame)
 - test/image-collapse.test.ts: a live out-of-order image close cannot transfer collapse state to the earlier occurrence (stable occurrence rank: open opaque image blocks reserve a rank)
 - test/image-collapse.test.ts: a live out-of-order image close cannot transfer a press to the earlier occurrence (the press fence shares the stable occurrence rank)
+- test/transcript.test.ts: live projection follows first-seen stream order, not numeric index order (canonical BlockAssembler parity)
+- test/image-collapse.test.ts: a later first-seen lower-index image cannot inherit an earlier occurrence's collapse (first-seen occurrence rank)
+- test/image-collapse.test.ts: a later first-seen lower-index image cannot receive a stale press (first-seen occurrence rank)
 
 #### Upstream comparison
 
