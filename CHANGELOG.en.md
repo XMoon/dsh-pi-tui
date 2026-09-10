@@ -55,7 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   draft WITH its attachments. File attachments are refused for commands (the host expects an upload receipt
   this client cannot produce yet). Skill invocations are unaffected: an explicit `/skill <name> [image #1]`
   and a skill wrapper stay agent-facing, so their images ride the delivered prompt instead of the command
-  wire.
+  wire. The policy follows the FINAL authority: an unknown `/name [image #1]` line whose command only appears
+  with the session (a session-scoped host command) is checked again after the session resolves — an undeclared
+  command refuses it instead of running with an empty payload and consuming the draft.
 - **An attachment-bearing client command no longer refuses before the deferred authority resolves.**
   Before the first session exists, a line such as `/deploy [image #1]` first resolves the session-keyed
   authority: a host command or skill wrapper that appears with the session takes the line **with its

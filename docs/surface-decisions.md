@@ -525,6 +525,15 @@ The composer's attachment policy is the DSH client contract
   outright: their line is a UI control, never agent-facing input. A skill
   wrapper, a `/skill <name>` invocation and a plain prompt stay agent-facing
   and deliver their attachments to the model.
+- The policy is applied against the FINAL authority, not only at submit time.
+  A deferred start may commit a session-scoped host command the standing view
+  could not see, so the dispatch RE-APPLIES the policy after
+  `ensureSession()` and before `commands.execute` (the host executor only
+  validates the payload it is handed — an empty one would run the handler with
+  the placeholder as a plain argument and then consume the draft). An unknown
+  `/name [image #1]` line that becomes an undeclared host command is refused,
+  a late declaring command receives its images, and a late declaring command
+  still refuses a file.
 
 ## Focus is surface-adaptive
 

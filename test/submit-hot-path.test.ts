@@ -1682,6 +1682,126 @@ for (const form of [
   })
 }
 
+test('an unknown slash line that becomes an UNDECLARED host command refuses its attachment (deferred authority)', async (t) => {
+  // Deferred start with NO client contribution for the name: the standing
+  // view cannot classify the line, so the composer lets the attachment
+  // through. The session then commits a session-scoped host command that does
+  // NOT declare `input.attachments` — the dispatch must re-apply the composer
+  // policy against the FINAL catalog before the command plane runs. The host
+  // executor only validates the SUBMITTED payload, so passing `[]` would let
+  // the handler run with the placeholder as a raw argument and then consume
+  // the draft: the attachment would be silently dropped.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-late-host-attachment-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(6, 6))
+  const { harness, mounted, imageSaves } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    attachments: true,
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  harness.onCreateSession(() => {
+    ;(harness.commands as {
+      register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
+    }).register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+  })
+  const staged = await stageAttachmentDraft(mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  assert.deepEqual(harness.createdSessionIds, [], 'the sessionless intake creates no session')
+  mounted.app.setDraft(`/deploy ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 60 && !/does not accept attachments/.test(mounted.app.notifyTextForTest()); round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.match(mounted.app.notifyTextForTest(), /\/deploy does not accept attachments; remove them first/)
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/deploy')),
+    `the undeclared late claim never reaches the command plane: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
+  assert.deepEqual(imageSaves, [], 'nothing is admitted either')
+  assert.match(mounted.app.getDraft(), /^\/deploy /, 'the draft comes back')
+  assert.match(mounted.app.getDraft(), /\[image #1/, 'with its attachment placeholder intact')
+  assert.equal(harness.createdSessionIds.length, 1, 'the authority resolution ran (the session is session-keyed)')
+})
+
+test('an unknown slash line that becomes a DECLARED host command delivers and consumes its attachment', async (t) => {
+  // The same deferred authority, with the command DECLARING
+  // `input.attachments`: the encoded image must ride the command invocation
+  // (the dispatch-side re-check must not over-refuse), and success consumes
+  // the draft.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-late-host-attachment-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(7, 7))
+  const { harness, mounted, imageSaves } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    attachments: true,
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  harness.onCreateSession(() => {
+    ;(harness.commands as {
+      register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
+    }).register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '', attachments: true } })
+  })
+  const staged = await stageAttachmentDraft(mounted, path)
+  mounted.app.setDraft(`/deploy ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 60 && !harness.executed.some(entry => entry.line.startsWith('/deploy')); round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  const call = harness.executed.find(entry => entry.line.startsWith('/deploy'))
+  assert.equal(call?.outcome, 'executed', `the declared late claim is admitted: ${JSON.stringify(harness.executed)}`)
+  assert.equal(call?.attachments.length, 1, 'the declared command receives the submitted image')
+  assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
+  assert.deepEqual(imageSaves, [], 'the host admits the image, not the client')
+  // CONSUME-ON-SUCCESS: the same placeholder as a plain prompt is plain text.
+  mounted.app.setDraft(staged.trim())
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'consumed late-host placeholder')
+  assert.deepEqual(imageSaves, [], 'the consumed attachment is not re-admitted')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
+  assert.deepEqual([...delivered.content], [{ type: 'text', text: staged.trim() }], 'the line stays plain text')
+})
+
+test('an unknown slash line that becomes a DECLARED host command still refuses a FILE (no receipt seam)', async (t) => {
+  // The late-authority policy covers FILES too: a declared command receives
+  // images, never a file (the host expects an upload receipt this client
+  // cannot produce). Without the dispatch-side re-check the placeholder line
+  // would run with an empty payload and the success path would CONSUME the
+  // file draft — a silent drop of a user attachment.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-late-host-attachment-')
+  const path = join(root, 'report.pdf')
+  await writeFile(path, Buffer.from('%PDF-1.7\nbody'))
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    attachments: true,
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  harness.onCreateSession(() => {
+    ;(harness.commands as {
+      register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
+    }).register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '', attachments: true } })
+  })
+  const staged = await stageAttachmentDraft(mounted, path)
+  assert.match(staged, /\[file #1/, `the file is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/deploy ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 60 && !/cannot receive file attachments/.test(mounted.app.notifyTextForTest()); round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.match(mounted.app.notifyTextForTest(), /\/deploy cannot receive file attachments in this client; remove them first/)
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/deploy')),
+    `the file-bearing invocation never reaches the command plane: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
+  assert.match(mounted.app.getDraft(), /\[file #1/, 'the file draft comes back unconsumed')
+})
+
 test('a HOST command that does not declare input.attachments refuses an attachment (web composer parity)', async (t) => {
   // Upstream `CommandUiRuntime` refuses an attachment-bearing invocation of a
   // command whose descriptor does not declare `input.attachments`. The TUI
