@@ -521,8 +521,11 @@ The composer's attachment policy is the DSH client contract
 - A command submission CONSUMES its attachments only after handler success
   (web parity): an error outcome restores the draft and KEEPS the staged
   attachments, so a failed command never swallows the user's image.
-- TUI/core local commands and client contributions keep refusing attachments
-  outright: their line is a UI control, never agent-facing input. A skill
+- TUI/core local commands, client contributions AND `!`/`!!` local shell
+  lines keep refusing attachments outright: their line is a UI control, never
+  agent-facing input. The shell has no attachment delivery path
+  (`runLocalShell` neither admits nor consumes drafts), so the refusal is
+  what keeps a placeholder from becoming shell arguments. A skill
   wrapper, a `/skill <name>` invocation and a plain prompt stay agent-facing
   and deliver their attachments to the model.
 - The policy is applied against the FINAL authority, not only at submit time.

@@ -34,6 +34,8 @@
 
 ### 改进
 
+- **`!`/`!!` 本地 shell 行不再把占位符带进 shell。** 本地 shell 本来就不 admit/consume 草稿，`!echo [image #1]`
+  会把占位符当普通 shell 参数执行、图片留在 store 里。现在与其它本地命令一致：直接拒绝，并把草稿（含附件）退回。
 - **命令附件按命令自身的声明处理。** 只有 descriptor 声明了 `input.attachments` 的命令才允许带附件调用；
   其余命令在派发前直接拒绝（`/<name> does not accept attachments; remove them first`），不再把"只有占位符、
   没有内容"的行交给 host。声明过的命令会在 host 命令调用上收到编码后的图片附件；命令提交**只在 handler
@@ -132,6 +134,8 @@ dsh --profile pi-tui
 
 ### 修复
 
+- **过期的命令 handle 不再删除新一代注册。** handle 只代表**一次**注册：重复或迟到的 `dispose()`（HMR 重载后
+  才到达的 fiber cleanup）不会删掉同 id 的新 contribution，也不会误清新一代的健康记录。
 - **文本输入态的键盘所有权修正。** 自由输入编辑不再被父层抢走行编辑键:
   Question 的“Type something.”自由输入里 `←/→` 现在是文本光标(此前会误
   提交或翻页),`Home/End/Ctrl+A/E/B/F/Delete` 等编辑键统一进入共享输入;

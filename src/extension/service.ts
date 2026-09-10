@@ -878,22 +878,28 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       throw new Error(`command contribution "${contribution.name}" conflicts: ${detail} — resolve the conflict before registering`)
     }
     this.trackRegistryHealth('command', contribution.id, owner)
+    // The health record is keyed (slot, owner, id) — it cannot tell two
+    // registrations of the same id apart, so every cleanup asks the bridge
+    // whether THIS handle is still the live registration before untracking:
+    // a stale cleanup (a repeated explicit dispose, or a late fiber effect
+    // after an HMR re-registration) must never drop a newer generation's
+    // record.
+    const disposeOwn = (): void => {
+      const current = this.commands.isCurrent(outcome.handle)
+      outcome.handle.dispose()
+      if (current) this.untrackRegistryHealth('command', contribution.id, owner)
+    }
     let dispose: () => void
     try {
-      dispose = caller.fiber.effect(() => () => {
-        outcome.handle.dispose()
-        this.untrackRegistryHealth('command', contribution.id, owner)
-      }, 'piTuiExtensions.registerCommand()')
+      dispose = caller.fiber.effect(() => disposeOwn, 'piTuiExtensions.registerCommand()')
     } catch (error) {
-      outcome.handle.dispose()
-      this.untrackRegistryHealth('command', contribution.id, owner)
+      disposeOwn()
       throw error
     }
     return {
       id: outcome.handle.id,
       dispose: () => {
-        outcome.handle.dispose()
-        this.untrackRegistryHealth('command', contribution.id, owner)
+        disposeOwn()
         dispose()
       },
     }

@@ -57,6 +57,9 @@ interface Contribution {
    * empty snapshot in between). */
   readonly generation: number
   readonly handler: TuiLocalCommandHandler
+  /** The handle minted for THIS registration (identity for the caller's
+   * generation-aware cleanup). */
+  handle?: TuiCommandHandle
   disposed: boolean
 }
 
@@ -162,24 +165,38 @@ export class CommandBridge {
       handler: spec.handler,
       disposed: false,
     }
+    // IDENTITY-bound handle: a handle captured before a re-registration under
+    // the same id must never remove the NEWER registration (a repeated or
+    // late fiber cleanup would otherwise kill a live contribution —
+    // `dispose(id)` cannot tell the generations apart).
+    const handle: TuiCommandHandle = {
+      id: spec.id,
+      dispose: () => this.disposeContribution(contribution),
+    }
+    contribution.handle = handle
     this.contributions.set(spec.id, contribution)
     this.revision += 1
     this.onInvalidate()
-    return {
-      kind: 'registered',
-      handle: {
-        id: spec.id,
-        dispose: () => this.dispose(spec.id),
-      },
-    }
+    return { kind: 'registered', handle }
   }
 
   /** Remove one contribution by id (idempotent). */
   dispose(id: string): void {
     const contribution = this.contributions.get(id)
     if (contribution === undefined || contribution.disposed) return
+    this.disposeContribution(contribution)
+  }
+
+  /** Remove ONE registration by identity (the handle's own record).
+   * Idempotent, and a no-op for an entry the map no longer holds: the id may
+   * already belong to a NEWER registration (a dispose + re-register under the
+   * same id is a new generation, and a late cleanup of the old handle must
+   * leave it alive). */
+  private disposeContribution(contribution: Contribution): void {
+    if (contribution.disposed) return
     contribution.disposed = true
-    this.contributions.delete(id)
+    if (this.contributions.get(contribution.id) !== contribution) return
+    this.contributions.delete(contribution.id)
     this.revision += 1
     this.onInvalidate()
   }
@@ -189,6 +206,16 @@ export class CommandBridge {
     for (const [id, contribution] of [...this.contributions]) {
       if (contribution.owner === owner) this.dispose(id)
     }
+  }
+
+  /** Whether one handle still names the LIVE registration for its id. The
+   * caller's cleanup consults it before touching state that is keyed by id
+   * alone — the extension ledger's health record is (slot, owner, id), so a
+   * STALE handle's cleanup would otherwise untrack a NEWER generation's
+   * record. */
+  isCurrent(handle: TuiCommandHandle): boolean {
+    const contribution = this.contributions.get(handle.id)
+    return contribution !== undefined && !contribution.disposed && contribution.handle === handle
   }
 
   /** The owning fiber of one contribution id (the runner-facing health

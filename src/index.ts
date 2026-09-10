@@ -5223,6 +5223,16 @@ export function apply(ctx: Context, config: Config): void {
       // no session at all; the contextual `!` creates the session first
       // (the FIRST user message is the deferred trigger).
       if (text.startsWith('!')) {
+        // A local shell line is a UI control with NO attachment delivery path
+        // (`runLocalShell` neither admits nor consumes drafts): a staged
+        // attachment must never become shell arguments, and the success path
+        // must never consume it. Refuse and hand the draft (placeholder
+        // intact) back, exactly like a local command.
+        if (draftHasAttachments(text, draftImages, draftFiles)) {
+          app.setEditorText(mergeDraft(app.getDraft(), text))
+          app.notify('Attachments cannot be included in a local command.', 'error')
+          return
+        }
         if (text.startsWith('!!')) {
           // `!!` runs purely locally with NO session write (pi's
           // excluded-from-context escape hatch) — the row is sessionless

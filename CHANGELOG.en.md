@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 
+- **`!`/`!!` shell lines refuse attachments instead of passing the placeholder to the shell.** The local shell never
+  admitted or consumed drafts, so `!echo [image #1]` used to run with the placeholder as ordinary shell arguments and
+  leave the image staged. The line is now refused like any other local command, and the draft comes back with its
+  attachment intact.
 - **Command attachments follow the command's own declaration.** A command may be invoked with attachments
   only when its descriptor declares `input.attachments`; anything else refuses the line up front
   (`/<name> does not accept attachments; remove them first`) instead of handing the host a placeholder with
@@ -172,6 +176,9 @@ commands are in the README's “Install into a DSH profile” section.
 
 ### Fixed
 
+- **A stale command handle can no longer remove a newer registration.** A dispose handle names ONE registration:
+  a repeated or late `dispose()` (a fiber cleanup arriving after an HMR reload re-registered the same id) no longer
+  removes the newer contribution or drops its health record.
 - **Text-input keyboard ownership is corrected.** Free-text editing no
   longer loses its line-editing keys to the parent: in Question's “Type
   something.” edit, `←/→` are the text cursor (previously they could

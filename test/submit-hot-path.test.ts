@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
@@ -438,6 +439,22 @@ async function mountRunner(
   return {
     dispose: () => Promise.resolve(),
     app: app as TuiApp,
+  }
+}
+
+/** Drain microtasks + nextTick + the poll phase until `ready` or a bounded
+ * deadline. Load-tolerant on purpose: the FULL product suite mounts many
+ * surfaces in parallel, so a pure iteration budget is not enough for work
+ * that depends on real fs/timer scheduling (the attachment intake), and a
+ * fixed sleep is not allowed. Returns the final readiness. */
+async function drainUntil(ready: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (ready()) return true
+    if (Date.now() >= deadline) return false
+    for (let index = 0; index < 50; index += 1) await Promise.resolve()
+    await new Promise<void>(resolve => process.nextTick(resolve))
+    await new Promise<void>(resolve => setImmediate(resolve))
   }
 }
 
@@ -1567,17 +1584,23 @@ function pngHeader(width: number, height: number): Uint8Array {
  * sessionless command: the intake inserts its placeholder into the editor,
  * which is exactly the draft text the user submits next. */
 async function stageAttachmentDraft(mounted: { app: TuiApp }, path: string): Promise<string> {
+  // The runner registers its TUI commands during mount, and the mount's
+  // readiness can lag under a loaded suite (the full product run mounts many
+  // surfaces in parallel): submitting before `/attach` is advertised makes
+  // the line fall back to the session dispatch, where the intake lands much
+  // later. Wait for the catalog row first (bounded, drain-based).
+  await drainUntil(
+    () => mounted.app.commandCompletionsForTest().some(row => row.name === 'attach'),
+    10_000,
+  )
   mounted.app.setDraft(`/attach ${path}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  // The intake reads the file through real fs I/O in a detached workflow, so
-  // the wait drains microtasks + nextTick + the poll phase per round (the
-  // repository's race-test pattern — never a wall-clock sleep).
-  for (let round = 0; round < 40 && !/\[(file|image) #1/.test(mounted.app.getDraft()); round += 1) {
-    for (let index = 0; index < 50; index += 1) await Promise.resolve()
-    await new Promise<void>(resolve => process.nextTick(resolve))
-    await new Promise<void>(resolve => setImmediate(resolve))
-  }
-  return mounted.app.getDraft()
+  // The intake then reads the file through real fs I/O in a detached workflow.
+  const staged = await drainUntil(() => /\[(file|image) #1/.test(mounted.app.getDraft()), 10_000)
+  const draft = mounted.app.getDraft()
+  assert.ok(staged,
+    `the attachment intake staged nothing (draft=${JSON.stringify(draft)}, notice=${JSON.stringify(mounted.app.notifyTextForTest())})`)
+  return draft
 }
 
 test('an attachment-bearing client command defers to a LATE declared host claim (delivered, then consumed)', async (t) => {
@@ -1712,9 +1735,7 @@ test('an unknown slash line that becomes an UNDECLARED host command refuses its 
   assert.deepEqual(harness.createdSessionIds, [], 'the sessionless intake creates no session')
   mounted.app.setDraft(`/deploy ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  for (let round = 0; round < 60 && !/does not accept attachments/.test(mounted.app.notifyTextForTest()); round += 1) {
-    await new Promise<void>(resolve => setImmediate(resolve))
-  }
+  await drainUntil(() => /does not accept attachments/.test(mounted.app.notifyTextForTest()), 5000)
   assert.match(mounted.app.notifyTextForTest(), /\/deploy does not accept attachments; remove them first/)
   assert.ok(!harness.executed.some(entry => entry.line.startsWith('/deploy')),
     `the undeclared late claim never reaches the command plane: ${JSON.stringify(harness.executed)}`)
@@ -1749,9 +1770,7 @@ test('an unknown slash line that becomes a DECLARED host command delivers and co
   const staged = await stageAttachmentDraft(mounted, path)
   mounted.app.setDraft(`/deploy ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  for (let round = 0; round < 60 && !harness.executed.some(entry => entry.line.startsWith('/deploy')); round += 1) {
-    await new Promise<void>(resolve => setImmediate(resolve))
-  }
+  await drainUntil(() => harness.executed.some(entry => entry.line.startsWith('/deploy')), 5000)
   const call = harness.executed.find(entry => entry.line.startsWith('/deploy'))
   assert.equal(call?.outcome, 'executed', `the declared late claim is admitted: ${JSON.stringify(harness.executed)}`)
   assert.equal(call?.attachments.length, 1, 'the declared command receives the submitted image')
@@ -1792,15 +1811,49 @@ test('an unknown slash line that becomes a DECLARED host command still refuses a
   assert.match(staged, /\[file #1/, `the file is staged: ${JSON.stringify(staged)}`)
   mounted.app.setDraft(`/deploy ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  for (let round = 0; round < 60 && !/cannot receive file attachments/.test(mounted.app.notifyTextForTest()); round += 1) {
-    await new Promise<void>(resolve => setImmediate(resolve))
-  }
+  await drainUntil(() => /cannot receive file attachments/.test(mounted.app.notifyTextForTest()), 5000)
   assert.match(mounted.app.notifyTextForTest(), /\/deploy cannot receive file attachments in this client; remove them first/)
   assert.ok(!harness.executed.some(entry => entry.line.startsWith('/deploy')),
     `the file-bearing invocation never reaches the command plane: ${JSON.stringify(harness.executed)}`)
   assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
   assert.match(mounted.app.getDraft(), /\[file #1/, 'the file draft comes back unconsumed')
 })
+
+// A `!`/`!!` shell line is a local UI control: the shell neither admits nor
+// consumes drafts, so a staged attachment must be refused BEFORE the
+// placeholder can become shell arguments (and before the success path could
+// consume it).
+for (const form of [
+  { label: 'context `!`', line: (staged: string) => `!echo ${staged.trim()}` },
+  { label: 'local `!!`', line: (staged: string) => `!!echo ${staged.trim()}` },
+] as const) {
+  test(`a shell line never carries an attachment placeholder into the shell (${form.label})`, async (t) => {
+    const life = testLifecycle(t)
+    const root = life.tempDir('dsh-pi-tui-shell-attachment-')
+    const marker = join(root, 'shell-ran.marker')
+    const image = join(root, 'shot.png')
+    await writeFile(image, pngHeader(8, 8))
+    const { harness, mounted } = await bootCommandHarness(t, {
+      busyEnter: 'queue',
+      status: 'idle',
+      attachments: true,
+    })
+    const staged = await stageAttachmentDraft(mounted, image)
+    assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+    // The shell command would create the marker if it ever ran.
+    mounted.app.setDraft(form.line(staged).replace('echo ', `touch ${marker} # `))
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    for (let round = 0; round < 40 && !/Attachments cannot be included/.test(mounted.app.notifyTextForTest()); round += 1) {
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    // The strongest signal first: a shell that ran would have created the
+    // marker (the placeholder text is passed as shell arguments).
+    assert.equal(existsSync(marker), false, 'the shell never ran with the placeholder')
+    assert.match(mounted.app.notifyTextForTest(), /Attachments cannot be included in a local command\./)
+    assert.equal(harness.host.followedUp.length, 0, 'nothing is posted to the session')
+    assert.match(mounted.app.getDraft(), /\[image #1/, 'the draft comes back with its placeholder intact')
+  })
+}
 
 test('a HOST command that does not declare input.attachments refuses an attachment (web composer parity)', async (t) => {
   // Upstream `CommandUiRuntime` refuses an attachment-bearing invocation of a

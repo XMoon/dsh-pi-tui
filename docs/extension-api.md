@@ -336,7 +336,10 @@ shell, or keyboard focus — the host owns all of it.
 
 - Every registration is FIBER-BOUND: the host disposes it when the
   plugin's Cordis fiber unloads (HMR, disable). Explicit `dispose()` is
-  idempotent.
+  idempotent, and a handle names ONE registration: a repeated or LATE
+  `dispose()` (a fiber cleanup arriving after an HMR reload re-registered the
+  same id) never removes the newer registration, and it never drops that
+  registration's health record.
 - Registrations may happen BEFORE any surface exists; the host renders
   them when the surface attaches.
 - The surface GENERATION is stable across start/stop/fullscreen/

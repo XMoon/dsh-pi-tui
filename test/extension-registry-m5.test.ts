@@ -41,6 +41,31 @@ test('CommandBridge: dynamic local commands join the effective-local set', () =>
   assert.equal(bridge.isLocal('grilling', LOCAL_COMMANDS), false, 'unregistered is not local')
 })
 
+test('CommandBridge: a disposed handle never removes a LATER registration of the same id', () => {
+  // Caller-owned lifecycle: the handle names ONE registration. A repeated or
+  // late cleanup of a disposed handle (a fiber disposer running after an HMR
+  // reload re-registered the same id) must never remove the NEW generation.
+  const bridge = new CommandBridge()
+  const spec = { id: 'plugin-cmd', name: 'mycommand', description: 'a plugin command', handler: () => ({ kind: 'success' as const }) }
+  const first = bridge.register(spec, 'owner-a')
+  assert.equal(first.kind, 'registered')
+  if (first.kind !== 'registered') return
+  first.handle.dispose()
+  assert.equal(bridge.snapshot().entries.length, 0, 'the first registration is gone')
+  const second = bridge.register(spec, 'owner-a')
+  assert.equal(second.kind, 'registered')
+  if (second.kind !== 'registered') return
+  // The LATE / REPEATED dispose of the old handle: idempotent for itself and
+  // a no-op for the new generation.
+  first.handle.dispose()
+  first.handle.dispose()
+  assert.equal(bridge.snapshot().entries.length, 1, 'the new generation stays registered')
+  assert.equal(bridge.isLocal('mycommand', LOCAL_COMMANDS), true, 'the new generation stays live')
+  assert.equal(bridge.snapshot().entries[0]?.generation, 2, 'the live entry is the SECOND generation')
+  second.handle.dispose()
+  assert.equal(bridge.snapshot().entries.length, 0, 'the new handle still disposes its own registration')
+})
+
 test('CommandBridge: a plugin command can NEVER shadow a host-owned command (P1-04)', () => {
   // The authoritative host catalog (TUI commands + ownership sets).
   const catalog = new Set(['status', 'sessions', 'help', 'exit', 'kill', 'settings'])
