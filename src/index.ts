@@ -381,8 +381,9 @@ export function isLocalCommandLine(
 ): boolean {
   // The NAMESPACE ORDER decides: a TUI-owned local command is local, while
   // the agent-facing routes (a live skill wrapper, a live HOST claim) outrank
-  // a client contribution — the host handler owns its own attachment policy,
-  // and a contribution must never suppress it.
+  // a client contribution — a host claim's own `input.attachments`
+  // declaration decides whether it may carry attachments (never classified
+  // local here), and a contribution must never suppress that claim.
   if (LOCAL_COMMANDS.has(name)) return true
   if (isSkillWrapper?.(name) === true) return false
   if (isHostCommand?.(name) === true) return false
@@ -400,7 +401,9 @@ export function isLocalCommandLine(
  * @param isSkillWrapper - the live skill-wrapper test (absent = none).
  * @param isDynamicLocal - the live client-contribution test (absent = none).
  * @param isHostCommand - the live HOST-claim test (absent = none): a host
- *   command owns its own attachment policy, so it is never classified local.
+ *   command is never classified local here — its own `input.attachments`
+ *   declaration decides whether the composer may attach anything
+ *   ({@link attachmentRefusal}).
  * @returns the predicate for `commandRejectsImages` /
  *   {@link attachmentRefusal} (the dispatch's composer attachment policy).
  */
