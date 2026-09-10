@@ -762,6 +762,41 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return this.isComponentLive(target.component);
 	}
 
+	/** Whether the gesture target's CURRENT painted placement matches the
+	 * press-time placement: a still-mounted component whose overlay moved
+	 * or reflowed (e.g. a centered overlay that grew after the press
+	 * selected a described row) must not receive a synthetic click
+	 * retargeted with the OLD origin — the release cell is no longer the
+	 * pressed cell. (dsh-pi-tui divergence X018 hardening.) */
+	private isMouseTargetPlacementLive(target: TuiMouseDispatchTarget): boolean {
+		// Overlay targets AND their subtrees: the press-time originX/originY
+		// are the overlay's col/row at press time (dispatchMouseToOverlay
+		// sets x = screenX - layout.col, and nested dispatches keep the
+		// same x). The CURRENT rendered overlay layout must still place the
+		// component's overlay at the same absolute origin.
+		for (const layout of this.renderedOverlayLayouts) {
+			if (this.componentTreeContains(layout.entry.component, target.component)) {
+				return layout.col === target.originX && layout.row === target.originY;
+			}
+		}
+		// Layout-root targets: the press-time origin is the box rect
+		// origin (dispatchMouseToLayout sets x = screenX - box.rect.x). The
+		// current layout frame must still place the component at the same
+		// origin.
+		if (this.currentLayout !== undefined) {
+			const boxes = getLayoutBoxesAt(this.currentLayout, target.originX, target.originY);
+			if (boxes.some(box => box.component === target.component)) return true;
+			// Implicit-document children have no independent placement:
+			// they follow the implicit document (always at the screen
+			// origin), so a still-live direct child is placement-live.
+			for (const child of this.children) {
+				if (this.componentTreeContains(child, target.component)) return true;
+			}
+			return false;
+		}
+		return true;
+	}
+
 	/** Whether a component is still mounted and reachable: a live overlay,
 	 * a node of the current layout root's component tree, or a direct
 	 * child (implicit-document dispatch). Liveness is checked against the
@@ -1146,7 +1181,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				const targetResult = this.dispatchMouseToTarget(event, target);
 				if (targetResult) render = this.applyMouseDispatchResult(event, targetResult);
 				if (raw.release) {
-					if (!this.mousePressMoved && this.mousePressPoint?.x === raw.x && this.mousePressPoint.y === raw.y) {
+					if (
+						!this.mousePressMoved &&
+						this.mousePressPoint?.x === raw.x &&
+						this.mousePressPoint.y === raw.y &&
+						// The press-time painted placement must still match
+						// the CURRENT placement: a still-mounted component
+						// whose overlay moved/reflowed must not receive a
+						// synthetic click retargeted with the old origin.
+						// (dsh-pi-tui divergence X018 hardening.)
+						this.isMouseTargetPlacementLive(target)
+					) {
 						const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
 							clickCount: this.getComponentClickCount(target, raw.x, raw.y),
 						});

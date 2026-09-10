@@ -13,6 +13,7 @@ import { Image } from "../src/components/image.ts";
 import { MouseRegion } from "../src/components/mouse-region.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
 import { SelectList } from "../src/components/select-list.ts";
+import { SettingsList } from "../src/components/settings-list.ts";
 import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "../src/keybindings.ts";
@@ -3128,5 +3129,61 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		assert.strictEqual(second.focused, true, "the pressed Input must receive the focused flag");
 		root.clear();
 		assert.strictEqual(second.focused, false, "clear must clear the focused flag");
+		tui.stop();
+	});
+
+	it("does not synthesize a click on a still-mounted overlay that moved (X018 painted-placement liveness)", async () => {
+		const terminal = new RecordingTerminal(40, 20);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\niota\nkappa\nlambda\nmu\nnu\nxi\nomicron\npi\nrho\nsigma\ntau\nupsilon", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const changes: string[] = [];
+		const list = new SettingsList(
+			[
+				{ id: "a", label: "A", currentValue: "on", values: ["on", "off"] },
+				{
+					id: "b",
+					label: "B",
+					currentValue: "on",
+					values: ["on", "off"],
+					description: "long description " + "that wraps ".repeat(3),
+				},
+			],
+			10,
+			{
+				label: (text) => text,
+				value: (text) => text,
+				description: (text) => text,
+				cursor: "> ",
+				hint: (text) => text,
+			},
+			(id, value) => changes.push(`${id}:${value}`),
+			() => {},
+		);
+		tui.showOverlay(list, { anchor: "center" });
+		await terminal.waitForRender();
+		// Record B's absolute row.
+		const view = terminal.getViewport();
+		const rowB = view.findIndex(line => line.includes("B"));
+		assert.ok(rowB >= 0, `B row missing:\n${view.join("\n")}`);
+		// Press B: the press selects B, its description renders, and the
+		// CENTERED overlay grows and moves up.
+		terminal.sendInput(`\x1b[<0;2;${rowB + 1}M`);
+		await terminal.waitForRender();
+		const after = terminal.getViewport();
+		const rowB2 = after.findIndex(line => line.includes("B"));
+		assert.notEqual(rowB2, rowB, "B must move after the press repaint");
+		// Release at the ORIGINAL absolute row: the synthetic click must
+		// NOT activate B (the painted placement moved — the release cell
+		// is no longer the pressed cell).
+		terminal.sendInput(`\x1b[<0;2;${rowB + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(changes, [], "the moved overlay must not receive the ghost click");
+		// A fresh press+release at B's NEW row works.
+		terminal.sendInput(`\x1b[<0;2;${rowB2 + 1}M`);
+		terminal.sendInput(`\x1b[<0;2;${rowB2 + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(changes, ["b:off"], "a fresh press at the new row must activate B");
 		tui.stop();
 	});
