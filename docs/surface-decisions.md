@@ -503,10 +503,16 @@ The composer's attachment policy is the DSH client contract
   is refused before dispatch (`/<name> does not accept attachments; remove
   them first`) and the draft — attachment placeholder included — comes back.
   The host executor re-enforces the same declaration at admission.
-- A DECLARING command receives the submitted IMAGES as encoded
+- A DECLARING **HOST** command receives the submitted IMAGES as encoded
   `CommandSubmitAttachment`s on `commands.execute`; the host admits them
   through its own attachment store (the client never saves them locally for a
-  command invocation).
+  command invocation). A TUI-owned command never carries a payload on that
+  wire: `/skill <name> ...` is itself a registered TUI command and a live
+  skill wrapper is TUI-owned, and neither declares `input.attachments` — the
+  host executor would reject the invocation before `loadSkill` ran. Their
+  placeholder line is delivered as-is and the images are admitted by the
+  delivery path (`loadSkill` → `prepareUserMessage`), which is what makes an
+  explicit `/skill <name> [image #1]` multimodal.
 - A FILE attachment is refused even for a declaring command: the host
   contract carries files as upload receipts, and this client has no seam to
   produce one — fail closed rather than hand the host a placeholder with no
