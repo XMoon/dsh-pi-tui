@@ -196,8 +196,9 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   defaultModel: unknown
   commands: unknown
   host: FakeAgentHost
-  /** Every `commands.execute` line, in call order (the command plane). */
-  executed: { line: string }[]
+  /** Every `commands.execute` call, in order (the command plane), with the
+   * submitted attachments the client handed over. */
+  executed: { line: string; attachments: readonly unknown[] }[]
   readonly session: LiveSession | undefined
   /** The session ids `agents.create` produced (the deferred-start gate). */
   createdSessionIds: string[]
@@ -272,16 +273,30 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     currentSelection: () => ({ provider: 'p', model: 'm' }),
     saveSelection: async () => {},
   }
-  const definitions = new Map<string, { name: string; description?: string; handler: (...args: never[]) => unknown }>()
-  const executed: { line: string }[] = []
+  const definitions = new Map<string, {
+    name: string
+    description?: string
+    input?: { hint: string; attachments?: boolean }
+    handler: (...args: never[]) => unknown
+  }>()
+  const executed: { line: string; attachments: readonly unknown[] }[] = []
   const commands = {
-    register: (definition: { name: string; handler: (...args: never[]) => unknown; description?: string; input?: { hint: string } }): (() => void) => {
+    register: (definition: {
+      name: string
+      handler: (...args: never[]) => unknown
+      description?: string
+      input?: { hint: string; attachments?: boolean }
+    }): (() => void) => {
       definitions.set(definition.name, definition)
       return () => {
         if (definitions.get(definition.name) === definition) definitions.delete(definition.name)
       }
     },
-    list: () => [...definitions.values()].map(({ name, description }) => ({ name, description: description ?? '', input: { hint: '' } })),
+    list: () => [...definitions.values()].map(({ name, description, input }) => ({
+      name,
+      description: description ?? '',
+      input: input ?? { hint: '' },
+    })),
     // The real commands service resolves a definition by name for the
     // global layer too (`find(undefined, name)`); the harness mirrors it so
     // a TUI-owned sessionless command runs LOCALLY in a deferred start
@@ -293,11 +308,11 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     // like production. A plain prompt is NOT a command: undefined falls
     // back to the follow-up delivery (the runner's real semantics). Only
     // ACTUAL executions are recorded — an attempted miss is not a command.
-    execute: async (agent: unknown, line: string) => {
+    execute: async (agent: unknown, line: string, attachments: readonly unknown[] = []) => {
       const name = line.trim().replace(/^\//, '').split(/\s+/)[0] ?? ''
       const def = definitions.get(name)
       if (def === undefined) return undefined
-      executed.push({ line })
+      executed.push({ line, attachments: [...attachments] })
       const rawInput = line.slice(line.indexOf(name) + name.length)
       const result = await (def.handler as (inv: unknown) => unknown)({
         commandId: CommandId('cmd-test'),
@@ -926,6 +941,9 @@ async function bootCommandHarness(
     hostLoadsSkillBody?: boolean
     /** Mount WITHOUT a resumed session (the deferred-start gate). */
     deferredStart?: boolean
+    /** Provide a recording fake `ctx.attachments` (image admission
+     * observability: `imageSaves` records each `saveImages` batch). */
+    attachments?: boolean
     /** Extension command contributions to mount (owner metadata + the
      * plugin's own commands-service registration, like a real plugin). */
     extensionCommands?: readonly {
@@ -953,6 +971,8 @@ async function bootCommandHarness(
     sessionless?: boolean
     bridgeHandler: () => { kind: 'success' | 'error'; text?: string }
   }): Promise<void>
+  /** The recorded image-admission batches (only with `attachments: true`). */
+  imageSaves: readonly (readonly { mediaType: string; byteLength: number }[])[]
   /** The mounted extension service (health assertions). */
   extensionService: {
     _ledger(): {
@@ -970,6 +990,29 @@ async function bootCommandHarness(
   })
   const context = new Context()
   life.defer(() => disposeContext(context))
+  const imageSaves: { mediaType: string; byteLength: number }[][] = []
+  if (options.attachments === true) {
+    context.provide('attachments', {
+      imageLimits: {
+        maxImageBytes: 20 * 1024 * 1024,
+        maxImagesPerMessage: 4,
+        maxMessageImageBytes: 200 * 1024 * 1024,
+        maxImagePixels: 64_000_000,
+        maxImageDimension: 8192,
+        mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+      },
+      saveImages: async (inputs: readonly { mediaType: string; data: Uint8Array }[]) => {
+        imageSaves.push(inputs.map(input => ({ mediaType: input.mediaType, byteLength: input.data.byteLength })))
+        return inputs.map((input, index) => ({
+          attachmentId: `att-${imageSaves.length}-${index}`,
+          mediaType: input.mediaType,
+          bytes: input.data.byteLength,
+          width: 1,
+          height: 1,
+        }))
+      },
+    } as never)
+  }
   const harness = makeHarness(home, { id: 'command-session', events: sessionEvents('resumed answer') })
   for (const name of options.hostCommands ?? []) {
     ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void }).register({
@@ -1068,7 +1111,7 @@ async function bootCommandHarness(
   const mounted = await mountRunner(context, home, harness,
     options.deferredStart === true ? {} : { sessionId: 'command-session' })
   harness.host.status = options.status
-  return { harness, mounted, registerContribution, extensionService: extensionService as {
+  return { harness, mounted, registerContribution, imageSaves, extensionService: extensionService as {
     _ledger(): {
       healthSnapshot(): readonly { id: string; owner: string; extensionPoint: string; state: string; lastError?: string }[]
     }
@@ -1487,102 +1530,209 @@ test('a host command that appears only AFTER the deferred session outranks the c
   assert.equal(harness.host.steered.length, 0, 'never steered')
 })
 
+/** A minimal PNG header (magic + IHDR): the intake parses headers only, so a
+ * header is a complete fixture for the image attachment paths. */
+function pngHeader(width: number, height: number): Uint8Array {
+  const bytes = new Uint8Array(33)
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
+  bytes.set([0, 0, 0, 13], 8)
+  bytes.set([0x49, 0x48, 0x44, 0x52], 12)
+  const set32 = (offset: number, value: number): void => {
+    bytes[offset] = (value >>> 24) & 0xff
+    bytes[offset + 1] = (value >>> 16) & 0xff
+    bytes[offset + 2] = (value >>> 8) & 0xff
+    bytes[offset + 3] = value & 0xff
+  }
+  set32(16, width)
+  set32(20, height)
+  return bytes
+}
+
 /** Stage ONE real generic-file attachment through the REAL `/attach`
  * sessionless command: the intake inserts its placeholder into the editor,
  * which is exactly the draft text the user submits next. */
 async function stageAttachmentDraft(mounted: { app: TuiApp }, path: string): Promise<string> {
   mounted.app.setDraft(`/attach ${path}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  for (let round = 0; round < 40 && !/\[file #1/.test(mounted.app.getDraft()); round += 1) {
+  // The intake reads the file through real fs I/O in a detached workflow, so
+  // the wait drains microtasks + nextTick + the poll phase per round (the
+  // repository's race-test pattern — never a wall-clock sleep).
+  for (let round = 0; round < 40 && !/\[(file|image) #1/.test(mounted.app.getDraft()); round += 1) {
+    for (let index = 0; index < 50; index += 1) await Promise.resolve()
+    await new Promise<void>(resolve => process.nextTick(resolve))
     await new Promise<void>(resolve => setImmediate(resolve))
   }
   return mounted.app.getDraft()
 }
 
-test('an attachment-bearing client command defers its local refusal: a LATE host claim takes the line', async (t) => {
+test('an attachment-bearing client command defers to a LATE declared host claim (delivered, then consumed)', async (t) => {
   // Deferred start + a session-backed client contribution + a REAL staged
-  // attachment. The standing view classifies the line LOCAL (the client
-  // contribution), but the session may commit a session-scoped host claim
-  // that outranks it and accepts the attachment — so the irrevocable local
-  // refusal must wait for the same authority resolution instead of firing
-  // before `ensureSession()` (which would leave the real host command no
-  // chance to take the line).
+  // IMAGE. The standing view classifies the line LOCAL (the contribution),
+  // but the session commits a host command that DECLARES
+  // `input.attachments` — it takes the line and receives the encoded image
+  // (web composer parity: the leading claim's submit passes the attachments
+  // through). Success then CONSUMES the draft.
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-pi-tui-deferred-attachment-')
-  const path = join(root, 'report.pdf')
-  await writeFile(path, Buffer.from('%PDF-1.7\nbody'))
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(2, 2))
   const calls: string[] = []
-  const { harness, mounted } = await bootCommandHarness(t, {
+  const { harness, mounted, imageSaves } = await bootCommandHarness(t, {
     busyEnter: 'queue',
     status: 'idle',
     deferredStart: true,
+    attachments: true,
     extensionCommands: [{
       id: 'deploy', name: 'deploy', description: 'deploy',
       bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
     }],
   })
   harness.onCreateSession(() => {
-    ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void })
-      .register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+    ;(harness.commands as {
+      register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
+    }).register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '', attachments: true } })
   })
   const staged = await stageAttachmentDraft(mounted, path)
-  assert.match(staged, /\[file #1/, `the attachment is staged through the real intake: ${JSON.stringify(staged)}`)
+  assert.match(staged, /\[image #1/, `the image is staged through the real intake: ${JSON.stringify(staged)}`)
   assert.deepEqual(harness.createdSessionIds, [], 'the sessionless intake creates no session')
   mounted.app.setDraft(`/deploy ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   await waitForCommand(harness)
-  assert.equal(harness.executed.length, 1, 'the LATE host claim owns the line')
+  assert.equal(harness.executed.length, 1, 'the LATE declared host claim owns the line')
   assert.match(harness.executed[0]?.line ?? '', /^\/deploy /, 'the host command receives the raw line')
+  const submitted = harness.executed[0]?.attachments[0] as { type: string; mediaType: string; data: string; name?: string }
+  assert.equal(harness.executed[0]?.attachments.length, 1, 'the declared command receives the submitted image')
+  assert.equal(submitted.type, 'image')
+  assert.equal(submitted.mediaType, 'image/png')
+  assert.equal(submitted.name, 'shot.png')
+  assert.deepEqual([...Buffer.from(submitted.data, 'base64')], [...pngHeader(2, 2)],
+    'the EXACT encoded bytes ride the command invocation (no re-encode, no drop)')
   assert.deepEqual(calls, [], 'the client handler never runs once the session claims the name')
   assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a model prompt')
-  assert.ok(!mounted.app.notifyTextForTest().includes('Attachments cannot be included'),
-    `the local-attachment refusal must not fire before the authority resolves: ${mounted.app.notifyTextForTest()}`)
+  assert.deepEqual(imageSaves, [], 'a command submission is admitted by the HOST, not saved locally')
+  // CONSUME-ON-SUCCESS: the same placeholder re-submitted as a PLAIN prompt
+  // is ordinary text now — a surviving draft would be admitted (saveImages).
+  mounted.app.setDraft(staged.trim())
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'consumed placeholder')
+  assert.deepEqual(imageSaves, [], 'the consumed attachment is not re-admitted by a later submit')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
+  assert.deepEqual([...delivered.content], [{ type: 'text', text: staged.trim() }], 'the line stays plain text')
 })
 
-test('a deferred client command never runs a REPLACED contribution generation (and never becomes a prompt)', async (t) => {
-  // The submission captured one contribution generation, then the session
-  // create awaits. A plugin reload (dispose + re-register under the SAME
-  // owner and id) must not let the post-await resolution run the NEW
-  // generation's handler — the user submitted the old one — and a vanished
-  // name must never fall through `runLocalCommand`'s name-only lookup into
-  // the command plane or the MODEL.
-  const flush = async (): Promise<void> => {
-    for (let round = 0; round < 20; round += 1) await new Promise<void>(resolve => setImmediate(resolve))
-  }
-  const calls: string[] = []
-  const { harness, mounted, extensionService } = await bootCommandHarness(t, {
+test('a HOST command that does not declare input.attachments refuses an attachment (web composer parity)', async (t) => {
+  // Upstream `CommandUiRuntime` refuses an attachment-bearing invocation of a
+  // command whose descriptor does not declare `input.attachments`. The TUI
+  // must not let the line through and then hand the host a placeholder with
+  // no bytes (the attachment would be silently dropped).
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-command-attachment-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(4, 4))
+  const { harness, mounted, registerContribution, imageSaves } = await bootCommandHarness(t, {
     busyEnter: 'queue',
     status: 'idle',
-    deferredStart: true,
+    attachments: true,
     extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
   })
-  const service = extensionService as unknown as {
-    registerCommand(contribution: {
-      id: string; name: string; description: string; handler: () => { kind: 'success' }
-    }): { dispose(): void }
-  }
-  const spec = { id: 'deploy-cmd', name: 'deploy', description: 'client deploy' }
-  const submitted = service.registerCommand({ ...spec, handler: () => { calls.push('submitted'); return { kind: 'success' } } })
-  await flush()
-  harness.armCreateGate()
-  mounted.app.setDraft('/deploy prod')
+  // /compact is a HOST command without an attachment declaration; a registry
+  // change (any extension invalidation) refreshes the effective catalog.
+  ;(harness.commands as {
+    register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
+  }).register({ name: 'compact', handler: () => ({ kind: 'success' }) })
+  await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
+  const staged = await stageAttachmentDraft(mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged through the real intake: ${JSON.stringify(staged)}`)
+  const executedBefore = harness.executed.length
+  mounted.app.setDraft(`/compact ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  for (let round = 0; round < 40 && harness.createdSessionIds.length === 0; round += 1) {
+  for (let round = 0; round < 40 && !/does not accept attachments/.test(mounted.app.notifyTextForTest()); round += 1) {
     await new Promise<void>(resolve => setImmediate(resolve))
   }
-  assert.equal(harness.createdSessionIds.length, 1, 'the session create is in flight')
-  // The plugin reloads while the create awaits: SAME id, SAME owner (the
-  // registration context), a NEW generation.
-  submitted.dispose()
-  const replacement = service.registerCommand({ ...spec, handler: () => { calls.push('replacement'); return { kind: 'success' } } })
-  harness.releaseCreateGate()
-  await flush()
-  assert.deepEqual(calls, [], 'no generation runs: the submitted registration no longer exists')
-  assert.equal(harness.executed.length, 0, 'the command plane is never a fallback for a vanished contribution')
-  assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a model prompt')
-  assert.match(mounted.app.notifyTextForTest(), /\/deploy is no longer available/)
-  assert.match(mounted.app.getDraft(), /^\/deploy prod/, 'the draft comes back for a retry')
-  replacement.dispose()
+  assert.match(mounted.app.notifyTextForTest(), /\/compact does not accept attachments; remove them first/)
+  assert.equal(harness.executed.length, executedBefore, 'the undeclared command never executes')
+  assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
+  assert.deepEqual(imageSaves, [], 'nothing is admitted either')
+  assert.match(mounted.app.getDraft(), /^\/compact /, 'the draft comes back')
+  assert.match(mounted.app.getDraft(), /\[image #1/, 'with its attachment placeholder intact')
+})
+
+test('a declared HOST command still refuses a FILE attachment (no host receipt seam)', async (t) => {
+  // The host contract carries files as upload RECEIPTS; this client has no
+  // seam to produce one, so a declared command refuses a file rather than
+  // handing over a placeholder with no payload (fail closed).
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-command-attachment-')
+  const path = join(root, 'report.pdf')
+  await writeFile(path, Buffer.from('%PDF-1.7\nbody'))
+  const { harness, mounted, registerContribution } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    attachments: true,
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  ;(harness.commands as {
+    register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
+  }).register({ name: 'goal', handler: () => ({ kind: 'success' }), input: { hint: '<objective>', attachments: true } })
+  await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
+  const staged = await stageAttachmentDraft(mounted, path)
+  assert.match(staged, /\[file #1/)
+  const executedBefore = harness.executed.length
+  mounted.app.setDraft(`/goal ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && !/cannot receive file attachments/.test(mounted.app.notifyTextForTest()); round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.match(mounted.app.notifyTextForTest(), /\/goal cannot receive file attachments in this client; remove them first/)
+  assert.equal(harness.executed.length, executedBefore, 'the command never executes with an undeliverable file')
+  assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
+  assert.match(mounted.app.getDraft(), /\[file #1/, 'the file draft comes back')
+})
+
+test('a FAILED declared command keeps its attachment (consume only after handler success)', async (t) => {
+  // Web parity: "a submission consumes its attachments only after handler
+  // success; an error outcome keeps the draft and attachments" — a failed
+  // command must never swallow the user's image.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-command-attachment-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(3, 3))
+  const { harness, mounted, registerContribution, imageSaves } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    attachments: true,
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  ;(harness.commands as {
+    register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
+  }).register({
+    name: 'goal',
+    handler: () => ({ kind: 'error', text: 'goal rejected' }),
+    input: { hint: '<objective>', attachments: true },
+  })
+  await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
+  const staged = await stageAttachmentDraft(mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged through the real intake: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/goal ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && !harness.executed.some(entry => entry.line.startsWith('/goal ')); round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  const goalCall = harness.executed.find(entry => entry.line.startsWith('/goal '))
+  assert.equal(goalCall?.attachments.length, 1, 'the declared command receives the image')
+  for (let round = 0; round < 40 && !/^\/goal /.test(mounted.app.getDraft()); round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.match(mounted.app.getDraft(), /^\/goal /, 'the failed command restores the draft')
+  assert.deepEqual(imageSaves, [], 'the failed command admits nothing locally')
+  // The attachment SURVIVED: the same placeholder as a plain prompt is
+  // still an image submission (admitted through the model path).
+  mounted.app.setDraft(staged.trim())
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'kept attachment after a failed command')
+  assert.equal(imageSaves.length, 1, 'the kept attachment is admitted on the next plain-prompt submit')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.type), ['image'], 'the image reaches the model')
 })
 
 test('an attachment-bearing client command is refused AFTER the session resolves when the contribution keeps the line', async (t) => {

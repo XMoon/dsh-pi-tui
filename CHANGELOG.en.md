@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 
+- **Command attachments follow the command's own declaration.** A command may be invoked with attachments
+  only when its descriptor declares `input.attachments`; anything else refuses the line up front
+  (`/<name> does not accept attachments; remove them first`) instead of handing the host a placeholder with
+  no payload. A declaring command receives the submitted images as encoded attachments on the host command
+  call, and a command submission consumes them only after handler success — a failed command restores the
+  draft WITH its attachments. File attachments are refused for commands (the host expects an upload receipt
+  this client cannot produce yet).
 - **An attachment-bearing client command no longer refuses before the deferred authority resolves.**
   Before the first session exists, a line such as `/deploy [image #1]` first resolves the session-keyed
   authority: a host command or skill wrapper that appears with the session takes the line **with its

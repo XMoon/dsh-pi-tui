@@ -76,3 +76,14 @@ export function draftHasAttachments(
 ): boolean {
   return expandAttachmentPlaceholders(text, imageStore, fileStore).some(segment => segment.type !== 'text')
 }
+
+/** Whether text contains a currently live GENERIC-FILE placeholder (a
+ * command invocation cannot carry one: the host expects an upload receipt
+ * this client has no seam to produce). */
+export function draftHasFiles(
+  text: string,
+  imageStore: DraftImageStoreLike,
+  fileStore?: DraftFileStoreLike,
+): boolean {
+  return expandAttachmentPlaceholders(text, imageStore, fileStore).some(segment => segment.type === 'file')
+}

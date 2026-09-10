@@ -176,6 +176,8 @@ import {
   pruneUnreferencedDraftAttachments,
   type PrepareInputDeps,
 } from './image/submit.ts'
+import { expandImagePlaceholders } from './image/placeholder.ts'
+import { draftHasFiles } from './attachment/placeholder.ts'
 import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
 import { createExitController } from './exit.ts'
@@ -340,17 +342,6 @@ export function commandRejectsImages(
   return parsed !== undefined && isLocal(parsed.name) && draftHasImages(text, store)
 }
 
-/** Whether a local command line carries any live attachment placeholder. */
-function commandRejectsAttachments(
-  parsed: { name: string } | undefined,
-  text: string,
-  imageStore: import('./image/types.ts').DraftImageStoreLike,
-  fileStore: import('./attachment/file-draft.ts').DraftFileStoreLike | undefined,
-  isLocal: (name: string) => boolean,
-): boolean {
-  return parsed !== undefined && isLocal(parsed.name) && draftHasAttachments(text, imageStore, fileStore)
-}
-
 /**
  * The STATIC host-owned command catalog (P1-04): the ownership sets
  * (LOCAL_COMMANDS and SESSIONLESS_COMMANDS — the TUI's own local/UI command
@@ -410,7 +401,8 @@ export function isLocalCommandLine(
  * @param isDynamicLocal - the live client-contribution test (absent = none).
  * @param isHostCommand - the live HOST-claim test (absent = none): a host
  *   command owns its own attachment policy, so it is never classified local.
- * @returns the predicate for `commandRejectsAttachments` / `commandRejectsImages`.
+ * @returns the predicate for `commandRejectsImages` /
+ *   {@link attachmentRefusal} (the dispatch's composer attachment policy).
  */
 export function commandIsLocalForAttachments(
   parsed: { name: string; rawInput?: string } | undefined,
@@ -4125,6 +4117,56 @@ export function apply(ctx: Context, config: Config): void {
      * against concurrent attach-time prunes). Correctness side effect
      * first; never throws.
      */
+    /**
+     * The COMPOSER-side attachment policy for one parsed line (DSH web
+     * parity): returns the refusal text, or undefined when the line may carry
+     * the staged attachments.
+     * - a TUI/core local command and a client contribution are UI controls —
+     *   refused;
+     * - a LIVE skill wrapper, a `/skill <name>` invocation and a plain prompt
+     *   are agent-facing — delivered to the model;
+     * - a HOST command accepts attachments ONLY when its descriptor declares
+     *   `input.attachments` (upstream refuses otherwise before dispatch);
+     * - a declared command still refuses a FILE attachment: the host expects
+     *   an upload receipt, which this client has no seam to produce (fail
+     *   closed rather than silently drop the file).
+     * The host executor re-enforces the declaration at admission.
+     */
+    const attachmentRefusal = (
+      parsed: { name: string; rawInput?: string },
+      draft: string,
+      isLocalLine: (name: string) => boolean,
+    ): string | undefined => {
+      if (!draftHasAttachments(draft, draftImages, draftFiles)) return undefined
+      // A skill wrapper is TUI-owned agent-facing input even when a client
+      // contribution shares the name.
+      if (isSkillWrapperName?.(parsed.name) === true) return undefined
+      if (!isLocalLine(parsed.name)) {
+        if (isHostCommandName?.(parsed.name) === true) {
+          if (isHostCommandAcceptingAttachments?.(parsed.name) !== true) {
+            return `/${parsed.name} does not accept attachments; remove them first`
+          }
+          if (draftHasFiles(draft, draftImages, draftFiles)) {
+            return `/${parsed.name} cannot receive file attachments in this client; remove them first`
+          }
+        }
+        return undefined
+      }
+      return 'Attachments cannot be included in a local command.'
+    }
+    /** The encoded images ONE command invocation carries (DSH
+     * `CommandSubmitAttachment`): the draft store holds the exact bytes, and
+     * the host admits them through its own store at execute time. Only a
+     * declared host command reaches this builder — an undeclared command and
+     * any file attachment are refused before dispatch. */
+    const commandSubmitAttachments = (draft: string) => expandImagePlaceholders(draft, draftImages)
+      .flatMap(segment => segment.type === 'image' ? [segment.image] : [])
+      .map(image => ({
+        type: 'image' as const,
+        mediaType: image.mediaType,
+        data: Buffer.from(image.bytes).toString('base64'),
+        ...(image.name === undefined ? {} : { name: image.name }),
+      }))
     const restoreSubmissionDraft = (draft: string): void => {
       if (lifecycleController.signal.aborted) return
       app.setEditorText(mergeDraft(app.getDraft(), draft))
@@ -4492,7 +4534,13 @@ export function apply(ctx: Context, config: Config): void {
             // window: `commands.execute` invokes a resolved handler in the
             // same call stack, so a TUI-owned skill handler captures its
             // submission's mode before any await (see withDelivery).
-            return withCommandDelivery(delivery, () => commands.execute(agent as Agent, toggled, [], signal))
+            // The command plane receives the submitted attachments (DSH
+            // `CommandSubmitAttachment`): the gate already proved that the
+            // resolved command DECLARES `input.attachments` and that the line
+            // carries images only, so this is the web composer's
+            // `leadingClaim.submit(args, attachments)` path — the host admits
+            // them through its own store before the handler runs.
+            return withCommandDelivery(delivery, () => commands.execute(agent as Agent, toggled, commandSubmitAttachments(text), signal))
           }, {
             diag,
             sessionId: () => agent.session.id,
@@ -4607,10 +4655,14 @@ export function apply(ctx: Context, config: Config): void {
                     : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
                 }
               } else {
-                // A recognized command error committed no agent-facing
-                // message; restore any staged attachment draft before the
-                // handoff pin is released. A success consumed its refs.
+                // A command submission CONSUMES its attachments only after
+                // handler success (web parity: an error outcome keeps the
+                // draft and its attachments for correction, so a failed
+                // command never silently drops the user's attachment). An
+                // error result committed no agent-facing message: restore the
+                // staged draft before the handoff pin is released.
                 if (execution.result.kind === 'error') restoreCommandAttachmentDraft()
+                else consumeDraftAttachments(text, draftImages, draftFiles)
                 // The command COMMITTED (no image fallback): release the
                 // handoff pin.
                 fallbackPin()
@@ -5205,11 +5257,13 @@ export function apply(ctx: Context, config: Config): void {
         && liveAgent === undefined
         && extensionService?.commands.find(parsed.name)?.sessionless === false
         && localForAttachments(parsed.name)
-      if (!deferredClientAttachments
-        && commandRejectsAttachments(parsed, text, draftImages, draftFiles, localForAttachments)) {
-        app.setEditorText(mergeDraft(app.getDraft(), text))
-        app.notify('Attachments cannot be included in a local command.', 'error')
-        return
+      if (!deferredClientAttachments && parsed !== undefined) {
+        const refusal = attachmentRefusal(parsed, text, localForAttachments)
+        if (refusal !== undefined) {
+          app.setEditorText(mergeDraft(app.getDraft(), text))
+          app.notify(refusal, 'error')
+          return
+        }
       }
       const isSessionless = parsed !== undefined && SESSIONLESS_COMMANDS.has(parsed.name)
       // The submission's effective delivery mode — resolved ONCE, here at
@@ -5281,6 +5335,19 @@ export function apply(ctx: Context, config: Config): void {
           run: async () => {
             await ensureSession()
             if (liveAgent === undefined) return
+            // The COMPOSER attachment policy is resolved with the FINAL
+            // authority: a late host claim that does not declare
+            // `input.attachments` refuses the line (a declared one takes it
+            // WITH the images, see the delivery side); a late skill wrapper
+            // delivers to the model; a contribution that keeps the line
+            // refuses as a local command — the synchronous gate's outcome,
+            // only now final.
+            const refusal = attachmentRefusal(parsed, text, localForAttachments)
+            if (refusal !== undefined) {
+              restoreSubmissionDraft(text)
+              app.notify(refusal, 'error')
+              return
+            }
             // AUTHORITY RE-CHECK after the session exists: the deferred start
             // commits a session whose scoped catalog the standing view could
             // not see, and the skill catalog may load with it. A live HOST
@@ -5299,15 +5366,6 @@ export function apply(ctx: Context, config: Config): void {
             if (extensionService?.commands.find(parsed.name) !== submitted) {
               app.notify(`/${parsed.name} is no longer available — the draft was restored, submit it again`, 'error')
               restoreSubmissionDraft(text)
-              return
-            }
-            // The FINAL owner is the client command: its local route refuses
-            // attachments. The refusal is the synchronous gate's outcome,
-            // resolved late — now that no host claim or skill wrapper can
-            // take the line instead.
-            if (commandRejectsAttachments(parsed, text, draftImages, draftFiles, localForAttachments)) {
-              restoreSubmissionDraft(text)
-              app.notify('Attachments cannot be included in a local command.', 'error')
               return
             }
             runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
@@ -7523,6 +7581,11 @@ export function apply(ctx: Context, config: Config): void {
      * TUI-owned skill wrapper)? The dispatch consults it BEFORE the busy
      * queue/steer policy (PR115-fix problem 1). */
     let isHostCommandName: ((name: string) => boolean) | undefined
+    /** The declaration test installed by registerTuiCommands: does the
+     * current host catalog's command for this name declare
+     * `input.attachments`? The composer refuses an attachment-bearing line
+     * for any other command (web `CommandUiRuntime.candidates` parity). */
+    let isHostCommandAcceptingAttachments: ((name: string) => boolean) | undefined
     /** The skill-wrapper test installed by registerTuiCommands: is a slash
      * name a LIVE TUI-owned skill wrapper? The steer path consults it to
      * decide whether a composition without the host skill-body loader must
@@ -7881,6 +7944,7 @@ export function apply(ctx: Context, config: Config): void {
         const installed = registerTuiCommands(runner, initial)
         wasAdvertisedClaim = installed.wasAdvertised
         isHostCommandName = installed.isHostCommand
+        isHostCommandAcceptingAttachments = installed.isHostCommandAcceptingAttachments
         isSkillWrapperName = installed.isSkillWrapper
         refreshCommandCompletions = installed.refreshCommandCompletions
         withCommandDelivery = installed.withDelivery

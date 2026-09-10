@@ -172,7 +172,8 @@ locally, never steered.
 - **Host authority.** A name the current host catalog resolves is a HOST
   command: it executes through the command plane and a contribution can
   never shadow it — not in the dispatch, and not in the attachment gate
-  (the host handler owns its own attachment policy).
+  (a host command's own `input.attachments` declaration decides whether the
+  composer may attach anything).
 - **Two collision mechanisms.** A name owned by the TUI's OWN static catalog
   (`/status`, `/kill`, ...) is rejected at REGISTRATION: `registerCommand`
   throws and the plugin fails to load loudly. A name the SESSION's host
