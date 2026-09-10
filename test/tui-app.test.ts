@@ -2980,3 +2980,41 @@ test('question: press Q1 option → keyboard advance → release same cell must 
   answers.catch(() => {})
   app.stop()
 })
+
+test('question: a queued flow cannot consume the previous flow press (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers1 = app.askQuestions([
+    { id: 'q1', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+  ])
+  const answers2 = app.askQuestions([
+    { id: 'q1', question: 'Q1', options: [{ label: 'C' }, { label: 'D' }] },
+  ])
+  await vt.waitForRender()
+  // F1: option A on some row. Press it (no release): the press-time
+  // identity belongs to F1's flow instance.
+  const view = vt.getViewport()
+  const rowA = view.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, `option A missing:\n${view.join('\n')}`)
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}M`)
+  await vt.waitForRender()
+  // Keyboard completes F1: Enter confirms A, Enter submits the review.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  // F2 (queued, same question id) takes over: option C on the same row.
+  const after = vt.getViewport()
+  assert.ok((after[rowA] ?? '').includes('[1] C'), `option C must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: F2 must NOT consume F1's press (the
+  // gesture object belongs to F1's flow instance).
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}m`)
+  await vt.waitForRender()
+  // F2 must not be answered: the flow stays on F2's Q1.
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('?  Q1')), `the flow must still be on F2's Q1:\n${final.join('\n')}`)
+  answers1.catch(() => {})
+  answers2.catch(() => {})
+  app.stop()
+})

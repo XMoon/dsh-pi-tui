@@ -425,15 +425,21 @@ export class QuestionFlow implements Component, Focusable {
 
   /**
    * Complete a mouse gesture: the release click may only run the action
-   * for the EXACT press-time identity. A mismatch (question advanced,
-   * the cell repainted to a different target, the gesture was never
-   * started) is a no-op — the stale identity is always consumed.
+   * for the EXACT press-time identity. The gesture OBJECT itself is part
+   * of the identity — a queued flow that took over the seat after the
+   * previous flow settled can never consume the previous flow's press
+   * (its own mousePressGesture is undefined or a different object). A
+   * mismatch (question advanced, the cell repainted to a different
+   * target, the gesture was never started) is a no-op — the stale
+   * identity is always consumed.
    */
   completeMouseClick(gesture: QuestionMouseGesture | undefined, row: number, x?: number): void {
+    const pressedGesture = this.mousePressGesture
     this.mousePressGesture = undefined
+    if (gesture === undefined || gesture !== pressedGesture) return
     const question = this.questions[this.tab]
     if (question === undefined) return
-    if (gesture === undefined || gesture.questionId !== question.id) return
+    if (gesture.questionId !== question.id) return
     if (this.hitMap.get(row) !== gesture.hit) return
     this.clickRow(row, x)
   }
@@ -515,6 +521,14 @@ export class QuestionFlow implements Component, Focusable {
       this.confirm()
       return
     }
+  }
+
+  /** One bullet per GRAPHEME of the real value (the mask contract: 1
+   * visible grapheme = 1 mask glyph, never UTF-16 code units). Used by
+   * the review page and the multi-select custom suffix so the mask
+   * semantics match the editing state. */
+  private maskedValue(value: string): string {
+    return '•'.repeat([...segmenter.segment(value)].length)
   }
 
   /** One bullet per GRAPHEME of the real value, aligned with the Input's
@@ -1143,10 +1157,15 @@ export class QuestionFlow implements Component, Focusable {
           : draft.custom !== '' && question.multiSelect !== true
             ? question.masked === true
               // A masked secret stays masked on the review page too: the
-              // answer is confirmed as "typed", never re-shown in plaintext.
-              ? '•'.repeat(draft.custom.length)
+              // answer is confirmed as "typed", never re-shown in
+              // plaintext — one bullet per GRAPHEME, matching the
+              // editing-state mask contract.
+              ? this.maskedValue(draft.custom)
               : draft.custom
-            : [...draft.selected].join(', ') + (draft.custom !== '' ? ` + ${draft.custom}` : '')
+            : [...draft.selected].join(', ')
+                + (draft.custom !== ''
+                  ? ` + ${question.masked === true ? this.maskedValue(draft.custom) : draft.custom}`
+                  : '')
         reviewBudget = appendWrappedBudgeted(
           lines,
           `${color.textDim(`Q${qi + 1}`)}  `,
