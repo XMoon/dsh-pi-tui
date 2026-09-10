@@ -47,6 +47,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 
+- **An attachment-bearing client command no longer refuses before the deferred authority resolves.**
+  Before the first session exists, a line such as `/deploy [image #1]` first resolves the session-keyed
+  authority: a host command or skill wrapper that appears with the session takes the line **with its
+  attachment**; only when the client command keeps it does the attachment refusal fire, returning the
+  draft (placeholder intact) for a re-attach decision. The referenced drafts are reserved across the
+  deferred window, so a concurrent attach-time prune cannot drop them.
+- **A plugin reload during a deferred start never runs the next generation.** If the contribution is
+  unloaded/replaced while the first submission resolves its session (even under the same owner and id),
+  the submitted command does **not** run the new handler and is **never** downgraded to a model prompt:
+  the submission is aborted with `/<name> is no longer available` and the draft is restored for a retry.
 - **Ctrl+Enter now follows the web submission semantics.** While the agent is running, Ctrl+Enter takes
   the **opposite** of the busy-Enter behavior: it steers under the default `busyEnter=queue` and queues
   under `busyEnter=steer` (an idle agent always queues). The old `app.input.queue` action is kept as a
@@ -55,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compatibility
 
+- **The extension API version is now 2 (breaking).** `api().apiVersion` reports `2` because the
+  plugin command contribution contract below is a breaking change to the STABLE surface (removed
+  `execution`/`argumentProvider`, required `handler`); `1` stays the M0–M3 foundation, so a plugin
+  can tell the two schemas apart. A plugin still declaring the removed v1 shape is rejected at
+  registration instead of being silently reinterpreted.
 - **Plugin command contributions now follow the DSH client command model (breaking).** The
   `execution: 'local' | 'submission'` ownership metadata is REMOVED: a contribution IS a client-owned
   command (a required `handler`, no host descriptor) that joins the `/` menu and executes locally, never

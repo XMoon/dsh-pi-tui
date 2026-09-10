@@ -236,7 +236,7 @@ function main() {
           }
           return {
             api: () => ({
-              apiVersion: 1,
+              apiVersion: 2,
               hostVersion: 'test',
               capabilities: new Set(['advanced.input.capture', 'advanced.ui.interactive', 'advanced.editor.control']),
               deprecations: new Map(),

@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
@@ -281,7 +282,11 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
       }
     },
     list: () => [...definitions.values()].map(({ name, description }) => ({ name, description: description ?? '', input: { hint: '' } })),
-    find: () => undefined,
+    // The real commands service resolves a definition by name for the
+    // global layer too (`find(undefined, name)`); the harness mirrors it so
+    // a TUI-owned sessionless command runs LOCALLY in a deferred start
+    // instead of falling through to the session dispatch.
+    find: (_agent: unknown, name: string) => definitions.get(name),
     // A REGISTERED command executes through the command plane (the Host
     // command semantics): the handler runs with a CommandRuntime-shaped
     // invocation, so a real handler (e.g. /skill → loadSkill) delivers
@@ -949,7 +954,11 @@ async function bootCommandHarness(
     bridgeHandler: () => { kind: 'success' | 'error'; text?: string }
   }): Promise<void>
   /** The mounted extension service (health assertions). */
-  extensionService: { _ledger(): { healthSnapshot(): readonly { id: string; owner: string; state: string; lastError?: string }[] } }
+  extensionService: {
+    _ledger(): {
+      healthSnapshot(): readonly { id: string; owner: string; extensionPoint: string; state: string; lastError?: string }[]
+    }
+  }
 }> {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-command-arb-')
@@ -1060,7 +1069,9 @@ async function bootCommandHarness(
     options.deferredStart === true ? {} : { sessionId: 'command-session' })
   harness.host.status = options.status
   return { harness, mounted, registerContribution, extensionService: extensionService as {
-    _ledger(): { healthSnapshot(): readonly { id: string; owner: string; state: string; lastError?: string }[] }
+    _ledger(): {
+      healthSnapshot(): readonly { id: string; owner: string; extensionPoint: string; state: string; lastError?: string }[]
+    }
   } }
 }
 
@@ -1476,6 +1487,139 @@ test('a host command that appears only AFTER the deferred session outranks the c
   assert.equal(harness.host.steered.length, 0, 'never steered')
 })
 
+/** Stage ONE real generic-file attachment through the REAL `/attach`
+ * sessionless command: the intake inserts its placeholder into the editor,
+ * which is exactly the draft text the user submits next. */
+async function stageAttachmentDraft(mounted: { app: TuiApp }, path: string): Promise<string> {
+  mounted.app.setDraft(`/attach ${path}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && !/\[file #1/.test(mounted.app.getDraft()); round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  return mounted.app.getDraft()
+}
+
+test('an attachment-bearing client command defers its local refusal: a LATE host claim takes the line', async (t) => {
+  // Deferred start + a session-backed client contribution + a REAL staged
+  // attachment. The standing view classifies the line LOCAL (the client
+  // contribution), but the session may commit a session-scoped host claim
+  // that outranks it and accepts the attachment — so the irrevocable local
+  // refusal must wait for the same authority resolution instead of firing
+  // before `ensureSession()` (which would leave the real host command no
+  // chance to take the line).
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-deferred-attachment-')
+  const path = join(root, 'report.pdf')
+  await writeFile(path, Buffer.from('%PDF-1.7\nbody'))
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    extensionCommands: [{
+      id: 'deploy', name: 'deploy', description: 'deploy',
+      bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
+    }],
+  })
+  harness.onCreateSession(() => {
+    ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void })
+      .register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+  })
+  const staged = await stageAttachmentDraft(mounted, path)
+  assert.match(staged, /\[file #1/, `the attachment is staged through the real intake: ${JSON.stringify(staged)}`)
+  assert.deepEqual(harness.createdSessionIds, [], 'the sessionless intake creates no session')
+  mounted.app.setDraft(`/deploy ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the LATE host claim owns the line')
+  assert.match(harness.executed[0]?.line ?? '', /^\/deploy /, 'the host command receives the raw line')
+  assert.deepEqual(calls, [], 'the client handler never runs once the session claims the name')
+  assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a model prompt')
+  assert.ok(!mounted.app.notifyTextForTest().includes('Attachments cannot be included'),
+    `the local-attachment refusal must not fire before the authority resolves: ${mounted.app.notifyTextForTest()}`)
+})
+
+test('a deferred client command never runs a REPLACED contribution generation (and never becomes a prompt)', async (t) => {
+  // The submission captured one contribution generation, then the session
+  // create awaits. A plugin reload (dispose + re-register under the SAME
+  // owner and id) must not let the post-await resolution run the NEW
+  // generation's handler — the user submitted the old one — and a vanished
+  // name must never fall through `runLocalCommand`'s name-only lookup into
+  // the command plane or the MODEL.
+  const flush = async (): Promise<void> => {
+    for (let round = 0; round < 20; round += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  const calls: string[] = []
+  const { harness, mounted, extensionService } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  const service = extensionService as unknown as {
+    registerCommand(contribution: {
+      id: string; name: string; description: string; handler: () => { kind: 'success' }
+    }): { dispose(): void }
+  }
+  const spec = { id: 'deploy-cmd', name: 'deploy', description: 'client deploy' }
+  const submitted = service.registerCommand({ ...spec, handler: () => { calls.push('submitted'); return { kind: 'success' } } })
+  await flush()
+  harness.armCreateGate()
+  mounted.app.setDraft('/deploy prod')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && harness.createdSessionIds.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(harness.createdSessionIds.length, 1, 'the session create is in flight')
+  // The plugin reloads while the create awaits: SAME id, SAME owner (the
+  // registration context), a NEW generation.
+  submitted.dispose()
+  const replacement = service.registerCommand({ ...spec, handler: () => { calls.push('replacement'); return { kind: 'success' } } })
+  harness.releaseCreateGate()
+  await flush()
+  assert.deepEqual(calls, [], 'no generation runs: the submitted registration no longer exists')
+  assert.equal(harness.executed.length, 0, 'the command plane is never a fallback for a vanished contribution')
+  assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a model prompt')
+  assert.match(mounted.app.notifyTextForTest(), /\/deploy is no longer available/)
+  assert.match(mounted.app.getDraft(), /^\/deploy prod/, 'the draft comes back for a retry')
+  replacement.dispose()
+})
+
+test('an attachment-bearing client command is refused AFTER the session resolves when the contribution keeps the line', async (t) => {
+  // The same deferral, with no late authority: the FINAL owner is the client
+  // contribution, whose local route refuses attachments. The refusal is the
+  // SAME user-visible outcome as the synchronous gate — just resolved late
+  // (the authority had to be settled) — and the draft, attachments included,
+  // comes back for a re-attach decision.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-deferred-attachment-')
+  const path = join(root, 'report.pdf')
+  await writeFile(path, Buffer.from('%PDF-1.7\nbody'))
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    extensionCommands: [{
+      id: 'deploy', name: 'deploy', description: 'deploy',
+      bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
+    }],
+  })
+  const staged = await stageAttachmentDraft(mounted, path)
+  mounted.app.setDraft(`/deploy ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 60 && !/Attachments cannot be included/.test(mounted.app.notifyTextForTest()); round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.match(mounted.app.notifyTextForTest(), /Attachments cannot be included in a local command\./)
+  assert.deepEqual(calls, [], 'the local handler never runs for an attachment-bearing line')
+  assert.equal(harness.executed.length, 0, 'never the command plane')
+  assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
+  assert.equal(harness.createdSessionIds.length, 1, 'the deferred authority resolution ran (the session is session-keyed)')
+  assert.match(mounted.app.getDraft(), /^\/deploy /, 'the draft comes back for a re-attach decision')
+  assert.match(mounted.app.getDraft(), /\[file #1/, 'with its attachment placeholder intact')
+})
+
 test('a sessionless client command runs without creating a session', async (t) => {
   const calls: string[] = []
   const { harness, mounted } = await bootCommandHarness(t, {
@@ -1881,4 +2025,98 @@ test('running + steer: the Ctrl+Enter chord never turns a Host command into a qu
   assert.equal(harness.executed.length, 1, 'a Host command owns its execution regardless of the chord')
   assert.equal(harness.host.followedUp.length, 0, 'the chord must not queue a Host command as a prompt')
   assert.equal(harness.host.steered.length, 0, 'the chord must not steer a Host command')
+})
+
+
+test('a DISPOSED colliding contribution never suppresses its next generation notice', async (t) => {
+  // The notice key is the contribution identity (id + owner) AND failure
+  // generation. A disposed contribution leaves the snapshot entirely — its
+  // bookkeeping must be purged with it, or a re-registration under the same
+  // id/owner (a plugin reload/HMR) inherits the suppression while the health
+  // record fails again: the second generation would be silent.
+  const { harness, mounted, registerContribution, extensionService } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  const flush = async (): Promise<void> => {
+    for (let round = 0; round < 20; round += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  const registerHost = (name: string): (() => void) =>
+    (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
+      .register({ name, handler: () => ({ kind: 'success' }) })
+  const disposeDeploy = registerHost('deploy')
+  const disposeCompact = registerHost('compact')
+  const healthOf = (id: string): { state: string; lastError?: string } | undefined =>
+    extensionService._ledger().healthSnapshot().find(entry => entry.id === id)
+  // A root-context registration keeps ONE owner across the generations (the
+  // identity the regression needs); a plugin-fiber helper would mint a new
+  // owner per call.
+  const service = extensionService as unknown as {
+    registerCommand(contribution: {
+      id: string; name: string; description: string; handler: () => { kind: 'success' }
+    }): { dispose(): void }
+  }
+  // Generation 1: /deploy collides → surfaced.
+  const first = service.registerCommand({
+    id: 'deploy-cmd', name: 'deploy', description: 'client deploy', handler: () => ({ kind: 'success' }),
+  })
+  await flush()
+  assert.match(mounted.app.notifyTextForTest(), /\/deploy/, 'the first collision is surfaced')
+  assert.equal(healthOf('deploy-cmd')?.state, 'failed')
+  // Dispose it: the snapshot is empty and the health record was untracked.
+  first.dispose()
+  await flush()
+  // Generation 2 under the SAME id/owner, but a different colliding name, so
+  // a suppressed notice is observable (a stale message instead of a new one).
+  const second = service.registerCommand({
+    id: 'deploy-cmd', name: 'compact', description: 'client compact', handler: () => ({ kind: 'success' }),
+  })
+  await flush()
+  assert.equal(healthOf('deploy-cmd')?.state, 'failed', 'the second generation fails again')
+  assert.match(mounted.app.notifyTextForTest(), /\/compact/,
+    'the second generation is surfaced, not suppressed by the disposed predecessor')
+  second.dispose()
+  disposeDeploy()
+  disposeCompact()
+})
+
+test('collision recovery clears only the COMMAND health record, never a same-id record in another slot', async (t) => {
+  // ExtensionHealth is keyed by (slot, owner, id); ONE plugin may legally
+  // reuse an id across slots (a theme and a command). The recovery lookup
+  // must therefore match the extension point as well, or it can read the
+  // OTHER slot's record and skip the clear this synthesis owns.
+  const { harness, mounted, registerContribution, extensionService } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  const healthOf = (slot: string): { state: string; lastError?: string } | undefined =>
+    extensionService._ledger().healthSnapshot().find(entry => entry.extensionPoint === slot && entry.id === 'shared-id')
+  const registerHost = (name: string): (() => void) =>
+    (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
+      .register({ name, handler: () => ({ kind: 'success' }) })
+  // The THEME registers FIRST so its (theme, owner, shared-id) record
+  // precedes the command record in the health snapshot.
+  const service = extensionService as unknown as {
+    registerTheme(theme: { id: string; name: string; palette: Record<string, string> }): { dispose(): void }
+    registerCommand(contribution: {
+      id: string; name: string; description: string; handler: () => { kind: 'success' }
+    }): { dispose(): void }
+  }
+  const theme = service.registerTheme({ id: 'shared-id', name: 'Shared', palette: { text: '#ffffff' } })
+  const disposeDeploy = registerHost('deploy')
+  const command = service.registerCommand({
+    id: 'shared-id', name: 'deploy', description: 'client deploy', handler: () => ({ kind: 'success' }),
+  })
+  await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
+  assert.equal(healthOf('command')?.state, 'failed', 'the collision marks the command record failed')
+  // Recovery: the host descriptor goes away, the contribution merges again.
+  disposeDeploy()
+  await registerContribution({ id: 'omega-cmd', name: 'omega', description: 'omega', bridgeHandler: () => ({ kind: 'success' }) })
+  assert.equal(healthOf('theme')?.state, 'active', 'the theme record is untouched')
+  assert.equal(healthOf('command')?.state, 'active', 'the command record is cleared by the collision recovery')
+  command.dispose()
+  theme.dispose()
+  void mounted
 })

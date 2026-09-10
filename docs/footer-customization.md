@@ -7,7 +7,7 @@ builtin status items, create your own text or command items, and place
 plugin-provided items without editing YAML by hand.
 
 This guide covers the user-facing Footer surface. Plugin authors should also
-read [Extension API v1](extension-api.md).
+read [Extension API v2](extension-api.md).
 
 ## Quick start
 
@@ -503,7 +503,7 @@ terminal ownership, arbitrary ANSI, cursor control, shell execution, or
 keyboard focus through this slot.
 
 Plugin authors should use the full contract in
-[Extension API v1](extension-api.md) rather than copying internal TUI code.
+[Extension API v2](extension-api.md) rather than copying internal TUI code.
 
 ## Responsive and narrow-terminal behavior
 
@@ -672,5 +672,5 @@ Use the Stable package boundary:
 and feature-detect the configurable Footer item capability before relying on
 it.
 
-See [Extension API v1](extension-api.md) for the authoritative registration,
+See [Extension API v2](extension-api.md) for the authoritative registration,
 ownership, lifecycle, HMR identity, sanitization, and compatibility contract.

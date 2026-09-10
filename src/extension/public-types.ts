@@ -73,8 +73,16 @@ export interface TuiAutocompleteProvider {
   getSuggestions(query: TuiAutocompleteQuery): Promise<TuiAutocompleteSuggestions | null>
 }
 
-/** API version of the extension surface (bumped only on breaking changes). */
-export const API_VERSION = 1 as const
+/**
+ * API version of the extension surface (bumped only on breaking changes).
+ * `2` is the client-command contribution contract: `execution` and the
+ * never-wired `argumentProvider` are REMOVED, `handler` is required, and a
+ * stale plugin still declaring the removed ownership shape is rejected at
+ * registration. `1` was the M0–M3 foundation. A plugin branching on
+ * `api().apiVersion` can tell the two schemas apart — the host never reports
+ * a version it does not implement.
+ */
+export const API_VERSION = 2 as const
 
 /** Capability identifiers, feature-detected via {@link PiTuiApiInfo}. */
 export type PiTuiCapability =
@@ -126,7 +134,8 @@ export type UnstableCapability = `unstable.${string}`
 
 /** What a plugin may know about the host (M1: version + capabilities only). */
 export interface PiTuiApiInfo {
-  /** The extension API version; 1 for the M0–M3 foundation. */
+  /** The extension API version: 2 for the client-command contribution
+   * contract, 1 for the M0–M3 foundation (see {@link API_VERSION}). */
   readonly apiVersion: typeof API_VERSION
   /** The `@xmoon76/dsh-pi-tui` bundle version (semver string). */
   readonly hostVersion: string

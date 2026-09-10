@@ -28,7 +28,7 @@ knows where the rest lives.
 | `perf-baseline.md` | contributors | Measured rendering performance before/after the incremental read grouping + render-cache optimization, and how to re-run it |
 | `tmux-testing.md` | contributors | When to test in tmux instead of headless, the manual verification flows, and every trap hit while real-testing |
 | `footer-customization.md` | users | User guide for `/footer`: builtin items and styles, Custom Text, trusted Custom Command Items, whole-footer commands, extension items, responsive behavior, raw settings reference, and troubleshooting |
-| `extension-api.md` | plugin authors | The extension API v1 author guide: import rules, the surface table, lifecycle/render contracts, deprecation policy, stability |
+| `extension-api.md` | plugin authors | The extension API v2 author guide: import rules, the surface table, lifecycle/render contracts, deprecation policy, stability |
 | `extension-advanced.md` | plugin authors | The ADVANCED tier author guide (Phase 2/4): normalized input capture, focused interactive surfaces, advanced editor control, the imperative UI broker, custom UI and the host-state facade — the Host-mediated contract and the capture ladder position |
 | `extension-capability-matrix.md` | plugin authors | The Pi capability reference: Pi capability → dsh equivalent → tier → status (roadmap, not a hash gate) |
 | `plugin-authoring.md` | plugin authors | The "which tier should I use?" decision tree and the authoring checklist |

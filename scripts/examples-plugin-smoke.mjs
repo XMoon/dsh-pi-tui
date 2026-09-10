@@ -234,7 +234,7 @@ function main() {
             const makeHandle = () => ({ id: 'x', invalidate: () => {}, replace: () => {}, dispose: () => {} })
             return {
               api: () => ({
-                apiVersion: 1,
+                apiVersion: 2,
                 hostVersion: 'test',
                 capabilities: new Set([
                   'slot.chrome.header.badge', 'slot.input.dock.item', 'slot.chrome.footer.status',

@@ -431,6 +431,25 @@ name collision **fails loud — it never shadows**.
 - A contribution is a client-owned command (menu row + client handler); it
   executes locally and never steers. `sessionless: true` runs it before a
   session exists, otherwise the session resolves first.
+- A **deferred start** settles a session-backed contribution's authority only
+  AFTER the session exists (the session commits the catalog the standing view
+  could not see): a host claim or skill wrapper that appears with it takes the
+  line, otherwise the client handler runs. Two rules follow, both
+  regression-pinned:
+  - **Attachments defer with the authority.** An attachment-bearing line is
+    refused as "local" only once the local classification is FINAL. For a
+    provisional session-backed contribution the refusal waits for the same
+    resolution, with the referenced drafts RESERVED across the window (a
+    concurrent attach-time prune must not drop them). A late host claim or
+    skill wrapper takes the line WITH its attachment; if the contribution
+    keeps it, the refusal fires after the session resolves and the draft —
+    placeholder intact — comes back for a re-attach decision.
+  - **The captured registration is fenced.** The deferred resolution runs the
+    EXACT contribution the user submitted. A dispose + reload during the
+    window (even under the same owner and id) is a NEW generation that must
+    never run in place of the submitted one, and a vanished name must never
+    fall through to the command plane or the MODEL. The submission is aborted
+    with a `/<name> is no longer available` notice and the draft is restored.
 - A colliding contribution fails the candidate synthesis as a whole: the
   command SOURCE is marked failed (upstream `source-failed` parity — the
   source's whole group is removed), so no command row, client or host, is
