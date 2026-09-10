@@ -10066,6 +10066,7 @@ export class TuiApp {
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
             this.imageLoader!,
             this.imageTheme!,
+            () => this.requestRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
           ))
         }
@@ -10134,6 +10135,7 @@ export class TuiApp {
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
               this.imageLoader,
               this.imageTheme,
+              () => this.requestRender(),
               this.occurrenceCollapsedRef(message, imageIndex),
             ))
           }
@@ -10162,6 +10164,7 @@ export class TuiApp {
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
             this.imageLoader,
             this.imageTheme,
+            () => this.requestRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
           ))
         }
@@ -11182,6 +11185,7 @@ export class TuiApp {
                     block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
                     this.imageLoader,
                     this.imageTheme,
+                    () => this.requestRender(),
                   ))
                 } else {
                   // Known process blocks keep their legacy JSON form;
@@ -11334,6 +11338,7 @@ export class TuiApp {
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
               this.imageLoader,
               this.imageTheme,
+              () => this.requestRender(),
             ))
           } else {
             // Known process blocks keep their legacy JSON form; file and
@@ -11379,6 +11384,7 @@ export class TuiApp {
           block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
           this.imageLoader,
           this.imageTheme,
+          () => this.requestRender(),
         ))
       }
     }

@@ -416,3 +416,43 @@ test('an attachment press cannot transfer to a sibling after an async image grow
   assert.equal(collapsed.size, 0, `the stale attachment press must not toggle a sibling:\n${vt.getViewport().join('\n')}`)
   app.stop()
 })
+
+test('an async image load that settles between frames repaints automatically (host load-notify gap)', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const vt = new VirtualTerminal(100, 24)
+  const pending: Array<() => void> = []
+  const loader = new ImageLoader(() => new Promise(resolve => { pending.push(() => resolve({ ref: {}, data: pngBytes() })) }))
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    imageLoader: loader,
+    imageTheme: { fallbackColor: (text) => text },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', seq: 1, time: 1, data: { content: [
+      { type: 'text', text: 'check' },
+      { type: 'image', attachment: IMAGE_REF },
+    ], source: { kind: 'user' } } },
+    { type: 'user/message', seq: 2, time: 2, data: { content: [
+      { type: 'text', text: 'NEXT' },
+    ], source: { kind: 'user' } } },
+  ] as never[])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  // The image is still loading (info bar only): the NEXT message sits
+  // right below it.
+  const before = await rowOf(vt, 'NEXT', 'loading layout')
+  // The deferred read resolves BETWEEN frames: the loader settle only
+  // invalidates the thumbnail — the thumbnail's own requestRender must
+  // schedule the repaint with the resolved bytes (no explicit
+  // app.requestRender in this test).
+  pending[0]!()
+  await vt.waitForRender()
+  const after = await viewport(vt)
+  const afterRow = await rowOf(vt, 'NEXT', 'grown layout')
+  assert.ok(afterRow > before, `the image growth must repaint automatically:\n${after}`)
+  app.stop()
+})
