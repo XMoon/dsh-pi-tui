@@ -232,7 +232,7 @@ function main() {
         function mockService() {
           const makeHandle = () => ({ id: 'x', invalidate: () => {}, replace: () => {}, dispose: () => {} })
           return {
-            api: () => ({ apiVersion: 1, hostVersion: 'test', capabilities: new Set(['slot.input.widget', 'slot.input.dock.item', 'slot.chrome.header.badge', 'slot.chrome.footer.status']) }),
+            api: () => ({ apiVersion: 2, hostVersion: 'test', capabilities: new Set(['slot.input.widget', 'slot.input.dock.item', 'slot.chrome.header.badge', 'slot.chrome.footer.status']) }),
             register: () => makeHandle(),
             registerCommand: () => makeHandle(),
             registerTheme: () => makeHandle(),

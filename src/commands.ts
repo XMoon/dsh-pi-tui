@@ -1428,6 +1428,19 @@ export function registerTuiCommands(
     const bridge = runner.extensions?.commands
     if (bridge === undefined) return host
     const contributions = bridge.snapshot().entries
+    // PURGE the bookkeeping of contributions that are GONE. A disposed
+    // contribution leaves the snapshot entirely — the recovery loop below
+    // only visits LIVE entries — while its notice key would survive and
+    // silence a RE-registration under the same id/owner (a plugin
+    // reload/HMR): that is a NEW failure generation, and its health record
+    // fails again. The registration's ledger record was untracked with it,
+    // so only these local records remain to drop.
+    const live = new Set(contributions.map(contribution => contributionIdentity(contribution)))
+    for (const identity of [...collisionHealth.keys()]) {
+      if (live.has(identity)) continue
+      collisionHealth.delete(identity)
+      notifiedCollisions.delete(identity)
+    }
     if (contributions.length === 0) return host
     const byName = new Map(host.map(entry => [entry.name, entry] as const))
     // Record EVERY collision of this pass before failing it: the health
@@ -1467,9 +1480,13 @@ export function registerTuiCommands(
       // the first message) — clearing blindly would erase a handler failure
       // that this synthesis never wrote (and that has not recovered). A
       // failure deduplicated into OUR live collision record is
-      // indistinguishable here (documented limitation).
+      // indistinguishable here (documented limitation). The record identity
+      // is (slot, owner, id): one plugin may legally reuse an id in another
+      // slot (a theme and a command), so the extension point MUST match too.
       const current = runner.extensions?.health?.().find(
-        entry => entry.id === recorded.ref.id && entry.owner === recorded.ref.owner,
+        entry => entry.extensionPoint === recorded.ref.slot
+          && entry.id === recorded.ref.id
+          && entry.owner === recorded.ref.owner,
       )
       if (current === undefined || current.state !== 'failed' || current.lastError !== recorded.message) continue
       clearExtensionError?.(recorded.ref)

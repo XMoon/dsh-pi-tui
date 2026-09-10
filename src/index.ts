@@ -5183,12 +5183,30 @@ export function apply(ctx: Context, config: Config): void {
       // plain prompts AND per-skill slash lines, including `/skill <name>
       // [image #N ...]` (`skill` is local only as the bare picker; with
       // arguments it is a loadSkill agent prompt — review finding).
-      if (commandRejectsAttachments(parsed, text, draftImages, draftFiles, commandIsLocalForAttachments(
+      // The line's attachment classification is computed ONCE and reused by
+      // the deferred resolution below (the same predicate, live view).
+      const localForAttachments = commandIsLocalForAttachments(
         parsed,
         isSkillWrapperName,
         n => extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false,
         isHostCommandName,
-      ))) {
+      )
+      // A session-backed client contribution on a DEFERRED START is the ONE
+      // classification the standing view cannot settle: the session commits
+      // the session-scoped host catalog (and the skill catalog) the view
+      // could not see, and either outranks the contribution. Refusing an
+      // attachment here would be irrevocable — the real host command would
+      // never get its chance — so the refusal DEFERS to the same authority
+      // resolution the namespace decision waits for (see the client-command
+      // block below, which reserves the drafts across the window). Every
+      // other local classification (TUI/core commands, a live contribution)
+      // is final and refuses NOW.
+      const deferredClientAttachments = parsed !== undefined
+        && liveAgent === undefined
+        && extensionService?.commands.find(parsed.name)?.sessionless === false
+        && localForAttachments(parsed.name)
+      if (!deferredClientAttachments
+        && commandRejectsAttachments(parsed, text, draftImages, draftFiles, localForAttachments)) {
         app.setEditorText(mergeDraft(app.getDraft(), text))
         app.notify('Attachments cannot be included in a local command.', 'error')
         return
@@ -5249,25 +5267,59 @@ export function apply(ctx: Context, config: Config): void {
           runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
           return
         }
-        runOwned('client command session', async () => {
-          await ensureSession()
-          if (liveAgent === undefined) return
-          // AUTHORITY RE-CHECK after the session exists: the deferred start
-          // commits a session whose scoped catalog the standing view could
-          // not see, and the skill catalog may load with it. A live HOST
-          // claim or a TUI skill wrapper outranks the contribution that was
-          // decided before the session existed.
-          if (isHostCommandName?.(parsed.name) === true || isSkillWrapperName?.(parsed.name) === true) {
-            dispatchViaSession(text, persistHistory, delivery)
-            return
-          }
-          runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
-        }, {
+        // The captured contribution is a PROVISIONAL authority: it is bound
+        // here so the post-await resolution can never run a generation the
+        // user did not submit (see the fence inside).
+        const submitted = contribution
+        runOwned('client command session', () => runReservedSubmit({
+          // The editor was already cleared by the gesture: the referenced
+          // drafts must survive the deferred window — an attach-time prune
+          // during session creation must not delete what this submission is
+          // about to admit (a late host claim / skill wrapper) or refuse.
+          // No await may precede this reservation.
+          reserve: (draft) => pinDraftAttachments(draft, draftImages, draftFiles),
+          run: async () => {
+            await ensureSession()
+            if (liveAgent === undefined) return
+            // AUTHORITY RE-CHECK after the session exists: the deferred start
+            // commits a session whose scoped catalog the standing view could
+            // not see, and the skill catalog may load with it. A live HOST
+            // claim or a TUI skill wrapper outranks the contribution that was
+            // decided before the session existed.
+            if (isHostCommandName?.(parsed.name) === true || isSkillWrapperName?.(parsed.name) === true) {
+              dispatchViaSession(text, persistHistory, delivery)
+              return
+            }
+            // IDENTITY + GENERATION FENCE: the client handler runs only while
+            // the EXACT registration the user submitted is still live. A
+            // dispose + reload (HMR) is a NEW bridge record — possibly under
+            // the same owner/id — and a vanished name must never fall through
+            // `runLocalCommand`'s name-only lookup (which would either run
+            // the new generation's handler or deliver the line to the MODEL).
+            if (extensionService?.commands.find(parsed.name) !== submitted) {
+              app.notify(`/${parsed.name} is no longer available — the draft was restored, submit it again`, 'error')
+              restoreSubmissionDraft(text)
+              return
+            }
+            // The FINAL owner is the client command: its local route refuses
+            // attachments. The refusal is the synchronous gate's outcome,
+            // resolved late — now that no host claim or skill wrapper can
+            // take the line instead.
+            if (commandRejectsAttachments(parsed, text, draftImages, draftFiles, localForAttachments)) {
+              restoreSubmissionDraft(text)
+              app.notify('Attachments cannot be included in a local command.', 'error')
+              return
+            }
+            runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
+          },
+          restore: (draft) => restoreSubmissionDraft(draft),
+        }, text), {
           diag,
           sessionId: () => liveAgent?.session.id,
           onError: (error) => {
+            // The flow restored the editor BEFORE the reservation released;
+            // this sink only notifies (never a second restore).
             app.notify(safeErrorMessage(error), 'error')
-            restoreSubmissionDraft(text)
           },
         })
         return

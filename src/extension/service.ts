@@ -23,6 +23,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import { ExtensionLedger } from './internal/ledger.ts'
 import { InvalidateBatcher } from './internal/batcher.ts'
 import { isSlotName, slotNames, slotSemantic } from './slot-map.ts'
+import { API_VERSION } from './public-types.ts'
 import type { PiTuiApiInfo, PiTuiCapability, PiTuiSlotName, RegistrationHandle, RegistrationSpec, SurfaceStateValues } from './public-types.ts'
 import type {
   AdvancedConfirmOptions,
@@ -526,12 +527,15 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // attachment-gated: the snapshot contract only holds while a surface
     // is attached. The runner's attachSurface() adds the live set.
     return {
-      apiVersion: 1,
+      // The ONE source of truth for the reported version (`public-types`):
+      // never a literal, so a bump cannot leave the runtime behind.
+      apiVersion: API_VERSION,
       hostVersion: this.hostVersion,
       capabilities: new Set([...PiTuiExtensionServiceImpl.ADVERTISED_CAPABILITIES, ...this.liveCapabilities]),
       // M11 deprecation policy (plan §16): currently nothing is
       // deprecated — the map stays empty. When a surface is deprecated,
-      // its note lands here AND the capability/API is removed in API v2.
+      // its note lands here AND the capability/API is removed in the NEXT
+      // API version.
       deprecations: new Map(),
     }
   }

@@ -34,6 +34,13 @@
 
 ### 改进
 
+- **带附件的 client 命令在 deferred start 下不再提前拒绝。** 首次输入前没有 session 时，`/deploy [image #1]`
+  这类命令先完成 session 级 authority 解析：随 session 出现的 host 命令或 skill wrapper 会**带着附件**接管
+  该行；只有最终归属仍是 client 命令时才拒绝附件，并把草稿（附件占位符保留）原样退回。延迟窗口内的附件由
+  reservation 保护，不会被并发的 attach 清理删掉。
+- **deferred start 期间插件重载不会串代执行。** 首次输入触发的 session 解析过程中，如果该 contribution
+  被卸载/重载（即使 owner 与 id 相同），已提交的命令**不会**执行新一代的 handler，也**不会**降级成模型
+  prompt：提交被中止、提示 `/<name> is no longer available`，草稿还原后可直接重试。
 - **Ctrl+Enter 与 Web 提交语义对齐。** 运行中按 Ctrl+Enter 现在取"忙碌提交行为"的**相反值**：默认
   `busyEnter=queue` 时它 steer，`busyEnter=steer` 时它入队（空闲时一律入队）。旧的
   `app.input.queue` 动作保留为 deprecated、无默认键，已有自定义绑定仍然是"入队"，不会被悄悄改成
@@ -41,6 +48,10 @@
 
 ### 兼容性
 
+- **扩展 API 版本升到 2（破坏性）。** `api().apiVersion` 现在返回 `2`：下面的插件命令 contribution
+  契约对 STABLE 面是破坏性变更（移除 `execution`/`argumentProvider`、`handler` 变为必填）；`1` 仍是
+  M0–M3 基础版，插件可据此区分两套 schema。仍声明旧 v1 shape 的插件会在注册时**直接报错**，不会
+  被静默重新解释。
 - **插件命令 contribution 对齐 DSH 客户端命令模型（破坏性）。** `execution: 'local' | 'submission'`
   已**移除**：contribution 就是"客户端自有的命令"（必有 `handler`，无 host descriptor），会进入 `/`
   命令菜单并本地执行、永不 steer；名字与当前 host catalog 冲突时**候选合成整体失败**（不安装任何菜单

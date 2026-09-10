@@ -1,10 +1,16 @@
-# Extension API v1 — Stable author guide and stability contract
+# Extension API v2 — Stable author guide and stability contract
 
 The dsh-pi-tui STABLE extension surface (`@xmoon76/dsh-pi-tui/extensions`)
 is the compatibility-oriented public seam for third-party plugins. This
 document is the STABLE API author guide and stability record (plan §16 —
-M11 API v1 hardening). Advanced and Unstable tiers are documented in
-`docs/extension-tiers.md`.
+M11 hardening, now at **API v2**). Advanced and Unstable tiers are
+documented in `docs/extension-tiers.md`.
+
+`api().apiVersion` reports **2**. The version was bumped with the breaking
+client-command contribution contract below; a plugin that must support both
+schemas branches on `api().apiVersion` (`1` = the M0–M3 foundation), and a
+plugin that declared the removed v1 ownership shape is rejected loudly at
+registration instead of being silently reinterpreted.
 
 ## Import rules (hard gate — Stable)
 
@@ -183,10 +189,16 @@ locally, never steered.
   (pure client commands: an overlay toggle, a picker). `false` (default)
   resolves/creates the session first — the host command surface is
   session-keyed — and only then runs the handler.
+- **Deferred reloads.** A `sessionless: false` contribution submitted before
+  the first session exists resolves the session first; if the plugin unloads
+  or replaces it during that window, the submission is aborted with a
+  `/<name> is no longer available` notice and the draft is restored — the new
+  generation's handler never runs, and the line never reaches the model.
 - **`handler`** receives `invocation.rawInput` verbatim, like every other
   command surface.
 
-**Breaking change (Unreleased).** The previous `execution: 'local' |
+**Breaking change (Unreleased) — API v1 → v2.** `api().apiVersion` reports
+`2` from this release on. The previous `execution: 'local' |
 'submission'` ownership metadata is REMOVED, and the never-wired
 `argumentProvider` field is gone with it (use `registerAutocomplete` for
 plugin suggestions — it was a dead public surface). A contribution is a client

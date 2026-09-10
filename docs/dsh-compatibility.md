@@ -140,6 +140,14 @@ removed with the temporary validation workspace and must never be committed to
   until a `pi2dsh` release declares and runs on DSH `>= 0.1.2-alpha.4`; the
   official-preset gate above keeps the real preset coverage meanwhile. The
   local driver (`pnpm smoke:pi2dsh`) remains available for manual runs.
+- **Second, independent Gate B blocker (extension API v2).** The published
+  `pi2dsh@0.24.0` bridge hard-gates the host API version
+  (`api().apiVersion !== 1` ⇒ it refuses to host Pi components), and the
+  candidate now reports **API v2** (`docs/extension-api.md`). The pinned
+  consumer therefore also needs a v2-aware release; its manifest
+  (`test/compat/pi2dsh.json`) keeps recording `apiVersion=1` because that is
+  the consumer's own requirement — never silently rewritten to match this
+  host. Re-enabling Gate B requires a `pi2dsh` release that accepts API v2.
 - The runtime-boundary smoke intentionally runs the 0.4 candidate against DSH
   0.1.1 and requires a nonzero unsupported-runtime outcome. Friendly startup
   guidance is asserted when emitted, but raw import failure is accepted because
