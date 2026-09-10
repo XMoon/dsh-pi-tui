@@ -130,7 +130,7 @@ function fakeCommands() {
 }
 
 /** Register the TUI commands with a stubbed runner and return /settings. */
-function setup(options: { busyEnter?: string; localShellSandbox?: string } = {}) {
+function setup(options: { busyEnter?: string; localShellSandbox?: string; extensions?: unknown } = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -212,7 +212,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: undefined,
+    extensions: options.extensions as never,
     exit: () => {},
   }
   const installed = registerTuiCommands(runner)
@@ -460,5 +460,36 @@ test('isHostCommand claims advertised non-skill commands and never skill wrapper
   // is not claimed (it keeps the ordinary prompt semantics).
   assert.equal(t.installed.isHostCommand('not-a-command'), false,
     'an unadvertised name must not be claimed')
+  t.app.stop()
+})
+
+test('isHostCommand never claims an extension contribution: advertised ≠ Host-owned (PR115-fix problem 2)', () => {
+  // An extension command is advertised in the effective catalog too (the
+  // plugin registers it through the commands service), but its
+  // `execution` metadata owns the classification: 'submission' flows
+  // through the busy queue/steer policy like a skill invocation, 'local'
+  // never steers. Claiming either as a Host command would bypass the busy
+  // policy (and the force-queue chord) before it is even consulted.
+  const contributions = new Map<string, { name: string; execution: 'local' | 'submission' }>([
+    ['deploy', { name: 'deploy', execution: 'submission' }],
+    ['panel', { name: 'panel', execution: 'local' }],
+  ])
+  const t = setup({
+    extensions: {
+      commands: { find: (name: string) => contributions.get(name) },
+    },
+  })
+  t.commands.service.register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+  t.commands.service.register({ name: 'panel', handler: () => ({ kind: 'success' }) })
+  t.commands.service.register({ name: 'compact', handler: () => ({ kind: 'success' }) })
+  t.installed.installSnapshot({ commands: [], scopedCommands: [], skills: [], issues: [] })
+  assert.equal(t.installed.isHostCommand('deploy'), false,
+    'an extension submission command must keep the session submission policy')
+  assert.equal(t.installed.isHostCommand('panel'), false,
+    'an extension local command is never Host-owned either')
+  // The genuine Host command is unaffected: the predicate stays
+  // catalog-driven for names no TUI/extension owner claims.
+  assert.equal(t.installed.isHostCommand('compact'), true,
+    'a real Host command must still be claimed')
   t.app.stop()
 })

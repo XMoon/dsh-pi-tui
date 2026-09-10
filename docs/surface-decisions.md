@@ -376,6 +376,41 @@ claims next-step first). Without the host loader the invocation keeps
 the steer path to preserve the original-line-before-body order — the
 documented exception, confined to compositions without the loader.
 
+The mode is resolved ONCE, at the submitting gesture's own boundary, and
+then only executed:
+
+- The dispatch boundary resolves `queue | steer` from the agent's liveness,
+  the persisted preference, and the one-shot Ctrl+Enter force-queue chord,
+  and binds it for the command execution that launches the delivery
+  (`withDelivery`). The skill delivery accepts that value; it never
+  re-reads `busyEnter` or `agent.status`, because a chord is a property of
+  the gesture that settings cannot reconstruct — and an async draft
+  preparation must not let a concurrent settings edit or status change
+  re-decide the mode.
+- The `/skill` picker (a modal selection with no dispatcher above it) is
+  its own boundary: it resolves the same preference rule at picker open
+  (`prefersSteer`) and hands the result to the delivery.
+- A TUI-owned skill command executed with no submission behind it (the
+  command plane driven from outside the submit boundary) has no chord to
+  honor and delivers queued.
+
+## Advertised is not Host-owned
+
+The busy queue/steer policy is skipped only for a confirmed HOST command —
+a slash name the current effective catalog advertises and that neither the
+TUI nor an extension owns. Ownership, not advertising, decides:
+
+- a TUI-owned skill wrapper (agent-facing input built by `loadSkill`),
+- an extension contribution (`TuiCommandContribution.execution`): a
+  `submission` command flows through the busy policy like a skill
+  invocation, a `local` one never steers,
+- the TUI-local set (`LOCAL_COMMANDS` plus dynamic local contributions).
+
+Everything else that is advertised resolves through the command plane
+without consulting the busy policy (e.g. `/compact`), and a claimed
+command the real session then lacks is consumed by the advertised-miss
+gate — never a plain model message.
+
 ## Focus is surface-adaptive
 
 Two surfaces, two consistent detail paths — no mouse hit-map in regular

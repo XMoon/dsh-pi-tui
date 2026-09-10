@@ -359,6 +359,33 @@ export interface DefaultIntentRecord {
   readonly selection: ModelSelection
 }
 
+/**
+ * The effective mode ONE submission resolved at the submit boundary: whether
+ * an agent-facing delivery steers into the running turn or queues behind it
+ * (web `ComposerSubmissionPolicy` parity — the boundary resolves 'queue' for
+ * a non-running agent, for `busyEnter=queue`, and for the Ctrl+Enter
+ * force-queue chord).
+ *
+ * It is a property of the GESTURE, not of the persisted settings: a one-shot
+ * chord exists only inside the dispatch that resolved it, so every
+ * downstream consumer (the TUI skill delivery) accepts this value instead of
+ * re-deriving the mode from `busyEnter`.
+ */
+export type SubmitDelivery = 'steer' | 'queue'
+
+/**
+ * Whether an agent-facing delivery steers under the busy-Enter preference:
+ * the agent is RUNNING and the preference says 'steer'. The submit gate adds
+ * the local-command and one-shot-chord terms on top; the `/skill` picker — a
+ * gesture with no dispatcher above it — resolves with this same rule, so the
+ * preference has exactly ONE implementation.
+ * @param running - whether the live agent reports running.
+ * @param busyEnter - the persisted preference value (''/undefined = queue).
+ */
+export function prefersSteer(running: boolean, busyEnter: string | undefined): boolean {
+  return running && busyEnter === 'steer'
+}
+
 /** Everything the TUI-owned commands read from the runner. */
 export interface TuiCommandRunner {
   ctx: Context
@@ -1172,12 +1199,15 @@ export function registerTuiCommands(
 ): {
   wasAdvertised(name: string): boolean
   /** Whether one slash name is a HOST command in the current effective
-   * catalog (advertised, not a TUI-owned skill wrapper). */
+   * catalog (advertised, owned by neither the TUI nor an extension). */
   isHostCommand(name: string): boolean
   /** One synchronous catalog commit (the coordinator's install hook). */
   installSnapshot(snapshot: SurfaceCatalogSnapshot): void
   /** The revalidating transition (the coordinator's target-change hook). */
   enterTransition(): void
+  /** Bind one submission's resolved delivery mode for the synchronous window
+   * that launches a command execution (see the TUI skill handlers). */
+  withDelivery<T>(delivery: SubmitDelivery, run: () => T): T
 } {
   const { ctx, app } = runner
   const cwd = runner.cwd
@@ -1189,6 +1219,46 @@ export function registerTuiCommands(
   // The commands service is part of the base layer; its absence means the
   // TUI commands cannot be registered at all — the caller surfaces this.
   if (commands === undefined) throw new Error('commands service unavailable')
+
+  // ── submit-resolved delivery binding ────────────────────────────────────
+  /**
+   * The delivery mode bound to the command execution launched in the CURRENT
+   * synchronous window (`withDelivery`). `commands.execute` invokes a
+   * resolved handler in the SAME call stack as the dispatch (the TUI submits
+   * no attachments), so a TUI-owned skill handler captures its invocation's
+   * mode before any await and passes it to the delivery — never re-deriving
+   * the mode from the persisted preference, which cannot reconstruct a
+   * one-shot force-queue chord.
+   */
+  let boundDelivery: SubmitDelivery | undefined
+  /**
+   * Bind `delivery` for one synchronous window and run the launch. Commands
+   * that own their own busy semantics (Host commands, local UI commands)
+   * simply never consume it.
+   * @param delivery - the mode the submit boundary resolved for this gesture.
+   * @param run - the launch (the command execution) to run inside the window.
+   */
+  const withDelivery = <T>(delivery: SubmitDelivery, run: () => T): T => {
+    const previous = boundDelivery
+    boundDelivery = delivery
+    try {
+      return run()
+    } finally {
+      // Reentrancy-safe: a nested execution restores the outer window.
+      boundDelivery = previous
+    }
+  }
+  /**
+   * Consume the delivery mode bound for the execution launching in this call
+   * stack. `undefined` means no TUI submission launched it (the command
+   * plane driven from outside the submit boundary): there is no chord to
+   * honor, so the skill delivery falls back to the safe queue mode.
+   */
+  const takeDelivery = (): SubmitDelivery | undefined => {
+    const delivery = boundDelivery
+    boundDelivery = undefined
+    return delivery
+  }
 
   /** The EFFECTIVE key label for user-facing descriptions (plan §18): a
    * remap updates every row; a disabled action shows a neutral dash. */
@@ -2833,12 +2903,15 @@ export function registerTuiCommands(
    * here — a summary that passed the cold/live filter is never execution
    * authorization. A model-only skill is refused with an explicit error and
    * never injected.
+   * @param delivery - the delivery mode the caller's boundary resolved for
+   *   this gesture, or undefined when no TUI submission launched it.
    */
   const loadSkill = async (
     agent: Agent,
     name: string,
     args = '',
     signal: AbortSignal = runner.signal,
+    delivery: SubmitDelivery | undefined,
   ): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
     const skillSignal = signal === runner.signal ? runner.signal : AbortSignal.any([runner.signal, signal])
     skillSignal.throwIfAborted()
@@ -2901,17 +2974,19 @@ export function registerTuiCommands(
         await runner.withSessionWriter(agent.session.id, async () => {
           skillSignal.throwIfAborted()
           // Web parity (busyEnter): a skill invocation is an agent-facing
-          // prompt — while the agent is running with busyEnter=queue (or
-          // idle), it QUEUES like a plain prompt (web: session.prompt with
-          // the policy-resolved mode). The queue delivery is only safe when
-          // the HOST injects the skill body: the fallback body injection
-          // below rides next-step, so a followup would let the body arrive
-          // before the user's words (the driver claims next-step FIRST).
-          // Without the host loader the invocation keeps the steer path to
-          // preserve the original-line-before-body order.
-          const busyEnter = runner.tuiSettings?.get().busyEnter
-          const queueDelivery = hostLoadsSkillBody && (agent.status !== 'running' || busyEnter !== 'steer')
-          if (queueDelivery) {
+          // prompt — under the queue mode it QUEUES like a plain prompt
+          // (web: session.prompt with the policy-resolved mode). The mode
+          // was resolved ONCE at the gesture's own boundary and handed in;
+          // re-deriving it here from the persisted preference would lose
+          // the one-shot Ctrl+Enter force-queue chord, which exists only in
+          // the dispatch that resolved it.
+          // The queue delivery is only safe when the HOST injects the skill
+          // body: the fallback body injection below rides next-step, so a
+          // followup would let the body arrive before the user's words (the
+          // driver claims next-step FIRST). Without the host loader the
+          // invocation keeps the steer path to preserve the
+          // original-line-before-body order — the documented exception.
+          if (delivery !== 'steer' && hostLoadsSkillBody) {
             agent.followup(userMessage)
           } else {
             agent.steer(userMessage)
@@ -3043,8 +3118,12 @@ export function registerTuiCommands(
           // line, never carved out or dropped — the wrapper's own name is
           // the skill name, everything after it is args).
           handler: async (invocation) => {
+            // The FIRST synchronous statement: the submit boundary bound this
+            // invocation's delivery mode for exactly this call stack (see
+            // withDelivery). Everything below may await.
+            const delivery = takeDelivery()
             const agent = await requireAgent()
-            return loadSkill(agent, skill.name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal)
+            return loadSkill(agent, skill.name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery)
           },
         })
         skillDisposers.set(skill.name, dispose)
@@ -3103,8 +3182,10 @@ export function registerTuiCommands(
             name,
             description: `[skill: revalidating] ${name}`,
             handler: async (invocation) => {
+              // Captured before any await, exactly like the direct wrapper.
+              const delivery = takeDelivery()
               const agent = await requireAgent()
-              return loadSkill(agent, name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal)
+              return loadSkill(agent, name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery)
             },
           })
           skillDisposers.set(name, dispose)
@@ -3119,13 +3200,18 @@ export function registerTuiCommands(
    * (the claim captured at submit time, before any session creation). */
   const wasAdvertised = (name: string): boolean => claims.has(name)
   /** Whether one slash name is a HOST command in the CURRENT effective
-   * catalog: advertised by the completion list but NOT a TUI-owned skill
-   * wrapper. A skill wrapper is a thin agent-facing invocation (loadSkill
-   * builds a prompt), so it must keep the ordinary submission semantics —
-   * only real Host commands (e.g. /compact) execute through the command
-   * plane regardless of the busy-Enter policy. */
+   * catalog: advertised by the completion list, NOT a TUI-owned skill
+   * wrapper, and NOT an extension contribution. A skill wrapper is a thin
+   * agent-facing invocation (loadSkill builds a prompt), and an extension
+   * contribution's `execution` metadata owns its classification
+   * ('submission' flows through the busy queue/steer policy like a skill
+   * invocation; 'local' never steers) — so both keep the ordinary
+   * submission semantics. Only real Host commands (e.g. /compact) execute
+   * through the command plane regardless of the busy-Enter policy: being
+   * advertised never proves Host ownership. */
   const isHostCommand = (name: string): boolean => {
     if (skillDisposers.has(name)) return false
+    if (runner.extensions?.commands.find(name) !== undefined) return false
     return claims.has(name)
   }
 
@@ -3134,6 +3220,8 @@ export function registerTuiCommands(
     description: 'Load a skill into the session context',
     input: { hint: '<name>' },
     handler: async (invocation) => {
+      // Captured before any await: the submit boundary's resolved mode.
+      const delivery = takeDelivery()
       const liveAgent = await requireAgent()
       // `/skill <name> [args...]`: the first whitespace token is the skill
       // name, the remainder its arguments (forwarded verbatim on the
@@ -3141,7 +3229,7 @@ export function registerTuiCommands(
       // invocation line is normalized to `/name args` so the host's pre-step
       // gesture (dsh-tool-skill) also recognizes it when visible.
       const [name, ...args] = splitSkillLine(invocation.rawInput)
-      if (name !== '') return loadSkill(liveAgent, name, args.join(' '), invocation.signal ?? runner.signal)
+      if (name !== '') return loadSkill(liveAgent, name, args.join(' '), invocation.signal ?? runner.signal, delivery)
       // No argument: pick from the catalog — the same validated, policy-
       // filtered, sorted view the collector builds (the catalog port's
       // live read), so hostile or model-only entries never reach the
@@ -3149,6 +3237,15 @@ export function registerTuiCommands(
       const catalog = await runner.catalog.skills.listHumanSkills(liveAgent.session.id)
       if (catalog === undefined) return { kind: 'error', text: 'skill service unavailable' }
       if (catalog.skills.length === 0) return { kind: 'error', text: 'no skills available' }
+      // A picker selection is its OWN delivery boundary (no dispatcher above
+      // it): choosing a row submits the skill like a plain Enter on the
+      // completed `/<name>` line, so the busy-Enter preference is resolved
+      // here — the one-shot Ctrl+Enter chord cannot exist for a modal
+      // selection. The resolved mode is handed to the delivery, which never
+      // re-derives it.
+      const pickerDelivery: SubmitDelivery = prefersSteer(liveAgent.status === 'running', runner.tuiSettings?.get().busyEnter)
+        ? 'steer'
+        : 'queue'
       // SettingsList rows: Enter cycles the value, which fires onChange.
       app.openSettings(
         catalog.skills.map(skill => ({
@@ -3159,7 +3256,7 @@ export function registerTuiCommands(
           values: ['✓'],
         })),
         (id) => {
-          detach('skill load', () => loadSkill(liveAgent, id).then(result => {
+          detach('skill load', () => loadSkill(liveAgent, id, '', runner.signal, pickerDelivery).then(result => {
             if (result.kind === 'error') app.notify(result.text)
           }), { notify: true })
         },
@@ -4411,14 +4508,14 @@ export function registerTuiCommands(
     /** The claim test for the dispatch: is /name advertised right now? */
     wasAdvertised,
     /** Whether one slash name is a HOST command in the CURRENT effective
-     * catalog: advertised by the completion list but NOT a TUI-owned skill
-     * wrapper (a skill invocation is agent-facing input, never a command
-     * claim). TUI-local commands are excluded by the dispatch caller
-     * (LOCAL_COMMANDS). */
+     * catalog: advertised by the completion list but owned by neither the
+     * TUI as a skill wrapper nor an extension contribution (the dispatch
+     * caller excludes TUI-local commands itself via LOCAL_COMMANDS). */
     isHostCommand,
     /** One synchronous catalog commit (the coordinator's install hook). */
     installSnapshot: (snapshot: SurfaceCatalogSnapshot): void => installSurfaceSnapshot(snapshot),
     /** The revalidating transition (the coordinator's target-change hook). */
     enterTransition: (): void => enterCatalogTransition(),
+    withDelivery,
   }
 }

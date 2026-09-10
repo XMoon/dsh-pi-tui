@@ -20,6 +20,7 @@ import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, type Config } from '../src/index.ts'
+import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
@@ -361,7 +362,12 @@ async function mountRunner(
   config: Config = {},
 ): Promise<{ dispose: () => Promise<void>; app: TuiApp }> {
   ctx.provide('appExit', () => {})
-  ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
+  // The startup service is normally provided here; an extension-hosting
+  // harness provides it earlier (the extension host's `inject` gate needs it
+  // mounted BEFORE the runner reads the service).
+  if (ctx.get(TUI_STARTUP_SERVICE) === undefined) {
+    ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
+  }
   ctx.provide('sessionPersistence', harness.counting.proxy as never)
   ctx.provide('agents', harness.agents as never)
   ctx.provide('sessions', harness.sessions as never)
@@ -875,6 +881,20 @@ async function waitForCommand(harness: ReturnType<typeof makeHarness>): Promise<
   assert.ok(harness.executed.length > 0, 'the submission must reach the command plane')
 }
 
+/** Poll until the per-skill wrapper command is registered (the mount-time
+ * catalog refresh installs it asynchronously). Without the wrapper the
+ * `/name args` line would be a plain prompt and the delivery assertions
+ * would pass for the wrong reason. */
+async function waitForSkillWrapper(harness: ReturnType<typeof makeHarness>, name: string): Promise<void> {
+  for (let round = 0; round < 40; round += 1) {
+    if ((harness.commands as { list(): readonly { name: string }[] }).list().some(def => def.name === name)) return
+    for (let index = 0; index < 50; index += 1) await Promise.resolve()
+    await new Promise<void>(resolve => process.nextTick(resolve))
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.fail(`the ${name} skill wrapper must be registered`)
+}
+
 /** Boot a runner with a resumed session, optional pre-registered Host
  * commands, and a busyEnter preference. */
 async function bootCommandHarness(
@@ -887,6 +907,14 @@ async function bootCommandHarness(
      * service shaped like the dsh-tool-skill loader (hostLoadsSkillBody). */
     skills?: boolean
     hostLoadsSkillBody?: boolean
+    /** Extension command contributions to mount (owner metadata + the
+     * plugin's own commands-service registration, like a real plugin). */
+    extensionCommands?: readonly {
+      id: string
+      name: string
+      description: string
+      execution: 'local' | 'submission'
+    }[]
   },
 ): Promise<{ harness: ReturnType<typeof makeHarness>; mounted: { dispose: () => Promise<void>; app: TuiApp } }> {
   const life = testLifecycle(t)
@@ -907,13 +935,18 @@ async function bootCommandHarness(
     })
   }
   if (options.skills === true) {
+    const summary = {
+      name: 'grilling',
+      description: 'a skill',
+      content: 'skill body',
+      invocation: { userInvocable: true, modelInvocable: true },
+      source: 'bundled',
+      provider: 't',
+    }
     context.provide('skills', {
-      get: async () => ({
-        name: 'grilling',
-        description: 'a skill',
-        content: 'skill body',
-        invocation: { userInvocable: true, modelInvocable: true },
-      }),
+      // The catalog read that installs the per-skill wrapper commands.
+      list: async () => [summary],
+      get: async () => summary,
     } as never)
   }
   if (options.hostLoadsSkillBody === true) {
@@ -928,6 +961,37 @@ async function bootCommandHarness(
       replace: async (next: Record<string, unknown>) => { Object.assign(doc, next) },
     }),
   } as never)
+  if (options.extensionCommands !== undefined) {
+    // The extension host must be mounted BEFORE the runner reads its
+    // service (the runner attaches a SurfaceHost over its ledger), and its
+    // `inject` gate needs the startup service — provided here with the same
+    // payload mountRunner would use. Each contribution is registered by a
+    // plugin fiber, exactly like a real plugin (registerCommand is
+    // fiber-bound).
+    const contributions = options.extensionCommands
+    context.provide(TUI_STARTUP_SERVICE, { sessionId: 'command-session', shippedPresetRoot: home })
+    await context.plugin(applyExtensionHost)
+    await context.plugin((pluginCtx) => {
+      const service = pluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+        registerCommand(contribution: {
+          id: string
+          name: string
+          description: string
+          execution: 'local' | 'submission'
+        }): unknown
+      }
+      for (const contribution of contributions) service.registerCommand(contribution)
+    })
+    for (const contribution of contributions) {
+      // The plugin's own commands-service registration: the effective
+      // completion surface (and with it the advertised claim) sees the
+      // name, exactly like a real plugin's `ctx.commands.register`.
+      ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void }).register({
+        name: contribution.name,
+        handler: () => ({ kind: 'success' }),
+      })
+    }
+  }
   const mounted = await mountRunner(context, home, harness, { sessionId: 'command-session' })
   harness.host.status = options.status
   return { harness, mounted }
@@ -1039,6 +1103,48 @@ test('running + queue: /skill <name> keeps the steer path when the TUI must inje
   assert.equal(harness.host.followedUp.length, 0, 'no followup — the body order contract forbids it')
 })
 
+test('running + steer: the Ctrl+Enter chord force-queues /skill <name> (delivery mode resolved once)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    skills: true,
+    hostLoadsSkillBody: true,
+  })
+  mounted.app.setDraft('/skill grilling args')
+  // The Ctrl+Enter opposite chord: force the QUEUE delivery regardless of
+  // the busyEnter preference. The chord is a property of THIS submission —
+  // the skill delivery accepts the mode the submit boundary resolved and
+  // must never re-derive it from the persisted preference (busyEnter=steer
+  // here), because a one-shot chord does not survive in settings.
+  ;(mounted.app as unknown as { submitDraft(forceQueue?: boolean): void }).submitDraft(true)
+  await waitForDelivery(harness.host, 'force-queued skill')
+  assert.equal(harness.host.followedUp.length, 1, 'the chord must force the queue delivery')
+  const followed = harness.host.followedUp[0] as { content: { type: string; text: string }[] }
+  assert.equal(followed.content[0]?.text, '/grilling args', 'the queued line is the normalized /name args form')
+  assert.equal(harness.host.steered.length, 0, 'the chord must never steer')
+  assert.equal(harness.host.injected.length, 0, 'the host owns the body injection — no TUI fallback body')
+})
+
+test('running + steer: the Ctrl+Enter chord force-queues a per-skill wrapper (/grilling args)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    skills: true,
+    hostLoadsSkillBody: true,
+  })
+  await waitForSkillWrapper(harness, 'grilling')
+  mounted.app.setDraft('/grilling args')
+  ;(mounted.app as unknown as { submitDraft(forceQueue?: boolean): void }).submitDraft(true)
+  await waitForDelivery(harness.host, 'force-queued skill wrapper')
+  assert.equal(harness.executed.length, 1, 'the wrapper is a TUI command: it executes through the command plane')
+  assert.equal(harness.executed[0]?.line, '/grilling args', 'the wrapper receives its own slash line')
+  assert.equal(harness.host.followedUp.length, 1, 'the chord must force the queue delivery')
+  const followed = harness.host.followedUp[0] as { content: { type: string; text: string }[] }
+  assert.equal(followed.content[0]?.text, '/grilling args', 'the queued line is the original /name args line')
+  assert.equal(harness.host.steered.length, 0, 'the chord must never steer')
+  assert.equal(harness.host.injected.length, 0, 'the host owns the body injection — no TUI fallback body')
+})
+
 test('a dynamic Host command never enters the ordinary inbox while running (PR115-fix problem 1)', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'steer',
@@ -1052,4 +1158,77 @@ test('a dynamic Host command never enters the ordinary inbox while running (PR11
   assert.equal(harness.executed[0]?.line, '/test-host-command')
   assert.equal(harness.host.steered.length, 0, 'no steer — the fix is architectural, not a /compact special case')
   assert.equal(harness.host.followedUp.length, 0, 'no ordinary inbox entry')
+})
+
+// ── extension command ownership (PR115-fix problem 2) ──────────────────────
+// An extension contribution declares its own `execution`: 'submission' flows
+// through the session submission policy (steer/queue) like a skill
+// invocation, 'local' never steers. Being advertised in the effective
+// catalog does NOT make either a Host command: the busy policy (and the
+// force-queue chord) must be consulted before any command plane execution.
+
+test('running + steer: an extension submission command keeps the busy steer, never the Host claim', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    extensionCommands: [{ id: 'deploy', name: 'deploy', description: 'deploy the app', execution: 'submission' }],
+  })
+  mounted.app.setDraft('/deploy now')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'extension submission steer')
+  assert.equal(harness.host.steered.length, 1, 'a submission command steers while the agent is running with busyEnter=steer')
+  const steered = harness.host.steered[0] as { content: { type: string; text: string }[] }
+  assert.equal(steered.content[0]?.text, '/deploy now', 'the raw command line travels as the agent prompt')
+  assert.equal(harness.executed.length, 0, 'an advertised extension command must never be claimed as a Host command')
+})
+
+test('running + steer: the Ctrl+Enter chord force-queues an extension submission command', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    extensionCommands: [{ id: 'deploy', name: 'deploy', description: 'deploy the app', execution: 'submission' }],
+  })
+  mounted.app.setDraft('/deploy now')
+  ;(mounted.app as unknown as { submitDraft(forceQueue?: boolean): void }).submitDraft(true)
+  await waitForCommand(harness)
+  // The chord resolves 'queue' at the submit boundary; the submission route
+  // hands the line to the command plane (the plugin's own handler owns the
+  // session write), and the TUI never steers it into the running turn.
+  assert.equal(harness.executed.length, 1, 'the queue-side submission route reaches the command plane')
+  assert.equal(harness.executed[0]?.line, '/deploy now')
+  assert.equal(harness.host.steered.length, 0, 'the chord must never steer')
+})
+
+test('running + steer: an extension local command still executes directly under both chords', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    extensionCommands: [{ id: 'panel', name: 'panel', description: 'toggle the panel', execution: 'local' }],
+  })
+  mounted.app.setDraft('/panel')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'an extension local command always executes locally')
+  // The Ctrl+Enter chord cannot change a local command's ownership either.
+  mounted.app.setDraft('/panel')
+  ;(mounted.app as unknown as { submitDraft(forceQueue?: boolean): void }).submitDraft(true)
+  for (let round = 0; round < 20 && harness.executed.length < 2; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(harness.executed.length, 2, 'the chord keeps the local execution')
+  assert.equal(harness.host.steered.length, 0, 'local commands never steer')
+})
+
+test('running + steer: the Ctrl+Enter chord never turns a Host command into a queued prompt', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    hostCommands: ['compact'],
+  })
+  mounted.app.setDraft('/compact')
+  ;(mounted.app as unknown as { submitDraft(forceQueue?: boolean): void }).submitDraft(true)
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'a Host command owns its execution regardless of the chord')
+  assert.equal(harness.host.followedUp.length, 0, 'the chord must not queue a Host command as a prompt')
+  assert.equal(harness.host.steered.length, 0, 'the chord must not steer a Host command')
 })
