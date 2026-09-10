@@ -1544,3 +1544,39 @@ test('question: inert press → repaint moves the marker onto the cell → relea
   f.completeMouseClick(gesture, row)
   assert.equal(state.bodyExpanded, before, 'the inert press must not toggle the expanded panel')
 })
+
+test('masked review keeps the grapheme mask (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Secret', masked: true, options: [{ label: 'A' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  let rendered = f.render(100).map(strip)
+  const otherRow = rendered.findIndex(line => line.includes('Type something.'))
+  assert.ok(otherRow >= 0, 'free-text row missing')
+  f.clickRow(otherRow, 5) // enter edit
+  for (const ch of '👨‍💻a') f.handleInput(ch)
+  rendered = f.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('••')), 'editing must show one bullet per grapheme')
+  f.handleInput('\r') // commit → review
+  rendered = f.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('  ••')), 'review must show ONE bullet per grapheme (2 for 👨‍💻a, never 6 UTF-16 units)')
+  assert.ok(!rendered.some(line => line.includes('••••••')), 'review must not use UTF-16 length')
+  assert.ok(!rendered.some(line => line.includes('👨')), 'the secret must never render on review')
+})
+
+test('masked multiSelect review never shows the custom plaintext (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Secret', masked: true, multiSelect: true, options: [{ label: 'A' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  f.handleInput('1') // select A
+  let rendered = f.render(100).map(strip)
+  const otherRow = rendered.findIndex(line => line.includes('Type something.'))
+  assert.ok(otherRow >= 0, 'free-text row missing')
+  f.clickRow(otherRow, 5) // enter edit
+  for (const ch of 'secret') f.handleInput(ch)
+  f.handleInput('\r') // commit → review
+  rendered = f.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('A + ••••••')), 'review must mask the custom beside the selection')
+  assert.ok(!rendered.some(line => line.includes('secret')), 'the secret must never render on review')
+})
