@@ -94,9 +94,12 @@ export type TranscriptMessage =
    * Labeled entries carry the Web-provenance producer name (e.g. AGENTS.md,
    * @deepseek-ai/dsh-system-prompt, skill-catalog), a source-kind icon
    * SEMANTIC (never a concrete glyph — the renderer resolves the palette),
-   * and, for notice forms, the producer's one-line summary.
+   * and, for notice forms, the producer's one-line summary. `context` is the
+   * source-derived semantic marker distinguishing injected context from
+   * other `kind: 'system'` presentation rows (llm/retry, max-tokens), which
+   * are orchestration and must never be treated as turn foundation.
    */
-  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; icon?: IconSemantic }
+  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; icon?: IconSemantic; context?: true }
   | TranscriptToolMessage
   | TranscriptWorkflowMessage
   /** Older-than-window turns collapsed into one line (windowing). */
@@ -3502,6 +3505,10 @@ export class TranscriptFolder {
             ...provenance.label === null ? {} : { label: provenance.label },
             ...summary === null ? {} : { summary },
             icon: contextIconSemantic(event.data.source),
+            // The source-derived semantic marker: this row IS injected
+            // context (never orchestration like llm/retry or max-tokens),
+            // so Focus may treat it as turn foundation.
+            context: true as const,
           })
           // Focus aggregation: injected context (skill-invocation,
           // skill-catalog, system reminders) is orchestration, NOT one of
