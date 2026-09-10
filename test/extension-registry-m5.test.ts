@@ -102,7 +102,7 @@ test('CommandBridge: a sessionless client command records its flag', () => {
   }, 'owner-a')
   assert.equal(outcome.kind, 'registered')
   assert.equal(bridge.find('vimmode')?.sessionless, true)
-  assert.equal(bridge.isSessionless('vimmode', new Set()), true, 'the sessionless classification is contribution-driven')
+  assert.equal(bridge.find('vimmode')?.sessionless, true, 'the sessionless classification lives on the contribution record')
 })
 
 test('CommandBridge: a duplicate id is an error', () => {
@@ -127,17 +127,17 @@ test('CommandBridge: dynamic unload drops the client ownership (busy-enter regre
     id: 'dyn', name: 'dyncmd', description: '', handler: () => ({ kind: 'success' }),
   }, 'owner-a')
   assert.equal(handle.kind, 'registered')
-  // While registered: never steers.
+  // While registered it is a CLIENT command: the namespace dispatch routes it
+  // before the busy policy (the resolver is never consulted for it).
+  assert.equal(bridge.isLocal('dyncmd', LOCAL_COMMANDS), true)
   assert.equal(
-    resolveSubmitDelivery({ name: 'dyncmd' }, true, 'enter', 'steer', name => bridge.isLocal(name, LOCAL_COMMANDS)),
-    'queue',
-  )
-  // After unload: submission policy applies.
-  if (handle.kind === 'registered') handle.handle.dispose()
-  assert.equal(
-    resolveSubmitDelivery({ name: 'dyncmd' }, true, 'enter', 'steer', name => bridge.isLocal(name, LOCAL_COMMANDS)),
+    resolveSubmitDelivery({ name: 'dyncmd' }, true, 'enter', 'steer'),
     'steer',
+    'a client name is not TUI-local for the resolver: it would follow the busy policy',
   )
+  // After unload the name returns to the ordinary routes.
+  if (handle.kind === 'registered') handle.handle.dispose()
+  assert.equal(bridge.isLocal('dyncmd', LOCAL_COMMANDS), false)
 })
 
 test('CommandBridge: rawInput is preserved verbatim (skill rawInput regression)', () => {
@@ -159,12 +159,12 @@ test('CommandBridge: rawInput is preserved verbatim (skill rawInput regression)'
   assert.equal(received, raw, 'the bridge must never re-parse or rewrite rawInput')
 })
 
-test('CommandBridge: sessionless contributions join the sessionless set', () => {
+test('CommandBridge: the sessionless flag stays on the contribution record (the static set is the TUI core)', () => {
   const bridge = new CommandBridge()
   bridge.register({ id: 's', name: 'nosession', description: '', sessionless: true, handler: () => ({ kind: 'success' }) }, 'o')
-  assert.equal(bridge.isSessionless('nosession', SESSIONLESS_COMMANDS), true)
-  assert.equal(bridge.isSessionless('exit', SESSIONLESS_COMMANDS), true, 'static core stays')
-  assert.equal(bridge.isSessionless('nosession2', SESSIONLESS_COMMANDS), false)
+  assert.equal(bridge.find('nosession')?.sessionless, true, 'the contribution declares it')
+  assert.equal(bridge.find('nosession2'), undefined, 'an unknown name has no record')
+  assert.equal(SESSIONLESS_COMMANDS.has('exit'), true, 'the static TUI core stays the dispatch baseline')
 })
 
 // ── ThemeRegistry ──────────────────────────────────────────────────────────
@@ -712,4 +712,15 @@ test('KeybindingRegistry: duplicate keys conflict; unload removes bindings', () 
   assert.equal(registry.actionFor({ key: 'y', ctrl: true, alt: true, shift: false, super: false }), 'open-search')
   handle.dispose()
   assert.equal(registry.actionFor({ key: 'y', ctrl: false, alt: true, shift: false, super: false }), undefined)
+})
+
+test('CommandBridge: a contribution without a handler fails loud at the boundary', () => {
+  // TypeScript requires `handler`, but a plain-JS / stale compiled caller can
+  // bypass it: installing a menu row with no behavior would be silent.
+  const bridge = new CommandBridge()
+  assert.throws(
+    () => bridge.register({ id: 'x', name: 'broken', description: '' } as never, 'o1'),
+    /must declare its handler/,
+  )
+  assert.equal(bridge.find('broken'), undefined, 'nothing malformed is stored')
 })

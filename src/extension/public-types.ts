@@ -439,9 +439,9 @@ export interface TuiCommandContribution {
    * TUI extension for pure client commands (an overlay toggle, a picker). */
   readonly sessionless?: boolean
 
-  /** Optional autocomplete provider for this command's arguments
-   * (the structural {@link TuiAutocompleteProvider}). */
-  readonly argumentProvider?: TuiAutocompleteProvider
+  // REMOVED (Unreleased): `argumentProvider` was never wired to the
+  // completion path (a dead public surface). Use the AutocompleteRegistry
+  // (`registerAutocomplete`) for plugin suggestions.
   /** The command's client behavior (required): the TUI runs it locally,
    * passing `invocation.rawInput` verbatim, with or without a live session
    * according to {@link sessionless}. */

@@ -1428,36 +1428,83 @@ export function registerTuiCommands(
     const contributions = bridge.snapshot().entries
     if (contributions.length === 0) return host
     const byName = new Map(host.map(entry => [entry.name, entry] as const))
+    // Record EVERY collision of this pass before failing it: the health
+    // surface must list all offenders, not only the first one scanned.
+    const colliding = new Set<string>()
+    let firstCollision: Error | undefined
     for (const contribution of contributions) {
       if (!byName.has(contribution.name)) continue
-      const collision = new Error(`command contribution /${contribution.name} collides with a host command`)
-      recordExtensionError?.({ slot: 'command', id: contribution.id, owner: contribution.owner }, collision)
-      throw collision
+      const identity = contributionIdentity(contribution)
+      colliding.add(identity)
+      const collision = Object.assign(
+        new Error(`command contribution /${contribution.name} collides with a host command`),
+        { contributionIdentity: identity },
+      )
+      const ref = { slot: 'command', id: contribution.id, owner: contribution.owner }
+      collisionHealth.set(identity, { ref, message: collision.message })
+      recordExtensionError?.(ref, collision)
+      firstCollision ??= collision
     }
+    // HEALTH RECOVERY, scoped to COLLISION records only: a contribution that
+    // merges cleanly again is no longer failed — even while another
+    // contribution keeps this pass failing. A handler-failure record in the
+    // same health slot is NEVER touched (this synthesis did not write it).
+    for (const contribution of contributions) {
+      const identity = contributionIdentity(contribution)
+      if (colliding.has(identity)) continue
+      const recorded = collisionHealth.get(identity)
+      if (recorded === undefined) continue
+      collisionHealth.delete(identity)
+      // A recovered collision may notify again in a later generation.
+      notifiedCollisions.delete(identity)
+      // Clear ONLY when the health record currently shows OUR collision: the
+      // same slot also carries handler runtime failures, and the ledger
+      // DEDUPLICATES a later failure into an already-failed record (keeping
+      // the first message) — clearing blindly would erase a handler failure
+      // that this synthesis never wrote (and that has not recovered).
+      const current = runner.extensions?.health?.().find(
+        entry => entry.id === recorded.ref.id && entry.owner === recorded.ref.owner,
+      )
+      if (current === undefined || current.state !== 'failed' || current.lastError !== recorded.message) continue
+      clearExtensionError?.(recorded.ref)
+    }
+    if (firstCollision !== undefined) throw firstCollision
     for (const contribution of contributions) {
       byName.set(contribution.name, { name: contribution.name, description: contribution.description })
     }
     return [...byName.values()]
   }
-  /** One collision notice per contribution name (never a per-refresh spam). */
-  const notifiedCollisions = new Set<string>()
   /**
-   * Install one completion list (sorted, claims refreshed). The single
-   * synchronous seam every catalog commit funnels through.
-   * @param entries - the HOST catalog rows; the client contributions are
-   *   merged in by {@link mergeContributions} (the installed DISPLAY list),
-   *   while `claims` stays host-only — a contribution is not a command-plane
-   *   claim.
+   * One collision notice per contribution IDENTITY and failure GENERATION
+   * (the key is dropped when the collision recovers): a new owner reusing a
+   * released name, or the same contribution colliding again after the host
+   * descriptor went away and came back, is surfaced again.
    */
-  const installCompletions = (entries: readonly SurfaceCommandSummary[]): void => {
+  const notifiedCollisions = new Set<string>()
+  /** The identity of one contribution across the bridge and the health
+   * ledger (the id alone is unique today, the owner keeps it honest). */
+  const contributionIdentity = (entry: { id: string; owner: string }): string => `${entry.id}\u0000${entry.owner}`
+  /** The COLLISION records THIS synthesis wrote, by identity — the only
+   * health entries a successful merge may clear, and only while the record
+   * still shows that collision message (see the recovery loop). */
+  const collisionHealth = new Map<string, { ref: { slot: string; id: string; owner: string }; message: string }>()
+  const installCompletions = (
+    entries: readonly SurfaceCommandSummary[],
+    options: { display?: 'merged' | 'none' } = {},
+  ): void => {
     const sorted = [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
     // HOST CLAIMS first: the claim set is the host's AUTHORITY record (the
     // dispatch consults it), so it must never depend on the client merge — a
     // failed synthesis must not cost a host command its claim.
     claims = new Set(sorted.map(command => command.name))
     // The display list carries the client contributions too; the CLAIM set
-    // never does (see the parameter doc).
-    const display = [...mergeContributions(sorted)].sort((left, right) => left.name < right.name ? -1 : 1)
+    // never does (see the parameter doc). 'none' is the FAILED-SOURCE state
+    // (upstream `source-failed` removes the source's group): no command rows
+    // are offered until a synthesis succeeds again, while the claims above
+    // stay live.
+    const display = options.display === 'none'
+      ? []
+      : [...mergeContributions(sorted)].sort((left, right) => left.name < right.name ? -1 : 1)
     // M5: the plugin autocomplete chain (AutocompleteRegistry) is consulted
     // after the host's own provider returns null. The registry's suggest()
     // handles cancellation (latest-only commit) and per-provider isolation.
@@ -1542,15 +1589,33 @@ export function registerTuiCommands(
     try {
       installCompletions(entries)
     } catch (error) {
+      // The failed pass marks the command SOURCE failed (upstream
+      // `source-failed` parity: the source's whole group is removed): no
+      // command row — client OR host — is offered until a synthesis succeeds
+      // again, so no displayed row can ever execute a different command than
+      // it shows. The HOST CLAIMS were refreshed before the merge, so the
+      // input authority of a host command is never lost while the menu is
+      // empty.
       const message = safeErrorMessage(error)
-      if (!notifiedCollisions.has(message)) {
-        notifiedCollisions.add(message)
+      // The notice identity is the FAILING contribution (the error carries
+      // its name; the health ref carries the owner) — a re-used name by a
+      // new owner notifies again.
+      const collision = error as { contributionIdentity?: string }
+      const noticeKey = collision.contributionIdentity ?? message
+      if (!notifiedCollisions.has(noticeKey)) {
+        notifiedCollisions.add(noticeKey)
         app.notify(message, 'error')
       }
       try {
         ctx.logger.error(`tui-runner: ${message}`)
       } catch {
         // The cordis logger must not block the submission path.
+      }
+      try {
+        installCompletions(entries, { display: 'none' })
+      } catch {
+        // Clearing the display is plain work: a failure here is a core bug,
+        // not a contribution problem — leave the previous list in place.
       }
     }
   }

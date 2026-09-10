@@ -15,8 +15,9 @@
  * - `/name args...` ALWAYS keeps `invocation.rawInput` verbatim — the
  *   bridge never re-parses or rewrites arguments (the skill rawInput
  *   regression gate);
- * - busy Enter keeps classifying by the EFFECTIVE ownership: a dynamic
- *   local command is local while registered, submission after unload;
+ * - a contribution is CLIENT-OWNED while registered; after unload the name
+ *   returns to the ordinary routes (a host claim, or an unclaimed prompt —
+ *   never a lingering client route);
  * - dynamic unload removes the contribution (fiber-bound, like every
  *   extension registration);
  * - near-synonym command conflicts keep the AGENTS hard rule: the bridge
@@ -48,8 +49,7 @@ interface Contribution {
   readonly description: string
   readonly sessionless: boolean
   readonly owner: string
-  readonly argumentProvider: TuiAutocompleteProvider | undefined
-  readonly handler: TuiLocalCommandHandler | undefined
+  readonly handler: TuiLocalCommandHandler
   disposed: boolean
 }
 
@@ -89,6 +89,20 @@ export class CommandBridge {
       throw new Error(`duplicate command contribution id "${spec.id}" (owner "${this.contributions.get(spec.id)?.owner}")`)
     }
     if (spec.name === '') throw new Error('command contribution name must not be empty')
+    // A contribution IS its client behavior: a caller that bypasses the
+    // public types (plain JS, a stale compiled plugin) must fail LOUD at the
+    // boundary rather than install a menu row that can never run.
+    if (typeof spec.handler !== 'function') {
+      throw new Error(`command contribution "${spec.name}" must declare its handler (the client behavior)`)
+    }
+    // The removed `execution` ownership metadata must never be SILENTLY
+    // reinterpreted: a stale plugin still declaring it is rejected loudly
+    // (breaking API, explicit migration — see docs/extension-api.md).
+    if ('execution' in spec) {
+      throw new Error(
+        `command contribution "${spec.name}" declares the removed 'execution' ownership metadata — a contribution is a client-owned command now; drop 'execution' and declare 'handler' (see docs/extension-api.md)`,
+      )
+    }
     // P1-04: the host-owned catalog is authoritative — an EXACT collision
     // with a host command is rejected loudly (a plugin can never shadow
     // /status, /sessions, ...). Near-synonyms of host names are rejected
@@ -132,7 +146,6 @@ export class CommandBridge {
       description: spec.description,
       sessionless: spec.sessionless ?? false,
       owner,
-      argumentProvider: spec.argumentProvider,
       handler: spec.handler,
       disposed: false,
     }
@@ -184,17 +197,6 @@ export class CommandBridge {
     return false
   }
 
-  /** Whether a command name is sessionless (static set OR a live dynamic
-   * sessionless contribution). */
-  isSessionless(name: string, staticSessionless: ReadonlySet<string>): boolean {
-    if (staticSessionless.has(name)) return true
-    for (const contribution of this.contributions.values()) {
-      if (contribution.disposed) continue
-      if (contribution.name === name && contribution.sessionless) return true
-    }
-    return false
-  }
-
   /** The live contribution for one name, or undefined. */
   find(name: string): Contribution | undefined {
     for (const contribution of this.contributions.values()) {
@@ -215,11 +217,6 @@ export class CommandBridge {
    * back to the commands service for TUI-owned sessionless names). */
   handlerFor(name: string): TuiLocalCommandHandler | undefined {
     return this.find(name)?.handler
-  }
-
-  /** The argument autocomplete provider for one name, or undefined. */
-  argumentProviderFor(name: string): TuiAutocompleteProvider | undefined {
-    return this.find(name)?.argumentProvider
   }
 
   /** An immutable snapshot (diagnostics + /status). */

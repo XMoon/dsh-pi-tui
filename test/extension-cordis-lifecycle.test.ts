@@ -653,7 +653,7 @@ test('M5: command/theme/setting registrations are fiber-bound (owner unload clea
         id: string
         name: string
         description: string
-        execution: 'local' | 'submission'
+        handler: () => { kind: 'success' }
       }): { id: string; dispose(): void }
       registerTheme(contribution: { id: string; name: string; palette: object }): { id: string; dispose(): void }
       registerSetting(contribution: { id: string; label: string; currentValue: string }): { id: string; dispose(): void }
@@ -673,7 +673,7 @@ test('M5: command/theme/setting registrations are fiber-bound (owner unload clea
     // Plugin A registers one contribution in every M5 registry.
     const disposer = await mount(ctx, (pluginCtx) => {
       const svc = pluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as typeof service
-      svc.registerCommand({ id: 'cmd-a', name: 'acmd', description: 'a', execution: 'local' })
+      svc.registerCommand({ id: 'cmd-a', name: 'acmd', description: 'a', handler: () => ({ kind: 'success' }) })
       svc.registerTheme({ id: 'theme-a', name: 'A Theme', palette: { text: '#fff' } })
       svc.registerSetting({ id: 'set-a', label: 'A Setting', currentValue: 'v' })
       svc.registerAutocomplete({ id: 'auto-a', provider: { getSuggestions: async () => null } })
