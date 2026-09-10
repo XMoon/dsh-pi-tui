@@ -1237,8 +1237,6 @@ test('a dynamic Host command never enters the ordinary inbox while running (PR11
 })
 
 // ── extension command ownership (PR115-fix problem 2) ──────────────────────
-// An extension contribution declares its own `execution`: 'submission' flows
-// through the session submission policy (steer/queue) like a skill
 // The DSH client command contribution model: a contribution is a CLIENT-OWNED
 // command (menu row + client handler). A name that is also a host command is a
 // COLLISION: the host claim wins and the candidate synthesis fails loud —
@@ -1575,18 +1573,19 @@ test('a sessionless client command runs its handler even with a LIVE session', a
 })
 
 test('a dynamic host collision fails the command source (upstream source-failed parity)', async (t) => {
-  let failDeploy = false
   const { harness, mounted, registerContribution } = await bootCommandHarness(t, {
     busyEnter: 'queue',
     status: 'idle',
+    hostCommands: ['compact'],
     extensionCommands: [
       { id: 'deploy-cmd', name: 'deploy', description: 'client deploy', bridgeHandler: () => ({ kind: 'success' }) },
       { id: 'keep-cmd', name: 'keep', description: 'client keep', bridgeHandler: () => ({ kind: 'success' }) },
     ],
   })
-  // T0: both client rows are in the menu.
+  // T0: the host row and both client rows are in the menu — one source.
   const t0 = mounted.app.commandCompletionsForTest().map(row => row.name)
   assert.ok(t0.includes('deploy') && t0.includes('keep'), `both client rows installed: ${t0.join(',')}`)
+  assert.ok(t0.includes('compact'), `the host row shares the source: ${t0.join(',')}`)
   // T1: the host catalog gains /deploy; a later registration flushes the
   // extension invalidation into a completion refresh.
   const disposeHost = (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
@@ -1612,7 +1611,49 @@ test('a dynamic host collision fails the command source (upstream source-failed 
   const recovered = mounted.app.commandCompletionsForTest().map(row => row.name)
   assert.ok(recovered.includes('deploy') && recovered.includes('keep') && recovered.includes('omega'),
     `the menu recovers after a successful synthesis: ${recovered.join(',')}`)
-  void failDeploy
+})
+
+test('a SECOND colliding contribution is surfaced too (aggregated fresh-collision notice)', async (t) => {
+  // A collides first and is notified; B starts colliding while A keeps
+  // colliding. B must be surfaced as well — the failed pass notifies every
+  // FRESH collision (one per identity and failure generation), aggregated
+  // into the single transient notice slot.
+  const healthOf = (id: string): { state: string } | undefined =>
+    extensionServiceOf().find(entry => entry.id === id)
+  const { harness, mounted, registerContribution, extensionService } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [
+      { id: 'alpha-cmd', name: 'alpha', description: 'alpha', bridgeHandler: () => ({ kind: 'success' }) },
+      { id: 'beta-cmd', name: 'beta', description: 'beta', bridgeHandler: () => ({ kind: 'success' }) },
+    ],
+  })
+  const extensionServiceOf = (): readonly { id: string; state: string }[] =>
+    extensionService._ledger().healthSnapshot()
+  const registerHost = (name: string): (() => void) =>
+    (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
+      .register({ name, handler: () => ({ kind: 'success' }) })
+  // T0: /alpha becomes a host command → the first collision, notified.
+  const disposeAlpha = registerHost('alpha')
+  await registerContribution({ id: 'gamma-cmd', name: 'gamma', description: 'gamma', bridgeHandler: () => ({ kind: 'success' }) })
+  assert.match(mounted.app.notifyTextForTest(), /\/alpha/, 'the first collision is surfaced')
+  assert.equal(healthOf('alpha-cmd')?.state, 'failed')
+  // T1: /beta becomes a host command while /alpha still collides.
+  const disposeBeta = registerHost('beta')
+  await registerContribution({ id: 'delta-cmd', name: 'delta', description: 'delta', bridgeHandler: () => ({ kind: 'success' }) })
+  const notice = mounted.app.notifyTextForTest()
+  assert.match(notice, /\/beta/, 'the NEWLY colliding contribution is surfaced')
+  assert.match(notice, /\/alpha/, 'the still-colliding contribution is included in the aggregated notice')
+  assert.equal(healthOf('beta-cmd')?.state, 'failed')
+  // Recovery: both host descriptors go away; a successful synthesis clears
+  // both notice keys and both health records.
+  disposeAlpha()
+  disposeBeta()
+  await registerContribution({ id: 'epsilon-cmd', name: 'epsilon', description: 'epsilon', bridgeHandler: () => ({ kind: 'success' }) })
+  assert.equal(healthOf('alpha-cmd')?.state, 'active', 'the recovered collision clears')
+  assert.equal(healthOf('beta-cmd')?.state, 'active', 'the recovered collision clears')
+  const names = mounted.app.commandCompletionsForTest().map(row => row.name)
+  assert.ok(names.includes('alpha') && names.includes('beta'), `client rows return: ${names.join(',')}`)
 })
 
 test('a collision health record clears on recovery, while a HANDLER failure record survives an unrelated refresh', async (t) => {

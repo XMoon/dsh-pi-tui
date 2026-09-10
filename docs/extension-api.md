@@ -175,7 +175,8 @@ locally, never steered.
   a whole — upstream `source-failed` parity, so its command rows are removed
   until a synthesis succeeds again — while the host claims stay refreshed
   (input authority is never lost) and the collision is recorded on the
-  contribution's health and surfaced once.
+  contribution's health and surfaced once, naming every collision of that
+  failed pass.
 - **`sessionless`.** `true` lets the command run before a session exists
   (pure client commands: an overlay toggle, a picker). `false` (default)
   resolves/creates the session first — the host command surface is

@@ -440,7 +440,8 @@ name collision **fails loud — it never shadows**.
   costs a host command its input authority; the collision is recorded on the
   contribution's health (cleared only when it merges cleanly again, and never
   over a handler-failure record in the same slot) and surfaced once per
-  contribution identity and failure generation.
+  contribution identity and failure generation — one failed pass states EVERY
+  collision it found in the single notice slot.
 - Everything unclaimed is an ordinary prompt; TUI-local commands
   (`LOCAL_COMMANDS`) and TUI-owned skill wrappers keep their own routes
   (local execution, `loadSkill`).
