@@ -4519,6 +4519,32 @@ export function apply(ctx: Context, config: Config): void {
           const restoreCommandAttachmentDraft = (): void => {
             if (draftHasAttachments(text, draftImages, draftFiles)) restoreSubmissionDraft(text)
           }
+          // DEFERRED AUTHORITY: the session may have committed a host command
+          // the standing view could not see when the composer classified this
+          // line (an unknown slash line becomes a session-scoped command).
+          // Re-apply the attachment policy against the FINAL catalog BEFORE
+          // the command plane runs: an undeclared command must never receive
+          // a placeholder line with no payload (and must never consume the
+          // attachment), while a declaring command keeps its payload and a
+          // skill invocation keeps its agent-facing delivery.
+          const lateRefusal = parsed === undefined ? undefined : attachmentRefusal(
+            parsed,
+            text,
+            commandIsLocalForAttachments(
+              parsed,
+              isSkillWrapperName,
+              n => extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false,
+              isHostCommandName,
+            ),
+            isSkillInvocation(parsed, text),
+          )
+          if (lateRefusal !== undefined) {
+            fallbackPin()
+            restoreCommandAttachmentDraft()
+            app.notify(lateRefusal, 'error')
+            settleLocalSubmitAck('attachments refused by the command declaration', { token: submitAckToken, terminal: true })
+            return
+          }
           // The session-transition write fence: the identity check above
           // can yield across a concurrent /new, /fork, rewind or
           // switch — once a transition is in flight, executing the command

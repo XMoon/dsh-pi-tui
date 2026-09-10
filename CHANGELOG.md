@@ -39,7 +39,9 @@
   没有内容"的行交给 host。声明过的命令会在 host 命令调用上收到编码后的图片附件；命令提交**只在 handler
   成功后才 consume 附件**——失败的命令会连同附件一起还原草稿。文件附件对命令一律拒绝（host 需要上传
   receipt，本 client 尚无该通道）。skill 调用不受影响：显式 `/skill <name> [image #1]` 与 skill wrapper
-  仍属 agent-facing，图片随投递的 prompt 进入模型，而不是走命令通道。
+  仍属 agent-facing，图片随投递的 prompt 进入模型，而不是走命令通道。策略按**最终 authority** 复核：
+  未知的 `/name [image #1]` 若其命令在 session 建立后才出现（session 级 host 命令），会在 session 解析后
+  再判一次——未声明的命令会被拒绝，而不是带着空 payload 执行并把草稿 consume 掉。
 - **带附件的 client 命令在 deferred start 下不再提前拒绝。** 首次输入前没有 session 时，`/deploy [image #1]`
   这类命令先完成 session 级 authority 解析：随 session 出现的 host 命令或 skill wrapper 会**带着附件**接管
   该行；只有最终归属仍是 client 命令时才拒绝附件，并把草稿（附件占位符保留）原样退回。延迟窗口内的附件由
