@@ -2534,6 +2534,22 @@ interface ExitConfirmationTrigger {
   readonly clearsDraft: boolean
 }
 
+/** One rendered transcript block in the fullscreen row map (mouse
+ * hit-testing): the message/activity owner, the painted height, the
+ * attachment spans, the PTC sub-call header spans, the Workflow card hit
+ * spans, and the Focus owner mark. The per-row SEMANTIC hit identity
+ * (fullscreenRowHitIdentity) is derived from these spans. */
+type FullscreenRowEntry = {
+  message?: TranscriptMessage
+  activity?: TurnActivity
+  height: number
+  attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+  collapseFocusOwnerOnClick?: number
+  subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
+  workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
+  hasTrailingSpacer: boolean
+}
+
 export class TuiApp {
   private readonly terminal: Terminal
   /** The extension surface host (M2), when the runner attached one. */
@@ -2619,8 +2635,14 @@ export class TuiApp {
    * repainted onto the same cell. The press-time frame dimensions are
    * recorded too: a resize + repaint between press and release changes
    * the frame, and the release must not act against it (the press began
-   * on the OLD geometry). */
-  private fullscreenCellGesture: { ownerId: string; row: number; columns: number; termRows: number } | undefined
+   * on the OLD geometry). `hitId` is the pressed row's per-row SEMANTIC
+   * hit identity (the row's actual action target — card toggle / PTC
+   * sub-call / Workflow run-phase-member / attachment / Focus owner
+   * collapse): a repaint that reinterprets the row can never pass the
+   * fence even when the card object and the relative row are unchanged. */
+  private fullscreenCellGesture:
+    | { ownerId: string; row: number; hitId: string; columns: number; termRows: number }
+    | undefined
   /** Flows waiting behind the active one (FIFO; shown on settle). */
   private readonly questionQueue: QuestionState[] = []
   /** The active Save Location prompt, if any (one on screen at a time). */
@@ -3039,31 +3061,7 @@ export class TuiApp {
    * Message rows carry their message + attachment spans; Focus activity
    * rows carry the activity (the whole collapsed Thought block — and the
    * expanded header — is the toggle hit area, plan §17.1). */
-  private messageRows: ReadonlyArray<{
-    message?: TranscriptMessage
-    activity?: TurnActivity
-    height: number
-    /** The row span (block-relative) of every attachment's click region. */
-    attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
-    /** Set ONLY on process rows revealed by an EXPANDED Focus Thought
-     * (plan §8.8 / review P2): the fullscreen click handler collapses the
-     * owner turn when this is set. The user's own rows and the FINAL
-     * assistant never carry it — clicking them must not collapse the
-     * Thought. */
-    collapseFocusOwnerOnClick?: number
-    /** The row span (block-relative) of every PTC sub-call header's click
-     * region, keyed by the durable subCallId. */
-    subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
-    /** The row span (block-relative) of every Workflow card hit target
-     * (run/phase headers, running members, scoped-agent entries — PR2
-     * plan §12.5). */
-    workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
-    /** Whether this entry's height includes the trailing inter-block
-     * spacer (a blank visual row — the plan §9 blank-row collapse
-     * target). Never set on the projection's LAST block or on skipped
-     * zero-row blocks, mirroring the rendered layout exactly. */
-    hasTrailingSpacer: boolean
-  }> = []
+  private messageRows: ReadonlyArray<FullscreenRowEntry> = []
   /** The terminal geometry of the LAST PAINTED frame (fullscreen only):
    * a zero-row probe rides the fullscreen layout root, and the fork
    * renders every layout child on EVERY frame, so these fields record
@@ -3112,9 +3110,14 @@ export class TuiApp {
         scrollTop: number
         viewportHeight: number
         /** The painted transcript projection: per-block semantic identity
-         * + painted height (the stable values the press-time identity
-         * record needs — the live messageRows entries are mutable). */
-        rows: ReadonlyArray<{ ownerId: string; height: number }>
+         * + painted height + the per-row SEMANTIC hit identity (the
+         * stable values the press-time identity record needs — the live
+         * messageRows entries are mutable). The hit identity names the
+         * row's actual action target (card toggle / PTC sub-call /
+         * workflow run-phase-member / attachment / Focus owner collapse),
+         * so a repaint that reinterprets the pressed row can never pass
+         * the release fence. */
+        rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
       }
     | undefined
   /** ONE external-editor ownership at a time: set synchronously at launch,
@@ -7087,7 +7090,106 @@ export class TuiApp {
       rows: this.messageRows.map((entry, index) => ({
         ownerId: this.fullscreenRowOwnerId(entry, index),
         height: entry.height,
+        hits: this.fullscreenRowHits(entry, index),
       })),
+    }
+  }
+
+  /** The per-row SEMANTIC hit identities of one painted transcript block
+   * (mouse parity): one immutable string per row, naming the row's
+   * ACTUAL action target at the last paint — the card toggle, a PTC
+   * sub-call header, a Workflow run/phase/member/agents row, an
+   * attachment, or a Focus owner collapse. The release click recomputes
+   * the CURRENT identity of the pressed cell and requires equality, so a
+   * repaint that reinterprets the row (a Workflow 5→6 aggregate switch, a
+   * PTC settle reflow, an async image growth) can never pass the fence. */
+  private fullscreenRowHits(entry: FullscreenRowEntry, index: number): ReadonlyArray<string> {
+    const nextVisible = this.nextVisibleRowEntry(index)
+    return Array.from({ length: entry.height }, (_, row) => this.fullscreenRowHitIdentity(entry, row, nextVisible))
+  }
+
+  /** The next VISIBLE transcript block after `index` (the blank-row
+   * escape hatch's boundary test needs it: a spacer whose following
+   * entries are all zero-height is the Thought's BOUNDARY spacer). */
+  private nextVisibleRowEntry(index: number): FullscreenRowEntry | undefined {
+    for (let next = index + 1; next < this.messageRows.length; next += 1) {
+      const candidate = this.messageRows[next]!
+      if (candidate.height > 0) return candidate
+    }
+    return undefined
+  }
+
+  /** The per-row SEMANTIC hit identity of one transcript row (mouse
+   * parity): the row's ACTUAL action target, following the click-path
+   * priority EXACTLY (blank-row escape hatch > Focus activity > PTC
+   * sub-call > Workflow > attachment > Focus-secondary/card). A row
+   * inside a Workflow card that matches no hit is INERT (the card
+   * consumes every click — it must never fall through to the owner/card
+   * branch). Shared by the paint-snapshot commit and the release-click
+   * validation so both sides compute the EXACT same identity string. */
+  private fullscreenRowHitIdentity(
+    entry: FullscreenRowEntry,
+    inMessage: number,
+    nextVisible: FullscreenRowEntry | undefined,
+  ): string {
+    // The blank-row escape hatch: the click collapses the owner Thought
+    // (the boundary spacer is unclaimed → inert).
+    if (entry.hasTrailingSpacer && inMessage === entry.height - 1) {
+      const owner = this.blankRowFocusCollapseOwner(entry, nextVisible)
+      return owner !== undefined ? `focus:collapse:${owner}` : 'inert'
+    }
+    // A Focus Thought block: the whole rendered block toggles the turn.
+    if (entry.activity !== undefined) {
+      return `focus:toggle:${entry.activity.turn}`
+    }
+    const message = entry.message
+    if (message === undefined) return 'inert'
+    const token = this.identityToken(message)
+    // PTC sub-call header rows win FIRST (their own disclosure is
+    // independent of the root card).
+    if (entry.subCallHits !== undefined) {
+      const hit = entry.subCallHits.find(candidate => inMessage >= candidate.top && inMessage < candidate.top + candidate.height)
+      if (hit !== undefined) return `ptc:${token}:${hit.subCallId}`
+    }
+    // Workflow card rows: EVERY row of the card consumes the click — a
+    // row matching no hit is inert (it must never fall through to the
+    // owner/card branch).
+    if (entry.workflowHits !== undefined) {
+      const hit = entry.workflowHits.find(candidate => inMessage >= candidate.top && inMessage < candidate.top + candidate.height)
+      if (hit !== undefined) return this.workflowHitIdentity(hit.hit)
+      return 'inert'
+    }
+    // Attachment rows.
+    for (const attachment of entry.attachments) {
+      if (inMessage >= attachment.start && inMessage < attachment.end) {
+        return `attachment:${token}:${attachment.imageIndex}`
+      }
+    }
+    // Focus owner-marked rows: a SECONDARY card toggles ITSELF (the
+    // card-level identity); a NON-secondary process row collapses the
+    // owner turn.
+    if (entry.collapseFocusOwnerOnClick !== undefined) {
+      if (isFocusSecondaryDisclosure(message)) return `message:toggle:${token}`
+      return `focus:collapse:${entry.collapseFocusOwnerOnClick}`
+    }
+    // The card-level toggle.
+    return `message:toggle:${token}`
+  }
+
+  /** The semantic identity of one Workflow card row hit (the durable
+   * run/phase/member/agents target the click acts on). */
+  private workflowHitIdentity(hit: WorkflowHit): string {
+    switch (hit.kind) {
+      case 'run':
+        return `workflow:run:${hit.runId}`
+      case 'phase':
+        return `workflow:phase:${hit.runId}:${hit.phaseKey}`
+      case 'member':
+        return `workflow:member:${hit.runId}:${hit.seq}:${hit.childId}`
+      case 'phase-agents':
+        return `workflow:phase-agents:${hit.runId}:${hit.phaseKey}`
+      case 'run-agents':
+        return `workflow:run-agents:${hit.runId}`
     }
   }
 
@@ -7237,19 +7339,23 @@ export class TuiApp {
       this.fullscreenCellGesture = {
         ownerId: inDock ? 'todo:dock' : 'todo:panel',
         row: 0,
+        hitId: 'todo',
         columns: snapshot.columns,
         termRows: snapshot.termRows,
       }
       return
     }
     // Transcript cells: record the press-time semantic identity (the
-    // message/activity owner + the block-relative row) so a release on a
-    // repainted projection cannot activate whatever moved onto the cell.
+    // message/activity owner + the block-relative row + the row's per-row
+    // SEMANTIC hit identity) so a release on a repainted projection
+    // cannot activate whatever moved onto the cell.
     const cell = this.resolveFullscreenTranscriptCell(y, snapshot)
     if (cell !== undefined) {
+      const painted = snapshot.rows[cell.entryIndex]!
       this.fullscreenCellGesture = {
-        ownerId: snapshot.rows[cell.entryIndex]!.ownerId,
+        ownerId: painted.ownerId,
         row: cell.inMessage,
+        hitId: painted.hits[cell.inMessage] ?? 'inert',
         columns: snapshot.columns,
         termRows: snapshot.termRows,
       }
@@ -7433,9 +7539,19 @@ export class TuiApp {
     // The release may only act on the EXACT press-time identity: an async
     // transcript projection change between press and release (a thumbnail
     // finishing its load, a turn settling, a reflow) must not transfer
-    // the click to whatever repainted onto the same cell.
+    // the click to whatever repainted onto the same cell. The per-row
+    // SEMANTIC hit identity is the decisive check: the card object and
+    // the relative row can both be unchanged while the row's ACTUAL
+    // action target changed (a Workflow 5→6 aggregate switch, a PTC
+    // settle reflow, an async image growth) — the release recomputes the
+    // CURRENT hit identity and requires equality.
     const ownerId = this.fullscreenRowOwnerId(entry, cell.entryIndex)
-    if (this.fullscreenCellGesture?.ownerId !== ownerId || this.fullscreenCellGesture?.row !== inMessage) {
+    const hitId = this.fullscreenRowHitIdentity(entry, inMessage, this.nextVisibleRowEntry(cell.entryIndex))
+    if (
+      this.fullscreenCellGesture?.ownerId !== ownerId ||
+      this.fullscreenCellGesture?.row !== inMessage ||
+      this.fullscreenCellGesture?.hitId !== hitId
+    ) {
       this.fullscreenCellGesture = undefined
       return
     }

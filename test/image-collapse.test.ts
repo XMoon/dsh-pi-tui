@@ -363,3 +363,56 @@ test('the same attachment twice in ONE message collapses per block index', async
   app.setFullscreen(false)
   app.stop()
 })
+
+test('an attachment press cannot transfer to a sibling after an async image growth (mouse parity)', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const vt = new VirtualTerminal(100, 24)
+  const pending: Array<() => void> = []
+  const loader = new ImageLoader(() => new Promise(resolve => { pending.push(() => resolve({ ref: {}, data: pngBytes() })) }))
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    imageLoader: loader,
+    imageTheme: { fallbackColor: (text) => text },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', seq: 1, time: 1, data: { content: [
+      { type: 'text', text: 'check' },
+      { type: 'image', attachment: IMAGE_REF },
+      { type: 'image', attachment: IMAGE_REF_2 },
+    ], source: { kind: 'user' } } },
+  ] as never[])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  // Both images are still loading (info bar only).
+  const bRow = await rowOf(vt, '🖼️ second.png · 800×100', 'B info bar row')
+  // Press B's info bar (no release): the press identity is
+  // attachment:<token>:1.
+  vt.sendInput(`\x1b[<0;4;${bRow}M`)
+  await vt.waitForRender()
+  // Image A loads and grows: the SAME message object is unchanged, A's
+  // rows insert below A, and the old B cell falls inside A's range. The
+  // loader settle only invalidates the thumbnail (it does not schedule a
+  // frame), so the test waits for the settle notification and drives the
+  // repaint explicitly.
+  const settled = new Promise<void>(resolve => {
+    const unsubscribe = loader.subscribe(IMAGE_REF.attachmentId, () => { unsubscribe(); resolve() })
+  })
+  pending[0]!()
+  await settled
+  app.requestRender()
+  await vt.waitForRender()
+  const after = await viewport(vt)
+  const aInfo = await rowOf(vt, '🖼️ shot.png · 800×100', 'A info bar row')
+  assert.ok(aInfo < bRow, `A's growth must push B down:\n${after}`)
+  // Release on the old cell: the click must NOT toggle A (the press
+  // identity is B's attachment).
+  vt.sendInput(`\x1b[<0;4;${bRow}m`)
+  await vt.waitForRender()
+  const collapsed = (app as unknown as { collapsedOccurrences: Map<unknown, Set<number>> }).collapsedOccurrences
+  assert.equal(collapsed.size, 0, `the stale attachment press must not toggle a sibling:\n${vt.getViewport().join('\n')}`)
+  app.stop()
+})
