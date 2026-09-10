@@ -144,7 +144,7 @@ import {
 import type { TaskBrowserViewState, TaskPanelItem } from './task-panel.ts'
 import { TaskBrowserRuntime, type TaskBrowserDatasetScope } from './task-browser-runtime.ts'
 import type { TaskBrowserHandle, WorkflowAction } from './tui-app.ts'
-import { registerTuiCommands, type DefaultIntentRecord, type InitialCommandCatalog, type TuiCommandRunner } from './commands.ts'
+import { prefersSteer, registerTuiCommands, type DefaultIntentRecord, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
@@ -394,11 +394,11 @@ export function shouldSteerOnEnter(
     // NOT the local picker: it steers like any other prompt. Only the bare
     // `/skill` picker counts as local (review finding — same classification
     // as the image-rejection gate).
-    if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return running && busyEnter === 'steer'
+    if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return prefersSteer(running, busyEnter)
     if (LOCAL_COMMANDS.has(parsed.name)) return false
     if (isDynamicLocal !== undefined && isDynamicLocal(parsed.name)) return false
   }
-  return running && busyEnter === 'steer'
+  return prefersSteer(running, busyEnter)
 }
 
 /**
@@ -4299,8 +4299,11 @@ export function apply(ctx: Context, config: Config): void {
     }
     /** The session-backed dispatch: create the session lazily (the first
      * user input is the deferred trigger), then execute a registered slash
-     * command or follow up. */
-    const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void): void => {
+     * command or follow up.
+     * @param delivery - the delivery mode the submit boundary resolved for
+     *   this submission; bound for the command execution so a TUI-owned
+     *   skill handler accepts it instead of re-deriving it. */
+    const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void, delivery: SubmitDelivery): void => {
       // Local submit acknowledgement (plan D): the row appears NOW —
       // before any session create / admission / command work — because
       // this gesture owns no user-visible feedback until the first
@@ -4431,7 +4434,11 @@ export function apply(ctx: Context, config: Config): void {
             commandHealthRef = liveCommandId === undefined
               ? undefined
               : extensionService?._recordRegistryHealthRef('command', liveCommandId)
-            return commands.execute(agent as Agent, toggled, [], signal)
+            // The resolution's delivery mode is bound for THIS synchronous
+            // window: `commands.execute` invokes a resolved handler in the
+            // same call stack, so a TUI-owned skill handler captures its
+            // submission's mode before any await (see withDelivery).
+            return withCommandDelivery(delivery, () => commands.execute(agent as Agent, toggled, [], signal))
           }, {
             diag,
             sessionId: () => agent.session.id,
@@ -4659,7 +4666,7 @@ export function apply(ctx: Context, config: Config): void {
      * sessionless command that failed to register falls back to the
      * session dispatch, which reports unknown commands as messages.
      */
-    const runLocalCommand = (parsed: { name: string; rawInput: string }, text: string, persistHistory: (sessionId: string | undefined) => void): void => {
+    const runLocalCommand = (parsed: { name: string; rawInput: string }, text: string, persistHistory: (sessionId: string | undefined) => void, delivery: SubmitDelivery): void => {
       // M5: a plugin-declared local command with a bridge handler routes
       // to the bridge FIRST (its rawInput is passed verbatim — never
       // re-parsed or rewritten, the skill rawInput regression gate); the
@@ -4678,7 +4685,7 @@ export function apply(ctx: Context, config: Config): void {
         // a session dispatch — the history row goes through the
         // deferred-start gate (persist AFTER the session exists, with the
         // final session id), never a sessionless write here.
-        dispatchViaSession(text, persistHistory)
+        dispatchViaSession(text, persistHistory, delivery)
         return
       }
       const invocation = {
@@ -4689,7 +4696,7 @@ export function apply(ctx: Context, config: Config): void {
       } as CommandInvocation
       const handler = bridgeHandler ?? definition?.handler
       if (handler === undefined) {
-        dispatchViaSession(text, persistHistory)
+        dispatchViaSession(text, persistHistory, delivery)
         return
       }
       // A truly local command: no session is created — the row persists
@@ -5104,6 +5111,23 @@ export function apply(ctx: Context, config: Config): void {
         SESSIONLESS_COMMANDS.has(parsed.name)
         || (extensionService?.commands.isSessionless(parsed.name, SESSIONLESS_COMMANDS) ?? false)
       )
+      // The submission's effective delivery mode — resolved ONCE, here at
+      // the boundary (web ComposerSubmissionPolicy parity): a non-running
+      // agent, busyEnter=queue, and the Ctrl+Enter force-queue chord all
+      // resolve to 'queue'. The resolved mode rides into the command plane
+      // (dispatchViaSession → withDelivery → the TUI skill delivery), which
+      // never re-derives it from the persisted preference — a one-shot chord
+      // does not survive in settings. Commands that own their own busy
+      // semantics (Host commands, local UI commands) ignore it.
+      const delivery: SubmitDelivery = shouldSteerOnEnter(
+        parsed,
+        liveAgent?.status === 'running',
+        tuiSettings?.get().busyEnter,
+        forceQueue,
+        // M5: the CommandBridge's effective-local check (dynamic plugin
+        // local commands are local while registered).
+        name => extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false,
+      ) ? 'steer' : 'queue'
       if (parsed !== undefined && isSessionless) {
         // A recognized sessionless command: its history row is sessionless
         // — it must NEVER appear in Current session, whether or not a
@@ -5114,17 +5138,18 @@ export function apply(ctx: Context, config: Config): void {
         // it dispatches through the session's command service, but the
         // persist closure still supplies undefined.
         if (liveAgent === undefined) {
-          runLocalCommand(parsed, text, persistHistory)
+          runLocalCommand(parsed, text, persistHistory, delivery)
         } else {
-          dispatchViaSession(text, () => persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id)))
+          dispatchViaSession(text, () => persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id)), delivery)
         }
         return
       }
       // Host-command claim (PR115-fix problem 1): a slash name the CURRENT
       // effective command catalog resolves — and that is neither a TUI-local
-      // command nor a TUI-owned skill wrapper — is a Host command. It
-      // executes through the command plane; the busy queue/steer policy
-      // applies only to agent-facing prompts, never to a confirmed Host
+      // command nor agent-facing input the TUI/extension layer owns (a
+      // TUI-owned skill wrapper, an extension contribution) — is a Host
+      // command. It executes through the command plane; the busy queue/steer
+      // policy applies only to agent-facing prompts, never to a confirmed Host
       // command (the command handler itself decides the busy outcome). A
       // claimed command that the real session then lacks is consumed by the
       // advertised-miss gate inside dispatchViaSession — never a plain
@@ -5133,7 +5158,7 @@ export function apply(ctx: Context, config: Config): void {
         && !LOCAL_COMMANDS.has(parsed.name)
         && !(extensionService?.commands.isLocal(parsed.name, LOCAL_COMMANDS) ?? false)
         && isHostCommandName?.(parsed.name) === true) {
-        dispatchViaSession(text, persistHistory)
+        dispatchViaSession(text, persistHistory, delivery)
         return
       }
       // Busy-Enter preference (web busyEnter parity): while the agent is
@@ -5146,10 +5171,7 @@ export function apply(ctx: Context, config: Config): void {
       // (/status, /settings, ...) always execute directly; plugin-declared
       // local commands (M5 CommandBridge) join the same set; `!` shells and
       // sessionless commands returned before this gate.
-      if (shouldSteerOnEnter(parsed, liveAgent?.status === 'running', tuiSettings?.get().busyEnter, forceQueue,
-        // M5: the CommandBridge's effective-local check (dynamic plugin
-        // local commands are local while registered).
-        name => extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false)) {
+      if (delivery === 'steer') {
         // An explicit `/skill <name>` invocation steers its NORMALIZED
         // `/<name> <args>` line — the harness gesture recognizes the
         // skill's own slash name and injects its body; the raw `/skill
@@ -5160,7 +5182,7 @@ export function apply(ctx: Context, config: Config): void {
         steerNow(normalizeSkillInvocation(text) ?? text, true, persistHistory)
         return
       }
-      dispatchViaSession(text, persistHistory)
+      dispatchViaSession(text, persistHistory, delivery)
     }
     // M3 runner wiring (F-1): when the extension host service is mounted,
     // the TUI surface attaches a SurfaceHost over its ledger — extensions
@@ -7315,6 +7337,12 @@ export function apply(ctx: Context, config: Config): void {
      * TUI-owned skill wrapper)? The dispatch consults it BEFORE the busy
      * queue/steer policy (PR115-fix problem 1). */
     let isHostCommandName: ((name: string) => boolean) | undefined
+    /** The delivery binding installed by registerTuiCommands: bind one
+     * submission's resolved queue/steer mode for the synchronous window that
+     * launches a command execution (the TUI skill handlers consume it).
+     * Before the command surface is wired nothing can consume a binding, so
+     * the unwired default simply runs the launch. */
+    let withCommandDelivery = <T>(_delivery: SubmitDelivery, run: () => T): T => run()
     /** The catalog refresh coordinator: the ONE post-mount refresh owner
      * (first session, switches, /preset, /reload). Built inside
      * registerCommands once the surface hooks exist. (Declared before
@@ -7658,6 +7686,7 @@ export function apply(ctx: Context, config: Config): void {
         const installed = registerTuiCommands(runner, initial)
         wasAdvertisedClaim = installed.wasAdvertised
         isHostCommandName = installed.isHostCommand
+        withCommandDelivery = installed.withDelivery
         // The coordinator's surface hooks point INTO the command surface;
         // the runner's refreshCatalog routes every post-mount refresh here.
         catalogCoordinator = new CatalogRefreshCoordinator({
