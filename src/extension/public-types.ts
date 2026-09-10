@@ -482,6 +482,10 @@ export interface TuiCommandBridgeSnapshot {
     readonly description: string
     readonly sessionless: boolean
     readonly owner: string
+    /** Monotonic per-registration generation (diagnostics + the notice
+     * identity): a dispose + re-register under the same id/owner is a NEW
+     * generation, even when both happen inside one coalesced flush. */
+    readonly generation: number
   }[]
   readonly revision: number
 }

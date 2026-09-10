@@ -51,6 +51,11 @@ interface Contribution {
   readonly description: string
   readonly sessionless: boolean
   readonly owner: string
+  /** Monotonic registration generation: a dispose + re-register under the
+   * same id/owner is a NEW generation (the consumer's notice/de-duplication
+   * identity must follow it — a coalesced invalidate batch never exposes the
+   * empty snapshot in between). */
+  readonly generation: number
   readonly handler: TuiLocalCommandHandler
   disposed: boolean
 }
@@ -75,6 +80,8 @@ export class CommandBridge {
   private readonly staticCatalog: ReadonlySet<string>
   /** Local names, derived on demand (never stored twice). */
   private revision = 0
+  /** Per-registration generation counter (see {@link Contribution.generation}). */
+  private nextGeneration = 0
   private readonly onInvalidate: () => void
 
   constructor(onInvalidate: () => void = () => {}, staticCatalog: ReadonlySet<string> = new Set()) {
@@ -151,6 +158,7 @@ export class CommandBridge {
       description: spec.description,
       sessionless: spec.sessionless ?? false,
       owner,
+      generation: this.nextGeneration += 1,
       handler: spec.handler,
       disposed: false,
     }
@@ -235,6 +243,7 @@ export class CommandBridge {
         description: contribution.description,
         sessionless: contribution.sessionless,
         owner: contribution.owner,
+        generation: contribution.generation,
       }))
     return { entries, revision: this.revision }
   }

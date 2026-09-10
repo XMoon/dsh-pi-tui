@@ -2081,6 +2081,49 @@ test('a DISPOSED colliding contribution never suppresses its next generation not
   disposeCompact()
 })
 
+test('a dispose + re-register inside ONE invalidate flush is still a new collision generation', async (t) => {
+  // HMR coalescing: the invalidate batcher flushes on a microtask, so a
+  // dispose and a re-registration in the SAME tick reach the synthesis as
+  // one pass over the NEW snapshot — the empty state is never observed, and
+  // a purge keyed on "identity absent from the snapshot" cannot see the gap.
+  // The notice identity must therefore follow the REGISTRATION GENERATION.
+  const flush = async (): Promise<void> => {
+    for (let round = 0; round < 20; round += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  const { harness, mounted, extensionService } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  const healthOf = (id: string): { state: string; lastError?: string } | undefined =>
+    extensionService._ledger().healthSnapshot().find(entry => entry.id === id)
+  const registerHost = (name: string): (() => void) =>
+    (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
+      .register({ name, handler: () => ({ kind: 'success' }) })
+  const disposeDeploy = registerHost('deploy')
+  const disposeCompact = registerHost('compact')
+  const service = extensionService as unknown as {
+    registerCommand(contribution: {
+      id: string; name: string; description: string; handler: () => { kind: 'success' }
+    }): { dispose(): void }
+  }
+  const spec = { id: 'deploy-cmd', description: 'client command', handler: () => ({ kind: 'success' }) as const }
+  const first = service.registerCommand({ ...spec, name: 'deploy' })
+  await flush()
+  assert.match(mounted.app.notifyTextForTest(), /\/deploy/, 'the first generation is surfaced')
+  assert.equal(healthOf('deploy-cmd')?.state, 'failed')
+  // SAME tick: dispose + re-register (same id, same owner, new generation).
+  first.dispose()
+  const second = service.registerCommand({ ...spec, name: 'compact' })
+  await flush()
+  assert.equal(healthOf('deploy-cmd')?.state, 'failed', 'the new generation fails again')
+  assert.match(mounted.app.notifyTextForTest(), /\/compact/,
+    'the coalesced generation is surfaced, not suppressed by its predecessor')
+  second.dispose()
+  disposeDeploy()
+  disposeCompact()
+})
+
 test('collision recovery clears only the COMMAND health record, never a same-id record in another slot', async (t) => {
   // ExtensionHealth is keyed by (slot, owner, id); ONE plugin may legally
   // reuse an id across slots (a theme and a command). The recovery lookup
