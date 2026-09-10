@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `2e50ab1cbd50ce15c67941d5bad8725d2fdf6283`
+- Audited local source commit: `35d50f7ad349dc068a05a62ef2ff59efb15a011d`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -4464,6 +4464,8 @@ A host that resolves a same-cell click against the frame the user actually SAW n
 - test/rendering.test.ts: a PTC sub-call press cannot transfer after a sibling settle reflow (per-row semantic hit identity)
 - test/image-collapse.test.ts: an attachment press cannot transfer to a sibling after an async image growth (per-row semantic hit identity)
 - test/image-collapse.test.ts: an async image load that settles between frames repaints automatically (the thumbnail's loader-notify clears the cache AND schedules the next frame)
+- test/image-collapse.test.ts: a live out-of-order image close cannot transfer collapse state to the earlier occurrence (stable occurrence rank: open opaque image blocks reserve a rank)
+- test/image-collapse.test.ts: a live out-of-order image close cannot transfer a press to the earlier occurrence (the press fence shares the stable occurrence rank)
 
 #### Upstream comparison
 

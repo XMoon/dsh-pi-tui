@@ -9,7 +9,7 @@
  "verification": {
   "auditedAt": "2026-09-09",
   "branch": "chore/revendor-pi-tui-v0.85.1",
-  "auditedSourceCommit": "2e50ab1cbd50ce15c67941d5bad8725d2fdf6283",
+  "auditedSourceCommit": "35d50f7ad349dc068a05a62ef2ff59efb15a011d",
   "referenceSnapshots": {
    "upstream": {
     "repository": "earendil-works/pi",
@@ -5439,7 +5439,9 @@
     "test/workflow-ui.test.ts: a workflow member press cannot transfer to the aggregate View row after a 5→6 switch (per-row semantic hit identity)",
     "test/rendering.test.ts: a PTC sub-call press cannot transfer after a sibling settle reflow (per-row semantic hit identity)",
     "test/image-collapse.test.ts: an attachment press cannot transfer to a sibling after an async image growth (per-row semantic hit identity)",
-    "test/image-collapse.test.ts: an async image load that settles between frames repaints automatically (the thumbnail's loader-notify clears the cache AND schedules the next frame)"
+    "test/image-collapse.test.ts: an async image load that settles between frames repaints automatically (the thumbnail's loader-notify clears the cache AND schedules the next frame)",
+    "test/image-collapse.test.ts: a live out-of-order image close cannot transfer collapse state to the earlier occurrence (stable occurrence rank: open opaque image blocks reserve a rank)",
+    "test/image-collapse.test.ts: a live out-of-order image close cannot transfer a press to the earlier occurrence (the press fence shares the stable occurrence rank)"
    ],
    "upstream": {
     "equivalence": "NO",
