@@ -833,15 +833,25 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		// Layout-root targets: the press-time origin is the box rect
 		// origin (dispatchMouseToLayout sets x = screenX - box.rect.x). The
-		// current layout frame must still place the component at the same
-		// origin.
+		// current layout frame must still place the component at the SAME
+		// absolute origin — containment of the OLD origin is not enough (a
+		// target that reflowed inside its ancestor still overlaps the old
+		// point, but the release cell is no longer the pressed cell).
 		if (this.currentLayout !== undefined) {
 			const boxes = getLayoutBoxesAt(this.currentLayout, target.originX, target.originY);
-			if (boxes.some(box => box.component === target.component)) return true;
-			// A nested descendant (e.g. an editor-seat occupant) is not a
-			// layout box itself: it is placement-live when its ancestor box
-			// still occupies the press-time origin.
-			if (boxes.some(box => this.componentTreeContains(box.component, target.component))) return true;
+			// The deepest box whose subtree contains the target: its
+			// CURRENT rect origin + the target's offset within it (from
+			// the last-painted child layout) is the target's CURRENT
+			// painted origin, which must equal the press-time origin.
+			const ancestor = boxes.find(box => this.componentTreeContains(box.component, target.component));
+			if (ancestor !== undefined) {
+				const offset = this.overlayChildOrigin(ancestor.component, target.component);
+				return (
+					offset !== undefined &&
+					ancestor.rect.x + offset.x === target.originX &&
+					ancestor.rect.y + offset.y === target.originY
+				);
+			}
 			// Implicit-document children have no independent placement:
 			// they follow the implicit document (always at the screen
 			// origin), so a still-live direct child is placement-live.

@@ -3271,3 +3271,52 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		assert.deepStrictEqual(actions, ["B action"], "a fresh press at the new row must activate");
 		tui.stop();
 	});
+
+	it("does not synthesize a click on a layout-root descendant that reflowed (X018 painted-placement)", async () => {
+		const terminal = new RecordingTerminal(40, 20);
+		const tui = new TuiAltScreen(terminal);
+		tui.start();
+		await terminal.waitForRender();
+		const actions: string[] = [];
+		let headerRows = 2;
+		const header = {
+			render: () => Array.from({ length: headerRows }, (_, index) => `H${index}`),
+			invalidate: () => {},
+			handleMouse: () => undefined,
+		};
+		const target = {
+			render: () => ["T0", "T1", "T2"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				if (event.type === "press") return { handled: true };
+				if (event.type === "click") {
+					actions.push(`row${event.y}`);
+					return { handled: true };
+				}
+				return undefined;
+			},
+		};
+		tui.setLayoutRoot(new VStack([header, target]));
+		await terminal.waitForRender();
+		const rowT1 = terminal.getViewport().findIndex((line) => line.includes("T1"));
+		// Press T1 (physical row rowT1).
+		terminal.sendInput(`\x1b[<0;2;${rowT1 + 1}M`);
+		await terminal.waitForRender();
+		// The header shrinks 2→1 rows: the target moves up one row.
+		headerRows = 1;
+		tui.requestRender();
+		await terminal.waitForRender();
+		const rowT1b = terminal.getViewport().findIndex((line) => line.includes("T1"));
+		assert.notStrictEqual(rowT1b, rowT1, "the target must have reflowed");
+		// Release at the ORIGINAL cell: the target must NOT receive a
+		// click (the release cell is now a DIFFERENT row of the target).
+		terminal.sendInput(`\x1b[<0;2;${rowT1 + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(actions, [], "a reflowed layout-root descendant must not receive the ghost click");
+		// A fresh press+click at the NEW row works.
+		terminal.sendInput(`\x1b[<0;2;${rowT1b + 1}M`);
+		terminal.sendInput(`\x1b[<0;2;${rowT1b + 1}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(actions, ["row1"], "a fresh press at the new row must activate the right row");
+		tui.stop();
+	});
