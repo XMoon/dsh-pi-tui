@@ -2869,6 +2869,12 @@ export function registerTuiCommands(
     // and the draft consumption — so a concurrent /image prune can never
     // delete images this invocation is still admitting (review finding 1).
     const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
+    // The host's pre-step listener (dsh-tool-skill) injects the rendered
+    // body only when ITS tool registration is visible to this agent — the
+    // same visibility test the listener itself uses. Probed BEFORE the
+    // delivery: the queue path below depends on it, and the fallback body
+    // injection after the write needs it too.
+    const hostLoadsSkillBody = runner.catalog.skills.hostLoadsSkillBody(agent.session.id)
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
     try {
       userMessage = await runner.prepareDraftMessage(line)
@@ -2894,7 +2900,22 @@ export function registerTuiCommands(
       try {
         await runner.withSessionWriter(agent.session.id, async () => {
           skillSignal.throwIfAborted()
-          agent.steer(userMessage)
+          // Web parity (busyEnter): a skill invocation is an agent-facing
+          // prompt — while the agent is running with busyEnter=queue (or
+          // idle), it QUEUES like a plain prompt (web: session.prompt with
+          // the policy-resolved mode). The queue delivery is only safe when
+          // the HOST injects the skill body: the fallback body injection
+          // below rides next-step, so a followup would let the body arrive
+          // before the user's words (the driver claims next-step FIRST).
+          // Without the host loader the invocation keeps the steer path to
+          // preserve the original-line-before-body order.
+          const busyEnter = runner.tuiSettings?.get().busyEnter
+          const queueDelivery = hostLoadsSkillBody && (agent.status !== 'running' || busyEnter !== 'steer')
+          if (queueDelivery) {
+            agent.followup(userMessage)
+          } else {
+            agent.steer(userMessage)
+          }
         })
       } catch (error) {
         if (error instanceof TransitionInProgressError) {
@@ -2932,7 +2953,6 @@ export function registerTuiCommands(
     // would not inject for it either, so the TUI's fallback must cover it.
     // The probe is a SEMANTIC catalog operation now (migration M1.8) — the
     // raw tools service never crosses into the command surface.
-    const hostLoadsSkillBody = runner.catalog.skills.hostLoadsSkillBody(agent.session.id)
     // Deliver the batch through the steer path (and unlike
     // agent.inject alone, which queues for the next pre-step WITHOUT waking
     // the driver): the ORIGINAL line is steered — a running turn takes it
@@ -2946,12 +2966,18 @@ export function registerTuiCommands(
     // body lands as step 2 of the same turn (the loop only ends when
     // next-step drains). Either way the original line reaches the model
     // before the body, exactly like the web's message order.
-    // Never follow-up the original line here: followup parks the line in
-    // next-turn while the body sits in next-step, and the driver's first
-    // step boundary claims next-step FIRST — the body would arrive BEFORE
-    // the user's words, inverting the web's message order. (A second
-    // follow-up would not help either: a turn boundary claims ONE next-turn
-    // message, so the pair would split across two turns.)
+    // The queue delivery (chosen above when the HOST injects the body) is
+    // the web-parity busyEnter path: followup parks the line in next-turn
+    // and the host's pre-step listener injects the body at the next model
+    // request — the same order the web's queued session.prompt produces.
+    // The fallback body injection below is INCOMPATIBLE with followup:
+    // the body would sit in next-step while the line waits in next-turn,
+    // and the driver's first step boundary claims next-step FIRST — the
+    // body would arrive BEFORE the user's words, inverting the web's
+    // message order. (A second follow-up would not help either: a turn
+    // boundary claims ONE next-turn message, so the pair would split
+    // across two turns.) That is why the queue path requires
+    // hostLoadsSkillBody.
     if (!hostLoadsSkillBody) {
       const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
       // Forward the resource base too, so the fallback rendering matches

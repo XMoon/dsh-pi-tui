@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { ProcessTerminal } from '@xmoon76/pi-tui'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -115,6 +116,8 @@ interface FakeAgentHost {
   failFollowupAbort: boolean
   followedUp: unknown[]
   steered: unknown[]
+  /** The skill-body fallback injections (agent.inject), in call order. */
+  injected: unknown[]
 }
 
 function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent {
@@ -142,6 +145,7 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
       host?.followedUp.push(message)
     },
     steer: (message: unknown) => { host?.steered.push(message) },
+    inject: (message: unknown) => { host?.injected.push(message) },
     cancel: (_reason: unknown, _options: { keepInbox: boolean }) => { /* the interrupt transport */ },
   } as unknown as Agent
 }
@@ -196,7 +200,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   armCreateGate(): void
   releaseCreateGate(): void
 } {
-  const host: FakeAgentHost = { status: 'idle', failFollowup: false, failFollowupAbort: false, followedUp: [], steered: [] }
+  const host: FakeAgentHost = { status: 'idle', failFollowup: false, failFollowupAbort: false, followedUp: [], steered: [], injected: [] }
   const persisted = new Map<string, LiveSession>()
   const live = new Map<string, Agent>()
   let liveSession: LiveSession | undefined
@@ -268,14 +272,24 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     list: () => [...definitions.values()].map(({ name, description }) => ({ name, description: description ?? '', input: { hint: '' } })),
     find: () => undefined,
     // A REGISTERED command executes through the command plane (the Host
-    // command semantics); a plain prompt is NOT a command: undefined falls
+    // command semantics): the handler runs with a CommandRuntime-shaped
+    // invocation, so a real handler (e.g. /skill → loadSkill) delivers
+    // like production. A plain prompt is NOT a command: undefined falls
     // back to the follow-up delivery (the runner's real semantics). Only
     // ACTUAL executions are recorded — an attempted miss is not a command.
-    execute: async (_agent: unknown, line: string) => {
+    execute: async (agent: unknown, line: string) => {
       const name = line.trim().replace(/^\//, '').split(/\s+/)[0] ?? ''
-      if (!definitions.has(name)) return undefined
+      const def = definitions.get(name)
+      if (def === undefined) return undefined
       executed.push({ line })
-      return { result: { kind: 'success' } }
+      const rawInput = line.slice(line.indexOf(name) + name.length)
+      const result = await (def.handler as (inv: unknown) => unknown)({
+        commandId: CommandId('cmd-test'),
+        agent,
+        rawInput,
+        signal: new AbortController().signal,
+      })
+      return { result }
     },
     handler: (name: string) => definitions.get(name)?.handler,
   }
@@ -865,7 +879,15 @@ async function waitForCommand(harness: ReturnType<typeof makeHarness>): Promise<
  * commands, and a busyEnter preference. */
 async function bootCommandHarness(
   t: TestContext,
-  options: { busyEnter: 'queue' | 'steer'; status: 'idle' | 'running'; hostCommands?: readonly string[] },
+  options: {
+    busyEnter: 'queue' | 'steer'
+    status: 'idle' | 'running'
+    hostCommands?: readonly string[]
+    /** Provide a skills registry (resolveSkill succeeds) and/or a tools
+     * service shaped like the dsh-tool-skill loader (hostLoadsSkillBody). */
+    skills?: boolean
+    hostLoadsSkillBody?: boolean
+  },
 ): Promise<{ harness: ReturnType<typeof makeHarness>; mounted: { dispose: () => Promise<void>; app: TuiApp } }> {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-command-arb-')
@@ -883,6 +905,21 @@ async function bootCommandHarness(
       name,
       handler: () => ({ kind: 'success' }),
     })
+  }
+  if (options.skills === true) {
+    context.provide('skills', {
+      get: async () => ({
+        name: 'grilling',
+        description: 'a skill',
+        content: 'skill body',
+        invocation: { userInvocable: true, modelInvocable: true },
+      }),
+    } as never)
+  }
+  if (options.hostLoadsSkillBody === true) {
+    context.provide('tools', {
+      get: (name: string) => name === 'skill' ? { execute: async () => {} } : undefined,
+    } as never)
   }
   const doc: Record<string, unknown> = { busyEnter: options.busyEnter }
   context.provide('settings', {
@@ -958,6 +995,48 @@ test('running + steer: /skill <name> stays an agent-facing invocation (PR115-fix
   const steered = harness.host.steered[0] as { content: { type: string; text: string }[] }
   assert.equal(steered.content[0]?.text, '/grilling args', 'the skill line must steer in its normalized /name args form')
   assert.equal(harness.executed.length, 0, 'a skill invocation must never be claimed as a Host command')
+})
+
+test('running + queue: /skill <name> queues like a plain prompt when the host injects the body (web parity)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'running',
+    skills: true,
+    hostLoadsSkillBody: true,
+  })
+  mounted.app.setDraft('/skill grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'queued skill')
+  // Web parity: a skill invocation is a plain agent-facing prompt — with
+  // busyEnter=queue it QUEUES (followup), never steers into the running
+  // turn. The host's dsh-tool-skill pre-step injects the body at the next
+  // model request, so the queue delivery keeps the web message order.
+  assert.equal(harness.host.followedUp.length, 1, 'the skill line must queue like a plain prompt')
+  const followed = harness.host.followedUp[0] as { content: { type: string; text: string }[] }
+  assert.equal(followed.content[0]?.text, '/grilling args', 'the queued line is the normalized /name args form')
+  assert.equal(harness.host.steered.length, 0, 'queue preference must not steer the skill')
+  assert.equal(harness.host.injected.length, 0, 'the host owns the body injection — no TUI fallback body')
+})
+
+test('running + queue: /skill <name> keeps the steer path when the TUI must inject the body itself (order-preserving fallback)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'running',
+    skills: true,
+  })
+  mounted.app.setDraft('/skill grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'fallback skill steer')
+  // Without the host loader the TUI injects the body into next-step: a
+  // followup would let the body arrive BEFORE the user's words (the driver
+  // claims next-step first), so the invocation keeps the steer path to
+  // preserve the original-line-before-body order — the documented
+  // exception to the queue preference.
+  assert.equal(harness.host.steered.length, 1, 'the fallback keeps the order-preserving steer')
+  const steered = harness.host.steered[0] as { content: { type: string; text: string }[] }
+  assert.equal(steered.content[0]?.text, '/grilling args', 'the steered line is the normalized /name args form')
+  assert.equal(harness.host.injected.length, 1, 'the TUI fallback injects the skill body')
+  assert.equal(harness.host.followedUp.length, 0, 'no followup — the body order contract forbids it')
 })
 
 test('a dynamic Host command never enters the ordinary inbox while running (PR115-fix problem 1)', async (t) => {
