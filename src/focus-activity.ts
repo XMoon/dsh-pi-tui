@@ -382,16 +382,21 @@ export class FocusActivityComponent {
  * The Focus presentation projection over one windowed transcript (plan
  * §12/§33): a turn with an initial prompt is grouped as
  * `user(s) → FocusActivity`; a turn with only same-turn steers starts with
- * `FocusActivity` and keeps those steers in process order. Expanded
- * process/final and compaction rows follow, so the raw TranscriptMessage
- * union is never polluted with a fake `focus-activity` kind and the session
- * data stays lossless.
+ * `FocusActivity` and keeps those steers in process order. A turn woken by
+ * injected/system context keeps that LEADING prefix as its foundation
+ * before the Thought (expanded and collapsed). Expanded process/final and
+ * compaction rows follow, so the raw TranscriptMessage union is never
+ * polluted with a fake `focus-activity` kind and the session data stays
+ * lossless.
  *
- * Collapsed turns HIDE thinking/tool/system/intermediate-assistant rows
- * entirely — they cannot leak through Ctrl+O/Alt+T because they are not in
- * the rendered list at all (plan §15.2). The final assistant only appears
- * after the authoritative `turn/end` (plan §13.1) and never duplicates in
- * the expanded view (it stays at its chronological position).
+ * Collapsed turns HIDE the process rows — thinking, tool, mid-turn
+ * system/inject and intermediate-assistant — entirely: they cannot leak
+ * through Ctrl+O/Alt+T because they are not in the rendered list at all
+ * (plan §15.2). The LEADING injected/system prefix (the turn foundation)
+ * and every human user row stay visible before the Thought. The final
+ * assistant only appears after the authoritative `turn/end` (plan §13.1)
+ * and never duplicates in the expanded view (it stays at its
+ * chronological position).
  * @param messages - the windowed transcript.
  * @param activities - the folder's per-turn activities (same fold state).
  * @param expandedTurns - the user's expansion choices (live running turns
@@ -458,19 +463,22 @@ export function projectFocus(
       // the final assistant held back and appended LAST (a max-tokens
       // turn's `max tokens reached` system row must never land after the
       // final: the settled order is User → Thought → process → final).
-      // The INITIAL-PROMPT boundary precedes the Thought: rows before the
+      // The THOUGHT-LEAD boundary precedes the Thought: rows before the
       // turn's FIRST non-steer user (injected/system context) stay in place
       // and that initial user itself stays above the Thought; every later
       // user/steer returns to its chronological position in the process
       // (plan: expanded chronology — the projection reorders, never the
       // session events). With a non-steer user, the first such row is the
-      // compatibility boundary; when every user is a steer, the boundary is 0.
-      // Consecutive users after the boundary stay in chronological
-      // order; they are not a multi-row initial prompt (plan: no adjacency guessing).
-      // Every revealed process row carries the owner-turn collapse mark; the
-      // user's rows and the FINAL assistant stay unmarked (clicking them
-      // must not collapse the Thought — review P2).
-      const boundary = initialPromptBoundary(group)
+      // compatibility boundary; when every user is a steer, the boundary
+      // falls back to the end of the LEADING injected/system prefix, so an
+      // inject-woken turn keeps its foundation before the Thought (never a
+      // scan of mid-process system rows). Consecutive users after the
+      // boundary stay in chronological order; they are not a multi-row
+      // initial prompt (plan: no adjacency guessing). Every revealed
+      // process row carries the owner-turn collapse mark; the user's rows,
+      // the lead foundation rows and the FINAL assistant stay unmarked
+      // (clicking them must not collapse the Thought — review P2).
+      const boundary = thoughtLeadBoundary(group)
       for (const member of group.slice(0, boundary)) {
         out.push({ kind: 'message', message: member })
       }
@@ -488,21 +496,20 @@ export function projectFocus(
       }
       continue
     }
-    // Collapsed: preserve the existing users-before-Thought summary when
-    // an initial prompt exists. A turn with no same-turn opening user row
-    // has its Thought lead, followed by the claimed mid-turn steers.
-    const hasInitialPrompt = initialPromptBoundary(group) > 0
-    if (hasInitialPrompt) {
-      for (const member of group) {
-        if (member.kind === 'user') out.push({ kind: 'message', message: member })
-      }
+    // Collapsed Focus summarizes the turn's INPUTS before the Thought: the
+    // leading injected/system prefix (the turn foundation) and EVERY human
+    // user row (same-turn steers included) precede the Thought; the process
+    // stays hidden inside it. This is a summary, not strict chronology — a
+    // steer-only turn still shows its user input above the Thought. Only
+    // the LEADING system prefix is lifted; mid-turn injected context stays
+    // process content, hidden under the collapsed Thought.
+    for (const member of group.slice(0, leadingSystemPrefixEnd(group))) {
+      out.push({ kind: 'message', message: member })
+    }
+    for (const member of group) {
+      if (member.kind === 'user') out.push({ kind: 'message', message: member })
     }
     if (activity !== undefined) out.push({ kind: 'activity', activity })
-    if (!hasInitialPrompt) {
-      for (const member of group) {
-        if (member.kind === 'user') out.push({ kind: 'message', message: member })
-      }
-    }
     // Compaction cards keep their existing lifecycle in the collapsed
     // view (plan §12.3 v1 — never hidden into the Thought).
     for (const member of group) {
@@ -530,19 +537,32 @@ function assistantForStep(
   return undefined
 }
 
-/** The initial-prompt boundary of one turn group: the index AFTER the
+/** The end of the turn's LEADING injected/system prefix: only consecutive
+ * `kind === 'system'` rows at the very start of the group count as the
+ * opening turn foundation. Mid-process system rows are never included, so a
+ * later inject can never be lifted before the Thought. */
+function leadingSystemPrefixEnd(group: readonly TranscriptMessage[]): number {
+  let end = 0
+  while (group[end]?.kind === 'system') end += 1
+  return end
+}
+
+/** The Thought-lead boundary of one turn group: the index AFTER the
  * turn's FIRST unmarked user row. Rows before it (injected/system context)
  * and the initial user itself stay above the Thought; every later row
  * (same-turn steers included) returns to its chronological position. A turn
- * whose user rows are all marked same-turn steers has no boundary, so the
- * Thought leads with chronology intact. Without steer metadata, the first
- * user remains the initial-prompt fallback; consecutive users are queue/steer
- * input, not a multi-row initial prompt. */
-function initialPromptBoundary(group: readonly TranscriptMessage[]): number {
+ * whose user rows are all marked same-turn steers has no opening human
+ * prompt: the boundary falls back to the end of the LEADING injected/system
+ * prefix, so an inject-woken turn keeps its foundation before the Thought
+ * (never a scan of mid-process system rows). Without steer metadata, the
+ * first user remains the initial-prompt fallback; consecutive users are
+ * queue/steer input, not a multi-row initial prompt. */
+function thoughtLeadBoundary(group: readonly TranscriptMessage[]): number {
   const firstInitialUserIndex = group.findIndex(
     member => member.kind === 'user' && member.steer !== true,
   )
-  return firstInitialUserIndex < 0 ? 0 : firstInitialUserIndex + 1
+  if (firstInitialUserIndex >= 0) return firstInitialUserIndex + 1
+  return leadingSystemPrefixEnd(group)
 }
 
 /** Whether one Assistant entry has semantic/finalized content. Pending

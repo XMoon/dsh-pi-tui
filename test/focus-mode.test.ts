@@ -2689,7 +2689,7 @@ test('metadata-free logs keep the first user as the initial-prompt fallback', ()
   assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant'])
 })
 
-test('collapsed: a claimed steer in a non-user turn follows the Thought', () => {
+test('collapsed: a claimed steer in a non-user turn precedes the Thought', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
@@ -2710,11 +2710,18 @@ test('collapsed: a claimed steer in a non-user turn follows the Thought', () => 
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 9),
   ])
   const blocks = projectTools(folder.messages(), folder.turnActivities(), new Set())
-  assert.deepEqual(blockKinds(blocks), ['activity', 'user', 'compaction', 'assistant'],
-    'a non-user turn must put Thought, steer, compaction, and final in order when collapsed')
+  // Collapsed Focus summarizes inputs: every human user row (a same-turn
+  // steer included) precedes the Thought; compaction and the final keep
+  // their existing lifecycle.
+  assert.deepEqual(blockKinds(blocks), ['user', 'activity', 'compaction', 'assistant'],
+    'a non-user turn must put steer, Thought, compaction, and final in order when collapsed')
+  const steer = blocks.find(block => block.kind === 'message' && block.message.kind === 'user')
+  assert.ok(steer !== undefined && steer.kind === 'message' && steer.message.kind === 'user')
+  assert.equal(steer.message.steer, true,
+    'the projection change must not touch the durable steer fact')
 })
 
-test('Focus keeps injected context and a claimed steer under the Thought root', () => {
+test('Focus surfaces an opening injected trigger before Thought while keeping the steer chronological when expanded', () => {
   const events: SessionEvent[] = [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('user/message', {
@@ -2734,9 +2741,44 @@ test('Focus keeps injected context and a claimed steer under the Thought root', 
   const folder = new TranscriptFolder()
   applyMixed(folder, events)
   const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
-  assert.deepEqual(blockKinds(expanded), ['activity', 'system', 'thinking', 'user', 'assistant'])
+  // The opening injected trigger is the turn foundation: it stays BEFORE
+  // the Thought; the claimed steer returns to its chronological process
+  // position (expanded chronology preserved).
+  assert.deepEqual(blockKinds(expanded), ['system', 'activity', 'thinking', 'user', 'assistant'],
+    `the opening inject must precede the Thought while the steer stays chronological: ${blockKinds(expanded).join(',')}`)
   const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
-  assert.deepEqual(blockKinds(collapsed), ['activity', 'user', 'assistant'])
+  // Collapsed Focus summarizes inputs: opening injected context + every
+  // human user row (the steer included) precede the Thought.
+  assert.deepEqual(blockKinds(collapsed), ['system', 'user', 'activity', 'assistant'],
+    `collapsed Focus must surface the opening inject and the steer before the Thought: ${blockKinds(collapsed).join(',')}`)
+  // The system row is still the ORIGINAL injected context (same text and
+  // label — the projection never rewrites or duplicates the fact).
+  const expandedSystem = expanded.find(block => block.kind === 'message' && block.message.kind === 'system')
+  assert.ok(expandedSystem !== undefined && expandedSystem.kind === 'message' && expandedSystem.message.kind === 'system')
+  assert.equal(expandedSystem.message.text, 'system reminder')
+  assert.equal(expandedSystem.message.label, 'agent-instructions')
+  // The steer keeps its durable `steer: true` fact — only the projection
+  // moved, never the provenance.
+  const expandedUsers = expanded.flatMap(block => block.kind === 'message' && block.message.kind === 'user' ? [block.message] : [])
+  assert.equal(expandedUsers.length, 1)
+  assert.equal(expandedUsers[0]?.steer, true)
+  // Click-owner contract: the opening system row is foundation, NOT
+  // process — it must never collapse the owner Thought; the expanded
+  // thinking row is process content and keeps the owner mark; user and
+  // final stay unmarked.
+  assert.equal(expandedSystem.collapseFocusOwnerOnClick, undefined,
+    'an opening injected row must not carry the Thought collapse mark')
+  const expandedThinking = expanded.find(block => block.kind === 'message' && block.message.kind === 'thinking')
+  assert.ok(expandedThinking !== undefined && expandedThinking.kind === 'message')
+  assert.equal(expandedThinking.collapseFocusOwnerOnClick, 0,
+    'expanded process rows keep the owner-turn collapse mark')
+  for (const block of expanded) {
+    if (block.kind !== 'message') continue
+    if (block.message.kind === 'user' || block.message.kind === 'assistant') {
+      assert.equal(block.collapseFocusOwnerOnClick, undefined,
+        `user/final rows never carry the owner mark: ${block.message.kind}`)
+    }
+  }
 })
 
 test('a steer claimed before reasoning is still identified durably', () => {
@@ -2754,6 +2796,88 @@ test('a steer claimed before reasoning is still identified durably', () => {
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
   assert.deepEqual(blockKinds(blocks), ['activity', 'user', 'thinking', 'assistant'],
     'durable next-step identity must not depend on a prior visible process row')
+})
+
+test('expanded: a mid-turn injected/system row stays in its process position (never lifted to the lead)', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('u0'), role: 'user',
+      content: [{ type: 'text', text: 'initial prompt 0' }],
+      source: { kind: 'user' },
+    }, 1001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1002, 2),
+    // A NON-opening injected context: it lands mid-process, after thinking.
+    eventAt('user/message', {
+      id: MessageId('mid-inject'), role: 'user',
+      content: [{ type: 'text', text: 'mid-turn reminder' }],
+      source: { kind: 'plugin', plugin: 'agent-instructions' },
+    }, 1003, 3),
+    ...claimedSteer('mid-steer', 'steer after inject', 1004, 4),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('mid-a'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1007, 7),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1008, 8),
+  ])
+  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  // Only the LEADING system prefix is the turn foundation; a mid-turn
+  // inject stays at its real chronological position inside the process.
+  assert.deepEqual(blockKinds(expanded), ['user', 'activity', 'thinking', 'system', 'user', 'assistant'],
+    `a mid-turn inject must stay in its process position when expanded: ${blockKinds(expanded).join(',')}`)
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  // Collapsed Focus summarizes inputs only: the mid-turn inject is process
+  // content and stays hidden under the Thought — never lifted to the lead.
+  assert.deepEqual(blockKinds(collapsed), ['user', 'user', 'activity', 'assistant'],
+    `a mid-turn inject must not surface before the collapsed Thought: ${blockKinds(collapsed).join(',')}`)
+  const expandedSystem = expanded.find(block => block.kind === 'message' && block.message.kind === 'system')
+  assert.ok(expandedSystem !== undefined && expandedSystem.kind === 'message' && expandedSystem.message.kind === 'system')
+  assert.equal(expandedSystem.message.text, 'mid-turn reminder')
+  assert.equal(expandedSystem.collapseFocusOwnerOnClick, 0,
+    'a mid-turn inject is process content: it keeps the owner-turn collapse mark')
+  assert.ok(!collapsed.some(block => block.kind === 'message' && block.message.kind === 'system'),
+    'collapsed Focus must not surface a mid-turn inject')
+})
+
+test('expanded and collapsed: multiple opening injected rows keep their order and never duplicate', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('i1'), role: 'user',
+      content: [{ type: 'text', text: 'first reminder' }],
+      source: { kind: 'plugin', plugin: 'agent-instructions' },
+    }, 1001, 1),
+    eventAt('user/message', {
+      id: MessageId('i2'), role: 'user',
+      content: [{ type: 'text', text: 'second reminder' }],
+      source: { kind: 'plugin', plugin: 'skill-catalog' },
+    }, 1002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, 1003, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('multi-a'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+  ])
+  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  assert.deepEqual(blockKinds(expanded), ['system', 'system', 'activity', 'thinking', 'assistant'],
+    `every opening inject precedes the Thought when expanded: ${blockKinds(expanded).join(',')}`)
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['system', 'system', 'activity', 'assistant'],
+    `every opening inject precedes the Thought when collapsed: ${blockKinds(collapsed).join(',')}`)
+  const systemTexts = (blocks: readonly FocusProjectedBlock[]): string[] =>
+    blocks.flatMap(block => block.kind === 'message' && block.message.kind === 'system' ? [block.message.text] : [])
+  assert.deepEqual(systemTexts(expanded), ['first reminder', 'second reminder'],
+    'opening injects keep their original order when expanded')
+  assert.deepEqual(systemTexts(collapsed), ['first reminder', 'second reminder'],
+    'opening injects keep their original order when collapsed')
+  for (const block of [...expanded, ...collapsed]) {
+    if (block.kind !== 'message' || block.message.kind !== 'system') continue
+    assert.equal(block.collapseFocusOwnerOnClick, undefined,
+      'an opening injected row never carries the Thought collapse mark')
+  }
 })
 
 test('fold → expand → fold projection is reversible (same collapsed output)', () => {

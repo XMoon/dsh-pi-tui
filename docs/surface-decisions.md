@@ -340,6 +340,18 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   state, and neither Focus ON/OFF nor fullscreen ON/OFF nor session
   switches reset it. The old `hideThinking` / `focusThinkingVisible`
   visibility pair is deleted.
+- **Focus separates turn foundation from process chronology
+  (projection-only)**: a LEADING injected/system context prefix that
+  wakes a turn is persistent input context and renders before the
+  Thought — expanded and collapsed. Only the leading prefix counts;
+  mid-turn injected context stays process content at its real position.
+  Collapsed Focus summarizes inputs: opening injected context + ALL
+  human user rows precede the Thought, even when a user row was a
+  same-turn steer. Expanded Focus preserves process chronology after
+  the foundation: later steers and mid-turn injected context return to
+  their real positions. The durable `steer`/source facts are never
+  rewritten, and injected context still does not occupy Think/Tool/
+  Message slots and never counts as a tool.
 
 ## Focus is surface-adaptive
 
