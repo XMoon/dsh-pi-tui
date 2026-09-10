@@ -420,9 +420,12 @@ export interface InputWidget {
 
 // ── M5: commands / themes / autocomplete / settings / keybindings ──────────
 
-/** One command contribution (plan §10): ownership metadata over an
- * existing command. The bridge does NOT execute — the commands service
- * does. `/name args...` ALWAYS keeps `invocation.rawInput` verbatim. */
+/** One command contribution (plan §10): ownership metadata over a slash
+ * name. The bridge itself never executes anything — the RUNNER routes from
+ * `execution`: a local contribution runs its own bridge `handler` locally
+ * (falling back to the commands-service definition handler when it declares
+ * none), a submission contribution is delivered as an agent-facing line.
+ * `/name args...` ALWAYS keeps `invocation.rawInput` verbatim. */
 export interface TuiCommandContribution {
   readonly id: string
   /** The slash-command name WITHOUT the leading slash. */
@@ -430,8 +433,9 @@ export interface TuiCommandContribution {
   readonly description: string
   /** Execution ownership over an existing command (TUI-owned metadata; the
    * bridge never executes).
-   * - `local` — the command ALWAYS executes through the commands service
-   *   (its handler, or the bridge handler when one is declared); the busy
+   * - `local` — the command ALWAYS executes locally, never steered: the
+   *   contribution's own bridge `handler` when one is declared (live session
+   *   or not), otherwise the commands-service definition handler; the busy
    *   policy never applies and the line is never steered.
    * - `submission` — the command is a SUBMISSION LINE, not a command
    *   execution: the TUI delivers the raw `/<name> args` line to the session

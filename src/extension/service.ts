@@ -220,8 +220,11 @@ export interface PiTuiExtensionService {
   subscribeState(listener: (state: SurfaceStateValues) => void): () => void
   /**
    * Register a TUI command contribution (M5): execution ownership metadata
-   * over an existing command. The bridge does NOT execute — actual
-   * execution stays in the commands service. Owned by the calling fiber.
+   * over a slash name. The bridge itself never executes anything — the
+   * runner runs a local contribution's own bridge `handler` locally (the
+   * commands-service definition handler is the fallback), while a
+   * submission contribution is delivered as an agent-facing line. Owned by
+   * the calling fiber.
    * @param contribution - the command contribution.
    */
   registerCommand(contribution: TuiCommandContribution): TuiCommandHandle
