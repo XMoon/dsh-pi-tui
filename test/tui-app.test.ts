@@ -3018,3 +3018,36 @@ test('question: a queued flow cannot consume the previous flow press (mouse pari
   answers2.catch(() => {})
   app.stop()
 })
+
+test('question: a press cannot transfer to the next question with a duplicate id (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'same', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'same', question: 'Q2', options: [{ label: 'C' }, { label: 'D' }] },
+  ])
+  await vt.waitForRender()
+  // Q1: option A on some row. Press it (no release): the press-time
+  // identity is Q1's question INDEX + option A.
+  const view = vt.getViewport()
+  const rowA = view.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, `option A missing:\n${view.join('\n')}`)
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}M`)
+  await vt.waitForRender()
+  // Keyboard Enter confirms A and advances to Q2 (same caller id).
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  // Q2: option C now occupies the same physical row.
+  const after = vt.getViewport()
+  assert.ok((after[rowA] ?? '').includes('[1] C'), `option C must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the press from Q1 must NOT activate Q2's C
+  // (the question INDEX changed even though the caller id is duplicated).
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}m`)
+  await vt.waitForRender()
+  // Q2 must not be answered: the flow stays on Q2.
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('?  Q2')), `the flow must still be on Q2:\n${final.join('\n')}`)
+  answers.catch(() => {})
+  app.stop()
+})

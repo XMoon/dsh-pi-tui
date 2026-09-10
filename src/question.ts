@@ -216,6 +216,11 @@ interface Row {
  * same cell.
  */
 export interface QuestionMouseGesture {
+  /** The question INDEX within this flow at press time (the flow's own
+   * unique in-flow identity — the caller-provided question id is NOT
+   * guaranteed unique within a batch, so a duplicate id must not let a
+   * press from Q[n] activate Q[n+1] after a keyboard advance). */
+  questionIndex: number
   /** The question id at press time (a question advance rejects the
    * release). */
   questionId: string
@@ -416,6 +421,7 @@ export class QuestionFlow implements Component, Focusable {
     const question = this.questions[this.tab]
     if (question === undefined) return undefined
     const gesture: QuestionMouseGesture = {
+      questionIndex: this.tab,
       questionId: question.id,
       hit: this.hitMap.get(row),
     }
@@ -439,6 +445,11 @@ export class QuestionFlow implements Component, Focusable {
     if (gesture === undefined || gesture !== pressedGesture) return
     const question = this.questions[this.tab]
     if (question === undefined) return
+    // The question INDEX is the flow's own unique in-flow identity: the
+    // caller-provided id is not guaranteed unique within a batch, so a
+    // duplicate id must not let a press from Q[n] activate Q[n+1] after
+    // a keyboard advance.
+    if (gesture.questionIndex !== this.tab) return
     if (gesture.questionId !== question.id) return
     if (this.hitMap.get(row) !== gesture.hit) return
     this.clickRow(row, x)

@@ -1580,3 +1580,26 @@ test('masked multiSelect review never shows the custom plaintext (mouse parity)'
   assert.ok(rendered.some(line => line.includes('A + ••••••')), 'review must mask the custom beside the selection')
   assert.ok(!rendered.some(line => line.includes('secret')), 'the secret must never render on review')
 })
+
+test('question: the gesture identity includes the question index (duplicate ids) (mouse parity)', () => {
+  const f = new QuestionFlow([
+    { id: 'same', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'same', question: 'Q2', options: [{ label: 'C' }, { label: 'D' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  let rendered = f.render(100).map(strip)
+  const rowA = rendered.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, 'option A row missing')
+  // Press Q1/A: the press-time identity is question index 0 + option A.
+  const gesture = f.beginMousePress(rowA)
+  assert.ok(gesture !== undefined && gesture.questionIndex === 0, 'the gesture must record the question index')
+  // Keyboard Enter advances to Q2 (same caller id, index 1).
+  f.handleInput('\r')
+  rendered = f.render(100).map(strip)
+  const rowC = rendered.findIndex(line => line.includes('[1] C'))
+  assert.ok(rowC >= 0, 'option C row missing')
+  // Release on the SAME row: Q2/C must not activate (index changed).
+  f.completeMouseClick(gesture, rowC)
+  rendered = f.render(100).map(strip)
+  assert.ok(rendered.some(line => line.includes('?  Q2')), 'the flow must still be on Q2')
+})
