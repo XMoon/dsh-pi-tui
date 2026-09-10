@@ -389,6 +389,54 @@ test('a collapsed running turn stays collapsed after turn/end (◐ → ▸) and 
   app.stop()
 })
 
+test('collapsed Focus renders the opening inject, the steer, and the Thought in input-summary order', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  const steerMessage = {
+    id: MessageId('ui-steer'),
+    role: 'user',
+    content: [{ type: 'text', text: 'steer after inject' }],
+    source: { kind: 'user' },
+  }
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    // The opening injected trigger wakes the turn (no opening human prompt).
+    eventAt('user/message', {
+      id: MessageId('ui-inject'), role: 'user',
+      content: [{ type: 'text', text: 'system reminder' }],
+      source: { kind: 'plugin', plugin: 'agent-instructions' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } }, T0 + 2, 2),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [steerMessage] }, T0 + 3, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, T0 + 3.1, 4),
+    eventAt('user/message', steerMessage, T0 + 4, 5),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('ui-a'), role: 'assistant', content: [{ type: 'text', text: 'answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 6, 6),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 7000, 7),
+  ])
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const joined = view.join('\n')
+  // The collapsed system row shows its producer label (the body is folded
+  // behind the `(ctrl+o to expand)` hint), so the inject is located by the
+  // Context-injection card title.
+  const injectRow = findRow(view, 'Context injection agent-instructions')
+  const steerRow = findRow(view, 'steer after inject')
+  const thoughtRow = findRow(view, '🐋 Thought')
+  assert.ok(injectRow >= 0, `opening inject row missing:\n${joined}`)
+  assert.ok(steerRow >= 0, `steer row missing:\n${joined}`)
+  assert.ok(thoughtRow >= 0, `Thought row missing:\n${joined}`)
+  assert.ok(injectRow < steerRow && steerRow < thoughtRow,
+    `collapsed Focus must render opening inject → steer → Thought (rows ${injectRow}, ${steerRow}, ${thoughtRow}):\n${joined}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('clicking the expanded header collapses the turn again while it runs', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
