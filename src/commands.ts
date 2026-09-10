@@ -1446,10 +1446,13 @@ export function registerTuiCommands(
       recordExtensionError?.(ref, collision)
       firstCollision ??= collision
     }
-    // HEALTH RECOVERY, scoped to COLLISION records only: a contribution that
-    // merges cleanly again is no longer failed — even while another
-    // contribution keeps this pass failing. A handler-failure record in the
-    // same health slot is NEVER touched (this synthesis did not write it).
+    // HEALTH RECOVERY, scoped to the COLLISION records this synthesis wrote: a
+    // contribution that merges cleanly again is no longer failed — even while
+    // another contribution keeps this pass failing. A handler failure that
+    // OPENED the record is protected by the message guard below (the ledger
+    // deduplicates into it, keeping the handler message); one deduplicated
+    // INTO a live collision record is not — the documented diagnostic
+    // limitation (docs/surface-decisions.md).
     for (const contribution of contributions) {
       const identity = contributionIdentity(contribution)
       if (colliding.has(identity)) continue
@@ -1462,7 +1465,9 @@ export function registerTuiCommands(
       // same slot also carries handler runtime failures, and the ledger
       // DEDUPLICATES a later failure into an already-failed record (keeping
       // the first message) — clearing blindly would erase a handler failure
-      // that this synthesis never wrote (and that has not recovered).
+      // that this synthesis never wrote (and that has not recovered). A
+      // failure deduplicated into OUR live collision record is
+      // indistinguishable here (documented limitation).
       const current = runner.extensions?.health?.().find(
         entry => entry.id === recorded.ref.id && entry.owner === recorded.ref.owner,
       )

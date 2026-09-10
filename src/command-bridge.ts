@@ -23,11 +23,14 @@
  * - near-synonym command conflicts keep the AGENTS hard rule: the bridge
  *   reports a conflicting registration loudly instead of guessing;
  * - P1-04: a dynamic command can NEVER shadow a host-owned command. The
- *   authoritative static catalog (TUI-registered commands + the
- *   LOCAL_COMMANDS/SESSIONLESS_COMMANDS ownership sets) is validated at
+ *   STATIC ownership catalog (the LOCAL_COMMANDS/SESSIONLESS_COMMANDS sets
+ *   plus `/plan`, handed over by the extension host) is validated at
  *   register time — an exact-name or near-synonym collision with a
- *   host-owned command name is rejected loudly, never silently overriding
- *   the built-in behavior.
+ *   TUI-owned command name is rejected loudly, never silently overriding
+ *   the built-in behavior. A name the CURRENT (session-scoped) host catalog
+ *   owns is NOT visible here: that collision is caught at candidate
+ *   synthesis, which fails the whole pass (see `mergeContributions` in
+ *   commands.ts).
  * @module @xmoon76/dsh-pi-tui/command-bridge
  */
 
@@ -60,12 +63,15 @@ interface Contribution {
 export class CommandBridge {
   /** Contributions by id (diagnostic identity; also the registry key). */
   private readonly contributions = new Map<string, Contribution>()
-  /** The AUTHORITATIVE host-owned command names (P1-04): TUI-registered
-   * commands + the LOCAL_COMMANDS/SESSIONLESS_COMMANDS ownership sets. A
-   * dynamic contribution colliding with this catalog (exact or
-   * near-synonym) is rejected at register time — a plugin can never
-   * shadow a built-in command. Defaults to empty for standalone tests
-   * that exercise the dynamic-vs-dynamic rules only. */
+  /** The STATIC host-owned command names (P1-04): the
+   * LOCAL_COMMANDS/SESSIONLESS_COMMANDS ownership sets plus `/plan` — the
+   * names the TUI owns and registers itself. A dynamic contribution
+   * colliding with this catalog (exact or near-synonym) is rejected at
+   * register time — a plugin can never shadow a built-in command. Dynamic
+   * and session-scoped host names are NOT in this catalog (it is a fixed
+   * set); those collisions surface at candidate synthesis instead.
+   * Defaults to empty for standalone tests that exercise the
+   * dynamic-vs-dynamic rules only. */
   private readonly staticCatalog: ReadonlySet<string>
   /** Local names, derived on demand (never stored twice). */
   private revision = 0
