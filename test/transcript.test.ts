@@ -4010,7 +4010,7 @@ test('open opaque live starts are visible without semantic content', () => {
   }
 })
 
-test('open opaque display projection keeps sparse and duplicate indexes ordered', () => {
+test('open opaque display projection keeps sparse and duplicate indexes in first-seen order', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -4022,10 +4022,57 @@ test('open opaque display projection keeps sparse and duplicate indexes ordered'
   folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 1, text: 'first' }, 5))
   const assistant = folder.messages().find(message => message.kind === 'assistant')
   assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  // FIRST-SEEN stream order (the canonical DSH BlockAssembler order) —
+  // the numeric block index is a protocol handle, never an ordering key:
+  // index 3 first-seen, then 7, then 1.
   assert.deepEqual(assistant.displayBlocks, [
-    { kind: 'content', block: { type: 'text', text: 'first' } },
     { kind: 'open-opaque', blockType: 'future-A' },
     { kind: 'content', block: { type: 'text', text: 'later' } },
+    { kind: 'content', block: { type: 'text', text: 'first' } },
+  ])
+})
+
+test('live projection follows first-seen stream order, not numeric index order (canonical BlockAssembler parity)', () => {
+  const imageB = { attachmentId: 'att-b', mediaType: 'image/png', bytes: 1, width: 1, height: 1, name: 'b.png' }
+  const imageA = { attachmentId: 'att-a', mediaType: 'image/png', bytes: 1, width: 1, height: 1, name: 'a.png' }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ])
+  // index 1 FIRST-SEEN and closed before index 0 ever appears: the DSH
+  // protocol does not define the numeric block index as an ordering key —
+  // the canonical BlockAssembler emits [B, A] (first-seen stream order),
+  // and the TUI projection must match it exactly.
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 1, blockType: 'image' }, 2))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-end', index: 1, block: { type: 'image', attachment: imageB } }, 3))
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'image' }, 4))
+  const open = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(open !== undefined && open.kind === 'assistant')
+  // While A is still open, the display projection is [B, A] (first-seen).
+  assert.deepEqual(open.displayBlocks, [
+    { kind: 'content', block: { type: 'image', attachment: imageB } },
+    { kind: 'open-opaque', blockType: 'image' },
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-end', index: 0, block: { type: 'image', attachment: imageA } }, 5))
+  const live = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(live !== undefined && live.kind === 'assistant')
+  // The live content projection is [B, A] — the same order the canonical
+  // BlockAssembler emits, so the durable settlement never reorders.
+  assert.deepEqual(live.content, [
+    { type: 'image', attachment: imageB },
+    { type: 'image', attachment: imageA },
+  ])
+  // The durable settlement carries the same canonical order: no jump.
+  folder.apply([assistantMessageWithBlocks(6, [
+    { type: 'image', attachment: imageB },
+    { type: 'image', attachment: imageA },
+  ])])
+  const durable = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(durable !== undefined && durable.kind === 'assistant')
+  assert.deepEqual(durable.content, [
+    { type: 'image', attachment: imageB },
+    { type: 'image', attachment: imageA },
   ])
 })
 

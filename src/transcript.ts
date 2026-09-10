@@ -817,6 +817,11 @@ interface AssistantStreamProjection {
  */
 interface LiveAssistantProjection {
   states: Map<number, AssistantBlockState>
+  /** First-seen stream order of every block index (append-only; the
+   * canonical BlockAssembler order — never numeric index order). */
+  order: number[]
+  /** index → position in `order`. */
+  orderPos: Map<number, number>
   blockIndexes: number[]
   blocks: ContentBlock[]
   displayIndexes: number[]
@@ -917,10 +922,12 @@ function assistantContentFromBlockState(state: AssistantBlockState): ContentBloc
   }
 }
 
-/** Project indexed block state in stable upstream index order. */
+/** Project indexed block state in FIRST-SEEN stream order — the canonical
+ * DSH BlockAssembler order (the numeric block index is a protocol handle,
+ * never a content ordering key; the Map's insertion order is the first-seen
+ * order, and re-setting an existing key keeps its position). */
 function assistantContentFromBlocks(blocks: Map<number, AssistantBlockState>): ContentBlock[] {
   return [...blocks.entries()]
-    .sort(([left], [right]) => left - right)
     .map(([, state]) => assistantContentFromBlockState(state))
     .filter((block): block is ContentBlock => block !== undefined)
 }
@@ -939,10 +946,11 @@ function assistantDisplayBlockFromState(state: AssistantBlockState): AssistantDi
   }
 }
 
-/** Project all indexed states in upstream numeric order for Assistant display. */
+/** Project all indexed states in FIRST-SEEN stream order for Assistant
+ * display (the canonical BlockAssembler order — see
+ * {@link assistantContentFromBlocks}). */
 function assistantDisplayBlocksFromStates(blocks: Map<number, AssistantBlockState>): AssistantDisplayBlock[] {
   return [...blocks.entries()]
-    .sort(([left], [right]) => left - right)
     .map(([, state]) => assistantDisplayBlockFromState(state))
     .filter((block): block is AssistantDisplayBlock => block !== undefined)
 }
@@ -968,33 +976,46 @@ function assistantBlockProjection(state: AssistantBlockState): AssistantBlockPro
   }
 }
 
-function lowerBound(values: readonly number[], value: number): number {
-  let low = 0
-  let high = values.length
-  while (low < high) {
-    const middle = (low + high) >>> 1
-    if (values[middle]! < value) low = middle + 1
-    else high = middle
-  }
-  return low
-}
-
-/** Replace one indexed projection without rescanning the other indexes. */
+/** Replace one indexed projection without rescanning the other indexes.
+ * The projection arrays follow FIRST-SEEN stream order (the canonical DSH
+ * BlockAssembler order), never numeric index order: `order` records each
+ * block's first-seen position (append-only), and a block that gains a
+ * projection after later blocks first-seen is inserted at its first-seen
+ * rank — so the live order always matches the durable settlement, and an
+ * occurrence identity derived from the projection never renumbers. */
 function updateIndexedProjection<T>(
+  order: number[],
+  orderPos: Map<number, number>,
   indexes: number[],
   values: T[],
   index: number,
   value: T | undefined,
 ): void {
-  const position = lowerBound(indexes, index)
-  const ownsIndex = position < indexes.length && indexes[position] === index
+  let rank = orderPos.get(index)
+  if (rank === undefined) {
+    rank = order.length
+    orderPos.set(index, rank)
+    order.push(index)
+  }
+  // The block's position in the projection = its rank among the order
+  // entries before it that are currently in the projection. Both arrays
+  // are in first-seen order, so a lockstep walk counts the members.
+  let position = 0
+  let j = 0
+  for (let i = 0; i < rank; i += 1) {
+    if (j < indexes.length && indexes[j] === order[i]) {
+      position += 1
+      j += 1
+    }
+  }
+  const present = j < indexes.length && indexes[j] === index
   if (value === undefined) {
-    if (!ownsIndex) return
+    if (!present) return
     indexes.splice(position, 1)
     values.splice(position, 1)
     return
   }
-  if (ownsIndex) {
+  if (present) {
     values[position] = value
     return
   }
@@ -2298,6 +2319,8 @@ export class TranscriptFolder {
         const key = stepKey(input.turn, input.step)
         this.liveAssistantBlocks.set(key, {
           states: new Map(),
+          order: [],
+          orderPos: new Map(),
           blockIndexes: [],
           blocks: [],
           displayIndexes: [],
@@ -2478,6 +2501,8 @@ export class TranscriptFolder {
     if (projection === undefined) {
       projection = {
         states: new Map(),
+        order: [],
+        orderPos: new Map(),
         blockIndexes: [],
         blocks: [],
         displayIndexes: [],
@@ -2506,8 +2531,8 @@ export class TranscriptFolder {
     if (currentProjection?.assistantVisible === true) projection.assistantVisibleCount += 1
     if (currentProjection?.thinkingVisible === true) projection.thinkingVisibleCount += 1
     if (currentProjection?.opaque === true) projection.openOpaqueCount += 1
-    updateIndexedProjection(projection.blockIndexes, projection.blocks, index, currentProjection?.content)
-    updateIndexedProjection(projection.displayIndexes, projection.displayBlocks, index, currentProjection?.display)
+    updateIndexedProjection(projection.order, projection.orderPos, projection.blockIndexes, projection.blocks, index, currentProjection?.content)
+    updateIndexedProjection(projection.order, projection.orderPos, projection.displayIndexes, projection.displayBlocks, index, currentProjection?.display)
   }
 
   /** Replace the Focus message candidate with authoritative assembled text. */
