@@ -805,11 +805,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return this.isComponentLive(target.component);
 	}
 
-	/** Re-derive a nested descendant's CURRENT painted origin inside an
-	 * overlay root from the last-painted child layouts (Box padding +
+	/** Re-derive a nested descendant's CURRENT painted offset inside a
+	 * container root from the last-painted child layouts (Box padding +
 	 * preceding sibling heights). Returns undefined when the target is not
-	 * painted under the root. (dsh-pi-tui divergence X018 hardening.) */
-	private overlayChildOrigin(root: Component, target: Component): { x: number; y: number } | undefined {
+	 * painted under the root. Used for overlay roots, explicit layout
+	 * roots, and the implicit document (the TuiBase's own Container
+	 * mouseLayout). (dsh-pi-tui divergence X018 hardening.) */
+	private paintedDescendantOffset(root: Component, target: Component): { x: number; y: number } | undefined {
 		// The root itself is the target (a direct overlay-root press): its
 		// painted origin is the overlay origin, regardless of whether it
 		// has a cached child layout.
@@ -822,7 +824,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		for (const { component, height } of layout.children) {
 			if (component === target) return { x: padding.x, y };
 			if ((component as Container).children !== undefined) {
-				const nested = this.overlayChildOrigin(component, target);
+				const nested = this.paintedDescendantOffset(component, target);
 				if (nested !== undefined) return { x: padding.x + nested.x, y: y + nested.y };
 			}
 			y += height;
@@ -859,7 +861,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				// target's CURRENT painted origin (re-derived from the
 				// last-painted child layout) must still match the
 				// press-time origin.
-				const current = this.overlayChildOrigin(layout.entry.component, target.component);
+				const current = this.paintedDescendantOffset(layout.entry.component, target.component);
 				return (
 					current !== undefined &&
 					current.x === target.originX - press.col &&
@@ -881,18 +883,30 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			// painted origin, which must equal the press-time origin.
 			const ancestor = boxes.find(box => this.componentTreeContains(box.component, target.component));
 			if (ancestor !== undefined) {
-				const offset = this.overlayChildOrigin(ancestor.component, target.component);
+				const offset = this.paintedDescendantOffset(ancestor.component, target.component);
 				return (
 					offset !== undefined &&
 					ancestor.rect.x + offset.x === target.originX &&
 					ancestor.rect.y + offset.y === target.originY
 				);
 			}
-			// Implicit-document children have no independent placement:
-			// they follow the implicit document (always at the screen
-			// origin), so a still-live direct child is placement-live.
-			for (const child of this.children) {
-				if (this.componentTreeContains(child, target.component)) return true;
+			// Implicit-document children (the legacy single-document mode
+			// without setLayoutRoot): the implicit document renders via
+			// super.render, which accumulates the TuiBase's direct children
+			// vertically, so a direct child's screen origin is the implicit
+			// document's current box origin + its offset within the
+			// TuiBase's last-painted child layout. A sibling reflow or a
+			// scroll between press and release moves the target — the
+			// release cell is no longer the pressed cell, so mounted
+			// liveness alone must not accept the retained click.
+			const implicitBox = boxes.find(box => box.component === this.implicitDocument);
+			if (implicitBox !== undefined) {
+				const offset = this.paintedDescendantOffset(this, target.component);
+				return (
+					offset !== undefined &&
+					implicitBox.rect.x + offset.x === target.originX &&
+					implicitBox.rect.y + offset.y === target.originY
+				);
 			}
 			return false;
 		}
