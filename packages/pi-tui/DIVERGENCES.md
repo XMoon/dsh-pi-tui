@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `763fc8ce674709133de4c66da15f7a31e8e3300a`
+- Audited local source commit: `74929d8648841a84f903e085d38e77c09340f287`
 - Branch audited: `chore/revendor-pi-tui-v0.85.1`
 - Audit date: `2026-09-09`
 - Upstream reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
@@ -4459,6 +4459,7 @@ A host that resolves a same-cell click against the frame the user actually SAW n
 - test/tui-app.test.ts: fullscreen todo: a dock press cannot run the panel action after a keyboard toggle (todo:dock vs todo:panel press identities)
 - test/tui-app.test.ts: fullscreen todo: a dock press cannot toggle the panel across a session switch (the session-boundary gesture clear in clearSessionOverrides; the generic todo identities have no object to tokenize)
 - test/tui-app.test.ts: fullscreen transcript click: a click that resolves to no cell consumes the stale latch (the identity-fence invariant is literal before every early return)
+- test/tui-app.test.ts: fullscreen todo: a session switch resets the click-coalescing window (a fresh click in the new session must never be swallowed by the old session's window)
 
 #### Upstream comparison
 
