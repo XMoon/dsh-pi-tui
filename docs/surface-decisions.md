@@ -431,9 +431,16 @@ name collision **fails loud — it never shadows**.
 - A contribution is a client-owned command (menu row + client handler); it
   executes locally and never steers. `sessionless: true` runs it before a
   session exists, otherwise the session resolves first.
-- A colliding contribution is NOT installed: the candidate synthesis pass
-  fails as a whole (no partial menu), the collision is recorded against the
-  contribution's health and surfaced once, and the previous list stays.
+- A colliding contribution fails the candidate synthesis as a whole: the
+  command SOURCE is marked failed (upstream `source-failed` parity — the
+  source's whole group is removed), so no command row, client or host, is
+  offered until a synthesis succeeds again. Nothing stale survives: a
+  displayed row can never execute a different command than it shows. The
+  HOST CLAIMS are refreshed before the merge, so a failed synthesis never
+  costs a host command its input authority; the collision is recorded on the
+  contribution's health (cleared only when it merges cleanly again, and never
+  over a handler-failure record in the same slot) and surfaced once per
+  contribution identity and failure generation.
 - Everything unclaimed is an ordinary prompt; TUI-local commands
   (`LOCAL_COMMANDS`) and TUI-owned skill wrappers keep their own routes
   (local execution, `loadSkill`).

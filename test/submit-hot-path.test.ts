@@ -200,6 +200,8 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   readonly session: LiveSession | undefined
   /** The session ids `agents.create` produced (the deferred-start gate). */
   createdSessionIds: string[]
+  /** Register a hook that runs as each session is created. */
+  onCreateSession(hook: (sessionId: string) => void): void
   armCreateGate(): void
   releaseCreateGate(): void
 } {
@@ -242,9 +244,13 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     createGate = new Promise<void>(resolve => { releaseCreateGate = resolve })
   }
   const createdSessionIds: string[] = []
+  /** Test hook: invoked with each CREATED session id, before the handle is
+   * returned — the place a session-scoped host catalog can appear. */
+  let onCreateSession: ((sessionId: string) => void) | undefined
   const agents = {
     create: async ({ sessionId }: { sessionId: string }) => {
       createdSessionIds.push(String(sessionId))
+      onCreateSession?.(String(sessionId))
       if (createGate !== undefined) await createGate
       const session = makeLiveSession(String(sessionId), { id: String(sessionId), cwd: home, createdAt: Date.now(), version: 0 }, [])
       persisted.set(session.id, session)
@@ -301,6 +307,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   return {
     counting,
     createdSessionIds,
+    onCreateSession: (hook: (sessionId: string) => void) => { onCreateSession = hook },
     agents,
     sessions,
     defaultModel,
@@ -930,7 +937,20 @@ async function bootCommandHarness(
       registerDefinition?: boolean
     }[]
   },
-): Promise<{ harness: ReturnType<typeof makeHarness>; mounted: { dispose: () => Promise<void>; app: TuiApp } }> {
+): Promise<{
+  harness: ReturnType<typeof makeHarness>
+  mounted: { dispose: () => Promise<void>; app: TuiApp }
+  /** Register a contribution AFTER the mount (a late/HMR plugin). */
+  registerContribution(contribution: {
+    id: string
+    name: string
+    description: string
+    sessionless?: boolean
+    bridgeHandler: () => { kind: 'success' | 'error'; text?: string }
+  }): Promise<void>
+  /** The mounted extension service (health assertions). */
+  extensionService: { _ledger(): { healthSnapshot(): readonly { id: string; owner: string; state: string; lastError?: string }[] } }
+}> {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-command-arb-')
   const previousHome = process.env.DSH_HOME
@@ -975,6 +995,28 @@ async function bootCommandHarness(
       replace: async (next: Record<string, unknown>) => { Object.assign(doc, next) },
     }),
   } as never)
+  let extensionService: unknown
+  const registerContribution = async (contribution: {
+    id: string
+    name: string
+    description: string
+    sessionless?: boolean
+    bridgeHandler: () => { kind: 'success' | 'error'; text?: string }
+  }): Promise<void> => {
+    const { bridgeHandler, ...spec } = contribution
+    await context.plugin((pluginCtx) => {
+      const service = pluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as {
+        registerCommand(contribution: {
+          id: string; name: string; description: string; sessionless?: boolean
+          handler: () => { kind: 'success' | 'error'; text?: string }
+        }): unknown
+      }
+      service.registerCommand({ ...spec, handler: bridgeHandler })
+    })
+    // The service batcher flushes the invalidation into the surface's
+    // completion refresh on a later tick.
+    for (let round = 0; round < 20; round += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  }
   if (options.extensionCommands !== undefined) {
     // The extension host must be mounted BEFORE the runner reads its
     // service (the runner attaches a SurfaceHost over its ledger), and its
@@ -985,6 +1027,7 @@ async function bootCommandHarness(
     const contributions = options.extensionCommands
     context.provide(TUI_STARTUP_SERVICE, { ...options.deferredStart === true ? {} : { sessionId: 'command-session' }, shippedPresetRoot: home })
     await context.plugin(applyExtensionHost)
+    extensionService = context.get(PI_TUI_EXTENSIONS_SERVICE)
     await context.plugin((pluginCtx) => {
       const service = pluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as {
         registerCommand(contribution: {
@@ -1016,7 +1059,9 @@ async function bootCommandHarness(
   const mounted = await mountRunner(context, home, harness,
     options.deferredStart === true ? {} : { sessionId: 'command-session' })
   harness.host.status = options.status
-  return { harness, mounted }
+  return { harness, mounted, registerContribution, extensionService: extensionService as {
+    _ledger(): { healthSnapshot(): readonly { id: string; owner: string; state: string; lastError?: string }[] }
+  } }
 }
 
 test('idle /compact executes as a Host command: no followup, no queue, no prompt (PR115-fix problem 1)', async (t) => {
@@ -1232,12 +1277,19 @@ test('a host/client name collision fails the candidate synthesis loud (never a p
       registerDefinition: true,
     }],
   })
-  // The synthesis pass throws, so the contribution never reaches the menu and
-  // the previous list stays installed (no partial success).
+  // The synthesis pass throws; the containment seam marks the command SOURCE
+  // failed (upstream `source-failed` parity: the source's whole group is
+  // removed) — no command row is offered until a synthesis succeeds again.
   const rows = mounted.app.commandCompletionsForTest()
-  assert.equal(rows.some(row => row.name === 'deploy'), false,
-    'a colliding contribution must never appear in the menu')
-  assert.ok(harness.host !== undefined, 'harness wired')
+  assert.equal(rows.some(entry => entry.name === 'deploy'), false,
+    'the failed source offers no command rows (client or host)')
+  // The HOST CLAIM was refreshed before the merge, so the input authority is
+  // untouched even while the menu is empty.
+  mounted.app.setDraft('/deploy prod')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the host command keeps its claim and executes')
+  assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
 })
 
 test('running + queue: the DEFAULT preference makes the accelerated chord STEER (web parity)', async (t) => {
@@ -1394,6 +1446,38 @@ test('a client command is session-backed by default: the session resolves BEFORE
     'a session-backed client command resolves the session first (the host command surface is session-keyed)')
 })
 
+test('a host command that appears only AFTER the deferred session outranks the client contribution', async (t) => {
+  // Deferred start: the standing catalog does not resolve /deploy, so the
+  // submission is classified as a client command. The session-scoped host
+  // catalog then provides /deploy — the live claim must win; running the
+  // client handler would shadow a host command (upstream: the host catalog is
+  // session-keyed and a collision never shadows it).
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    extensionCommands: [{
+      id: 'deploy', name: 'deploy', description: 'deploy',
+      bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
+    }],
+  })
+  harness.onCreateSession(() => {
+    ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void }).register({
+      name: 'deploy',
+      handler: () => ({ kind: 'success' }),
+    })
+  })
+  mounted.app.setDraft('/deploy prod')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the LATE host claim executes through the command plane')
+  assert.equal(harness.executed[0]?.line, '/deploy prod', 'the host command receives the raw line')
+  assert.deepEqual(calls, [], 'the client handler must not run once the live host catalog claims the name')
+  assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a model prompt')
+  assert.equal(harness.host.steered.length, 0, 'never steered')
+})
+
 test('a sessionless client command runs without creating a session', async (t) => {
   const calls: string[] = []
   const { harness, mounted } = await bootCommandHarness(t, {
@@ -1412,6 +1496,156 @@ test('a sessionless client command runs without creating a session', async (t) =
   }
   assert.deepEqual(calls, ['vimmode'], 'the sessionless client handler runs immediately')
   assert.deepEqual(harness.createdSessionIds, [], 'a sessionless client command never creates a session')
+})
+
+test('a skill wrapper that loads AFTER a same-named client contribution outranks it', async (t) => {
+  // The contribution exists first (bridge-only, so the skill wrapper can
+  // still install); the skill catalog then provides /grilling. A skill
+  // wrapper is TUI-owned agent-facing input: the invocation must take the
+  // loadSkill route — never the client handler.
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'running',
+    skills: true,
+    hostLoadsSkillBody: true,
+    extensionCommands: [{
+      id: 'grilling-cmd', name: 'grilling', description: 'client grilling',
+      bridgeHandler: () => { calls.push('grilling'); return { kind: 'success' } },
+    }],
+  })
+  await waitForSkillWrapper(harness, 'grilling')
+  mounted.app.setDraft('/grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'skill over contribution')
+  assert.deepEqual(calls, [], 'the client handler must not run for a live skill wrapper')
+  assert.equal(harness.host.followedUp.length, 1, 'the skill invocation queues under busyEnter=queue (loadSkill route)')
+  const followed = harness.host.followedUp[0] as { content: { type: string; text: string }[] }
+  assert.equal(followed.content[0]?.text, '/grilling args', 'the skill line is delivered verbatim')
+  assert.equal(harness.host.injected.length, 0, 'the host loader owns the body injection')
+})
+
+test('a SESSIONLESS client command never shadows a live skill wrapper of the same name', async (t) => {
+  // The namespace order decides it: a live skill wrapper is TUI-owned
+  // agent-facing input and outranks any contribution — including one that
+  // declares sessionless (the generic sessionless branch must not run a
+  // client handler for a wrapper's name).
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'running',
+    skills: true,
+    hostLoadsSkillBody: true,
+    extensionCommands: [{
+      id: 'grilling-cmd', name: 'grilling', description: 'client grilling', sessionless: true,
+      bridgeHandler: () => { calls.push('grilling'); return { kind: 'success' } },
+    }],
+  })
+  await waitForSkillWrapper(harness, 'grilling')
+  mounted.app.setDraft('/grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'sessionless skill over contribution')
+  assert.deepEqual(calls, [], 'the client handler must not run for a live skill wrapper')
+  assert.equal(harness.host.followedUp.length, 1, 'the skill invocation queues (loadSkill route)')
+  assert.equal(harness.host.injected.length, 0, 'the host loader owns the body')
+})
+
+test('a sessionless client command runs its handler even with a LIVE session', async (t) => {
+  // The namespace order decides this, not the generic sessionless branch: a
+  // client command is client-owned whether or not a session exists. Routing
+  // it through the command plane would miss (no definition) and deliver the
+  // line to the MODEL.
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [{
+      id: 'vimmode', name: 'vimmode', description: 'toggle vim mode', sessionless: true,
+      bridgeHandler: () => { calls.push('vimmode'); return { kind: 'success' } },
+    }],
+  })
+  mounted.app.setDraft('/vimmode')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && calls.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(calls, ['vimmode'], 'a sessionless client command runs locally with a live session too')
+  assert.equal(harness.executed.length, 0, 'never the command plane')
+  assert.equal(harness.host.followedUp.length, 0, 'never the model')
+})
+
+test('a dynamic host collision fails the command source (upstream source-failed parity)', async (t) => {
+  let failDeploy = false
+  const { harness, mounted, registerContribution } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [
+      { id: 'deploy-cmd', name: 'deploy', description: 'client deploy', bridgeHandler: () => ({ kind: 'success' }) },
+      { id: 'keep-cmd', name: 'keep', description: 'client keep', bridgeHandler: () => ({ kind: 'success' }) },
+    ],
+  })
+  // T0: both client rows are in the menu.
+  const t0 = mounted.app.commandCompletionsForTest().map(row => row.name)
+  assert.ok(t0.includes('deploy') && t0.includes('keep'), `both client rows installed: ${t0.join(',')}`)
+  // T1: the host catalog gains /deploy; a later registration flushes the
+  // extension invalidation into a completion refresh.
+  const disposeHost = (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
+    .register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+  await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
+  const names = mounted.app.commandCompletionsForTest().map(row => row.name)
+  // The command SOURCE failed: its whole group is removed (upstream
+  // `source-failed`), so neither the stale client rows NOR the host rows are
+  // offered — a displayed row can never execute a different command than it
+  // shows.
+  assert.deepEqual(names, [], `the failed source offers no rows: ${names.join(',')}`)
+  // Submitting the name executes the HOST command (claims were refreshed
+  // before the merge).
+  mounted.app.setDraft('/deploy now')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the host command owns the name')
+  assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
+  // Recovery: the host descriptor goes away and a successful synthesis
+  // restores the whole menu.
+  disposeHost()
+  await registerContribution({ id: 'omega-cmd', name: 'omega', description: 'omega', bridgeHandler: () => ({ kind: 'success' }) })
+  const recovered = mounted.app.commandCompletionsForTest().map(row => row.name)
+  assert.ok(recovered.includes('deploy') && recovered.includes('keep') && recovered.includes('omega'),
+    `the menu recovers after a successful synthesis: ${recovered.join(',')}`)
+  void failDeploy
+})
+
+test('a collision health record clears on recovery, while a HANDLER failure record survives an unrelated refresh', async (t) => {
+  const healthOf = (service: { _ledger(): { healthSnapshot(): readonly { id: string; state: string; lastError?: string }[] } }, id: string) =>
+    service._ledger().healthSnapshot().find(entry => entry.id === id)
+  const { harness, mounted, registerContribution, extensionService } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [
+      { id: 'boom-cmd', name: 'boom', description: 'boom', bridgeHandler: () => { throw new Error('handler boom') } },
+      { id: 'deploy-cmd', name: 'deploy', description: 'client deploy', bridgeHandler: () => ({ kind: 'success' }) },
+    ],
+  })
+  // The client handler fails: the health record carries the HANDLER error.
+  mounted.app.setDraft('/boom')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && healthOf(extensionService, 'boom-cmd')?.state !== 'failed'; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(healthOf(extensionService, 'boom-cmd')?.state, 'failed', 'a throwing handler marks its contribution failed')
+  // A dynamic host collision on ANOTHER contribution triggers a failed
+  // synthesis: it must not clear the unrelated handler-failure record.
+  const disposeHost = (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
+    .register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+  await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
+  assert.equal(healthOf(extensionService, 'deploy-cmd')?.state, 'failed', 'the colliding contribution is marked failed')
+  assert.equal(healthOf(extensionService, 'boom-cmd')?.state, 'failed', 'the handler failure survives the synthesis')
+  // Recovery: the host descriptor disappears, the contribution merges again,
+  // and only the COLLISION record clears.
+  disposeHost()
+  await registerContribution({ id: 'omega-cmd', name: 'omega', description: 'omega', bridgeHandler: () => ({ kind: 'success' }) })
+  assert.equal(healthOf(extensionService, 'deploy-cmd')?.state, 'active', 'the recovered collision clears')
+  assert.equal(healthOf(extensionService, 'boom-cmd')?.state, 'failed', 'the handler failure is untouched by the recovery')
 })
 
 test('a client command executes locally under both chords (never the plane, never the model)', async (t) => {

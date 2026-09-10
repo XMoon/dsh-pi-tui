@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DraftImageStore } from '../src/image/draft-store.ts'
-import { commandRejectsImages, LOCAL_COMMANDS, normalizeSkillInvocation, SESSIONLESS_COMMANDS } from '../src/index.ts'
+import { commandIsLocalForAttachments, commandRejectsImages, isLocalCommandLine, LOCAL_COMMANDS, normalizeSkillInvocation, SESSIONLESS_COMMANDS } from '../src/index.ts'
 
 function storeWithImage(): DraftImageStore {
   const store = new DraftImageStore()
@@ -87,4 +87,58 @@ test('normalizeSkillInvocation preserves the argument text VERBATIM (trailing wh
   // original text — only the command-name separator is normalized.
   assert.equal(normalizeSkillInvocation('/skill grilling foo bar   '), '/grilling foo bar   ')
   assert.equal(normalizeSkillInvocation('/skill grilling   spaced  args '), '/grilling spaced  args ')
+})
+
+test('a LIVE skill wrapper is agent-facing even when a client contribution shares its name', () => {
+  // The attachment gate must not treat a skill wrapper as a local UI command
+  // just because a client contribution of the same name exists: the wrapper
+  // route (its own slash line + injected body) supports images.
+  const contribution = (name: string): boolean => name === 'grilling'
+  const wrapper = (name: string): boolean => name === 'grilling'
+  assert.equal(isLocalCommandLine('grilling', wrapper, contribution), false,
+    'a live skill wrapper is agent-facing (multimodal), never a local command')
+  assert.equal(isLocalCommandLine('grilling', undefined, contribution), true,
+    'without a live wrapper the contribution IS the local client command')
+  assert.equal(isLocalCommandLine('help', wrapper, contribution), true, 'core local commands stay local')
+  assert.equal(isLocalCommandLine('plain', wrapper, contribution), false, 'an unknown name is not local')
+})
+
+test('a client command with a staged attachment is REJECTED as a local command (never run with a live attachment)', () => {
+  // The contribution classification rides the SAME predicate as the dispatch:
+  // a client-owned command is local, so an image/file-bearing line must be
+  // refused (the client handler has no attachment channel) — while a live
+  // skill wrapper of the same name stays agent-facing and is allowed.
+  const store = storeWithImage()
+  const image = store.values()[0]!
+  const clientCommand = commandIsLocalForAttachments({ name: 'panel', rawInput: '' }, undefined, name => name === 'panel')
+  assert.equal(commandRejectsImages({ name: 'panel' }, `/panel ${image.placeholder}`, store, clientCommand), true,
+    'a client command rejects attachments')
+  const skillWrapper = commandIsLocalForAttachments({ name: 'grilling', rawInput: ' args' }, name => name === 'grilling', name => name === 'grilling')
+  assert.equal(commandRejectsImages({ name: 'grilling' }, `/grilling args ${image.placeholder}`, store, skillWrapper), false,
+    'a live skill wrapper is agent-facing even when a client contribution shares the name')
+  const explicitSkill = commandIsLocalForAttachments({ name: 'skill', rawInput: ' grilling' }, undefined, undefined)
+  assert.equal(commandRejectsImages({ name: 'skill' }, `/skill grilling ${image.placeholder}`, store, explicitSkill), false,
+    'an explicit /skill <name> invocation is agent-facing')
+})
+
+test('a HOST claim outranks a same-named client contribution in the attachment gate', () => {
+  // Host authority: a contribution must never turn an attachment-bearing
+  // /deploy line into a rejected "local command" while the host catalog owns
+  // that name — the host handler decides its own attachment policy.
+  const store = storeWithImage()
+  const image = store.values()[0]!
+  const colliding = commandIsLocalForAttachments(
+    { name: 'deploy', rawInput: ' prod' },
+    undefined,
+    name => name === 'deploy',
+    name => name === 'deploy',
+  )
+  assert.equal(commandRejectsImages({ name: 'deploy' }, `/deploy prod ${image.placeholder}`, store, colliding), false,
+    'a host-claimed name is never a local command (the host route owns it)')
+  const clientOnly = commandIsLocalForAttachments({ name: 'deploy', rawInput: ' prod' }, undefined, name => name === 'deploy', () => false)
+  assert.equal(commandRejectsImages({ name: 'deploy' }, `/deploy prod ${image.placeholder}`, store, clientOnly), true,
+    'without a host claim the same name is the local client command')
+  const core = commandIsLocalForAttachments({ name: 'help', rawInput: '' }, undefined, undefined, name => name === 'help')
+  assert.equal(commandRejectsImages({ name: 'help' }, `/help ${image.placeholder}`, store, core), true,
+    'a TUI-owned local command stays local even if a registry claim exists for it')
 })

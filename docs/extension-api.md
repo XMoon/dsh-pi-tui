@@ -165,11 +165,17 @@ locally, never steered.
 
 - **Host authority.** A name the current host catalog resolves is a HOST
   command: it executes through the command plane and a contribution can
-  never shadow it. Upstream's candidate synthesis throws on a
-  host/contribution name collision; here the synthesis pass FAILS (nothing
-  is installed, the collision is recorded on the contribution's health and
-  surfaced once) while the host command keeps its claim — the input can
-  never be downgraded to a model prompt.
+  never shadow it — not in the dispatch, and not in the attachment gate
+  (the host handler owns its own attachment policy).
+- **Two collision mechanisms.** A name owned by the TUI's OWN static catalog
+  (`/status`, `/kill`, ...) is rejected at REGISTRATION: `registerCommand`
+  throws and the plugin fails to load loudly. A name the SESSION's host
+  catalog resolves (a preset/plugin command that may appear only after the
+  session exists) is a SYNTHESIS-time collision: the candidate pass fails as
+  a whole — upstream `source-failed` parity, so its command rows are removed
+  until a synthesis succeeds again — while the host claims stay refreshed
+  (input authority is never lost) and the collision is recorded on the
+  contribution's health and surfaced once.
 - **`sessionless`.** `true` lets the command run before a session exists
   (pure client commands: an overlay toggle, a picker). `false` (default)
   resolves/creates the session first — the host command surface is
@@ -178,7 +184,9 @@ locally, never steered.
   command surface.
 
 **Breaking change (Unreleased).** The previous `execution: 'local' |
-'submission'` ownership metadata is REMOVED. A contribution is a client
+'submission'` ownership metadata is REMOVED, and the never-wired
+`argumentProvider` field is gone with it (use `registerAutocomplete` for
+plugin suggestions — it was a dead public surface). A contribution is a client
 command, full stop: a `/name args` line that is not a command is an
 unclaimed prompt (the host pre-step owns skill expansion, and the inline
 skill lexicon owns its discovery), so a contribution no longer needs to
@@ -187,7 +195,6 @@ required); a contribution that used `submission` to advertise a
 prompt-style name should instead not register a contribution at all — its
 line reaches the model as an ordinary prompt.
 
-## Theme registry (M5)
 ## Theme registry (M5)
 
 `registerTheme(contribution)` registers a named color palette into the

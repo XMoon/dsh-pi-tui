@@ -63,7 +63,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while the host command keeps its claim — it can never be downgraded to a model prompt. A contribution
   used to advertise a prompt-style name should simply not be registered (an unclaimed `/name args` line
   is already a prompt; the host-side skill owns discovery). `sessionless: true` runs the command before a
-  session exists; the default `false` resolves/creates the session first.
+  session exists; the default `false` resolves/creates the session first. A collision with the SESSION's
+  host catalog fails the whole candidate pass at synthesis time (upstream `source-failed` parity: the
+  source's command rows are withdrawn until a synthesis succeeds again) while the host claims stay
+  refreshed — input authority is never lost — and the collision is recorded on the contribution's health
+  and surfaced once per identity/failure generation; a collision with the TUI's own static command names
+  is rejected at registration. The never-wired `argumentProvider` field is removed too (use
+  `registerAutocomplete`).
 
 ## [0.4.3-alpha.2] - 2026-09-08
 

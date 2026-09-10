@@ -370,6 +370,58 @@ export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * The TUI-local classification the attachment gate uses: a TUI/core local
+ * command or a live client command contribution is LOCAL (its line is a UI
+ * control — attachments are refused), while a LIVE skill wrapper is
+ * AGENT-FACING input (multimodal) even when a client contribution shares its
+ * name: the wrapper route outranks the contribution everywhere.
+ * @param name - the slash name.
+ * @param isSkillWrapper - the live skill-wrapper test (absent = none).
+ * @param isDynamicLocal - the live client-contribution test (absent = none).
+ */
+export function isLocalCommandLine(
+  name: string,
+  isSkillWrapper: ((name: string) => boolean) | undefined,
+  isDynamicLocal: ((name: string) => boolean) | undefined,
+  isHostCommand?: ((name: string) => boolean) | undefined,
+): boolean {
+  // The NAMESPACE ORDER decides: a TUI-owned local command is local, while
+  // the agent-facing routes (a live skill wrapper, a live HOST claim) outrank
+  // a client contribution — the host handler owns its own attachment policy,
+  // and a contribution must never suppress it.
+  if (LOCAL_COMMANDS.has(name)) return true
+  if (isSkillWrapper?.(name) === true) return false
+  if (isHostCommand?.(name) === true) return false
+  return isDynamicLocal?.(name) ?? false
+}
+
+/**
+ * The attachment gate's local-command predicate for one parsed line — the
+ * SINGLE classification the dispatch and its regression tests share:
+ * `/skill <name> ...` is agent-facing (loadSkill), a LIVE skill wrapper is
+ * agent-facing (multimodal) even when a client contribution shares its name,
+ * and everything else follows {@link isLocalCommandLine} (TUI/core local
+ * commands and live client command contributions are local).
+ * @param parsed - the parsed slash command (undefined = plain prompt).
+ * @param isSkillWrapper - the live skill-wrapper test (absent = none).
+ * @param isDynamicLocal - the live client-contribution test (absent = none).
+ * @param isHostCommand - the live HOST-claim test (absent = none): a host
+ *   command owns its own attachment policy, so it is never classified local.
+ * @returns the predicate for `commandRejectsAttachments` / `commandRejectsImages`.
+ */
+export function commandIsLocalForAttachments(
+  parsed: { name: string; rawInput?: string } | undefined,
+  isSkillWrapper: ((name: string) => boolean) | undefined,
+  isDynamicLocal: ((name: string) => boolean) | undefined,
+  isHostCommand?: ((name: string) => boolean) | undefined,
+): (name: string) => boolean {
+  return name => {
+    if (name === 'skill' && (parsed?.rawInput?.trim() ?? '') !== '') return false
+    return isLocalCommandLine(name, isSkillWrapper, isDynamicLocal, isHostCommand)
+  }
+}
+
+/**
  * The TUI dispatch boundary's delivery resolution: the WEB composer policy
  * ({@link resolveComposerDelivery}) applied to agent-facing input, with the
  * TUI's own ownership terms on top. Pure so the dispatch gate (inside the
@@ -378,15 +430,12 @@ export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
  * @param running - whether the live agent reports running.
  * @param gesture - the composer gesture that raised the submission.
  * @param busyEnter - the persisted preference value (''/undefined = queue).
- * @param isDynamicLocal - M5: the CommandBridge's effective-local check for
- *   plugin-declared local commands (absent = static set only).
  */
 export function resolveSubmitDelivery(
   parsed: { name: string; rawInput?: string } | undefined,
   running: boolean,
   gesture: ComposerSubmitGesture,
   busyEnter: string | undefined,
-  isDynamicLocal?: (name: string) => boolean,
 ): SubmitDelivery {
   if (parsed !== undefined) {
     // `/skill <name> [args...]` is an AGENT-facing invocation (loadSkill),
@@ -394,11 +443,11 @@ export function resolveSubmitDelivery(
     // prompt. Only the bare `/skill` picker counts as local (review finding
     // — same classification as the image-rejection gate).
     if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return resolveComposerDelivery(running, gesture, busyEnter)
-    // A TUI-owned local command (and a plugin-declared local one) executes
-    // through its own surface and never steers; its delivery value is only
-    // ever a placeholder for the (never taken) skill-delivery binding.
+    // A TUI-owned local command executes through its own surface and never
+    // steers; its delivery value is only ever a placeholder for the (never
+    // taken) skill-delivery binding. Client contributions never reach this
+    // resolver at all (the namespace dispatch routes them first).
     if (LOCAL_COMMANDS.has(parsed.name)) return 'queue'
-    if (isDynamicLocal !== undefined && isDynamicLocal(parsed.name)) return 'queue'
   }
   return resolveComposerDelivery(running, gesture, busyEnter)
 }
@@ -5131,19 +5180,17 @@ export function apply(ctx: Context, config: Config): void {
       // plain prompts AND per-skill slash lines, including `/skill <name>
       // [image #N ...]` (`skill` is local only as the bare picker; with
       // arguments it is a loadSkill agent prompt — review finding).
-      if (commandRejectsAttachments(parsed, text, draftImages, draftFiles, name => {
-        if (name === 'skill' && (parsed?.rawInput.trim() ?? '') !== '') return false
-        return LOCAL_COMMANDS.has(name)
-          || (extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false)
-      })) {
+      if (commandRejectsAttachments(parsed, text, draftImages, draftFiles, commandIsLocalForAttachments(
+        parsed,
+        isSkillWrapperName,
+        n => extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false,
+        isHostCommandName,
+      ))) {
         app.setEditorText(mergeDraft(app.getDraft(), text))
         app.notify('Attachments cannot be included in a local command.', 'error')
         return
       }
-      const isSessionless = parsed !== undefined && (
-        SESSIONLESS_COMMANDS.has(parsed.name)
-        || (extensionService?.commands.isSessionless(parsed.name, SESSIONLESS_COMMANDS) ?? false)
-      )
+      const isSessionless = parsed !== undefined && SESSIONLESS_COMMANDS.has(parsed.name)
       // The submission's effective delivery mode — resolved ONCE, here at
       // the boundary (web ComposerSubmissionPolicy parity, DSH
       // 0.1.3-alpha.2): an idle agent queues, plain Enter takes the
@@ -5152,83 +5199,87 @@ export function apply(ctx: Context, config: Config): void {
       // the command plane (dispatchViaSession → withDelivery → the TUI skill
       // delivery), which never re-derives it from the persisted preference —
       // a one-shot gesture does not survive in settings. Commands that own
-      // their own busy semantics (Host commands, local UI commands) ignore
-      // it.
+      // their own busy semantics (Host commands, client commands) ignore it.
       const delivery: SubmitDelivery = request === 'explicit-queue'
         ? 'queue'
-        : resolveSubmitDelivery(
-            parsed,
-            liveAgent?.status === 'running',
-            request,
-            tuiSettings?.get().busyEnter,
-            // M5: the CommandBridge's effective-local check (dynamic plugin
-            // local commands are local while registered).
-            name => extensionService?.commands.isLocal(name, LOCAL_COMMANDS) ?? false,
-          )
-      // Host-command claim (HOST AUTHORITY): a slash name the CURRENT
-      // effective host catalog resolves is a host command — a client command
-      // contribution can never shadow it (the DSH client contribution rule:
-      // candidate synthesis fails loud, never shadows; the host command keeps
-      // its claim and its handler decides the busy outcome). TUI-owned names
-      // are excluded here: LOCAL_COMMANDS execute through their own surface
-      // and a TUI skill wrapper is agent-facing input. A claimed command the
-      // real session then lacks is consumed by the advertised-miss gate
-      // inside dispatchViaSession — never a plain model message.
+        : resolveSubmitDelivery(parsed, liveAgent?.status === 'running', request, tuiSettings?.get().busyEnter)
+      // NAMESPACE ORDER (DSH client command contribution parity):
+      //   1. host command claim (the closed host catalog always wins);
+      //   2. client command contribution (client-owned behavior);
+      //   3. TUI-owned sessionless command;
+      //   4. agent-facing input (steer / prompt).
+      //
+      // 1. HOST AUTHORITY: a slash name the CURRENT effective host catalog
+      // resolves is a host command — a client contribution can never shadow
+      // it (upstream: candidate synthesis fails loud, never shadows; the host
+      // handler decides the busy outcome). TUI-owned LOCAL_COMMANDS execute
+      // through their own surface and are excluded here; a TUI skill wrapper
+      // is agent-facing input (also excluded from the claim). A claimed
+      // command the real session then lacks is consumed by the
+      // advertised-miss gate inside dispatchViaSession — never a plain model
+      // message.
       if (parsed !== undefined
         && !LOCAL_COMMANDS.has(parsed.name)
         && isHostCommandName?.(parsed.name) === true) {
         dispatchViaSession(text, persistHistory, delivery)
         return
       }
+      // 2. CLIENT-OWNED command contribution: its behavior lives entirely on
+      // the client, so it executes locally and never steers — the namespace
+      // decision is NOT the generic sessionless branch's to make.
+      // `sessionless` decides whether it may run before a session exists:
+      // true runs immediately (no session is created); false (default)
+      // resolves/creates the session FIRST — the host command surface is
+      // session-keyed — and then runs the handler. A LIVE skill wrapper is
+      // TUI-owned agent-facing input and outranks a contribution of the same
+      // name (the contribution may have been registered before the skill
+      // catalog loaded).
+      const contribution = parsed === undefined || isSkillWrapperName?.(parsed.name) === true
+        ? undefined
+        : extensionService?.commands.find(parsed.name)
+      if (parsed !== undefined && contribution !== undefined) {
+        if (contribution.sessionless) {
+          runLocalCommand(parsed, text, persistHistory, delivery, 'sessionless')
+          return
+        }
+        if (liveAgent !== undefined) {
+          runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
+          return
+        }
+        runOwned('client command session', async () => {
+          await ensureSession()
+          if (liveAgent === undefined) return
+          // AUTHORITY RE-CHECK after the session exists: the deferred start
+          // commits a session whose scoped catalog the standing view could
+          // not see, and the skill catalog may load with it. A live HOST
+          // claim or a TUI skill wrapper outranks the contribution that was
+          // decided before the session existed.
+          if (isHostCommandName?.(parsed.name) === true || isSkillWrapperName?.(parsed.name) === true) {
+            dispatchViaSession(text, persistHistory, delivery)
+            return
+          }
+          runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
+        }, {
+          diag,
+          sessionId: () => liveAgent?.session.id,
+          onError: (error) => {
+            app.notify(safeErrorMessage(error), 'error')
+            restoreSubmissionDraft(text)
+          },
+        })
+        return
+      }
+      // 3. A recognized TUI-owned sessionless command: its history row is
+      // sessionless — it must NEVER appear in Current session, whether or not
+      // a session exists. Without a live agent it runs locally (and creates
+      // none); with a live agent it dispatches through the session's command
+      // service, but the persist closure still supplies undefined.
       if (parsed !== undefined && isSessionless) {
-        // A recognized sessionless command: its history row is sessionless
-        // — it must NEVER appear in Current session, whether or not a
-        // session exists. Without a live agent it runs locally (and
-        // creates none; its fallback path goes through the deferred-start
-        // gate instead, so an unknown "sessionless" command that creates a
-        // session still carries the final session id). With a live agent
-        // it dispatches through the session's command service, but the
-        // persist closure still supplies undefined.
         if (liveAgent === undefined) {
           runLocalCommand(parsed, text, persistHistory, delivery, 'sessionless')
         } else {
           dispatchViaSession(text, () => persistHistory(historySessionIdFor('sessionless', liveAgent?.session.id)), delivery)
         }
-        return
-      }
-      // A CLIENT-OWNED command contribution (the DSH client contribution
-      // shape): its behavior lives entirely on the client, so it executes
-      // locally and never steers. `sessionless` decides whether it may run
-      // before a session exists: false (default) resolves/creates the
-      // session FIRST — the host command surface is session-keyed — and only
-      // then runs the handler; true runs immediately without creating one.
-      const contribution = parsed === undefined ? undefined : extensionService?.commands.find(parsed.name)
-      if (contribution !== undefined && parsed !== undefined) {
-        if (contribution.sessionless) {
-          runLocalCommand(parsed, text, persistHistory, delivery, 'sessionless')
-          return
-        }
-        // A session-backed client command: with a live session it runs NOW
-        // (its row carries that session id); on a deferred start the session
-        // is resolved/created FIRST — the host command surface is
-        // session-keyed — and only then does the handler run, through the
-        // owned flow (a failed creation restores the draft and reports).
-        if (liveAgent === undefined) {
-          runOwned('client command session', async () => {
-            await ensureSession()
-            if (liveAgent === undefined) return
-            runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
-          }, {
-            diag,
-            sessionId: () => liveAgent?.session.id,
-            onError: (error) => {
-              app.notify(safeErrorMessage(error), 'error')
-              restoreSubmissionDraft(text)
-            },
-          })
-          return
-        }
-        runLocalCommand(parsed, text, persistHistory, delivery, 'agent-facing')
         return
       }
       // Busy-Enter policy (web parity): agent-facing input steers into the
