@@ -84,6 +84,10 @@ export class AppActionDispatcher {
         return this.host.submitDraft('enter')
       case 'app.input.submitAccelerated':
         return this.host.submitDraft('accelerated')
+      case 'app.input.queue':
+        // The DEPRECATED fixed-queue action (no default key): a stored remap
+        // keeps queueing — never the accelerated opposite.
+        return this.host.submitDraft('explicit-queue')
       case 'app.input.steer':
         return this.host.steerDraft()
       case 'app.input.dequeue':

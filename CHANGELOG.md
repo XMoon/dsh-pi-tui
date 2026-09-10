@@ -32,6 +32,21 @@
 
 - **内置 Footer 默认布局更新。** 未自定义 Footer 的默认 statusline 现在是两行:第一行左侧为权限、Model、Tasks、目录、分支与扩展条目,右侧为 Plan 状态和 Focus Mode;第二行左侧为 token 用量、cache 命中、TTFB、吞吐与 turn/step 计数(stats-line 的语义拆解),右侧为完整 Context 用量(`已用/窗口 (百分比)`)。已保存自定义 `footerLayout` 的用户不受影响。
 
+### 改进
+
+- **Ctrl+Enter 与 Web 提交语义对齐。** 运行中按 Ctrl+Enter 现在取"忙碌提交行为"的**相反值**：默认
+  `busyEnter=queue` 时它 steer，`busyEnter=steer` 时它入队（空闲时一律入队）。旧的
+  `app.input.queue` 动作保留为 deprecated、无默认键，已有自定义绑定仍然是"入队"，不会被悄悄改成
+  相反行为；新的 `app.input.submitAccelerated` 独立拥有 Ctrl+Enter。
+
+### 兼容性
+
+- **插件命令 `execution: 'submission'` 语义变更（破坏性）。** 它现在表示"提交行"而不是"执行命令"：
+  TUI 把 `/name args` 原样按解析出的模式投递给会话（steer / 入队），**不再调用 commands service 的
+  handler**（与 Web composer 未 claim 行的语义一致），行内展开交给插件自己的 pre-step。需要 handler
+  执行的插件请改声明 `execution: 'local'`；`submission` 与 `sessionless: true` 的组合现在会在注册时
+  被拒绝。
+
 ## [0.4.3-alpha.2] - 2026-09-08
 
 ### 安装与版本对应

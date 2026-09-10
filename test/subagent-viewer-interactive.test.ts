@@ -145,11 +145,11 @@ test('Enter in a continuable viewer submits to onSubagentSubmit — never the pa
 
 test('the main session chords are inert inside the interactive viewer', async () => {
   const steered: string[] = []
-  const queued: string[] = []
+  const accelerated: string[] = []
   const singleEscapes: number[] = []
   const { vt, app } = await startApp({
     onSteer: (text) => steered.push(text),
-    onAcceleratedSubmit: (text) => queued.push(text),
+    onAcceleratedSubmit: (text) => accelerated.push(text),
     onSingleEscape: () => { singleEscapes.push(1); return true },
   })
   app.setViewerMode(continuable())
@@ -170,7 +170,7 @@ test('the main session chords are inert inside the interactive viewer', async ()
   vt.sendInput('\x03') // ctrl+c
   await vt.waitForRender()
   assert.deepEqual(steered, [], 'Ctrl+S must never steer the parent from the viewer')
-  assert.deepEqual(queued, [], 'Ctrl+Enter must never submit to the parent from the viewer')
+  assert.deepEqual(accelerated, [], 'Ctrl+Enter must never submit to the parent from the viewer')
   assert.equal(singleEscapes.length, 0, 'Ctrl+C must not exit (and no accidental Esc)')
   // The child draft is untouched by the blocked chords.
   assert.equal(app.getDraft(), 'draft text')

@@ -289,7 +289,7 @@ TUI 使用 DSH 提供的模型和设置服务。
 | 按键            | 功能                     |
 | ------------- | ---------------------- |
 | `Enter`       | 提交输入                   |
-| `Ctrl+Enter`  | Agent 忙碌时把草稿入队(与 Enter 相反) |
+| `Ctrl+Enter`  | 与 Enter 的忙碌行为相反(默认 steer,`busyEnter=steer` 时入队) |
 | `Shift+Enter` | 换行                     |
 | `Esc`         | 取消当前交互 / 中断运行          |
 | `Esc Esc`     | 空闲时打开 Rewind           |

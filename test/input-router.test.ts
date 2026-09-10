@@ -399,11 +399,11 @@ test('TuiApp: active host lifecycle keys never fire a plugin binding (action-dri
   const { TuiApp } = await import('../src/tui-app.ts')
   const vt = new VirtualTerminal(80, 24)
   const actions: string[] = []
-  const queued: string[] = []
+  const accelerated: string[] = []
   const app = new TuiApp(vt, {
     // A real submit handler: with it wired, Ctrl+Enter is a live host action
     // that CONSUMES (never declines) — the plugin must not see it.
-    onSubmit: (text, request) => { if (request === 'accelerated') queued.push(text) },
+    onSubmit: (text, request) => { if (request === 'accelerated') accelerated.push(text) },
     onExit: () => {},
     onExtensionAction: (action) => { actions.push(action) },
   }, {
@@ -422,11 +422,12 @@ test('TuiApp: active host lifecycle keys never fire a plugin binding (action-dri
   // Ctrl+Enter (app.input.submitAccelerated) with a LIVE handler AND a
   // non-empty draft: the host action CONSUMES (submits) — never a plugin
   // binding.
-  app.setDraft('queued text')
+  app.setDraft('accelerated text')
   await vt.waitForRender()
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
   await vt.waitForRender()
-  assert.deepEqual(queued, ['queued text'], 'Ctrl+Enter must queue (host-owned)')
+  assert.deepEqual(accelerated, ['accelerated text'],
+    'the accelerated chord must be consumed by the host (never a plugin binding)')
   // Ctrl+O (app.transcript.toggleExpand): ACTIVE host action — never a
   // plugin binding. Kitty ctrl+o = modifier 5.
   vt.sendInput('\x1b[111;5u')

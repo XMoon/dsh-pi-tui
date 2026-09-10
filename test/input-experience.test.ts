@@ -183,6 +183,28 @@ test('the explicit queue action raises the explicit-queue request (never the cho
     'the explicit queue action must not be confused with the accelerated gesture')
 })
 
+test('the deprecated app.input.queue action still raises the explicit-queue request', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const requests: { text: string; request: string }[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text, request) => requests.push({ text, request }),
+    onExit: () => {},
+  })
+  app.start()
+  startedApps.add(app)
+  vt.sendInput('queue me')
+  // The deprecated action keeps its ORIGINAL meaning (a stored remap must not
+  // turn into the accelerated opposite), and it is dispatched like any other
+  // semantic action.
+  const dispatched = (app as unknown as {
+    actionDispatcher: { dispatch: (action: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.queue')
+  await viewport(vt)
+  assert.equal(dispatched, true, 'the deprecated queue action must be dispatchable')
+  assert.deepEqual(requests, [{ text: 'queue me', request: 'explicit-queue' }],
+    'the deprecated action must queue — never the accelerated gesture')
+})
+
 test('ctrl+enter on an empty draft does not fire the chord (no session-creating submit)', async () => {
   const vt = new VirtualTerminal(80, 24)
   const requests: { text: string; request: string }[] = []

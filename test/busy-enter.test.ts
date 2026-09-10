@@ -507,16 +507,19 @@ test('isHostCommand never claims an extension contribution: advertised ≠ Host-
   t.app.stop()
 })
 
-test('a stored app.input.queue override still applies after the id rename (settings aliases)', () => {
-  // The id is a settings-level public name: a user document written before
-  // the rename (the chord became the web accelerated-submit gesture) must
-  // keep applying to the action it was written for — never be dropped as
-  // "unknown action".
+test('the deprecated app.input.queue action keeps its own (fixed-queue) identity', () => {
+  // The chord became the web accelerated gesture, but the OLD action id is a
+  // settings-level public name: a stored remap must keep meaning "queue the
+  // draft" — never be silently re-interpreted as the opposite behavior, and
+  // never be dropped as an unknown action.
   const parsed = parseUserKeybindings({ 'app.input.queue': 'ctrl+y' })
-  assert.equal(parsed.bindings['app.input.submitAccelerated'], 'ctrl+y',
-    'the legacy id must apply to the renamed action')
-  assert.ok(parsed.diagnostics.some(entry => entry.includes('app.input.queue') && entry.includes('renamed')),
-    `the rename must be diagnosed, got: ${JSON.stringify(parsed.diagnostics)}`)
-  // The new id is the documented one.
-  assert.equal(parseUserKeybindings({ 'app.input.submitAccelerated': 'ctrl+y' }).bindings['app.input.submitAccelerated'], 'ctrl+y')
+  assert.equal(parsed.bindings['app.input.queue'], 'ctrl+y', 'the deprecated action keeps its own declaration')
+  assert.equal(parsed.bindings['app.input.submitAccelerated'], undefined,
+    'the accelerated action must not inherit the legacy declaration')
+  assert.deepEqual(parsed.diagnostics, [], 'the deprecated id is a KNOWN action — no diagnostic')
+  // The two actions are independent: declaring both binds both.
+  const both = parseUserKeybindings({ 'app.input.queue': 'ctrl+y', 'app.input.submitAccelerated': 'ctrl+k' })
+  assert.equal(both.bindings['app.input.queue'], 'ctrl+y')
+  assert.equal(both.bindings['app.input.submitAccelerated'], 'ctrl+k')
+  assert.deepEqual(both.diagnostics, [], 'two distinct actions never collide')
 })

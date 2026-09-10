@@ -94,6 +94,24 @@ test('CommandBridge: near-synonym names are reported (AGENTS hard rule)', () => 
   assert.equal(ok.kind, 'registered')
 })
 
+test('CommandBridge: a submission command cannot be sessionless (needs a session)', () => {
+  const bridge = new CommandBridge()
+  // A submission contribution is an agent-facing LINE: it is delivered to a
+  // session, so `sessionless` (which lets a LOCAL command run before any
+  // session exists) would route it into the local path and execute a handler
+  // the submission ownership does not run. Rejected at registration.
+  const outcome = bridge.register({
+    id: 'deploy', name: 'deploy', description: '', execution: 'submission', sessionless: true,
+  }, 'owner-a')
+  assert.equal(outcome.kind, 'invalid')
+  assert.match(outcome.kind === 'invalid' ? outcome.reason : '', /sessionless/)
+  assert.equal(bridge.find('deploy'), undefined, 'an invalid contribution is never stored')
+  // The same command as a LOCAL contribution may be sessionless.
+  assert.equal(bridge.register({
+    id: 'deploy', name: 'deploy', description: '', execution: 'local', sessionless: true,
+  }, 'owner-a').kind, 'registered')
+})
+
 test('CommandBridge: a duplicate id is an error', () => {
   const bridge = new CommandBridge()
   bridge.register({ id: 'x', name: 'a', description: '', execution: 'local' }, 'o1')

@@ -864,6 +864,9 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const caller = this.ctx
     const owner = `${caller.fiber.uid}:${caller.fiber.name}`
     const outcome = this.commands.register(contribution, owner)
+    if (outcome.kind === 'invalid') {
+      throw new Error(`command contribution "${contribution.name}" is invalid: ${outcome.reason}`)
+    }
     if (outcome.kind === 'conflict') {
       const detail = outcome.nearSynonym === undefined
         ? `owner "${outcome.existingOwner}" already holds it`

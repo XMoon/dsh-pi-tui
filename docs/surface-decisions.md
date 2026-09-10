@@ -424,10 +424,15 @@ TUI nor an extension owns. Ownership, not advertising, decides:
 
 - a TUI-owned skill wrapper (agent-facing input built by `loadSkill`),
 - an extension contribution (`TuiCommandContribution.execution`): a
-  `submission` command flows through the busy policy like a skill
-  invocation — its LINE is delivered (steer / queue) and the plugin's
-  command handler is never run ahead of the queue it asked to join; a
-  `local` one always executes and never steers,
+  `submission` command is a SUBMISSION LINE (the web composer's
+  unclaimed-line semantics) — its line is delivered with the resolved mode
+  (steer / queue) and the commands-service handler is NOT run for it; a
+  `local` one always executes and never steers. A submission needs a live
+  session, so `submission + sessionless` is rejected at registration
+  (fail fast at the extension boundary). `submission` is a DELIBERATE
+  BREAKING ownership change (Unreleased): the handler used to stay
+  authoritative in every non-steer mode — see the migration note in
+  `docs/extension-api.md` and `TuiCommandContribution.execution`,
 - the TUI-local set (`LOCAL_COMMANDS` plus dynamic local contributions).
 
 Everything else that is advertised resolves through the command plane

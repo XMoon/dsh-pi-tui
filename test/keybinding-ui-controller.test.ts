@@ -510,3 +510,32 @@ test('a failed settings replace leaves the last-known runtime map untouched', as
     manager.dispose()
   }
 })
+
+test('the deprecated app.input.queue declaration is editable and resettable as its own action', async () => {
+  // A stored declaration of the DEPRECATED fixed-queue action must stay a
+  // first-class action in the editor: it keeps meaning "queue the draft"
+  // (never the accelerated opposite), and Reset must remove THAT
+  // declaration — a read-time alias onto `app.input.submitAccelerated`
+  // would leave the legacy key in the document, so the next parse would
+  // resurrect the binding after the UI reported success.
+  const fixture = settingsFixture({ 'app.input.queue': 'ctrl+y' })
+  const { controller, manager } = controllerFor(fixture)
+  try {
+    assert.deepEqual(manager.keysFor('app.input.queue'), ['ctrl+y'],
+      'the stored declaration applies to the deprecated action itself')
+    assert.deepEqual(manager.keysFor('app.input.submitAccelerated'), ['ctrl+enter'],
+      'the accelerated action keeps its own default — no inherited override')
+    const result = await controller.mutate({ kind: 'reset-action', action: 'app.input.queue' })
+    assert.equal(result.kind, 'applied')
+    // The deprecated action has NO builtin default, so resetting it drops the
+    // declaration entirely (an empty-array marker would be a redundant "no
+    // override"): the legacy key must be GONE from the persisted document.
+    assert.deepEqual((fixture.latest() as TuiSettingsDoc).keybindings, {})
+    assert.deepEqual(manager.keysFor('app.input.queue'), [], 'the reset removes the legacy binding')
+    // Re-parsing the persisted document must NOT resurrect it (the exact
+    // failure mode of an alias-only migration).
+    assert.equal(parseUserKeybindings((fixture.latest() as TuiSettingsDoc).keybindings).bindings['app.input.queue'], undefined)
+  } finally {
+    manager.dispose()
+  }
+})

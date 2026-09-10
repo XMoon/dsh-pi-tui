@@ -170,9 +170,9 @@ test('an empty queue falls back to the classic single-draft steer', async () => 
 
 test('onlyDraft steers the draft alone: explicitly queued messages stay queued', async () => {
   // Busy-Enter steer (web busyEnter parity): Enter steers the DRAFT only —
-  // a message the user queued explicitly (Ctrl+Enter or a notice) must not
-  // be swept into the turn, because already-steered input cannot be pulled
-  // back.
+  // a message the user queued explicitly (a queue-mode submission,
+  // `queue-draft`, or a notice) must not be swept into the turn, because
+  // already-steered input cannot be pulled back.
   const agent = fakeAgent(['queued'])
   agent.status = 'running'
   const outcome = await steerAll(makeDeps({ agent: () => agent }), 'draft text', { onlyDraft: true })
