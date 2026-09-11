@@ -2405,10 +2405,10 @@ test('a settled text-only answer crossed by a human steer stays persistent befor
       turn: 0,
       step: 1,
       chunk: { type: 'text-delta', index: 0, text: 'assistant A' },
-    }, 1004, 3),
-    // Same-millisecond output and insertion still count as pre-steer.
+    }, 1003, 3),
+    // A's first visible output is strictly before the steer insertion.
     queueSteer(steer, 1004, 4),
-    assistantSettlement(0, 1, 'focus-a', 'assistant A', 1005, 5, [{ type: 'text', text: 'assistant A' }], 1004),
+    assistantSettlement(0, 1, 'focus-a', 'assistant A', 1005, 5, [{ type: 'text', text: 'assistant A' }], 1003),
     eventAt('step/end', { turn: 0, step: 1 }, 1006, 6),
     claimSteer(1007, 7),
     eventAt('step/start', { turn: 0, step: 2 }, 1008, 8),
@@ -2462,6 +2462,45 @@ test('a settled text-only answer crossed by a human steer stays persistent befor
   const off = projectFocus(raw, folder.turnActivities(), new Set(), false)
   assert.deepEqual(off.map(block => block.kind === 'message' ? block.message : undefined), raw,
     'Focus off leaves the raw transcript chronology unchanged')
+})
+
+test('same-millisecond steer and assistant output stays process evidence', () => {
+  const initial = steerMessage('equal-initial', 'initial prompt')
+  const steer = steerMessage('equal-steer', 'human steer')
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 1100, 20),
+    eventAt('step/start', { turn: 0, step: 1 }, 1101, 21),
+    eventAt('user/message', initial, 1102, 22),
+    // The output event is applied first, but its timestamp collides with the
+    // next-step insertion timestamp and therefore cannot prove ordering.
+    eventAt('assistant/chunk', {
+      turn: 0,
+      step: 1,
+      chunk: { type: 'text-delta', index: 0, text: 'assistant A' },
+    }, 1104, 23),
+    queueSteer(steer, 1104, 24),
+    assistantSettlement(0, 1, 'equal-a', 'assistant A', 1105, 25, undefined, 1104),
+    eventAt('step/end', { turn: 0, step: 1 }, 1106, 26),
+    claimSteer(1107, 27),
+    eventAt('step/start', { turn: 0, step: 2 }, 1108, 28),
+    eventAt('user/message', steer, 1109, 29),
+  ]
+  const live = new TranscriptFolder()
+  applyMixed(live, events)
+  const activity = live.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.message?.text, 'assistant A', 'ambiguous timing does not commit A')
+  const collapsed = projectTools(live.messages(), live.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'user', 'activity'])
+  assert.equal(collapsed.some(block => block.kind === 'message' && block.message.kind === 'assistant'), false)
+
+  const replay = new TranscriptFolder()
+  replay.hydrate(events)
+  const replayActivity = replay.turnActivity(0)
+  assert.ok(replayActivity !== undefined)
+  assert.equal(replayActivity.message?.text, 'assistant A')
+  const replayCollapsed = projectTools(replay.messages(), replay.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(replayCollapsed), ['user', 'user', 'activity'])
 })
 
 test('a steer inserted before the first visible assistant output does not commit that answer', () => {
