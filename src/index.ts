@@ -26,6 +26,7 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -1440,6 +1441,17 @@ export interface AgentComposition {
 }
 
 /**
+ * Source-compatible composition returned for standalone callers that provide
+ * their own ModelSelectionRef instead of an Agent-local installer.
+ */
+interface LegacyAgentComposition {
+  /** Preset id for the session header, absent when the deployment composes no roster. */
+  agentPreset?: string
+  /** Standalone setup installs the caller-owned model selection ref. */
+  setup: (agentCtx: Context) => Promise<void> | void
+}
+
+/**
  * Resolve the preset an agent will be composed from, and the setup that
  * installs it.
  *
@@ -1453,7 +1465,10 @@ export interface AgentComposition {
  * host composition, which is the behavior before presets existed.
  * @param ctx - the runner context (services read through `ctx.get`).
  * @param installSelection - installs a fresh Agent-local model selection ref
- *   during setup using the explicit Agent identity supplied by DSH.
+ *   during setup using the explicit Agent identity supplied by DSH. A
+ *   ModelSelectionRef is also accepted for source compatibility with
+ *   standalone composition callers; that branch installs the caller-owned ref
+ *   and does not require an Agent.
  * @param presetId - the requested preset, or `undefined` for the default.
  * @param focusState - the shared Focus runtime state (STRUCTURAL on
  *   purpose: the public declaration bundle must not inline src/focus.ts —
@@ -1466,21 +1481,46 @@ export interface AgentComposition {
  * @returns the id to record on the header (absent without a roster) and the setup callback.
  * @throws when the roster supplies no such preset.
  */
-export async function composeAgent(
+export function composeAgent(
+  ctx: Context,
+  installSelection: ModelSelectionRef,
+  presetId?: string,
+  focusState?: { enabled: boolean },
+  diag?: Diag,
+): Promise<LegacyAgentComposition>
+export function composeAgent(
   ctx: Context,
   installSelection: (agentCtx: Context, agent: Agent) => void,
   presetId?: string,
   focusState?: { enabled: boolean },
   diag?: Diag,
-): Promise<AgentComposition> {
+): Promise<AgentComposition>
+export async function composeAgent(
+  ctx: Context,
+  installSelection: ModelSelectionRef | ((agentCtx: Context, agent: Agent) => void),
+  presetId?: string,
+  focusState?: { enabled: boolean },
+  diag?: Diag,
+): Promise<LegacyAgentComposition | AgentComposition> {
   const presets = ctx.get('agentPresets')
   if (presets === undefined) {
     if (presetId === 'code') {
       throw new Error('preset "code" is unavailable in this deployment; use a configured preset')
     }
+    if (typeof installSelection === 'function') {
+      return {
+        setup: (agentCtx: Context, agent: Agent): void => {
+          installSelection(agentCtx, agent)
+          // Focus is a TUI surface policy: install it only when the runner
+          // supplied the shared state (other callers — the headless tests —
+          // keep the plain composition).
+          if (focusState !== undefined) installFocusPrompt(agentCtx, focusState, diag)
+        },
+      }
+    }
     return {
-      setup: (agentCtx: Context, agent: Agent): void => {
-        installSelection(agentCtx, agent)
+      setup: (agentCtx: Context): void => {
+        installModelSelection(agentCtx, installSelection)
         // Focus is a TUI surface policy: install it only when the runner
         // supplied the shared state (other callers — the headless tests —
         // keep the plain composition).
@@ -1495,19 +1535,31 @@ export async function composeAgent(
   // The resolver returns the concrete roster identity, including a legitimate
   // custom `code` entry. The only compatibility rewrite is inside the shared
   // omitted-default resolver above.
+  const finishSetup = async (agentCtx: Context): Promise<void> => {
+    await presets.mount(agentCtx, resolved.id)
+    // Focus is a TUI surface policy, installed AFTER the preset mount so
+    // it exists consistently across every preset (standard/ptc/minimal/
+    // cordis) without depending on what the preset itself installs
+    // (plan §9.1). A preset recompose that only swaps preset-owned rows
+    // keeps this outer scoped section; a full agent rebuild re-runs this
+    // setup, so the section still lands exactly once. Only the runner
+    // (which owns the shared state) requests the install.
+    if (focusState !== undefined) installFocusPrompt(agentCtx, focusState, diag)
+  }
+  if (typeof installSelection === 'function') {
+    return {
+      agentPreset: resolved.id,
+      setup: async (agentCtx: Context, agent: Agent): Promise<void> => {
+        installSelection(agentCtx, agent)
+        await finishSetup(agentCtx)
+      },
+    }
+  }
   return {
     agentPreset: resolved.id,
-    setup: async (agentCtx: Context, agent: Agent): Promise<void> => {
-      installSelection(agentCtx, agent)
-      await presets.mount(agentCtx, resolved.id)
-      // Focus is a TUI surface policy, installed AFTER the preset mount so
-      // it exists consistently across every preset (standard/ptc/minimal/
-      // cordis) without depending on what the preset itself installs
-      // (plan §9.1). A preset recompose that only swaps preset-owned rows
-      // keeps this outer scoped section; a full agent rebuild re-runs this
-      // setup, so the section still lands exactly once. Only the runner
-      // (which owns the shared state) requests the install.
-      if (focusState !== undefined) installFocusPrompt(agentCtx, focusState, diag)
+    setup: async (agentCtx: Context): Promise<void> => {
+      installModelSelection(agentCtx, installSelection)
+      await finishSetup(agentCtx)
     },
   }
 }

@@ -224,6 +224,10 @@ line, such as `@xmoon76/dsh-pi-tui@0.3` for DSH `0.1.1-rc.1`/`rc.2`.
   collision with the TUI's own static command names
   is rejected at registration. The never-wired `argumentProvider` field is removed too (use
   `registerAutocomplete`).
+- **Standalone composition callers retain `ModelSelectionRef` compatibility.** The
+  root `composeAgent(ctx, ref)` form remains supported, and its setup installs
+  the caller-owned selection without requiring an Agent; the Direct runner
+  continues to use the explicit Agent-local installer form.
 
 ## [0.4.3-alpha.2] - 2026-09-08
 

@@ -139,6 +139,9 @@ dsh --profile pi-tui
   已先行刷新，输入归属不受影响，冲突记录在该 contribution 的健康上并按 identity/失败代次提示一次（提示列出该轮全部冲突）；
   TUI 静态命令名冲突则在注册时直接抛错。另外从未接线的 `argumentProvider` 字段一并移除（请用
   `registerAutocomplete`）。
+- **保留 standalone composition caller 的 `ModelSelectionRef` 兼容性。** 根导出的
+  `composeAgent(ctx, ref)` 形式继续可用，返回的 setup 会安装调用方持有的 selection，
+  无需 Agent；Direct runner 继续使用显式 Agent-local installer 形式。
 
 ## [0.4.3-alpha.2] - 2026-09-08
 

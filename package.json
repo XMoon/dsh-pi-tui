@@ -218,7 +218,7 @@
     "gate:pi-surface-compat": "node --test test/pi-component-compat.test.ts",
     "smoke:examples": "node scripts/examples-plugin-smoke.mjs",
     "prepack": "pnpm clean && pnpm clean:fork && pnpm build && pnpm typecheck:bundle && pnpm test:product",
-    "postpack": "node scripts/tarball-smoke.mjs && node scripts/extension-fixture-smoke.mjs && node scripts/advanced-plugin-smoke.mjs && node scripts/phase4-plugin-smoke.mjs && node scripts/unstable-plugin-smoke.mjs && node scripts/vim-plugin-smoke.mjs && node scripts/examples-plugin-smoke.mjs",
+    "postpack": "node scripts/tarball-smoke.mjs && node scripts/extension-fixture-smoke.mjs && node scripts/advanced-plugin-smoke.mjs && node scripts/phase4-plugin-smoke.mjs && node scripts/unstable-plugin-smoke.mjs && node scripts/vim-plugin-smoke.mjs && node scripts/examples-plugin-smoke.mjs && node scripts/compose-agent-compat-smoke.mjs",
     "pack:release": "rm -f xmoon76-dsh-pi-tui-*.tgz && pnpm pack --pack-destination .",
     "release:context": "node scripts/release-context.mjs",
     "release:notes": "node scripts/release-notes.mjs",
