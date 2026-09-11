@@ -145,6 +145,18 @@ export function assistantLatestStepOf(activity: TurnActivity): number | undefine
   return (activity as MutableTurnActivity).lastAssistantStep
 }
 
+/** Whether an Assistant crossed an admitted human-steer boundary and is
+ * therefore a persistent conversation answer rather than Focus process. */
+export function assistantCommittedBeforeSteer(
+  activity: TurnActivity,
+  message: TranscriptMessage,
+): boolean {
+  if (message.kind !== 'assistant') return false
+  const step = assistantStepOf(message)
+  return step !== undefined
+    && (activity as MutableTurnActivity).committedAnswerSteps.has(step)
+}
+
 function rememberAssistantStep(message: Extract<TranscriptMessage, { kind: 'assistant' }>, step: number): void {
   assistantStepIdentities.set(message, step)
 }
@@ -638,6 +650,12 @@ interface MutableTurnActivity {
    * is ignored — it must never corrupt the settled preview (review
    * finding). */
   settledSteps: Set<number>
+  /** The exact previous assistant step that may become persistent when the
+   * next step admits a same-turn human steer. */
+  pendingPreSteerAnswerStep?: number
+  /** Assistant steps that crossed an admitted human-steer boundary and are
+   * therefore persistent conversation answers rather than Focus process. */
+  committedAnswerSteps: Set<number>
   /** The step of the turn's LAST assistant output (streaming or settled)
    * — the turn/end final-answer check compares the candidate's step
    * against this. */
@@ -1393,6 +1411,7 @@ export class TranscriptFolder {
         thinkingTail: '',
         confirmedSteps: new Set(),
         settledSteps: new Set(),
+        committedAnswerSteps: new Set(),
         revision: 0,
       }
       this.activityByTurn.set(turn, activity)
@@ -1705,6 +1724,23 @@ export class TranscriptFolder {
     activity.messageConfirmedStep = candidate.step
     activity.confirmedSteps.add(candidate.step)
     activity.messageCandidate = undefined
+  }
+
+  /** Commit the exact previous text-only answer once its next step admits a
+   * same-turn human steer. It leaves the replay fences intact and only moves
+   * that step out of the transient Message slot. */
+  private commitPreSteerAnswer(activity: MutableTurnActivity): void {
+    const step = activity.pendingPreSteerAnswerStep
+    if (step === undefined) return
+    activity.pendingPreSteerAnswerStep = undefined
+    activity.committedAnswerSteps.add(step)
+    if (activity.messageCandidate?.step === step) activity.messageCandidate = undefined
+    if (activity.messageConfirmedStep === step) {
+      activity.messageConfirmed = undefined
+      activity.messageConfirmedStep = undefined
+    }
+    this.syncMessage(activity)
+    activity.revision += 1
   }
 
   /** Materialize the Message slot from the candidate (running) or the
@@ -3405,6 +3441,18 @@ export class TranscriptFolder {
         // accumulator state (review finding).
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
+        activity.pendingPreSteerAnswerStep = undefined
+        const previousStep = event.data.step - 1
+        if (activity.lastAssistantStep === previousStep
+          && activity.settledSteps.has(previousStep)) {
+          const previous = this.assistantEntries.get(stepKey(event.data.turn, previousStep))
+          if (previous !== undefined && previous.interrupted !== true) {
+            const blocks = assistantEntryBlocks(previous)
+            const visible = assistantBlocksVisibleNow(blocks)
+            const hasToolCall = blocks.some(block => block.type === 'tool-call')
+            if (visible && !hasToolCall) activity.pendingPreSteerAnswerStep = previousStep
+          }
+        }
         this.usage.onStepStart(event.data.turn, event.data.step)
         // Owner lifecycle: the step is now open (plan §5.1). Guarded by the
         // same replay fence as the usage accounting — a late step/start
@@ -3483,6 +3531,11 @@ export class TranscriptFolder {
         // process block must not turn into an empty system row.
         if (event.data.source.kind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break
+          const activity = this.activityFor(this.currentTurn)
+          if (activity.pendingPreSteerAnswerStep !== undefined) {
+            if (isMidTurnSteer) this.commitPreSteerAnswer(activity)
+            else activity.pendingPreSteerAnswerStep = undefined
+          }
           this.appendItem({
             kind: 'user',
             turn: this.currentTurn,
@@ -3863,6 +3916,7 @@ export class TranscriptFolder {
         // leave a stale open step behind (re-projection is idempotent).
         this.workflow.onTurnEnd(endTurn)
         const endActivity = this.activityFor(endTurn)
+        endActivity.pendingPreSteerAnswerStep = undefined
         if (endActivity.completed) break
         // Every still-open thinking entry of THIS turn stops streaming when
         // the turn closes (interrupted steps never see their
