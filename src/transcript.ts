@@ -3582,11 +3582,13 @@ export class TranscriptFolder {
           const activity = this.activityFor(this.currentTurn)
           if (activity.pendingPreSteerAnswerStep !== undefined) {
             const firstVisible = activity.firstVisibleAssistantTimes.get(activity.pendingPreSteerAnswerStep)
+            // Keep an early same-turn steer pending for a later message in
+            // the same admitted next-step batch.
             if (isMidTurnSteer
                && claimedIdentity !== undefined
                && firstVisible !== undefined
                && firstVisible <= claimedIdentity.insertionTime) this.commitPreSteerAnswer(activity)
-            else activity.pendingPreSteerAnswerStep = undefined
+            else if (!isMidTurnSteer) activity.pendingPreSteerAnswerStep = undefined
           }
           this.appendItem({
             kind: 'user',
