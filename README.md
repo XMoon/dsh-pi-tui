@@ -49,7 +49,7 @@ npm install -g @deepseek-ai/dsh@0.1.5-rc.1
 | TUI 包版本 | 对应 DSH 版本 | 说明 |
 |---|---|---|
 | `0.4.1`（已发布 `@latest`） | `>=0.1.2-rc.1` | 历史稳定版；按 0.1.2-rc.1 family 验证 |
-| `0.4.3-alpha.2`（历史 next npm 线） | `>=0.1.3-alpha.2, <0.1.5-alpha.0` | 历史 npm alpha.2 目标；兼容至 0.1.4 runtime |
+| `0.4.3-alpha.2`（历史 next npm 线） | `0.1.3-alpha.2` | 历史 npm alpha.2 目标；最后一个官方兼容 runtime tag |
 | 当前 `next` npm 线（本 checkout；版本 `0.4.3-alpha.3`） | `>=0.1.5-rc.1` | 已发布的 npm rc.1 目标；按精确 0.1.5-rc.1 family 验证 |
 | `0.3.x`（`@0.3`） | `>=0.1.1-rc.1` | 旧运行时兼容线（0.3.0 最低版本） |
 
