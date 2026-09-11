@@ -47,31 +47,18 @@ npm install -g @deepseek-ai/dsh@0.1.5-rc.1
 
 ### DSH/TUI version pairing (important)
 
-| TUI package line | Matching DSH line | Notes |
+| TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.4.1` (published `@latest`) | `>=0.1.2-rc.1` | Historical stable; validated against the rc.1 family |
-| `0.4.3-alpha.2` (historical next npm line) | `0.1.3-alpha.2` | Historical npm alpha.2 target; the last official compatible runtime tag |
-| Current `next` npm line (this checkout; version `0.4.3-alpha.3`) | `>=0.1.5-rc.1` | Published npm rc.1 target; validated against the exact 0.1.5-rc.1 family |
-| `0.3.x` (`@0.3`) | `>=0.1.1-rc.1` | Legacy runtime line (0.3.0 minimum) |
+| `0.4.1` (published `@latest`) | `dsh-v0.1.2-rc.1` | Latest stable line |
+| Current `next` npm line (this checkout; version `0.4.5`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current next line |
 
-Do not mix the stable and `next` lines. The published 0.4.1 stable line
-still uses the 0.1.2-rc.1 family; if you keep a legacy DSH runtime, use the 0.3
-compatibility line below. This `next` checkout declares the published
-`0.1.5-rc.1` npm floor, and older runtimes fail at the normal
-incompatible-runtime boundary. The startup row's compatibility notice is
-best-effort rather than a Loader startup-order guarantee; the suggested upgrade
-target is a published npm version.
-
-```sh
-npm install -g @deepseek-ai/dsh@0.1.1-rc.1
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
-dsh --profile pi-tui
-```
-
-The published `0.4.1` stable line declares `>=0.1.2-rc.1`; this checkout's
-`next` npm line declares `>=0.1.5-rc.1`. `npm install -g` is only for
-installing a published DSH; to install dsh-pi-tui into a DSH profile, you must
-use the `dsh plugin` command.
+Do not mix the stable and `next` lines. The current `next` checkout declares
+the published `0.1.5-rc.1` npm floor; older runtimes fail at the normal
+incompatible-runtime boundary. The startup notice is best-effort rather than a
+Loader startup-order guarantee. See the [full historical compatibility matrix](docs/dsh-compatibility.md)
+for official-tag pairings and fallback commands, and see the [latest `next`
+README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for the current
+integration status.
 
 New agent sessions use the official roster's selected preset id. A custom DSH
 preset literally named `code` is valid and remains `code` when it exists in the

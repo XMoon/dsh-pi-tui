@@ -46,16 +46,16 @@ test('release-notes accepts stable v tags and next-v prerelease tags', (t) => {
   assert.match(readFileSync(next.output, 'utf8'), /English migration note\./)
 })
 
-test('0.4.3-alpha.3 release guidance pins the rc.1 DSH/TUI pairing', (t) => {
+test('0.4.5 release guidance pins the rc.1 DSH/TUI pairing', (t) => {
   const life = testLifecycle(t)
-  const guidance = '\n- @deepseek-ai/dsh@0.1.5-rc.1\n- @xmoon76/dsh-pi-tui@0.4.3-alpha.3\n- @xmoon76/dsh-pi-tui@0.3'
-  const fixture = createFixture(life, { version: '0.4.3-alpha.3', guidance })
-  const result = run(fixture, 'next-v0.4.3-alpha.3')
+  const guidance = '\n- @deepseek-ai/dsh@0.1.5-rc.1\n- @xmoon76/dsh-pi-tui@0.4.5\n- @xmoon76/dsh-pi-tui@0.3'
+  const fixture = createFixture(life, { version: '0.4.5', guidance })
+  const result = run(fixture, 'v0.4.5')
   assert.equal(result.status, 0, result.stderr)
   const body = readFileSync(fixture.output, 'utf8')
   for (const command of [
     '@deepseek-ai/dsh@0.1.5-rc.1',
-    '@xmoon76/dsh-pi-tui@0.4.3-alpha.3',
+    '@xmoon76/dsh-pi-tui@0.4.5',
     '@xmoon76/dsh-pi-tui@0.3',
   ]) {
     assert.ok(body.includes(command), `release body is missing ${command}`)

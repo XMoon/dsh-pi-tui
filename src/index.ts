@@ -996,7 +996,7 @@ function packageVersion(): string {
 /**
  * The welcome card's version line: the installed dsh version plus the
  * bundle's own version (header-badge parity — `dsh-0.1.5-rc.1 ·
- * tui-v0.4.3-alpha.3`). Without a resolvable dsh launcher it degrades to
+ * tui-v0.4.5`). Without a resolvable dsh launcher it degrades to
  * the bundle version alone.
  * @returns the combined version string.
  */

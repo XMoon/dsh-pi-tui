@@ -171,7 +171,7 @@ test('the previous alpha.4/alpha.5 line is rejected by the rc.1 npm gate', (t) =
 })
 
 test('the published floor and future stable lines start normally', (t) => {
-  for (const version of ['0.1.5-rc.1', '0.1.5', '0.2.0']) {
+  for (const version of ['0.1.5-rc.1', '0.1.5-rc.2', '0.1.5', '0.2.0']) {
     const life = testLifecycle(t)
     const launcher = fakeLauncher(life, version)
     try {
@@ -221,7 +221,8 @@ test('incompatibleHarnessMessage is actionable and names both versions', () => {
   assert.ok(message.includes('DeepSeek Harness 0.1.5-rc.1 or later'), 'must name the requirement')
   assert.ok(message.includes('0.1.0-rc.8'), 'must name the installed version')
   assert.ok(message.includes('npm install -g @deepseek-ai/dsh@0.1.5-rc.1'), 'must give the exact npm upgrade')
-  assert.doesNotMatch(message, /compatible TUI line|pinned master source|pinned DSH master source distribution/u, 'must not offer an unvalidated legacy fallback')
+  assert.ok(message.includes('dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.2'), 'must offer the compatible 0.2 fallback for the official rc.8 runtime')
+  assert.doesNotMatch(message, /pinned master source|pinned DSH master source distribution/u, 'must not keep Source Mode wording')
 })
 
 test('bundleVersionLabel falls back to the release line that imposed the requirement', () => {
@@ -247,18 +248,20 @@ test('DSH peer ranges keep the lower-bound compatibility contract', () => {
   }
 })
 
-test('harnessCompatEntryFor preserves historical fallback lines below the published rc.1 floor', () => {
+test('harnessCompatEntryFor follows the official DSH tag matrix below the published rc.1 floor', () => {
+  // These entries correspond to the published dsh-v* tags, not invented versions.
   const matrix: readonly [string, string | undefined][] = [
-    ['0.1.0-rc.8', undefined],
+    ['0.1.0-rc.7', undefined],
+    ['0.1.0-rc.8', '0.2'],
     ['0.1.1-rc.1', '0.3'],
     ['0.1.1-rc.2', '0.3'],
-    ['0.1.2-alpha.1', '0.3'],
+    ['0.1.2-alpha.1', undefined],
     ['0.1.2-alpha.2', '0.4.0-alpha.1'],
     ['0.1.2-alpha.3', '0.4.0-alpha.1'],
     ['0.1.2-alpha.4', '0.4.0-alpha.2'],
     ['0.1.2-alpha.5', '0.4.0-alpha.2'],
     ['0.1.2-rc.1', '0.4.1'],
-    ['0.1.3-alpha.1', '0.4.1'],
+    ['0.1.3-alpha.1', undefined],
     ['0.1.3-alpha.2', '0.4.3-alpha.2'],
     ['0.1.5-alpha.1', undefined],
     ['0.1.5-alpha.2', undefined],
