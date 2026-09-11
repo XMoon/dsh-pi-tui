@@ -48,6 +48,34 @@ test('an explicit npm DSH override rewrites only DSH development packages', (t) 
   assert.equal(packageJson.peerDependencies['@deepseek-ai/dsh-agent'], '>=0.1.5-rc.1')
 })
 
+test('exact-family pinning writes pnpm workspace overrides without changing package metadata', (t) => {
+  const life = testLifecycle(t)
+  const workspace = life.tempDir('dsh-npm-exact-family-test-')
+  writeFileSync(join(workspace, 'package.json'), JSON.stringify({
+    devDependencies: {
+      '@deepseek-ai/dsh-agent': '0.1.5-rc.1',
+      typescript: '5.0.0',
+    },
+  }))
+  writeFileSync(join(workspace, 'pnpm-lock.yaml'), [
+    "  '@deepseek-ai/dsh-agent@0.1.5-rc.1':",
+    "  '@deepseek-ai/dsh-deque@0.1.5-rc.2':",
+    "  '@deepseek-ai/dsh-atomic-write@0.1.2-alpha.2':",
+  ].join('\n'))
+  writeFileSync(join(workspace, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n')
+
+  pinNpmDshDependencies(workspace, '0.1.5-rc.2', { exactFamily: true })
+
+  const packageJson = JSON.parse(readFileSync(join(workspace, 'package.json'), 'utf8'))
+  assert.equal(packageJson.devDependencies['@deepseek-ai/dsh-agent'], '0.1.5-rc.2')
+  assert.equal(packageJson.pnpm, undefined)
+  const workspaceConfig = readFileSync(join(workspace, 'pnpm-workspace.yaml'), 'utf8')
+  assert.ok(workspaceConfig.includes('overrides:\n'))
+  assert.ok(workspaceConfig.includes("'@deepseek-ai/dsh-agent': '0.1.5-rc.2'"))
+  assert.ok(workspaceConfig.includes("'@deepseek-ai/dsh-deque': '0.1.5-rc.2'"))
+  assert.doesNotMatch(workspaceConfig, /dsh-atomic-write/u)
+})
+
 test('CI npm install branches pin the public registry and isolated config', () => {
   const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
   const npmInstallBlocks = workflow.match(/printf 'registry=https:\/\/registry\.npmjs\.org\/\\n' > "\$RUNNER_TEMP\/dsh-npmrc"[\s\S]*?pnpm install --frozen-lockfile/gu) ?? []
@@ -74,6 +102,8 @@ test('CI source preparation and publication have explicit time and registry boun
   assert.match(workflow, /echo "npm_config_userconfig=\$RUNNER_TEMP\/dsh-publish-npmrc"/u)
   assert.doesNotMatch(workflow, /NPM_CONFIG_(?:REGISTRY|USERCONFIG):/u)
   assert.ok(workflow.includes("printf 'registry=https://registry.npmjs.org/\\n' > \"$RUNNER_TEMP/dsh-publish-npmrc\""))
+  assert.match(workflow, /client-family-compat:[\s\S]*?compat:dsh:client-family/u)
+  assert.match(workflow, /publish:[\s\S]*?needs\.client-family-compat\.result == 'success'/u)
 })
 
 test('official preset assembly follows the selected Source/npm distribution lane', () => {

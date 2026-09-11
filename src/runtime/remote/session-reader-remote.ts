@@ -101,14 +101,19 @@ function errorCodeOf(error: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined
 }
 
+const RC1_DISABLED_SEARCH_MESSAGE =
+  'session search failed: SessionQueryError: session search is disabled: '
+  + 'this deployment configures the session-query index with openAt "never"'
+
 function isSearchDisabled(error: unknown): boolean {
   if (errorCodeOf(error) === 'SESSION_QUERY_SEARCH_DISABLED') return true
   // rc1 reports an unmounted dsh-session-query through the generic gateway
-  // error code; only the official capability-unavailable message is mapped,
+  // error code; only the official capability-unavailable messages are mapped,
   // never every gateway/internal failure.
   if (errorCodeOf(error) !== 'gateway/internal') return false
   const message = (error as { readonly message?: unknown }).message
-  return typeof message === 'string' && message.startsWith('session search is unavailable:')
+  return message === RC1_DISABLED_SEARCH_MESSAGE
+    || (typeof message === 'string' && message.startsWith('session search is unavailable:'))
 }
 
 function isRemoteAbort(error: unknown): boolean {
