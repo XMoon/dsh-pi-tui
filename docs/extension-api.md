@@ -169,11 +169,17 @@ entirely on the client (no host descriptor), carried by the required
 `handler`. It is merged into the `/` menu with the host catalog and runs
 locally, never steered.
 
-- **Host authority.** A name the current host catalog resolves is a HOST
+- **Host authority.** A LINE the current host catalog CLAIMS is a host
   command: it executes through the command plane and a contribution can
-  never shadow it — not in the dispatch, and not in the attachment gate
-  (a host command's own `input.attachments` declaration decides whether the
-  composer may attach anything).
+  never shadow it — not in the dispatch, and not in the attachment gate (a
+  host command's own `input.attachments` declaration decides whether the
+  composer may attach anything). The claim belongs to the line, exactly like
+  the DSH decision table: every host command claims its BARE token, and a
+  `leadingInput` descriptor claims its argued line too. An argued line of an
+  execute-kind command (`/compact now`) is not an invocation at all — it is an
+  ordinary submission. A name the host catalog RESOLVES is host territory in
+  both states: the contribution of that name never runs for such a line, and
+  the line is never classified as a local client command.
 - **Two collision mechanisms.** A name owned by the TUI's OWN static catalog
   (`/status`, `/kill`, ...) is rejected at REGISTRATION: `registerCommand`
   throws and the plugin fails to load loudly. A name the SESSION's host
@@ -186,6 +192,12 @@ locally, never steered.
   failed pass. That health record is a best-effort diagnostic: a handler
   failure overlapping a live collision can be masked or cleared by it (see
   the diagnostic-limitation note in `docs/surface-decisions.md`).
+  "The host keeps its claim" is a claim on the LINES its descriptor owns: the
+  bare token for every command, plus the argued line for a `leadingInput` one.
+  A contribution colliding with an execute-kind host command therefore loses
+  that command's ARGUED line as well — the host never claimed it, so neither
+  the host nor the colliding contribution runs it: the line falls through to an
+  ordinary submission.
 - **`sessionless`.** `true` lets the command run before a session exists
   (pure client commands: an overlay toggle, a picker). `false` (default)
   resolves/creates the session first — the host command surface is
@@ -195,6 +207,10 @@ locally, never steered.
   or replaces it during that window, the submission is aborted with a
   `/<name> is no longer available` notice and the draft is restored — the new
   generation's handler never runs, and the line never reaches the model.
+  The session's own catalog is consulted first, in both directions: a command
+  that appears and CLAIMS the line executes it, and a command that resolves the
+  name without claiming the line (an argued line of an execute-kind command)
+  makes the submission an ordinary one — the contribution does not run for it.
 - **`handler`** receives `invocation.rawInput` verbatim, like every other
   command surface.
 

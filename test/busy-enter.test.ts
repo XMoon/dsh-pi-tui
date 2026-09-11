@@ -125,17 +125,25 @@ function fakeTuiSettings(busyEnter: string, localShellSandbox = 'bypass'): { val
 
 /** A fake commands service recording the registered definitions. */
 function fakeCommands() {
-  const defs: { name: string; handler?: unknown }[] = []
+  const defs: { name: string; handler?: unknown; input?: { hint: string; attachments?: boolean } }[] = []
   return {
     defs,
     service: {
-      register: (def: { name: string; handler?: unknown }): (() => void) => {
+      register: (def: { name: string; handler?: unknown; input?: { hint: string; attachments?: boolean } }): (() => void) => {
         defs.push(def)
         return () => {}
       },
       // The completion list mirrors the registry (like the real service's
-      // effective view), so the advertised-claim surface sees registrations.
-      list: () => defs.map(def => ({ name: def.name, description: 'a command', input: { hint: '' } })),
+      // effective view), so the advertised-claim surface sees registrations —
+      // INCLUDING the descriptor's input kind: fabricating an `input` for an
+      // execute-kind command would erase the DSH distinction between a
+      // `leadingInput` command (`/goal <objective>`) and a bare one
+      // (`/compact`) and make the claim tests pass for the wrong reason.
+      list: () => defs.map(def => ({
+        name: def.name,
+        description: 'a command',
+        ...(def.input === undefined ? {} : { input: def.input }),
+      })),
       find: () => undefined,
       execute: async () => undefined,
     },
@@ -451,14 +459,22 @@ test('/settings frame left padding does not activate SettingsList rows (v0.85.1 
   t.app.stop()
 })
 
-test('isHostCommand claims advertised non-skill commands and never skill wrappers (PR115-fix problem 1)', () => {
+test('hostClaimOf claims the LINE an advertised host command owns, never a skill wrapper (PR115-fix problem 1)', () => {
   const t = setup()
-  // A Host command (e.g. /compact) registered by the Host joins the
-  // effective catalog; a snapshot commit refreshes the advertised claims.
+  // A Host command (e.g. /compact) registered by the Host WITHOUT an input
+  // descriptor is execute-kind: it claims the BARE token only, exactly like
+  // the DSH client's `matchEnter` decision table.
   t.commands.service.register({ name: 'compact', handler: () => ({ kind: 'success' }) })
   t.installed.installSnapshot({ commands: [], scopedCommands: [], skills: [], issues: [] })
-  assert.equal(t.installed.isHostCommand('compact'), true,
-    'an advertised Host command must be claimed as a Host command')
+  assert.deepEqual(t.installed.hostClaimOf({ name: 'compact', rawInput: '' }), { claimed: true, attachments: false },
+    'the bare token of an advertised Host command must be claimed')
+  assert.deepEqual(t.installed.hostClaimOf({ name: 'compact', rawInput: ' extra' }), { claimed: false },
+    'an argued line of an execute-kind command is NOT a command invocation')
+  // A leadingInput descriptor claims its argued line too.
+  t.commands.service.register({ name: 'goal', handler: () => ({ kind: 'success' }), input: { hint: '<objective>' } })
+  t.installed.installSnapshot({ commands: [], scopedCommands: [], skills: [], issues: [] })
+  assert.deepEqual(t.installed.hostClaimOf({ name: 'goal', rawInput: ' ship it' }), { claimed: true, attachments: false },
+    'a leadingInput command claims its argued line (without an attachment declaration)')
   // A TUI-owned skill wrapper is advertised too, but it is an agent-facing
   // invocation — never a Host-command claim.
   t.installed.installSnapshot({
@@ -467,16 +483,16 @@ test('isHostCommand claims advertised non-skill commands and never skill wrapper
     skills: [{ name: 'grilling', description: 'a skill' }],
     issues: [],
   })
-  assert.equal(t.installed.isHostCommand('grilling'), false,
+  assert.equal(t.installed.hostClaimOf({ name: 'grilling', rawInput: ' args' }), undefined,
     'a TUI-owned skill wrapper must never be claimed as a Host command')
   // The claim is catalog-driven: a name absent from the effective catalog
   // is not claimed (it keeps the ordinary prompt semantics).
-  assert.equal(t.installed.isHostCommand('not-a-command'), false,
+  assert.equal(t.installed.hostClaimOf({ name: 'not-a-command', rawInput: '' }), undefined,
     'an unadvertised name must not be claimed')
   t.app.stop()
 })
 
-test('isHostCommand keeps HOST AUTHORITY: a client contribution never removes a host claim', () => {
+test('hostClaimOf keeps HOST AUTHORITY: a client contribution never removes a host claim', () => {
   // A client command contribution only ADDS a client-owned name. When the
   // host catalog resolves the same name, the host command keeps its claim —
   // upstream's candidate synthesis fails loud on the collision instead of
@@ -490,14 +506,14 @@ test('isHostCommand keeps HOST AUTHORITY: a client contribution never removes a 
       commands: { find: (name: string) => contributions.get(name) },
     },
   })
-  t.commands.service.register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+  t.commands.service.register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
   t.commands.service.register({ name: 'compact', handler: () => ({ kind: 'success' }) })
   t.installed.installSnapshot({ commands: [], scopedCommands: [], skills: [], issues: [] })
-  assert.equal(t.installed.isHostCommand('deploy'), true,
+  assert.deepEqual(t.installed.hostClaimOf({ name: 'deploy', rawInput: ' prod' }), { claimed: true, attachments: false },
     'a host command keeps its claim even when a client contribution shares the name')
-  assert.equal(t.installed.isHostCommand('compact'), true,
+  assert.deepEqual(t.installed.hostClaimOf({ name: 'compact', rawInput: '' }), { claimed: true, attachments: false },
     'a real Host command stays claimed')
-  assert.equal(t.installed.isHostCommand('panel'), false,
+  assert.equal(t.installed.hostClaimOf({ name: 'panel', rawInput: '' }), undefined,
     'a client-only name is not a host claim (it never entered the host list)')
   t.app.stop()
 })

@@ -34,6 +34,13 @@
 
 ### 改进
 
+- **命令与普通输入按"整行"判定，不再按命令名判定。** DSH 的命令判定表
+  （`CommandDescriptor.input`）区分两类命令：`leadingInput` 命令（如 `/goal`）把参数一起当作调用，
+  无参数命令（如 `/compact`）只有**裸命令**才是调用。此前只要名字出现在命令表里，整行就会走命令
+  通道——`/compact 任意内容` 会被当成命令执行，运行中也不跟随 queue/steer 策略，带图片时还会被按
+  命令附件规则拒绝。现在这类"带参数的无参数命令"与普通提示完全一致：跟随忙碌策略（queue/steer、
+  Ctrl+Enter 取反），图片作为多模态提示进入模型；而 `/compact`、`/goal <objective>`、`/plan <message>`
+  等真正的调用仍然走命令通道，附件规则也只在"这一行确实被命令接管"时生效。
 - **`!`/`!!` 本地 shell 行不再把占位符带进 shell。** 本地 shell 本来就不 admit/consume 草稿，`!echo [image #1]`
   会把占位符当普通 shell 参数执行、图片留在 store 里。现在与其它本地命令一致：直接拒绝，并把草稿（含附件）退回。
 - **命令附件按命令自身的声明处理。** 只有 descriptor 声明了 `input.attachments` 的命令才允许带附件调用；

@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 
+- **Commands are decided by the whole LINE, not by the command name.** The DSH decision table
+  (`CommandDescriptor.input`) distinguishes a `leadingInput` command (e.g. `/goal`), whose arguments are part of the
+  invocation, from an execute-kind one (e.g. `/compact`), where only the BARE token is an invocation. Previously any
+  name present in the command catalog sent the whole line to the command plane — `/compact anything` executed the
+  command, ignored the busy queue/steer policy while running, and was even refused by the command attachment rule when
+  it carried an image. Such a line now behaves exactly like an ordinary prompt: it follows the busy policy
+  (queue/steer, and Ctrl+Enter takes the opposite), and its image is delivered to the model as a multimodal prompt.
+  Real invocations — `/compact`, `/goal <objective>`, `/plan <message>` — still execute through the command plane, and
+  the attachment rule only applies to a line a command actually claims.
 - **`!`/`!!` shell lines refuse attachments instead of passing the placeholder to the shell.** The local shell never
   admitted or consumed drafts, so `!echo [image #1]` used to run with the placeholder as ordinary shell arguments and
   leave the image staged. The line is now refused like any other local command, and the draft comes back with its
