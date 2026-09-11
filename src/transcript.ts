@@ -3587,7 +3587,7 @@ export class TranscriptFolder {
             if (isMidTurnSteer
                && claimedIdentity !== undefined
                && firstVisible !== undefined
-               && firstVisible <= claimedIdentity.insertionTime) this.commitPreSteerAnswer(activity)
+               && firstVisible < claimedIdentity.insertionTime) this.commitPreSteerAnswer(activity)
             else if (!isMidTurnSteer) activity.pendingPreSteerAnswerStep = undefined
           }
           this.appendItem({
