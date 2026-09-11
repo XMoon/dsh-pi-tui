@@ -641,11 +641,10 @@ function makeHarness(home: string, options: {
   const live = new Map<string, Agent>()
   const makeHandle = (session: { id: string; header: { id: string; cwd: string; createdAt: number; version: number } }): { agent: Agent; dispose: () => Promise<void> } => {
     // The structural Agent shape the runner's surface rebuild and the
-    // Direct retirement touch: ctx (get/on/agent), whenIdle, cancel, inbox.
+    // Direct retirement touch: ctx (get/on), whenIdle, cancel, inbox.
     const agentContext = {
       get: () => undefined,
       on: () => () => {},
-      agent: undefined as Agent | undefined,
     }
     let cancelled = false
     let releaseIdle: (() => void) | undefined
@@ -667,7 +666,6 @@ function makeHarness(home: string, options: {
         releaseIdle?.()
       },
     } as unknown as Agent
-    agentContext.agent = agent
     live.set(session.id, agent)
     return { agent, dispose: async () => { live.delete(session.id) } }
   }
@@ -688,11 +686,11 @@ function makeHarness(home: string, options: {
     },
   }
   const agents = {
-    resume: async ({ resumeSessionId, setup }: { resumeSessionId: unknown; setup?: (agentCtx: unknown) => unknown }) => {
+    resume: async ({ resumeSessionId, setup }: { resumeSessionId: unknown; setup?: (agentCtx: unknown, agent: Agent) => unknown }) => {
       const session = persisted.get(String(resumeSessionId))
       if (session === undefined) throw new Error(`unknown test session ${String(resumeSessionId)}`)
       const handle = makeHandle(session)
-      await setup?.(handle.agent.ctx)
+      await setup?.(handle.agent.ctx, handle.agent)
       return handle
     },
     create: async ({ sessionId }: { sessionId: unknown }) => {

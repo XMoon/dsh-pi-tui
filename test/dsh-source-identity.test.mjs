@@ -262,9 +262,9 @@ test('source verification delegates packing to the dedicated pack script', () =>
 })
 
 test('official preset npm target uses the checkout npm dependency version', () => {
-  assert.equal(currentValidatedDshVersion(), '0.1.3-alpha.1')
-  assert.equal(npmDshVersion(), '0.1.3-alpha.2')
-  assert.equal(npmDshVersion({ devDependencies: { '@deepseek-ai/dsh-agent': '0.1.3-alpha.2' } }), '0.1.3-alpha.2')
+  assert.equal(currentValidatedDshVersion(), '0.1.5-rc.1')
+  assert.equal(npmDshVersion(), '0.1.5-rc.1')
+  assert.equal(npmDshVersion({ devDependencies: { '@deepseek-ai/dsh-agent': '0.1.5-rc.1' } }), '0.1.5-rc.1')
   assert.throws(() => npmDshVersion({ devDependencies: { '@deepseek-ai/dsh-agent': 'workspace:*' } }), /exact SemVer/u)
 })
 

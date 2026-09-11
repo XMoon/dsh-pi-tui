@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
-import { cpSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
@@ -47,32 +46,21 @@ test('release-notes accepts stable v tags and next-v prerelease tags', (t) => {
   assert.match(readFileSync(next.output, 'utf8'), /English migration note\./)
 })
 
-test('current 0.4.3-alpha.2 release body carries the DSH/TUI install pairing', () => {
-  // The NEXT prerelease line documents its published 0.1.3-alpha.2 target
-  // while the peer floor stays >=0.1.3-alpha.2; the release body must carry
-  // the copy-paste install commands. (This test validates the live repository
-  // state, so it follows the current package.json version — the historical
-  // prerelease pairings are pinned by the fixture-based tests below.)
-  const output = join(tmpdir(), `dsh-pi-tui-release-notes-${process.pid}.md`)
-  try {
-    const result = spawnSync(
-      process.execPath,
-      [join(repo, 'scripts/release-notes.mjs'), 'next-v0.4.3-alpha.2', output],
-      { cwd: repo, encoding: 'utf8' },
-    )
-    assert.equal(result.status, 0, result.stderr)
-    const body = readFileSync(output, 'utf8')
-    for (const command of [
-      '@deepseek-ai/dsh@0.1.3-alpha.2',
-      '@xmoon76/dsh-pi-tui@0.4.3-alpha.2',
-      '@xmoon76/dsh-pi-tui@0.3',
-    ]) {
-      assert.ok(body.includes(command), `release body is missing ${command}`)
-    }
-    assert.doesNotMatch(body, /@xmoon76\/dsh-pi-tui@(latest|next)/u)
-  } finally {
-    rmSync(output, { force: true })
+test('0.4.3-alpha.3 release guidance pins the rc.1 DSH/TUI pairing', (t) => {
+  const life = testLifecycle(t)
+  const guidance = '\n- @deepseek-ai/dsh@0.1.5-rc.1\n- @xmoon76/dsh-pi-tui@0.4.3-alpha.3\n- @xmoon76/dsh-pi-tui@0.3'
+  const fixture = createFixture(life, { version: '0.4.3-alpha.3', guidance })
+  const result = run(fixture, 'next-v0.4.3-alpha.3')
+  assert.equal(result.status, 0, result.stderr)
+  const body = readFileSync(fixture.output, 'utf8')
+  for (const command of [
+    '@deepseek-ai/dsh@0.1.5-rc.1',
+    '@xmoon76/dsh-pi-tui@0.4.3-alpha.3',
+    '@xmoon76/dsh-pi-tui@0.3',
+  ]) {
+    assert.ok(body.includes(command), `release body is missing ${command}`)
   }
+  assert.doesNotMatch(body, /@xmoon76\/dsh-pi-tui@(latest|next)/u)
 })
 
 test('0.4 release guidance pins the exact release TUI version', (t) => {

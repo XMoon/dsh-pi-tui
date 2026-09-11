@@ -7,16 +7,17 @@ boundary.
 
 | dsh-pi-tui line | DeepSeek Harness line | Policy |
 |---|---|---|
-| `0.3.x` | `0.1.1-rc.2` | Supported legacy runtime line |
+| `0.3.x` | `>=0.1.1-rc.1` | Supported legacy runtime line (0.3.0 minimum) |
 | `0.4.1` (published) | `>=0.1.2-rc.1` | Historical stable; validated against the rc.1 DSH family |
-| `0.4.3-alpha.2` (next npm line; this checkout) | `>=0.1.3-alpha.2` | Published npm alpha.2 target; validated against the exact `0.1.3-alpha.2` npm family |
+| `0.4.3-alpha.2` (historical next npm line) | `>=0.1.3-alpha.2` | Historical npm alpha.2 target; validated against the exact `0.1.3-alpha.2` npm family |
+| `0.4.3-alpha.3` (current next npm line; this checkout) | `>=0.1.5-rc.1` | Published npm rc.1 target; validated against the exact `0.1.5-rc.1` npm family |
 | `0.4.0-alpha.2` | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; validated the alpha.4/alpha.5 DSH family |
 | `0.4.0-alpha.1` | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 DSH family |
 
 The published 0.4.1 line has no 0.1.1 runtime shim. An old Harness remains
 outside its supported peer window and must fail at the normal incompatible-
 runtime boundary. The current `next` checkout raises that floor to the
-published npm `0.1.3-alpha.2` release. Its startup notice is best-effort because
+published npm `0.1.5-rc.1` release. Its startup notice is best-effort because
 Loader rows mount concurrently. The floor is a registry release, so the notice
 suggests the exact npm upgrade target.
 
@@ -30,7 +31,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 
 The current `next` checkout is npm mode. Use the isolated npm driver, which
 installs the exact DSH version declared by the checkout's `package.json`
-(`0.1.3-alpha.2`) from the public registry and exercises the TUI build/test/
+(`0.1.5-rc.1`) from the public registry and exercises the TUI build/test/
 package path:
 
 ```sh
@@ -40,13 +41,13 @@ pnpm compat:dsh:npm
 The startup notice on an old runtime suggests the exact published upgrade:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+npm install -g @deepseek-ai/dsh@0.1.5-rc.1
 ```
 
 If the legacy DSH runtime must be kept, use the compatible 0.3 TUI line:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+npm install -g @deepseek-ai/dsh@0.1.1-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 ```
 
@@ -55,7 +56,7 @@ historical lower-bound contract `>=0.1.2-rc.1`. A Harness on the alpha.2/alpha.3
 baseline uses `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, and alpha.4/alpha.5 uses
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.2` — the last published lines that accept them.
 The current npm-mode checkout is separate: its peer floor is
-`>=0.1.3-alpha.2`, and its exact npm family is verified by the frozen lockfile.
+`>=0.1.5-rc.1`, and its exact npm family is verified by the frozen lockfile.
 
 Note that `npm install -g @deepseek-ai/dsh` without an explicit version follows
 npm's `latest` dist-tag, which may be an older runtime line. Always name a
@@ -72,11 +73,12 @@ event wins.
 
 The canonical shipped preset ids are `standard`, `ptc`, `minimal`, and `cordis`,
 resolved from DSH's official shipped root. No local preset copy or `code` runtime
-alias is shipped. DSH's user preset namespace still permits a custom preset
-literally named `code`: explicit input and durable state preserve `code` when
-that roster entry exists. Only an omitted legacy default or session value is
-mapped to `ptc` after the current roster proves that `code` is absent; new
-command/config writes are validated against the roster before they are saved.
+alias is shipped. DSH's V2→V3 migration owns historical session header and
+`agent-preset/selected` conversion from `code` to `ptc`; the current projection
+therefore preserves a native custom preset literally named `code`. Only an
+omitted legacy settings default is mapped to `ptc` after the current roster
+proves that `code` is absent; new command/config writes are validated against the
+roster before they are saved.
 
 ## Source Mode validation
 

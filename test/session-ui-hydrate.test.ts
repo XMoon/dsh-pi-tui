@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { computeStats } from '../src/stats.ts'
 import { hydrateSessionUi } from '../src/session-ui-hydrate.ts'
 import { foldTranscript } from '../src/transcript.ts'
@@ -13,7 +13,7 @@ function event<K extends string>(
   data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
 ): SessionEvent {
-  return { type, seq, time: 1_700_000_000_000 + seq * 1000, data } as SessionEvent
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq * 1000, data } as SessionEvent
 }
 
 test('hydrates transcript and stats projections from the same event log', () => {

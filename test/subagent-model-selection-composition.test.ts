@@ -4,7 +4,7 @@
  * standard-composed Session's `subagent` tool must actually expose
  * provider/model/reasoning_effort plus `list_subagent_models` — the exact
  * capability that supersedes the legacy `subagent_route` routing. The stack
- * is the REAL alpha.4 host: the settings service, the
+ * is the REAL rc.1 host: the settings service, the
  * subagent-model-selection-settings service, the Agent registry, the
  * subagent runtime with the in-process spawn provider, and the real
  * tool-subagent plugin mounted with `modelSelectionSettings: true` (the
@@ -27,7 +27,6 @@ import { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as tool from '@deepseek-ai/dsh-tool-subagent'
@@ -71,7 +70,6 @@ async function boot(): Promise<Context> {
   await ctx.plugin(MemorySettings)
   await ctx.plugin(SubagentModelSelectionConfig)
   await mountAgentLoopTestDependencies(ctx)
-  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })

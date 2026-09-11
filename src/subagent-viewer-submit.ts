@@ -1,7 +1,7 @@
 /**
  * The interactive subagent viewer's HUMAN PROMPT delivery seam — the pure,
  * dependency-injected layer between TuiApp's semantic submit event and the
- * DSH official subagent control API (plan §17; DSH 0.1.2-alpha.4). It owns
+ * DSH official subagent control API (plan §17; DSH 0.1.5-rc.1). It owns
  * validation, the `ctx.subagents.prompt(...)` call, and error
  * classification; the runner owns the surface effects (draft restore,
  * notices, stale-viewer guards).
@@ -14,7 +14,7 @@
  * submitSubagentPrompt(...)
  *   ↓ canonicalize the TUI @-mention grammar (client-owned, Host-neutral)
  *   ↓ ctx.subagents.prompt({ requestId, parentSessionId, childSessionId,
- *                           mode: 'continuable', content }, signal)
+ *                           mode: 'continuable', delivery: 'queue', content }, signal)
  *   ↓ child Agent inbox (the ONLY queue — a distinct FIFO turn)
  * ```
  *
@@ -31,8 +31,8 @@
  */
 
 /** One human-authored content part for a viewer prompt. The DTO mirrors
- * the official `PromptContentPart` vocabulary (alpha.4's official
- * `prompt()` admits image parts through the Host attachment store), so the
+ * the official `PromptContentPart` vocabulary from the DSH subagent API;
+ * `prompt()` admits image parts through the Host attachment store, so the
  * delivery contract is not locked to text-only — the viewer's image intake
  * joins in a later milestone without another port change. */
 export type SubagentPromptContentPart =
@@ -57,8 +57,8 @@ export interface SubagentViewerSubmitRequest {
  * a package dependency; the service resolves from the dsh installation).
  * The request shape is the official `SubagentPromptRequest` vocabulary:
  * caller-minted `requestId`, durable parent/child address, the required
- * `continuable` discriminator, prompt parts, and the optional browser
- * zone. */
+ * `continuable` discriminator, explicit FIFO `queue` delivery, prompt parts,
+ * and the optional browser zone. */
 export interface SubagentPromptService {
   prompt(
     request: {
@@ -66,6 +66,7 @@ export interface SubagentPromptService {
       readonly parentSessionId: string
       readonly childSessionId: string
       readonly mode: 'continuable'
+      readonly delivery: 'queue'
       readonly content: readonly SubagentPromptContentPart[]
       readonly clientTimeZone?: string
     },
@@ -225,6 +226,7 @@ export async function submitSubagentPrompt(
         parentSessionId: request.parentSessionId,
         childSessionId: request.childSessionId,
         mode: 'continuable',
+        delivery: 'queue',
         content: canonical,
       },
       signal,

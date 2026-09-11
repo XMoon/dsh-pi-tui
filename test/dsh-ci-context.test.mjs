@@ -9,7 +9,7 @@ import {
   resolveDshMode,
 } from '../scripts/dsh-ci-context.mjs'
 
-const nextSha = 'd347e703908d0406b7a7ef80e3a0e594d86b2215'
+const nextSha = '183f08e9c6dde7e36cd2318eaee70b0da08fb35e'
 
 /** A temp mode-config file with the given mode (the tracked policy is
  * injectable so the source branch of the resolver is testable without
@@ -25,7 +25,7 @@ function tempModeConfig(mode, life) {
 
 test('DSH mode resolver follows the tracked policy for next, npm elsewhere', () => {
   // The tracked test/compat/dsh-mode.json currently says npm: next events
-  // (the 1.3 line) run the published npm alpha.2 distribution.
+  // run the published npm rc.1 distribution.
   assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/next' }), 'npm')
   assert.equal(resolveDshMode({ eventName: 'pull_request', ref: 'refs/pull/1/merge', baseRef: 'next' }), 'npm')
   assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/main' }), 'npm')
@@ -66,22 +66,22 @@ test('context uses the current DSH target in every mode and exposes the source p
   const life = testLifecycle(t)
   const main = resolveDshContext({ eventName: 'push', ref: 'refs/heads/main' })
   assert.equal(main.mode, 'npm')
-  assert.equal(main.version, '0.1.3-alpha.2')
+  assert.equal(main.version, '0.1.5-rc.1')
   assert.equal(main.sourceRef, '')
   assert.equal(main.sourceExpectedVersion, '')
 
-  // The tracked policy routes next (the 1.3 line) to the published npm
-  // alpha.2 distribution; the source pin is exposed only in source mode.
+  // The tracked policy routes next to the published npm rc.1 distribution;
+  // the source pin is exposed only in source mode.
   const source = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next' })
   assert.equal(source.mode, 'npm')
-  assert.equal(source.version, '0.1.3-alpha.2')
+  assert.equal(source.version, '0.1.5-rc.1')
   assert.equal(source.sourceRef, '')
   assert.equal(source.sourceExpectedVersion, '')
 
   // A PR targeting next resolves the same npm context.
   const pr = resolveDshContext({ eventName: 'pull_request', ref: 'refs/pull/94/merge', baseRef: 'next' })
   assert.equal(pr.mode, 'npm')
-  assert.equal(pr.version, '0.1.3-alpha.2')
+  assert.equal(pr.version, '0.1.5-rc.1')
 
   // The injectable policy still overrides for other branches.
   const { path } = tempModeConfig('source', life)

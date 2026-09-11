@@ -21,7 +21,6 @@ import {
   projectionBatch,
   type SessionProjectionCacheLike,
   type SessionProjectionReaderLike,
-  type SessionReaderDiagLike,
 } from './session-projection-direct.ts'
 import {
   errorCodeOf,
@@ -92,9 +91,6 @@ export interface DirectSessionLiveResolvers {
   flushSession?(session: unknown): Promise<void>
 }
 
-/** The diagnostics sink for isolated per-row projection failures. */
-export type SessionReaderDiag = SessionReaderDiagLike
-
 /** Read the optional activity projection without activating a cold Session.
  * Missing projection capability, seeded headers without an exact cut, and
  * derived-cache failures all safely fall back to header creation time. */
@@ -126,7 +122,6 @@ function activityTimestamp(
 export class DirectSessionReader implements SessionReader {
   private readonly ctx: HostContextLike
   private readonly liveResolvers: DirectSessionLiveResolvers | undefined
-  private readonly diag: SessionReaderDiagLike | undefined
   /**
    * The most recent listing's complete `SessionHeader` values, keyed by
    * session id. `projectionBatch` reads the projection-cache hint from these
@@ -137,10 +132,9 @@ export class DirectSessionReader implements SessionReader {
    */
   private headerSnapshot = new Map<string, SessionHeader>()
 
-  constructor(ctx: HostContextLike, liveResolvers?: DirectSessionLiveResolvers, diag?: SessionReaderDiagLike) {
+  constructor(ctx: HostContextLike, liveResolvers?: DirectSessionLiveResolvers) {
     this.ctx = ctx
     this.liveResolvers = liveResolvers
-    this.diag = diag
   }
 
   private liveAgent(sessionId: string): LiveAgentLike | undefined {
@@ -170,23 +164,6 @@ export class DirectSessionReader implements SessionReader {
       }
     }
     return undefined
-  }
-
-  private async presetRosterIds(signal?: AbortSignal): Promise<readonly string[] | undefined> {
-    const presets = this.ctx.get('agentPresets') as { list(): Promise<readonly { id: string }[]> } | undefined
-    if (presets === undefined) return undefined
-    signal?.throwIfAborted()
-    try {
-      const roster = await presets.list()
-      signal?.throwIfAborted()
-      return roster.map(preset => preset.id)
-    } catch {
-      signal?.throwIfAborted()
-      // A failed roster read must not turn a lightweight picker into a hard
-      // failure. Cold rows remain fail-closed if their projection cannot be
-      // resolved; the batch caller can still show all session identities.
-      return undefined
-    }
   }
 
   /** List the master-visible semantic session roster: live rows are retained
@@ -252,8 +229,6 @@ export class DirectSessionReader implements SessionReader {
       headerOf: id => this.headerSnapshot.get(id),
       liveSessionOf: id => this.liveSession(id),
       livePresetOf: id => this.livePreset(id),
-      rosterIds: signal => this.presetRosterIds(signal),
-      diag: this.diag,
     }, signal)
   }
 

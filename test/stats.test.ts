@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MessageId, type AssistantStreamRecord, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { computeStats, formatStats, StatsFolder, type SessionStats } from '../src/stats.ts'
 import { StepUsageAccumulator } from '../src/token-usage.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
@@ -26,7 +26,7 @@ function event<K extends string>(
   seq: number,
   time = 1_700_000_000_000 + seq * 1000,
 ): SessionEvent {
-  return { type, seq, time, data } as SessionEvent
+  return { type, seq: SessionSeq(seq), time, data } as SessionEvent
 }
 
 /** One Session v2 live chunk input (the transient plane replaces durable
@@ -118,7 +118,7 @@ test('replacement surface messages do not mutate either stats fold', () => {
       usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 25 },
       stream: [],
     }, 1, t + 100),
-    surfaceOp: { op: 'replace', start: 0, end: 0 },
+    surfaceOp: { op: 'replace', startSeq: SessionSeq(0), endSeq: SessionSeq(0) },
   } as SessionEvent
   const log = [event('step/start', { turn: 0, step: 0 }, 0, t), replacement]
   const folded = computeStats(log)

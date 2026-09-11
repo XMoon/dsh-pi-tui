@@ -10605,7 +10605,7 @@ export class TuiApp {
       }
       card.addChild(new Text(rows.join('\n'), 0, 0))
     }
-    // PTC nested sub-calls (alpha.2 tool/code-dispatch events): recursively
+    // PTC nested sub-calls (`tool/ptc-dispatch` events): recursively
     // attached to the parent card, never top-level surface items. The child
     // tree is ALWAYS visible under the parent — the root Code disclosure
     // only controls the run_code program/details, never the sub-calls. The

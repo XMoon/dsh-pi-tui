@@ -8,7 +8,7 @@ import { ProcessTerminal } from '@xmoon76/pi-tui'
 import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SESSION_FORMAT_VERSION, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, type Config } from '../src/index.ts'
 import { foldPendingModelSelection } from '../src/model-selection.ts'
 import { StatsFolder } from '../src/stats.ts'
@@ -36,7 +36,7 @@ function event<K extends string>(
 ): SessionEvent {
   return {
     type,
-    seq,
+    seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq * 1000,
     data,
     ...(surfaceOp === undefined ? {} : { surfaceOp }),
@@ -98,7 +98,7 @@ function liveAgentOf(harness: RunnerHarness, sessionId: string): unknown {
 function modelEvent(type: 'model/selection' | 'request/header', data: unknown, seq: number): SessionEvent {
   return {
     type,
-    seq,
+    seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq * 1000,
     data,
   } as unknown as SessionEvent
@@ -146,7 +146,7 @@ function sessionEvents(text: string): SessionEvent[] {
   ]
 }
 
-/** A FakeSession literal before the alpha.4 log accessors are attached. */
+/** A FakeSession literal before the current log accessors are attached. */
 interface FakeSessionInit {
   id: string
   header: {
@@ -162,7 +162,7 @@ interface FakeSessionInit {
   append?: (type: string, data: unknown, options?: { surfaceOp?: 'append' }) => unknown
 }
 
-/** The alpha.4 Session shape: the backing log is PRIVATE — production code
+/** The current Session shape: the backing log is PRIVATE — production code
  * sees only `seq` / `eventAt` / `snapshotEvents`, so a mock can never again
  * mask old `Session.events` API drift (compatibility-plan B4). */
 interface FakeSession {
@@ -182,7 +182,7 @@ interface FakeSession {
   append?(type: string, data: unknown, options?: { surfaceOp?: 'append' }): unknown
 }
 
-/** Build the alpha.4 Session mock over a private backing log. */
+/** Build the current Session mock over a private backing log. */
 function fakeSession(init: FakeSessionInit): FakeSession {
   const events = [...init.events]
   return {
@@ -231,11 +231,10 @@ interface RunnerHarness {
 
 function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<void>, retirementEvents?: string[]): Agent {
   // A small structural Agent context is sufficient for the Direct setup
-  // callbacks and lets the harness expose the public `ctx.agent` setup seam.
+  // callbacks.
   const agentContext = {
     get: () => undefined,
     on: () => () => {},
-    agent: undefined as Agent | undefined,
   }
   // cancel is idempotent and BREAKS a pending whenIdle (the real Agent
   // contract): a cancelled agent's whenIdle settles immediately, which is
@@ -265,7 +264,6 @@ function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<void>, ret
       releaseIdle?.()
     },
   } as unknown as Agent
-  agentContext.agent = agent
   return agent
 }
 
@@ -330,20 +328,20 @@ function makeHarness(
     },
   }
   const agents = {
-    resume: async ({ resumeSessionId, setup, signal }: { resumeSessionId: unknown; setup?: (agentCtx: unknown) => unknown; signal?: AbortSignal }) => {
+    resume: async ({ resumeSessionId, setup, signal }: { resumeSessionId: unknown; setup?: (agentCtx: unknown, agent: Agent) => unknown; signal?: AbortSignal }) => {
       resumeSignals.push(signal)
       if (resumeError !== undefined) throw resumeError
       const session = persisted.get(String(resumeSessionId))
       if (session === undefined) throw new Error(`unknown test session ${String(resumeSessionId)}`)
       const handle = makeHandle(session)
-      await setup?.(handle.agent.ctx)
+      await setup?.(handle.agent.ctx, handle.agent)
       await resumeGate?.(String(resumeSessionId))
       return handle
     },
     create: async ({ sessionId, agentOptions, setup, seed, inheritedEventCount, signal }: {
       sessionId: unknown
       agentOptions?: { provider?: string; model?: string }
-      setup?: (agentCtx: unknown) => unknown
+      setup?: (agentCtx: unknown, agent: Agent) => unknown
       seed?: readonly SessionEvent[]
       inheritedEventCount?: number
       signal?: AbortSignal
@@ -361,7 +359,7 @@ function makeHarness(
       createdSessions.push(session)
       persisted.set(id, session)
       const handle = makeHandle(session)
-      await setup?.(handle.agent.ctx)
+      await setup?.(handle.agent.ctx, handle.agent)
       return handle
     },
     get: (id: string) => live.get(id),

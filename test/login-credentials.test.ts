@@ -479,6 +479,29 @@ test('/login wizard reports a profile that persisted but whose key write failed'
   t.app.stop()
 })
 
+test('/login add-provider rejects invalid base URLs before discovery or persistence', async () => {
+  let baseURL = ''
+  const t = setup({
+    llm: fakeLlm([]),
+    questions: () => [
+      { id: 'api', selected: ['openai-completions'], custom: '' },
+      { id: 'baseURL', selected: [], custom: baseURL },
+      { id: 'displayName', selected: [], custom: '' },
+      { id: 'key', selected: [], custom: 'sk-acme' },
+    ],
+  })
+  for (const candidate of ['gateway.example.com/v1', 'ftp://example.com', 'https://']) {
+    baseURL = candidate
+    const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme-gateway')
+    assert.equal(result.kind, 'error')
+    assert.match(result.text ?? '', /invalid base URL/)
+    assert.equal(t.llm!.probes.length, 0, `${candidate} must fail before model discovery`)
+    assert.equal(t.settings!.mutations.length, 0, `${candidate} must fail before profile persistence`)
+    assert.deepEqual(t.credentials.sets, [], `${candidate} must fail before credential persistence`)
+  }
+  t.app.stop()
+})
+
 test('/login Add New Platform rejects a malformed route id', async () => {
   // Picker selects the Add New Platform row; the wizard's route question is
   // answered with a digit-leading id, which fails ROUTE_PATTERN.

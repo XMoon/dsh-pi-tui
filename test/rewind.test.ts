@@ -17,7 +17,7 @@ import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { SessionHandle } from '../src/runtime/session-lifecycle-port.ts'
@@ -66,7 +66,7 @@ function event<K extends string>(
   data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
 ): SessionEvent {
-  return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
 }
 
 function turnStart(seq: number, turn: number): SessionEvent {
@@ -151,7 +151,7 @@ test('R03: log-only state events between turns stay in the seed', () => {
   const events = [
     ...turn(0, 1, 'A'),
     event('todo/write', { todos: [] }, 4),
-    { type: 'permission/preset', seq: 5, time: 1_700_000_000_005, data: { agentPreset: 'standard' } } as SessionEvent,
+    { type: 'permission/preset', seq: SessionSeq(5), time: 1_700_000_000_005, data: { preset: 'standard' } } as SessionEvent,
     ...turn(6, 2, 'B'),
   ]
   const candidates = collectRewindCandidates(events)
@@ -200,11 +200,11 @@ test('R06: steers inside one turn do not create new rewind points', () => {
 test('R07: compaction-shadowed history still yields candidates from the raw log', () => {
   // The raw append-only log keeps the ORIGINAL user events even after a
   // compaction replacement — the source of truth is the session log
-  // (served through the alpha.4 snapshot reads), never the folded surface
+  // (served through snapshot reads), never the folded surface
   // projection. Compaction events are structural (dsh-compaction augments
   // the map; the transcript treats them the same).
   const compaction = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
-    ({ type, seq, time: 1_700_000_000_000 + seq, data }) as SessionEvent
+    ({ type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data }) as SessionEvent
   const events = [
     ...turn(0, 1, 'old prompt'),
     compaction('compaction/start', { id: 'c1' }, 4),
@@ -386,7 +386,7 @@ function makeRig(options: {
 }
 
 function sourceAgent(sessionId = 'session-source', events: readonly SessionEvent[] = [], agentPreset?: string, cwd = '/ws'): Agent {
-  // The alpha.4 Session shape: the log is served through the snapshot
+  // The current Session shape: the log is served through the snapshot
   // reads (the comment at the fold below still explains WHY the log is
   // the source of truth — the accessor, not the field).
   return {

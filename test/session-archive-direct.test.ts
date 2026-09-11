@@ -22,7 +22,7 @@ import { DirectSessionArchive } from '../src/runtime/direct/session-archive-dire
 /** One stored logical session log served by the fake persistence backend. */
 interface StoredLog {
   readonly header: {
-    version: 2
+    version: 3
     id: ReturnType<typeof SessionId>
     createdAt: number
     isSeeded: boolean
@@ -35,7 +35,7 @@ interface StoredLog {
 
 function header(id: string, parentSession?: string): StoredLog['header'] {
   return {
-    version: 2,
+    version: 3,
     id: SessionId(id),
     createdAt: 1000,
     isSeeded: false,
@@ -58,10 +58,10 @@ function readHandle(stored: StoredLog) {
     inheritedEventCount: 0,
     read: async () => {
       const events = structuredClone(stored.events)
-      // The upstream read contract differs across DSH distributions: the npm
-      // 0.1.3-alpha.2 line destructures `{ events }` from the detached read
-      // result, while the pinned source line (0.1.3-alpha.1) consumes the
-      // events array directly. Return a shape satisfying BOTH (an array
+      // The upstream read contract differs across DSH distributions: some
+      // lines destructure `{ events }` from the detached read result, while
+      // others consume the events array directly. Return a shape satisfying
+      // BOTH (an array
       // that also carries the detached `events` property), so the adapter
       // contract test is distribution-agnostic.
       return Object.assign(events, { eventState: 'detached', events })
@@ -279,11 +279,11 @@ test('integration: the produced ZIP contains the root log, a descendant log and 
   if (result.kind !== 'ready') return
   const entries = await archiveEntries(result.artifact.stream)
   // Root log under the canonical session filename.
-  const rootEntry = entries.get('session.v2.jsonl')
+  const rootEntry = entries.get('session.v3.jsonl')
   assert.ok(rootEntry !== undefined, 'root log entry present')
   assert.ok(new TextDecoder().decode(rootEntry).includes('session-root'), 'root log names the root session')
   // Descendant log under subagents/<id>/.
-  const childEntry = entries.get('subagents/session-child/session.v2.jsonl')
+  const childEntry = entries.get('subagents/session-child/session.v3.jsonl')
   assert.ok(childEntry !== undefined, 'descendant log entry present (descendants=true)')
   assert.ok(new TextDecoder().decode(childEntry).includes('session-child'), 'descendant log names the child')
   // Generic file under files/<prefix>/<digest>/<name>.

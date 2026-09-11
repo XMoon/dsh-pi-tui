@@ -26,7 +26,6 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -996,8 +995,8 @@ function packageVersion(): string {
 
 /**
  * The welcome card's version line: the installed dsh version plus the
- * bundle's own version (header-badge parity — `dsh-0.1.3-alpha.2 ·
- * tui-v0.4.3-alpha.2`). Without a resolvable dsh launcher it degrades to
+ * bundle's own version (header-badge parity — `dsh-0.1.5-rc.1 ·
+ * tui-v0.4.3-alpha.3`). Without a resolvable dsh launcher it degrades to
  * the bundle version alone.
  * @returns the combined version string.
  */
@@ -1437,7 +1436,7 @@ export interface AgentComposition {
   /** Preset id for the session header, absent when the deployment composes no roster. */
   agentPreset?: string
   /** Agent-factory setup: model selection, then the preset mount when composed. */
-  setup: (agentCtx: Context) => Promise<void> | void
+  setup: (agentCtx: Context, agent: Agent) => Promise<void> | void
 }
 
 /**
@@ -1454,9 +1453,7 @@ export interface AgentComposition {
  * host composition, which is the behavior before presets existed.
  * @param ctx - the runner context (services read through `ctx.get`).
  * @param installSelection - installs a fresh Agent-local model selection ref
- *   during setup. A ModelSelectionRef is still accepted for source
- *   compatibility with standalone composition callers; the runner always
- *   supplies the Agent-local installer.
+ *   during setup using the explicit Agent identity supplied by DSH.
  * @param presetId - the requested preset, or `undefined` for the default.
  * @param focusState - the shared Focus runtime state (STRUCTURAL on
  *   purpose: the public declaration bundle must not inline src/focus.ts —
@@ -1471,25 +1468,19 @@ export interface AgentComposition {
  */
 export async function composeAgent(
   ctx: Context,
-  installSelection: ((agentCtx: Context) => void) | ModelSelectionRef,
+  installSelection: (agentCtx: Context, agent: Agent) => void,
   presetId?: string,
   focusState?: { enabled: boolean },
   diag?: Diag,
 ): Promise<AgentComposition> {
   const presets = ctx.get('agentPresets')
-  // Keep the old public helper shape usable by headless composition callers,
-  // but make the runner's production path pass an installer that creates a
-  // distinct ref for the Agent being composed.
-  const install = typeof installSelection === 'function'
-    ? installSelection
-    : (agentCtx: Context): void => { installModelSelection(agentCtx, installSelection) }
   if (presets === undefined) {
     if (presetId === 'code') {
       throw new Error('preset "code" is unavailable in this deployment; use a configured preset')
     }
     return {
-      setup: (agentCtx: Context): void => {
-        install(agentCtx)
+      setup: (agentCtx: Context, agent: Agent): void => {
+        installSelection(agentCtx, agent)
         // Focus is a TUI surface policy: install it only when the runner
         // supplied the shared state (other callers — the headless tests —
         // keep the plain composition).
@@ -1498,16 +1489,16 @@ export async function composeAgent(
     }
   }
   // DSH allows a user preset literally named `code`. Resolve the real roster
-  // entry first; only an omitted persisted default falls back from old pi-tui
-  // `code` data to the canonical `ptc` preset.
+  // entry first; DSH's V2→V3 migration owns historical session conversion, and
+  // only an omitted legacy settings default may use the `ptc` fallback.
   const resolved = await resolvePresetRequest(presets, presetId)
   // The resolver returns the concrete roster identity, including a legitimate
   // custom `code` entry. The only compatibility rewrite is inside the shared
   // omitted-default resolver above.
   return {
     agentPreset: resolved.id,
-    setup: async (agentCtx: Context): Promise<void> => {
-      install(agentCtx)
+    setup: async (agentCtx: Context, agent: Agent): Promise<void> => {
+      installSelection(agentCtx, agent)
       await presets.mount(agentCtx, resolved.id)
       // Focus is a TUI surface policy, installed AFTER the preset mount so
       // it exists consistently across every preset (standard/ptc/minimal/
@@ -1522,8 +1513,8 @@ export async function composeAgent(
 }
 
 /**
- * The preset a persisted session actually runs, resolved by the DSH 0.1.2+
- * session projection (header initialization plus the latest selection event).
+ * The preset a persisted session actually runs, read from DSH 0.1.5-rc.1's
+ * V3 session projection (header initialization plus the latest selection event).
  * @param ctx - the runner context.
  * @param sessionId - the persisted session id.
  * @returns the recorded preset id, or undefined to compose the default.
@@ -2137,7 +2128,7 @@ export function apply(ctx: Context, config: Config): void {
       },
       assembled: undefined,
     }
-    const installSessionModelSelection = (agentCtx: Context): void => modelSelections.installForContext(agentCtx)
+    const installSessionModelSelection = (_agentCtx: Context, agent: Agent): void => { modelSelections.installForAgent(agent) }
     const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, installSessionModelSelection, presetId, focusState, diag)
     const withPresetMeta = (composition: AgentComposition): { agentPreset?: string } =>
       composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }
@@ -2153,7 +2144,7 @@ export function apply(ctx: Context, config: Config): void {
         sessionOf: id => sessions.get(id),
         agentOf: id => agents.get(id),
         flushSession: async session => { await sessions.flush(session as never) },
-      }, diag),
+      }),
       new DirectSessionWriter(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent as never : undefined),
       new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
       new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
@@ -5447,7 +5438,7 @@ export function apply(ctx: Context, config: Config): void {
       const isSessionless = parsed !== undefined && SESSIONLESS_COMMANDS.has(parsed.name)
       // The submission's effective delivery mode — resolved ONCE, here at
       // the boundary (web ComposerSubmissionPolicy parity, DSH
-      // 0.1.3-alpha.2): an idle agent queues, plain Enter takes the
+      // 0.1.5-rc.1): an idle agent queues, plain Enter takes the
       // preference, the accelerated chord takes its OPPOSITE, and the
       // explicit queue action always queues. The resolved mode rides into
       // the command plane (dispatchViaSession → withDelivery → the TUI skill
@@ -7641,7 +7632,7 @@ export function apply(ctx: Context, config: Config): void {
         // create publishes the session; a create failure leaves the
         // surface sessionless — the next user input starts a NEW attempt
         // (no pin, no second fresh fallback).
-        const createFirstSession = async (composition: { agentPreset?: string; setup: (agentCtx: Context) => Promise<void> | void }): Promise<SessionHandle> => {
+        const createFirstSession = async (composition: { agentPreset?: string; setup: (agentCtx: Context, agent: Agent) => Promise<void> | void }): Promise<SessionHandle> => {
           const sessionId = SessionId(`session-${randomUUID()}`)
            openingSession = { id: String(sessionId), events: [] }
           // Read the sessionless facade at the actual create boundary so a

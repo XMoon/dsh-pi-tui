@@ -2,7 +2,7 @@
 /**
  * Verify the npm/DSH runtime boundary with a real candidate tarball and a
  * published below-floor runtime. The candidate must fail on the unsupported
- * runtime. The startup row points to the published npm alpha.2 distribution
+ * runtime. The startup row points to the published npm rc.1 distribution
  * and suggests the exact npm upgrade target.
  *
  * Usage: node scripts/dsh-runtime-boundary-smoke.mjs [path-to-candidate.tgz]
@@ -27,12 +27,12 @@ const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 
 // Only PUBLISHED versions can be installed by this smoke. The real
-// rejection case is 0.1.1-rc.2; the exact alpha.1 → alpha.2 floor is covered
+// rejection case is 0.1.1-rc.2; the exact prerelease floor is covered
 // by the startup-gate unit tests.
 const OLD_DSH_VERSION = '0.1.1-rc.2'
-const TARGET_DSH_VERSION = '0.1.3-alpha.2'
-const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
-const EXPECTED_BOUNDARY_IMPORT = /@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|session|session-persistence|settings)/iu
+const TARGET_DSH_VERSION = '0.1.5-rc.1'
+const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|ERR_PACKAGE_PATH_NOT_EXPORTED|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
+const EXPECTED_BOUNDARY_IMPORT = /(?:@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|commands|credentials|goal|jobs|llm|llm-retry|permission-presets|plan-mode|sandbox-policy|session|session-log-export|session-persistence|session-title|settings|shell|skill|subagent|token-meter|tool-todo|tool-workflow|tools|user-approval|user-questions|tool-subagent|code-runtime-worker-thread|cordis-host-runner))(?=['"/]|$)/iu
 
 function run(command, args, options = {}) {
   const detached = options.detached ?? process.platform !== 'win32'
@@ -125,7 +125,7 @@ function installCandidate(invocation, tarball, harnessDir, env) {
 }
 
 // Mirrors src/startup.ts HARNESS_COMPAT: every runtime below the published
-// npm alpha.2 floor is rejected. The exact prerelease boundary is tested by
+// npm rc.1 floor is rejected. The exact prerelease boundary is tested by
 // startup.test.ts because only the 0.1.1 line is installed by this smoke.
 function floorNoticeFor(oldVersion) {
   if (semver.lt(oldVersion, TARGET_DSH_VERSION)) {
@@ -182,7 +182,7 @@ function main() {
   const env = isolatedEnvironment(workDir, home, dshHome)
   try {
     // One published below-floor runtime rejects the candidate for real
-    // (0.1.1-rc.2). The exact alpha.1 → alpha.2 floor is covered by the
+    // (0.1.1-rc.2). The exact prerelease floor is covered by the
     // startup-gate unit tests.
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
       name: 'dsh-runtime-boundary-harness',
