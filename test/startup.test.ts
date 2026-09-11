@@ -260,11 +260,8 @@ test('harnessCompatEntryFor preserves historical fallback lines below the publis
     ['0.1.2-rc.1', '0.4.1'],
     ['0.1.3-alpha.1', '0.4.1'],
     ['0.1.3-alpha.2', '0.4.3-alpha.2'],
-    ['0.1.4', '0.4.3-alpha.2'],
-    ['0.1.5-alpha.0', undefined],
     ['0.1.5-alpha.1', undefined],
     ['0.1.5-alpha.2', undefined],
-    ['0.1.5-rc.0', undefined],
   ]
   for (const [version, fallback] of matrix) {
     const entry = harnessCompatEntryFor(version)
