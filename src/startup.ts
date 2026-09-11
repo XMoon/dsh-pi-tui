@@ -139,7 +139,8 @@ export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
   { ...CURRENT_RC1_REQUIREMENT, min: '0.1.2-alpha.2', max: '0.1.2-alpha.4', fallbackTui: '0.4.0-alpha.1' },
   { ...CURRENT_RC1_REQUIREMENT, min: '0.1.2-alpha.4', max: '0.1.2-rc.1', fallbackTui: '0.4.0-alpha.2' },
   { ...CURRENT_RC1_REQUIREMENT, min: '0.1.2-rc.1', max: '0.1.3-alpha.2', fallbackTui: '0.4.1' },
-  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.3-alpha.2', max: '0.1.5-rc.1', fallbackTui: '0.4.3-alpha.2' },
+  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.3-alpha.2', max: '0.1.5-alpha.0', fallbackTui: '0.4.3-alpha.2' },
+  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.5-alpha.0', max: '0.1.5-rc.1' },
 ]
 
 /** The compat entry covering the installed dsh version, or undefined when
