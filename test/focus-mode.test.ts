@@ -2350,13 +2350,13 @@ function steerMessage(id: string, text: string): {
 }
 
 /** Queue one human message without admitting it yet. */
-function queueSteer(message: ReturnType<typeof steerMessage>, time: number, seq: number): SessionEvent {
-  return eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq)
+function queueSteer(message: ReturnType<typeof steerMessage>, time: number, seq: number, start = 0): SessionEvent {
+  return eventAt('agent/inbox/spliced', { target: 'next-step', start, inserted: [message] }, time, seq)
 }
 
-/** Claim the queued message immediately before the next step starts. */
-function claimSteer(time: number, seq: number): SessionEvent {
-  return eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time, seq)
+/** Claim queued messages immediately before the next step starts. */
+function claimSteer(time: number, seq: number, removedCount = 1): SessionEvent {
+  return eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount, inserted: [] }, time, seq)
 }
 
 /** A turn with an initial user, thinking, a tool, a MID-TURN steer, and a
@@ -2510,6 +2510,55 @@ test('a steer inserted before the first visible assistant output does not commit
   assert.deepEqual(
     replayCollapsed.map(block => block.kind === 'message' && 'text' in block.message ? block.message.text : 'Thought'),
     collapsed.map(block => block.kind === 'message' && 'text' in block.message ? block.message.text : 'Thought'),
+  )
+})
+
+test('a later steer in one claimed batch can still commit the answer boundary', () => {
+  const initial = steerMessage('batch-initial', 'initial prompt')
+  const firstSteer = steerMessage('batch-steer-1', 'steer #1')
+  const secondSteer = steerMessage('batch-steer-2', 'steer #2')
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 9000, 140),
+    eventAt('step/start', { turn: 0, step: 1 }, 9001, 141),
+    eventAt('user/message', initial, 9002, 142),
+    queueSteer(firstSteer, 9100, 143),
+    eventAt('assistant/chunk', {
+      turn: 0,
+      step: 1,
+      chunk: { type: 'text-delta', index: 0, text: 'assistant A' },
+    }, 9110, 144),
+    queueSteer(secondSteer, 9120, 145, 1),
+    assistantSettlement(0, 1, 'batch-a', 'assistant A', 9130, 146, undefined, 9110),
+    eventAt('step/end', { turn: 0, step: 1 }, 9131, 147),
+    claimSteer(9140, 148, 2),
+    eventAt('step/start', { turn: 0, step: 2 }, 9141, 149),
+    eventAt('user/message', firstSteer, 9142, 150),
+    eventAt('user/message', secondSteer, 9143, 151),
+    assistantSettlement(0, 2, 'batch-b', 'assistant B', 9144, 152),
+    eventAt('step/end', { turn: 0, step: 2 }, 9145, 153),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9146, 154),
+  ]
+  const live = new TranscriptFolder()
+  applyMixed(live, events)
+  const collapsed = projectTools(live.messages(), live.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant', 'user', 'user', 'assistant'])
+  assert.deepEqual(
+    collapsed.flatMap(block => block.kind === 'message' && block.message.kind === 'user' ? [block.message.text] : []),
+    ['initial prompt', 'steer #1', 'steer #2'],
+  )
+  assert.deepEqual(
+    collapsed.flatMap(block => block.kind === 'message' && block.message.kind === 'assistant' ? [block.message.text] : []),
+    ['assistant A', 'assistant B'],
+    'the later steer still commits A even though the first steer was early',
+  )
+
+  const replay = new TranscriptFolder()
+  replay.hydrate(events)
+  const replayCollapsed = projectTools(replay.messages(), replay.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(replayCollapsed), blockKinds(collapsed), 'batch admission keeps live/replay parity')
+  assert.deepEqual(
+    replayCollapsed.flatMap(block => block.kind === 'message' && block.message.kind === 'assistant' ? [block.message.text] : []),
+    ['assistant A', 'assistant B'],
   )
 })
 
