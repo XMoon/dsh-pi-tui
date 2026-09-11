@@ -138,8 +138,10 @@ export function sessionRowMatchesQuery(row: SessionPickerRow, query: string): bo
 export interface SessionPickerRow {
   /** Full session id (the picker's value). */
   id: string
-  /** Creation epoch-ms, for the relative age. */
-  createdAt: number
+  /** Host-authoritative activity/order timestamp. */
+  updatedAt: number
+  /** Source-specific creation hint; Remote rows may not provide it. */
+  createdAt?: number
   /** Latest session title, absent until the background title read lands. */
   title?: string
   /** Absolute working directory, for the workspace group. */
@@ -195,7 +197,7 @@ export function sanitizeTerminalText(value: string): string {
 export function sessionPickerItem(row: SessionPickerRow, currentId: string, indent = 0, contentHit?: SessionContentHit): SessionPickerItem {
   const marker = row.id === currentId ? '● ' : ''
   const treePrefix = indent <= 0 ? '' : `${'  '.repeat(indent)}└─ `
-  const meta: string[] = [shortSessionId(row.id), formatSessionAge(row.createdAt)]
+  const meta: string[] = [shortSessionId(row.id), formatSessionAge(row.createdAt ?? row.updatedAt)]
   if (row.origin === 'subagent') meta.push('sub')
   if (row.parentSession !== undefined) meta.push('fork')
   if (row.preset !== undefined) meta.push(`preset:${row.preset}`)
@@ -307,6 +309,7 @@ export function findSessionMatch(rows: readonly SessionPickerRow[], query: strin
 export function headerToPickerRow(header: SessionHeader, live: boolean): SessionPickerRow {
   return {
     id: header.id,
+    updatedAt: header.createdAt,
     createdAt: header.createdAt,
     cwd: header.cwd,
     // This pure mapper has no roster to disambiguate the legal custom `code`

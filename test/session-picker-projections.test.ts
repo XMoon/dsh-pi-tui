@@ -55,7 +55,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 3000, stepMs = 10
 
 /** A session id with a deterministic createdAt so sort order is stable. */
 function row(id: string, createdAt: number): import('../src/sessions.ts').SessionPickerRow {
-  return { id, createdAt, cwd: '/ws/project-a', live: false }
+  return { id, updatedAt: createdAt, createdAt, cwd: '/ws/project-a', live: false }
 }
 
 test('the picker projection loader covers EVERY main row beyond the legacy window, and never reads subagents', async (t) => {
@@ -88,8 +88,8 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
   const sessionReader = {
     list: async () =>
       [...rows]
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .map(({ id, createdAt, cwd, origin }) => ({ id, createdAt, cwd, origin, live: false })),
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .map(({ id, updatedAt, createdAt, cwd, origin }) => ({ id, updatedAt, createdAt, cwd, origin, live: false })),
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async (batch: readonly { id: string }[]) => {
       batchLog.push(batch.length)

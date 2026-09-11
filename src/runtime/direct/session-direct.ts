@@ -3,8 +3,7 @@
  * `SessionReader` over the dsh `sessionPersistence` / `sessionQuery` /
  * projection services. This is the ONLY module in the session-read
  * path that touches `ctx`; the consumer (commands.ts) depends on the port,
- * and a Remote adapter will implement the same interface in a later
- * milestone.
+ * and the experimental D1.1 Remote adapter implements the same interface.
  *
  * The domain semantics live here: semantic session-query listing with
  * capability-aware activity ordering and bounded content search; the combined
@@ -197,17 +196,21 @@ export class DirectSessionReader implements SessionReader {
     this.headerSnapshot = new Map(visibleRecords.map(record => [String(record.header.id), record.header]))
     const projections = this.ctx.get('sessionProjections') as SessionProjectionReaderLike | undefined
     const cache = this.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
-    const rows = visibleRecords.map(record => ({
-      row: {
-        id: record.header.id,
-        createdAt: record.header.createdAt,
-        cwd: record.header.cwd,
-        parentSession: record.header.parentSession,
-        origin: record.header.origin,
-        live: record.live,
-      },
-      activity: activityTimestamp(record.header, record.live, record.session, projections, cache),
-    }))
+    const rows = visibleRecords.map(record => {
+      const updatedAt = activityTimestamp(record.header, record.live, record.session, projections, cache)
+      return {
+        row: {
+          id: record.header.id,
+          updatedAt,
+          createdAt: record.header.createdAt,
+          cwd: record.header.cwd,
+          parentSession: record.header.parentSession,
+          origin: record.header.origin,
+          live: record.live,
+        },
+        activity: updatedAt,
+      }
+    })
     signal?.throwIfAborted()
     rows.sort((a, b) => b.activity - a.activity)
     return rows.map(({ row }) => row)
