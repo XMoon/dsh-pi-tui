@@ -111,4 +111,3 @@ test('a file draft without attachment storage fails explicitly', async () => {
     (error: unknown) => error instanceof FileInputError && error.message === 'File attachment storage is unavailable.',
   )
 })
-

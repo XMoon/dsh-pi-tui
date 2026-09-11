@@ -2,8 +2,8 @@
 /**
  * Verify the npm/DSH runtime boundary with a real candidate tarball and a
  * published below-floor runtime. The candidate must fail on the unsupported
- * runtime. The startup row points to the published npm rc.1 distribution
- * and suggests the exact npm upgrade target.
+ * runtime. The startup row names the rc.1 floor and suggests the recommended
+ * published npm rc.2 upgrade target.
  *
  * Usage: node scripts/dsh-runtime-boundary-smoke.mjs [path-to-candidate.tgz]
  *       pnpm smoke:boundary -- [path-to-candidate.tgz]
@@ -151,7 +151,7 @@ function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION) {
       'dsh-pi-tui',
       `running dsh ${oldVersion}`,
       `DeepSeek Harness ${notice.requires} or later`,
-      `npm install -g @deepseek-ai/dsh@${TARGET_DSH_VERSION}`,
+      'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2',
       'dsh --profile pi-tui',
     ]
     for (const text of required) {

@@ -101,9 +101,10 @@ export const inject = ['cmdlineArgs']
  * it is shown as the fallback version label (`>= <since>`) when the
  * bundle's own version cannot be read, so the message stays truthful.
  *
- * This next line targets the published npm release dsh-v0.1.5-rc.1: the
- * runtime is installed from the public npm registry, so the recovery guidance
- * names the exact published upgrade target.
+ * The 0.4.5 line has a minimum of the published npm release dsh-v0.1.5-rc.1
+ * and is also compatible with dsh-v0.1.5-rc.2. The recovery guidance names
+ * the recommended published upgrade target and allows its native install
+ * scripts.
  */
 export interface HarnessCompatEntry {
   /** Inclusive lower bound of the incompatible range; absent = unbounded below. */
@@ -116,6 +117,8 @@ export interface HarnessCompatEntry {
   requires: string
   /** The target DSH version to install when the current runtime is too old. */
   upgradeDsh?: string
+  /** An exact install command when the target needs install-script flags. */
+  upgradeCommand?: string
   /** The compatible TUI line to install when keeping an old DSH runtime. */
   fallbackTui?: string
   /** Special guidance for a range that is not covered by the normal recovery
@@ -125,28 +128,29 @@ export interface HarnessCompatEntry {
 
 /** The compatibility table. Entries are ordered from oldest to newest so
  * `harnessCompatEntryFor()` can return the first matching historical range. */
-const CURRENT_RC1_REQUIREMENT = {
+const CURRENT_DSH_REQUIREMENT = {
   since: '0.4.5',
   requires: 'DeepSeek Harness 0.1.5-rc.1 or later',
-  upgradeDsh: '0.1.5-rc.1',
-  guidance: 'This next npm build is validated with the published DeepSeek Harness 0.1.5-rc.1 distribution; see docs/dsh-compatibility.md.',
+  upgradeDsh: '0.1.5-rc.2',
+  upgradeCommand: 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2',
+  guidance: 'This 0.4.5 release is validated with the published DeepSeek Harness 0.1.5-rc.1 distribution and is also compatible with 0.1.5-rc.2; see docs/dsh-compatibility.md.',
 } as const
 
 export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
   // These boundaries follow the published DSH tags. Cross-core prereleases do
   // not satisfy the older TUI package's semver peer range.
-  { ...CURRENT_RC1_REQUIREMENT, max: '0.1.0-rc.8' },
-  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.0-rc.8', max: '0.1.1-rc.1', fallbackTui: '0.2' },
-  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.1-rc.1', max: '0.1.2-alpha.1', fallbackTui: '0.3' },
-  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.2-alpha.1', max: '0.1.2-alpha.2' },
-  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.2-alpha.2', max: '0.1.2-alpha.4', fallbackTui: '0.4.0-alpha.1' },
-  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.2-alpha.4', max: '0.1.2-rc.1', fallbackTui: '0.4.0-alpha.2' },
-  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.2-rc.1', max: '0.1.3-alpha.1', fallbackTui: '0.4.1' },
-  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.3-alpha.1', max: '0.1.3-alpha.2' },
+  { ...CURRENT_DSH_REQUIREMENT, max: '0.1.0-rc.8' },
+  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.0-rc.8', max: '0.1.1-rc.1', fallbackTui: '0.2' },
+  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.1-rc.1', max: '0.1.2-alpha.1', fallbackTui: '0.3' },
+  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-alpha.1', max: '0.1.2-alpha.2' },
+  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-alpha.2', max: '0.1.2-alpha.4', fallbackTui: '0.4.0-alpha.1' },
+  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-alpha.4', max: '0.1.2-rc.1', fallbackTui: '0.4.0-alpha.2' },
+  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-rc.1', max: '0.1.3-alpha.1', fallbackTui: '0.4.1' },
+  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.3-alpha.1', max: '0.1.3-alpha.2' },
   // The last official runtime for this fallback is dsh-v0.1.3-alpha.2;
   // the next official tags, dsh-v0.1.5-alpha.1/.2, require the new setup contract.
-  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.3-alpha.2', max: '0.1.5-alpha.1', fallbackTui: '0.4.3-alpha.2' },
-  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.5-alpha.1', max: '0.1.5-rc.1' },
+  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.3-alpha.2', max: '0.1.5-alpha.1', fallbackTui: '0.4.3-alpha.2' },
+  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.5-alpha.1', max: '0.1.5-rc.1' },
 ]
 
 /** The compat entry covering the installed dsh version, or undefined when
@@ -179,7 +183,7 @@ export function incompatibleHarnessMessage(installed: string, entry: HarnessComp
   if (entry.upgradeDsh !== undefined) {
     recovery.push(
       'Upgrade DeepSeek Harness:',
-      `  npm install -g @deepseek-ai/dsh@${entry.upgradeDsh}`,
+      `  ${entry.upgradeCommand ?? `npm install -g @deepseek-ai/dsh@${entry.upgradeDsh}`}`,
     )
   }
   if (entry.fallbackTui !== undefined) {

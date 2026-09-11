@@ -17,23 +17,27 @@ fallback was checked against the peer manifest at its corresponding TUI tag.
 | `0.4.0-alpha.2` | `dsh-v0.1.2-alpha.4`, `dsh-v0.1.2-alpha.5` | Previous 0.4 prerelease |
 | `0.4.1` (published) | `dsh-v0.1.2-rc.1` | Historical stable |
 | `0.4.3-alpha.2` (historical next npm line) | `dsh-v0.1.3-alpha.2` | Last official runtime tag for this TUI line |
-| `0.4.5` (current next npm line; this checkout) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Published npm rc.1 target |
+| `0.4.5` (published stable) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable; validated against the published npm rc.1 family |
+| `next` npm line (current checkout) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Same target while the next prerelease is being qualified |
 | No historical fallback | `dsh-v0.1.0-rc.7`, `dsh-v0.1.2-alpha.1`, `dsh-v0.1.3-alpha.1`, `dsh-v0.1.5-alpha.1`, `dsh-v0.1.5-alpha.2` | Upgrade DSH to a supported release |
 
 The table is keyed to the official release tags above. Do not widen a pairing
 from a package peer lower bound alone: npm/node-semver excludes a prerelease
 whose major/minor/patch tuple differs from the comparator's prerelease tuple.
 For example, `>=0.1.2-rc.1` does not include `0.1.3-alpha.1`, and
-`^0.1.1-rc.1` does not include `0.1.2-alpha.1`. The current `next` checkout
-raises the floor to the published npm `0.1.5-rc.1` release. Its startup notice
-is best-effort because Loader rows mount concurrently. The floor is a registry
-release, so the notice suggests the exact npm upgrade target.
+`^0.1.1-rc.1` does not include `0.1.2-alpha.1`. The 0.4.5 release raises the
+floor to the published npm `0.1.5-rc.1` release; the open peer range also
+accepts the compatible `0.1.5-rc.2` family. Its startup notice is best-effort
+because Loader rows mount concurrently. The floor is a registry release, so
+the notice suggests the exact npm upgrade target.
 
-For the current stable 0.4 line, install the validated Harness family and the
-stable TUI:
+For the current stable 0.4 line, install the recommended DSH family and the
+stable TUI. DSH `0.1.5-rc.1` is the minimum; `0.1.5-rc.2` is also compatible.
+The recommended install command explicitly allows the DSH native install
+scripts:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-rc.1
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 ```
 
@@ -49,7 +53,7 @@ pnpm compat:dsh:npm
 The startup notice on an old runtime suggests the exact published upgrade:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.5-rc.1
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2
 ```
 
 If the official `dsh-v0.1.0-rc.8` runtime must be kept, use the compatible
@@ -68,22 +72,26 @@ npm install -g @deepseek-ai/dsh@0.1.1-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 ```
 
-The published stable pair uses the concrete `dsh-v0.1.2-rc.1` tag. Official
-`dsh-v0.1.2-alpha.2`/`alpha.3` use `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`,
-`alpha.4`/`alpha.5` use `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`, and
-`dsh-v0.1.3-alpha.2` uses `@xmoon76/dsh-pi-tui@0.4.3-alpha.2`. The current
-npm-mode checkout is separate: its peer floor is `>=0.1.5-rc.1`, and its exact
-npm family is verified by the frozen lockfile.
+The historical 0.4.1 stable pair uses the concrete `dsh-v0.1.2-rc.1` tag.
+Official `dsh-v0.1.2-alpha.2`/`alpha.3` use
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, `alpha.4`/`alpha.5` use
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.2`, and `dsh-v0.1.3-alpha.2` uses
+`@xmoon76/dsh-pi-tui@0.4.3-alpha.2`. The current npm-mode checkout is
+separate: its peer floor is `>=0.1.5-rc.1`, and its exact npm family is
+verified by the frozen lockfile.
 
-Note that `npm install -g @deepseek-ai/dsh` without an explicit version follows
-npm's `latest` dist-tag, which may be an older runtime line. Always name a
-published version explicitly.
+The root README intentionally uses DSH's moving `latest`/`alpha` channels for
+ordinary stable/preview installs; the exact release pairing and compatibility
+checks in this document and the dated changelogs remain pinned. For a
+reproducible release verification, always name a published version explicitly.
 
 ## Data compatibility
 
 Runtime compatibility and data compatibility are separate. A 0.4 runtime
 requires the declared DSH lower bound, but it continues to read
-sessions created by 0.3.x.
+sessions created by 0.3.x. The minimum DSH `0.1.5-rc.1` runtime persists
+Session V2; compatible `0.1.5-rc.2` persists Session V3 and owns the V2-to-V3
+migration when an older session is opened.
 Preset state is read through DSH's `agentPreset` session projection: the
 creation header initializes the state and the newest `agent-preset/selected`
 event wins.

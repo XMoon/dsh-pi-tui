@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 /**
  * Local npm-mode driver. It validates the published/registry dependency lane
- * in an isolated copy, keeping the tracked lockfile frozen and exercising the
- * same TUI candidate packaging path used by releases.
+ * in an isolated copy, keeping the tracked lockfile frozen for the declared
+ * target and exercising the same TUI candidate packaging path used by releases.
+ * An explicit --dsh-version override resolves a temporary matching lockfile
+ * before running the same frozen install and checks.
  *
- * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.5-rc.1]
+ * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.5-rc.2]
  *
  * @module dsh-npm-verify
  */
 
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -91,6 +93,17 @@ function copyRepository(destination) {
   })
 }
 
+/** Pin every DSH development package in an ephemeral npm verification copy. */
+export function pinNpmDshDependencies(workspace, version) {
+  const packagePath = join(workspace, 'package.json')
+  const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'))
+  const devDependencies = packageJson.devDependencies ?? {}
+  for (const name of Object.keys(devDependencies)) {
+    if (name.startsWith('@deepseek-ai/dsh')) devDependencies[name] = version
+  }
+  writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8')
+}
+
 /** Point the temporary workspace at the real repository's git metadata so
  * git-dependent tests (the pre-push hook gate) behave identically to the
  * source verification workspace. Best-effort: a checkout without git
@@ -121,15 +134,30 @@ export function candidateTarball(workspace) {
 
 async function main() {
   const values = parseCli()
-  const distribution = npmDshDistribution(values['dsh-version'] ?? npmDshVersion())
+  const requestedVersion = values['dsh-version']
+  const distribution = npmDshDistribution(requestedVersion ?? npmDshVersion())
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-npm-'))
   const workspace = join(root, 'workspace')
   const npmConfigPath = join(root, 'npmrc')
-  const npmEnvironment = npmVerificationEnvironment(npmConfigPath)
+  const npmEnvironment = npmVerificationEnvironment(npmConfigPath, {
+    ...process.env,
+    DSH_NPM_VERIFY_TARGET: distribution.version,
+  })
   try {
     writeFileSync(npmConfigPath, `registry=${PUBLIC_NPM_REGISTRY}\n`, 'utf8')
     copyRepository(workspace)
     attachGitMetadata(workspace)
+    if (requestedVersion !== undefined) {
+      pinNpmDshDependencies(workspace, distribution.version)
+      await run(
+        PNPM_COMMAND,
+        ['install', '--lockfile-only', '--no-frozen-lockfile', '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only'],
+        workspace,
+        'resolve DSH override lockfile',
+        npmEnvironment,
+        NPM_VERIFY_TIMEOUTS.install,
+      )
+    }
     const prepared = prepareDshInstall(distribution, workspace, { stripPackageManager: true })
     try {
       await run(PNPM_COMMAND, [...prepared.installArgs, '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only'], workspace, 'frozen npm dependency install', npmEnvironment, NPM_VERIFY_TIMEOUTS.install)
