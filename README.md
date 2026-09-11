@@ -18,26 +18,30 @@
 稳定版是普通用户的推荐渠道。请先安装 DSH，再将 TUI 添加到 `pi-tui` profile：
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-rc.1
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@latest
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
 ### Next / npm 线（验证）
 
-当前 `next` 线以已发布的 npm 版本 `dsh-v0.1.5-rc.1` 为兼容目标。使用
-隔离的 npm 驱动验证（安装 checkout 声明的精确 DSH 版本并跑完整
-build/test/package 路径）：
+预览安装使用 DSH 的 `alpha` channel 与 TUI 的 `next` channel；安装 DSH
+时需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@alpha
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+隔离的 npm 驱动仍按本 checkout 声明的精确 DSH 版本运行，并执行完整的
+build/test/package 路径：
 
 ```sh
 pnpm compat:dsh:npm
 ```
 
-旧 runtime 的启动提示会给出精确的 npm 升级命令：
-
-```sh
-npm install -g @deepseek-ai/dsh@0.1.5-rc.1
-```
+具体的稳定版最低版本、next 兼容范围和回退路径见[兼容性文档](docs/dsh-compatibility.md)。
 
 ### 环境要求
 
@@ -48,7 +52,7 @@ npm install -g @deepseek-ai/dsh@0.1.5-rc.1
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.4.1`（已发布 `@latest`） | `dsh-v0.1.2-rc.1` | 最近的稳定版 |
+| `0.4.5`（已发布 `@latest`） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 当前稳定版；最低 rc.1，兼容 rc.2 |
 | 当前 `next` npm 线（本 checkout；版本 `0.4.5`） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 当前 next 线 |
 
 不要把稳定线与 `next` 线混装。当前 `next` checkout 的 peer floor 是

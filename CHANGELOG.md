@@ -11,62 +11,42 @@
 
 ### 安装与版本对应
 
-本稳定版本对应已发布的 DSH `0.1.5-rc.1` family：
+本稳定版最低兼容 DSH `0.1.5-rc.1`，同时兼容 `0.1.5-rc.2`。推荐安装
+rc.2；安装 DSH 时需要显式允许其原生安装脚本：
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.5-rc.1
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.5
 dsh --profile pi-tui
 ```
 
-不要把本版本与历史 DSH `0.1.3-alpha.2` 线混用。必须保留旧版 DSH
-时，请安装对应的历史 TUI 线，例如 DSH `0.1.1-rc.1`/`rc.2` 使用
-`@xmoon76/dsh-pi-tui@0.3`。
+不要把本版本与历史 DSH `0.1.3-alpha.2` 线混用。仍需保留旧版 DSH 的用户，
+请安装对应的历史 TUI 线：DSH `0.1.2-rc.1` 使用
+`@xmoon76/dsh-pi-tui@0.4.1`，DSH `0.1.3-alpha.2` 使用
+`@xmoon76/dsh-pi-tui@0.4.3-alpha.2`，更旧的 DSH `0.1.1-rc.1`/`rc.2`
+使用 `@xmoon76/dsh-pi-tui@0.3`。
 
 ### 新增
 
-- **PTC / `run_code` 嵌套工具树。** `run_code` 程序内派发的子调用现在作为
-  递归子调用树挂在根 Code 卡片下：完整身份链（`subCallId`/`parentCallId`/
-  `rootCallId`）支持孙级拓扑；未知父级的孤儿 start/settle 事实先私有暂存，
-  父级出现时挂接，绝不提升为顶层 surface 行。子调用树与 Focus、展示与搜索
-  等表面对齐：折叠 Focus 中 `run_code` 仍是正式 Tool 槽，并附加紧凑的活跃
-  子调用提示（如 `Bash running` / `Bash ×2 running` / `Bash +1 running`，
-  带宽度降级）；`/search` 语料递归包含子调用（命中定位到根 Code 卡）；
-  markdown 导出保留嵌套输出。
-- **会话呈现对齐 DSH v2 语义。** Direct 适配器按官方语义摄取
-  `agent/assistant-stream` 实时帧（完成回合栅栏、修订间隔重同步），
-  Transcript/Focus/Stats 折叠瞬态平面；冷回放从 assistant/message block
-  恢复 thinking；移除旧的 durable assistant/chunk 私有路径。
-- **`/search` 收敛进会话浏览器。** `/sessions`、`/resume` 与 `/search` 现在共用
-  同一个会话浏览器：输入查询后进入全局搜索结果视图（本地元数据匹配 ∪ 内容
-  匹配），不再按工作区裁剪搜索结果；命中片段直接显示在对应会话行上；内容搜索
-  不可用或失败时，本地元数据筛选照常工作，浏览器不会关闭。
-- **会话内容搜索对齐 DSH 官方语义。** Direct 适配器改用
-  `sessionQuery.searchSessions()`（与 DSH master `ApiSessionList.search()`
-  一致：可见性授权、去重、游标翻页、20 条结果窗口），移除了旧的“最新 100 个
-  会话 + filterEvents”私有搜索规则——很早创建的会话中的匹配现在也能被找到。
-- **统一附件摄取。** `@` 提及、`/image` 参数与粘贴内容走同一条附件 intake
-  流水线：有界签名探测区分图片与普通文件，普通文件保留元数据并在提交时
-  流式送入；占位与草稿提交行为一致化。
-- **草稿中补全内联 `/skill` 引用。** 提示模式草稿中空白边界的 `/名称`
-  token 现在按 detached 的人类 skill 目录补全；接受时插入字面引用而不提交，
-  最终普通提问由 Host 的 `dsh-tool-skill` pre-step 注入所有已识别 skill。
-- **Workflow 可扩展 UI。** Workflow 卡片自带 Run/Phase 两层展开：小 phase
-  （≤5 个 agent）在 transcript 内完整列出成员，大 phase 只显示聚合计数 +
-  最多 3 个异常预览 + `View N agents` 入口，100+ agent 的 run 不再线性撑大
-  transcript；completed run 默认收起但仍显示聚合摘要（如 `126 agents ·
-  completed`）。`cancelled`/`interrupted` 改用 warning 视觉（不再与 `failed`
-  混为 error），缺失/显式空 phase 显示为 `Unassigned`/`Empty`。运行中的直接
-  child 可从卡片进入现有只读 Subagent Viewer；`View N agents` 打开按
-  Workflow 数据集过滤的 Task Viewer（关闭后恢复全局任务列表）。搜索扩展到
-  phase/member 标签与状态，隐藏在大 phase 里的 member 仍可命中所属卡片。
-- **Workflow 生命周期/模型对齐 DSH alpha.2。** Workflow 从普通工具卡中拆出独立
-  semantic model：run/member 状态完整保留 `running/completed/failed/cancelled/
-  interrupted`（不再折叠成 ok/error），成员保留 `seq`/`childId` 与精确 phase
-  身份（缺失 phase 与显式空 phase 不再合并）；所属 step/turn 关闭而缺少终态
-  事件的 run 投影为 `interrupted`（冷回放与 live append 一致）；搜索按 run
-  名称/状态命中，`/transcript` 保留 Workflow 记录。
-- **`/export` 现在保存完整 Session 归档。** 命令成功后生成官方完整 Session 树归档(含子代理与附件),并询问 Client 本地保存目录;文件名固定为完整 Session id。旧的单日志 JSONL 导出已移除。
+- **PTC / `run_code` 嵌套工具树。** `run_code` 内的子调用现在会作为递归树显示在
+  根 Code 卡片下，不再散落成顶层工具行；Focus、`/search` 和 Markdown 导出也会
+  保留嵌套关系，并显示紧凑的活跃子调用提示。
+- **会话呈现对齐 DSH Session 语义（兼容 V2/V3 持久化代）。** 实时回答、工具结果、
+  Thinking 与冷恢复会话的显示更加一致；Focus、Transcript 和 Stats 不再把瞬态流内容重复展示。
+- **`/search` 收敛进会话浏览器。** `/sessions`、`/resume` 与 `/search` 共用同一个
+  全局搜索视图，同时匹配会话元数据和内容；早期会话也能被找到，内容搜索不可用时
+  仍可用元数据筛选，浏览器不会关闭。
+- **统一附件摄取。** `@` 提及、`/image` 参数与粘贴内容现在共享一条附件流水线，
+  图片、普通文件、占位符和草稿提交的行为保持一致。
+- **草稿中补全内联 `/skill` 引用。** `/名称` token 可从 detached skill 目录补全；
+  接受后只插入引用，最终普通提问再由 Host 注入识别出的 skill。
+- **Workflow 可扩展 UI。** Run/Phase 卡片在小规模运行中展示成员，在大规模运行中展示
+  聚合摘要、异常预览和可筛选的 Task Viewer；completed、cancelled 与 interrupted
+  状态也有明确的展示。
+- **Workflow 生命周期/模型对齐 DSH alpha.2。** Workflow 保留完整运行与成员状态，
+  冷回放、实时记录、搜索和 `/transcript` 使用同一套结果。
+- **`/export` 现在保存完整 Session 归档。** 导出包含子代理与附件，并生成可恢复的完整
+  Session 文件；旧的单日志 JSONL 导出已移除。
 - **新增 `/transcript` 命令。** 将当前 Session 保存为可读的 Markdown 对话记录到 Client 本地目录,与 `/export` 相同的无参数/保存位置交互。
 - **Welcome Card 视觉重构。** 首屏欢迎卡引入原创圆润鲸鱼 ASCII mascot(5 种变体,每次启动随机一个),按终端宽度使用三档响应式布局:72 列以上鲸鱼与 session facts 左右并排,24～71 列鲸鱼居中、facts 在下,24 列以下切换为紧凑文本布局(🐋 标题)。鲸鱼保留 cyan → blue 品牌渐变,不随主题切换改色;facts 继续完整显示(长值 wrap、不截断),idle 邀请、`setWelcomeCard()` 契约、fullscreen 滚动/锚点/点击映射均保持不变。
 
@@ -110,6 +90,9 @@ dsh --profile pi-tui
   `app.input.queue` 动作保留为 deprecated、无默认键，已有自定义绑定仍然是"入队"，不会被悄悄改成
   相反行为；新的 `app.input.submitAccelerated` 独立拥有 Ctrl+Enter。
 
+- **吞吐统计口径统一。** Footer 的 tok/s 现在按可观察到的 decode 输出 token 与对应观测时间窗计算；burst samples 不再与完整 LLM wall time 或其它阶段计数混合。
+- **Focus 中的 steer 时间线更可靠。** 早到、迟到以及时间戳相同的 steer/answer 事件会按可证明的边界处理，跨 steer 的回答不会被错误吞掉或重复显示。
+
 ### 修复
 
 - **过期的命令 handle 不再删除新一代注册。** handle 只代表**一次**注册：重复或迟到的 `dispose()`（HMR 重载后才到达的 fiber cleanup）不会删掉同 id 的新 contribution，也不会误清新一代的健康记录。
@@ -142,6 +125,8 @@ dsh --profile pi-tui
 - **保留 standalone composition caller 的 `ModelSelectionRef` 兼容性。** 根导出的
   `composeAgent(ctx, ref)` 形式继续可用，返回的 setup 会安装调用方持有的 selection，
   无需 Agent；Direct runner 继续使用显式 Agent-local installer 形式。
+
+> **已知限制：** 当前生产默认后端仍为 Direct；remote attach 暂不支持。
 
 ## [0.4.3-alpha.2] - 2026-09-08
 

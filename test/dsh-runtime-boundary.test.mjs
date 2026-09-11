@@ -16,12 +16,12 @@ test('runtime boundary rejects explicit and discovered symlinked candidates', (t
   assert.throws(() => resolveTarball(undefined, directory), /no candidate tarball/u)
 })
 
-test('runtime boundary accepts the npm rc.1 advisory notice', () => {
+test('runtime boundary accepts the recommended npm rc.2 advisory notice', () => {
   const output = [
     'dsh-pi-tui v0.4.5 requires DeepSeek Harness 0.1.5-rc.1 or later,',
     'but this installation is running dsh 0.1.1-rc.2.',
     'Upgrade DeepSeek Harness:',
-    '  npm install -g @deepseek-ai/dsh@0.1.5-rc.1',
+    '  npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2',
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
   assert.doesNotThrow(() => assertBoundary(output, 1, '0.1.1-rc.2'))
@@ -33,7 +33,7 @@ test('runtime boundary applies the same npm floor to an earlier runtime', () => 
     'dsh-pi-tui v0.4.5 requires DeepSeek Harness 0.1.5-rc.1 or later,',
     'but this installation is running dsh 0.1.3-alpha.0.',
     'Upgrade DeepSeek Harness:',
-    '  npm install -g @deepseek-ai/dsh@0.1.5-rc.1',
+    '  npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2',
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
   assert.doesNotThrow(() => assertBoundary(output, 1, '0.1.3-alpha.0'))

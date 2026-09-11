@@ -8,7 +8,8 @@
  *   - package.json `version` must equal the parsed tag version,
  *   - CHANGELOG.md must contain a `## [<version>]` section,
  *   - CHANGELOG.en.md must contain the same section,
- *   - the two section headings (version + date) must match exactly.
+ *   - the current section is dated and immediately follows an empty Unreleased,
+ *   - both reference links and the bilingual section headings are present.
  *
  * The notes file is written as `## 中文` / `## English` sections so the
  * GitHub Release body carries the human-written changelog verbatim.
@@ -45,6 +46,7 @@ function extractSection(file) {
   const lines = text.split(/\r?\n/)
 
   const prefix = `## [${version}]`
+  const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
   const start = lines.findIndex(
     (line) => line === prefix || line.startsWith(`${prefix} - `),
@@ -55,6 +57,20 @@ function extractSection(file) {
   }
 
   const heading = lines[start]
+  if (!new RegExp(`^## \\[${escapedVersion}\\] - \\d{4}-\\d{2}-\\d{2}$`, 'u').test(heading)) {
+    throw new Error(`Version ${version} in ${file} must have a YYYY-MM-DD release date`)
+  }
+
+  const unreleased = lines.findIndex(line => line === '## [Unreleased]')
+  if (version === pkg.version) {
+    if (unreleased < 0) throw new Error(`${file} must contain an Unreleased section`)
+    const firstSection = lines.findIndex(line => /^## /u.test(line))
+    if (unreleased !== firstSection) throw new Error(`${file} must keep Unreleased as the first changelog section`)
+    const firstRelease = lines.findIndex((line, index) => index > unreleased && /^## \[(?!Unreleased\])/u.test(line))
+    if (start !== firstRelease || lines.slice(unreleased + 1, start).some(line => line.trim() !== '')) {
+      throw new Error(`Version ${version} in ${file} must immediately follow an empty Unreleased section`)
+    }
+  }
 
   let end = lines.length
 
@@ -74,6 +90,24 @@ function extractSection(file) {
 
   if (!content) {
     throw new Error(`Version ${version} is empty in ${file}`)
+  }
+  if (!/^### /mu.test(content)) {
+    throw new Error(`Version ${version} in ${file} must contain changelog categories`)
+  }
+  if (version === '0.4.5') {
+    const limitation = file.endsWith('CHANGELOG.md') ? '已知限制' : 'Known limitation'
+    if (!content.includes(limitation)) {
+      throw new Error(`Version ${version} in ${file} must document its known limitation`)
+    }
+  }
+  const comparePrefix = channel === 'next' ? 'next-v' : 'v'
+  const tagPattern = `${comparePrefix}\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?`
+  const compareBase = 'https://github.com/XMoon/dsh-pi-tui/compare/'
+  const escapedCompareBase = compareBase.replaceAll('.', '\\.')
+  const unreleasedReference = new RegExp(`^\\[Unreleased\\]:\\s+${escapedCompareBase}${comparePrefix}${escapedVersion}\\.\\.\\.HEAD$`, 'mu')
+  const releaseReference = new RegExp(`^\\[${escapedVersion}\\]:\\s+${escapedCompareBase}${tagPattern}\\.\\.\\.${comparePrefix}${escapedVersion}$`, 'mu')
+  if (!unreleasedReference.test(text) || !releaseReference.test(text)) {
+    throw new Error(`${file} must contain matching ${channel} release reference links for ${version}`)
   }
 
   return {
@@ -146,33 +180,30 @@ function containsExactGuidance(content, command) {
 // 0.4.1 stable releases continue to use the published rc.1 family because the
 // 0.1.2 stable family is not published yet. The 0.4.3-alpha.2 prerelease
 // targets the published npm `0.1.3-alpha.2` family, while the current 0.4.5
-// release targets the published `0.1.5-rc.1` family. Released changelog
-// sections are immutable, so the requirement follows the version being
-// released.
+// release recommends the published `0.1.5-rc.2` family (the peer floor remains
+// `0.1.5-rc.1`). Released changelog sections are immutable, so the requirement
+// follows the version being released.
 const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3'
   : version === '0.4.3-alpha.2' ? '0.1.3-alpha.2'
   : version === '0.4.3-alpha.3' ? '0.1.5-rc.1'
   : '0.1.2-alpha.5'
 const dshStablePin = version === '0.4.0' || version === '0.4.1'
   ? '0.1.2-rc.1'
-  : version === '0.4.5' ? '0.1.5-rc.1'
+  : version === '0.4.5' ? '0.1.5-rc.2'
   : '0.1.2'
 if (version.startsWith('0.4.')) {
   // Release bodies must remain reproducible after a later stable/preview
   // publish moves the npm dist-tags. README keeps the moving channel tags for
   // ordinary installs; changelog/release-note guidance pins this release.
   const tuiPin = `@xmoon76/dsh-pi-tui@${version}`
-  const requiredGuidance = channel === 'next'
-    ? [
-        `@deepseek-ai/dsh@${dshAlphaPin}`,
-        tuiPin,
-        '@xmoon76/dsh-pi-tui@0.3',
-      ]
-    : [
-        `@deepseek-ai/dsh@${dshStablePin}`,
-        tuiPin,
-        '@xmoon76/dsh-pi-tui@0.3',
-      ]
+  const dshGuidance = version === '0.4.5'
+    ? 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2'
+    : `@deepseek-ai/dsh@${channel === 'next' ? dshAlphaPin : dshStablePin}`
+  const requiredGuidance = [
+    dshGuidance,
+    tuiPin,
+    '@xmoon76/dsh-pi-tui@0.3',
+  ]
   for (const command of requiredGuidance) {
     if (!containsExactGuidance(zh.content, command) || !containsExactGuidance(en.content, command)) {
       throw new Error(`Version ${version} must document ${command} in both changelogs`)

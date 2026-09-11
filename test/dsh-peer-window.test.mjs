@@ -6,6 +6,9 @@ import test from 'node:test'
 
 const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
 const expectedWindow = '>=0.1.5-rc.1'
+const expectedDevVersion = Object.entries(packageJson.devDependencies ?? {})
+  .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
+const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.5-rc.1'
 const dshPeerEntries = Object.entries(packageJson.peerDependencies ?? {})
   .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
 
@@ -25,11 +28,13 @@ test('all DSH runtime peers use the published npm 0.1.5-rc.1 lower bound', () =>
   }
 })
 
-test('all DSH development packages stay pinned to the exact target rc.1', () => {
+test('all DSH development packages stay pinned to the exact declared target', () => {
   const dshDevEntries = Object.entries(packageJson.devDependencies ?? {})
     .filter(([name]) => name.startsWith('@deepseek-ai/dsh'))
   assert.ok(dshDevEntries.length > 0, 'the bundle must have target DSH development packages')
+  assert.equal(expectedDevVersion, expectedNpmTarget, 'the package must keep the declared npm target')
+  assert.equal(typeof expectedDevVersion, 'string', 'the bundle must declare the primary DSH development target')
   for (const [name, version] of dshDevEntries) {
-    assert.equal(version, '0.1.5-rc.1', `${name} must stay exact`)
+    assert.equal(version, expectedDevVersion, `${name} must stay exact`)
   }
 })

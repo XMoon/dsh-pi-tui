@@ -19,26 +19,31 @@ Stable releases are recommended for ordinary users. Install DSH first, then add
 the TUI to the `pi-tui` profile:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-rc.1
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@latest
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
 ### Next / npm line (validation)
 
-The current `next` line targets the published npm release `dsh-v0.1.5-rc.1`.
-Use the isolated npm driver (installs the exact DSH version declared by this
+Preview installation uses the DSH `alpha` channel and the TUI `next` channel.
+The DSH native install scripts must be explicitly allowed:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@alpha
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+Use the isolated npm driver (it installs the exact DSH version declared by this
 checkout and exercises the full build/test/package path):
 
 ```sh
 pnpm compat:dsh:npm
 ```
 
-The startup notice on an old runtime suggests the exact npm upgrade:
-
-```sh
-npm install -g @deepseek-ai/dsh@0.1.5-rc.1
-```
+See the [compatibility guide](docs/dsh-compatibility.md) for the stable minimum,
+next compatibility range, and fallback paths.
 
 ### Requirements
 
@@ -49,7 +54,7 @@ npm install -g @deepseek-ai/dsh@0.1.5-rc.1
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.4.1` (published `@latest`) | `dsh-v0.1.2-rc.1` | Latest stable line |
+| `0.4.5` (published `@latest`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable line; rc.1 minimum, rc.2 compatible |
 | Current `next` npm line (this checkout; version `0.4.5`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current next line |
 
 Do not mix the stable and `next` lines. The current `next` checkout declares

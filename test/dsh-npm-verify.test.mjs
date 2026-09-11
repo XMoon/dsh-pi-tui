@@ -7,6 +7,7 @@ import { testLifecycle } from './support/temp-lifecycle.ts'
 import {
   candidateTarball as npmVerifyCandidateTarball,
   npmVerificationEnvironment,
+  pinNpmDshDependencies,
 } from '../scripts/dsh-npm-verify.mjs'
 
 test('npm verification pins the public registry and isolated user config', () => {
@@ -22,6 +23,29 @@ test('npm verification pins the public registry and isolated user config', () =>
   assert.equal(environment.npm_config_userconfig, '/tmp/dsh-npm-verify-test.npmrc')
   assert.equal(environment.NPM_CONFIG_USERCONFIG, '/tmp/dsh-npm-verify-test.npmrc')
   assert.equal(environment.DSH_TEST_SENTINEL, 'preserved')
+})
+
+test('an explicit npm DSH override rewrites only DSH development packages', (t) => {
+  const life = testLifecycle(t)
+  const workspace = life.tempDir('dsh-npm-pin-test-')
+  writeFileSync(join(workspace, 'package.json'), JSON.stringify({
+    devDependencies: {
+      '@deepseek-ai/dsh': '0.1.5-rc.1',
+      '@deepseek-ai/dsh-agent': '0.1.5-rc.1',
+      typescript: '5.0.0',
+    },
+    peerDependencies: { '@deepseek-ai/dsh-agent': '>=0.1.5-rc.1' },
+  }))
+
+  pinNpmDshDependencies(workspace, '0.1.5-rc.2')
+
+  const packageJson = JSON.parse(readFileSync(join(workspace, 'package.json'), 'utf8'))
+  assert.deepEqual(packageJson.devDependencies, {
+    '@deepseek-ai/dsh': '0.1.5-rc.2',
+    '@deepseek-ai/dsh-agent': '0.1.5-rc.2',
+    typescript: '5.0.0',
+  })
+  assert.equal(packageJson.peerDependencies['@deepseek-ai/dsh-agent'], '>=0.1.5-rc.1')
 })
 
 test('CI npm install branches pin the public registry and isolated config', () => {

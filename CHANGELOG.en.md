@@ -11,78 +11,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Installation and version pairing
 
-This stable release is paired with the published DSH `0.1.5-rc.1` family:
+This stable release has a minimum DSH version of `0.1.5-rc.1` and is also
+compatible with `0.1.5-rc.2`. We recommend rc.2; its native install scripts
+must be explicitly allowed:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.5-rc.1
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.5
 dsh --profile pi-tui
 ```
 
 Do not pair this release with the historical DSH `0.1.3-alpha.2` line. Users
-who must keep an older supported DSH should install the matching historical TUI
-line, such as `@xmoon76/dsh-pi-tui@0.3` for DSH `0.1.1-rc.1`/`rc.2`.
+who must keep an older DSH should install the matching historical TUI: use
+`@xmoon76/dsh-pi-tui@0.4.1` for DSH `0.1.2-rc.1`,
+`@xmoon76/dsh-pi-tui@0.4.3-alpha.2` for DSH `0.1.3-alpha.2`, and
+`@xmoon76/dsh-pi-tui@0.3` for the older DSH `0.1.1-rc.1`/`rc.2` line.
 
 ### Added
 
-- **PTC / `run_code` nested tool tree.** Sub-calls dispatched inside a
-  `run_code` program now render as a recursive sub-call tree under the root
-  Code card: a full identity chain (`subCallId`/`parentCallId`/`rootCallId`)
-  supports grandchild topology, and orphan start/settle facts are parked
-  privately and connected when their parent appears — never promoted to
-  top-level surface rows. The tree is aligned with Focus, display and search:
-  in collapsed Focus, `run_code` stays the formal Tool slot with a compact
-  active-child hint (e.g. `Bash running` / `Bash ×2 running` /
-  `Bash +1 running`, with a width-degradation ladder); the `/search` corpus
-  recursively includes sub-call descendants (matches locate the root Code
-  card); markdown export keeps nested output.
-- **Session presentation aligns with DSH v2 semantics.** The Direct adapter
-  ingests official `agent/assistant-stream` live frames (completed-turn
-  fences, revision-gap resynchronization); Transcript/Focus/Stats fold the
-  transient plane; cold replay restores thinking from assistant/message
-  blocks; the old durable assistant/chunk private path is gone.
-- **`/search` converges into the Session Browser.** `/sessions`, `/resume`
-  and `/search` now share one session browser: typing a query enters a global
-  search view (local metadata matches ∪ content matches) that is never scoped
-  by the workspace tabs, and hit snippets render on the matching session rows;
-  when content search is unavailable or fails, local metadata filtering keeps
-  working and the browser stays open.
-- **Session content search aligns with official DSH semantics.** The Direct
-  adapter now uses `sessionQuery.searchSessions()` (matching DSH master
-  `ApiSessionList.search()`: visibility authorization, dedupe, cursor
-  pagination, 20-result window), removing the old “newest 100 sessions +
-  filterEvents” private rule — matches in old sessions are now found.
-- **Unified attachment intake.** `@` mentions, `/image` arguments and pasted
-  content share one attachment intake pipeline: a bounded signature probe
-  separates images from generic files, generic files keep their metadata and
-  stream at submit time, and placeholder/draft submission behavior is unified.
-- **Inline `/skill` references complete in drafts.** A `/name` token at a
-  whitespace boundary in a prompt-mode draft completes against the detached
-  human skill catalog; accepting inserts the literal reference without
-  submitting, and the final ordinary prompt lets the Host `dsh-tool-skill`
-  pre-step inject every recognized skill.
-- **Scalable Workflow UI.** Workflow cards now own a two-level Run/Phase
-  disclosure: small phases (≤5 agents) list every member inline in the
-  transcript, large phases show aggregate counts + a capped abnormal preview
-  (max 3) + a `View N agents` entry, so a 100+ agent run never grows the
-  transcript linearly; a completed run collapses by default but keeps its
-  aggregate summary (e.g. `126 agents · completed`). `cancelled`/`interrupted`
-  use the warning visual category (no longer fused into `failed` error), and
-  a missing / explicit-empty phase reads as `Unassigned` / `Empty`. A running
-  direct child opens the existing read-only Subagent Viewer from the card;
-  `View N agents` opens the Task Viewer filtered to the exact Workflow
-  dataset (the global task list is restored on close). Search now covers
-  phase/member labels and statuses — a member hidden inside a large phase
-  still hits its card.
-- **Workflow lifecycle/model parity with DSH alpha.2.** Workflow runs now fold
-  into their own transcript semantic model instead of a generic tool card: run
-  and member statuses keep the full `running/completed/failed/cancelled/
-  interrupted` vocabulary (no longer collapsed to ok/error), members preserve
-  `seq`, `childId` and exact phase identity (a missing phase and an explicit
-  empty phase no longer merge); a run whose owning step/turn closed without
-  terminal events projects as `interrupted` (cold replay and live append
-  agree); search matches by run name/status, and `/transcript` keeps workflow
-  records.
+- **PTC / `run_code` nested tool tree.** Sub-calls inside a `run_code` program now
+  render as a recursive tree under the root Code card instead of scattered top-level
+  tool rows; Focus, `/search`, and Markdown export preserve the nesting and show a
+  compact active-child hint.
+- **Session presentation aligns with DSH Session semantics across V2/V3 persistence generations.**
+  Live answers, tool results, Thinking, and cold-resumed sessions now render consistently;
+  Focus, Transcript, and Stats no longer duplicate transient stream content.
+- **`/search` converges into the Session Browser.** `/sessions`, `/resume`, and
+  `/search` share one global view for session metadata and content; older sessions
+  are searchable, and metadata filtering remains available when content search fails.
+- **Unified attachment intake.** `@` mentions, `/image` arguments, and pasted content
+  now share one pipeline, keeping image, file, placeholder, and draft submission
+  behavior consistent.
+- **Inline `/skill` references complete in drafts.** `/name` tokens can complete from
+  the detached skill catalog; acceptance inserts only the reference, and the final
+  ordinary prompt lets the Host inject the recognized skill.
+- **Scalable Workflow UI.** Run/Phase cards show members for small runs and aggregate
+  summaries, abnormal previews, and a filterable Task Viewer for large runs; completed,
+  cancelled, and interrupted states are presented distinctly.
+- **Workflow lifecycle/model parity with DSH alpha.2.** Workflow preserves complete run
+  and member statuses, with cold replay, live records, search, and `/transcript` using
+  the same result model.
 - **`/export` saves the full Session archive.** The command now produces the
   official full Session-tree archive (descendants + attachments) and asks
   for a Client-local save directory after the command succeeds; the file
@@ -145,6 +113,11 @@ line, such as `@xmoon76/dsh-pi-tui@0.3` for DSH `0.1.1-rc.1`/`rc.2`.
   under `busyEnter=steer` (an idle agent always queues). The old `app.input.queue` action is kept as a
   deprecated, key-less action, so a stored remap still means "queue" instead of being silently turned
   into the opposite behavior; the new `app.input.submitAccelerated` owns Ctrl+Enter.
+- **Throughput statistics use observable decode throughput.** Footer tok/s now uses counted output
+  tokens over the observable decode window; burst samples are not mixed with full LLM wall time or
+  counts from other response stages.
+- **Focus steer chronology is more reliable.** Early, late, and same-timestamp steer/answer events use
+  the provable boundary; answers crossed by a steer are not lost or shown twice.
 
 ### Fixed
 
@@ -228,6 +201,9 @@ line, such as `@xmoon76/dsh-pi-tui@0.3` for DSH `0.1.1-rc.1`/`rc.2`.
   root `composeAgent(ctx, ref)` form remains supported, and its setup installs
   the caller-owned selection without requiring an Agent; the Direct runner
   continues to use the explicit Agent-local installer form.
+
+> **Known limitation:** The production default backend remains Direct; remote
+> attach is not supported.
 
 ## [0.4.3-alpha.2] - 2026-09-08
 

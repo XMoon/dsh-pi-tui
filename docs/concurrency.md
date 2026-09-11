@@ -30,9 +30,11 @@ PINNED quarantine, no manual lock recovery. A clean exit needs no lock
 release — the DSH session teardown releases the lease. The TUI's physical
 owner.lock / lease / cooling / PINNED stack is removed legacy.
 
-## Session v2 event planes
+## DSH Session persistence and v2 event planes
 
-The TUI keeps DSH's two Session v2 event planes distinct:
+The TUI leaves durable format generation to DSH (V2 on the minimum rc.1 runtime,
+V3 on the compatible rc.2 runtime) while keeping its two Session v2 event planes
+distinct:
 
 - durable `assistant/message` is the surface settlement; durable
   `assistant/attempt` is non-surface attempt evidence that may be projected as
