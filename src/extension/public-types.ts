@@ -435,7 +435,10 @@ export interface InputWidget {
  * the host catalog and executes through its own `handler`, never steered.
  * A contribution whose name is a host command FAILS LOUD at candidate
  * synthesis and never shadows it (the host command keeps its claim).
- * `/name args...` ALWAYS keeps `invocation.rawInput` verbatim. */
+ * A contribution is a slash-MENU entry, so it claims the BARE `/name` token
+ * only (DSH `matchEnter`): `/name args...` is NOT an invocation — it is an
+ * ordinary submission that reaches the model, and `handler` never runs for
+ * it. */
 export interface TuiCommandContribution {
   readonly id: string
   /** The slash-command name WITHOUT the leading slash. */
@@ -451,15 +454,20 @@ export interface TuiCommandContribution {
   // REMOVED (Unreleased): `argumentProvider` was never wired to the
   // completion path (a dead public surface). Use the AutocompleteRegistry
   // (`registerAutocomplete`) for plugin suggestions.
-  /** The command's client behavior (required): the TUI runs it locally,
-   * passing `invocation.rawInput` verbatim, with or without a live session
+  /** The command's client behavior (required): the TUI runs it locally for the
+   * BARE `/name` line, passing `invocation.rawInput` verbatim (it carries no
+   * non-whitespace input, since an argued line is never an invocation, though
+   * trailing whitespace may be preserved), with or without a live session
    * according to {@link sessionless}. */
   readonly handler: TuiLocalCommandHandler
 }
 
 /** The local command handler signature (invocation carries the VERBATIM
- * raw input — never re-parsed or rewritten). Returns the commands
- * service's result shape (`{ kind: 'success' }` / `{ kind: 'error',
+ * raw input — never re-parsed or rewritten). A client command CONTRIBUTION is
+ * invoked by its bare token alone, so its `rawInput` never carries
+ * non-whitespace input (trailing whitespace is preserved verbatim); TUI-owned
+ * local commands (`/export json`) still receive their arguments here. Returns the
+ * commands service's result shape (`{ kind: 'success' }` / `{ kind: 'error',
  * text }`) so the runner's notify path is shared. */
 export interface TuiLocalCommandHandler {
   (invocation: { commandId: string; rawInput: string; signal: AbortSignal }):

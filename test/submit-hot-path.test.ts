@@ -1023,6 +1023,8 @@ async function bootCommandHarness(
   }): Promise<void>
   /** The recorded image-admission batches (only with `attachments: true`). */
   imageSaves: readonly (readonly { mediaType: string; byteLength: number }[])[]
+  /** The recorded FILE admissions (only with `attachments: true`). */
+  fileSaves: readonly { name: string | undefined; byteLength: number }[]
   /** Dispose one pre-registered `hostCommands` definition (a catalog name that
    * disappears — e.g. while a deferred session is being created). */
   disposeHostCommand(name: string): void
@@ -1044,6 +1046,7 @@ async function bootCommandHarness(
   const context = new Context()
   life.defer(() => disposeContext(context))
   const imageSaves: { mediaType: string; byteLength: number }[][] = []
+  const fileSaves: { name: string | undefined; byteLength: number }[] = []
   if (options.attachments === true) {
     context.provide('attachments', {
       imageLimits: {
@@ -1063,6 +1066,15 @@ async function bootCommandHarness(
           width: 1,
           height: 1,
         }))
+      },
+      // The streamed file-admission seam (a plain prompt or an argued
+      // command-name line carries its FILE drafts through the model path): the
+      // fake drains the stream and records the bytes it actually received.
+      saveFileStream: async (input: { data: AsyncIterable<Uint8Array>; name?: string }) => {
+        let bytes = 0
+        for await (const chunk of input.data) bytes += chunk.byteLength
+        fileSaves.push({ name: input.name, byteLength: bytes })
+        return { attachmentId: `file-${fileSaves.length}`, name: input.name ?? 'file', bytes }
       },
     } as never)
   }
@@ -1179,6 +1191,7 @@ async function bootCommandHarness(
     mounted,
     registerContribution,
     imageSaves,
+    fileSaves,
     disposeHostCommand: (name: string) => { hostCommandDisposers.get(name)?.() },
     extensionService: extensionService as {
       _ledger(): {
@@ -2407,39 +2420,74 @@ test('a FAILED declared command keeps its attachment (consume only after handler
   assert.deepEqual(delivered.content.map(block => block.type), ['image'], 'the image reaches the model')
 })
 
-test('an attachment-bearing client command is refused AFTER the session resolves when the contribution keeps the line', async (t) => {
-  // The same deferral, with no late authority: the FINAL owner is the client
-  // contribution, whose local route refuses attachments. The refusal is the
-  // SAME user-visible outcome as the synchronous gate — just resolved late
-  // (the authority had to be settled) — and the draft, attachments included,
-  // comes back for a re-attach decision.
+test('an argued line of a client command name is an ordinary submission (the handler never runs)', async (t) => {
+  // DSH `matchEnter`: a contribution is a slash-MENU entry — it claims the BARE
+  // `/name` token only (`if (!bare) return undefined`). `/deploy <args>` is an
+  // ordinary submission even for a session-backed contribution on a deferred
+  // start, so the client handler never runs for it, the line reaches the MODEL
+  // (with its attachment), and no local-command refusal is surfaced.
   const life = testLifecycle(t)
-  const root = life.tempDir('dsh-pi-tui-deferred-attachment-')
-  const path = join(root, 'report.pdf')
-  await writeFile(path, Buffer.from('%PDF-1.7\nbody'))
+  const root = life.tempDir('dsh-pi-tui-argued-contribution-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(2, 2))
   const calls: string[] = []
-  const { harness, mounted } = await bootCommandHarness(t, {
+  const { harness, mounted, imageSaves } = await bootCommandHarness(t, {
     busyEnter: 'queue',
     status: 'idle',
     deferredStart: true,
+    attachments: true,
     extensionCommands: [{
       id: 'deploy', name: 'deploy', description: 'deploy',
       bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
     }],
   })
   const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
   mounted.app.setDraft(`/deploy ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  for (let round = 0; round < 60 && !/Attachments cannot be included/.test(mounted.app.notifyTextForTest()); round += 1) {
-    await new Promise<void>(resolve => setImmediate(resolve))
-  }
-  assert.match(mounted.app.notifyTextForTest(), /Attachments cannot be included in a local command\./)
-  assert.deepEqual(calls, [], 'the local handler never runs for an attachment-bearing line')
+  await waitForDelivery(harness.host, 'argued contribution line')
+  assert.equal(mounted.app.notifyTextForTest(), '', 'no local-command refusal is surfaced')
+  assert.deepEqual(calls, [], 'the client handler never runs for an argued line')
   assert.equal(harness.executed.length, 0, 'never the command plane')
-  assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
-  assert.equal(harness.createdSessionIds.length, 1, 'the deferred authority resolution ran (the session is session-keyed)')
-  assert.match(mounted.app.getDraft(), /^\/deploy /, 'the draft comes back for a re-attach decision')
-  assert.match(mounted.app.getDraft(), /\[file #1/, 'with its attachment placeholder intact')
+  assert.equal(imageSaves.length, 1, 'the image is admitted through the ordinary model path')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.type), ['text', 'image'],
+    'the model receives the multimodal prompt')
+  assert.match(delivered.content[0]?.text ?? '', /^\/deploy /, 'with the raw line (placeholder included)')
+})
+
+test('an argued line of a client command name carries a FILE as an ordinary submission', async (t) => {
+  // The same row with a generic FILE draft: the argued line is not a
+  // contribution invocation, so the file is admitted through the ordinary
+  // model path (never a local-command refusal, and the handler stays silent).
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-argued-contribution-file-')
+  const path = join(root, 'report.pdf')
+  await writeFile(path, Buffer.from('%PDF-1.7\nbody'))
+  const calls: string[] = []
+  const { harness, mounted, fileSaves } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    attachments: true,
+    extensionCommands: [{
+      id: 'deploy', name: 'deploy', description: 'deploy',
+      bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
+    }],
+  })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[file #1/, `the file is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/deploy ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'argued contribution line with a file')
+  assert.equal(mounted.app.notifyTextForTest(), '', 'no local-command refusal is surfaced')
+  assert.deepEqual(calls, [], 'the client handler never runs for an argued line')
+  assert.equal(harness.executed.length, 0, 'never the command plane')
+  assert.deepEqual(fileSaves.map(save => ({ name: save.name, byteLength: save.byteLength })),
+    [{ name: 'report.pdf', byteLength: 13 }], 'the exact file bytes are admitted through the model path')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.type), ['text', 'file'],
+    'the model receives the file-bearing prompt')
 })
 
 test('a sessionless client command runs without creating a session', async (t) => {
@@ -2835,6 +2883,100 @@ test('a client command executes locally under both chords (never the plane, neve
   assert.equal(harness.host.steered.length, 0, 'a client command never steers')
   assert.equal(harness.host.followedUp.length, 0, 'a client command never reaches the model')
   assert.equal(harness.executed.length, 0, 'a client command never enters the command plane')
+})
+
+test('running + queue: an argued client-command line is an ordinary queued followup', async (t) => {
+  // DSH `matchEnter`: a contribution claims the BARE token only, so its argued
+  // line follows the ordinary busy policy — the handler never runs.
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'running',
+    extensionCommands: [{
+      id: 'deploy', name: 'deploy', description: 'deploy the app',
+      bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
+    }],
+  })
+  mounted.app.setDraft('/deploy explain the risk')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'argued client-command line')
+  assert.deepEqual(calls, [], 'the client handler never runs for an argued line')
+  assert.equal(harness.executed.length, 0, 'never the command plane')
+  assert.equal(harness.host.followedUp.length, 1, 'the line takes the ordinary queue delivery')
+  assert.equal(harness.host.steered.length, 0, 'the queue preference never steers')
+})
+
+test('running + steer: an argued client-command line steers as an ordinary prompt', async (t) => {
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    extensionCommands: [{
+      id: 'deploy', name: 'deploy', description: 'deploy the app',
+      bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
+    }],
+  })
+  mounted.app.setDraft('/deploy explain the risk')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'argued client-command line')
+  assert.deepEqual(calls, [], 'the client handler never runs for an argued line')
+  assert.equal(harness.executed.length, 0, 'never the command plane')
+  assert.equal(harness.host.steered.length, 1, 'it takes the ordinary steer delivery')
+  assert.equal(harness.host.followedUp.length, 0, 'the steer preference never queues')
+})
+
+test('running + accelerated chord: an argued client-command line takes the OPPOSITE policy', async (t) => {
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'running',
+    extensionCommands: [{
+      id: 'deploy', name: 'deploy', description: 'deploy the app',
+      bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
+    }],
+  })
+  mounted.app.setDraft('/deploy explain the risk')
+  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
+  await waitForDelivery(harness.host, 'accelerated argued client-command line')
+  assert.deepEqual(calls, [], 'the chord cannot turn the line into a client command either')
+  assert.equal(harness.executed.length, 0, 'never the command plane')
+  assert.equal(harness.host.steered.length, 1, 'the accelerated chord takes the opposite of the queue preference')
+  assert.equal(harness.host.followedUp.length, 0, 'the chord must not queue')
+})
+
+test('bare /panel runs the client handler while /panel args is an ordinary submission', async (t) => {
+  // The two rows of the DSH contribution decision table, side by side.
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    extensionCommands: [{
+      id: 'panel', name: 'panel', description: 'toggle the panel',
+      bridgeHandler: () => { calls.push('panel'); return { kind: 'success' } },
+    }],
+  })
+  mounted.app.setDraft('/panel')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && calls.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(calls, ['panel'], 'the BARE token runs the client handler')
+  assert.equal(harness.host.followedUp.length, 0, 'a client command never reaches the model')
+  // Trailing whitespace is NOT input (DSH `bare`), so the handler still runs —
+  // and it receives the preserved whitespace verbatim.
+  mounted.app.setDraft('/panel   ')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 40 && calls.length < 2; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(calls, ['panel', 'panel'], 'trailing whitespace keeps the line bare')
+  assert.equal(harness.host.followedUp.length, 0, 'still never the model')
+  mounted.app.setDraft('/panel with args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'argued /panel line')
+  assert.deepEqual(calls, ['panel', 'panel'], 'the argued line does not run the handler')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
+  assert.equal(delivered.content[0]?.text, '/panel with args', 'the MODEL receives the raw line')
 })
 
 test('running + steer: the Ctrl+Enter chord never turns a Host command into a queued prompt', async (t) => {

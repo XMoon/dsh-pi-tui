@@ -155,12 +155,27 @@ test('a HOST claim outranks a same-named client contribution in the attachment g
   )
   assert.equal(commandRejectsImages({ name: 'deploy' }, `/deploy prod ${image.placeholder}`, store, colliding), false,
     'a host-claimed line is never a local command (the host route owns it)')
-  const clientOnly = commandIsLocalForAttachments({ name: 'deploy', rawInput: ' prod' }, undefined, name => name === 'deploy', hostCatalog({}))
-  assert.equal(commandRejectsImages({ name: 'deploy' }, `/deploy prod ${image.placeholder}`, store, clientOnly), true,
-    'without a host claim the same name is the local client command')
   const core = commandIsLocalForAttachments({ name: 'help', rawInput: '' }, undefined, undefined, hostCatalog({ help: { leadingInput: true } }))
   assert.equal(commandRejectsImages({ name: 'help' }, `/help ${image.placeholder}`, store, core), true,
     'a TUI-owned local command stays local even if a registry claim exists for it')
+})
+
+test('a client contribution claims the BARE token only: an argued line keeps its attachments', () => {
+  // DSH `matchEnter`: a contribution is a slash-menu entry, so `if (!bare)
+  // return undefined` — `/deploy explain` is an ordinary multimodal
+  // submission, never a local client command (which would refuse the image).
+  const store = storeWithImage()
+  const image = store.values()[0]!
+  const isClientCommand = (name: string): boolean => name === 'deploy'
+  const host = hostCatalog({})
+  const bare = commandIsLocalForAttachments({ name: 'deploy', rawInput: '' }, undefined, isClientCommand, host)
+  assert.equal(bare, true, 'the bare token IS the contribution invocation (a local client command)')
+  assert.equal(commandRejectsImages({ name: 'deploy' }, `/deploy ${image.placeholder}`, store, bare), true,
+    '…whose attachment-bearing form is impossible, but the classification is local')
+  const argued = commandIsLocalForAttachments({ name: 'deploy', rawInput: ' explain' }, undefined, isClientCommand, host)
+  assert.equal(argued, false, 'an argued line of a contribution name is an ordinary submission')
+  assert.equal(commandRejectsImages({ name: 'deploy', rawInput: ' explain' }, `/deploy explain ${image.placeholder}`, store, argued), false,
+    'the argued line keeps its image (no local-command refusal)')
 })
 
 test('the host claim is LINE-level: an execute-kind command does not claim its argued line', () => {

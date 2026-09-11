@@ -434,6 +434,14 @@ name collision **fails loud — it never shadows**.
   (busy policy included) and the command plane is never asked to run it. A
   claimed command the real session then lacks is consumed by the
   advertised-miss gate — never a plain model message.
+- **A contribution is a slash-MENU entry: it claims the BARE token only.**
+  Upstream checks a contribution with `if (!bare) return undefined`, so
+  `/deploy` runs the client handler while `/deploy explain` is an ordinary
+  submission that reaches the model (busy policy and attachments included),
+  and the handler never runs for it. A contribution can therefore never be
+  invoked with a composer attachment — an attachment makes the line argued —
+  and its `handler` only ever sees `rawInput` without non-whitespace input
+  (trailing whitespace stays verbatim, like every other command surface).
 - **A name the host catalog RESOLVES is host territory in BOTH states.** The
   catalog's view of a line has three outcomes: it CLAIMS the line, it resolves
   the name but does not claim THIS line (an argued line of an execute-kind
@@ -475,28 +483,20 @@ name collision **fails loud — it never shadows**.
   could not see): a host claim or skill wrapper that appears with it takes the
   line, otherwise the client handler runs. A name the committed catalog
   resolves — claimed or not — ends the contribution's ownership of the line.
-  Three rules follow, all regression-pinned:
-  - **Attachments defer with the authority.** An attachment-bearing line is
-    refused as "local" only once the local classification is FINAL. For a
-    provisional session-backed contribution the refusal waits for the same
-    resolution, with the referenced drafts RESERVED across the window (a
-    concurrent attach-time prune must not drop them). A late host claim or
-    skill wrapper takes the line WITH its attachment; if the contribution
-    keeps it, the refusal fires after the session resolves and the draft —
-    placeholder intact — comes back for a re-attach decision.
+  Two rules follow, both regression-pinned (the deferred line is always the
+  BARE token, so there is no attachment to carry across the window and no
+  deferred refusal to fire):
   - **The captured registration is fenced.** The deferred resolution runs the
     EXACT contribution the user submitted. A dispose + reload during the
     window (even under the same owner and id) is a NEW generation that must
     never run in place of the submitted one, and a vanished name must never
     fall through to the command plane or the MODEL. The submission is aborted
     with a `/<name> is no longer available` notice and the draft is restored.
-  - **The line's final owner is re-asked, in both directions.** A late host
-    descriptor that CLAIMS the argued line takes it (the plane executes the
-    command even though the standing view had classified the line as
-    unclaimed), and a late descriptor that resolves the name WITHOUT claiming
-    the line takes it away from the contribution: the submission becomes an
-    ordinary delivery. The plane's ownership and the advertised-miss gate are
-    resolved from that same final answer.
+  - **The line's final owner is re-asked.** A late host descriptor that
+    resolves the name owns the bare line (the plane executes it, or — for a
+    name resolved without claiming the line, which can only be an argued
+    line — the submission becomes an ordinary delivery). The plane's ownership
+    and the advertised-miss gate are resolved from that same final answer.
 - A colliding contribution fails the candidate synthesis as a whole: the
   command SOURCE is marked failed (upstream `source-failed` parity — the
   source's whole group is removed), so no command row, client or host, is
@@ -579,13 +579,15 @@ The composer's attachment policy is the DSH client contract
 - A command submission CONSUMES its attachments only after handler success
   (web parity): an error outcome restores the draft and KEEPS the staged
   attachments, so a failed command never swallows the user's image.
-- TUI/core local commands, client contributions AND `!`/`!!` local shell
-  lines keep refusing attachments outright: their line is a UI control, never
-  agent-facing input. The shell has no attachment delivery path
-  (`runLocalShell` neither admits nor consumes drafts), so the refusal is
-  what keeps a placeholder from becoming shell arguments. A skill
-  wrapper, a `/skill <name>` invocation and a plain prompt stay agent-facing
-  and deliver their attachments to the model.
+- TUI/core local commands AND `!`/`!!` local shell lines keep refusing
+  attachments outright: their line is a UI control, never agent-facing input.
+  The shell has no attachment delivery path (`runLocalShell` neither admits nor
+  consumes drafts), so the refusal is what keeps a placeholder from becoming
+  shell arguments. A client command contribution needs no refusal: its
+  invocation is the BARE token only, so an attachment-bearing `/deploy [image
+  #1]` line is never its invocation — it is an ordinary multimodal submission.
+  A skill wrapper, a `/skill <name>` invocation and a plain prompt stay
+  agent-facing and deliver their attachments to the model.
 - The policy is applied against the FINAL authority, not only at submit time.
   A deferred start may commit a session-scoped host command the standing view
   could not see, so the dispatch RE-APPLIES the policy after

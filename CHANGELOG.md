@@ -51,10 +51,9 @@
   仍属 agent-facing，图片随投递的 prompt 进入模型，而不是走命令通道。策略按**最终 authority** 复核：
   未知的 `/name [image #1]` 若其命令在 session 建立后才出现（session 级 host 命令），会在 session 解析后
   再判一次——未声明的命令会被拒绝，而不是带着空 payload 执行并把草稿 consume 掉。
-- **带附件的 client 命令在 deferred start 下不再提前拒绝。** 首次输入前没有 session 时，`/deploy [image #1]`
-  这类命令先完成 session 级 authority 解析：随 session 出现的 host 命令或 skill wrapper 会**带着附件**接管
-  该行；只有最终归属仍是 client 命令时才拒绝附件，并把草稿（附件占位符保留）原样退回。延迟窗口内的附件由
-  reservation 保护，不会被并发的 attach 清理删掉。
+- **带附件的 `/name args` 行不再被当成 client 命令。** client 命令 contribution 只 claim **裸 `/name`**，
+  所以 `/deploy [image #1]` 这类带参数（附件必然引入参数）的行本来就**不是** contribution 调用：它作为
+  普通多模态提交进入模型，插件 handler 不执行、也不会再报 "local command" 附件拒绝。
 - **deferred start 期间插件重载不会串代执行。** 首次输入触发的 session 解析过程中，如果该 contribution
   被卸载/重载（即使 owner 与 id 相同），已提交的命令**不会**执行新一代的 handler，也**不会**降级成模型
   prompt：提交被中止、提示 `/<name> is no longer available`，草稿还原后可直接重试。
@@ -65,6 +64,10 @@
 
 ### 兼容性
 
+- **客户端命令 contribution 改为"仅裸命令"调用（破坏性）。** 对齐 DSH `matchEnter`：contribution 是
+  斜杠**菜单项**，只 claim **裸 `/name`**；`/name args` 不是调用——它作为普通提交进入模型（跟随忙碌
+  策略、附件照常投递），插件的 handler 完全不执行。此前 `/deploy prod` 会执行插件 handler。需要参数的
+  插件应在裸命令里自行打开面板/选择器，或把该能力做成模型可用的工具。
 - **扩展 API 版本升到 2（破坏性）。** `api().apiVersion` 现在返回 `2`：下面的插件命令 contribution
   契约对 STABLE 面是破坏性变更（移除 `execution`/`argumentProvider`、`handler` 变为必填）；`1` 仍是
   M0–M3 基础版，插件可据此区分两套 schema。仍声明旧 v1 shape 的插件会在注册时**直接报错**，不会

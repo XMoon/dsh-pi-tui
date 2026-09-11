@@ -398,6 +398,19 @@ export function isLocalCommandLine(
 }
 
 /**
+ * Whether one parsed line is the BARE slash token (DSH `matchEnter`'s `bare`:
+ * no input follows the name — trailing whitespace is not input). It is the
+ * whole difference between a command invocation and an ordinary submission
+ * for the NAME-keyed client routes: a client command contribution claims the
+ * bare token only, exactly like an execute-kind host command.
+ * @param parsed - the parsed slash command.
+ * @returns whether the line carries no input after the command name.
+ */
+export function isBareCommandLine(parsed: { name: string; rawInput?: string }): boolean {
+  return (parsed.rawInput?.trim() ?? '') === ''
+}
+
+/**
  * The attachment gate's local-command classification for ONE parsed line —
  * the SINGLE classification the dispatch and its regression tests share, and
  * the DSH client namespace order applied to a LINE:
@@ -410,7 +423,10 @@ export function isLocalCommandLine(
  *   line of an execute-kind command, `/compact extra`) the line is an
  *   ordinary submission — never a command and never a same-named client
  *   contribution's;
- * - everything else follows the live client contribution of that name.
+ * - everything else follows the live client contribution of that name — for
+ *   the BARE token only: a contribution claims `/name`, so an argued line
+ *   (`/deploy explain`) is an ordinary multimodal submission that keeps its
+ *   attachments.
  * @param parsed - the parsed slash command (undefined = plain prompt).
  * @param isSkillWrapper - the live skill-wrapper test (absent = none).
  * @param isDynamicLocal - the live client-contribution test (absent = none).
@@ -428,8 +444,14 @@ export function commandIsLocalForAttachments(
   // bare `/skill` picker is a TUI-local command.
   if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return false
   // The host catalog's view of THIS LINE outranks a same-named client
-  // contribution, exactly like the dispatch's namespace order.
-  return isLocalCommandLine(parsed.name, isSkillWrapper, isDynamicLocal, hostClaim?.(parsed))
+  // contribution, exactly like the dispatch's namespace order; the
+  // contribution term itself is asked for a BARE line alone (DSH `matchEnter`).
+  return isLocalCommandLine(
+    parsed.name,
+    isSkillWrapper,
+    isBareCommandLine(parsed) ? isDynamicLocal : undefined,
+    hostClaim?.(parsed),
+  )
 }
 
 /**
@@ -4462,11 +4484,12 @@ export function apply(ctx: Context, config: Config): void {
       // routing decision (before any session creation): only a line whose
       // initial route was a LIVE client contribution keeps the client-local
       // attachment classification under the final authority. A contribution
-      // that appears LATER never turns a generic line into a UI control
-      // (upstream `matchEnter` checks the contribution once, before the session
-      // work), and this route never runs the new handler anyway — the line is
-      // an ordinary submission.
+      // claims the BARE token only (DSH `matchEnter`), and a contribution that
+      // appears LATER never turns a generic line into a UI control — this route
+      // never runs the new handler anyway, so the line is an ordinary
+      // submission.
       const clientLocalAtSubmit = parsedAtSubmit !== undefined
+        && isBareCommandLine(parsedAtSubmit)
         && extensionService?.commands.find(parsedAtSubmit.name) !== undefined
       // Whether the command plane OWNS the submitted line, asked against the
       // LIVE catalog at INVOCATION time (after ensureSession: a deferred start
@@ -5397,32 +5420,24 @@ export function apply(ctx: Context, config: Config): void {
       // plain prompts AND per-skill slash lines, including `/skill <name>
       // [image #N ...]` (`skill` is local only as the bare picker; with
       // arguments it is a loadSkill agent prompt — review finding).
-      // The line's attachment classification is RE-EVALUATED at every ask
-      // (a thunk, never a snapshot): the deferred resolution below must
-      // classify against the catalog the session committed, not the standing
-      // view the gesture saw.
-      const localForAttachments = (): boolean => commandIsLocalForAttachments(
-        parsed,
-        isSkillWrapperName,
-        n => extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false,
-        hostClaimOf,
-      )
-      // A session-backed client contribution on a DEFERRED START is the ONE
-      // classification the standing view cannot settle: the session commits
-      // the session-scoped host catalog (and the skill catalog) the view
-      // could not see, and either outranks the contribution. Refusing an
-      // attachment here would be irrevocable — the real host command would
-      // never get its chance — so the refusal DEFERS to the same authority
-      // resolution the namespace decision waits for (see the client-command
-      // block below, which reserves the drafts across the window). Every
-      // other local classification (TUI/core commands, a live contribution)
-      // is final and refuses NOW.
-      const deferredClientAttachments = parsed !== undefined
-        && liveAgent === undefined
-        && extensionService?.commands.find(parsed.name)?.sessionless === false
-        && localForAttachments()
-      if (!deferredClientAttachments && parsed !== undefined) {
-        const refusal = attachmentRefusal(parsed, text, localForAttachments(), isSkillInvocation(parsed, text))
+      // The line's attachment classification against the CURRENT catalog.
+      // Every local classification refuses NOW: a contribution claims the BARE
+      // token only (DSH `matchEnter`), and a bare line can never reference a
+      // draft, so there is no attachment to carry across a deferred window —
+      // an argued line of a contribution name is an ordinary submission, with
+      // its attachments.
+      if (parsed !== undefined) {
+        const refusal = attachmentRefusal(
+          parsed,
+          text,
+          commandIsLocalForAttachments(
+            parsed,
+            isSkillWrapperName,
+            n => extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false,
+            hostClaimOf,
+          ),
+          isSkillInvocation(parsed, text),
+        )
         if (refusal !== undefined) {
           app.setEditorText(mergeDraft(app.getDraft(), text))
           app.notify(refusal, 'error')
@@ -5468,11 +5483,12 @@ export function apply(ctx: Context, config: Config): void {
       }
       // 2. CLIENT-OWNED command contribution: its behavior lives entirely on
       // the client, so it executes locally and never steers — the namespace
-      // decision is NOT the generic sessionless branch's to make. A name the
-      // host catalog RESOLVES is host territory even when the catalog does
-      // not claim THIS line (an argued line of an execute-kind command): the
-      // line is an ordinary submission, so the contribution of that name
-      // never runs for it.
+      // decision is NOT the generic sessionless branch's to make. A
+      // contribution is a slash-MENU entry, so it claims the BARE `/name`
+      // token only (DSH `matchEnter`: `if (!bare) return undefined`): an argued
+      // line (`/deploy explain`) is an ordinary submission, and the handler
+      // never runs for it. A name the host catalog RESOLVES is host territory
+      // in both states, so a contribution never runs for such a line either.
       // `sessionless` decides whether it may run before a session exists:
       // true runs immediately (no session is created); false (default)
       // resolves/creates the session FIRST — the host command surface is
@@ -5481,12 +5497,12 @@ export function apply(ctx: Context, config: Config): void {
       // name (the contribution may have been registered before the skill
       // catalog loaded).
       const contribution = parsed === undefined
+        || !isBareCommandLine(parsed)
         || isSkillWrapperName?.(parsed.name) === true
         // A name the host catalog RESOLVES is host territory even when it does
-        // not claim THIS line: the line is an ordinary submission (upstream
-        // `matchEnter` `if (!bare) return undefined`), so a same-named
-        // contribution — reachable only in the failed-source collision state —
-        // never runs for it.
+        // not claim THIS line: the line is an ordinary submission, so a
+        // same-named contribution — reachable only in the failed-source
+        // collision state — never runs for it.
         || hostView !== undefined
         ? undefined
         : extensionService?.commands.find(parsed.name)
@@ -5504,38 +5520,25 @@ export function apply(ctx: Context, config: Config): void {
         // user did not submit (see the fence inside).
         const submitted = contribution
         runOwned('client command session', () => runReservedSubmit({
-          // The editor was already cleared by the gesture: the referenced
-          // drafts must survive the deferred window — an attach-time prune
-          // during session creation must not delete what this submission is
-          // about to admit (a late host claim / skill wrapper) or refuse.
-          // No await may precede this reservation.
+          // The submit-flow core's ordering contract. A contribution is only
+          // ever invoked by its BARE token, so the line references no drafts
+          // and this reservation pins nothing — it stays because the failure
+          // path (restore the draft when the session cannot be created) is the
+          // shared one. No await may precede it.
           reserve: (draft) => pinDraftAttachments(draft, draftImages, draftFiles),
           run: async () => {
             await ensureSession()
             if (liveAgent === undefined) return
-            // The COMPOSER attachment policy is resolved with the FINAL
-            // authority: a late host claim that does not declare
-            // `input.attachments` refuses the line (a declared one takes it
-            // WITH the images, see the delivery side); a late skill wrapper
-            // delivers to the model; a contribution that keeps the line
-            // refuses as a local command — the synchronous gate's outcome,
-            // only now final.
-            const refusal = attachmentRefusal(parsed, text, localForAttachments(), isSkillInvocation(parsed, text))
-            if (refusal !== undefined) {
-              restoreSubmissionDraft(text)
-              app.notify(refusal, 'error')
-              return
-            }
             // AUTHORITY RE-CHECK after the session exists: the deferred start
             // commits a session whose scoped catalog the standing view could
             // not see, and the skill catalog may load with it. A live HOST
             // claim FOR THIS LINE or a TUI skill wrapper outranks the
-            // contribution that was decided before the session existed — and a
-            // name the committed catalog resolves WITHOUT claiming this line
-            // is an ordinary submission the contribution must not run either.
-            // The delivery resolved before the session existed, so it is a
-            // queue-mode submission: `dispatchViaSession` delivers the line
-            // itself (its command-plane gate refuses the unclaimed line).
+            // contribution that was decided before the session existed. (A host
+            // name can only CLAIM this bare line: the argued lines a catalog
+            // resolves without claiming are ordinary submissions and never
+            // reach this branch.) The delivery resolved before the session
+            // existed, so it is a queue-mode submission: `dispatchViaSession`
+            // delivers the line itself.
             if (hostClaimOf?.(parsed) !== undefined || isSkillWrapperName?.(parsed.name) === true) {
               dispatchViaSession(text, persistHistory, delivery)
               return

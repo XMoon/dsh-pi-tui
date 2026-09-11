@@ -169,6 +169,16 @@ entirely on the client (no host descriptor), carried by the required
 `handler`. It is merged into the `/` menu with the host catalog and runs
 locally, never steered.
 
+- **Bare-token invocation.** A contribution is a slash-MENU entry, so it
+  claims the BARE `/name` token only — the DSH decision table
+  (`ui-commands` `matchEnter`) checks a contribution with `if (!bare) return
+  undefined`. `/deploy` runs the handler; `/deploy explain` is NOT an
+  invocation: it is an ordinary submission that reaches the model (with its
+  attachments), and the handler never runs for it. A contribution therefore
+  receives an `invocation.rawInput` with no non-whitespace input (trailing
+  whitespace is preserved verbatim, like every other command surface), and one
+  can never be invoked with a composer attachment (any attachment makes the line
+  argued).
 - **Host authority.** A LINE the current host catalog CLAIMS is a host
   command: it executes through the command plane and a contribution can
   never shadow it — not in the dispatch, and not in the attachment gate (a
@@ -212,20 +222,30 @@ locally, never steered.
   name without claiming the line (an argued line of an execute-kind command)
   makes the submission an ordinary one — the contribution does not run for it.
 - **`handler`** receives `invocation.rawInput` verbatim, like every other
-  command surface.
+  command surface — for a contribution that is the bare token's remainder,
+  which carries no non-whitespace input (only the bare `/name` line invokes
+  one).
 
 **Breaking change (Unreleased) — API v1 → v2.** `api().apiVersion` reports
 `2` from this release on. The previous `execution: 'local' |
 'submission'` ownership metadata is REMOVED, and the never-wired
 `argumentProvider` field is gone with it (use `registerAutocomplete` for
 plugin suggestions — it was a dead public surface). A contribution is a client
-command, full stop: a `/name args` line that is not a command is an
-unclaimed prompt (the host pre-step owns skill expansion, and the inline
-skill lexicon owns its discovery), so a contribution no longer needs to
-declare that. Migration: drop `execution` (and declare `handler`, now
-required); a contribution that used `submission` to advertise a
-prompt-style name should instead not register a contribution at all — its
-line reaches the model as an ordinary prompt.
+command, full stop: the `'submission'` variant is gone, and an unclaimed slash
+line is an ordinary prompt (the host pre-step owns skill expansion, and the
+inline skill lexicon owns its discovery). Migration: drop `execution` (and
+declare `handler`, now required); a contribution that used `submission` to
+advertise a prompt-style name should instead not register a contribution at all
+— its line reaches the model as an ordinary prompt.
+
+The bare-token invocation is part of the same alignment and is itself a
+behaviour change for plugins that declared arguments before: `/name args` no
+longer reaches `handler` (the line is an ordinary submission, and its
+`rawInput` was never a stable argument channel to begin with — the handler is
+the CLI-entered *bare* command gesture on the web too, where a contribution
+opens its popup). A plugin that needs arguments should own them client-side
+(a picker/overlay opened by the bare command) or expose the capability to the
+MODEL as a tool instead.
 
 ## Theme registry (M5)
 
