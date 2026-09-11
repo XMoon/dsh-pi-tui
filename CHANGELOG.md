@@ -7,8 +7,50 @@
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-09-11
+
+### 安装与版本对应
+
+本稳定版本对应已发布的 DSH `0.1.5-rc.1` family：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.5-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.5
+dsh --profile pi-tui
+```
+
+不要把本版本与历史 DSH `0.1.3-alpha.2` 线混用。必须保留旧版 DSH
+时，请安装对应的历史 TUI 线，例如 DSH `0.1.1-rc.1`/`rc.2` 使用
+`@xmoon76/dsh-pi-tui@0.3`。
+
 ### 新增
 
+- **PTC / `run_code` 嵌套工具树。** `run_code` 程序内派发的子调用现在作为
+  递归子调用树挂在根 Code 卡片下：完整身份链（`subCallId`/`parentCallId`/
+  `rootCallId`）支持孙级拓扑；未知父级的孤儿 start/settle 事实先私有暂存，
+  父级出现时挂接，绝不提升为顶层 surface 行。子调用树与 Focus、展示与搜索
+  等表面对齐：折叠 Focus 中 `run_code` 仍是正式 Tool 槽，并附加紧凑的活跃
+  子调用提示（如 `Bash running` / `Bash ×2 running` / `Bash +1 running`，
+  带宽度降级）；`/search` 语料递归包含子调用（命中定位到根 Code 卡）；
+  markdown 导出保留嵌套输出。
+- **会话呈现对齐 DSH v2 语义。** Direct 适配器按官方语义摄取
+  `agent/assistant-stream` 实时帧（完成回合栅栏、修订间隔重同步），
+  Transcript/Focus/Stats 折叠瞬态平面；冷回放从 assistant/message block
+  恢复 thinking；移除旧的 durable assistant/chunk 私有路径。
+- **`/search` 收敛进会话浏览器。** `/sessions`、`/resume` 与 `/search` 现在共用
+  同一个会话浏览器：输入查询后进入全局搜索结果视图（本地元数据匹配 ∪ 内容
+  匹配），不再按工作区裁剪搜索结果；命中片段直接显示在对应会话行上；内容搜索
+  不可用或失败时，本地元数据筛选照常工作，浏览器不会关闭。
+- **会话内容搜索对齐 DSH 官方语义。** Direct 适配器改用
+  `sessionQuery.searchSessions()`（与 DSH master `ApiSessionList.search()`
+  一致：可见性授权、去重、游标翻页、20 条结果窗口），移除了旧的“最新 100 个
+  会话 + filterEvents”私有搜索规则——很早创建的会话中的匹配现在也能被找到。
+- **统一附件摄取。** `@` 提及、`/image` 参数与粘贴内容走同一条附件 intake
+  流水线：有界签名探测区分图片与普通文件，普通文件保留元数据并在提交时
+  流式送入；占位与草稿提交行为一致化。
+- **草稿中补全内联 `/skill` 引用。** 提示模式草稿中空白边界的 `/名称`
+  token 现在按 detached 的人类 skill 目录补全；接受时插入字面引用而不提交，
+  最终普通提问由 Host 的 `dsh-tool-skill` pre-step 注入所有已识别 skill。
 - **Workflow 可扩展 UI。** Workflow 卡片自带 Run/Phase 两层展开：小 phase
   （≤5 个 agent）在 transcript 内完整列出成员，大 phase 只显示聚合计数 +
   最多 3 个异常预览 + `View N agents` 入口，100+ agent 的 run 不再线性撑大
@@ -34,6 +76,12 @@
 
 ### 改进
 
+- **流式工具准备 UX 增强。** 准备卡片在块结束前的身份迁移更稳：延迟到达的
+  名称保留有界前缀，空 id 在 block 结束时迁移到权威 id，并行预览独立累计
+  字节与摘要。
+- **内容块呈现完善。** 打开中的不透明 assistant 块立即渲染（不再等流结束），
+  pending final 有栅栏防护，过期确认的 assistant 预览会刷新；continuable
+  子代理查看器保留查看历史。
 - **命令与普通输入按"整行"判定，不再按命令名判定。** DSH 的命令判定表
   （`CommandDescriptor.input`）区分两类命令：`leadingInput` 命令（如 `/goal`）把参数一起当作调用，
   无参数命令（如 `/compact`）只有**裸命令**才是调用。此前只要名字出现在命令表里，整行就会走命令
@@ -61,6 +109,14 @@
   `busyEnter=queue` 时它 steer，`busyEnter=steer` 时它入队（空闲时一律入队）。旧的
   `app.input.queue` 动作保留为 deprecated、无默认键，已有自定义绑定仍然是"入队"，不会被悄悄改成
   相反行为；新的 `app.input.submitAccelerated` 独立拥有 Ctrl+Enter。
+
+### 修复
+
+- **过期的命令 handle 不再删除新一代注册。** handle 只代表**一次**注册：重复或迟到的 `dispose()`（HMR 重载后才到达的 fiber cleanup）不会删掉同 id 的新 contribution，也不会误清新一代的健康记录。
+- **文本输入态的键盘所有权修正。** 自由输入编辑不再被父层抢走行编辑键：Question 的“Type something.”自由输入里 `←/→` 现在是文本光标（此前会误提交或翻页），`Home/End/Ctrl+A/E/B/F/Delete` 等编辑键统一进入共享输入。无选项的纯文本问题改为明确的两层状态：编辑层里 `←/→` 编辑文本、`↵` 提交、`Esc/Ctrl+C` 只退出编辑回到导航层，导航层里 `↵` 重新进入编辑、`←/→` 翻题（或跳过）、`Esc/Ctrl+C` 才取消整个流程（此前按 Esc 会把这类问题困在无法重新编辑的半死状态，或直接取消整个提问）。Question 编辑态与 Task Center 搜索态的底部提示改为只描述当前模式真实行为（不再宣传 `↑↓ select` / `A active/all` 等列表动作）。Transcript 搜索现在可用 Esc 或 Ctrl+C 关闭（`app.transcript.search.close` 默认键扩充，Ctrl+C 此前被搜索输入框吞掉），并在输入框下显示 `↵ next · ⇧↵ prev · esc/ctrl+c close` 指引。`/keybindings` 的搜索框改为共享 Input 渲染：支持光标移动/Home/End/删除/词移动等完整行编辑，提示随查询是否为空在 `Esc: clear` 与 `Esc: close` 间切换。
+- **退出时完整回收 Direct 会话。** 退出 TUI 时，主 Agent、continuable subagent 与 Agent 作用域后台任务现在按固定顺序回收：取消主 Agent 并等待静默 → 排空 continuable 后代 → 最终持久化 flush → 释放 AgentHandle。此前退出后进程可能残留约 5 分钟（continuable subagent 仍存活）；现在退出在数秒内完成，且诊断日志能区分 surface 关闭、Host 回收与 launcher 退出。会话切换（/new、/fork、rewind、/sessions）提交后也会回收旧 owner 的 continuable 后代。
+- **展示细节修正。** diff 展示对齐官方语义（折叠的多 hunk 有界、编辑 header 与结果 parity 保留）；`@` 文件补全保留完整路径，marquee 提示路由与宿主清理修正；fork/rewind 后模型选择引用保留；Focus thought 后的非用户回合 steer 保留，并区分 opening steer 与回合中途输入；assistant 工具结果展示在呈现流水线后保持不变。
+- **会话打开与切换更稳健。** 打开/切换会话（/new、/resume、fork、rewind、/sessions）期间不再丢状态：新会话加载完成前旧会话保持可见可用，新会话初始化失败也不会卡死表面（重试仍能正常打开）；切换期间旧 Agent 保持写入权威直到新会话接管；迟到的 assistant 流片段按官方语义归位，不再产生残缺或悬空的块。
 
 ### 兼容性
 
@@ -810,7 +866,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.3-alpha.2...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...v0.4.5
 [0.4.3-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...next-v0.4.3-alpha.2
 [0.4.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...v0.4.0

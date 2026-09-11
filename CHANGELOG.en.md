@@ -7,8 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-09-11
+
+### Installation and version pairing
+
+This stable release is paired with the published DSH `0.1.5-rc.1` family:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.5-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.5
+dsh --profile pi-tui
+```
+
+Do not pair this release with the historical DSH `0.1.3-alpha.2` line. Users
+who must keep an older supported DSH should install the matching historical TUI
+line, such as `@xmoon76/dsh-pi-tui@0.3` for DSH `0.1.1-rc.1`/`rc.2`.
+
 ### Added
 
+- **PTC / `run_code` nested tool tree.** Sub-calls dispatched inside a
+  `run_code` program now render as a recursive sub-call tree under the root
+  Code card: a full identity chain (`subCallId`/`parentCallId`/`rootCallId`)
+  supports grandchild topology, and orphan start/settle facts are parked
+  privately and connected when their parent appears — never promoted to
+  top-level surface rows. The tree is aligned with Focus, display and search:
+  in collapsed Focus, `run_code` stays the formal Tool slot with a compact
+  active-child hint (e.g. `Bash running` / `Bash ×2 running` /
+  `Bash +1 running`, with a width-degradation ladder); the `/search` corpus
+  recursively includes sub-call descendants (matches locate the root Code
+  card); markdown export keeps nested output.
+- **Session presentation aligns with DSH v2 semantics.** The Direct adapter
+  ingests official `agent/assistant-stream` live frames (completed-turn
+  fences, revision-gap resynchronization); Transcript/Focus/Stats fold the
+  transient plane; cold replay restores thinking from assistant/message
+  blocks; the old durable assistant/chunk private path is gone.
+- **`/search` converges into the Session Browser.** `/sessions`, `/resume`
+  and `/search` now share one session browser: typing a query enters a global
+  search view (local metadata matches ∪ content matches) that is never scoped
+  by the workspace tabs, and hit snippets render on the matching session rows;
+  when content search is unavailable or fails, local metadata filtering keeps
+  working and the browser stays open.
+- **Session content search aligns with official DSH semantics.** The Direct
+  adapter now uses `sessionQuery.searchSessions()` (matching DSH master
+  `ApiSessionList.search()`: visibility authorization, dedupe, cursor
+  pagination, 20-result window), removing the old “newest 100 sessions +
+  filterEvents” private rule — matches in old sessions are now found.
+- **Unified attachment intake.** `@` mentions, `/image` arguments and pasted
+  content share one attachment intake pipeline: a bounded signature probe
+  separates images from generic files, generic files keep their metadata and
+  stream at submit time, and placeholder/draft submission behavior is unified.
+- **Inline `/skill` references complete in drafts.** A `/name` token at a
+  whitespace boundary in a prompt-mode draft completes against the detached
+  human skill catalog; accepting inserts the literal reference without
+  submitting, and the final ordinary prompt lets the Host `dsh-tool-skill`
+  pre-step inject every recognized skill.
 - **Scalable Workflow UI.** Workflow cards now own a two-level Run/Phase
   disclosure: small phases (≤5 agents) list every member inline in the
   transcript, large phases show aggregate counts + a capped abnormal preview
@@ -47,6 +99,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 
+- **Streaming tool preparation UX.** Preparing cards migrate more reliably
+  around block completion: delayed names keep a bounded prefix, empty call
+  ids migrate to the authoritative block-end id, and parallel previews keep
+  independent bytes and summaries.
+- **Content-block presentation.** Open opaque assistant blocks render
+  immediately (no longer waiting for the stream to end), pending finals are
+  fenced, stale confirmed assistant previews refresh, and the continuable
+  subagent viewer keeps its viewing history.
 - **Commands are decided by the whole LINE, not by the command name.** The DSH decision table
   (`CommandDescriptor.input`) distinguishes a `leadingInput` command (e.g. `/goal`), whose arguments are part of the
   invocation, from an execute-kind one (e.g. `/compact`), where only the BARE token is an invocation. Previously any
@@ -85,6 +145,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `busyEnter=steer` (an idle agent always queues). The old `app.input.queue` action is kept as a
   deprecated, key-less action, so a stored remap still means "queue" instead of being silently turned
   into the opposite behavior; the new `app.input.submitAccelerated` owns Ctrl+Enter.
+
+### Fixed
+
+- **A stale command handle can no longer remove a newer registration.** A dispose handle names ONE registration:
+  a repeated or late `dispose()` (a fiber cleanup arriving after an HMR reload re-registered the same id) no longer
+  removes the newer contribution or drops its health record.
+- **Text-input keyboard ownership is corrected.** Free-text editing no
+  longer loses its line-editing keys to the parent: in Question's “Type
+  something.” edit, `←/→` are the text cursor (previously they could commit
+  and move on, or page back), and `Home/End/Ctrl+A/E/B/F/Delete` etc. all
+  reach the shared Input. Optionless questions now use an explicit two-layer
+  state: in the EDIT layer `←/→` move the text cursor, `↵` commits, and
+  `Esc/Ctrl+C` only leave the edit for the NAVIGATION layer, where `↵`
+  re-enters the edit, `←/→` page between questions (or skip), and
+  `Esc/Ctrl+C` cancel the whole flow (previously Esc either stranded such a
+  question in a half-dead, uneditable state or cancelled the whole flow
+  outright). The Question edit-mode and Task Center search-mode footers only
+  advertise what the current mode actually does (no more `↑↓ select` /
+  `A active/all` list actions while typing). Transcript search now closes on
+  Esc or Ctrl+C (the `app.transcript.search.close` defaults were extended —
+  previously the overlay's Input swallowed Ctrl+C), and shows a
+  `↵ next · ⇧↵ prev · esc/ctrl+c close` hint under the input. The
+  `/keybindings` search box is rendered by the shared Input: full
+  cursor/Home/End/Delete/word-move editing works, and the hint flips between
+  `Esc: clear` (non-empty query) and `Esc: close`.
+- **Direct sessions are now fully retired on exit.** Exiting the TUI now retires
+  the main Agent, its continuable subagents and Agent-scoped background jobs in
+  a fixed order: cancel the main Agent and await quiescence → drain continuable
+  descendants → final persistence flush → release the AgentHandle. Previously
+  the process could linger for ~5 minutes after exit while a continuable
+  subagent stayed alive; exit now completes within seconds, and the diagnostics
+  distinguish surface close, Host retirement and launcher exit. Session
+  switches (/new, /fork, rewind, /sessions) also retire the old owner's
+  continuable descendants after the commit.
+- **Presentation details.** Diff presentation aligns with official DSH semantics
+  (folded multi-hunk diffs stay bounded; edit headers and result parity are
+  preserved); `@` file completion keeps full paths and fixes marquee routing
+  and host cleanup; model selection survives fork and rewind; steers after a
+  Focus thought are kept for non-user turns and opening steers are distinguished
+  from mid-turn input; assistant tool-result presentation survives the
+  presentation pipeline.
+- **Session open/switch robustness.** Opening or switching sessions (/new,
+  /resume, fork, rewind, /sessions) no longer drops state: the previous session
+  stays visible and usable until the new one is ready, a failed initial bootstrap
+  no longer strands the surface (retry still opens), the old Agent keeps write
+  authority until the new session takes over, and late-arriving assistant stream
+  fragments are reassembled per official semantics without half-built or
+  orphan blocks.
 
 ### Compatibility
 
@@ -989,7 +1097,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.3-alpha.2...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...v0.4.5
 [0.4.3-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...next-v0.4.3-alpha.2
 [0.4.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...v0.4.0

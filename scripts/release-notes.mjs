@@ -145,8 +145,8 @@ function containsExactGuidance(content, command) {
 // family while the peer floor stayed at the previous alpha. The 0.4.0 and
 // 0.4.1 stable releases continue to use the published rc.1 family because the
 // 0.1.2 stable family is not published yet. The 0.4.3-alpha.2 prerelease
-// targets the published npm `0.1.3-alpha.2` family, while the current alpha.3
-// adaptation targets the published `0.1.5-rc.1` family. Released changelog
+// targets the published npm `0.1.3-alpha.2` family, while the current 0.4.5
+// release targets the published `0.1.5-rc.1` family. Released changelog
 // sections are immutable, so the requirement follows the version being
 // released.
 const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3'
@@ -155,6 +155,7 @@ const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3'
   : '0.1.2-alpha.5'
 const dshStablePin = version === '0.4.0' || version === '0.4.1'
   ? '0.1.2-rc.1'
+  : version === '0.4.5' ? '0.1.5-rc.1'
   : '0.1.2'
 if (version.startsWith('0.4.')) {
   // Release bodies must remain reproducible after a later stable/preview

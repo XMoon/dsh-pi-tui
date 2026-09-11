@@ -5,21 +5,29 @@ boundary.
 
 ## Runtime compatibility
 
-| dsh-pi-tui line | DeepSeek Harness line | Policy |
-|---|---|---|
-| `0.3.x` | `>=0.1.1-rc.1` | Supported legacy runtime line (0.3.0 minimum) |
-| `0.4.1` (published) | `>=0.1.2-rc.1` | Historical stable; validated against the rc.1 DSH family |
-| `0.4.3-alpha.2` (historical next npm line) | `0.1.3-alpha.2` | Historical npm alpha.2 target; the last official compatible runtime tag |
-| `0.4.3-alpha.3` (current next npm line; this checkout) | `>=0.1.5-rc.1` | Published npm rc.1 target; validated against the exact `0.1.5-rc.1` npm family |
-| `0.4.0-alpha.2` | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; validated the alpha.4/alpha.5 DSH family |
-| `0.4.0-alpha.1` | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 DSH family |
+The DSH versions below are the published tags in the official [DeepSeek Harness
+release list](https://github.com/deepseek-ai/deepseek-harness/releases). Each
+fallback was checked against the peer manifest at its corresponding TUI tag.
 
-The published 0.4.1 line has no 0.1.1 runtime shim. An old Harness remains
-outside its supported peer window and must fail at the normal incompatible-
-runtime boundary. The current `next` checkout raises that floor to the
-published npm `0.1.5-rc.1` release. Its startup notice is best-effort because
-Loader rows mount concurrently. The floor is a registry release, so the notice
-suggests the exact npm upgrade target.
+| dsh-pi-tui line | Official DeepSeek Harness tags for the recommended pairing | Policy |
+|---|---|---|
+| `0.2.x` (latest `v0.2.2`) | `dsh-v0.1.0-rc.8` | Legacy runtime line |
+| `0.3.x` | `dsh-v0.1.1-rc.1`, `dsh-v0.1.1-rc.2` | Legacy runtime line |
+| `0.4.0-alpha.1` | `dsh-v0.1.2-alpha.2`, `dsh-v0.1.2-alpha.3` | Earlier 0.4 prerelease |
+| `0.4.0-alpha.2` | `dsh-v0.1.2-alpha.4`, `dsh-v0.1.2-alpha.5` | Previous 0.4 prerelease |
+| `0.4.1` (published) | `dsh-v0.1.2-rc.1` | Historical stable |
+| `0.4.3-alpha.2` (historical next npm line) | `dsh-v0.1.3-alpha.2` | Last official runtime tag for this TUI line |
+| `0.4.5` (current next npm line; this checkout) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Published npm rc.1 target |
+| No historical fallback | `dsh-v0.1.0-rc.7`, `dsh-v0.1.2-alpha.1`, `dsh-v0.1.3-alpha.1`, `dsh-v0.1.5-alpha.1`, `dsh-v0.1.5-alpha.2` | Upgrade DSH to a supported release |
+
+The table is keyed to the official release tags above. Do not widen a pairing
+from a package peer lower bound alone: npm/node-semver excludes a prerelease
+whose major/minor/patch tuple differs from the comparator's prerelease tuple.
+For example, `>=0.1.2-rc.1` does not include `0.1.3-alpha.1`, and
+`^0.1.1-rc.1` does not include `0.1.2-alpha.1`. The current `next` checkout
+raises the floor to the published npm `0.1.5-rc.1` release. Its startup notice
+is best-effort because Loader rows mount concurrently. The floor is a registry
+release, so the notice suggests the exact npm upgrade target.
 
 For the current stable 0.4 line, install the validated Harness family and the
 stable TUI:
@@ -44,19 +52,28 @@ The startup notice on an old runtime suggests the exact published upgrade:
 npm install -g @deepseek-ai/dsh@0.1.5-rc.1
 ```
 
-If the legacy DSH runtime must be kept, use the compatible 0.3 TUI line:
+If the official `dsh-v0.1.0-rc.8` runtime must be kept, use the compatible
+0.2 TUI line:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.0-rc.8
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.2
+```
+
+For official `dsh-v0.1.1-rc.1` or `dsh-v0.1.1-rc.2`, use the compatible 0.3
+TUI line:
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.1.1-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 ```
 
-The published stable pair uses the concrete `0.1.2-rc.1` family and retains the
-historical lower-bound contract `>=0.1.2-rc.1`. A Harness on the alpha.2/alpha.3
-baseline uses `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, and alpha.4/alpha.5 uses
-`@xmoon76/dsh-pi-tui@0.4.0-alpha.2` — the last published lines that accept them.
-The current npm-mode checkout is separate: its peer floor is
-`>=0.1.5-rc.1`, and its exact npm family is verified by the frozen lockfile.
+The published stable pair uses the concrete `dsh-v0.1.2-rc.1` tag. Official
+`dsh-v0.1.2-alpha.2`/`alpha.3` use `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`,
+`alpha.4`/`alpha.5` use `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`, and
+`dsh-v0.1.3-alpha.2` uses `@xmoon76/dsh-pi-tui@0.4.3-alpha.2`. The current
+npm-mode checkout is separate: its peer floor is `>=0.1.5-rc.1`, and its exact
+npm family is verified by the frozen lockfile.
 
 Note that `npm install -g @deepseek-ai/dsh` without an explicit version follows
 npm's `latest` dist-tag, which may be an older runtime line. Always name a

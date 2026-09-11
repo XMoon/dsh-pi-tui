@@ -18,7 +18,7 @@ test('runtime boundary rejects explicit and discovered symlinked candidates', (t
 
 test('runtime boundary accepts the npm rc.1 advisory notice', () => {
   const output = [
-    'dsh-pi-tui v0.4.3-alpha.3 requires DeepSeek Harness 0.1.5-rc.1 or later,',
+    'dsh-pi-tui v0.4.5 requires DeepSeek Harness 0.1.5-rc.1 or later,',
     'but this installation is running dsh 0.1.1-rc.2.',
     'Upgrade DeepSeek Harness:',
     '  npm install -g @deepseek-ai/dsh@0.1.5-rc.1',
@@ -30,7 +30,7 @@ test('runtime boundary accepts the npm rc.1 advisory notice', () => {
 
 test('runtime boundary applies the same npm floor to an earlier runtime', () => {
   const output = [
-    'dsh-pi-tui v0.4.3-alpha.3 requires DeepSeek Harness 0.1.5-rc.1 or later,',
+    'dsh-pi-tui v0.4.5 requires DeepSeek Harness 0.1.5-rc.1 or later,',
     'but this installation is running dsh 0.1.3-alpha.0.',
     'Upgrade DeepSeek Harness:',
     '  npm install -g @deepseek-ai/dsh@0.1.5-rc.1',

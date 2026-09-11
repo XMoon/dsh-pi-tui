@@ -46,29 +46,15 @@ npm install -g @deepseek-ai/dsh@0.1.5-rc.1
 
 ### DSH 与 TUI 版本对应（重要）
 
-| TUI 包版本 | 对应 DSH 版本 | 说明 |
+| TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.4.1`（已发布 `@latest`） | `>=0.1.2-rc.1` | 历史稳定版；按 0.1.2-rc.1 family 验证 |
-| `0.4.3-alpha.2`（历史 next npm 线） | `0.1.3-alpha.2` | 历史 npm alpha.2 目标；最后一个官方兼容 runtime tag |
-| 当前 `next` npm 线（本 checkout；版本 `0.4.3-alpha.3`） | `>=0.1.5-rc.1` | 已发布的 npm rc.1 目标；按精确 0.1.5-rc.1 family 验证 |
-| `0.3.x`（`@0.3`） | `>=0.1.1-rc.1` | 旧运行时兼容线（0.3.0 最低版本） |
+| `0.4.1`（已发布 `@latest`） | `dsh-v0.1.2-rc.1` | 最近的稳定版 |
+| 当前 `next` npm 线（本 checkout；版本 `0.4.5`） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 当前 next 线 |
 
-不要把稳定线与 `next` 线混装。已发布的 0.4.1 稳定线仍按
-0.1.2-rc.1 family 使用；保留旧 DSH 时请使用下方的 0.3 兼容线。当前
-`next` checkout 的 peer floor 是 `>=0.1.5-rc.1`，旧 runtime 会在正常的
-不兼容边界以非零状态失败。启动行的兼容提示是 best-effort，不是 Loader
-启动顺序保证；它建议的升级目标是已发布的 npm 版本。
-
-```sh
-npm install -g @deepseek-ai/dsh@0.1.1-rc.1
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
-dsh --profile pi-tui
-```
-
-已发布的 `0.4.1` 稳定线声明支持范围是 `>=0.1.2-rc.1`；本 checkout 的
-`next` npm 线则声明 `>=0.1.5-rc.1`。`npm install -g` 仅用于
-安装已发布的 DSH；要将 dsh-pi-tui 安装进 DSH profile，必须使用
-`dsh plugin` 命令。
+不要把稳定线与 `next` 线混装。当前 `next` checkout 的 peer floor 是
+`>=0.1.5-rc.1`，旧 runtime 会在正常的不兼容边界以非零状态失败。完整的
+历史兼容矩阵和 fallback 命令见 [兼容性文档](docs/dsh-compatibility.md)；
+要查看 next 的最新集成状态，请看 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
