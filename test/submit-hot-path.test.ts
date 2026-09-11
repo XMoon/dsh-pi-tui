@@ -20,7 +20,7 @@ import { ProcessTerminal } from '@xmoon76/pi-tui'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, type Config } from '../src/index.ts'
 import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
@@ -37,14 +37,14 @@ function event<K extends string>(
   data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
 ): SessionEvent {
-  // DSH 0.1.2+ requires the top-level `surfaceOp` marker on surface-eligible
+  // DSH 0.1.5-rc.1 requires the top-level `surfaceOp` marker on surface-eligible
   // (message-producing) events — exactly user/message, assistant/message and
   // tool/result — and REJECTS the marker on log-only events
   // (packages/core/session/src/surface.ts). request/context is log-only.
   const surfaceOp = type === 'user/message' || type === 'assistant/message' || type === 'tool/result'
     ? { surfaceOp: 'append' as const }
     : {}
-  return { type, seq, time: 1_700_000_000_000 + seq * 1000, data, ...surfaceOp } as SessionEvent
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq * 1000, data, ...surfaceOp } as SessionEvent
 }
 
 /** A plain-text turn: user/message → assistant/message → boundaries. */
@@ -89,7 +89,7 @@ function longSessionEvents(totalTurns: number): SessionEvent[] {
   return events
 }
 
-/** The alpha.4 Session shape: the backing log is private; production code
+/** The current Session shape: the backing log is private; production code
  * sees only the snapshot reads (compatibility-plan B4). */
 interface LiveSession {
   id: string
@@ -99,7 +99,7 @@ interface LiveSession {
   snapshotEvents(): readonly SessionEvent[]
 }
 
-/** Build the alpha.4 Session mock over a private backing log. */
+/** Build the current Session mock over a private backing log. */
 function makeLiveSession(id: string, header: LiveSession['header'], events: readonly SessionEvent[]): LiveSession {
   const log = [...events]
   return {
@@ -230,7 +230,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   }
   const rawPersistence: Record<string, unknown> = {
     list: async () => [...persisted.values()].map(session => session.header),
-    // DSH 0.1.2+ preset resolution materializes `meta` through the real
+    // DSH 0.1.5-rc.1 preset resolution materializes `meta` through the real
     // Session.fromRestore validation — the inspection must carry the header.
     inspect: async (id: unknown) => {
       const session = persisted.get(String(id))
@@ -482,7 +482,7 @@ async function waitForDelivery(host: FakeAgentHost, label: string): Promise<void
     `${label}: the submission must reach the agent's inbox`)
 }
 
-/** The surface-eligible event types under DSH 0.1.2 (the exact set in
+/** The surface-eligible event types under DSH 0.1.5-rc.1 (the exact set in
  * packages/core/session/src/types.ts `SurfaceEventType`). */
 const SURFACE_ELIGIBLE_TYPES = ['user/message', 'assistant/message', 'tool/result'] as const
 
@@ -1558,7 +1558,7 @@ test('running + queue: the DEFAULT preference makes the accelerated chord STEER 
   mounted.app.setDraft('hello world')
   ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
   await waitForDelivery(harness.host, 'accelerated prompt')
-  // The web ComposerSubmissionPolicy (0.1.3-alpha.2) resolves the
+  // The web ComposerSubmissionPolicy (DSH 0.1.5-rc.1) resolves the
   // accelerated gesture to the OPPOSITE of the preference: with the DEFAULT
   // busyEnter=queue it steers. A fixed "always queue" chord would get the
   // default configuration exactly backwards.

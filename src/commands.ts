@@ -306,7 +306,7 @@ const BUILT_IN_PRESET_COPY: Readonly<Record<string, { name: string; description:
   },
   minimal: {
     name: 'Minimal mode',
-    description: 'Two-tool coding agent with persistent bash and str_replace_editor.',
+    description: 'Minimal coding agent with a persistent shell.',
   },
   cordis: {
     name: 'Creator mode',
@@ -375,7 +375,7 @@ export type SubmitDelivery = 'steer' | 'queue'
 
 /**
  * Resolve one submission's delivery mode — the DSH WEB
- * `ComposerSubmissionPolicy.resolve()` contract (baseline 0.1.3-alpha.2,
+ * `ComposerSubmissionPolicy.resolve()` contract (baseline 0.1.5-rc.1,
  * shared by every UI client):
  *
  * ```text
@@ -1055,6 +1055,14 @@ async function askAddProvider(
   const api = answers.find(answer => answer.id === 'api')?.selected[0] ?? PROTOCOL_CHOICES[0]
   const baseURL = (answers.find(answer => answer.id === 'baseURL')?.custom ?? '').trim()
   if (baseURL === '') return { kind: 'error', text: 'base URL is required for a hand-declared provider route' }
+  try {
+    const protocol = new URL(baseURL).protocol
+    if (protocol !== 'http:' && protocol !== 'https:') {
+      return { kind: 'error', text: `invalid base URL "${baseURL}" — expected an absolute http(s) URL` }
+    }
+  } catch {
+    return { kind: 'error', text: `invalid base URL "${baseURL}" — expected an absolute http(s) URL` }
+  }
   const displayName = (answers.find(answer => answer.id === 'displayName')?.custom ?? '').trim() || routeValue
   const key = (answers.find(answer => answer.id === 'key')?.custom ?? '').trim()
 
@@ -3857,9 +3865,9 @@ export function registerTuiCommands(
       const displayedDefault = async (): Promise<string | undefined> => {
         const configured = runner.config.presetDefault.get()
         if (configured !== 'code') return configured ?? presets.defaultId()
-        // A persisted legacy `code` value is resolved through the roster. This
+        // The omitted settings default is resolved through the roster. This
         // keeps status/default display consistent with composition: a real
-        // custom code remains code, while old data without code displays ptc.
+        // custom code remains code, while old settings without code display ptc.
         try {
           return (await presets.resolve()).id ?? configured
         } catch {

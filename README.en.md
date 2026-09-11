@@ -26,7 +26,7 @@ dsh --profile pi-tui
 
 ### Next / npm line (validation)
 
-The current `next` line targets the published npm release `dsh-v0.1.3-alpha.2`.
+The current `next` line targets the published npm release `dsh-v0.1.5-rc.1`.
 Use the isolated npm driver (installs the exact DSH version declared by this
 checkout and exercises the full build/test/package path):
 
@@ -37,7 +37,7 @@ pnpm compat:dsh:npm
 The startup notice on an old runtime suggests the exact npm upgrade:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+npm install -g @deepseek-ai/dsh@0.1.5-rc.1
 ```
 
 ### Requirements
@@ -50,32 +50,35 @@ npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
 | TUI package line | Matching DSH line | Notes |
 |---|---|---|
 | `0.4.1` (published `@latest`) | `>=0.1.2-rc.1` | Historical stable; validated against the rc.1 family |
-| Current `next` npm line (this checkout; version `0.4.3-alpha.2`) | `>=0.1.3-alpha.2` | Published npm alpha.2 target; validated against the exact 0.1.3-alpha.2 family |
-| `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
+| `0.4.3-alpha.2` (historical next npm line) | `>=0.1.3-alpha.2` | Historical npm alpha.2 target; validated against the exact 0.1.3-alpha.2 family |
+| Current `next` npm line (this checkout; version `0.4.3-alpha.3`) | `>=0.1.5-rc.1` | Published npm rc.1 target; validated against the exact 0.1.5-rc.1 family |
+| `0.3.x` (`@0.3`) | `>=0.1.1-rc.1` | Legacy runtime line (0.3.0 minimum) |
 
 Do not mix the stable and `next` lines. The published 0.4.1 stable line
 still uses the 0.1.2-rc.1 family; if you keep a legacy DSH runtime, use the 0.3
 compatibility line below. This `next` checkout declares the published
-`0.1.3-alpha.2` npm floor, and older runtimes fail at the normal
+`0.1.5-rc.1` npm floor, and older runtimes fail at the normal
 incompatible-runtime boundary. The startup row's compatibility notice is
 best-effort rather than a Loader startup-order guarantee; the suggested upgrade
 target is a published npm version.
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+npm install -g @deepseek-ai/dsh@0.1.1-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 dsh --profile pi-tui
 ```
 
 The published `0.4.1` stable line declares `>=0.1.2-rc.1`; this checkout's
-`next` npm line declares `>=0.1.3-alpha.2`. `npm install -g` is only for
+`next` npm line declares `>=0.1.5-rc.1`. `npm install -g` is only for
 installing a published DSH; to install dsh-pi-tui into a DSH profile, you must
 use the `dsh plugin` command.
 
 New agent sessions use the official roster's selected preset id. A custom DSH
 preset literally named `code` is valid and remains `code` when it exists in the
-current roster. Old persisted `code` defaults/session values fall back to `ptc`
-only after the roster proves that no custom `code` preset exists.
+current roster. DSH V3 migration owns historical session `code -> ptc`
+conversion, while the current projection preserves a legal custom `code`. Only
+an omitted legacy settings default `code` falls back to `ptc` after the roster
+proves that no custom `code` preset exists.
 
 ### Profile management
 
@@ -562,7 +565,7 @@ This section contains DSH compatibility and CI validation details only; ordinary
 ### npm mode (current `next`)
 
 The current `next` line is npm mode: it targets the published
-`dsh-v0.1.3-alpha.2` family declared by this checkout's `package.json` and
+`dsh-v0.1.5-rc.1` family declared by this checkout's `package.json` and
 resolved by its frozen lockfile. The isolated npm driver installs that exact
 family from the public registry and exercises the TUI build/test/package path:
 

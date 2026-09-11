@@ -16,24 +16,24 @@ test('runtime boundary rejects explicit and discovered symlinked candidates', (t
   assert.throws(() => resolveTarball(undefined, directory), /no candidate tarball/u)
 })
 
-test('runtime boundary accepts the npm advisory notice', () => {
+test('runtime boundary accepts the npm rc.1 advisory notice', () => {
   const output = [
-    'dsh-pi-tui v0.4.1 requires DeepSeek Harness 0.1.3-alpha.2 or later,',
+    'dsh-pi-tui v0.4.3-alpha.3 requires DeepSeek Harness 0.1.5-rc.1 or later,',
     'but this installation is running dsh 0.1.1-rc.2.',
     'Upgrade DeepSeek Harness:',
-    '  npm install -g @deepseek-ai/dsh@0.1.3-alpha.2',
+    '  npm install -g @deepseek-ai/dsh@0.1.5-rc.1',
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
   assert.doesNotThrow(() => assertBoundary(output, 1, '0.1.1-rc.2'))
   assert.doesNotMatch(output, /pinned master source|pinned DSH master source distribution/u)
 })
 
-test('runtime boundary applies the same npm floor to an earlier alpha', () => {
+test('runtime boundary applies the same npm floor to an earlier runtime', () => {
   const output = [
-    'dsh-pi-tui v0.4.1 requires DeepSeek Harness 0.1.3-alpha.2 or later,',
+    'dsh-pi-tui v0.4.3-alpha.3 requires DeepSeek Harness 0.1.5-rc.1 or later,',
     'but this installation is running dsh 0.1.3-alpha.0.',
     'Upgrade DeepSeek Harness:',
-    '  npm install -g @deepseek-ai/dsh@0.1.3-alpha.2',
+    '  npm install -g @deepseek-ai/dsh@0.1.5-rc.1',
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
   assert.doesNotThrow(() => assertBoundary(output, 1, '0.1.3-alpha.0'))
@@ -55,6 +55,13 @@ test('runtime boundary rejects stale Source Mode wording even on a raw import fa
 test('runtime boundary rejects an unrelated import failure', () => {
   assert.throws(
     () => assertBoundary('Error [ERR_MODULE_NOT_FOUND]: Cannot find package unrelated-dependency', 1, '0.1.1-rc.2'),
+    /expected TUI\/DSH import boundary/u,
+  )
+})
+
+test('runtime boundary rejects an unrelated DSH-family import failure', () => {
+  assert.throws(
+    () => assertBoundary("Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-unrelated'", 1, '0.1.1-rc.2'),
     /expected TUI\/DSH import boundary/u,
   )
 })

@@ -51,7 +51,7 @@ export interface CreateSessionRequest {
    * seed contract. */
   seed?: readonly unknown[]
   /** Exact fork-inherited prefix length when `meta.isSeeded` is set
-   * (alpha.4's seeded-session contract). */
+   * (the seeded-session contract). */
   inheritedEventCount?: number
   /** CLIENT-LOCAL control field (never serialized): creation-only
    * cancellation; the handle detaches on publication. */

@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptSearchText, workflowReadablePhase, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
 import { refreshedSearchState, steppedSearchOverlayState } from '../src/search-overlay.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
@@ -30,7 +30,7 @@ function event<K extends string>(
   data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
 ): SessionEvent {
-  return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
 }
 
 /** One Session v2 live chunk input (the transient plane replaces durable
@@ -131,7 +131,7 @@ function readToolCall(seq: number, callId: string, file: string, turn = 0): Sess
 
 /** Build an event with loosely-typed data (plugin/extension event kinds). */
 function rawEvent(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
-  return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
 }
 
 function compactionEvent(type: 'compaction/start' | 'compaction/summary' | 'compaction/end', data: Record<string, unknown>, seq: number): SessionEvent {
@@ -955,14 +955,14 @@ test('transcriptSearchText recursively includes PTC sub-call descendants', () =>
   folder.apply([
     turnStart(0, 0),
     toolCall(1, 'code-1', 'run_code', { code: 'print(1)' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
       arguments: { cmd: 'run tests' },
     }, 2),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -986,7 +986,7 @@ test('PTC child settle marks the root search entry dirty immediately', () => {
   folder.apply([
     turnStart(0, 0),
     toolCall(1, 'code-1', 'run_code', { code: 'print(1)', description: 'Inspect project and run tests' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -995,7 +995,7 @@ test('PTC child settle marks the root search entry dirty immediately', () => {
     }, 2),
   ])
   assert.equal(folder.search('128 passed').length, 0, 'nothing to find before the child settles')
-  folder.apply([event('tool/code-dispatch', {
+  folder.apply([event('tool/ptc-dispatch', {
     rootCallId: ToolCallId('code-1'),
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId('code-1:code:1'),

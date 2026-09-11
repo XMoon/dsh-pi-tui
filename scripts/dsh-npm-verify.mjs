@@ -4,7 +4,7 @@
  * in an isolated copy, keeping the tracked lockfile frozen and exercising the
  * same TUI candidate packaging path used by releases.
  *
- * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.3-alpha.2]
+ * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.5-rc.1]
  *
  * @module dsh-npm-verify
  */

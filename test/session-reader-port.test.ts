@@ -28,7 +28,7 @@ function header(id: string, createdAt: number, extra: Partial<{
   return {
     id: SessionId(id),
     createdAt,
-    version: 2 as const,
+    version: 3 as const,
     isSeeded: false,
     cwd: '/workspace',
     ...rest,
@@ -438,7 +438,7 @@ test('projectionBatch skips all cache reads for a seeded row without an exact cu
   assert.equal(observed, 0)
 })
 
-test('projectionBatch normalizes a cached legacy code through the roster', async () => {
+test('projectionBatch preserves a native V3 cached code projection', async () => {
   const persisted = header('session-code', 100)
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: persisted, live: false }]),
@@ -451,32 +451,24 @@ test('projectionBatch normalizes a cached legacy code through the roster', async
     },
   }))
   const rows = await reader.list(undefined)
-  assert.deepEqual((await reader.projectionBatch(rows!)).get('session-code'), { title: 'kept title', preset: 'ptc' })
+  assert.deepEqual((await reader.projectionBatch(rows!)).get('session-code'), { title: 'kept title', preset: 'code' })
 })
 
-test('projectionBatch isolates a throwing cached preset resolver', async () => {
-  const diagnostics: Array<{ message: string; fields?: Record<string, unknown> }> = []
+test('projectionBatch keeps cached V3 preset values without a roster resolver', async () => {
   const healthy = header('session-healthy', 110)
-  const legacy = header('session-legacy-code', 100)
+  const nativeCode = header('session-native-code', 100)
   const reader = new DirectSessionReader(host({
-    sessionQuery: query([{ header: healthy, live: false }, { header: legacy, live: false }]),
+    sessionQuery: query([{ header: healthy, live: false }, { header: nativeCode, live: false }]),
     sessionProjectionCache: {
       cachedSnapshot: (meta: { id: string }) => meta.id === 'session-healthy'
         ? { values: { title: 'healthy title', agentPreset: 'ptc' } }
         : { values: { title: 'kept title', agentPreset: 'code' } },
     },
-    agentPresets: {
-      list: async () => { throw new Error('roster service down') },
-      resolve: async () => { throw new Error('resolver exploded') },
-    },
-  }), undefined, { info: (message, fields) => diagnostics.push({ message, fields }) })
+  }))
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
-  assert.equal(projections.get('session-healthy')?.title, 'healthy title')
-  assert.equal(projections.get('session-legacy-code')?.title, 'kept title')
-  assert.equal(projections.get('session-legacy-code')?.preset, undefined)
-  assert.equal(diagnostics.length, 1)
-  assert.match(String(diagnostics[0]!.fields?.reason), /resolver exploded/)
+  assert.deepEqual(projections.get('session-healthy'), { title: 'healthy title', preset: 'ptc' })
+  assert.deepEqual(projections.get('session-native-code'), { title: 'kept title', preset: 'code' })
 })
 
 test('projectionBatch rejects an already-aborted signal before reading', async () => {

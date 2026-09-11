@@ -87,7 +87,7 @@ export const name = 'tui-startup'
 /** Services required before the flags can be resolved. */
 export const inject = ['cmdlineArgs']
 
-/** One incompatible dsh harness range and the guidance it deserves. Add a
+/** Incompatible dsh harness ranges and the guidance each deserves. Add a
  * new entry here whenever a future bundle release stops supporting an
  * older (or newer) harness line; entries are checked in ORDER and the
  * first whose range covers the installed dsh version wins.
@@ -101,7 +101,7 @@ export const inject = ['cmdlineArgs']
  * it is shown as the fallback version label (`>= <since>`) when the
  * bundle's own version cannot be read, so the message stays truthful.
  *
- * This next line targets the published npm release dsh-v0.1.3-alpha.2: the
+ * This next line targets the published npm release dsh-v0.1.5-rc.1: the
  * runtime is installed from the public npm registry, so the recovery guidance
  * names the exact published upgrade target.
  */
@@ -112,7 +112,7 @@ export interface HarnessCompatEntry {
   max?: string
   /** The bundle release line that first required this constraint. */
   since: string
-  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.3-alpha.2 or later`. */
+  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.5-rc.1 or later`. */
   requires: string
   /** The target DSH version to install when the current runtime is too old. */
   upgradeDsh?: string
@@ -123,15 +123,23 @@ export interface HarnessCompatEntry {
   guidance?: string
 }
 
-/** The compatibility table. */
+/** The compatibility table. Entries are ordered from oldest to newest so
+ * `harnessCompatEntryFor()` can return the first matching historical range. */
+const CURRENT_RC1_REQUIREMENT = {
+  since: '0.4.3-alpha.3',
+  requires: 'DeepSeek Harness 0.1.5-rc.1 or later',
+  upgradeDsh: '0.1.5-rc.1',
+  guidance: 'This next npm build is validated with the published DeepSeek Harness 0.1.5-rc.1 distribution; see docs/dsh-compatibility.md.',
+} as const
+
 export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
-  {
-    max: '0.1.3-alpha.2',
-    since: '0.4.1',
-    requires: 'DeepSeek Harness 0.1.3-alpha.2 or later',
-    upgradeDsh: '0.1.3-alpha.2',
-    guidance: 'This next npm build is validated with the published DeepSeek Harness 0.1.3-alpha.2 distribution; see docs/dsh-compatibility.md.',
-  },
+  // No published fallback is known below the legacy 0.3 runtime line.
+  { ...CURRENT_RC1_REQUIREMENT, max: '0.1.1-rc.1' },
+  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.1-rc.1', max: '0.1.2-alpha.2', fallbackTui: '0.3' },
+  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.2-alpha.2', max: '0.1.2-alpha.4', fallbackTui: '0.4.0-alpha.1' },
+  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.2-alpha.4', max: '0.1.2-rc.1', fallbackTui: '0.4.0-alpha.2' },
+  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.2-rc.1', max: '0.1.3-alpha.2', fallbackTui: '0.4.1' },
+  { ...CURRENT_RC1_REQUIREMENT, min: '0.1.3-alpha.2', max: '0.1.5-rc.1', fallbackTui: '0.4.3-alpha.2' },
 ]
 
 /** The compat entry covering the installed dsh version, or undefined when

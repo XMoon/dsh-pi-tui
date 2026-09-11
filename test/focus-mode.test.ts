@@ -1458,7 +1458,7 @@ function ptcActivity(events: SessionEvent[]): NonNullable<ReturnType<TranscriptF
 }
 
 function dispatchStart(seq: number, subCallId: string, name: string, args: Record<string, unknown>): SessionEvent {
-  return eventAt('tool/code-dispatch-start', {
+  return eventAt('tool/ptc-dispatch-start', {
     rootCallId: ToolCallId('code-1'),
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId(subCallId),
@@ -1468,7 +1468,7 @@ function dispatchStart(seq: number, subCallId: string, name: string, args: Recor
 }
 
 function dispatchSettle(seq: number, subCallId: string, name: string, isError: boolean, text: string, args: Record<string, unknown> = {}): SessionEvent {
-  return eventAt('tool/code-dispatch', {
+  return eventAt('tool/ptc-dispatch', {
     rootCallId: ToolCallId('code-1'),
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId(subCallId),

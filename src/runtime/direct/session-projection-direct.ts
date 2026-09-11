@@ -23,9 +23,9 @@
  *    activate a historical Session or synthesize a cold observation merely to
  *    fill a label.
  *
- * Per-row cache/resolver failures are isolated instead of hiding the picker:
- * a live teardown race fail-softs silently to the other field, while a broken
- * derived cache value is reported and omitted.
+ * Per-row projection failures are isolated instead of hiding the picker: a
+ * live teardown race fail-softs silently to the other field, while a broken
+ * cache hint is omitted.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-projection-direct
  */
@@ -33,9 +33,7 @@
 import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
-import { safeErrorMessage } from '../../error-boundary.ts'
 import type { SessionProjectionSummary, SessionSummary } from '../session-reader-port.ts'
-import { resolveProjectedPresetId } from './session-preset-direct.ts'
 
 /** The projection keys this batch reads (the official registered units). */
 type ProjectionKey = typeof agentPresetProjectionDefinition.key | 'title' | 'sessionListMetadata'
@@ -82,22 +80,10 @@ export interface SessionProjectionCacheLike {
   ): { readonly values?: { readonly title?: string | null } } | undefined
 }
 
-/** The diagnostics sink for isolated per-row failures (a structural subset
- * of the runner's Diag channel — the batch never imports the runner). */
-export interface SessionReaderDiagLike {
-  info(message: string, fields?: Record<string, unknown>): void
-}
-
 /** The minimal Host context surface (structural — the services resolve from
  * the dsh installation; never a package dependency). */
 export interface SessionProjectionContext {
   get(name: string): unknown
-}
-
-/** The presets-service resolver surface shared with the preset adapter. */
-export interface PresetsServiceLike {
-  readonly defaultId?: string
-  resolve(id?: string): Promise<{ readonly id: string }>
 }
 
 /** The Host surfaces the batch needs, supplied by the Direct reader (which
@@ -112,16 +98,6 @@ export interface ProjectionBatchDeps {
   readonly liveSessionOf: (sessionId: string) => Session | undefined
   /** The authoritative live preset composition for a session id. */
   readonly livePresetOf: (sessionId: string) => string | undefined
-  /** One roster snapshot shared by the whole batch (legacy `code` mapping). */
-  readonly rosterIds: (signal?: AbortSignal) => Promise<readonly string[] | undefined>
-  readonly diag?: SessionReaderDiagLike
-}
-
-/** Read a typed query-service error without depending on its package surface. */
-function errorCodeOf(error: unknown): string | undefined {
-  if (typeof error !== 'object' || error === null) return undefined
-  const code = (error as { code?: unknown }).code
-  return typeof code === 'string' ? code : undefined
 }
 
 /** The exact cache cut available from a lightweight list header. Unseeded
@@ -206,8 +182,6 @@ export async function projectionBatch(
 
   const projections = deps.ctx.get('sessionProjections') as SessionProjectionReaderLike | undefined
   const cache = deps.ctx.get('sessionProjectionCache') as SessionProjectionCacheLike | undefined
-  const presets = deps.ctx.get('agentPresets') as PresetsServiceLike | undefined
-
   // (1) Live rows: only the live branch may read live composed/cached values.
   // A live row with no cached title must never fall through to a cold cache
   // hint, which could expose stale persisted metadata.
@@ -228,13 +202,9 @@ export async function projectionBatch(
   }
   if (coldRows.length === 0) return result
 
-  // One roster snapshot shared by every cold row: legacy `code` data maps to
-  // `ptc` only when the roster proves no real `code` preset exists.
-  const rosterIds = await deps.rosterIds(signal)
-
-  // (2) Zero-I/O cache hints. `title: null` means "no title yet" while an
-  // unusable cached preset identity stays fail-closed; a cold cache miss does
-  // not trigger a historical observation or a second raw-log read.
+  // (2) Zero-I/O cache hints. `title: null` means "no title yet" while the
+  // cached preset identity is already DSH's current V3 projection value;
+  // a cold cache miss does not trigger a historical observation or raw-log read.
   for (const row of coldRows) {
     const header = deps.headerOf(row.id)
     const cached = header === undefined ? undefined : safeCachedSnapshot(cache, header)
@@ -244,19 +214,7 @@ export async function projectionBatch(
       result.set(row.id, { ...result.get(row.id), title: values.title })
     }
     if (typeof values.agentPreset === 'string') {
-      try {
-        const resolved = await resolveProjectedPresetId(values.agentPreset, rosterIds, presets)
-        if (resolved !== undefined) {
-          result.set(row.id, { ...result.get(row.id), preset: resolved })
-        }
-      } catch (error) {
-        signal?.throwIfAborted()
-        deps.diag?.info('session projection unavailable', {
-          session: row.id,
-          code: errorCodeOf(error),
-          reason: safeErrorMessage(error),
-        })
-      }
+      result.set(row.id, { ...result.get(row.id), preset: values.agentPreset })
     }
   }
   return result

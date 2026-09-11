@@ -10,7 +10,7 @@ import { performance } from 'node:perf_hooks'
 import test from 'node:test'
 import { BlockAssembler, expandAssistantStream, ToolCallId, MessageId, type AssistantStreamRecord, type ContentBlock, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import { foldTranscript, groupConsecutiveReads, PTC_MAX_DEPTH, renderTranscriptMarkdown, subCallDisplayStatus, TranscriptFolder, windowMessages, workflowPhaseKey, type TranscriptMessage } from '../src/transcript.ts'
 import { projectFocus } from '../src/focus-activity.ts'
@@ -29,12 +29,12 @@ function event<K extends string>(
   data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
 ): SessionEvent {
-  return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
 }
 
 /** Build an event with loosely-typed data (plugin-extension event tests). */
 function rawEvent(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
-  return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
 }
 
 /** One Session v2 live chunk input (the transient plane replaces durable
@@ -433,8 +433,8 @@ test('pairs tool calls with their results and caps long summaries', () => {
 // ── PTC mode alignment (plan §5.5) ────────────────────────────────────────
 //
 // Alpha.2's `ptc` preset keeps `run_code` as the model-authored composition
-// surface and appends LOG-ONLY `tool/code-dispatch-start` /
-// `tool/code-dispatch` events for nested bash/pwsh/read sub-calls. The outer
+// surface and appends LOG-ONLY `tool/ptc-dispatch-start` /
+// `tool/ptc-dispatch` events for nested bash/pwsh/read sub-calls. The outer
 // curated result may NOT carry the nested output (it can be
 // "(run_code completed with no output)"), so the TUI folds each sub-call into
 // a child card recursively attached to its parent card's `subCalls` tree —
@@ -471,14 +471,14 @@ test('run_code root call folds into a stable Code card', () => {
 test('nested PTC bash dispatch attaches to the run_code card subCalls tree', () => {
   const events = [
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
       arguments: { command: 'ls', description: 'List files' },
     }, 1),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -528,21 +528,21 @@ test('nested PTC dispatch supports recursive grandchild topology', () => {
   // full parent chain.
   const messages = foldTranscript([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
       arguments: { command: 'make', description: 'Build project' },
     }, 1),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1:code:1'),
       subCallId: ToolCallId('code-1:code:1:code:1'),
       name: 'read',
       arguments: { file_path: 'nested.ts', offset: 1, limit: 200 },
     }, 2),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1:code:1'),
       subCallId: ToolCallId('code-1:code:1:code:1'),
@@ -551,7 +551,7 @@ test('nested PTC dispatch supports recursive grandchild topology', () => {
       isError: false,
       content: [{ type: 'text', text: 'nested content' }],
     }, 3),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -591,28 +591,28 @@ test('nested PTC dispatch supports recursive grandchild topology', () => {
 test('nested PTC siblings keep their durable dispatch order', () => {
   const messages = foldTranscript([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'read',
       arguments: { file_path: 'a.ts', offset: 1, limit: 200 },
     }, 1),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:2'),
       name: 'bash',
       arguments: { command: 'ls', description: 'List files' },
     }, 2),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:3'),
       name: 'edit',
       arguments: { file_path: 'b.ts', old_string: 'x', new_string: 'y' },
     }, 3),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -621,7 +621,7 @@ test('nested PTC siblings keep their durable dispatch order', () => {
       isError: false,
       content: [{ type: 'text', text: 'a' }],
     }, 4),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:2'),
@@ -630,7 +630,7 @@ test('nested PTC siblings keep their durable dispatch order', () => {
       isError: false,
       content: [{ type: 'text', text: 'b' }],
     }, 5),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:3'),
@@ -659,14 +659,14 @@ test('nested PTC siblings keep their durable dispatch order', () => {
 test('nested PTC dispatch with an error outcome keeps the durable error status', () => {
   const messages = foldTranscript([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
       arguments: { command: 'boom', description: 'Trigger failure' },
     }, 1),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -704,14 +704,14 @@ test('a spilled result with an exit marker still parses the terminal failure', (
   // truncated output with a nonzero exit is still a terminal failure.
   const messages = foldTranscript([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
       arguments: { command: 'make', description: 'Build project' },
     }, 1),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -744,14 +744,14 @@ test('nested spilled/generic dispatch content stays readable without a fabricate
   // source, and the spill body stays readable.
   const messages = foldTranscript([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
       arguments: { command: 'make', description: 'Build project' },
     }, 1),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -784,20 +784,20 @@ test('nested spilled/generic dispatch content stays readable without a fabricate
 })
 
 test('nested dispatch with an explicit exit marker keeps the marker in the body', () => {
-  // The alpha.2 terminal contract: a bash command with a nonzero exit is a
+  // The terminal contract: a bash command with a nonzero exit is a
   // NORMAL settled tool call (isError: false) whose result tail carries
   // `[exit code: N]`; the child must be marked failed from the marker, and
   // the marker text stays in the body.
   const messages = foldTranscript([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
       arguments: { command: 'false', description: 'Fail on purpose' },
     }, 1),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -833,14 +833,14 @@ test('nested dispatch with an explicit exit marker keeps the marker in the body'
 test('nested dispatch with a signal marker is marked failed', () => {
   const messages = foldTranscript([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
       arguments: { command: 'sleep 100', description: 'Sleep' },
     }, 1),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -876,14 +876,14 @@ test('nested dispatch with a signal marker is marked failed', () => {
 test('nested dispatch with an exit code 0 marker stays ok', () => {
   const messages = foldTranscript([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
       arguments: { command: 'true', description: 'Succeed' },
     }, 1),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -923,14 +923,14 @@ test('a nested PTC read child never joins the top-level read grouping', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 1),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'read',
       arguments: { file_path: 'nested.ts', offset: 1, limit: 200 },
     }, 2),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -988,7 +988,7 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
   // flow. The facts are parked privately and connected when the parent
   // run_code call arrives.
   const orphanStart = foldTranscript([
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -998,7 +998,7 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
   ])
   assert.deepEqual(kinds(orphanStart), [])
   const orphanSettle = foldTranscript([
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -1012,7 +1012,7 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
 
   // The parked start connects once the parent run_code call arrives.
   const connected = foldTranscript([
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -1040,7 +1040,7 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
 
   // A parked settle applies when its start arrives after it.
   const settled = foldTranscript([
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -1049,7 +1049,7 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
       isError: false,
       content: [{ type: 'text', text: 'file.txt' }],
     }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -1080,7 +1080,7 @@ test('a settle parked before its start applies when the parent is already mounte
   // never left behind with the child stuck running.
   const messages = foldTranscript([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -1089,7 +1089,7 @@ test('a settle parked before its start applies when the parent is already mounte
       isError: false,
       content: [{ type: 'text', text: 'file.txt' }],
     }, 1),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -1142,14 +1142,14 @@ test('an outer run_code error result keeps the error status', () => {
 test('PTC event replay folds to the same topology and presentation', () => {
   const events = [
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 0),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
       name: 'bash',
       arguments: { command: 'ls', description: 'List files' },
     }, 1),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -1189,7 +1189,7 @@ test('PTC dispatch start/settle bump the root subtree revision (render-cache inv
   const before = folder.messages()[0]!
   assert.ok(before.kind === 'tool')
   const revBefore = before.subtreeRevision ?? 0
-  folder.apply([event('tool/code-dispatch-start', {
+  folder.apply([event('tool/ptc-dispatch-start', {
     rootCallId: ToolCallId('code-1'),
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId('code-1:code:1'),
@@ -1202,7 +1202,7 @@ test('PTC dispatch start/settle bump the root subtree revision (render-cache inv
   // messages() returns the SAME live object; snapshot before the settle
   // mutates it again.
   const revAfterStart = afterStart.subtreeRevision ?? 0
-  folder.apply([event('tool/code-dispatch', {
+  folder.apply([event('tool/ptc-dispatch', {
     rootCallId: ToolCallId('code-1'),
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId('code-1:code:1'),
@@ -1218,12 +1218,12 @@ test('PTC dispatch start/settle bump the root subtree revision (render-cache inv
 
 test('a conflicting PTC sub-call identity fails fast', () => {
   // A duplicate start with a different parent/root/name is impossible on a
-  // valid alpha.2 durable stream — it must throw, never silently keep one.
+  // valid durable stream — it must throw, never silently keep one.
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 1),
-    event('tool/code-dispatch-start', {
+    event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -1231,7 +1231,7 @@ test('a conflicting PTC sub-call identity fails fast', () => {
       arguments: { command: 'ls', description: 'List files' },
     }, 2),
   ])
-  assert.throws(() => folder.apply([event('tool/code-dispatch-start', {
+  assert.throws(() => folder.apply([event('tool/ptc-dispatch-start', {
     rootCallId: ToolCallId('code-1'),
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId('code-1:code:1'),
@@ -1240,7 +1240,7 @@ test('a conflicting PTC sub-call identity fails fast', () => {
   }, 3)]), /conflicting PTC sub-call identity/u)
   // A settle whose durable identity disagrees with the mounted child also
   // fails fast.
-  assert.throws(() => folder.apply([event('tool/code-dispatch', {
+  assert.throws(() => folder.apply([event('tool/ptc-dispatch', {
     rootCallId: ToolCallId('code-1'),
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId('code-1:code:1'),
@@ -1254,12 +1254,12 @@ test('a conflicting PTC sub-call identity fails fast', () => {
 test('a conflicting duplicate parked settle fails fast', () => {
   // Two settles for the same subCallId with conflicting durable identity
   // (the child is not mounted yet, so both park) are impossible on a valid
-  // alpha.2 stream — the second must throw, never silently overwrite the
+  // durable stream — the second must throw, never silently overwrite the
   // first (last-write-wins).
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
-    event('tool/code-dispatch', {
+    event('tool/ptc-dispatch', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: ToolCallId('code-1'),
       subCallId: ToolCallId('code-1:code:1'),
@@ -1269,7 +1269,7 @@ test('a conflicting duplicate parked settle fails fast', () => {
       content: [{ type: 'text', text: 'file.txt' }],
     }, 1),
   ])
-  assert.throws(() => folder.apply([event('tool/code-dispatch', {
+  assert.throws(() => folder.apply([event('tool/ptc-dispatch', {
     rootCallId: ToolCallId('code-1'),
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId('code-1:code:1'),
@@ -1289,7 +1289,7 @@ test('a PTC sub-call colliding with its root callId fails fast at ingestion', ()
     event('turn/start', { turn: 0 }, 0),
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 1),
   ])
-  assert.throws(() => folder.apply([event('tool/code-dispatch-start', {
+  assert.throws(() => folder.apply([event('tool/ptc-dispatch-start', {
     rootCallId: ToolCallId('code-1'),
     parentCallId: ToolCallId('code-1'),
     subCallId: ToolCallId('code-1'),
@@ -1310,7 +1310,7 @@ test('a PTC sub-call chain beyond the depth cap fails fast at ingestion', () => 
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: '{"code":"print(1)","description":"Inspect project and run tests"}' }, 1),
   ]
   for (let i = 1; i < PTC_MAX_DEPTH; i++) {
-    events.push(event('tool/code-dispatch-start', {
+    events.push(event('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('code-1'),
       parentCallId: i === 1 ? ToolCallId('code-1') : ToolCallId(`code-1:code:${i - 1}`),
       subCallId: ToolCallId(`code-1:code:${i}`),
@@ -1319,7 +1319,7 @@ test('a PTC sub-call chain beyond the depth cap fails fast at ingestion', () => 
     }, 1 + i))
   }
   folder.apply(events)
-  assert.throws(() => folder.apply([event('tool/code-dispatch-start', {
+  assert.throws(() => folder.apply([event('tool/ptc-dispatch-start', {
     rootCallId: ToolCallId('code-1'),
     parentCallId: ToolCallId(`code-1:code:${PTC_MAX_DEPTH - 1}`),
     subCallId: ToolCallId(`code-1:code:${PTC_MAX_DEPTH}`),
@@ -4921,7 +4921,7 @@ test('a retry never concatenates: the durable message carries only the retry tex
     retryId: 'retry-transcript', turn: 0, step: 0, provider: 'p', mode: 'normal',
     policyKey: 'test', retry: 1, maxRetries: 2, delayMs: 0,
     failure: { message: 'failed', code: 'TEST' },
-  }, 3.5)])
+  }, 4)])
   folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'final answer' }, 4)) // attempt B
   const streaming = folder.messages().filter(message => message.kind === 'assistant')
   assert.equal(streaming.length, 1)

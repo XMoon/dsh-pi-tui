@@ -408,7 +408,7 @@ export class WorkflowProjection {
 
 /**
  * One tool card — a top-level surface item OR a PTC nested sub-call.
- * Nested sub-calls (alpha.2 `tool/code-dispatch` events) are recursively
+ * Nested sub-calls (DSH `tool/ptc-dispatch` events) are recursively
  * attached to their parent card via `subCalls` and NEVER join the top-level
  * surface flow (upstream PTC contract: sub-calls never join nodes). Each
  * child reuses the ordinary tool-card shape and carries its durable
@@ -1252,7 +1252,7 @@ export class TranscriptFolder {
   /** Tool calls awaiting their result, keyed by callId with their running card. */
   private readonly pendingCalls = new Map<string, { name: string; args: string; turn: number; card: Extract<TranscriptMessage, { kind: 'tool' }>; index: number }>()
   /** Nested PTC sub-dispatches awaiting their settle, keyed by subCallId
-   * (alpha.2 `tool/code-dispatch-start` → `tool/code-dispatch`). The child
+   * (`tool/ptc-dispatch-start` → `tool/ptc-dispatch`). The child
    * card lives INSIDE its parent's `subCalls` tree, never in `items`. */
   private readonly pendingSubCalls = new Map<string, TranscriptToolMessage>()
   /** Every mounted PTC sub-call card by subCallId, for parent lookup of
@@ -3796,7 +3796,7 @@ export class TranscriptFolder {
       // the pending run_code call or a deeper pending sub-call). A start
       // without a known parent (an incomplete replay fragment) is parked in
       // the private orphan index and connected when the parent appears.
-      case 'tool/code-dispatch-start': {
+      case 'tool/ptc-dispatch-start': {
         const data = event.data as {
           rootCallId: string
           parentCallId: string
@@ -3828,7 +3828,7 @@ export class TranscriptFolder {
       // subCallId; the status comes from the durable isError flag (never
       // invented from spilled/truncated content). An orphan settle is
       // parked and applied when its start/parent appears.
-      case 'tool/code-dispatch': {
+      case 'tool/ptc-dispatch': {
         const data = event.data as {
           rootCallId: string
           parentCallId: string
@@ -4216,13 +4216,13 @@ export function renderTranscriptMarkdown(session: {
       // curated result may not carry the nested output, so the export
       // keeps the sub-call args and rendered content (simple indented
       // form — no new export format).
-      case 'tool/code-dispatch-start': {
+      case 'tool/ptc-dispatch-start': {
         const data = event.data as { name: string; subCallId: string; arguments: unknown }
         const args = typeof data.arguments === 'string' ? data.arguments : JSON.stringify(data.arguments)
         lines.push(`### Nested tool ${data.name} [${data.subCallId}]\n\n\`\`\`json\n${args}\n\`\`\`\n`)
         break
       }
-      case 'tool/code-dispatch': {
+      case 'tool/ptc-dispatch': {
         const data = event.data as { subCallId: string; isError: boolean; content: readonly ContentBlock[] }
         const text = markdownContent(data.content ?? [])
         if (text !== '') {

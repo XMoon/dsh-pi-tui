@@ -65,15 +65,22 @@ function liveChunk(turn: number, step: number, chunk: AssistantLiveChunk, time: 
   return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
 }
 
+type LegacyChunkEvent = {
+  readonly type: 'assistant/chunk'
+  readonly seq: SessionSeq
+  readonly time: number
+  readonly data: { readonly turn: number; readonly step: number; readonly chunk: AssistantLiveChunk }
+}
+type MixedEvent = SessionEvent | LegacyChunkEvent
+
 /** Apply a mixed event list: durable events through `apply()`, legacy
  * `assistant/chunk` events through the live input seam (Session v2). The
  * legacy type is read STRUCTURALLY (master's event union no longer
  * contains it). */
-function applyMixed(folder: TranscriptFolder, events: readonly SessionEvent[]): void {
+function applyMixed(folder: TranscriptFolder, events: readonly MixedEvent[]): void {
   for (const event of events) {
-    const kind = event.type as string
-    if (kind === 'assistant/chunk') {
-      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+    if (event.type === 'assistant/chunk') {
+      const data = event.data
       folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
     } else {
       folder.apply([event])
@@ -287,6 +294,7 @@ test('tool cards present through the real registry: read shows the relativized p
     assert.equal(outcome.isError, false)
     const resultEvent: SessionEvent = {
       type: 'tool/result',
+       surfaceOp: 'append',
       seq: SessionSeq(1),
       time: 1_700_000_000_001,
       data: {
@@ -1947,6 +1955,7 @@ function diffCallEvent(seq: number, callId: string, args = diffCallArgs()): Sess
 function diffResultEvent(seq: number, callId: string, text: string, isError = false): SessionEvent {
   return {
     type: 'tool/result',
+       surfaceOp: 'append',
     seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
     data: {
@@ -1960,6 +1969,7 @@ function diffResultEvent(seq: number, callId: string, text: string, isError = fa
 function emptyResultEvent(seq: number, callId: string, isError = false): SessionEvent {
   return {
     type: 'tool/result',
+       surfaceOp: 'append',
     seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
     data: {
@@ -1982,6 +1992,7 @@ function subagentRouteCallEvent(seq: number, callId: string, args: string): Sess
 function subagentRouteResultEvent(seq: number, callId: string): SessionEvent {
   return {
     type: 'tool/result',
+       surfaceOp: 'append',
     seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
     data: {
@@ -3094,7 +3105,7 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
     // pipeline's non-text-block retention keeps the empty assistant entry —
     // it must not occupy a spacer row, or the thinking card and the next
     // card read two blank rows apart.
-    { type: 'assistant/chunk', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', text: 'think one\nthink two\n' } } } as SessionEvent,
+    { type: 'assistant/chunk', seq: SessionSeq(1), time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think one\nthink two\n' } } },
     { type: 'assistant/message', seq: 2, time: 1_700_000_000_002, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'reasoning', text: 'think one\nthink two' }] } } } as SessionEvent,
     { type: 'tool/call', seq: 3, time: 1_700_000_000_003, data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } } as SessionEvent,
     { type: 'tool/result', seq: 4, time: 1_700_000_000_004, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: ToolCallId('c1'), content: [{ type: 'text', text: 'file.txt' }], isError: false }) } } as SessionEvent,

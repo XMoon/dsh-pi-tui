@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   PREPARING_SCAN_MAX_CHARS,
   clearStreamingToolPreviewsForStep,
@@ -25,7 +25,7 @@ function event<K extends string>(
   data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
 ): SessionEvent {
-  return { type, seq, time: 1_700_000_000_000 + seq * 1000, data } as SessionEvent
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq * 1000, data } as SessionEvent
 }
 
 /** One Session v2 live chunk input (the transient plane replaces durable

@@ -122,7 +122,7 @@ export interface RewindCommitHost extends ForkAgentHost {
    * semantic create (migration M1.11). */
   compose(presetId?: string): Promise<{
     agentPreset?: string
-    setup: (agentCtx: import('@deepseek-ai/cordis').Context) => Promise<void> | void
+    setup: (agentCtx: import('@deepseek-ai/cordis').Context, agent: Agent) => Promise<void> | void
   }>
   /** The live surface identity, re-read at every gate. */
   liveIdentity(): RewindLiveIdentity

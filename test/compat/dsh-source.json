@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
   "repository": "deepseek-ai/deepseek-harness",
-  "ref": "d347e703908d0406b7a7ef80e3a0e594d86b2215",
-  "expectedVersion": "0.1.3-alpha.1"
+  "ref": "183f08e9c6dde7e36cd2318eaee70b0da08fb35e",
+  "expectedVersion": "0.1.5-rc.1"
 }

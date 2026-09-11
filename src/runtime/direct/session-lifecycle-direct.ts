@@ -17,9 +17,9 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle, SessionLifecycle } from '../session-lifecycle-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
@@ -32,7 +32,7 @@ export interface HostContextLike {
  * compose function satisfies this structurally). */
 export interface CompositionLike {
   agentPreset?: string
-  setup: (agentCtx: Context) => Promise<void> | void
+  setup: (agentCtx: Context, agent: Agent) => Promise<void> | void
 }
 
 /** The structural `agents` service surface the lifecycle needs. */
@@ -41,18 +41,18 @@ export interface AgentsServiceLike {
     sessionId: ReturnType<typeof SessionId>
     meta: Record<string, unknown>
     agentOptions: { provider?: string; model?: string }
-    setup: (agentCtx: Context) => Promise<void> | void
+    setup: (agentCtx: Context, agent: Agent) => Promise<void> | void
     seed?: readonly SessionEvent[]
     /** Exact fork-inherited prefix length when `meta.isSeeded` is set
-     * (alpha.4's seeded-session contract — the old header `seedLength`
+     * (the seeded-session contract — the old header `seedLength`
      * field is rejected now). */
-    inheritedEventCount?: number
+    inheritedEventCount?: ReturnType<typeof SessionLogOffset>
     signal?: AbortSignal
   }): Promise<AgentHandle>
   resume(options: {
     resumeSessionId: ReturnType<typeof SessionId>
     agentOptions: { provider?: string; model?: string }
-    setup: (agentCtx: Context) => Promise<void> | void
+    setup: (agentCtx: Context, agent: Agent) => Promise<void> | void
     signal?: AbortSignal
   }): Promise<AgentHandle>
 }
@@ -82,7 +82,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       agentOptions: { provider: request.provider, model: request.model },
       setup: composition.setup,
       seed: request.seed as readonly SessionEvent[] | undefined,
-      ...request.inheritedEventCount === undefined ? {} : { inheritedEventCount: request.inheritedEventCount },
+      ...request.inheritedEventCount === undefined ? {} : { inheritedEventCount: SessionLogOffset(request.inheritedEventCount) },
       signal: request.signal,
     })
     // The ownership escape preserves BOTH the live agent and the real

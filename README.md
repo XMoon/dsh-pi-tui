@@ -25,7 +25,7 @@ dsh --profile pi-tui
 
 ### Next / npm 线（验证）
 
-当前 `next` 线以已发布的 npm 版本 `dsh-v0.1.3-alpha.2` 为兼容目标。使用
+当前 `next` 线以已发布的 npm 版本 `dsh-v0.1.5-rc.1` 为兼容目标。使用
 隔离的 npm 驱动验证（安装 checkout 声明的精确 DSH 版本并跑完整
 build/test/package 路径）：
 
@@ -36,7 +36,7 @@ pnpm compat:dsh:npm
 旧 runtime 的启动提示会给出精确的 npm 升级命令：
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+npm install -g @deepseek-ai/dsh@0.1.5-rc.1
 ```
 
 ### 环境要求
@@ -49,30 +49,32 @@ npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
 | TUI 包版本 | 对应 DSH 版本 | 说明 |
 |---|---|---|
 | `0.4.1`（已发布 `@latest`） | `>=0.1.2-rc.1` | 历史稳定版；按 0.1.2-rc.1 family 验证 |
-| 当前 `next` npm 线（本 checkout；版本 `0.4.3-alpha.2`） | `>=0.1.3-alpha.2` | 已发布的 npm alpha.2 目标；按精确 0.1.3-alpha.2 family 验证 |
-| `0.3.x`（`@0.3`） | `0.1.1-rc.2` | 旧运行时兼容线 |
+| `0.4.3-alpha.2`（历史 next npm 线） | `>=0.1.3-alpha.2` | 历史 npm alpha.2 目标；按精确 0.1.3-alpha.2 family 验证 |
+| 当前 `next` npm 线（本 checkout；版本 `0.4.3-alpha.3`） | `>=0.1.5-rc.1` | 已发布的 npm rc.1 目标；按精确 0.1.5-rc.1 family 验证 |
+| `0.3.x`（`@0.3`） | `>=0.1.1-rc.1` | 旧运行时兼容线（0.3.0 最低版本） |
 
 不要把稳定线与 `next` 线混装。已发布的 0.4.1 稳定线仍按
 0.1.2-rc.1 family 使用；保留旧 DSH 时请使用下方的 0.3 兼容线。当前
-`next` checkout 的 peer floor 是 `>=0.1.3-alpha.2`，旧 runtime 会在正常的
+`next` checkout 的 peer floor 是 `>=0.1.5-rc.1`，旧 runtime 会在正常的
 不兼容边界以非零状态失败。启动行的兼容提示是 best-effort，不是 Loader
 启动顺序保证；它建议的升级目标是已发布的 npm 版本。
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+npm install -g @deepseek-ai/dsh@0.1.1-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
 dsh --profile pi-tui
 ```
 
 已发布的 `0.4.1` 稳定线声明支持范围是 `>=0.1.2-rc.1`；本 checkout 的
-`next` npm 线则声明 `>=0.1.3-alpha.2`。`npm install -g` 仅用于
+`next` npm 线则声明 `>=0.1.5-rc.1`。`npm install -g` 仅用于
 安装已发布的 DSH；要将 dsh-pi-tui 安装进 DSH profile，必须使用
 `dsh plugin` 命令。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
-旧数据中省略请求的 `code` default/session 值只有在确认 roster 不含 `code` 后
-才会回退到 `ptc`。
+DSH V3 migration 负责历史 session header/selection 的 `code -> ptc` 转换；
+当前 projection 会原样保留合法的自定义 `code`。只有省略请求的 legacy
+settings default `code` 才会在确认 roster 不含 `code` 后回退到 `ptc`。
 
 ### Profile management
 
@@ -541,7 +543,7 @@ dsh --profile pi-tui-dev
 ### npm 模式（当前 `next`）
 
 当前 `next` 线是 npm 模式：以本 checkout 的 `package.json` 声明、冻结
-lockfile 解析的已发布 `dsh-v0.1.3-alpha.2` family 为兼容目标。隔离的 npm
+lockfile 解析的已发布 `dsh-v0.1.5-rc.1` family 为兼容目标。隔离的 npm
 驱动从公共 registry 安装该精确 family，并跑完整 build/test/package 路径：
 
 ```sh
