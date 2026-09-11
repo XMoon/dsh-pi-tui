@@ -2310,6 +2310,53 @@ function claimedSteer(id: string, text: string, time: number, seq: number): Sess
   ]
 }
 
+/** Build one durable Assistant settlement with an optional full content
+ * payload (used by the tool-call negative case). */
+function assistantSettlement(
+  turn: number,
+  step: number,
+  id: string,
+  text: string,
+  time: number,
+  seq: number,
+  content: readonly unknown[] = [{ type: 'text', text }],
+): SessionEvent {
+  return eventAt('assistant/message', {
+    turn,
+    step,
+    message: {
+      id: MessageId(id),
+      role: 'assistant',
+      content,
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+  }, time, seq)
+}
+
+function steerMessage(id: string, text: string): {
+  id: MessageId
+  role: 'user'
+  content: [{ type: 'text'; text: string }]
+  source: { kind: 'user' }
+} {
+  return {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }
+}
+
+/** Queue one human message without admitting it yet. */
+function queueSteer(message: ReturnType<typeof steerMessage>, time: number, seq: number): SessionEvent {
+  return eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq)
+}
+
+/** Claim the queued message immediately before the next step starts. */
+function claimSteer(time: number, seq: number): SessionEvent {
+  return eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time, seq)
+}
+
 /** A turn with an initial user, thinking, a tool, a MID-TURN steer, and a
  * final answer: user → thinking → tool → user(steer) → assistant → end. */
 function steeredTurn(turn: number, baseSeq: number, startTime: number): SessionEvent[] {
@@ -2342,6 +2389,251 @@ function steeredTurn(turn: number, baseSeq: number, startTime: number): SessionE
     eventAt('turn/end', { turn, reason: { kind: 'completed' } }, startTime + 6000, baseSeq + 9),
   ]
 }
+
+test('a settled text-only answer crossed by a human steer stays persistent before the next answer', () => {
+  const folder = new TranscriptFolder()
+  const initial = steerMessage('focus-initial', 'initial prompt')
+  const steer = steerMessage('focus-steer', 'human steer')
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 1 }, 1001, 1),
+    eventAt('user/message', initial, 1002, 2),
+    // A is still streaming when the human steer enters next-step.
+    eventAt('assistant/chunk', {
+      turn: 0,
+      step: 1,
+      chunk: { type: 'text-delta', index: 0, text: 'assistant A' },
+    }, 1003, 3),
+    queueSteer(steer, 1004, 4),
+    assistantSettlement(0, 1, 'focus-a', 'assistant A', 1005, 5),
+    eventAt('step/end', { turn: 0, step: 1 }, 1006, 6),
+    claimSteer(1007, 7),
+    eventAt('step/start', { turn: 0, step: 2 }, 1008, 8),
+    eventAt('user/message', steer, 1009, 9),
+  ])
+
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.message, undefined, 'committing A removes it from the Thought Message slot immediately')
+  const beforeB = folder.messages()
+  const collapsedBeforeB = projectTools(beforeB, folder.turnActivities(), new Set())
+  const expandedBeforeB = projectTools(beforeB, folder.turnActivities(), new Set([0]))
+  assert.deepEqual(blockKinds(collapsedBeforeB), ['user', 'activity', 'assistant', 'user'])
+  assert.deepEqual(blockKinds(expandedBeforeB), ['user', 'activity', 'assistant', 'user'])
+  const collapsedAssistant = collapsedBeforeB.find(block => block.kind === 'message' && block.message.kind === 'assistant')
+  assert.ok(collapsedAssistant?.kind === 'message' && collapsedAssistant.message.kind === 'assistant')
+  if (collapsedAssistant?.kind === 'message' && collapsedAssistant.message.kind === 'assistant') {
+    assert.equal(collapsedAssistant.message.text, 'assistant A')
+  }
+  const expandedAssistant = expandedBeforeB.find(block => block.kind === 'message' && block.message.kind === 'assistant')
+  assert.ok(expandedAssistant?.kind === 'message' && expandedAssistant.message.kind === 'assistant')
+  if (expandedAssistant?.kind === 'message' && expandedAssistant.message.kind === 'assistant') {
+    assert.equal(expandedAssistant.message.text, 'assistant A')
+    assert.equal(expandedAssistant.collapseFocusOwnerOnClick, undefined,
+      'a committed pre-steer answer is persistent in expanded Focus')
+  }
+
+  applyMixed(folder, [
+    eventAt('assistant/chunk', {
+      turn: 0,
+      step: 2,
+      chunk: { type: 'text-delta', index: 0, text: 'assistant B' },
+    }, 1010, 10),
+    assistantSettlement(0, 2, 'focus-b', 'assistant B', 1011, 11),
+    eventAt('step/end', { turn: 0, step: 2 }, 1012, 12),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1013, 13),
+  ])
+  const completed = folder.messages()
+  const collapsed = projectTools(completed, folder.turnActivities(), new Set())
+  const expanded = projectTools(completed, folder.turnActivities(), new Set([0]))
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant', 'user', 'assistant'])
+  assert.deepEqual(blockKinds(expanded), ['user', 'activity', 'assistant', 'user', 'assistant'])
+  assert.deepEqual(
+    collapsed.flatMap(block => block.kind === 'message' && (block.message.kind === 'user' || block.message.kind === 'assistant')
+      ? [`${block.message.kind}:${block.message.text}`] : []),
+    ['user:initial prompt', 'assistant:assistant A', 'user:human steer', 'assistant:assistant B'],
+  )
+  assert.equal(activity.message, undefined, 'the final B remains outside the Thought Message slot')
+
+  const raw = folder.messages()
+  const off = projectFocus(raw, folder.turnActivities(), new Set(), false)
+  assert.deepEqual(off.map(block => block.kind === 'message' ? block.message : undefined), raw,
+    'Focus off leaves the raw transcript chronology unchanged')
+})
+
+test('an assistant with text plus tool-call stays process evidence across a steer boundary', () => {
+  const folder = new TranscriptFolder()
+  const initial = steerMessage('tool-initial', 'initial prompt')
+  const steer = steerMessage('tool-steer', 'human steer')
+  const toolCallId = ToolCallId('focus-tool-call')
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 2000, 20),
+    eventAt('step/start', { turn: 0, step: 1 }, 2001, 21),
+    eventAt('user/message', initial, 2002, 22),
+    assistantSettlement(0, 1, 'tool-a', '我先检查一下', 2003, 23, [
+      { type: 'text', text: '我先检查一下' },
+      { type: 'tool-call', id: toolCallId, name: 'read', arguments: '{}' },
+    ]),
+    eventAt('tool/call', {
+      turn: 0,
+      step: 1,
+      callId: toolCallId,
+      name: 'read',
+      arguments: '{}',
+    }, 2004, 24),
+    eventAt('tool/result', {
+      turn: 0,
+      step: 1,
+      message: {
+        id: MessageId('tool-r'),
+        role: 'user',
+        content: [{ type: 'tool-result', toolCallId, content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: toolCallId },
+      },
+    }, 2005, 25),
+    eventAt('step/end', { turn: 0, step: 1 }, 2006, 26),
+    queueSteer(steer, 2007, 27),
+    claimSteer(2008, 28),
+    eventAt('step/start', { turn: 0, step: 2 }, 2009, 29),
+    eventAt('user/message', steer, 2010, 30),
+    assistantSettlement(0, 2, 'tool-b', 'final B', 2011, 31),
+    eventAt('step/end', { turn: 0, step: 2 }, 2012, 32),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2013, 33),
+  ])
+
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.toolCalls, 1)
+  assert.equal(activity.tool?.name, 'read')
+  assert.equal(activity.message?.text, '我先检查一下', 'tool-call text remains available as process evidence')
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'user', 'activity', 'assistant'])
+  const assistants = collapsed.flatMap(block => block.kind === 'message' && block.message.kind === 'assistant' ? [block.message.text] : [])
+  assert.deepEqual(assistants, ['final B'], 'the tool-call prefix is never promoted to an independent answer')
+})
+
+test('multiple text-only answers crossed by steers preserve conversation chronology', () => {
+  const folder = new TranscriptFolder()
+  const initial = steerMessage('multi-initial', 'initial prompt')
+  const steer1 = steerMessage('multi-steer-1', 'steer 1')
+  const steer2 = steerMessage('multi-steer-2', 'steer 2')
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 3000, 40),
+    eventAt('step/start', { turn: 0, step: 1 }, 3001, 41),
+    eventAt('user/message', initial, 3002, 42),
+    assistantSettlement(0, 1, 'multi-a', 'assistant A', 3003, 43),
+    eventAt('step/end', { turn: 0, step: 1 }, 3004, 44),
+    queueSteer(steer1, 3005, 45),
+    claimSteer(3006, 46),
+    eventAt('step/start', { turn: 0, step: 2 }, 3007, 47),
+    eventAt('user/message', steer1, 3008, 48),
+    assistantSettlement(0, 2, 'multi-b', 'assistant B', 3009, 49),
+    eventAt('step/end', { turn: 0, step: 2 }, 3010, 50),
+    queueSteer(steer2, 3011, 51),
+    claimSteer(3012, 52),
+    eventAt('step/start', { turn: 0, step: 3 }, 3013, 53),
+    eventAt('user/message', steer2, 3014, 54),
+    assistantSettlement(0, 3, 'multi-c', 'assistant C', 3015, 55),
+    eventAt('step/end', { turn: 0, step: 3 }, 3016, 56),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3017, 57),
+  ])
+
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  const expanded = projectTools(folder.messages(), folder.turnActivities(), new Set([0]))
+  const expectedKinds = ['user', 'activity', 'assistant', 'user', 'assistant', 'user', 'assistant']
+  assert.deepEqual(blockKinds(collapsed), expectedKinds)
+  assert.deepEqual(blockKinds(expanded), expectedKinds)
+  const textRows = (blocks: readonly FocusProjectedBlock[]): string[] => blocks.flatMap(block =>
+    block.kind === 'message' && (block.message.kind === 'user' || block.message.kind === 'assistant')
+      ? [block.message.text] : [])
+  assert.deepEqual(textRows(collapsed), ['initial prompt', 'assistant A', 'steer 1', 'assistant B', 'steer 2', 'assistant C'])
+  assert.deepEqual(textRows(expanded), textRows(collapsed))
+  const committedRows = expanded.filter(block => block.kind === 'message' && block.message.kind === 'assistant')
+  assert.equal(committedRows.length, 3)
+  for (const block of committedRows) {
+    assert.equal(block.kind, 'message')
+    assert.equal(block.collapseFocusOwnerOnClick, undefined)
+  }
+})
+
+test('the pre-steer answer boundary is identical for live fold and cold replay', () => {
+  const initial = steerMessage('replay-initial', 'initial prompt')
+  const steer = steerMessage('replay-steer', 'human steer')
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 4000, 60),
+    eventAt('step/start', { turn: 0, step: 1 }, 4001, 61),
+    eventAt('user/message', initial, 4002, 62),
+    assistantSettlement(0, 1, 'replay-a', 'assistant A', 4003, 63),
+    eventAt('step/end', { turn: 0, step: 1 }, 4004, 64),
+    queueSteer(steer, 4005, 65),
+    claimSteer(4006, 66),
+    eventAt('step/start', { turn: 0, step: 2 }, 4007, 67),
+    eventAt('user/message', steer, 4008, 68),
+    assistantSettlement(0, 2, 'replay-b', 'assistant B', 4009, 69),
+    eventAt('step/end', { turn: 0, step: 2 }, 4010, 70),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4011, 71),
+  ]
+  const live = new TranscriptFolder()
+  live.apply(events)
+  const replay = new TranscriptFolder()
+  replay.hydrate(events)
+  const liveProjected = projectTools(live.messages(), live.turnActivities(), new Set())
+  const replayProjected = projectTools(replay.messages(), replay.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(liveProjected), ['user', 'activity', 'assistant', 'user', 'assistant'])
+  assert.deepEqual(blockKinds(replayProjected), blockKinds(liveProjected))
+  assert.deepEqual(
+    replayProjected.map(block => block.kind === 'message' && 'text' in block.message ? block.message.text : 'Thought'),
+    liveProjected.map(block => block.kind === 'message' && 'text' in block.message ? block.message.text : 'Thought'),
+  )
+})
+
+test('a direct non-steer user clears a pending pre-steer boundary', () => {
+  const folder = new TranscriptFolder()
+  const initial = steerMessage('clear-initial', 'initial prompt')
+  const queued = steerMessage('clear-queued', 'queued steer')
+  const ordinary = steerMessage('clear-ordinary', 'ordinary follow-up')
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 5000, 80),
+    eventAt('step/start', { turn: 0, step: 1 }, 5001, 81),
+    eventAt('user/message', initial, 5002, 82),
+    assistantSettlement(0, 1, 'clear-a', 'assistant A', 5003, 83),
+    eventAt('step/end', { turn: 0, step: 1 }, 5004, 84),
+    queueSteer(queued, 5005, 85),
+    claimSteer(5006, 86),
+    eventAt('step/start', { turn: 0, step: 2 }, 5007, 87),
+    // This direct row is not the claimed queued steer, so it must not commit A.
+    eventAt('user/message', ordinary, 5008, 88),
+  ])
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.message?.text, 'assistant A')
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'user', 'activity'])
+})
+
+test('committed pre-steer answers do not alter the raw Focus-off projection', () => {
+  const folder = new TranscriptFolder()
+  const initial = steerMessage('off-initial', 'initial prompt')
+  const steer = steerMessage('off-steer', 'human steer')
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 6000, 90),
+    eventAt('step/start', { turn: 0, step: 1 }, 6001, 91),
+    eventAt('user/message', initial, 6002, 92),
+    assistantSettlement(0, 1, 'off-a', 'assistant A', 6003, 93),
+    eventAt('step/end', { turn: 0, step: 1 }, 6004, 94),
+    queueSteer(steer, 6005, 95),
+    claimSteer(6006, 96),
+    eventAt('step/start', { turn: 0, step: 2 }, 6007, 97),
+    eventAt('user/message', steer, 6008, 98),
+  ])
+  const raw = folder.messages()
+  const projected = projectFocus(raw, folder.turnActivities(), new Set(), false)
+  assert.equal(projected.length, raw.length)
+  projected.forEach((block, index) => {
+    assert.equal(block.kind, 'message')
+    if (block.kind === 'message') assert.equal(block.message, raw[index])
+  })
+})
 
 test('completed open opaque output remains process evidence, not a final Assistant', () => {
   const folder = new TranscriptFolder()

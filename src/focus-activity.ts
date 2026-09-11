@@ -26,7 +26,7 @@ import { color } from './theme.ts'
 import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import { toolTitle } from './present.ts'
-import { assistantBlocksVisibleNow, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
+import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
 import { displayFailureText } from './failure-presentation.ts'
 
 /** The max tool-type names the header stats show before the `+N` tail
@@ -389,11 +389,11 @@ export class FocusActivityComponent {
  * polluted with a fake `focus-activity` kind and the session data stays
  * lossless.
  *
- * Collapsed turns HIDE the process rows — thinking, tool, mid-turn
- * system/inject and intermediate-assistant — entirely: they cannot leak
- * through Ctrl+O/Alt+T because they are not in the rendered list at all
- * (plan §15.2). The LEADING injected-context prefix (the turn foundation)
- * and every human user row stay visible before the Thought. The final
+ * Collapsed turns HIDE process rows — thinking, tool, mid-turn system/inject
+ * and ordinary intermediate-assistant — so they cannot leak through
+ * Ctrl+O/Alt+T (plan §15.2). A committed pre-steer answer is the explicit
+ * persistent-row exception. The LEADING injected-context prefix (the turn
+ * foundation) and every human user row stay visible before the Thought. The final
  * assistant only appears after the authoritative `turn/end` (plan §13.1)
  * and never duplicates in the expanded view (it stays at its
  * chronological position).
@@ -457,6 +457,8 @@ export function projectFocus(
     // row (shared by the expanded and collapsed branches — one semantic,
     // never two drifting copies).
     const final = finalAssistantSelection(activity, group)
+    const isCommittedAnswer = (member: TranscriptMessage): boolean =>
+      activity !== undefined && assistantCommittedBeforeSteer(activity, member)
     if (expanded) {
       // The open Thought reveals the FULL process in ORIGINAL order —
       // compaction cards included at their chronological position — with
@@ -475,8 +477,9 @@ export function projectFocus(
       // scan of mid-process system rows). Consecutive users after the
       // boundary stay in chronological order; they are not a multi-row
       // initial prompt (plan: no adjacency guessing). Every revealed
-      // process row carries the owner-turn collapse mark; the user's rows,
-      // the lead foundation rows and the FINAL assistant stay unmarked
+      // ordinary process row carries the owner-turn collapse mark;
+       // committed pre-steer answers, the user's rows, the lead foundation
+      // rows and the FINAL assistant stay unmarked
       // (clicking them must not collapse the Thought — review P2).
       const boundary = thoughtLeadBoundary(group)
       for (const member of group.slice(0, boundary)) {
@@ -488,7 +491,11 @@ export function projectFocus(
           out.push({ kind: 'message', message: member })
         } else {
           if (final !== undefined && member === final.message) continue
-          out.push({ kind: 'message', message: member, collapseFocusOwnerOnClick: turn })
+          if (isCommittedAnswer(member)) {
+            out.push({ kind: 'message', message: member })
+          } else {
+            out.push({ kind: 'message', message: member, collapseFocusOwnerOnClick: turn })
+          }
         }
       }
       if (final !== undefined) {
@@ -496,25 +503,42 @@ export function projectFocus(
       }
       continue
     }
-    // Collapsed Focus summarizes the turn's INPUTS before the Thought: the
-    // leading injected-context prefix (the turn foundation) and EVERY human
-    // user row (same-turn steers included) precede the Thought; the process
-    // stays hidden inside it. This is a summary, not strict chronology — a
-    // steer-only turn still shows its user input above the Thought. Only
-    // the LEADING injected-context prefix is lifted; mid-turn injected
-    // context and orchestration rows (llm/retry, max-tokens) stay process
-    // content, hidden under the collapsed Thought.
+    // Collapsed Focus normally summarizes the turn's INPUTS before the
+    // Thought: the leading injected-context prefix (the turn foundation) and
+    // EVERY human user row (same-turn steers included) precede it; process
+    // rows stay hidden inside the Thought. A committed pre-steer answer is
+    // the one exception: from that exact raw boundary onward, preserve the
+    // conversation rows in chronology so the answer cannot be swallowed by
+    // the Thought or move when the disclosure changes.
     for (const member of group.slice(0, leadingInjectedContextPrefixEnd(group))) {
       out.push({ kind: 'message', message: member })
     }
-    for (const member of group) {
-      if (member.kind === 'user') out.push({ kind: 'message', message: member })
-    }
-    if (activity !== undefined) out.push({ kind: 'activity', activity })
-    // Compaction cards keep their existing lifecycle in the collapsed
-    // view (plan §12.3 v1 — never hidden into the Thought).
-    for (const member of group) {
-      if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
+    const firstCommittedIndex = group.findIndex(isCommittedAnswer)
+    if (firstCommittedIndex < 0) {
+      for (const member of group) {
+        if (member.kind === 'user') out.push({ kind: 'message', message: member })
+      }
+      if (activity !== undefined) out.push({ kind: 'activity', activity })
+      // Compaction cards keep their existing lifecycle in the collapsed
+      // view (plan §12.3 v1 — never hidden into the Thought).
+      for (const member of group) {
+        if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
+      }
+    } else {
+      const beforeCommitted = group.slice(0, firstCommittedIndex)
+      for (const member of beforeCommitted) {
+        if (member.kind === 'user') out.push({ kind: 'message', message: member })
+      }
+      if (activity !== undefined) out.push({ kind: 'activity', activity })
+      for (const member of beforeCommitted) {
+        if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
+      }
+      for (const member of group.slice(firstCommittedIndex)) {
+        if (final !== undefined && member === final.message) continue
+        if (member.kind === 'user' || member.kind === 'compaction' || isCommittedAnswer(member)) {
+          out.push({ kind: 'message', message: member })
+        }
+      }
     }
     // The collapsed final: only after the authoritative turn/end.
     if (final !== undefined) {
