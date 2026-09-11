@@ -71,12 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wire. The policy follows the FINAL authority: an unknown `/name [image #1]` line whose command only appears
   with the session (a session-scoped host command) is checked again after the session resolves — an undeclared
   command refuses it instead of running with an empty payload and consuming the draft.
-- **An attachment-bearing client command no longer refuses before the deferred authority resolves.**
-  Before the first session exists, a line such as `/deploy [image #1]` first resolves the session-keyed
-  authority: a host command or skill wrapper that appears with the session takes the line **with its
-  attachment**; only when the client command keeps it does the attachment refusal fire, returning the
-  draft (placeholder intact) for a re-attach decision. The referenced drafts are reserved across the
-  deferred window, so a concurrent attach-time prune cannot drop them.
+- **An attachment-bearing `/name args` line is no longer treated as a client command.** A client command
+  contribution claims the BARE `/name` token only, so a line such as `/deploy [image #1]` (an attachment
+  always brings input with it) was never a contribution invocation: it is an ordinary multimodal submission
+  that reaches the model — the plugin handler does not run and no "local command" attachment refusal is
+  raised.
 - **A plugin reload during a deferred start never runs the next generation.** If the contribution is
   unloaded/replaced while the first submission resolves its session (even under the same owner and id),
   the submitted command does **not** run the new handler and is **never** downgraded to a model prompt:
@@ -89,6 +88,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compatibility
 
+- **Client command contributions are bare-token invocations only (breaking).** DSH `matchEnter`
+  parity: a contribution is a slash-MENU entry, so it claims the BARE `/name` token only — `/name args`
+  is not an invocation. It is an ordinary submission that reaches the model (busy policy and
+  attachments included), and the plugin `handler` never runs for it. Previously `/deploy prod` ran the
+  plugin handler. A plugin that needs arguments should open its own picker from the bare command, or
+  expose the capability to the model as a tool.
 - **The extension API version is now 2 (breaking).** `api().apiVersion` reports `2` because the
   plugin command contribution contract below is a breaking change to the STABLE surface (removed
   `execution`/`argumentProvider`, required `handler`); `1` stays the M0–M3 foundation, so a plugin

@@ -12,9 +12,12 @@
  * Contract (plan §10):
  * - a contribution needs a declared handler (its client behavior) and needs
  *   no commands-service definition;
- * - `/name args...` ALWAYS keeps `invocation.rawInput` verbatim — the
- *   bridge never re-parses or rewrites arguments (the skill rawInput
- *   regression gate);
+ * - a contribution is a slash-MENU entry, so it claims the BARE `/name`
+ *   token only (DSH `matchEnter`: `if (!bare) return undefined`). An argued
+ *   line (`/deploy explain`) is an ordinary submission that reaches the
+ *   model — the handler never runs for it. A handler therefore always sees
+ *   `invocation.rawInput` with no non-whitespace input (trailing whitespace is
+ *   preserved verbatim, exactly like every other command surface);
  * - a contribution is CLIENT-OWNED while registered; after unload the name
  *   returns to the ordinary routes (a host claim, or an unclaimed prompt —
  *   never a lingering client route);
