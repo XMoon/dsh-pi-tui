@@ -11,7 +11,7 @@
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
-M2  IN PROGRESS   (D1.1 DONE: Remote Session read adapter + generation-fenced shadow; writes remain unimplemented)
+M2  IN PROGRESS   (D1.1 DONE: Remote Session read adapter + generation-fenced shadow; same-Host parity and release-family gates verified; writes remain unimplemented)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -494,6 +494,17 @@ while the overall M2 remains in progress:
   `SessionBinding` `loadThrough`/`loadOlder` history paging, Connection reconnect,
   contiguous-window recovery, and a write-endpoint spy. The package dependencies
   used by this harness are development-only.
+- `scripts/dsh-remote-session-read-parity-smoke.mjs` assembles one real Host
+  Context (Session Store, live registry, projections, SQLite query provider,
+  Session Controller, Gateway, Connection, and official forwarded events) and
+  an independent Client Context over the official in-process carrier. It
+  compares Direct and Remote list/projection/search results before and after a
+  Host-side session update, with no synthetic ready frame or private envelope.
+- `compat:dsh:client-family` runs the fixture and same-Host parity gates in two
+  isolated installs: an exact `0.1.5-rc.1` installed family and an independent
+  `0.1.5-rc.2` target. The exact-family override fences released `0.1.5-rc.*`
+  packages while retaining older legacy dependencies where the official release
+  graph still requires them.
 
 Production remains Direct. No Remote Backend, Session writer, UI wiring, retry
 loop, raw persistence access, or duplicate event fold is introduced by D1.1.

@@ -12,6 +12,8 @@ import {
   type RemoteSessionsReadSource,
 } from '../src/runtime/remote/session-reader-remote.ts'
 import type { SessionContentSearchPage, SessionSummary } from '../src/runtime/session-reader-port.ts'
+import { SessionQueryError } from '@deepseek-ai/dsh-session-query'
+import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { ConnectionGenerationState } from '@deepseek-ai/dsh-client-connection/client'
 
@@ -298,12 +300,35 @@ test('maps the official rc1 unmounted session-query error shape to unavailable',
   // ApiSessionList in rc1 uses this exact generic RemoteError because the
   // deployment capability is absent; generic gateway/internal failures must
   // still propagate (covered above).
-  const officialError = {
-    name: 'RemoteError',
-    code: 'gateway/internal',
-    message: 'session search is unavailable: this deployment does not mount @deepseek-ai/dsh-session-query',
-    details: {},
-  }
+  const officialError = new RemoteError(
+    'gateway/internal',
+    'session search is unavailable: this deployment does not mount @deepseek-ai/dsh-session-query',
+    {},
+  )
+  const source = remoteSource({
+    state: state([], {}),
+    search: async () => ({ ok: false, error: officialError }),
+  })
+
+  assert.equal(await new RemoteSessionReader(source, generations.source).search('needle'), undefined)
+})
+
+test('maps the official rc1 disabled-search wrapper to unavailable', async () => {
+  const generations = generationHarness()
+  const queryError = new SessionQueryError(
+    'session search is disabled: this deployment configures the session-query index with openAt "never"',
+    'SESSION_QUERY_SEARCH_DISABLED',
+  )
+  const officialError = new RemoteError(
+    'gateway/internal',
+    `session search failed: ${String(queryError)}`,
+    {},
+  )
+  assert.equal(
+    officialError.message,
+    'session search failed: SessionQueryError: session search is disabled: '
+      + 'this deployment configures the session-query index with openAt "never"',
+  )
   const source = remoteSource({
     state: state([], {}),
     search: async () => ({ ok: false, error: officialError }),

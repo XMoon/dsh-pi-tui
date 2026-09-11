@@ -7,6 +7,7 @@
  * before running the same frozen install and checks.
  *
  * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.5-rc.2]
+ * Client-only family lanes add `--exact-family --client-smoke-only`.
  *
  * @module dsh-npm-verify
  */
@@ -60,6 +61,8 @@ function parseCli() {
     args,
     options: {
       'dsh-version': { type: 'string' },
+      'exact-family': { type: 'boolean' },
+      'client-smoke-only': { type: 'boolean' },
       keep: { type: 'boolean' },
     },
     allowPositionals: false,
@@ -93,15 +96,63 @@ function copyRepository(destination) {
   })
 }
 
-/** Pin every DSH development package in an ephemeral npm verification copy. */
-export function pinNpmDshDependencies(workspace, version) {
+/**
+ * Read DSH package names that have a released rc family in the tracked lock.
+ * Legacy packages outside the 0.1.5 rc line deliberately stay out of this
+ * set: they are a separate upstream compatibility line and are not part of the
+ * rc1/rc2 family fence.
+ */
+function releasedDshFamilyNames(workspace) {
+  const lockfile = readFileSync(join(workspace, 'pnpm-lock.yaml'), 'utf8')
+  const names = new Set()
+  for (const line of lockfile.split('\n')) {
+    const match = /^\s{2,}['"]?(@deepseek-ai\/dsh-[a-z0-9-]+)@0\.1\.5-rc\.[12](?:['"]|\(|:)/iu.exec(line)
+    if (match !== null) names.add(match[1])
+  }
+  return names
+}
+
+/**
+ * Pin every DSH development package in an ephemeral npm verification copy.
+ * With exactFamily enabled, the temporary pnpm overrides fence every released
+ * rc package in the resolved graph to one version instead of allowing a
+ * prerelease range to drift to rc2.
+ */
+export function pinNpmDshDependencies(workspace, version, { exactFamily = false } = {}) {
   const packagePath = join(workspace, 'package.json')
   const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'))
   const devDependencies = packageJson.devDependencies ?? {}
   for (const name of Object.keys(devDependencies)) {
     if (name.startsWith('@deepseek-ai/dsh')) devDependencies[name] = version
   }
+  if (exactFamily) {
+    const familyNames = releasedDshFamilyNames(workspace)
+    for (const name of Object.keys(devDependencies)) {
+      if (name.startsWith('@deepseek-ai/dsh')) familyNames.add(name)
+    }
+    const workspacePath = join(workspace, 'pnpm-workspace.yaml')
+    const workspaceConfig = readFileSync(workspacePath, 'utf8').trimEnd()
+    const overrideLines = [...familyNames]
+      .sort()
+      .map(name => `  '${name}': '${version}'`)
+    writeFileSync(workspacePath, `${workspaceConfig}\noverrides:\n${overrideLines.join('\n')}\n`, 'utf8')
+  }
   writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8')
+}
+
+/** Assert that an exact-family install did not retain a second rc version. */
+function assertInstalledDshFamily(workspace, version) {
+  const modulesPath = join(workspace, 'node_modules', '.pnpm')
+  const installed = readdirSync(modulesPath)
+    .map(name => /^@deepseek-ai\+dsh-[^@]+@([^_]+)/iu.exec(name))
+    .filter(match => match !== null)
+    .map(match => match[1])
+  const released = installed.filter(installedVersion => /^0\.1\.5-rc\./u.test(installedVersion))
+  if (released.length === 0) fail(`exact DSH family install contained no 0.1.5 rc package for ${version}`)
+  const mismatches = released.filter(installedVersion => installedVersion !== version)
+  if (mismatches.length > 0) {
+    fail(`exact DSH family install resolved ${[...new Set(mismatches)].join(', ')} alongside ${version}`)
+  }
 }
 
 /** Point the temporary workspace at the real repository's git metadata so
@@ -135,6 +186,9 @@ export function candidateTarball(workspace) {
 async function main() {
   const values = parseCli()
   const requestedVersion = values['dsh-version']
+  const exactFamily = values['exact-family'] === true
+  const clientSmokeOnly = values['client-smoke-only'] === true
+  if (exactFamily && requestedVersion === undefined) fail('--exact-family requires --dsh-version')
   const distribution = npmDshDistribution(requestedVersion ?? npmDshVersion())
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-npm-'))
   const workspace = join(root, 'workspace')
@@ -148,7 +202,7 @@ async function main() {
     copyRepository(workspace)
     attachGitMetadata(workspace)
     if (requestedVersion !== undefined) {
-      pinNpmDshDependencies(workspace, distribution.version)
+      pinNpmDshDependencies(workspace, distribution.version, { exactFamily })
       await run(
         PNPM_COMMAND,
         ['install', '--lockfile-only', '--no-frozen-lockfile', '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only'],
@@ -163,6 +217,13 @@ async function main() {
       await run(PNPM_COMMAND, [...prepared.installArgs, '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only'], workspace, 'frozen npm dependency install', npmEnvironment, NPM_VERIFY_TIMEOUTS.install)
     } finally {
       restoreDshInstall(prepared)
+    }
+    if (exactFamily) assertInstalledDshFamily(workspace, distribution.version)
+    if (clientSmokeOnly) {
+      await run(PNPM_COMMAND, ['smoke:remote-session-read'], workspace, 'Remote Session fixture smoke', npmEnvironment)
+      await run(PNPM_COMMAND, ['smoke:remote-session-read-parity'], workspace, 'same-Host Remote Session parity smoke', npmEnvironment)
+      console.log(`DSH Client family compatibility passed — ${distribution.version}${exactFamily ? ' (exact family)' : ''}`)
+      return
     }
     for (const [label, args] of [
       ['vendored pi-tui typecheck', ['typecheck:fork']],

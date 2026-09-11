@@ -253,6 +253,12 @@ jobs:
       - name: Test vendored pi-tui
         run: pnpm test:fork
 
+      - name: Remote Session read fixture smoke
+        run: pnpm smoke:remote-session-read
+
+      - name: Remote Session same-Host parity smoke
+        run: pnpm smoke:remote-session-read-parity
+
       # This was missing from the previous CI.
       - name: Test documentation
         run: pnpm test:docs
@@ -293,6 +299,33 @@ jobs:
         run: node scripts/naming-gate.mjs
 
   # ---------------------------------------------------------------------------
+  # Build and run the Remote Session read gates against both the installed rc1
+  # family and an independent rc2 target. The verifier creates a fresh npm
+  # workspace per lane, so this never inherits the branch lockfile's mixed
+  # prerelease graph.
+  client-family-compat:
+    name: DSH Client release-family compatibility
+    needs: dsh-context
+    if: ${{ needs.dsh-context.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Run exact rc1 and independent rc2 gates
+        run: pnpm compat:dsh:client-family
+
   # Build the ONE artifact that is tested and eventually published.
   #
   # pnpm pack invokes the package lifecycle:
@@ -918,10 +951,11 @@ jobs:
     # The pi2dsh ecosystem gate is DISABLED (see the ecosystem-compat job
     # comment) — restore `needs.ecosystem-compat.result == 'success'` and the
     # `- ecosystem-compat` need when a compatible pi2dsh release lands.
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.build-and-pack.result == 'success' && needs.compat-smoke.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.build-and-pack.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
       - dsh-context
+      - client-family-compat
       - release-context
       - source-checks
       - build-and-pack
