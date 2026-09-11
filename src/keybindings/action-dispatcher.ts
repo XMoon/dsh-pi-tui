@@ -15,14 +15,17 @@
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'
+import type { ComposerSubmitRequest } from '../tui-app.ts'
 import type { AppKeybindingId } from './types.ts'
 
 /** The Host business surface the dispatcher routes to. Every method
  * returns whether the key was consumed (false lets the input fall through
  * to the editor/plugin stages). */
 export interface AppActionHost {
-  /** Submit the draft (forceQueue = the Ctrl+Enter parity). */
-  submitDraft(forceQueue?: boolean): boolean
+  /** Submit the draft with the request the action carries: the two composer
+   * gestures resolve through the busy-Enter policy, `explicit-queue` is the
+   * public queue action. */
+  submitDraft(request?: ComposerSubmitRequest): boolean
   /** Steer the running agent with the draft. */
   steerDraft(): boolean
   /** Pull queued input back into the editor. */
@@ -78,9 +81,13 @@ export class AppActionDispatcher {
   dispatch(action: AppKeybindingId, key?: KeyId): boolean {
     switch (action) {
       case 'app.input.submit':
-        return this.host.submitDraft(false)
+        return this.host.submitDraft('enter')
+      case 'app.input.submitAccelerated':
+        return this.host.submitDraft('accelerated')
       case 'app.input.queue':
-        return this.host.submitDraft(true)
+        // The DEPRECATED fixed-queue action (no default key): a stored remap
+        // keeps queueing — never the accelerated opposite.
+        return this.host.submitDraft('explicit-queue')
       case 'app.input.steer':
         return this.host.steerDraft()
       case 'app.input.dequeue':

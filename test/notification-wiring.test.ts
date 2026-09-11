@@ -52,7 +52,7 @@ test('focus reporting is enabled at mount and disabled on EVERY exit path', () =
   assert.equal(disables, 2, 'disable exactly twice: the normal cleanup AND the startup-failure catch')
   // The normal cleanup disables BEFORE the app dies (first teardown
   // step, before any throwable operation).
-  const cleanupStart = indexSource.indexOf('const cleanup = (): void => {')
+  const cleanupStart = indexSource.indexOf('const disposeSurface = (): void => {')
   const cleanup = indexSource.slice(cleanupStart, indexSource.indexOf('diag.dispose()', cleanupStart) + 20)
   const disableIndex = cleanup.indexOf('notificationWriter.write(DISABLE_FOCUS_REPORTING)')
   const disposeIndex = cleanup.indexOf('app?.dispose()')

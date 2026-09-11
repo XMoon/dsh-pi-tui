@@ -235,6 +235,7 @@ test('InputRouter: search overlay owns its keys', () => {
   const r = router()
   const search = context({ searchActive: true })
   assert.equal(r.route('\x1b', search, noBindings()).kind, 'consumed', 'Esc closes search')
+  assert.equal(r.route('\x03', search, noBindings()).kind, 'consumed', 'Ctrl+C closes search (the overlay Input would swallow it otherwise)')
   assert.equal(r.route('\r', search, noBindings()).kind, 'consumed', 'Enter jumps next')
 })
 
@@ -398,13 +399,12 @@ test('TuiApp: active host lifecycle keys never fire a plugin binding (action-dri
   const { TuiApp } = await import('../src/tui-app.ts')
   const vt = new VirtualTerminal(80, 24)
   const actions: string[] = []
-  const queued: string[] = []
+  const accelerated: string[] = []
   const app = new TuiApp(vt, {
-    onSubmit: () => {},
+    // A real submit handler: with it wired, Ctrl+Enter is a live host action
+    // that CONSUMES (never declines) — the plugin must not see it.
+    onSubmit: (text, request) => { if (request === 'accelerated') accelerated.push(text) },
     onExit: () => {},
-    // A real queue handler: with it wired, Ctrl+Enter is a live host
-    // action that CONSUMES (never declines) — the plugin must not see it.
-    onQueueSubmit: (text) => { queued.push(text) },
     onExtensionAction: (action) => { actions.push(action) },
   }, {
     // A resolver that would claim EVERY key — the router must stop the
@@ -419,13 +419,15 @@ test('TuiApp: active host lifecycle keys never fire a plugin binding (action-dri
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.deepEqual(actions, [], 'Enter must never fire a plugin binding')
-  // Ctrl+Enter (app.input.queue) with a LIVE handler AND a non-empty
-  // draft: the host action CONSUMES (queues) — never a plugin binding.
-  app.setDraft('queued text')
+  // Ctrl+Enter (app.input.submitAccelerated) with a LIVE handler AND a
+  // non-empty draft: the host action CONSUMES (submits) — never a plugin
+  // binding.
+  app.setDraft('accelerated text')
   await vt.waitForRender()
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
   await vt.waitForRender()
-  assert.deepEqual(queued, ['queued text'], 'Ctrl+Enter must queue (host-owned)')
+  assert.deepEqual(accelerated, ['accelerated text'],
+    'the accelerated chord must be consumed by the host (never a plugin binding)')
   // Ctrl+O (app.transcript.toggleExpand): ACTIVE host action — never a
   // plugin binding. Kitty ctrl+o = modifier 5.
   vt.sendInput('\x1b[111;5u')
@@ -548,12 +550,12 @@ test('TuiApp: submitDraft clears the draft like a normal submit (round-1 P2)', a
   // Type a draft, then submit via the host-owned path.
   app.setDraft('hello from a plugin action')
   await vt.waitForRender()
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submitted, ['hello from a plugin action'])
   assert.equal(app.getDraft(), '', 'the draft must be cleared like a normal submit')
   // An empty draft submits nothing.
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submitted, ['hello from a plugin action'])
   app.stop()

@@ -9,17 +9,18 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import {
-
 
   MAX_PICKER_SESSIONS,
   findSessionMatch,
   formatSessionAge,
   headerToPickerRow,
   sameWorkspace,
+  sanitizeSessionSearchInput,
+  sanitizeTerminalText,
   sessionPickerItem,
   shortSessionId,
   workspaceKey,
@@ -123,7 +124,7 @@ test('sessionPickerItem marks the current session, subagents, forks, live', () =
 
 test('headerToPickerRow maps a header onto the row shape', () => {
   const row = headerToPickerRow({
-    version: 0, isSeeded: false,
+    version: SESSION_FORMAT_VERSION, isSeeded: false,
     id: SessionId('session-0123456789abcdef'),
     createdAt: 42,
     cwd: '/w',
@@ -142,7 +143,7 @@ test('headerToPickerRow maps a header onto the row shape', () => {
 
 test('headerToPickerRow preserves code until a roster-aware reader can disambiguate it', () => {
   const row = headerToPickerRow({
-    version: 0, isSeeded: false,
+    version: SESSION_FORMAT_VERSION, isSeeded: false,
     id: SessionId('session-legacy'),
     createdAt: 42,
     agentPreset: 'code',
@@ -270,3 +271,38 @@ test('findSessionMatch resolves full ids, session- prefixes, and short ids', () 
   assert.equal(findSessionMatch(rows, 'nope'), undefined)
 })
 
+
+test('sanitizeTerminalText strips C0, DEL, C1 and complete ESC sequences', () => {
+  // C0: ESC + OSC payload + BEL → the whole sequence is removed by the
+  // fork parser; a lone ESC and other C0 controls are dropped.
+  assert.equal(sanitizeTerminalText('\x1b]0;PWNED\x07needle'), 'needle')
+  assert.equal(sanitizeTerminalText('a\x1bb'), 'ab')
+  assert.equal(sanitizeTerminalText('a\x00b\x7fc'), 'abc')
+  // C1: U+009B (CSI) and U+009D (OSC) in 8-bit form are controls to a
+  // UTF-8 terminal — they must never reach the picker description.
+  assert.equal(sanitizeTerminalText('a\u009b2Jb'), 'a2Jb')
+  assert.equal(sanitizeTerminalText('a\u009d0;PWNED\u0007b'), 'a0;PWNEDb')
+  // Visible text survives untouched.
+  assert.equal(sanitizeTerminalText('plain needle text'), 'plain needle text')
+})
+
+test('workspaceKey sanitizes terminal control sequences in the group header', () => {
+  // The group header is rendered straight to the terminal; a malicious
+  // cwd (Host boundary value) must never inject ESC/OSC/C1.
+  assert.equal(workspaceKey('/ws\x1b]0;PWNED\x07'), '/ws')
+  assert.equal(workspaceKey('/a\u009b2Jb'), '/a2Jb')
+  assert.equal(workspaceKey('/home/user/project'), 'user/project')
+})
+
+test('sanitizeSessionSearchInput canonicalizes remove-NUL → trim → cap-500', () => {
+  // The ONE canonical client query: NUL removal BEFORE trim, so NUL
+  // adjacent to padding whitespace can never leave a padded canonical
+  // behind (the Host trims again as a no-op — local and Host never drift).
+  assert.equal(sanitizeSessionSearchInput('\0 needle \0'), 'needle')
+  assert.equal(sanitizeSessionSearchInput('  needle  '), 'needle')
+  assert.equal(sanitizeSessionSearchInput('needle'), 'needle')
+  // Cap at 500 UTF-16 units AFTER trim, without splitting a surrogate pair.
+  assert.equal(sanitizeSessionSearchInput(' ' + 'x'.repeat(500)).length, 500)
+  assert.equal(sanitizeSessionSearchInput('x'.repeat(500) + '\u{1F600}').length, 500)
+  assert.equal(sanitizeSessionSearchInput('x'.repeat(500) + '\u{1F600}').endsWith('x'), true)
+})

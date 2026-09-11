@@ -215,3 +215,82 @@ test('a write settling AFTER the submenu closed converges the outer row and stay
     'the outer row converges to the COMMITTED summary after the late failure')
   assert.equal(harness.notices.length, 0, 'a failure settling after close stays silent')
 })
+
+/** A minimal left-button mouse event for direct component tests. */
+function mouse(type: 'press' | 'click', x: number, y: number, width = 60, height = 10): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type,
+    button: 'left',
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width,
+    height,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+  }
+}
+
+test('allowlist provider mouse click opens level 2 (mouse parity)', async () => {
+  const harness = rig({ enabled: false, allowedModels: [] })
+  const menu = new SubagentModelAllowlistSubmenu(harness.deps)
+  menu.render(60)
+  // The provider list has no search: item rows start at y=0.
+  const press = menu.handleMouse(mouse('press', 5, 0, 60, 10))
+  assert.ok(press?.handled, 'press on a provider row must be handled')
+  menu.handleMouse(mouse('click', 5, 0, 60, 10))
+  await settle(harness, 0)
+  const rendered = menu.render(60).join('\n')
+  assert.ok(rendered.includes('m1'), 'clicking the provider row must open the model list')
+})
+
+test('allowlist model mouse click toggles the exact route (mouse parity)', async () => {
+  const harness = rig({ enabled: false, allowedModels: [] })
+  const menu = new SubagentModelAllowlistSubmenu(harness.deps)
+  menu.render(60)
+  // Open level 2 with Enter, then click the first model row.
+  menu.handleInput(ENTER)
+  await settle(harness, 0)
+  menu.render(60)
+  const press = menu.handleMouse(mouse('press', 5, 0, 60, 10))
+  assert.ok(press?.handled, 'press on a model row must be handled')
+  menu.handleMouse(mouse('click', 5, 0, 60, 10))
+  await settle(harness, 1)
+  assert.deepEqual(
+    harness.store.writes[0]?.allowedModels,
+    [{ provider: 'p', model: 'm1' }],
+    'clicking a model row must toggle the exact route',
+  )
+})
+
+test('a stale click on the painted Loading row cannot write the allowlist (mouse parity)', async () => {
+  const harness = rig({ enabled: false, allowedModels: [] })
+  const menu = new SubagentModelAllowlistSubmenu(harness.deps)
+  const mouse = (type: 'press' | 'click', y: number) => ({
+    type, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
+    width: 60, height: 10, shift: false, alt: false, ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+  })
+  // Paint the provider list, then open the model list (Loading models…).
+  menu.render(60)
+  menu.handleInput(ENTER)
+  // The models resolve but are NOT repainted: the inner is now the model
+  // SettingsList while the screen still shows Loading.
+  await settle(harness, 0)
+  // A press+click on the stale Loading row (y=0 is where the first model
+  // row would be once repainted) must NOT write the allowlist.
+  menu.handleMouse(mouse('press', 0))
+  assert.equal(menu.handleMouse(mouse('click', 0)), undefined, 'the unpainted model list must not receive the click')
+  assert.deepEqual(harness.store.writes, [], 'a stale click must not write the allowlist')
+  // Repaint the model list: the click now toggles the first model.
+  menu.render(60)
+  menu.handleMouse(mouse('press', 0))
+  menu.handleMouse(mouse('click', 0))
+  await settle(harness, 1)
+  assert.deepEqual(harness.store.writes, [
+    { enabled: false, allowedModels: [{ provider: 'p', model: 'm1' }] },
+  ], 'the painted model row must toggle after repaint')
+})

@@ -1,6 +1,6 @@
 import { fuzzyFilter } from "../fuzzy.ts";
 import { getKeybindings } from "../keybindings.ts";
-import type { Component, Focusable } from "../tui.ts";
+import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from "../tui.ts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 import { Input } from "./input.ts";
 
@@ -51,6 +51,22 @@ export class SettingsList implements Component, Focusable {
 	private filteredItems: SettingItem[];
 	private theme: SettingsListTheme;
 	private selectedIndex = 0;
+	/** Physical row → hit entry from the LAST render (mouse parity): the
+	 * mapping is produced by the FINAL render (after the description
+	 * shrink), never re-derived from maxVisible — a click must hit the
+	 * row the user actually saw. */
+	private mouseRows: Array<{ kind: "item"; id: string } | { kind: "search" } | { kind: "inert" }> = [];
+	/** The pressed item ID (mouse parity): a click may only activate the
+	 * exact identity that was pressed. */
+	private mousePressedId: string | undefined;
+	/** The submenu generation at press time (mouse parity): a press that
+	 * started on the main list (or a previous submenu) must not be
+	 * forwarded to a submenu created AFTER the press. */
+	private mousePressedGeneration: number | undefined;
+	/** The submenu instance the LAST paint actually drew (mouse parity):
+	 * a live-but-unpainted submenu must not receive a fresh mouse
+	 * gesture. */
+	private paintedSubmenuComponent: Component | null = null;
 	/** Caller-configured item cap; the host may lower it for a short frame. */
 	private configuredMaxVisible: number;
 	private maxVisible: number;
@@ -181,6 +197,11 @@ export class SettingsList implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		// The painted owner: a submenu that exists in live state but has
+		// not been painted yet must not receive mouse events (the user
+		// still sees the main list). (dsh-pi-tui divergence X042 mouse
+		// parity.)
+		this.paintedSubmenuComponent = this.submenuComponent;
 		// If submenu is active, render it instead
 		if (this.submenuComponent) {
 			return this.submenuComponent.render(width);
@@ -191,8 +212,11 @@ export class SettingsList implements Component, Focusable {
 
 	private renderMainList(width: number): string[] {
 		const lines: string[] = [];
+		// The mouse mapping is rebuilt from THIS frame's final rows.
+		this.mouseRows = [];
 
 		if (this.searchEnabled && this.searchInput) {
+			this.mouseRows.push({ kind: "search" }, { kind: "inert" });
 			lines.push(...this.searchInput.render(width));
 			lines.push("");
 		}
@@ -205,7 +229,7 @@ export class SettingsList implements Component, Focusable {
 			return this.finalizeEmpty(lines);
 		}
 
-		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
+		const displayItems = this.getDisplayItems();
 		if (displayItems.length === 0) {
 			lines.push(truncateToWidth(this.theme.hint("  No matching settings"), width));
 			this.addHintLine(lines, width);
@@ -226,12 +250,18 @@ export class SettingsList implements Component, Focusable {
 		// baseline, so moving to a row without a description restores the
 		// full window (no render-time ratchet on PageUp/PageDown).
 		while (Number.isFinite(this.maxRows)
-			&& lines.length + window.length + this.descriptionRowCount(width, displayItems) + 2 > this.maxRows
+			&& lines.length + window.lines.length + this.descriptionRowCount(width, displayItems) + 2 > this.maxRows
 			&& visibleCount > 1) {
 			visibleCount -= 1;
 			window = this.renderItemWindow(width, maxLabelWidth, displayItems, visibleCount);
 		}
-		lines.push(...window);
+		lines.push(...window.lines);
+		// Record the FINAL painted item rows (after the shrink): physical
+		// row → item ID, exactly what the user sees.
+		const rowOffset = this.searchEnabled ? 2 : 0;
+		for (const { row, id } of window.itemRows) {
+			this.mouseRows[row + rowOffset] = { kind: "item", id };
+		}
 
 		// Description for the selected item — wrapped, then capped to the
 		// rows left after the hint, so the hint below always survives.
@@ -254,9 +284,14 @@ export class SettingsList implements Component, Focusable {
 		this.addHintLine(lines, width);
 
 		// Keep the hint tail on degenerate tiny grants (mirrors SelectList):
-		// a head slice would cut the hint, the non-negotiable tail row.
+		// a head slice would cut the hint, the non-negotiable tail row. The
+		// mouse map must be shifted with the slice: the physical rows the
+		// user sees are the TAIL rows, so the hit entries move up by the
+		// number of dropped head rows.
 		if (Number.isFinite(this.maxRows) && lines.length > this.maxRows) {
-			return lines.slice(lines.length - this.maxRows);
+			const dropped = lines.length - this.maxRows;
+			this.mouseRows = this.mouseRows.slice(dropped);
+			return lines.slice(dropped);
 		}
 		return lines;
 	}
@@ -279,8 +314,14 @@ export class SettingsList implements Component, Focusable {
 
 	/** Render the item window (rows + scroll indicator) at `visibleCount`,
 	 * centered on the selected row. */
-	private renderItemWindow(width: number, maxLabelWidth: number, displayItems: SettingItem[], visibleCount: number): string[] {
+	private renderItemWindow(
+		width: number,
+		maxLabelWidth: number,
+		displayItems: SettingItem[],
+		visibleCount: number,
+	): { lines: string[]; itemRows: Array<{ row: number; id: string }> } {
 		const lines: string[] = [];
+		const itemRows: Array<{ row: number; id: string }> = [];
 
 		// Calculate visible range with scrolling
 		const startIndex = Math.max(
@@ -309,16 +350,21 @@ export class SettingsList implements Component, Focusable {
 
 			const valueText = this.theme.value(truncateToWidth(item.currentValue, valueMaxWidth, ""), isSelected);
 
+			// The mouse mapping is built from the FINAL painted rows: the
+			// physical row → item ID pair is recorded here, exactly as the
+			// user sees it (the description shrink may have reduced the
+			// window below maxVisible).
+			itemRows.push({ row: lines.length, id: item.id });
 			lines.push(truncateToWidth(prefix + labelText + separator + valueText, width));
 		}
 
-		// Add scroll indicator if needed
+		// Add scroll indicator if needed (inert for mouse)
 		if (startIndex > 0 || endIndex < displayItems.length) {
 			const scrollText = `  (${this.selectedIndex + 1}/${displayItems.length})`;
 			lines.push(this.theme.hint(truncateToWidth(scrollText, width - 2, "")));
 		}
 
-		return lines;
+		return { lines, itemRows };
 	}
 
 	/** The rendered row count of the selected item's description block
@@ -327,6 +373,96 @@ export class SettingsList implements Component, Focusable {
 		const selectedItem = displayItems[this.selectedIndex];
 		if (!selectedItem?.description) return 0;
 		return 1 + wrapTextWithAnsi(selectedItem.description, width - 4).length;
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		// A click ends any gesture, and every left press starts a fresh
+		// one: release the pressed identity up front — a click on
+		// inert/removed/width-mismatched geometry, or a press that is
+		// delegated (search Input) or lands on inert rows, must not leave
+		// a stale latch that a later synthesized click could match (a
+		// repaint may have moved an item onto the pressed cell). The
+		// local copy still guards the valid-row comparison below.
+		const pressedId = this.mousePressedId;
+		if (event.type === "click" || (event.type === "press" && event.button === "left")) {
+			this.mousePressedId = undefined;
+		}
+		if (this.submenuComponent) {
+			// The submenu must be the PAINTED owner: a live-but-unpainted
+			// submenu (opened by a click whose repaint is still queued)
+			// must not receive a fresh mouse gesture — the user still sees
+			// the main list. (dsh-pi-tui divergence X042 mouse parity.)
+			if (this.submenuComponent !== this.paintedSubmenuComponent) return undefined;
+			// The submenu is a DIFFERENT semantic owner: a press that
+			// started on the main list (or a previous submenu) must not be
+			// forwarded to a submenu created AFTER the press — the
+			// submenuGeneration advances on every open/close/replacement,
+			// so a generation mismatch consumes the gesture. A FRESH left
+			// press on the open submenu records the current generation and
+			// forwards normally. (dsh-pi-tui divergence X042 mouse parity.)
+			if (event.type === "press" && event.button === "left") {
+				this.mousePressedGeneration = this.submenuGeneration;
+			} else if (this.mousePressedGeneration !== this.submenuGeneration) {
+				return undefined;
+			}
+			const result = this.submenuComponent.handleMouse?.(event);
+			return result ? { ...result, focus: true } : undefined;
+		}
+
+		// The hit map is the FINAL painted geometry (after the description
+		// shrink AND the tail slice): a click must hit the row the user
+		// actually saw, never a re-derived range from maxVisible.
+		const row = this.mouseRows[event.y];
+
+		// The search row is interactive only where the LAST paint put it:
+		// the tail slice may have dropped the search input off-screen, and
+		// a click on the row that replaced it must never reach the hidden
+		// input (last-painted fence) — otherwise the TUI would focus the
+		// list and typing would filter it through an invisible search box.
+		if (this.searchEnabled && this.searchInput) {
+			if (row?.kind === "search") {
+				const result = this.searchInput.handleMouse?.(event);
+				return result ? { ...result, focus: true } : undefined;
+			}
+			if (row?.kind === "inert") return undefined;
+		}
+
+		const displayItems = this.getDisplayItems();
+		if (displayItems.length === 0) return undefined;
+		if (event.type === "wheel" && event.wheelDelta) {
+			const delta = event.wheelDelta < 0 ? -1 : 1;
+			const previousIndex = this.selectedIndex;
+			this.selectedIndex = Math.max(0, Math.min(displayItems.length - 1, this.selectedIndex + delta));
+			return { handled: true, render: this.selectedIndex !== previousIndex };
+		}
+		// Hover must not change selection: the visible range is centered on it.
+		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
+
+		if (!row || row.kind !== "item") return undefined;
+		if (event.type === "press") {
+			// Resolve the CURRENT index by the painted item ID (a live
+			// items() change between paint and press may have reordered the
+			// list WITHOUT a repaint). No match => reject.
+			const currentIndex = displayItems.findIndex(item => item.id === row.id);
+			if (currentIndex === -1) return undefined;
+			this.mousePressedId = row.id;
+			// The press-time owner generation: a submenu opened by keyboard
+			// AFTER this press must not receive the release/click.
+			this.mousePressedGeneration = this.submenuGeneration;
+			this.selectedIndex = currentIndex;
+			return { handled: true, focus: true };
+		}
+		if (event.type === "click") {
+			// Activate only the exact pressed identity (press A → repaint →
+			// release must not activate whatever moved into the row).
+			if (pressedId !== row.id) return undefined;
+			const currentIndex = displayItems.findIndex(item => item.id === row.id);
+			if (currentIndex === -1) return undefined;
+			this.selectedIndex = currentIndex;
+			this.activateItem();
+			return { handled: true };
+		}
+		return undefined;
 	}
 
 	handleInput(data: string): void {
@@ -339,7 +475,7 @@ export class SettingsList implements Component, Focusable {
 
 		// Main list input handling
 		const kb = getKeybindings();
-		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
+		const displayItems = this.getDisplayItems();
 		if (kb.matches(data, "tui.select.up")) {
 			if (displayItems.length === 0) return;
 			this.selectedIndex = this.selectedIndex === 0 ? displayItems.length - 1 : this.selectedIndex - 1;
@@ -359,8 +495,12 @@ export class SettingsList implements Component, Focusable {
 		}
 	}
 
+	private getDisplayItems(): SettingItem[] {
+		return this.searchEnabled ? this.filteredItems : this.items;
+	}
+
 	private activateItem(): void {
-		const item = this.searchEnabled ? this.filteredItems[this.selectedIndex] : this.items[this.selectedIndex];
+		const item = this.getDisplayItems()[this.selectedIndex];
 		if (!item) return;
 
 		if (item.submenu) {

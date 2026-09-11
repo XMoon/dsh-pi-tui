@@ -73,8 +73,16 @@ export interface TuiAutocompleteProvider {
   getSuggestions(query: TuiAutocompleteQuery): Promise<TuiAutocompleteSuggestions | null>
 }
 
-/** API version of the extension surface (bumped only on breaking changes). */
-export const API_VERSION = 1 as const
+/**
+ * API version of the extension surface (bumped only on breaking changes).
+ * `2` is the client-command contribution contract: `execution` and the
+ * never-wired `argumentProvider` are REMOVED, `handler` is required, and a
+ * stale plugin still declaring the removed ownership shape is rejected at
+ * registration. `1` was the M0–M3 foundation. A plugin branching on
+ * `api().apiVersion` can tell the two schemas apart — the host never reports
+ * a version it does not implement.
+ */
+export const API_VERSION = 2 as const
 
 /** Capability identifiers, feature-detected via {@link PiTuiApiInfo}. */
 export type PiTuiCapability =
@@ -126,7 +134,8 @@ export type UnstableCapability = `unstable.${string}`
 
 /** What a plugin may know about the host (M1: version + capabilities only). */
 export interface PiTuiApiInfo {
-  /** The extension API version; 1 for the M0–M3 foundation. */
+  /** The extension API version: 2 for the client-command contribution
+   * contract, 1 for the M0–M3 foundation (see {@link API_VERSION}). */
   readonly apiVersion: typeof API_VERSION
   /** The `@xmoon76/dsh-pi-tui` bundle version (semver string). */
   readonly hostVersion: string
@@ -420,30 +429,45 @@ export interface InputWidget {
 
 // ── M5: commands / themes / autocomplete / settings / keybindings ──────────
 
-/** One command contribution (plan §10): ownership metadata over an
- * existing command. The bridge does NOT execute — the commands service
- * does. `/name args...` ALWAYS keeps `invocation.rawInput` verbatim. */
+/** One CLIENT-OWNED command contribution (plan §10) — the DSH client
+ * command contribution shape: a slash name whose behavior lives entirely on
+ * the client (no host descriptor). It appears in the `/` menu merged with
+ * the host catalog and executes through its own `handler`, never steered.
+ * A contribution whose name is a host command FAILS LOUD at candidate
+ * synthesis and never shadows it (the host command keeps its claim).
+ * A contribution is a slash-MENU entry, so it claims the BARE `/name` token
+ * only (DSH `matchEnter`): `/name args...` is NOT an invocation — it is an
+ * ordinary submission that reaches the model, and `handler` never runs for
+ * it. */
 export interface TuiCommandContribution {
   readonly id: string
   /** The slash-command name WITHOUT the leading slash. */
   readonly name: string
   readonly description: string
-  /** Execution ownership: local (never steered) vs submission (session
-   * policy). Busy Enter classifies by the EFFECTIVE ownership. */
-  readonly execution: 'local' | 'submission'
-  /** Whether the command may run without a live session. */
+  /** Whether the command may run BEFORE a live session exists (default
+   * false). A sessionless contribution executes immediately; every other
+   * contribution resolves/creates the session first, then executes — the
+   * host command surface is session-keyed upstream, so this is an explicit
+   * TUI extension for pure client commands (an overlay toggle, a picker). */
   readonly sessionless?: boolean
-  /** Optional autocomplete provider for this command's arguments
-   * (the structural {@link TuiAutocompleteProvider}). */
-  readonly argumentProvider?: TuiAutocompleteProvider
-  /** Optional local handler; absent = metadata-only ownership (the
-   * commands service handler runs). */
-  readonly handler?: TuiLocalCommandHandler
+
+  // REMOVED (Unreleased): `argumentProvider` was never wired to the
+  // completion path (a dead public surface). Use the AutocompleteRegistry
+  // (`registerAutocomplete`) for plugin suggestions.
+  /** The command's client behavior (required): the TUI runs it locally for the
+   * BARE `/name` line, passing `invocation.rawInput` verbatim (it carries no
+   * non-whitespace input, since an argued line is never an invocation, though
+   * trailing whitespace may be preserved), with or without a live session
+   * according to {@link sessionless}. */
+  readonly handler: TuiLocalCommandHandler
 }
 
 /** The local command handler signature (invocation carries the VERBATIM
- * raw input — never re-parsed or rewritten). Returns the commands
- * service's result shape (`{ kind: 'success' }` / `{ kind: 'error',
+ * raw input — never re-parsed or rewritten). A client command CONTRIBUTION is
+ * invoked by its bare token alone, so its `rawInput` never carries
+ * non-whitespace input (trailing whitespace is preserved verbatim); TUI-owned
+ * local commands (`/export json`) still receive their arguments here. Returns the
+ * commands service's result shape (`{ kind: 'success' }` / `{ kind: 'error',
  * text }`) so the runner's notify path is shared. */
 export interface TuiLocalCommandHandler {
   (invocation: { commandId: string; rawInput: string; signal: AbortSignal }):
@@ -452,9 +476,13 @@ export interface TuiLocalCommandHandler {
     | Promise<{ readonly kind: 'success'; readonly text?: string; readonly sourceEventSeq?: number } | { readonly kind: 'error'; readonly text: string }>
 }
 
-/** A live handle on one command contribution. */
+/** A live handle on ONE command contribution REGISTRATION. */
 export interface TuiCommandHandle {
   readonly id: string
+  /** Dispose THIS registration (idempotent). A repeated or late call — e.g.
+   * a fiber disposer running after an HMR reload re-registered the same id —
+   * never removes a NEWER registration: the handle names one generation, not
+   * the id. */
   dispose(): void
 }
 
@@ -464,9 +492,12 @@ export interface TuiCommandBridgeSnapshot {
     readonly id: string
     readonly name: string
     readonly description: string
-    readonly execution: 'local' | 'submission'
     readonly sessionless: boolean
     readonly owner: string
+    /** Monotonic per-registration generation (diagnostics + the notice
+     * identity): a dispose + re-register under the same id/owner is a NEW
+     * generation, even when both happen inside one coalesced flush. */
+    readonly generation: number
   }[]
   readonly revision: number
 }

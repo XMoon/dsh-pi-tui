@@ -2,8 +2,8 @@
  * The file-completion convergence regression suite (the 2026-08-27 plan):
  * P1.1–P1.5, the §23 matrix, and the §24 headless A–E integration flows.
  * These tests pin the CONVERGED contract — file completion ONLY on `@...`
- * and `/image ...`, scoped `@` paths, shared fuzzy ranking, directory
- * continuation, fd/fdfind detection, stale-apply fencing, and the sessionless
+ * and attachment arguments (`/attach ...` + `/image ...`), scoped `@` paths,
+ * shared fuzzy ranking, directory continuation, fd/fdfind detection, stale-apply fencing, and the sessionless
  * scope walk. The engine modules are pure; the provider/port/app layers are
  * exercised through the real chain (TuiApp + VirtualTerminal + MentionProvider
  * + DirectHostFilePort).
@@ -196,7 +196,7 @@ test('P1.2 absolute: @/tmp/ searches the absolute scope', async (t) => {
   assert.ok(result.items.some(item => item.value.startsWith(`@${target}`)))
 })
 
-test('§23 matrix: /image shares the scoped forms (../, ~/, absolute, directory continuation)', async (t) => {
+test('§23 matrix: attachment commands share the scoped forms (../, ~/, absolute, directory continuation)', async (t) => {
   const life = testLifecycle(t)
   // ../../ fixture for /image: workspace = /root/alpha/beta/workspace;
   // ../../alpha targets /root/alpha/alpha/pics.
@@ -309,7 +309,7 @@ test('P1.5: a stale prefix accept never deletes @-preceding text', (t) => {
   // `hello @ab`. Accepting the old item must leave the draft UNCHANGED.
   const applied = provider.applyCompletion(['hello @ab'], 0, 9, { value: '@abcdef-gh', label: 'abcdef-gh' }, '@abcdef')
   assert.deepEqual(applied.lines, ['hello @ab'], 'a stale accept must not delete text')
-  // The image-argument shape: the same fence protects the argument path.
+  // The path-argument shape: the same fence protects the argument path.
   const appliedArg = provider.applyCompletion(
     ['/image sub'],
     0,
@@ -342,15 +342,17 @@ test('P1.5 headless D: a quick Backspace over a mention leaves the draft intact'
   assert.equal(app.seatTextForTest(), '@ab', 'backspace edits the draft')
 })
 
-test('§23 matrix: the classifier gates @ and /image only', () => {
-  const set = new Set(['image'])
+test('§23 matrix: the classifier gates @ and attachment commands only', () => {
+  const set = new Set(['attach', 'image'])
   assert.equal(classifyFileCompletionContext('@foo', set).kind, 'mention')
   assert.equal(classifyFileCompletionContext('text @foo', set).kind, 'mention')
   assert.equal(classifyFileCompletionContext('看看@foo', set).kind, 'mention')
   assert.equal(classifyFileCompletionContext('email@foo', set).kind, 'none')
   assert.equal(classifyFileCompletionContext('pkg@1.0', set).kind, 'none')
-  assert.equal(classifyFileCompletionContext('/image foo', set).kind, 'image-argument')
-  assert.equal(classifyFileCompletionContext('/image    foo', set).kind, 'image-argument')
+  assert.equal(classifyFileCompletionContext('/image foo', set).kind, 'path-argument')
+  assert.equal(classifyFileCompletionContext('/image    foo', set).kind, 'path-argument')
+  assert.equal(classifyFileCompletionContext('/attach foo', set).kind, 'path-argument')
+  assert.equal(classifyFileCompletionContext('/attach    foo', set).kind, 'path-argument')
   assert.equal(classifyFileCompletionContext('/im foo', set).kind, 'none')
   assert.equal(classifyFileCompletionContext('/other foo', set).kind, 'none')
   assert.equal(classifyFileCompletionContext('ordinary text', set).kind, 'none')
@@ -464,22 +466,33 @@ test('§23 matrix: Windows drive and UNC tokens keep their dialect (pure)', () =
   assert.equal(unc.winAbsolute, true)
 })
 
-test('Windows candidates rank and present basename labels independently of host path dialect', () => {
+test('candidates present one full display path independently of host path dialect', () => {
   assert.equal(scorePathCandidate({ path: 'C:\\Users\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
   assert.equal(scorePathCandidate({ path: 'C:\\Users\\deep\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
+  const rootFile = presentPathCandidate({ path: 'package.json', kind: 'file' }, { at: false, quoted: false })
+  assert.equal(rootFile.label, 'package.json')
+  assert.equal(rootFile.description, undefined)
+  const nestedFile = presentPathCandidate(
+    { path: 'src/file-completion/presentation.ts', kind: 'file' },
+    { at: false, quoted: false },
+  )
+  assert.equal(nestedFile.label, 'src/file-completion/presentation.ts')
+  assert.equal(nestedFile.description, undefined)
   const directory = presentPathCandidate(
     { path: 'C:\\Users\\Pictures', kind: 'directory' },
     { at: false, quoted: false, sep: '\\' },
   )
   assert.equal(directory.value, 'C:\\Users\\Pictures\\')
-  assert.equal(directory.label, 'Pictures/')
-  assert.equal(directory.description, 'C:\\Users\\Pictures')
+  assert.equal(directory.label, 'C:\\Users\\Pictures/')
+  assert.ok(directory.label.endsWith('/'))
+  assert.equal(directory.description, undefined)
   const mixed = presentPathCandidate(
     { path: 'C:/Users\\Pictures', kind: 'directory' },
     { at: true, quoted: false, sep: '\\' },
   )
   assert.equal(mixed.value, '@C:/Users\\Pictures\\')
-  assert.equal(mixed.label, 'Pictures/')
+  assert.equal(mixed.label, 'C:/Users\\Pictures/')
+  assert.equal(mixed.description, undefined)
 })
 
 test('the presentation layer quotes spaced values for /image and keeps @ quoting', () => {
@@ -629,7 +642,7 @@ test('review finding (verified): multi-space /image separator applies without du
     root,
     new DirectHostFilePort(() => undefined, null),
   )
-  // imageArgumentOf slices AFTER the first separator; completeImageArgument
+  // pathArgumentOf slices AFTER the first separator; completePathArgument
   // re-prefixes the value with the REMAINING separator whitespace. The
   // fork's apply consumes the first separator in beforePrefix, so the
   // total separator count is preserved — never duplicated.

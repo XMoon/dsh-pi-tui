@@ -1,6 +1,6 @@
 /**
  * Runner-level tests for the interactive subagent viewer's human prompt
- * delivery seam (subagent-viewer-submit.ts, plan §17; DSH 0.1.2-alpha.4):
+ * delivery seam (subagent-viewer-submit.ts, plan §17; DSH 0.1.5-rc.1):
  * validation, the official `ctx.subagents.prompt(...)` call, requestId
  * minting, and error classification — with pure dependency injection, no
  * TUI surface.
@@ -41,6 +41,7 @@ interface RecordedCall {
   parentSessionId: string
   childSessionId: string
   mode: string
+  delivery: string
   content: readonly SubagentPromptContentPart[]
   clientTimeZone: string | undefined
   signal: AbortSignal
@@ -54,6 +55,7 @@ function service(calls: RecordedCall[]): SubagentPromptService {
         parentSessionId: payload.parentSessionId,
         childSessionId: payload.childSessionId,
         mode: payload.mode,
+         delivery: payload.delivery,
         content: payload.content,
         clientTimeZone: payload.clientTimeZone,
         signal,
@@ -78,6 +80,7 @@ test('delivers through the official prompt call with the official request vocabu
   assert.equal(calls[0]!.parentSessionId, 'session-parent')
   assert.equal(calls[0]!.childSessionId, 'session-child')
   assert.equal(calls[0]!.mode, 'continuable', 'the browser control address keeps the continuable discriminator')
+   assert.equal(calls[0]!.delivery, 'queue', 'viewer prompts are distinct FIFO continuation turns')
   assert.deepEqual(calls[0]!.content, request.content)
   assert.equal(calls[0]!.signal, signal, 'the caller-owned signal is forwarded to the official call')
 })
@@ -165,9 +168,9 @@ test('classifies cancellation before inbox acceptance as cancelled (message neve
   assert.deepEqual(reason, { kind: 'cancelled' })
 })
 
-test('the OLD SubagentError vocabulary is NOT interpreted anymore (superseded by alpha.4)', () => {
-  // alpha.4 replaced the internal NOT_RESUMABLE/DRAINING/… codes with the
-  // RemoteError vocabulary; reading the old codes again would silently
+test('the OLD SubagentError vocabulary is NOT interpreted anymore', () => {
+  // The current DSH contract replaced the internal NOT_RESUMABLE/DRAINING/…
+  // codes with the RemoteError vocabulary; reading the old codes again would silently
   // misclassify a future Host failure — they must fall through to `error`.
   for (const code of ['NOT_RESUMABLE', 'UNAUTHORIZED', 'PARENT_UNAVAILABLE', 'DRAINING', 'ACTIVATION_CLOSING']) {
     const reason = classifySubagentPromptError(makeError(code))

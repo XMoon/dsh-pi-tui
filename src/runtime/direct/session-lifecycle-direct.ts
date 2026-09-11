@@ -5,18 +5,21 @@
  * touches `ctx` and the preset composition; the semantic request (preset
  * id, provider/model) is converted HERE into the Direct shapes (`setup`
  * callback, `SessionId`, seed), and a Remote adapter will implement the
- * same interface over the wire. The runner keeps the Direct-mode
- * ownership machinery (owner.lock, lease/cooling, PINNED, transition
- * gate, operation barrier) around the port calls.
+ * same interface over the wire. The DSH AgentHandle / SessionHandle owns
+ * the persistence writer lifetime (its `dispose()` is the structured
+ * teardown; the kernel-flock SessionWriteLease is the only cross-process
+ * writer authority). The TUI runner owns only surface transition
+ * coordination (the transition gate, the operation barrier,
+ * generation/stale fences) around the port calls.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-lifecycle-direct
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle, SessionLifecycle } from '../session-lifecycle-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
@@ -29,7 +32,7 @@ export interface HostContextLike {
  * compose function satisfies this structurally). */
 export interface CompositionLike {
   agentPreset?: string
-  setup: (agentCtx: Context) => Promise<void> | void
+  setup: (agentCtx: Context, agent: Agent) => Promise<void> | void
 }
 
 /** The structural `agents` service surface the lifecycle needs. */
@@ -38,18 +41,19 @@ export interface AgentsServiceLike {
     sessionId: ReturnType<typeof SessionId>
     meta: Record<string, unknown>
     agentOptions: { provider?: string; model?: string }
-    setup: (agentCtx: Context) => Promise<void> | void
+    setup: (agentCtx: Context, agent: Agent) => Promise<void> | void
     seed?: readonly SessionEvent[]
     /** Exact fork-inherited prefix length when `meta.isSeeded` is set
-     * (alpha.4's seeded-session contract — the old header `seedLength`
+     * (the seeded-session contract — the old header `seedLength`
      * field is rejected now). */
-    inheritedEventCount?: number
+    inheritedEventCount?: ReturnType<typeof SessionLogOffset>
     signal?: AbortSignal
   }): Promise<AgentHandle>
   resume(options: {
     resumeSessionId: ReturnType<typeof SessionId>
     agentOptions: { provider?: string; model?: string }
-    setup: (agentCtx: Context) => Promise<void> | void
+    setup: (agentCtx: Context, agent: Agent) => Promise<void> | void
+    signal?: AbortSignal
   }): Promise<AgentHandle>
 }
 
@@ -78,14 +82,14 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       agentOptions: { provider: request.provider, model: request.model },
       setup: composition.setup,
       seed: request.seed as readonly SessionEvent[] | undefined,
-      ...request.inheritedEventCount === undefined ? {} : { inheritedEventCount: request.inheritedEventCount },
+      ...request.inheritedEventCount === undefined ? {} : { inheritedEventCount: SessionLogOffset(request.inheritedEventCount) },
       signal: request.signal,
     })
     // The ownership escape preserves BOTH the live agent and the real
     // AgentHandle: `dispose()` is the ownership capability the runner
     // needs at retirement (a lost handle previously pinned old leases —
-    // the P1 regression class). The semantic `session` identity stays
-    // transport-neutral.
+    // removed legacy, the P1 regression class). The semantic `session`
+    // identity stays transport-neutral.
     return { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } }
   }
 
@@ -97,6 +101,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       resumeSessionId: SessionId(request.resumeSessionId),
       agentOptions: { provider: request.provider, model: request.model },
       setup: composition.setup,
+      signal: request.signal,
     })
     return { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } }
   }

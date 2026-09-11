@@ -279,7 +279,9 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   app.setStatus({ model: 'deepseek/flash', cwd: '/home/x/proj' })
   const model = openDefault(app)
   await vt.waitForRender()
-  vt.sendInput('\r') // → Edit Row 1
+  vt.sendInput('\x1b[B') // ↓ Row 2 (the context item lives in its right zone)
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 2
   await vt.waitForRender()
   // Walk onto the context item (multi-format) and open the item editor.
   while (idAt(model) !== 'context') vt.sendInput('\x1b[B')
@@ -292,14 +294,18 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   assert.ok(view.includes('Tone'), `the tone row missing:\n${view}`)
   assert.ok(view.includes('Advanced…'), `the advanced row missing:\n${view}`)
   assert.ok(view.includes('↑↓ Select · Enter Open · ←→ Change · Esc Back'), `item help missing:\n${view}`)
-  // ←→ cycles the style inline: bar → percent → full.
+  const contextFormat = (): string | undefined =>
+    model.preview().rows[1]!.right.find(ref => ref.id === 'context')!.format
+  // ←→ cycles the style inline: full → bar (the definition default drops
+  // the override) → percent.
   vt.sendInput('\x1b[C')
   await vt.waitForRender()
-  assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'context')!.format, 'percent')
+  assert.equal(contextFormat(), undefined)
   vt.sendInput('\x1b[C')
   await vt.waitForRender()
-  assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
-  // Enter opens the Style picker with live examples.
+  assert.equal(contextFormat(), 'percent')
+  // Enter opens the Style picker with live examples (it opens on the
+  // CURRENT format: percent — the two ↓ presses below clamp on Full).
   vt.sendInput('\r')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
@@ -312,7 +318,7 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   vt.sendInput('\x1b[B')
   vt.sendInput('\r')
   await vt.waitForRender()
-  assert.equal(model.preview().rows[0]!.left.find(ref => ref.id === 'context')!.format, 'full')
+  assert.equal(contextFormat(), 'full')
   assert.equal(model.state().mode, 'item')
   app.stop()
 })
@@ -1087,9 +1093,9 @@ for (const cols of [40, 80, 120]) {
       assert.ok(text.includes('Preview'), `the preview must stay visible at ${cols}x${rows}:\n${text}`)
       assert.ok(text.includes('A Add'), `the contextual help must not scroll away at ${cols}x${rows}:\n${text}`)
       // THE key guarantee: the EDITABLE body survives — the cursor's item
-      // (the last one: Extension items) must be on screen, never eaten by
+      // (the last one: Focus mode) must be on screen, never eaten by
       // the fixed preview.
-      assert.ok(text.includes('Extension items'), `the active item must stay visible at ${cols}x${rows}:\n${text}`)
+      assert.ok(text.includes('Focus mode'), `the active item must stay visible at ${cols}x${rows}:\n${text}`)
       // A long label must not break the layout (ANSI-safe truncation).
       assert.ok(!text.split('\n').some(line => line.length > cols + 20), `no line may overflow the frame at ${cols}x${rows}`)
       app.stop()
@@ -1117,7 +1123,7 @@ test('a 4-physical-row preview cannot eat the editable body (10-row terminal)', 
   const text = view.join('\n')
   assert.ok(text.includes('A Add'), `the help must stay visible:\n${text}`)
   assert.ok(text.includes('Preview'), `the preview must stay visible:\n${text}`)
-  assert.ok(text.includes('Extension items'), `the ACTIVE item must stay visible (the body must never be eaten):\n${text}`)
+  assert.ok(text.includes('Focus mode'), `the ACTIVE item must stay visible (the body must never be eaten):\n${text}`)
   app.stop()
 })
 
@@ -1565,5 +1571,208 @@ test('PR D: a modified draft command never shows the old committed cache', async
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('[command]'), `a modified draft must show the placeholder:\n${view}`)
   assert.ok(!view.includes('14:30'), 'the stale cache must not be shown for a modified draft')
+  app.stop()
+})
+
+/** SGR press+release on a viewport row (1-based coordinates). */
+function mouseClick(vt: VirtualTerminal, row: number, leftBorder: number): void {
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${row + 1}m`)
+}
+
+test('configurator: rows page mouse click selects a row and Save changes saves (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let saved = 0
+  openWith(app, { onSave: () => { saved += 1 } })
+  await vt.waitForRender()
+  let viewport = vt.getViewport()
+  const row2 = viewport.findIndex(line => line.includes('Row 2'))
+  assert.ok(row2 >= 0, `Row 2 missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[row2]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'frame left border missing')
+  mouseClick(vt, row2, leftBorder)
+  await vt.waitForRender()
+  viewport = vt.getViewport()
+  assert.ok(viewport.some(line => line.includes('Left')), 'clicking Row 2 must open the row editor')
+  // Make the draft dirty (remove the cursor's item), then Esc back to the
+  // selector and click "Save changes".
+  vt.sendInput(' ')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  viewport = vt.getViewport()
+  const saveRow = viewport.findIndex(line => line.includes('Save changes'))
+  assert.ok(saveRow >= 0, `Save changes missing:\n${viewport.join('\n')}`)
+  mouseClick(vt, saveRow, leftBorder)
+  await vt.waitForRender()
+  assert.equal(saved, 1, 'clicking Save changes must use the single save path')
+  app.stop()
+})
+
+test('configurator: exit-confirm mouse click routes Discard & Exit (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let closed = 0
+  openWith(app, { onCancel: () => { closed += 1 } })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  vt.sendInput('\x1b') // dirty → exit-confirm
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  const discardRow = viewport.findIndex(line => line.includes('Discard & Exit'))
+  assert.ok(discardRow >= 0, `Discard & Exit missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[discardRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0)
+  mouseClick(vt, discardRow, leftBorder)
+  await vt.waitForRender()
+  assert.equal(closed, 1, 'clicking Discard & Exit must close without saving')
+  app.stop()
+})
+
+test('configurator: exit-confirm click cannot transfer to a different action after a resize (mouse parity)', async () => {
+  const { vt, app } = startApp(100, 10)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let saved = 0
+  let cancelled = 0
+  openWith(app, { onSave: () => { saved += 1 }, onCancel: () => { cancelled += 1 } })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  vt.sendInput('\x1b') // dirty → exit-confirm
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  const keepRow = viewport.findIndex(line => line.includes('Keep Editing') && !line.includes('↑↓'))
+  assert.ok(keepRow >= 0, `Keep Editing missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[keepRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0)
+  // Press Keep Editing (no release yet): the gesture identity is the
+  // exit/keep semantic action.
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${keepRow + 1}M`)
+  await vt.waitForRender()
+  // Resize: the preview block inserts and the action rows move down —
+  // the pressed cell now shows Save & Exit.
+  vt.resize(100, 11)
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok(
+    (after[keepRow] ?? '').includes('Save & Exit'),
+    `the pressed cell must now show Save & Exit:\n${after.join('\n')}`,
+  )
+  // Release on the SAME absolute cell: the synthesized click must NOT
+  // run the repainted action (no save, no discard, no wrong transition).
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${keepRow + 1}m`)
+  await vt.waitForRender()
+  assert.equal(saved, 0, 'the transferred click must not save')
+  assert.equal(cancelled, 0, 'the transferred click must not discard/close')
+  app.stop()
+})
+
+test('configurator: keyboard mutation between press and release cannot transfer the click (mouse parity)', async () => {
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const model = openWith(app)
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1 (row mode)
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  const frameTop = viewport.findIndex(line => line.includes('╭'))
+  assert.ok(frameTop >= 0, `frame top missing:\n${viewport.join('\n')}`)
+  const screenRow = frameTop + 1 + 7 // panel local y 7 = first item (View scope)
+  const leftBorder = viewport[screenRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, `left border missing on row ${screenRow}`)
+  // Press the first item (no release yet): the gesture identity is the
+  // select semantic target.
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${screenRow + 1}M`)
+  await vt.waitForRender()
+  // Keyboard removes the pressed item: the next item moves onto the same
+  // physical row (and the same ordinal target).
+  vt.sendInput(' ')
+  await vt.waitForRender()
+  // Release on the SAME absolute cell: the synthesized click must NOT
+  // activate the item that moved onto the pressed cell.
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${screenRow + 1}m`)
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'row', 'the transferred click must not open the replacement item')
+  app.stop()
+})
+
+test('configurator: the preview block is inert (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  openWith(app)
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  const previewRow = viewport.findIndex(line => line.includes('Preview'))
+  assert.ok(previewRow >= 0, `Preview missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[previewRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0)
+  // A click on the preview must not move the selection or open anything.
+  mouseClick(vt, previewRow, leftBorder)
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok(after.some(line => line.includes('Select row to edit')), 'the selector must stay on the rows page')
+  app.stop()
+})
+
+test('configurator: a save in flight freezes mouse mutations (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let resolveSave!: () => void
+  const savePromise = new Promise<void>(resolve => { resolveSave = resolve })
+  openWith(app, { onSave: () => savePromise })
+  await vt.waitForRender()
+  await makeDirty(vt)
+  const viewport = vt.getViewport()
+  const saveRow = viewport.findIndex(line => line.includes('Save changes'))
+  assert.ok(saveRow >= 0)
+  const leftBorder = viewport[saveRow]?.indexOf('│') ?? -1
+  mouseClick(vt, saveRow, leftBorder)
+  await vt.waitForRender()
+  // Saving… is painted; a click on a row must be ignored (no cursor move).
+  const savingView = vt.getViewport()
+  assert.ok(savingView.some(line => line.includes('Saving…')), 'the saving state must be painted')
+  const row1 = savingView.findIndex(line => line.includes('Row 1'))
+  assert.ok(row1 >= 0)
+  mouseClick(vt, row1, leftBorder)
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok(after.some(line => line.includes('Saving…')), 'the save must still be in flight')
+  resolveSave()
+  await vt.waitForRender()
+  app.stop()
+})
+
+test('row-move mode: a mouse click cannot reorder items or exit the mode (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const model = openDefault(app)
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1
+  await vt.waitForRender()
+  vt.sendInput('m') // → Move Mode
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  assert.ok(viewport.join('\n').includes('[MOVE]'), `the move banner must show:\n${viewport.join('\n')}`)
+  const before = model.preview().rows[0]!.left.map(row => row.id)
+  // Click a NON-active item row (the second item): a click must NOT
+  // implicitly reorder (the keyboard ↑/↓ in Move Mode reorder; the
+  // mouse-plan boundary says clicks select only) and must NOT exit the
+  // mode (Enter/Esc are the Done actions).
+  const itemRow = viewport.findIndex(line => line.includes('Permission preset'))
+  assert.ok(itemRow >= 0, `item row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[itemRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'frame left border missing')
+  mouseClick(vt, itemRow, leftBorder)
+  await vt.waitForRender()
+  const after = model.preview().rows[0]!.left.map(row => row.id)
+  assert.deepEqual(after, before, 'the click must not reorder items in Move Mode')
+  assert.equal(model.state().mode, 'row-move', 'the click must not exit Move Mode')
   app.stop()
 })

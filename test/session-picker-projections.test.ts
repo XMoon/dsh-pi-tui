@@ -90,7 +90,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
       [...rows]
         .sort((a, b) => b.createdAt - a.createdAt)
         .map(({ id, createdAt, cwd, origin }) => ({ id, createdAt, cwd, origin, live: false })),
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async (batch: readonly { id: string }[]) => {
       batchLog.push(batch.length)
       for (const { id } of batch) counts.set(id, (counts.get(id) ?? 0) + 1)
@@ -99,7 +99,6 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
       return new Map(batch.map(({ id }) => [id, { title: `title-of-${id}`, preset: 'standard' }]))
     },
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   }
 
   const defs: { name: string; handler?: unknown }[] = []

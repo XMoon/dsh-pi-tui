@@ -123,7 +123,6 @@ export function apply(ctx: Context): void {
     id: 'example-interactive-shell',
     name: 'shell',
     description: 'Run the Phase-5 interactive-shell example (Unstable raw seam).',
-    execution: 'local',
     handler: runShell,
   })
 }

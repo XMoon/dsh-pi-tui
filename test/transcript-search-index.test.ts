@@ -14,17 +14,50 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { TranscriptFolder, transcriptSearchText, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { TranscriptFolder, transcriptSearchText, workflowReadablePhase, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
 import { refreshedSearchState, steppedSearchOverlayState } from '../src/search-overlay.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 
-/** Build a minimal event envelope for tests. */
-function event<K extends SessionEvent['type']>(
+/** Build a minimal event envelope for tests. The type parameter is widened
+ * to any string so legacy v1 `assistant/chunk` events (absent from master's
+ * SessionEventMap) can be constructed and fed through the live-seam bridge;
+ * known types keep their typed data surface, widened with
+ * `Record<string, unknown>` so Session v2 fields the installed dsh-session
+ * may lag (e.g. `assistant/message.stream`) can be supplied. */
+function event<K extends string>(
   type: K,
-  data: SessionEvent<K>['data'],
+  data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
   seq: number,
 ): SessionEvent {
-  return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
+}
+
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(
+  turn: number,
+  step: number,
+  chunk: AssistantLiveChunk,
+  time = 1_700_000_000_000,
+): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+/** Apply a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function applyLive(folder: TranscriptFolder, events: readonly SessionEvent[]): void {
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
 }
 
 /** Build a surface event carrying its surface metadata marker. */
@@ -56,6 +89,7 @@ function assistantMessage(seq: number, turn: number, step: number, text: string)
   return event('assistant/message', {
     turn, step,
     message: { id: MessageId(`am-${seq}`), role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'model', provider: 'test', model: 'test' } },
+    stream: [],
   }, seq)
 }
 
@@ -97,7 +131,7 @@ function readToolCall(seq: number, callId: string, file: string, turn = 0): Sess
 
 /** Build an event with loosely-typed data (plugin/extension event kinds). */
 function rawEvent(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
-  return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
 }
 
 function compactionEvent(type: 'compaction/start' | 'compaction/summary' | 'compaction/end', data: Record<string, unknown>, seq: number): SessionEvent {
@@ -107,7 +141,21 @@ function compactionEvent(type: 'compaction/start' | 'compaction/summary' | 'comp
 function cardText(message: TranscriptMessage | undefined): string {
   if (message === undefined) return ''
   if (message.kind === 'tool') return `${message.name} ${message.args} ${message.result}`
+  if (message.kind === 'workflow') return workflowCorpus(message)
   return message.text ?? ''
+}
+
+/** The PR2 workflow search corpus (plan §13): kind + run name + run status +
+ * every phase's readable label + every member's label/status. Machine
+ * identities (childId/runId) are never indexed. */
+function workflowCorpus(message: Extract<TranscriptMessage, { kind: 'workflow' }>): string {
+  const phases = new Set<string>()
+  const members: string[] = []
+  for (const member of message.members) {
+    phases.add(workflowReadablePhase(member.phase))
+    members.push(`${member.label} ${member.status}`)
+  }
+  return `workflow ${message.name} ${message.status} ${[...phases].join(' ')} ${members.join(' ')}`
 }
 
 /**
@@ -119,7 +167,9 @@ function legacySearchForTest(folder: TranscriptFolder, query: string): Transcrip
   const needle = query.trim().toLowerCase()
   if (needle === '') return []
   return folder.messages().filter(message => {
-    const text = message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}` : message.text
+    const text = message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}`
+      : message.kind === 'workflow' ? workflowCorpus(message)
+        : message.text
     return text.toLowerCase().includes(needle)
   })
 }
@@ -149,7 +199,7 @@ function assertCorpusParity(folder: TranscriptFolder, queries: string[], label =
 
 test('parity: a plain user + assistant session (case-insensitive, empty query)', () => {
   const folder = new TranscriptFolder()
-  folder.hydrate([
+  applyLive(folder, [
     turnStart(0, 0),
     userMessage(1, 'Hello Searchable World'),
     ...assistantChunks(2, 0, 0, ['The ', 'quick brown ', 'fox.']),
@@ -167,7 +217,7 @@ test('parity: a plain user + assistant session (case-insensitive, empty query)',
 
 test('parity: streaming text is searchable as it accumulates (running -> settled)', () => {
   const folder = new TranscriptFolder()
-  folder.hydrate([
+  applyLive(folder, [
     turnStart(0, 0),
     ...assistantChunks(1, 0, 0, ['running ', 'needle', '-in-stream']),
   ])
@@ -450,7 +500,7 @@ test('live mutation while matches are held: no stale object, no crash, next quer
   const held = folder.search('needle')
   assert.equal(held.length, 1)
   // Stream a new message containing the needle while the old matches live.
-  folder.apply([
+  applyLive(folder, [
     turnStart(3, 1),
     ...assistantChunks(4, 1, 0, ['a brand new ', 'needle message']),
   ])
@@ -577,10 +627,62 @@ test('command/done and workflow cards are searchable exactly like legacy', () =>
     rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 4),
     turnEnd(5, 0),
   ])
-  assertCorpusParity(folder, ['theme set to dark', '/theme', 'audit', 'stop: completed'])
-  const workflow = folder.search('stop: completed')
+  assertCorpusParity(folder, ['theme set to dark', '/theme', 'audit', 'completed'])
+  const workflow = folder.search('audit')
   assert.equal(workflow.length, 1)
-  assert.equal(folder.resolveSearchMatch(workflow[0]!)?.kind, 'tool')
+  assert.equal(folder.resolveSearchMatch(workflow[0]!)?.kind, 'workflow')
+})
+
+test('workflow search text follows the live run status (plan §8.12)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+  ])
+  assertCorpusParity(folder, ['workflow', 'audit', 'running'])
+  assert.equal(folder.search('completed').length, 0, 'a running run must not match the terminal status')
+  folder.apply([rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 2)])
+  assertCorpusParity(folder, ['workflow', 'audit', 'completed'])
+  assert.equal(folder.search('running').length, 0, 'the settled run must not keep the start-time status in the corpus')
+})
+
+test('workflow search indexes phase labels and member labels/statuses (PR2 plan §13)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 0, label: 'dependency-scan', phase: 'Research', childId: 'session-x' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'schema-check', phase: '', childId: 'session-y' }, 3),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 2, label: 'orphan', phase: null, childId: 'session-z' }, 4),
+  ])
+  assertCorpusParity(folder, ['audit', 'Research', 'dependency-scan', 'running'])
+  // The readable phase labels are indexed: Unassigned (null) and Empty ('')
+  // are distinct searchable words.
+  assert.equal(folder.search('unassigned').length, 1, 'the null phase readable label must be searchable')
+  assert.equal(folder.search('empty').length, 1, 'the empty phase readable label must be searchable')
+  assert.equal(folder.search('schema-check').length, 1, 'a member label must be searchable')
+  // Machine identities are never indexed.
+  assert.equal(folder.search('session-x').length, 0, 'childId must never be indexed')
+  assert.equal(folder.search('run1').length, 0, 'runId must never be indexed')
+  // Member status words are indexed.
+  folder.apply([rawEvent('tool-workflow/agent-end', { runId: 'run1', seq: 0, outcome: 'failed' }, 5)])
+  assertCorpusParity(folder, ['failed'])
+  assert.equal(folder.search('failed').length, 1, 'a member status must be searchable')
+})
+
+test('a member hidden inside a large phase summary still hits its Workflow card (PR2 plan §13.1)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+    // 6 members: the phase renders as a summary; member 5 is never inline.
+    ...Array.from({ length: 6 }, (_, i) =>
+      rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: i, label: `shard-${i}`, phase: 'Migration', childId: `session-${i}` }, 2 + i)),
+  ])
+  const matches = folder.search('shard-5')
+  assert.equal(matches.length, 1, 'the hidden member must still hit the card')
+  assert.equal(folder.resolveSearchMatch(matches[0]!)?.kind, 'workflow', 'the hit must locate the Workflow card')
+  assertCorpusParity(folder, ['shard-5', 'Migration'])
 })
 
 test('a settled assistant message created WITHOUT chunks stays searchable after replacement', () => {
@@ -598,7 +700,7 @@ test('a settled assistant message created WITHOUT chunks stays searchable after 
   assertCorpusParity(folder, ['replaced authoritative'])
   assert.equal(folder.search('original settled').length, 0, 'the old text is gone from the corpus')
   // A late text delta after the replacement also lands in the projection.
-  folder.apply([
+  applyLive(folder, [
     ...assistantChunks(3, 0, 0, ['with a streamed tail']),
   ])
   assertCorpusParity(folder, ['replaced authoritative', 'streamed tail'])
@@ -606,12 +708,12 @@ test('a settled assistant message created WITHOUT chunks stays searchable after 
 
 test('interleaved reasoning and text deltas search their OWN entries (namespaced projection)', () => {
   const folder = new TranscriptFolder()
-  folder.hydrate([
+  applyLive(folder, [
     turnStart(0, 0),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning-corpse marker' } }, 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: 'reasoning-corpse marker' } }, 1),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'assistant-corpse marker' } }, 2),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: ' more reasoning deltas' } }, 3),
-    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 1, text: ' more text deltas' } }, 4),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: ' more text deltas' } }, 4),
   ])
   assertCorpusParity(folder, ['reasoning-corpse', 'assistant-corpse', 'more reasoning', 'more text'])
   // Parity catches the contamination vector: a reasoning-only needle must
@@ -722,7 +824,7 @@ test('stale search overlay: Next/Prev refreshes matches when the transcript chan
 
 test('streaming lowercasing is whole-string — Greek sigma across chunk boundaries (P2)', () => {
   const folder = new TranscriptFolder()
-  folder.hydrate([
+  applyLive(folder, [
     turnStart(0, 0),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'Ο' } }, 1),
     event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 1, text: 'Σ' } }, 2),
@@ -816,15 +918,15 @@ test('lazy normalization scans ONLY the dirty entries, never the history (P2)', 
   folder.search('answer')
   assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 0, 'no dirty entries -> zero normalization work')
   // One streaming chunk marks ONE entry: the next query normalizes exactly it.
-  folder.apply([...assistantChunks(seq++, 1000, 0, [' tail-one'])])
+  applyLive(folder, [...assistantChunks(seq++, 1000, 0, [' tail-one'])])
   folder.search('tail-one')
   assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 1)
   // Ten more chunks on the SAME entry: the Set dedupes — still one scan.
-  folder.apply([...assistantChunks(seq++, 1000, 0, [' tail-two', ' tail-three', ' tail-four', ' tail-five', ' tail-six', ' tail-seven', ' tail-eight', ' tail-nine', ' tail-ten', ' tail-eleven'])])
+  applyLive(folder, [...assistantChunks(seq++, 1000, 0, [' tail-two', ' tail-three', ' tail-four', ' tail-five', ' tail-six', ' tail-seven', ' tail-eight', ' tail-nine', ' tail-ten', ' tail-eleven'])])
   folder.search('tail-eleven')
   assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 2, 'repeated marks on one entry dedupe to one scan')
   // Five DISTINCT entries: five more scans.
-  folder.apply([
+  applyLive(folder, [
     ...assistantChunks(seq++, 1001, 0, [' x1']),
     ...assistantChunks(seq++, 1002, 0, [' x2']),
     ...assistantChunks(seq++, 1003, 0, [' x3']),
@@ -844,4 +946,65 @@ test('transcriptSearchText is the single corpus source (tool = name args result)
   const running = folder.messages()[0]!
   assert.equal(transcriptSearchText(running), 'bash {"command":"echo hi"} ')
   assert.ok(transcriptSearchText(running).toLowerCase().includes('echo hi'))
+})
+
+test('transcriptSearchText recursively includes PTC sub-call descendants', () => {
+  // A PTC root card's corpus must include its nested sub-calls so `/search`
+  // still finds nested output and locates the root Code card.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'code-1', 'run_code', { code: 'print(1)' }, 0),
+    event('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'run tests' },
+    }, 2),
+    event('tool/ptc-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'run tests' },
+      isError: false,
+      content: [{ type: 'text', text: '128 passed' }],
+    }, 3),
+  ])
+  const root = folder.messages()[0]!
+  const corpus = transcriptSearchText(root)
+  assert.ok(corpus.includes('run_code'), 'the root name stays in the corpus')
+  assert.ok(corpus.includes('bash'), 'the nested child name is searchable')
+  assert.ok(corpus.includes('128 passed'), 'the nested child result is searchable')
+})
+
+test('PTC child settle marks the root search entry dirty immediately', () => {
+  // The incremental search index must see nested child content as soon as
+  // the child settles — not only after the outer run_code result lands.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'code-1', 'run_code', { code: 'print(1)', description: 'Inspect project and run tests' }, 0),
+    event('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'run tests', description: 'Run tests' },
+    }, 2),
+  ])
+  assert.equal(folder.search('128 passed').length, 0, 'nothing to find before the child settles')
+  folder.apply([event('tool/ptc-dispatch', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId('code-1'),
+    subCallId: ToolCallId('code-1:code:1'),
+    name: 'bash',
+    arguments: { command: 'run tests', description: 'Run tests' },
+    isError: false,
+    content: [{ type: 'text', text: '128 passed' }],
+  }, 3)])
+  const matches = folder.search('128 passed')
+  assert.equal(matches.length, 1, 'the settled child content must be searchable immediately')
+  assert.equal(matches[0]!.id, 0, 'the match locates the root Code card')
 })

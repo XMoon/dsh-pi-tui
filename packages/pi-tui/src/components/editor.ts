@@ -3,7 +3,15 @@ import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
 import { PasteBurst } from "../paste-burst.ts";
-import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
+import {
+	type Component,
+	CURSOR_MARKER,
+	type Focusable,
+	type TUI,
+	type TuiMouseDispatchResult,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+} from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
 import {
 	cjkBreakRegex,
@@ -290,6 +298,13 @@ function buildDebouncePattern(triggerCharacters: string[]): RegExp {
 
 function createScrollBorder(direction: "↑" | "↓", hiddenLineCount: number, width: number): string {
 	const availableWidth = Math.max(0, width);
+	const label = ` ${direction} ${hiddenLineCount} more `;
+	const labelWidth = visibleWidth(label);
+	if (labelWidth + 2 <= availableWidth) {
+		const leftWidth = Math.floor((availableWidth - labelWidth) / 2);
+		return "─".repeat(leftWidth) + label + "─".repeat(availableWidth - leftWidth - labelWidth);
+	}
+
 	const indicator = `─── ${direction} ${hiddenLineCount} more `;
 	const remaining = availableWidth - visibleWidth(indicator);
 	if (remaining >= 0) return indicator + "─".repeat(remaining);
@@ -313,8 +328,17 @@ export class Editor implements Component, Focusable {
 	private theme: EditorTheme;
 	private paddingX: number = 0;
 
-	// Store last render width for cursor navigation
+	// Store last render geometry for cursor navigation and mouse hit-testing.
 	private lastWidth: number = 80;
+	private renderedVisibleLineCount = 1;
+	private renderedAutocompleteHeight = 0;
+	/** The autocomplete list that was ACTUALLY PAINTED last (mouse
+	 * parity): an async suggestion swap between paint and pointer event
+	 * must not let the new list eat a click aimed at the old screen. */
+	private renderedAutocompleteList: SelectList | undefined;
+	/** The autocomplete list the press started on (mouse parity): a click
+	 * may only act on the exact list instance that was pressed. */
+	private mousePressedAutocompleteList: SelectList | undefined;
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -582,6 +606,16 @@ export class Editor implements Component, Focusable {
 		// No cached state to invalidate currently
 	}
 
+	protected renderTopBorder(width: number, hiddenLineCount: number): string {
+		const border = hiddenLineCount > 0 ? createScrollBorder("↑", hiddenLineCount, width) : "─".repeat(width);
+		return this.borderColor(border);
+	}
+
+	protected renderBottomBorder(width: number, hiddenLineCount: number): string {
+		const border = hiddenLineCount > 0 ? createScrollBorder("↓", hiddenLineCount, width) : "─".repeat(width);
+		return this.borderColor(border);
+	}
+
 	render(width: number): string[] {
 		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
 		const paddingX = Math.min(this.paddingX, maxPadding);
@@ -593,8 +627,6 @@ export class Editor implements Component, Focusable {
 
 		// Store for cursor navigation (must match wrapping width)
 		this.lastWidth = layoutWidth;
-
-		const horizontal = this.borderColor("─");
 
 		// Layout the text
 		const layoutLines = this.layoutText(layoutWidth);
@@ -620,18 +652,14 @@ export class Editor implements Component, Focusable {
 
 		// Get visible lines slice
 		const visibleLines = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines);
+		this.renderedVisibleLineCount = visibleLines.length;
 
 		const result: string[] = [];
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
 
 		// Render top border (with scroll indicator if scrolled down)
-		if (this.scrollOffset > 0) {
-			const border = createScrollBorder("↑", this.scrollOffset, width);
-			result.push(this.borderColor(border));
-		} else {
-			result.push(horizontal.repeat(width));
-		}
+		result.push(this.renderTopBorder(width, this.scrollOffset));
 
 		// Render each visible layout line
 		// Emit hardware cursor marker when focused so TUI can position the
@@ -683,27 +711,145 @@ export class Editor implements Component, Focusable {
 
 		// Render bottom border (with scroll indicator if more content below)
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
-		if (linesBelow > 0) {
-			const border = createScrollBorder("↓", linesBelow, width);
-			result.push(this.borderColor(border));
-		} else {
-			result.push(horizontal.repeat(width));
-		}
+		result.push(this.renderBottomBorder(width, linesBelow));
 
 		// Add autocomplete list if active
+		this.renderedAutocompleteHeight = 0;
 		if (this.autocompleteState && this.autocompleteList) {
+			// The painted list is the one the user actually sees: mouse
+			// dispatch is fenced to it (an async swap that has not
+			// repainted must not receive a click aimed at the old list).
+			this.renderedAutocompleteList = this.autocompleteList;
 			const autocompleteResult = this.autocompleteList.render(contentWidth);
+			this.renderedAutocompleteHeight = autocompleteResult.length;
 			for (const line of autocompleteResult) {
 				const lineWidth = visibleWidth(line);
 				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
 				result.push(`${leftPadding}${line}${linePadding}${rightPadding}`);
 			}
+		} else {
+			this.renderedAutocompleteList = undefined;
 		}
 
 		return result;
 	}
 
+	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
+		const autocompleteStartRow = this.renderedVisibleLineCount + 2;
+		// Every press starts a fresh gesture: clear any latched pressed
+		// list first (a rejected/fenced press must not leave an old list
+		// that a later click could match).
+		if (event.type === "press") {
+			this.mousePressedAutocompleteList = undefined;
+		}
+		if (
+			this.autocompleteState &&
+			this.autocompleteList &&
+			// The dispatch is fenced to the PAINTED list: an async swap
+			// that has not repainted must not receive a click aimed at the
+			// old screen (a slash click must never submit an unpainted
+			// command).
+			this.autocompleteList === this.renderedAutocompleteList &&
+			event.y >= autocompleteStartRow &&
+			event.y < autocompleteStartRow + this.renderedAutocompleteHeight
+		) {
+			if (event.type === "press") {
+				this.mousePressedAutocompleteList = this.autocompleteList;
+			}
+			if (event.type === "click") {
+				// A click may only act on the exact list instance that was
+				// pressed (press A → repaint B → release must not activate
+				// B). A mismatch releases the pressed identity.
+				if (this.mousePressedAutocompleteList !== this.autocompleteList) {
+					this.mousePressedAutocompleteList = undefined;
+					return undefined;
+				}
+				this.mousePressedAutocompleteList = undefined;
+			}
+			const maxPadding = Math.max(0, Math.floor((event.width - 1) / 2));
+			const paddingX = Math.min(this.paddingX, maxPadding);
+			const contentWidth = Math.max(1, event.width - paddingX * 2);
+			const result = this.autocompleteList.handleMouse?.({
+				...event,
+				x: event.x - paddingX,
+				y: event.y - autocompleteStartRow,
+				width: contentWidth,
+				height: this.renderedAutocompleteHeight,
+			});
+			if (!result) return undefined;
+			// The dispatch target/focus are rewritten to THIS editor: the
+			// private SelectList is not mounted in the TUI tree, so X018
+			// gesture liveness (isMouseTargetLive) would clear the gesture
+			// on release and the synthetic click would never reach the
+			// list. (Mirrors the Search/X049 wrapper semantics.)
+			return {
+				...result,
+				...(result.focus ? { focusTarget: this } : {}),
+				target: {
+					component: this,
+					originX: event.screenX - event.x,
+					originY: event.screenY - event.y,
+					width: event.width,
+					height: event.height,
+				},
+			};
+		}
+		// A click that fell outside the painted autocomplete region (or a
+		// fenced list) must not leave a latched pressed identity either.
+		if (event.type === "click") {
+			this.mousePressedAutocompleteList = undefined;
+		}
+
+		// Leave press/drag/release unhandled so the renderer's screen-level text
+		// selection can run over the editor rows (drag to select, release to copy).
+		// The renderer synthesizes a click when press and release land on the same
+		// cell without movement, which is the gesture that positions the cursor.
+		if (event.type !== "click" || event.button !== "left") return undefined;
+		if (event.y <= 0 || event.y > this.renderedVisibleLineCount) return { handled: true, focus: true };
+
+		const visualLines = this.buildVisualLineMap(this.lastWidth);
+		const visualLineIndex = this.scrollOffset + event.y - 1;
+		const visualLine = visualLines[visualLineIndex];
+		if (!visualLine) return { handled: true, focus: true };
+		const logicalLine = this.state.lines[visualLine.logicalLine] ?? "";
+		const chunkEnd = visualLine.startCol + visualLine.length;
+		const chunk = logicalLine.slice(visualLine.startCol, chunkEnd);
+		const maxPadding = Math.max(0, Math.floor((event.width - 1) / 2));
+		const paddingX = Math.min(this.paddingX, maxPadding);
+		const targetColumn = Math.max(0, event.x - paddingX);
+		let visibleColumn = 0;
+		let targetIndex = chunk.length;
+		for (const grapheme of this.segment(chunk, "grapheme")) {
+			const nextColumn = visibleColumn + visibleWidth(grapheme.segment);
+			if (targetColumn < nextColumn) {
+				targetIndex = grapheme.index;
+				break;
+			}
+			visibleColumn = nextColumn;
+		}
+		// NOTE: upstream v0.85.1 (and current upstream main) force
+		// targetIndex = lastGraphemeIndex when a click lands at/after the
+		// end of a NON-last wrapped segment, placing the cursor one
+		// grapheme BEFORE the segment end. The fork keeps the natural
+		// end-of-segment position (chunk.length), matching the Input
+		// clamp-to-end behavior. (dsh-pi-tui divergence X050
+		// BUGFIX_MISSING_UPSTREAM.)
+
+		this.state.cursorLine = visualLine.logicalLine;
+		this.setCursorCol(visualLine.startCol + targetIndex);
+		this.lastAction = null;
+		this.exitHistoryBrowsing();
+		if (this.autocompleteState) this.updateAutocomplete();
+		return { handled: true, focus: true };
+	}
+
 	handleInput(data: string): void {
+		// Any keyboard input terminates an unfinished autocomplete mouse
+		// gesture: the document mutation can change the slash prefix while
+		// the OLD suggestion list is still current and painted — a release
+		// on the old cell must never submit the newly changed draft (the
+		// stale /help onSelect would submit /hex).
+		this.mousePressedAutocompleteList = undefined;
 		const kb = getKeybindings();
 
 		// Handle character jump mode (awaiting next character to jump to)
@@ -2452,12 +2598,50 @@ export class Editor implements Component, Focusable {
 		return firstPrefixIndex;
 	}
 
+	/**
+	 * Select the layout for an autocomplete list. PROTECTED (dsh-pi-tui
+	 * divergence X044): host editor subclasses can provide a context-specific
+	 * layout without reaching private autocomplete state.
+	 */
+	protected getAutocompleteSelectListLayout(prefix: string): SelectListLayoutOptions | undefined {
+		return prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
+	}
+
 	private createAutocompleteList(
 		prefix: string,
 		items: Array<{ value: string; label: string; description?: string }>,
 	): SelectList {
-		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
-		return new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
+		const layout = this.getAutocompleteSelectListLayout(prefix);
+		const list = new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
+		list.onSelect = (selected) => {
+			if (!this.autocompleteProvider) return;
+			this.pushUndoSnapshot();
+			this.lastAction = null;
+			const result = this.autocompleteProvider.applyCompletion(
+				this.state.lines,
+				this.state.cursorLine,
+				this.state.cursorCol,
+				selected,
+				this.autocompletePrefix,
+			);
+			this.state.lines = result.lines;
+			this.state.cursorLine = result.cursorLine;
+			this.setCursorCol(result.cursorCol);
+			if (this.autocompletePrefix.startsWith("/")) {
+				// Slash-prefix completions SUBMIT, exactly like the keyboard
+				// Enter path (apply → cancel → fall through to submit) —
+				// INCLUDING the disableSubmit guard: a mouse click must not
+				// bypass the public "submission disabled" contract. (Mouse
+				// parity / X050.)
+				this.cancelAutocomplete();
+				if (this.disableSubmit) return;
+				this.submitValue();
+			} else {
+				this.cancelAutocomplete();
+				this.onChange?.(this.getText());
+			}
+		};
+		return list;
 	}
 
 	private tryTriggerAutocomplete(explicitTab: boolean = false): void {
@@ -2679,6 +2863,8 @@ export class Editor implements Component, Focusable {
 	private clearAutocompleteUi(): void {
 		this.autocompleteState = null;
 		this.autocompleteList = undefined;
+		this.renderedAutocompleteList = undefined;
+		this.mousePressedAutocompleteList = undefined;
 		this.autocompletePrefix = "";
 	}
 

@@ -7,7 +7,7 @@ builtin status items, create your own text or command items, and place
 plugin-provided items without editing YAML by hand.
 
 This guide covers the user-facing Footer surface. Plugin authors should also
-read [Extension API v1](extension-api.md).
+read [Extension API v2](extension-api.md).
 
 ## Quick start
 
@@ -214,19 +214,24 @@ Common builtin Style sets include:
 | Turns / steps | `both`, `turns`, `steps` |
 | Version | `tui`, `dsh`, `both` |
 
-The `default` preset's second row composes real semantic placements:
+The `default` preset composes two rows with a left and a right zone each:
 
 ```text
-token-usage:pi · cache-hit:pi · performance:latency · performance:speed
+row 1 left   view-scope · permission-preset · model · tasks · cwd · git-branch · ext:*
+row 1 right  plan-state · focus-mode
+row 2 left   token-usage:pi · cache-hit:pi · performance:latency · performance:speed · turns-steps
+row 2 right  context:full
 ```
 
-rendering as `↑114M ↓54k R520k W12k · CH93.9% · TTFB 8.1s · 51 tok/s`. The
-left group is session cumulative usage; the right group is recent model
-performance — the average time-to-first-token and the effective output
-throughput over the last five completed model requests (a model/provider
-switch resets that window). The session lifetime LLM wall time is still
-accumulated and remains visible on the `/status` detail line, but it is no
-longer part of the default Footer row.
+Items of one zone are joined with two spaces; the right zone renders flush
+right. The second row decomposes the pi-vocabulary stats line into real
+semantic placements: session cumulative usage and the cache-hit share, then
+recent model performance — the average time-to-first-token and the effective
+output throughput over the last five completed model requests (a
+model/provider switch resets that window) — plus the turn/step counters,
+while the context pressure renders in its full `used/window (percent)` form.
+The session lifetime LLM wall time is still accumulated and remains visible
+on the `/status` detail line, but it is not part of the default Footer.
 
 Omitting `format` keeps that item's default Style.
 
@@ -498,7 +503,7 @@ terminal ownership, arbitrary ANSI, cursor control, shell execution, or
 keyboard focus through this slot.
 
 Plugin authors should use the full contract in
-[Extension API v1](extension-api.md) rather than copying internal TUI code.
+[Extension API v2](extension-api.md) rather than copying internal TUI code.
 
 ## Responsive and narrow-terminal behavior
 
@@ -667,5 +672,5 @@ Use the Stable package boundary:
 and feature-detect the configurable Footer item capability before relying on
 it.
 
-See [Extension API v1](extension-api.md) for the authoritative registration,
+See [Extension API v2](extension-api.md) for the authoritative registration,
 ownership, lifecycle, HMR identity, sanitization, and compatibility contract.

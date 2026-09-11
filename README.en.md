@@ -19,20 +19,31 @@ Stable releases are recommended for ordinary users. Install DSH first, then add
 the TUI to the `pi-tui` profile:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.1.2-rc.1
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@latest
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ```
 
-### Preview / next
+### Next / npm line (validation)
 
-Preview releases contain unreleased changes. Use this channel only when you need
-to try or validate a prerelease:
+Preview installation uses the DSH `alpha` channel and the TUI `next` channel.
+The DSH native install scripts must be explicitly allowed:
 
 ```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@alpha
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
+
+Use the isolated npm driver (it installs the exact DSH version declared by this
+checkout and exercises the full build/test/package path):
+
+```sh
+pnpm compat:dsh:npm
+```
+
+See the [compatibility guide](docs/dsh-compatibility.md) for the stable minimum,
+next compatibility range, and fallback paths.
 
 ### Requirements
 
@@ -41,38 +52,25 @@ dsh --profile pi-tui
 
 ### DSH/TUI version pairing (important)
 
-| TUI package line | Matching DSH line | Notes |
+| TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.4.1` (`@latest`) | `>=0.1.2-rc.1` | Current stable; validated against the rc.1 family |
-| `0.4.x-alpha` (`@next`) | `>=0.1.2-rc.1` | Subsequent prerelease; each release validates its concrete DSH family |
-| `0.4.0-alpha.2` (published) | `>=0.1.2-alpha.4` | Previous 0.4 prerelease; its releases validated the alpha.4/alpha.5 family |
-| `0.4.0-alpha.1` (published) | `>=0.1.2-alpha.2` | Earlier 0.4 prerelease; accepts the alpha.2/alpha.3 runtime |
-| `0.3.x` (`@0.3`) | `0.1.1-rc.2` | Legacy runtime line |
+| `0.4.5` (published `@latest`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable line; rc.1 minimum, rc.2 compatible |
+| Current `next` npm line (this checkout; version `0.4.5`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current next line |
 
-Do not mix the lines: DSH 0.1.1 is outside the 0.4 peer window and the
-normal incompatible-runtime boundary will fail. The startup row prints upgrade
-and rollback guidance when concurrent Loader ordering allows it, but that
-friendly notice is best-effort rather than a startup-order guarantee. If you
-keep DSH 0.1.1, use the 0.3 TUI line; if you keep the alpha.2/alpha.3
-baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`; if you keep the
-alpha.4/alpha.5 baseline, use `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`. The stable
-installation path is documented above under “Install into a DSH profile”; if
-you need to keep the legacy DSH runtime, use this compatibility recovery path:
-
-```sh
-npm install -g @deepseek-ai/dsh@0.1.1-rc.2
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.3
-dsh --profile pi-tui
-```
-
-The current 0.4 line declares `>=0.1.2-rc.1`; each release validates
-its concrete DSH family. `npm install -g` is only for installing DSH itself; to
-install dsh-pi-tui into a DSH profile, you must use the `dsh plugin` command.
+Do not mix the stable and `next` lines. The current `next` checkout declares
+the published `0.1.5-rc.1` npm floor; older runtimes fail at the normal
+incompatible-runtime boundary. The startup notice is best-effort rather than a
+Loader startup-order guarantee. See the [full historical compatibility matrix](docs/dsh-compatibility.md)
+for official-tag pairings and fallback commands, and see the [latest `next`
+README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for the current
+integration status.
 
 New agent sessions use the official roster's selected preset id. A custom DSH
 preset literally named `code` is valid and remains `code` when it exists in the
-current roster. Old persisted `code` defaults/session values fall back to `ptc`
-only after the roster proves that no custom `code` preset exists.
+current roster. DSH V3 migration owns historical session `code -> ptc`
+conversion, while the current projection preserves a legal custom `code`. Only
+an omitted legacy settings default `code` falls back to `ptc` after the roster
+proves that no custom `code` preset exists.
 
 ### Profile management
 
@@ -136,7 +134,8 @@ Supports persisted DSH Sessions, including:
 * Forking
 * Rewind
 * Session lineage
-* Transcript export
+* `/export` — full Session archive (descendants + attachments) saved to a Client-local directory
+* `/transcript` — readable Markdown transcript saved to a Client-local directory
 
 Use:
 
@@ -144,6 +143,8 @@ Use:
 /sessions
 /fork
 /rewind
+/export
+/transcript
 ```
 
 When the Agent is idle and the editor is empty, pressing `Esc` twice quickly also opens Rewind.
@@ -234,7 +235,7 @@ Typing `@` opens workspace file search and completion:
 @"path with spaces/file.ts"
 ```
 
-`/image <path>` also completes files and directories; paths with spaces, quotes, or Windows separators preserve the input dialect, and directories can be expanded further.
+`/attach <path>` is the unified Client-local image/file intake; `/image <path>` keeps its image-only compatibility semantics. Both complete files and directories; paths with spaces, quotes, or Windows separators preserve the input dialect, and directories can be expanded further.
 
 Resolvable relative paths are canonicalized before submission.
 
@@ -294,7 +295,7 @@ For the full `/footer` workflow, Custom Text / Command items, YAML reference, se
 | Key           | Action                                              |
 | ------------- | --------------------------------------------------- |
 | `Enter`       | Submit input                                        |
-| `Ctrl+Enter`  | Queue the draft while the agent is busy (the opposite of Enter while busy) |
+| `Ctrl+Enter`  | Submit with the OPPOSITE busy behavior (steers by default; queues when `busyEnter=steer`) |
 | `Shift+Enter` | Insert newline                                      |
 | `Esc`         | Cancel current interaction / interrupt running work |
 | `Esc Esc`     | Open Rewind while idle                              |
@@ -551,22 +552,34 @@ dsh --profile pi-tui-dev
 
 ## DSH compatibility and validation
 
-This section contains Source Mode and CI validation details only; ordinary users do not need Source Mode to install the TUI.
+This section contains DSH compatibility and CI validation details only; ordinary users do not need them to install the TUI.
+
+### npm mode (current `next`)
+
+The current `next` line is npm mode: it targets the published
+`dsh-v0.1.5-rc.1` family declared by this checkout's `package.json` and
+resolved by its frozen lockfile. The isolated npm driver installs that exact
+family from the public registry and exercises the TUI build/test/package path:
+
+```sh
+pnpm compat:dsh:npm
+```
 
 ### Source Mode (validation only)
 
-Source Mode is the validation-only distribution selected by the tracked policy for `next` CI and available for local compatibility checks. It reads the full commit pin in `test/compat/dsh-source.json`, builds the official DSH tarball family, installs it through temporary pnpm overrides, and removes the temporary state afterward. Do not write DSH source paths, `file:` dependencies, or workspace symlinks into a published package.
-
-```sh
-pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
-pnpm compat:dsh:npm
-```
+Source Mode is the validation-only distribution for an unpublished DSH
+checkout, available for local compatibility checks and explicit
+source-boundary work. It reads the full commit pin in
+`test/compat/dsh-source.json`, builds the official DSH tarball family, installs
+it through temporary pnpm overrides, and removes the temporary state afterward.
+Do not write DSH source paths, `file:` dependencies, or workspace symlinks into
+a published package.
 
 The published package already contains the Pi TUI fork required at runtime. No separate internal TUI package needs to be installed.
 
 ### CI validation policy
 
-CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Both `next` lanes use `test/compat/dsh-source.json` for the current validated DSH target; Source Mode validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary, while npm Mode runs the frozen registry lane. The published `pi2dsh` ecosystem check is explicitly marked skipped for an unpublished source family. See [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md) for the full workflow.
+CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Source Mode reads the source target from `test/compat/dsh-source.json` and validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary; npm Mode uses the DSH version declared by the checkout's `package.json` and frozen lockfile to run the registry lane. The published `pi2dsh` ecosystem check is explicitly marked skipped for an unpublished source family. See [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md) for the full workflow.
 
 ## Repository layout
 

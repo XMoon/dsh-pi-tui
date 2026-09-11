@@ -34,19 +34,21 @@ export interface HistoryPersistContext {
   ts: number
   /** The newest known content (consecutive-repeat dedupe). */
   lastContent: string | undefined
-  /** Whether the submission carries staged images (never persisted — the
+  /** Whether the submission carries staged attachments (never persisted — the
    * placeholder dies with the draft on consume, so an ↑ recall would
    * re-send it as ordinary text). */
-  hasImages: boolean
+  hasAttachments?: boolean
+  /** Legacy image-only spelling retained for existing callers. */
+  hasImages?: boolean
   /** The history file path for the cwd. */
   file: string
 }
 
 /** Persist one submission row; returns whether an entry was written. An
- * empty content, a repeat of `lastContent` and an image-bearing submission
+ * empty content, a repeat of `lastContent` and an attachment-bearing submission
  * are skipped without touching the file (shell-history behavior). */
 export function persistHistoryRecord(context: HistoryPersistContext): boolean {
-  if (context.content === '' || context.content === context.lastContent || context.hasImages) return false
+  if (context.content === '' || context.content === context.lastContent || context.hasAttachments === true || context.hasImages === true) return false
   return appendHistoryRecord(context.file, {
     v: 2,
     content: context.content,

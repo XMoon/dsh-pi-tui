@@ -97,7 +97,7 @@ interface BindingRecord {
  * (default keyboard exit confirmation, Ctrl+S steer-all, Ctrl+F search,
  * Ctrl+O expand, Ctrl+T
  * todo, Ctrl+G external editor, Ctrl+R history search, Ctrl+V clipboard,
- * Ctrl+Enter queue, Enter submit, Esc cancel, Shift+Tab permission,
+ * Ctrl+Enter accelerated submit (the busy-Enter opposite), Enter submit, Esc cancel, Shift+Tab permission,
  * Alt+Up dequeue, Alt+T thinking, Alt+K dismiss, Ctrl+End jump latest).
  * When a NEW default
  * host lifecycle key lands, extend THIS list in the same commit so
@@ -122,7 +122,7 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   // parser — isTerminalAmbiguousKeyId) rejects a plugin registration on it
   // anyway: on a legacy terminal the byte IS Enter, so the binding could
   // never fire through the router's normalized lookup (round-13 finding).
-  { key: 'enter', ctrl: true, alt: false, shift: false, super: false }, // Ctrl+Enter queue
+  { key: 'enter', ctrl: true, alt: false, shift: false, super: false }, // Ctrl+Enter accelerated submit
   { key: 'enter', ctrl: false, alt: false, shift: false, super: false }, // Enter submit
   { key: 'escape', ctrl: false, alt: false, shift: false, super: false }, // Esc cancel
   { key: 'tab', ctrl: false, alt: false, shift: true, super: false },   // Shift+Tab permission cycle

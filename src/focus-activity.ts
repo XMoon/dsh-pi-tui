@@ -26,8 +26,8 @@ import { color } from './theme.ts'
 import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import { toolTitle } from './present.ts'
-import type { TurnActivity } from './transcript.ts'
-import type { TranscriptMessage } from './transcript.ts'
+import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
+import { displayFailureText } from './failure-presentation.ts'
 
 /** The max tool-type names the header stats show before the `+N` tail
  * (plan §10.4). */
@@ -257,17 +257,60 @@ export function focusCollapsedBody(
     lines.push(previewLine('Tool:', preparingDisplay, width))
   } else if (activity.tool !== undefined && toolDisplay !== undefined) {
     const prefix = activity.tool.status === 'ok' ? '✓ ' : activity.tool.status === 'error' ? '✗ ' : ''
-    lines.push(previewLine('Tool:', `${prefix}${toolDisplay}`, width))
+    const active = activity.tool.activeSubCalls
+    if (active !== undefined && active.length > 0) {
+      lines.push(toolLineWithActive(prefix, toolDisplay, activity.tool.name, active, width))
+    } else {
+      lines.push(previewLine('Tool:', `${prefix}${toolDisplay}`, width))
+    }
   }
   if (activity.message !== undefined) {
     lines.push(...previewTailLines('Message:', activity.message.text, width, FOCUS_MESSAGE_MAX_ROWS))
   }
   const reason = activity.reason
   if (reason?.kind === 'error' && reason.error !== undefined) {
-    lines.push(previewLine('Error:', `${reason.error.code}: ${reason.error.message}`, width))
+    lines.push(previewLine('Error:', displayFailureText(reason.error), width))
   }
   return lines
 }
+
+/** The compact active-sub-call summary: one running child → `Bash running`;
+ * several of the same type → `Bash ×2 running`; mixed types → the first
+ * type (durable dispatch order) with its own count plus the remaining
+ * running count (`Bash ×2 +1 running`). Titles go through the existing
+ * tool-title mapping. */
+function activeSubCallSuffix(active: readonly { name: string; count: number }[]): string {
+  if (active.length === 1) {
+    const { name, count } = active[0]!
+    return `${toolTitle(name)}${count > 1 ? ` ×${count}` : ''} running`
+  }
+  const first = active[0]!
+  const rest = active.slice(1).reduce((sum, entry) => sum + entry.count, 0)
+  const firstCount = first.count > 1 ? ` ×${first.count}` : ''
+  return `${toolTitle(first.name)}${firstCount} +${rest} running`
+}
+
+/** The Tool line with the active-sub-call suffix, using the width-degradation
+ * ladder: full root display + suffix → root title + suffix → root title
+ * alone (the active child is never silently truncated away by a long root
+ * description). */
+function toolLineWithActive(
+  prefix: string,
+  toolDisplay: string,
+  rootName: string,
+  active: readonly { name: string; count: number }[],
+  width: number,
+): string {
+  const suffix = activeSubCallSuffix(active)
+  const lead = `Tool:${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth('Tool:')))}`
+  const bodyBudget = width - visibleWidth(lead)
+  const full = `${prefix}${toolDisplay} · ${suffix}`
+  if (bodyBudget > 0 && visibleWidth(full) <= bodyBudget) return previewLine('Tool:', full, width)
+  const degraded = `${prefix}${toolTitle(rootName)} · ${suffix}`
+  if (bodyBudget > 0 && visibleWidth(degraded) <= bodyBudget) return previewLine('Tool:', degraded, width)
+  return previewLine('Tool:', `${prefix}${toolTitle(rootName)}`, width)
+}
+
 
 /**
  * The live Thought disclosure. render() re-reads `now()` on EVERY frame, so
@@ -337,16 +380,23 @@ export class FocusActivityComponent {
 
 /**
  * The Focus presentation projection over one windowed transcript (plan
- * §12/§33): messages are grouped per turn into `user(s) → FocusActivity →
- * (process when expanded | final when settled) → compaction cards`, so the
- * raw TranscriptMessage union is never polluted with a fake `focus-activity`
- * kind and the session data stays lossless.
+ * §12/§33): a turn with an initial prompt is grouped as
+ * `user(s) → FocusActivity`; a turn with only same-turn steers starts with
+ * `FocusActivity` and keeps those steers in process order. A turn woken by
+ * injected-context keeps that LEADING prefix as its foundation
+ * before the Thought (expanded and collapsed). Expanded process/final and
+ * compaction rows follow, so the raw TranscriptMessage union is never
+ * polluted with a fake `focus-activity` kind and the session data stays
+ * lossless.
  *
- * Collapsed turns HIDE thinking/tool/system/intermediate-assistant rows
- * entirely — they cannot leak through Ctrl+O/Alt+T because they are not in
- * the rendered list at all (plan §15.2). The final assistant only appears
- * after the authoritative `turn/end` (plan §13.1) and never duplicates in
- * the expanded view (it stays at its chronological position).
+ * Collapsed turns HIDE process rows — thinking, tool, mid-turn system/inject
+ * and ordinary intermediate-assistant — so they cannot leak through
+ * Ctrl+O/Alt+T (plan §15.2). A committed pre-steer answer is the explicit
+ * persistent-row exception. The LEADING injected-context prefix (the turn
+ * foundation) and every human user row stay visible before the Thought. The final
+ * assistant only appears after the authoritative `turn/end` (plan §13.1)
+ * and never duplicates in the expanded view (it stays at its
+ * chronological position).
  * @param messages - the windowed transcript.
  * @param activities - the folder's per-turn activities (same fold state).
  * @param expandedTurns - the user's expansion choices (live running turns
@@ -407,24 +457,31 @@ export function projectFocus(
     // row (shared by the expanded and collapsed branches — one semantic,
     // never two drifting copies).
     const final = finalAssistantSelection(activity, group)
+    const isCommittedAnswer = (member: TranscriptMessage): boolean =>
+      activity !== undefined && assistantCommittedBeforeSteer(activity, member)
     if (expanded) {
       // The open Thought reveals the FULL process in ORIGINAL order —
       // compaction cards included at their chronological position — with
       // the final assistant held back and appended LAST (a max-tokens
       // turn's `max tokens reached` system row must never land after the
       // final: the settled order is User → Thought → process → final).
-      // The INITIAL-PROMPT boundary precedes the Thought: rows before the
-      // turn's FIRST direct user (injected/system context) stay in place
-      // and the initial user itself stays above the Thought; every later
+      // The THOUGHT-LEAD boundary precedes the Thought: rows before the
+      // turn's FIRST non-steer user (injected context) stay in place
+      // and that initial user itself stays above the Thought; every later
       // user/steer returns to its chronological position in the process
       // (plan: expanded chronology — the projection reorders, never the
-      // session events). Only the FIRST direct user is the initial
-      // prompt — consecutive users are queue/steer input, never a
-      // multi-row initial prompt (plan: no adjacency guessing). Every
-      // revealed process row carries the owner-turn collapse mark; the
-      // user's rows and the FINAL assistant stay unmarked (clicking them
-      // must not collapse the Thought — review P2).
-      const boundary = initialPromptBoundary(group)
+      // session events). With a non-steer user, the first such row is the
+      // compatibility boundary; when every user is a steer, the boundary
+      // falls back to the end of the LEADING injected-context prefix, so an
+      // inject-woken turn keeps its foundation before the Thought (never a
+      // scan of mid-process system rows). Consecutive users after the
+      // boundary stay in chronological order; they are not a multi-row
+      // initial prompt (plan: no adjacency guessing). Every revealed
+      // ordinary process row carries the owner-turn collapse mark;
+       // committed pre-steer answers, the user's rows, the lead foundation
+      // rows and the FINAL assistant stay unmarked
+      // (clicking them must not collapse the Thought — review P2).
+      const boundary = thoughtLeadBoundary(group)
       for (const member of group.slice(0, boundary)) {
         out.push({ kind: 'message', message: member })
       }
@@ -434,7 +491,11 @@ export function projectFocus(
           out.push({ kind: 'message', message: member })
         } else {
           if (final !== undefined && member === final.message) continue
-          out.push({ kind: 'message', message: member, collapseFocusOwnerOnClick: turn })
+          if (isCommittedAnswer(member)) {
+            out.push({ kind: 'message', message: member })
+          } else {
+            out.push({ kind: 'message', message: member, collapseFocusOwnerOnClick: turn })
+          }
         }
       }
       if (final !== undefined) {
@@ -442,17 +503,42 @@ export function projectFocus(
       }
       continue
     }
-    // Collapsed: the user's own messages stay visible (steers included)
-    // and ALL of them precede the Thought (summary semantics unchanged).
-    for (const member of group) {
-      if (member.kind === 'user') out.push({ kind: 'message', message: member })
+    // Collapsed Focus normally summarizes the turn's INPUTS before the
+    // Thought: the leading injected-context prefix (the turn foundation) and
+    // EVERY human user row (same-turn steers included) precede it; process
+    // rows stay hidden inside the Thought. A committed pre-steer answer is
+    // the one exception: from that exact raw boundary onward, preserve the
+    // conversation rows in chronology so the answer cannot be swallowed by
+    // the Thought or move when the disclosure changes.
+    for (const member of group.slice(0, leadingInjectedContextPrefixEnd(group))) {
+      out.push({ kind: 'message', message: member })
     }
-    // The Thought disclosure follows the user rows.
-    if (activity !== undefined) out.push({ kind: 'activity', activity })
-    // Compaction cards keep their existing lifecycle in the collapsed
-    // view (plan §12.3 v1 — never hidden into the Thought).
-    for (const member of group) {
-      if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
+    const firstCommittedIndex = group.findIndex(isCommittedAnswer)
+    if (firstCommittedIndex < 0) {
+      for (const member of group) {
+        if (member.kind === 'user') out.push({ kind: 'message', message: member })
+      }
+      if (activity !== undefined) out.push({ kind: 'activity', activity })
+      // Compaction cards keep their existing lifecycle in the collapsed
+      // view (plan §12.3 v1 — never hidden into the Thought).
+      for (const member of group) {
+        if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
+      }
+    } else {
+      const beforeCommitted = group.slice(0, firstCommittedIndex)
+      for (const member of beforeCommitted) {
+        if (member.kind === 'user') out.push({ kind: 'message', message: member })
+      }
+      if (activity !== undefined) out.push({ kind: 'activity', activity })
+      for (const member of beforeCommitted) {
+        if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
+      }
+      for (const member of group.slice(firstCommittedIndex)) {
+        if (final !== undefined && member === final.message) continue
+        if (member.kind === 'user' || member.kind === 'compaction' || isCommittedAnswer(member)) {
+          out.push({ kind: 'message', message: member })
+        }
+      }
     }
     // The collapsed final: only after the authoritative turn/end.
     if (final !== undefined) {
@@ -462,51 +548,71 @@ export function projectFocus(
   return out
 }
 
-/** The EXACT last assistant message of a turn (by position — an empty or
- * image-only step still owns the final slot; there is NEVER a fallback to
- * an earlier assistant, review fix). */
-function lastAssistant(
+/** Find the Assistant entry that owns the structural latest step. A late
+ * durable message can append after newer process evidence, so physical array
+ * order is not a reliable final-answer identity. */
+function assistantForStep(
   group: readonly TranscriptMessage[],
+  step: number,
 ): Extract<TranscriptMessage, { kind: 'assistant' }> | undefined {
   for (let index = group.length - 1; index >= 0; index -= 1) {
     const member = group[index]
-    if (member?.kind === 'assistant') return member
+    if (member?.kind === 'assistant' && assistantStepOf(member) === step) return member
   }
   return undefined
 }
 
-/** The initial-prompt boundary of one turn group: the index AFTER the
- * turn's FIRST direct user row. Rows before it (injected/system context)
- * and the initial user itself stay above the Thought; every later row
- * (steers included) returns to its chronological position. 0 when the
- * turn has no user row — the Thought then leads with chronology intact
- * (never a synthetic user, never a crash). Only the FIRST direct user is
- * the initial prompt: consecutive users are queue/steer input, not a
- * multi-row initial prompt (plan: no adjacency guessing). */
-function initialPromptBoundary(group: readonly TranscriptMessage[]): number {
-  const firstUserIndex = group.findIndex(member => member.kind === 'user')
-  return firstUserIndex < 0 ? 0 : firstUserIndex + 1
+/** The end of the turn's LEADING injected-context prefix: only consecutive
+ * `kind === 'system'` rows carrying the source-derived `context` marker at
+ * the very start of the group count as the opening turn foundation. Other
+ * `kind: 'system'` rows (llm/retry, max-tokens) are orchestration, not
+ * foundation — they must stay process content, never lifted before the
+ * Thought. Mid-process system rows are never included either, so a later
+ * inject can never be lifted before the Thought. */
+function leadingInjectedContextPrefixEnd(group: readonly TranscriptMessage[]): number {
+  let end = 0
+  while (true) {
+    const member = group[end]
+    if (member === undefined || member.kind !== 'system' || member.context !== true) break
+    end += 1
+  }
+  return end
 }
 
-/** Whether one assistant message truly renders visible rows. The flat
- * `text` already aggregates EVERY text block (textOf), so the only
- * non-text block the TUI's assistant renderer paints is an `image` —
- * `reasoning` / `tool-call` / `tool-result` content (and any future
- * merge-extended block) is SKIPPED by renderBlockSequence. A content
- * array made only of those renders zero rows and can never be presented
- * as a final answer: a max-tokens turn must not end in a bare
- * "(output may be truncated)" marker with no actual output (review
- * edge). Keep this in sync with the renderer's painted block types. */
+/** The Thought-lead boundary of one turn group: the index AFTER the
+ * turn's FIRST unmarked user row. Rows before it (injected context)
+ * and the initial user itself stay above the Thought; every later row
+ * (same-turn steers included) returns to its chronological position. A turn
+ * whose user rows are all marked same-turn steers has no opening human
+ * prompt: the boundary falls back to the end of the LEADING injected-context
+ * prefix, so an inject-woken turn keeps its foundation before the Thought
+ * (never a scan of mid-process system rows, and never orchestration rows
+ * like llm/retry). Without steer metadata, the first user remains the
+ * initial-prompt fallback; consecutive users are queue/steer input, not a
+ * multi-row initial prompt. */
+function thoughtLeadBoundary(group: readonly TranscriptMessage[]): number {
+  const firstInitialUserIndex = group.findIndex(
+    member => member.kind === 'user' && member.steer !== true,
+  )
+  if (firstInitialUserIndex >= 0) return firstInitialUserIndex + 1
+  return leadingInjectedContextPrefixEnd(group)
+}
+
+/** Whether one Assistant entry has semantic/finalized content. Pending
+ * display-only open-opaque rows remain transcript evidence but cannot become a
+ * completed/max-token final; finalized generic blocks stay eligible. */
 function assistantRenderable(assistant: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
-  if (assistant.text !== '') return true
-  return assistant.content?.some(block => block.type === 'image') === true
+  if (assistant.displayBlocks?.some(block => block.kind === 'open-opaque') === true) return false
+  if (assistant.content !== undefined) return assistantBlocksVisibleNow(assistant.content)
+  return assistant.text.trim() !== ''
 }
 
 /** The turn's final assistant selection: only after the authoritative
  * turn/end, only for a reason the system presents output (completed /
- * max-tokens), and only when the EXACT last assistant renders rows. An
- * empty last step yields NO final — never an earlier assistant (review
- * fix). The max-tokens final carries the truncated marker (plan §13.8). */
+ * max-tokens), and only when the Assistant owning the structural latest step
+ * has semantic/finalized content. An empty or pending latest step yields NO
+ * final — never an earlier assistant (review fix). The max-tokens final carries
+ * the truncated marker (plan §13.8). */
 function finalAssistantSelection(
   activity: TurnActivity | undefined,
   group: readonly TranscriptMessage[],
@@ -514,7 +620,14 @@ function finalAssistantSelection(
   if (activity === undefined || !activity.completed) return undefined
   const reason = activity.reason?.kind
   if (reason !== 'completed' && reason !== 'max-tokens') return undefined
-  const last = lastAssistant(group)
-  if (last === undefined || !assistantRenderable(last)) return undefined
+  // The exact authoritative assistant may be retained internally but hidden
+  // from the normal transcript projection; never fall back to an earlier row.
+  const latestStep = assistantLatestStepOf(activity)
+  if (activity.lastAssistantVisible === false || latestStep === undefined) return undefined
+  const last = assistantForStep(group, latestStep)
+  // Interrupted prefixes and display-only pending rows are process evidence,
+  // never a completed/max-token final answer, even when a malformed log reports
+  // a successful reason.
+  if (last === undefined || last.interrupted === true || !assistantRenderable(last)) return undefined
   return { message: last, truncated: reason === 'max-tokens' }
 }

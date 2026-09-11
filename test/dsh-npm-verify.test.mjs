@@ -7,6 +7,7 @@ import { testLifecycle } from './support/temp-lifecycle.ts'
 import {
   candidateTarball as npmVerifyCandidateTarball,
   npmVerificationEnvironment,
+  pinNpmDshDependencies,
 } from '../scripts/dsh-npm-verify.mjs'
 
 test('npm verification pins the public registry and isolated user config', () => {
@@ -22,6 +23,29 @@ test('npm verification pins the public registry and isolated user config', () =>
   assert.equal(environment.npm_config_userconfig, '/tmp/dsh-npm-verify-test.npmrc')
   assert.equal(environment.NPM_CONFIG_USERCONFIG, '/tmp/dsh-npm-verify-test.npmrc')
   assert.equal(environment.DSH_TEST_SENTINEL, 'preserved')
+})
+
+test('an explicit npm DSH override rewrites only DSH development packages', (t) => {
+  const life = testLifecycle(t)
+  const workspace = life.tempDir('dsh-npm-pin-test-')
+  writeFileSync(join(workspace, 'package.json'), JSON.stringify({
+    devDependencies: {
+      '@deepseek-ai/dsh': '0.1.5-rc.1',
+      '@deepseek-ai/dsh-agent': '0.1.5-rc.1',
+      typescript: '5.0.0',
+    },
+    peerDependencies: { '@deepseek-ai/dsh-agent': '>=0.1.5-rc.1' },
+  }))
+
+  pinNpmDshDependencies(workspace, '0.1.5-rc.2')
+
+  const packageJson = JSON.parse(readFileSync(join(workspace, 'package.json'), 'utf8'))
+  assert.deepEqual(packageJson.devDependencies, {
+    '@deepseek-ai/dsh': '0.1.5-rc.2',
+    '@deepseek-ai/dsh-agent': '0.1.5-rc.2',
+    typescript: '5.0.0',
+  })
+  assert.equal(packageJson.peerDependencies['@deepseek-ai/dsh-agent'], '>=0.1.5-rc.1')
 })
 
 test('CI npm install branches pin the public registry and isolated config', () => {
@@ -50,6 +74,17 @@ test('CI source preparation and publication have explicit time and registry boun
   assert.match(workflow, /echo "npm_config_userconfig=\$RUNNER_TEMP\/dsh-publish-npmrc"/u)
   assert.doesNotMatch(workflow, /NPM_CONFIG_(?:REGISTRY|USERCONFIG):/u)
   assert.ok(workflow.includes("printf 'registry=https://registry.npmjs.org/\\n' > \"$RUNNER_TEMP/dsh-publish-npmrc\""))
+})
+
+test('official preset assembly follows the selected Source/npm distribution lane', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  const officialStart = workflow.indexOf('  official-preset-assembly:')
+  const runtimeStart = workflow.indexOf('  runtime-boundary:', officialStart)
+  assert.ok(officialStart >= 0 && runtimeStart > officialStart, 'official preset job boundaries must exist')
+  const official = workflow.slice(officialStart, runtimeStart)
+  assert.match(official, /if \[ "\$DSH_MODE" = source \]; then/u)
+  assert.match(official, /official-presets-smoke\.mjs "\$\{TARBALLS\[0\]\}" --distribution "\$DSH_SOURCE_ARTIFACT"/u)
+  assert.match(official, /else\n\s+node scripts\/official-presets-smoke\.mjs "\$\{TARBALLS\[0\]\}"/u)
 })
 
 test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2dsh gate is DISABLED pending a compatible release', () => {

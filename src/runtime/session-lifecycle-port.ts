@@ -5,20 +5,22 @@
  * adapter in a later milestone. The contract is deliberately
  * transport-neutral:
  *
- * - Requests carry SERIALIZABLE data only (session id, provider/model,
- *   preset id, seed, meta) — never callbacks. A Remote adapter maps them
- *   to the official DSH API.
+ * - Requests carry SERIALIZABLE data (session id, provider/model, preset id,
+ *   seed, meta) plus the explicitly client-local lifecycle signal — never
+ *   callbacks. The signal is never serialized; a Remote adapter maps the
+ *   serializable request data to the official DSH API.
  * - The result is a lightweight `SessionHandle` (session identity plus an
  *   optional Direct-only agent escape) — never the in-process
  *   `AgentHandle` object.
  * - The Direct adapter resolves the preset composition (which builds the
  *   agent-setup callback) INTERNALLY; the runner keeps its preflight
- *   compose for lock-ordering and passes the preset id through the
- *   request.
+ *   compose and passes the preset id through the request.
  *
- * The runner keeps the Direct-mode ownership machinery (owner.lock,
- * lease/cooling, PINNED, transition gate, operation barrier) around the
- * port calls — those are M8 territory and never move here.
+ * The DSH AgentHandle / SessionHandle owns the persistence writer
+ * lifetime (its `dispose()` is the structured teardown; the kernel-flock
+ * SessionWriteLease is the only cross-process writer authority). The TUI
+ * runner owns only surface transition coordination (the transition gate,
+ * the operation barrier, generation/stale fences) around the port calls.
  *
  * Fork and rewind are NOT separate port methods: they ride the
  * dependency-injected seams in src/session-fork.ts (ForkAgentHost) and
@@ -49,7 +51,7 @@ export interface CreateSessionRequest {
    * seed contract. */
   seed?: readonly unknown[]
   /** Exact fork-inherited prefix length when `meta.isSeeded` is set
-   * (alpha.4's seeded-session contract). */
+   * (the seeded-session contract). */
   inheritedEventCount?: number
   /** CLIENT-LOCAL control field (never serialized): creation-only
    * cancellation; the handle detaches on publication. */
@@ -64,6 +66,11 @@ export interface ResumeSessionRequest {
   /** The recorded preset id (resolved from the session log); the Direct
    * adapter composes the setup from it. */
   agentPreset?: string
+  /** CLIENT-LOCAL control field (never serialized): resume-creation-only
+    * cancellation; it detaches when the handle is published. A future Remote
+    * adapter maps it to client/connection cancellation instead of serializing
+    * the AbortSignal. */
+  signal?: AbortSignal
 }
 
 /** The lightweight outcome of a lifecycle operation — the cross-backend
@@ -82,8 +89,9 @@ export interface SessionHandle {
     readonly agent: unknown
     /** The real DSH `AgentHandle` (with `dispose()` — the ownership
      * capability). MUST be preserved: the runner disposes it on
-     * retirement, and a lost handle pins the old lease (P1 regression
-     * class, fixed in M1.5 revision 2). */
+     * retirement, and a lost handle previously pinned the old lease
+     * (removed legacy — the P1 regression class, fixed in M1.5
+     * revision 2). */
     readonly ownerHandle: unknown
   }
 }
@@ -99,8 +107,9 @@ export interface SessionLifecycle {
  * (via `direct.ownerHandle`) and a legacy AgentHandle (which IS the
  * handle) so the runner's transition code never stores the SessionHandle
  * where it expects the AgentHandle — a lost handle would make
- * `dispose()` at retirement throw and PIN the old lease (the P1
- * regression class). Remote handles lack `direct` and yield undefined. */
+ * `dispose()` at retirement throw and pin the old lease (removed legacy
+ * — the P1 regression class). Remote handles lack `direct` and yield
+ * undefined. */
 export function ownerHandleOf(next: unknown): unknown {
   const handle = next as { dispose?: unknown; direct?: { ownerHandle?: unknown } }
   if (handle.direct?.ownerHandle !== undefined) return handle.direct.ownerHandle

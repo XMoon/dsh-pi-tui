@@ -130,10 +130,9 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     agents: {} as never,
     sessionReader: {
       list: async () => [],
-      search: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),

@@ -22,23 +22,21 @@ const parentNotice = event(5, 'user/message', {
   source: { kind: 'subagent-settled', form: 'notice', summary: 'Background subagent parent-child finished', senderSessionId: 'session-parent-child' },
 })
 
-test('childOwnEvents drops the seeded parent history after the last end-seed', () => {
+test('childOwnEvents cuts seeded parent history after the inherited ownership marker', () => {
   const log = [
     event(0, 'user/message', { content: [{ type: 'text', text: 'parent prompt' }], source: { kind: 'user' } }),
     event(1, 'turn/start', { turn: 1 }),
     event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'parent reply' }] } }),
     parentNotice,
     event(6, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
-    event(7, 'session/end-seed', {}),
+    event(7, 'session/end-seed', { inherited: true }),
     event(8, 'user/message', { content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' } }),
     event(9, 'turn/start', { turn: 1 }),
     event(10, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child reply' }] } }),
   ]
   const own = childOwnEvents(log)
-  assert.equal(own.length, 3, 'only the child events after the seed marker survive')
-  assert.ok(!own.some(e => e.seq <= 7), 'no seeded parent event may survive')
-  assert.equal(own[0]!.seq, 8)
-  assert.equal(own[2]!.seq, 10)
+  assert.deepEqual(own.map(candidate => candidate.seq), [8, 9, 10], 'only events after the ownership marker survive')
+  assert.ok(!own.some(candidate => JSON.stringify(candidate.data).includes('parent')), 'parent content must not survive')
 })
 
 test('childOwnEvents keeps everything for an unseeded (spawned) child', () => {
@@ -46,22 +44,46 @@ test('childOwnEvents keeps everything for an unseeded (spawned) child', () => {
     event(0, 'user/message', { content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' } }),
     event(1, 'turn/start', { turn: 1 }),
     event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child reply' }] } }),
+    event(3, 'session/end-seed', {}),
   ]
-  assert.equal(childOwnEvents(log), log, 'no seed marker means everything is the child\'s own')
+  assert.equal(childOwnEvents(log), log, 'without an inherited marker every event is the child\'s own')
 })
 
-test('childOwnEvents uses the LAST marker when the child itself was resumed', () => {
+test('childOwnEvents keeps child history across every untagged resume marker', () => {
   const log = [
     event(0, 'user/message', { content: [{ type: 'text', text: 'parent prompt' }], source: { kind: 'user' } }),
-    event(1, 'session/end-seed', {}),
+    event(1, 'session/end-seed', { inherited: true }),
     event(2, 'user/message', { content: [{ type: 'text', text: 'child first turn' }], source: { kind: 'user' } }),
-    event(3, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
-    event(4, 'session/end-seed', {}), // the child's stored log became a new seed on resume
+    event(3, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child first reply' }] } }),
+    event(4, 'session/end-seed', {}),
     event(5, 'user/message', { content: [{ type: 'text', text: 'child resumed turn' }], source: { kind: 'user' } }),
+    event(6, 'assistant/message', { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child resumed reply' }] } }),
+    event(7, 'session/end-seed', {}),
+    event(8, 'user/message', { content: [{ type: 'text', text: 'child third turn' }], source: { kind: 'user' } }),
   ]
   const own = childOwnEvents(log)
-  assert.equal(own.length, 1)
-  assert.equal(own[0]!.seq, 5, 'only the post-resume events are the child\'s own')
+  assert.deepEqual(own.map(candidate => candidate.seq), [2, 3, 4, 5, 6, 7, 8])
+  const text = own.map(candidate => JSON.stringify(candidate.data)).join('\n')
+  assert.ok(text.includes('child first turn'))
+  assert.ok(text.includes('child first reply'))
+  assert.ok(text.includes('child resumed turn'))
+  assert.ok(text.includes('child resumed reply'))
+  assert.ok(text.includes('child third turn'))
+  assert.ok(!text.includes('parent prompt'))
+})
+
+test('childOwnEvents uses the LAST inherited marker for nested fork history', () => {
+  const log = [
+    event(0, 'user/message', { content: [{ type: 'text', text: 'ancestor prompt' }], source: { kind: 'user' } }),
+    event(1, 'session/end-seed', { inherited: true }),
+    event(2, 'user/message', { content: [{ type: 'text', text: 'parent child prompt' }], source: { kind: 'user' } }),
+    event(3, 'session/end-seed', { inherited: true }),
+    event(4, 'user/message', { content: [{ type: 'text', text: 'current child prompt' }], source: { kind: 'user' } }),
+  ]
+  const own = childOwnEvents(log)
+  assert.deepEqual(own.map(candidate => candidate.seq), [4])
+  assert.ok(JSON.stringify(own[0]!.data).includes('current child prompt'))
+  assert.ok(!JSON.stringify(own[0]!.data).includes('parent child prompt'))
 })
 
 test('the viewer transcript never shows a seeded parent completion notice', () => {
@@ -71,7 +93,7 @@ test('the viewer transcript never shows a seeded parent completion notice', () =
     event(0, 'user/message', { content: [{ type: 'text', text: 'parent prompt' }], source: { kind: 'user' } }),
     parentNotice,
     event(6, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
-    event(7, 'session/end-seed', {}),
+    event(7, 'session/end-seed', { inherited: true }),
     event(8, 'user/message', { content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' } }),
     event(9, 'turn/start', { turn: 1 }),
     event(10, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child reply' }] } }),

@@ -7,6 +7,339 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-09-11
+
+### Installation and version pairing
+
+This stable release has a minimum DSH version of `0.1.5-rc.1` and is also
+compatible with `0.1.5-rc.2`. We recommend rc.2; its native install scripts
+must be explicitly allowed:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.5
+dsh --profile pi-tui
+```
+
+Do not pair this release with the historical DSH `0.1.3-alpha.2` line. Users
+who must keep an older DSH should install the matching historical TUI: use
+`@xmoon76/dsh-pi-tui@0.4.1` for DSH `0.1.2-rc.1`,
+`@xmoon76/dsh-pi-tui@0.4.3-alpha.2` for DSH `0.1.3-alpha.2`, and
+`@xmoon76/dsh-pi-tui@0.3` for the older DSH `0.1.1-rc.1`/`rc.2` line.
+
+### Added
+
+- **PTC / `run_code` nested tool tree.** Sub-calls inside a `run_code` program now
+  render as a recursive tree under the root Code card instead of scattered top-level
+  tool rows; Focus, `/search`, and Markdown export preserve the nesting and show a
+  compact active-child hint.
+- **Session presentation aligns with DSH Session semantics across V2/V3 persistence generations.**
+  Live answers, tool results, Thinking, and cold-resumed sessions now render consistently;
+  Focus, Transcript, and Stats no longer duplicate transient stream content.
+- **`/search` converges into the Session Browser.** `/sessions`, `/resume`, and
+  `/search` share one global view for session metadata and content; older sessions
+  are searchable, and metadata filtering remains available when content search fails.
+- **Unified attachment intake.** `@` mentions, `/image` arguments, and pasted content
+  now share one pipeline, keeping image, file, placeholder, and draft submission
+  behavior consistent.
+- **Inline `/skill` references complete in drafts.** `/name` tokens can complete from
+  the detached skill catalog; acceptance inserts only the reference, and the final
+  ordinary prompt lets the Host inject the recognized skill.
+- **Scalable Workflow UI.** Run/Phase cards show members for small runs and aggregate
+  summaries, abnormal previews, and a filterable Task Viewer for large runs; completed,
+  cancelled, and interrupted states are presented distinctly.
+- **Workflow lifecycle/model parity with DSH alpha.2.** Workflow preserves complete run
+  and member statuses, with cold replay, live records, search, and `/transcript` using
+  the same result model.
+- **`/export` saves the full Session archive.** The command now produces the
+  official full Session-tree archive (descendants + attachments) and asks
+  for a Client-local save directory after the command succeeds; the file
+  name is fixed to the full Session id. The old single-log JSONL export is
+  gone.
+- **New `/transcript` command.** Saves a readable Markdown transcript of the
+  current Session to a Client-local directory, with the same
+  no-argument/save-location UX as `/export`.
+- **Welcome card visual refresh.** The session-head card now shows an original round-backed whale ASCII mascot (five variants, one picked per process) with three responsive layouts: side-by-side (whale left, facts right) at 72+ columns, stacked (whale centered above the facts) at 24–71 columns, and a compact text layout (🐋 title) below 24 columns. The whale keeps a fixed cyan → blue brand gradient that does not follow theme switches; facts still render in full (long values wrap, never truncate); the idle invitation, the `setWelcomeCard()` contract, and fullscreen scroll/anchor/click mapping are unchanged.
+
+### Changed
+
+- **Updated builtin default Footer layout.** The default statusline (no custom Footer) now uses two rows: row 1 keeps permission, model, tasks, cwd, branch and extension items on the left, with plan state and Focus Mode on the right; row 2 composes token usage, cache hit, TTFB, throughput and the turn/step counters on the left (the semantic decomposition of the stats line), with the full context pressure (`used/window (percent)`) on the right. Users with a saved custom `footerLayout` are unaffected.
+
+### Improved
+
+- **Streaming tool preparation UX.** Preparing cards migrate more reliably
+  around block completion: delayed names keep a bounded prefix, empty call
+  ids migrate to the authoritative block-end id, and parallel previews keep
+  independent bytes and summaries.
+- **Content-block presentation.** Open opaque assistant blocks render
+  immediately (no longer waiting for the stream to end), pending finals are
+  fenced, stale confirmed assistant previews refresh, and the continuable
+  subagent viewer keeps its viewing history.
+- **Commands are decided by the whole LINE, not by the command name.** The DSH decision table
+  (`CommandDescriptor.input`) distinguishes a `leadingInput` command (e.g. `/goal`), whose arguments are part of the
+  invocation, from an execute-kind one (e.g. `/compact`), where only the BARE token is an invocation. Previously any
+  name present in the command catalog sent the whole line to the command plane — `/compact anything` executed the
+  command, ignored the busy queue/steer policy while running, and was even refused by the command attachment rule when
+  it carried an image. Such a line now behaves exactly like an ordinary prompt: it follows the busy policy
+  (queue/steer, and Ctrl+Enter takes the opposite), and its image is delivered to the model as a multimodal prompt.
+  Real invocations — `/compact`, `/goal <objective>`, `/plan <message>` — still execute through the command plane, and
+  the attachment rule only applies to a line a command actually claims.
+- **`!`/`!!` shell lines refuse attachments instead of passing the placeholder to the shell.** The local shell never
+  admitted or consumed drafts, so `!echo [image #1]` used to run with the placeholder as ordinary shell arguments and
+  leave the image staged. The line is now refused like any other local command, and the draft comes back with its
+  attachment intact.
+- **Command attachments follow the command's own declaration.** A command may be invoked with attachments
+  only when its descriptor declares `input.attachments`; anything else refuses the line up front
+  (`/<name> does not accept attachments; remove them first`) instead of handing the host a placeholder with
+  no payload. A declaring command receives the submitted images as encoded attachments on the host command
+  call, and a command submission consumes them only after handler success — a failed command restores the
+  draft WITH its attachments. File attachments are refused for commands (the host expects an upload receipt
+  this client cannot produce yet). Skill invocations are unaffected: an explicit `/skill <name> [image #1]`
+  and a skill wrapper stay agent-facing, so their images ride the delivered prompt instead of the command
+  wire. The policy follows the FINAL authority: an unknown `/name [image #1]` line whose command only appears
+  with the session (a session-scoped host command) is checked again after the session resolves — an undeclared
+  command refuses it instead of running with an empty payload and consuming the draft.
+- **An attachment-bearing `/name args` line is no longer treated as a client command.** A client command
+  contribution claims the BARE `/name` token only, so a line such as `/deploy [image #1]` (an attachment
+  always brings input with it) was never a contribution invocation: it is an ordinary multimodal submission
+  that reaches the model — the plugin handler does not run and no "local command" attachment refusal is
+  raised.
+- **A plugin reload during a deferred start never runs the next generation.** If the contribution is
+  unloaded/replaced while the first submission resolves its session (even under the same owner and id),
+  the submitted command does **not** run the new handler and is **never** downgraded to a model prompt:
+  the submission is aborted with `/<name> is no longer available` and the draft is restored for a retry.
+- **Ctrl+Enter now follows the web submission semantics.** While the agent is running, Ctrl+Enter takes
+  the **opposite** of the busy-Enter behavior: it steers under the default `busyEnter=queue` and queues
+  under `busyEnter=steer` (an idle agent always queues). The old `app.input.queue` action is kept as a
+  deprecated, key-less action, so a stored remap still means "queue" instead of being silently turned
+  into the opposite behavior; the new `app.input.submitAccelerated` owns Ctrl+Enter.
+- **Throughput statistics use observable decode throughput.** Footer tok/s now uses counted output
+  tokens over the observable decode window; burst samples are not mixed with full LLM wall time or
+  counts from other response stages.
+- **Focus steer chronology is more reliable.** Early, late, and same-timestamp steer/answer events use
+  the provable boundary; answers crossed by a steer are not lost or shown twice.
+
+### Fixed
+
+- **A stale command handle can no longer remove a newer registration.** A dispose handle names ONE registration:
+  a repeated or late `dispose()` (a fiber cleanup arriving after an HMR reload re-registered the same id) no longer
+  removes the newer contribution or drops its health record.
+- **Text-input keyboard ownership is corrected.** Free-text editing no
+  longer loses its line-editing keys to the parent: in Question's “Type
+  something.” edit, `←/→` are the text cursor (previously they could commit
+  and move on, or page back), and `Home/End/Ctrl+A/E/B/F/Delete` etc. all
+  reach the shared Input. Optionless questions now use an explicit two-layer
+  state: in the EDIT layer `←/→` move the text cursor, `↵` commits, and
+  `Esc/Ctrl+C` only leave the edit for the NAVIGATION layer, where `↵`
+  re-enters the edit, `←/→` page between questions (or skip), and
+  `Esc/Ctrl+C` cancel the whole flow (previously Esc either stranded such a
+  question in a half-dead, uneditable state or cancelled the whole flow
+  outright). The Question edit-mode and Task Center search-mode footers only
+  advertise what the current mode actually does (no more `↑↓ select` /
+  `A active/all` list actions while typing). Transcript search now closes on
+  Esc or Ctrl+C (the `app.transcript.search.close` defaults were extended —
+  previously the overlay's Input swallowed Ctrl+C), and shows a
+  `↵ next · ⇧↵ prev · esc/ctrl+c close` hint under the input. The
+  `/keybindings` search box is rendered by the shared Input: full
+  cursor/Home/End/Delete/word-move editing works, and the hint flips between
+  `Esc: clear` (non-empty query) and `Esc: close`.
+- **Direct sessions are now fully retired on exit.** Exiting the TUI now retires
+  the main Agent, its continuable subagents and Agent-scoped background jobs in
+  a fixed order: cancel the main Agent and await quiescence → drain continuable
+  descendants → final persistence flush → release the AgentHandle. Previously
+  the process could linger for ~5 minutes after exit while a continuable
+  subagent stayed alive; exit now completes within seconds, and the diagnostics
+  distinguish surface close, Host retirement and launcher exit. Session
+  switches (/new, /fork, rewind, /sessions) also retire the old owner's
+  continuable descendants after the commit.
+- **Presentation details.** Diff presentation aligns with official DSH semantics
+  (folded multi-hunk diffs stay bounded; edit headers and result parity are
+  preserved); `@` file completion keeps full paths and fixes marquee routing
+  and host cleanup; model selection survives fork and rewind; steers after a
+  Focus thought are kept for non-user turns and opening steers are distinguished
+  from mid-turn input; assistant tool-result presentation survives the
+  presentation pipeline.
+- **Session open/switch robustness.** Opening or switching sessions (/new,
+  /resume, fork, rewind, /sessions) no longer drops state: the previous session
+  stays visible and usable until the new one is ready, a failed initial bootstrap
+  no longer strands the surface (retry still opens), the old Agent keeps write
+  authority until the new session takes over, and late-arriving assistant stream
+  fragments are reassembled per official semantics without half-built or
+  orphan blocks.
+
+### Compatibility
+
+- **Client command contributions are bare-token invocations only (breaking).** DSH `matchEnter`
+  parity: a contribution is a slash-MENU entry, so it claims the BARE `/name` token only — `/name args`
+  is not an invocation. It is an ordinary submission that reaches the model (busy policy and
+  attachments included), and the plugin `handler` never runs for it. Previously `/deploy prod` ran the
+  plugin handler. A plugin that needs arguments should open its own picker from the bare command, or
+  expose the capability to the model as a tool.
+- **The extension API version is now 2 (breaking).** `api().apiVersion` reports `2` because the
+  plugin command contribution contract below is a breaking change to the STABLE surface (removed
+  `execution`/`argumentProvider`, required `handler`); `1` stays the M0–M3 foundation, so a plugin
+  can tell the two schemas apart. A plugin still declaring the removed v1 shape is rejected at
+  registration instead of being silently reinterpreted.
+- **Plugin command contributions now follow the DSH client command model (breaking).** The
+  `execution: 'local' | 'submission'` ownership metadata is REMOVED: a contribution IS a client-owned
+  command (a required `handler`, no host descriptor) that joins the `/` menu and executes locally, never
+  steered. A name that collides with the current host catalog FAILS the candidate synthesis as a whole
+  (no menu rows are installed, the collision is recorded on the contribution's health and surfaced once,
+  naming every colliding contribution of that failed pass)
+  while the host command keeps its claim — it can never be downgraded to a model prompt. A contribution
+  used to advertise a prompt-style name should simply not be registered (an unclaimed `/name args` line
+  is already a prompt; the host-side skill owns discovery). `sessionless: true` runs the command before a
+  session exists; the default `false` resolves/creates the session first. A collision with the SESSION's
+  host catalog fails the whole candidate pass at synthesis time (upstream `source-failed` parity: the
+  source's command rows are withdrawn until a synthesis succeeds again) while the host claims stay
+  refreshed — input authority is never lost — and the collision is recorded on the contribution's health
+  and surfaced once per identity/failure generation (the notice names every collision of that pass); a
+  collision with the TUI's own static command names
+  is rejected at registration. The never-wired `argumentProvider` field is removed too (use
+  `registerAutocomplete`).
+- **Standalone composition callers retain `ModelSelectionRef` compatibility.** The
+  root `composeAgent(ctx, ref)` form remains supported, and its setup installs
+  the caller-owned selection without requiring an Agent; the Direct runner
+  continues to use the explicit Agent-local installer form.
+
+> **Known limitation:** The production default backend remains Direct; remote
+> attach is not supported.
+
+## [0.4.3-alpha.2] - 2026-09-08
+
+### Installation and version pairing
+
+For this prerelease line, install the matching DSH first and then add the TUI
+bundle into a profile:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.3-alpha.2
+dsh --profile pi-tui
+```
+
+Users who must keep an older DSH should pin the matching TUI:
+`0.1.1-rc.2` → `@xmoon76/dsh-pi-tui@0.3`; `0.1.2-alpha.2`/`alpha.3` →
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.1`; `0.1.2-alpha.4`/`alpha.5` →
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.2`; `0.1.2-rc.1` →
+`@xmoon76/dsh-pi-tui@0.4.1`. The complete version matrix and update/remove
+commands are in the README's “Install into a DSH profile” section.
+
+### Added
+
+- **PTC / `run_code` nested tool tree.** Sub-calls dispatched inside a
+  `run_code` program now render as a recursive sub-call tree under the root
+  Code card: a full identity chain (`subCallId`/`parentCallId`/`rootCallId`)
+  supports grandchild topology, and orphan start/settle facts are parked
+  privately and connected when their parent appears — never promoted to
+  top-level surface rows. The tree is aligned with Focus, display and search:
+  in collapsed Focus, `run_code` stays the formal Tool slot with a compact
+  active-child hint (e.g. `Bash running` / `Bash ×2 running` /
+  `Bash +1 running`, with a width-degradation ladder); the `/search` corpus
+  recursively includes sub-call descendants (matches locate the root Code
+  card); markdown export keeps nested output.
+- **Session presentation aligns with DSH v2 semantics.** The Direct adapter
+  ingests official `agent/assistant-stream` live frames (completed-turn
+  fences, revision-gap resynchronization); Transcript/Focus/Stats fold the
+  transient plane; cold replay restores thinking from assistant/message
+  blocks; the old durable assistant/chunk private path is gone.
+- **`/search` converges into the Session Browser.** `/sessions`, `/resume`
+  and `/search` now share one session browser: typing a query enters a global
+  search view (local metadata matches ∪ content matches) that is never
+  scoped by the workspace tabs, and hit snippets render on the matching
+  session rows; when content search is unavailable or fails, local metadata
+  filtering keeps working and the browser stays open.
+- **Session content search aligns with official DSH semantics.** The Direct
+  adapter now uses `sessionQuery.searchSessions()` (matching DSH master
+  `ApiSessionList.search()`: visibility authorization, dedupe, cursor
+  pagination, 20-result window), removing the old “newest 100 sessions +
+  filterEvents” private rule — matches in old sessions are now found.
+- **Unified attachment intake.** `@` mentions, `/image` arguments and pasted
+  content share one attachment intake pipeline: a bounded signature probe
+  separates images from generic files, generic files keep their metadata and
+  stream at submit time, and placeholder/draft submission behavior is
+  unified.
+- **Inline `/skill` references complete in drafts.** A `/name` token at a
+  whitespace boundary in a prompt-mode draft completes against the detached
+  human skill catalog; accepting inserts the literal reference without
+  submitting, and the final ordinary prompt lets the Host `dsh-tool-skill`
+  pre-step inject every recognized skill.
+
+### Improved
+
+- **Streaming tool preparation UX.** Preparing cards migrate more reliably
+  around block completion: delayed names keep a bounded prefix, empty call
+  ids migrate to the authoritative block-end id, and parallel previews keep
+  independent bytes and summaries.
+- **Content-block presentation.** Open opaque assistant blocks render
+  immediately (no longer waiting for the stream to end), pending finals are
+  fenced, stale confirmed assistant previews refresh, and the continuable
+  subagent viewer keeps its viewing history.
+
+### Fixed
+
+- **A stale command handle can no longer remove a newer registration.** A dispose handle names ONE registration:
+  a repeated or late `dispose()` (a fiber cleanup arriving after an HMR reload re-registered the same id) no longer
+  removes the newer contribution or drops its health record.
+- **Text-input keyboard ownership is corrected.** Free-text editing no
+  longer loses its line-editing keys to the parent: in Question's “Type
+  something.” edit, `←/→` are the text cursor (previously they could
+  commit and move on, or page back), and `Home/End/Ctrl+A/E/B/F/Delete`
+  etc. all reach the shared Input. Optionless questions now use an
+  explicit two-layer state: in the EDIT layer `←/→` move the text
+  cursor, `↵` commits, and `Esc/Ctrl+C` only leave the edit for the
+  NAVIGATION layer, where `↵` re-enters the edit, `←/→` page between
+  questions (or skip), and `Esc/Ctrl+C` cancel the whole flow (previously
+  Esc either stranded such a question in a half-dead, uneditable state
+  or cancelled the whole flow outright). The Question edit-mode and Task
+  Center search-mode footers only advertise what the current mode
+  actually does (no more `↑↓ select` / `A active/all` list actions while
+  typing). Transcript search now closes on Esc or Ctrl+C (the
+  `app.transcript.search.close` defaults were extended — previously the
+  overlay's Input swallowed Ctrl+C), and shows a
+  `↵ next · ⇧↵ prev · esc/ctrl+c close` hint under the input. The
+  `/keybindings` search box is rendered by the shared Input: full
+  cursor/Home/End/Delete/word-move editing works, and the hint flips
+  between `Esc: clear` (non-empty query) and `Esc: close`.
+- **Direct sessions are now fully retired on exit.** Exiting the TUI now
+  retires the main Agent, its continuable subagents and Agent-scoped
+  background jobs in a fixed order: cancel the main Agent and await
+  quiescence → drain continuable descendants → final persistence flush →
+  release the AgentHandle. Previously the process could linger for ~5
+  minutes after exit while a continuable subagent stayed alive; exit now
+  completes within seconds, and the diagnostics distinguish surface close,
+  Host retirement and launcher exit. Session switches (/new, /fork, rewind,
+  /sessions) also retire the old owner's continuable descendants after the
+  commit.
+- **Presentation details.** Diff presentation aligns with official DSH
+  semantics (folded multi-hunk diffs stay bounded; edit headers and result
+  parity are preserved); `@` file completion keeps full paths and fixes
+  marquee routing and host cleanup; model selection survives fork and
+  rewind; steers after a Focus thought are kept for non-user turns and
+  opening steers are distinguished from mid-turn input; assistant
+  tool-result presentation survives the presentation pipeline.
+- **Session open/switch robustness.** Opening or switching sessions (/new,
+  /resume, fork, rewind, /sessions) no longer drops state: the previous
+  session stays visible and usable until the new one is ready, a failed
+  initial bootstrap no longer strands the surface (retry still opens), the
+  old Agent keeps write authority until the new session takes over, and
+  late-arriving assistant stream fragments are reassembled per official
+  semantics without half-built or orphan blocks.
+
+### Compatibility
+
+- **The `next` line now requires DeepSeek Harness `0.1.3-alpha.2` or later.**
+  The startup notice on an old runtime now gives the exact npm upgrade
+  command (`npm install -g @deepseek-ai/dsh@0.1.3-alpha.2`) instead of
+  referencing an unpublished master source baseline.
+- **This release is validated against the exact npm `0.1.3-alpha.2` family.**
+  The peer floor is `>=0.1.3-alpha.2`, dev/test dependencies and the frozen
+  lockfile resolve to that exact family, and compatibility/preset/boundary
+  smokes run against that family from the registry.
+
+> **Known limitation:** The production default backend remains Direct; remote
+> attach is not supported.
+
 ## [0.4.1] - 2026-09-04
 
 ### Installation and version pairing
@@ -744,7 +1077,9 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...v0.4.5
+[0.4.3-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...next-v0.4.3-alpha.2
 [0.4.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...v0.4.0
 [0.4.0-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...next-v0.4.0-alpha.2

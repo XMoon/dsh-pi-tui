@@ -136,14 +136,12 @@ test('ctrl+s with an empty draft still fires onSteer (the runner decides)', asyn
   assert.equal(app.getDraft(), '', 'editor must stay empty after ctrl+s')
 })
 
-test('ctrl+enter fires the queue-submit chord and clears the editor', async () => {
+test('ctrl+enter raises the ACCELERATED submit request and clears the editor', async () => {
   const vt = new VirtualTerminal(80, 24)
-  const queued: string[] = []
-  const submitted: string[] = []
+  const requests: { text: string; request: string }[] = []
   const app = new TuiApp(vt, {
-    onSubmit: (text) => submitted.push(text),
+    onSubmit: (text, request) => requests.push({ text, request }),
     onExit: () => {},
-    onQueueSubmit: (text) => queued.push(text),
   })
   app.start()
 
@@ -151,38 +149,75 @@ test('ctrl+enter fires the queue-submit chord and clears the editor', async () =
   vt.sendInput('queue me')
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter
   await viewport(vt)
-  assert.deepEqual(queued, ['queue me'], 'the chord must submit the draft in queue mode')
-  assert.deepEqual(submitted, [], 'the chord must not fire the plain submit')
+  // The chord is a GESTURE, not a fixed queue: it reaches the runner as the
+  // accelerated request, which resolves to the OPPOSITE of the busy-Enter
+  // preference (web ComposerSubmissionPolicy parity).
+  assert.deepEqual(requests, [{ text: 'queue me', request: 'accelerated' }],
+    'the chord must raise the accelerated submit request')
   // The editor was cleared: a follow-up Enter carries only the new text.
   vt.sendInput('x')
   vt.sendInput('\r')
   await viewport(vt)
-  assert.deepEqual(submitted, ['x'], 'the chord must clear the editor')
+  assert.deepEqual(requests[1], { text: 'x', request: 'enter' }, 'the chord must clear the editor')
 })
 
-test('ctrl+enter without a wired chord falls through (no draft loss)', async () => {
-  const { vt, app } = startApp()
-  vt.sendInput('keep me')
-  vt.sendInput('\x1b[13;5u') // kitty ctrl+enter with no onQueueSubmit wired
-  const view = await viewport(vt)
-  assert.ok(view.includes('keep me'), `draft must survive without a wired chord:\n${view}`)
-  void app
+test('the explicit queue action raises the explicit-queue request (never the chord request)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const requests: { text: string; request: string }[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text, request) => requests.push({ text, request }),
+    onExit: () => {},
+  })
+  app.start()
+
+  startedApps.add(app)
+  vt.sendInput('queue me')
+  // The public `queue-draft` action (and the replacement editor's
+  // `queue-submit`) is an explicit delivery command: the app raises the
+  // `explicit-queue` request, which the runner delivers as a queue even when
+  // the accelerated CHORD would steer. The two semantics are deliberately
+  // distinct (the runner maps the extension action onto this request).
+  app.submitDraft('explicit-queue')
+  await viewport(vt)
+  assert.deepEqual(requests, [{ text: 'queue me', request: 'explicit-queue' }],
+    'the explicit queue action must not be confused with the accelerated gesture')
+})
+
+test('the deprecated app.input.queue action still raises the explicit-queue request', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const requests: { text: string; request: string }[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text, request) => requests.push({ text, request }),
+    onExit: () => {},
+  })
+  app.start()
+  startedApps.add(app)
+  vt.sendInput('queue me')
+  // The deprecated action keeps its ORIGINAL meaning (a stored remap must not
+  // turn into the accelerated opposite), and it is dispatched like any other
+  // semantic action.
+  const dispatched = (app as unknown as {
+    actionDispatcher: { dispatch: (action: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.queue')
+  await viewport(vt)
+  assert.equal(dispatched, true, 'the deprecated queue action must be dispatchable')
+  assert.deepEqual(requests, [{ text: 'queue me', request: 'explicit-queue' }],
+    'the deprecated action must queue — never the accelerated gesture')
 })
 
 test('ctrl+enter on an empty draft does not fire the chord (no session-creating submit)', async () => {
   const vt = new VirtualTerminal(80, 24)
-  const queued: string[] = []
+  const requests: { text: string; request: string }[] = []
   const app = new TuiApp(vt, {
-    onSubmit: () => {},
+    onSubmit: (text, request) => requests.push({ text, request }),
     onExit: () => {},
-    onQueueSubmit: (text) => queued.push(text),
   })
   app.start()
 
   startedApps.add(app)
   vt.sendInput('\x1b[13;5u') // kitty ctrl+enter with an empty editor
   await viewport(vt)
-  assert.deepEqual(queued, [], 'an empty chord must not submit an empty followup')
+  assert.deepEqual(requests, [], 'an empty chord must not submit an empty followup')
 })
 
 // ── P0: empty-submission semantics (plan §4.1 / §6.2) ────────────────────────────────────
@@ -637,5 +672,119 @@ test('slash-command autocomplete paints the fresh list on the keystroke frame', 
   const view = await type('s')
   assert.ok(view.includes('resume'), `fresh /res list missing:\n${view}`)
   assert.ok(!view.includes('reload'), `stale list still painted after /res:\n${view}`)
+  app.stop()
+})
+
+// ── inline skill reference completion (the 2026-09-07 next plan §8.3) ─────
+
+/** The detached human skill catalog for the inline integration tests. */
+const INLINE_SKILLS = [
+  { name: 'eli5', description: 'Explain like I am five' },
+  { name: 'html-maker', description: 'Make HTML' },
+  { name: 'diagnosing-skills', description: 'Diagnose skills' },
+]
+
+/** Start an app with the inline skill catalog installed. */
+function startInlineApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[] } {
+  const started = startApp()
+  started.app.setCommandCompletions(
+    [{ name: 'help', description: 'Help' }, { name: 'settings', description: 'Panel' }],
+    '/ws',
+    null,
+    undefined,
+    undefined,
+    undefined,
+    INLINE_SKILLS,
+  )
+  return started
+}
+
+test('Case A: accepting an inline skill inserts the reference and does NOT submit', async () => {
+  const { vt, app, submitted } = startInlineApp()
+  vt.sendInput('请用 /el')
+  await vt.waitForRender()
+  vt.sendInput('\r') // accept the highlighted eli5
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '请用 /eli5 ', 'the accept must insert the reference with a separator')
+  assert.deepEqual(submitted, [], 'an inline accept must never submit the draft')
+  app.stop()
+})
+
+test('Case B: one draft accepts THREE inline skills and submits the full original line once', async () => {
+  const { vt, app, submitted } = startInlineApp()
+  // 1. 你知道 /el → eli5
+  vt.sendInput('你知道 /el')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '你知道 /eli5 ', 'first reference must insert')
+  assert.deepEqual(submitted, [], 'no submit after the first accept')
+  // 2. 可以利用 /ht → html-maker
+  vt.sendInput('可以利用 /ht')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '你知道 /eli5 可以利用 /html-maker ', 'second reference must insert')
+  assert.deepEqual(submitted, [], 'no submit after the second accept')
+  // 3. 进行 /diag → diagnosing-skills
+  vt.sendInput('进行 /diag')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '你知道 /eli5 可以利用 /html-maker 进行 /diagnosing-skills ', 'third reference must insert')
+  assert.deepEqual(submitted, [], 'no submit after the third accept')
+  // The final real submit carries the complete original line ONCE.
+  vt.sendInput('吗!!')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['你知道 /eli5 可以利用 /html-maker 进行 /diagnosing-skills 吗!!'],
+    'the final submit must be one ordinary prompt with every literal /name token')
+  app.stop()
+})
+
+test('Case C: leading slash-command Enter still submits (inline prefix workaround untouched)', async () => {
+  const { vt, app, submitted } = startInlineApp()
+  vt.sendInput('/he')
+  await vt.waitForRender()
+  vt.sendInput('\r') // accept the highlighted help command
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['/help'], 'a leading command accept must still submit')
+  app.stop()
+})
+
+test('Case D: the inline dropdown never leaks ordinary commands', async () => {
+  const { vt, app } = startInlineApp()
+  vt.sendInput('请执行 /set')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('settings'), `the inline dropdown must not list commands:\n${view}`)
+  assert.ok(view.includes('请执行 /set'), `the draft must stay intact:\n${view}`)
+  app.stop()
+})
+
+test('reinstalling the completion provider cancels the open inline dropdown', async () => {
+  const { vt, app, submitted } = startInlineApp()
+  vt.sendInput('请用 /el')
+  await vt.waitForRender()
+  // The catalog owner changed: the provider is reinstalled (the editor
+  // cancels the open dropdown — setAutocompleteProvider → cancelAutocomplete).
+  app.setCommandCompletions([{ name: 'help', description: 'Help' }], '/ws', null, undefined, undefined, undefined, [])
+  await vt.waitForRender()
+  vt.sendInput('\r') // the cancelled dropdown must not accept: Enter submits the draft
+  await vt.waitForRender()
+  assert.deepEqual(submitted, ['请用 /el'], 'a reinstalled provider must cancel the old dropdown')
+  app.stop()
+})
+
+test('a bracketed paste ending in an inline skill token opens the dropdown (review finding)', async () => {
+  const { vt, app } = startInlineApp()
+  // The paste lands the draft; the post-paste state must trigger the
+  // provider like ordinary typing (the raw paste event carries ESC, which
+  // the per-keystroke trigger gate must not swallow).
+  vt.sendInput('\x1b[200~请用 /el\x1b[201~')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('eli5'), `the pasted inline token must open the dropdown:\n${view}`)
+  assert.ok(view.includes('请用 /el'), `the pasted draft must be intact:\n${view}`)
   app.stop()
 })

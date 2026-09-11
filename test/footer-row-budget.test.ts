@@ -85,13 +85,12 @@ test('every logical row of the default layout stays inside the 1..2-line row con
       const truncatedSgr = line.match(/\x1b\[(?:[0-9;]*[^0-9;m]|[0-9;]*$)/)
       assert.equal(truncatedSgr, null, `truncated ANSI at ${width}: ${JSON.stringify(line)}`)
     }
-    // The stats row keeps at least one visible line within its allowance —
-    // with the hard capacity of 4 it may even wrap INTO two when the
-    // surface has the room (its demand is lower in layout order). At
-    // degenerate widths the truncated stats row may no longer carry its
-    // 'tok/s' text, only its leading '↑' counter.
+    // The stats row keeps at least one visible line within its allowance:
+    // it is a RIGHT-ZONE row (the full context pressure reserves its width
+    // first), so at degenerate widths the left zone truncates to its '…'
+    // marker while the context survives in its compact form.
     if (width > 4) {
-      const stats = lines.find(line => line.includes('tok/s') || line.includes('↑'))
+      const stats = lines.find(line => line.includes('ctx') || line.includes('↑') || line.includes('160k/1.0M'))
       assert.ok(stats !== undefined && visibleWidth(stats) <= Math.max(1, width), `stats row lost at ${width}:\n${JSON.stringify(lines)}`)
     }
   }
@@ -156,15 +155,18 @@ test('the Host instruction never deletes a user row when the budget fits', () =>
 test('the Host instruction reserves its line; capacity 4 gives status 2 + stats 1 + hint', () => {
   // Instruction + default 2-row layout at 40 columns with the effective
   // total of 4 (the plan §7 example): the hint reserves 1, the two rows
-  // share the remaining 3 — a baseline each, the leftover buys the status
-  // row its second line. 2 + 1 + 1 = 4; nothing replaced, nothing
-  // overflows.
-  const snap = busySnapshot()
+  // share the remaining 3 — a baseline each, the leftover buys the
+  // LEFT-ONLY status row its second line (no plan/focus: its right zone
+  // renders nothing; the stats row always carries the context right zone,
+  // so it keeps its single-line fit contract). 2 + 1 + 1 = 4; nothing
+  // replaced, nothing overflows.
+  const snap = busySnapshot() as DeepMutable<StatusSnapshot>
+  snap.collaboration.plan.effective = false
   const lines = plainPhysical(snap, DEFAULT_FOOTER_LAYOUT, 40, { instruction: INSTRUCTION })
   assert.equal(lines.length, 4, `2 + 1 + hint inside the capacity of 4:\n${JSON.stringify(lines)}`)
   assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+D again to exit'), `the hint must be its own line:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('yolo')), `the status row must survive:\n${JSON.stringify(lines)}`)
-  assert.ok(lines.some(line => line.includes('tok/s')), `the stats row must survive (not be replaced):\n${JSON.stringify(lines)}`)
+  assert.ok(lines.some(line => line.includes('160k/1.0M (16%)')), `the stats row must survive (not be replaced):\n${JSON.stringify(lines)}`)
 })
 
 test('a 3-row layout under the DEFAULT budget fits beside the instruction', () => {
@@ -197,7 +199,7 @@ test('a DYNAMIC total of 2 still keeps the instruction and drops the stats tail'
   assert.equal(lines.length, 2, `exactly the surface budget, hint included:\n${JSON.stringify(lines)}`)
   assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+D again to exit'), `the hint must be last:\n${JSON.stringify(lines)}`)
   assert.ok(lines.some(line => line.includes('yolo')), `the highest-importance row must survive:\n${JSON.stringify(lines)}`)
-  assert.ok(!lines.some(line => line.includes('tok/s')), `the stats tail must drop under height pressure:\n${JSON.stringify(lines)}`)
+  assert.ok(!lines.some(line => line.includes('↑')), `the stats row must drop under height pressure:\n${JSON.stringify(lines)}`)
 })
 
 test('a capacity of 4 lets BOTH rows wrap (2 + 2) when no instruction competes', () => {

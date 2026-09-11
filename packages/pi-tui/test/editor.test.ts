@@ -872,6 +872,19 @@ describe("Editor component", () => {
 	});
 
 	describe("Scroll indicators", () => {
+		it("centers scroll indicators on wide borders", () => {
+			const width = 40;
+			const editor = new Editor(createTestTUI(width), defaultEditorTheme);
+			editor.setText(Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n"));
+
+			editor.render(width);
+			for (let index = 0; index < 10; index++) editor.handleInput("\x1b[A");
+
+			const lines = editor.render(width);
+			assert.strictEqual(stripVTControlCharacters(lines[0]!), `${"─".repeat(15)} ↑ 9 more ${"─".repeat(15)}`);
+			assert.strictEqual(stripVTControlCharacters(lines.at(-1)!), `${"─".repeat(15)} ↓ 4 more ${"─".repeat(15)}`);
+		});
+
 		it("keeps truncated scroll indicators within width and preserves their color (issue #6962)", () => {
 			const width = 10;
 			const borderColor = (text: string) => `\x1b[35m${text}\x1b[39m`;
@@ -4899,12 +4912,420 @@ describe("protected autocomplete seam (X044)", () => {
 			exposedRequest(): void {
 				this.requestAutocomplete({ force: true, explicitTab: true });
 			}
+			exposedLayout(prefix: string) {
+				return this.getAutocompleteSelectListLayout(prefix);
+			}
 		}
 		const sub = new SubEditor(createTestTUI(), defaultEditorTheme);
 		// No provider: request must be a safe no-op, cancel must not throw
 		sub.exposedRequest();
 		sub.exposedCancel();
 		assert.strictEqual(sub.isShowingAutocomplete(), false);
+		assert.deepStrictEqual(sub.exposedLayout('/im'), {
+			minPrimaryColumnWidth: 12,
+			maxPrimaryColumnWidth: 32,
+		}, 'slash-command layout remains the default hook behavior');
+		assert.strictEqual(sub.exposedLayout('@path'), undefined, 'non-slash prefixes keep the default layout');
 		assert.ok(editor instanceof Editor);
+	});
+});
+
+describe("Editor mouse click cursor mapping (X050)", () => {
+	it("places the cursor at the end of a wrapped segment when clicking past its text", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.setText("abcdef");
+		editor.render(6);
+		// The first visual line shows "abcde " (wrapped); clicking the
+		// blank cell after 'e' must place the cursor at the segment end
+		// (col 5), not before the last grapheme (col 4).
+		editor.handleMouse({
+			type: "click",
+			button: "left",
+			x: 5,
+			y: 1,
+			screenX: 5,
+			screenY: 1,
+			width: 6,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 }, "clicking past the wrapped segment text must land at the segment end");
+	});
+
+	it("keeps the last visual segment clamping to the line end", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.setText("abcdef");
+		editor.render(6);
+		// The second (last) visual line shows "f"; clicking past it must
+		// clamp to the line end (col 6).
+		editor.handleMouse({
+			type: "click",
+			button: "left",
+			x: 5,
+			y: 2,
+			screenX: 5,
+			screenY: 2,
+			width: 6,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 6 }, "clicking past the last segment must clamp to the line end");
+	});
+});
+
+describe("Editor slash autocomplete mouse click (mouse parity)", () => {
+	it("submits a slash-prefix completion on mouse click, like keyboard Enter", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/help", label: "/help" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+
+		editor.handleInput("/");
+		editor.handleInput("h");
+		editor.handleInput("e");
+		editor.handleInput("\t"); // trigger autocomplete
+		await flushAutocomplete();
+		assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+		// Click the first suggestion: the autocomplete list starts at
+		// renderedVisibleLineCount + 2 (row 0 = the editor line, row 1 =
+		// blank, row 2 = the first suggestion).
+		const rendered = editor.render(80);
+		const suggestionRow = rendered.findIndex((line) => line.includes("/help"));
+		assert.ok(suggestionRow >= 0, `suggestion row missing:\n${rendered.join("\n")}`);
+		// A real click is a press + release (the renderer synthesizes the
+		// click): press first, then the click.
+		editor.handleMouse({
+			type: "press",
+			button: "left",
+			x: 2,
+			y: suggestionRow,
+			screenX: 2,
+			screenY: 2,
+			width: 80,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		const result = editor.handleMouse({
+			type: "click",
+			button: "left",
+			x: 2,
+			y: suggestionRow,
+			screenX: 2,
+			screenY: 2,
+			width: 80,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.ok(result?.handled, "clicking a slash suggestion must be handled");
+		assert.strictEqual(submitted, "/help", "clicking a slash suggestion must submit the completed command");
+		assert.strictEqual(editor.getText(), "", "the editor must clear after the slash submit");
+	});
+
+	it("does NOT submit a slash-prefix completion on mouse click while disableSubmit is set (X050 parity)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/help", label: "/help" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		editor.disableSubmit = true; // public Editor contract: no submission
+
+		editor.handleInput("/");
+		editor.handleInput("h");
+		editor.handleInput("e");
+		editor.handleInput("\t"); // trigger autocomplete
+		await flushAutocomplete();
+		assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+		const rendered = editor.render(80);
+		const suggestionRow = rendered.findIndex((line) => line.includes("/help"));
+		assert.ok(suggestionRow >= 0, `suggestion row missing:\n${rendered.join("\n")}`);
+		editor.handleMouse({
+			type: "press",
+			button: "left",
+			x: 2,
+			y: suggestionRow,
+			screenX: 2,
+			screenY: 2,
+			width: 80,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		const result = editor.handleMouse({
+			type: "click",
+			button: "left",
+			x: 2,
+			y: suggestionRow,
+			screenX: 2,
+			screenY: 2,
+			width: 80,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.ok(result?.handled, "clicking a slash suggestion must be handled");
+		assert.strictEqual(submitted, "", "disableSubmit must block the mouse slash submit");
+		assert.ok(!editor.isShowingAutocomplete(), "the autocomplete must be cancelled");
+	});
+});
+
+describe("Editor autocomplete painted-list identity (mouse parity)", () => {
+	const mouse = (type: "press" | "click", y: number, width = 80, height = 24) => ({
+		type,
+		button: "left" as const,
+		x: 2,
+		y,
+		screenX: 2,
+		screenY: y,
+		width,
+		height,
+		shift: false,
+		alt: false,
+		ctrl: false,
+		...(type === "click" ? { clickCount: 1 } : {}),
+	});
+
+	async function openAutocomplete(editor: Editor, value: string): Promise<number> {
+		editor.handleInput("/");
+		editor.handleInput("h");
+		editor.handleInput("e");
+		editor.handleInput("\t");
+		await flushAutocomplete();
+		const rendered = editor.render(80);
+		const row = rendered.findIndex((line) => line.includes(value));
+		assert.ok(row >= 0, `suggestion row missing:\n${rendered.join("\n")}`);
+		return row;
+	}
+
+	it("an unpainted list replacement cannot receive a click (Case A/B: no unpainted slash submit)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/old", label: "/old" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		const row = await openAutocomplete(editor, "/old");
+		// An async suggestion swap replaces the list WITHOUT a repaint.
+		const createList = (editor as unknown as {
+			createAutocompleteList(prefix: string, items: Array<{ value: string; label: string }>): unknown;
+		}).createAutocompleteList;
+		const newList = createList.call(editor, "/he", [{ value: "/new", label: "/new" }]);
+		(editor as unknown as { autocompleteList: unknown }).autocompleteList = newList;
+		// A click on the painted /old row must NOT submit the unpainted /new.
+		editor.handleMouse(mouse("click", row));
+		assert.strictEqual(submitted, "", "the unpainted list must not receive the click (no unpainted slash submit)");
+		// After the repaint the painted list works normally (Case D).
+		const rendered2 = editor.render(80);
+		const row2 = rendered2.findIndex((line) => line.includes("/new"));
+		assert.ok(row2 >= 0, `replacement row missing:\n${rendered2.join("\n")}`);
+		editor.handleMouse(mouse("press", row2));
+		editor.handleMouse(mouse("click", row2));
+		assert.strictEqual(submitted, "/new", "the painted list must submit after repaint");
+	});
+
+	it("press A → repaint B → release must not activate B (Case C)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/old", label: "/old" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		const row = await openAutocomplete(editor, "/old");
+		// Press on the painted /old row.
+		editor.handleMouse(mouse("press", row));
+		// The list is replaced WITHOUT a repaint.
+		const createList = (editor as unknown as {
+			createAutocompleteList(prefix: string, items: Array<{ value: string; label: string }>): unknown;
+		}).createAutocompleteList;
+		const newList = createList.call(editor, "/he", [{ value: "/new", label: "/new" }]);
+		(editor as unknown as { autocompleteList: unknown }).autocompleteList = newList;
+		// The release click must NOT activate the replacement list.
+		editor.handleMouse(mouse("click", row));
+		assert.strictEqual(submitted, "", "the release must not activate the replacement list");
+	});
+
+	it("rewrites the autocomplete dispatch target to the mounted editor (X018 liveness)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/help", label: "/help" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		editor.handleInput("/");
+		editor.handleInput("h");
+		editor.handleInput("e");
+		editor.handleInput("\t");
+		await flushAutocomplete();
+		const rendered = editor.render(80);
+		const row = rendered.findIndex((line) => line.includes("/help"));
+		assert.ok(row >= 0, `suggestion row missing:\n${rendered.join("\n")}`);
+		const result = editor.handleMouse({
+			type: "press",
+			button: "left",
+			x: 2,
+			y: row,
+			screenX: 2,
+			screenY: row,
+			width: 80,
+			height: 24,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		assert.ok(result?.handled, "the autocomplete press must be handled");
+		// The dispatch target must be the MOUNTED editor (the private
+		// SelectList is not in the TUI tree — X018 isMouseTargetLive would
+		// clear the gesture on release). The handleMouse return is a union
+		// (TuiMouseDispatchResult | TuiMouseEventResult), so the dispatch
+		// metadata is accessed through a structural cast.
+		const dispatch = result as { target?: { component: unknown }; focusTarget?: unknown } | undefined;
+		assert.ok(dispatch?.target, "the result must carry a dispatch target");
+		assert.strictEqual(dispatch!.target!.component, editor, "the gesture target must be the mounted editor");
+		if (result?.focus) {
+			assert.strictEqual(dispatch?.focusTarget, editor, "the focus target must be the mounted editor");
+		}
+	});
+
+	it("releases the pressed list identity on mismatch (no stale submit without a fresh press)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/old", label: "/old" }], prefix: "/he" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		const row = await openAutocomplete(editor, "/old");
+		// Press on the painted /old row.
+		editor.handleMouse(mouse("press", row));
+		// The list is replaced WITHOUT a repaint; the release click on the
+		// stale row is fenced and must RELEASE the pressed identity.
+		const createList = (editor as unknown as {
+			createAutocompleteList(prefix: string, items: Array<{ value: string; label: string }>): unknown;
+		}).createAutocompleteList;
+		const newList = createList.call(editor, "/he", [{ value: "/new", label: "/new" }]);
+		(editor as unknown as { autocompleteList: unknown }).autocompleteList = newList;
+		editor.handleMouse(mouse("click", row));
+		assert.strictEqual(submitted, "", "the fenced click must not submit");
+		// The OLD list returns and repaints: a click WITHOUT a fresh press
+		// must not submit (the pressed identity was released).
+		const oldList = createList.call(editor, "/he", [{ value: "/old", label: "/old" }]);
+		(editor as unknown as { autocompleteList: unknown }).autocompleteList = oldList;
+		editor.render(80);
+		editor.handleMouse(mouse("click", row));
+		assert.strictEqual(submitted, "", "a click without a fresh press must not submit");
+	});
+
+	it("a keyboard document mutation cancels the pending autocomplete press (no stale slash submit)", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol) => {
+				const text = lines[0] || "";
+				const prefix = text.slice(0, cursorCol);
+				if (prefix === "/he") {
+					return { items: [{ value: "/help", label: "help" }], prefix: "/he" };
+				}
+				if (prefix === "/hex") {
+					return { items: [{ value: "/hex", label: "hex" }], prefix: "/hex" };
+				}
+				return null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		const row = await openAutocomplete(editor, "help");
+		// Press the /help suggestion (no release yet).
+		editor.handleMouse(mouse("press", row));
+		// Keyboard mutates the document: /he → /hex. The new autocomplete
+		// request is async; the OLD list is still current and painted.
+		editor.handleInput("x");
+		// DO NOT await the new autocomplete / repaint.
+		// Release on the old suggestion cell: the stale press must NOT
+		// submit the mutated draft.
+		editor.handleMouse(mouse("click", row));
+		assert.strictEqual(submitted, "", "the stale autocomplete press must not submit");
+		assert.strictEqual(editor.getText(), "/hex", "the draft must stay /hex");
 	});
 });

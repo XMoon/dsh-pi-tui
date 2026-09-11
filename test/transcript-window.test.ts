@@ -167,3 +167,48 @@ test('history projection remains stable while new turns append', () => {
   assert.equal(after.lastTurn, 50)
   assert.equal(after.hasNewer, true)
 })
+
+// ── older-boundary invariant (PR115-fix problem 2) ────────────────────────
+// The current window already reaching the oldest retained turn must make
+// moveOlder() a no-op: hasOlder=false ⇒ moveOlder=false + no state mutation.
+// A short session can never be paged into a bogus history state that hides
+// its content.
+
+test('older boundary: a single turn never pages into history', () => {
+  const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10, turns: [1] })
+  assert.equal(controller.isLatest(), true)
+  assert.equal(controller.moveOlder(), false, 'one turn fits the window: no older page')
+  assert.equal(controller.isLatest(), true, 'a failed moveOlder must not change the mode')
+  assert.equal(controller.endTurn(), undefined, 'a failed moveOlder must not set a history anchor')
+})
+
+test('older boundary: two turns never page into history', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate(longSession(2))
+  const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10, turns: folder.turns() })
+  assert.equal(controller.moveOlder(), false, 'both turns already fit the window: no older page')
+  assert.equal(controller.isLatest(), true)
+  assert.equal(controller.endTurn(), undefined)
+  // The projection still contains BOTH turns — nothing was shrunk away.
+  assert.deepEqual(userTurns(folder, { maxTurns: 20 }), [1, 2], 'the short session must stay fully visible')
+})
+
+test('older boundary: exactly one full window never pages into history', () => {
+  const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10, turns: Array.from({ length: 20 }, (_, index) => index + 1) })
+  assert.equal(controller.moveOlder(), false, '20 turns fill the 20-turn window: no older page')
+  assert.equal(controller.isLatest(), true)
+})
+
+test('older boundary: a window that just reached the oldest turn stops paging', () => {
+  const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10, turns: Array.from({ length: 25 }, (_, index) => index + 1) })
+  // 1..25: the first page moves 25 → 15 (window 1..15), which already
+  // reaches the oldest retained turn.
+  assert.equal(controller.moveOlder(), true, '25 turns have an older page')
+  const snapshot = controller.snapshot()
+  assert.equal(snapshot.hasOlder, false, 'the 1..15 window reaches the oldest turn')
+  assert.equal(snapshot.firstTurn, 1)
+  const before = controller.state()
+  assert.equal(controller.moveOlder(), false, 'no older page: the move must be a no-op')
+  assert.deepEqual(controller.state(), before, 'a failed moveOlder must not mutate the controller state')
+  assert.equal(controller.endTurn(), 15, 'the history anchor must stay at the oldest reachable page')
+})

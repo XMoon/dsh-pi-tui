@@ -1,4 +1,5 @@
 import { Editor } from "../src/components/editor.ts";
+import type { SelectListLayoutOptions } from "../src/components/select-list.ts";
 
 /** Compile-only contract fixture for host editor subclasses (X044). */
 class HostEditor extends Editor {
@@ -8,6 +9,10 @@ class HostEditor extends Editor {
 
 	requestFromHost(): void {
 		this.requestAutocomplete({ force: true, explicitTab: true });
+	}
+
+	layoutFromHost(prefix: string): SelectListLayoutOptions | undefined {
+		return this.getAutocompleteSelectListLayout(prefix);
 	}
 }
 

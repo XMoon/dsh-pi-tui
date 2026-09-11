@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { CURSOR_MARKER } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { ModelSubmenu } from '../src/model-menu.ts'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
@@ -408,4 +409,214 @@ test('a model WITHOUT effort options keeps the overlay open (Esc still walks bac
   view = await viewport(vt)
   assert.ok(view.includes('m1'), `the model list (overlay) must stay open without effort options:\n${view}`)
   assert.deepEqual(applied, [{ provider: 'p', model: 'm1' }], 'the model still applies')
+})
+
+/** A minimal left-button mouse event for direct component tests. */
+function mouse(type: 'press' | 'click', x: number, y: number, width = 80, height = 24): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type,
+    button: 'left',
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width,
+    height,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+  }
+}
+
+/** A ModelSubmenu with a silent owned-task runner (no diag sink). */
+function directModelSubmenu(
+  llm: { listModels: () => Promise<readonly { id: string }[]>; resolveModelInfo: () => Promise<{ reasoning?: { efforts?: readonly { id: string; name: string }[] } }> },
+  applied: ModelSelection[],
+  done: (selected?: string) => void,
+): ModelSubmenu {
+  return new ModelSubmenu('p', 'm0', undefined, {
+    listModels: llm.listModels as never,
+    resolveModelInfo: llm.resolveModelInfo as never,
+    apply: (next) => { applied.push(next) },
+    requestRender: () => {},
+    done,
+    runOwned: (label, task, options) => {
+      runOwned(label, task, { ...options, diag: createDiag({ filePath: undefined, stderrLevel: 'off' }) })
+    },
+  })
+}
+
+test('ModelSubmenu mouse click applies a model with no effort options (mouse parity)', async () => {
+  const applied: ModelSelection[] = []
+  const menu = directModelSubmenu(fakeLlm({ models: [{ id: 'm0' }, { id: 'm1' }], efforts: undefined }), applied, () => {})
+  await settle()
+  menu.render(80)
+  // The model list has enableSearch: item rows start at y=2.
+  const press = menu.handleMouse(mouse('press', 5, 2, 80, 24))
+  assert.ok(press?.handled, 'press on a model row must be handled')
+  menu.handleMouse(mouse('click', 5, 2, 80, 24))
+  await settle()
+  assert.deepEqual(applied, [{ provider: 'p', model: 'm0' }], 'clicking a model row must apply the model')
+})
+
+test('ModelSubmenu mouse click selects an effort (mouse parity)', async () => {
+  const applied: ModelSelection[] = []
+  let doneValue: string | undefined
+  const menu = directModelSubmenu(
+    fakeLlm({ models: [{ id: 'm0' }], efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] }),
+    applied,
+    (selected) => { doneValue = selected },
+  )
+  await settle()
+  menu.render(80)
+  // Open the effort level by clicking the first model row (y=2).
+  menu.handleMouse(mouse('press', 5, 2, 80, 24))
+  menu.handleMouse(mouse('click', 5, 2, 80, 24))
+  await settle()
+  // The effort list has no search: item rows start at y=0; the first row
+  // is "Default" (__default), the second is "Low".
+  menu.render(80)
+  const press = menu.handleMouse(mouse('press', 5, 1, 80, 24))
+  assert.ok(press?.handled, 'press on an effort row must be handled')
+  menu.handleMouse(mouse('click', 5, 1, 80, 24))
+  await settle()
+  assert.deepEqual(applied, [{ provider: 'p', model: 'm0', reasoningEffort: 'low' }], 'clicking an effort row must apply it')
+  assert.equal(doneValue, 'low', 'the effort selection must close the submenu with the effort id')
+})
+
+test('ModelSubmenu retains focus across the async inner swap (CURSOR_MARKER)', async () => {
+  const applied: ModelSelection[] = []
+  const menu = directModelSubmenu(fakeLlm({ models: [{ id: 'm0' }], efforts: undefined }), applied, () => {})
+  // Focused while the model list is still loading: the swapped-in
+  // searchable SettingsList must receive the already-active focus state.
+  menu.focused = true
+  await settle()
+  const rendered = menu.render(80).join('\n')
+  assert.ok(rendered.includes(CURSOR_MARKER), 'the swapped-in searchable list must emit the cursor marker')
+  // Unfocused before resolve → no marker.
+  const menu2 = directModelSubmenu(fakeLlm({ models: [{ id: 'm0' }], efforts: undefined }), applied, () => {})
+  await settle()
+  const rendered2 = menu2.render(80).join('\n')
+  assert.ok(!rendered2.includes(CURSOR_MARKER), 'an unfocused swapped-in list must not emit the marker')
+})
+
+test('externally disposing ModelSubmenu aborts pending work without side effects', async () => {
+  const applied: ModelSelection[] = []
+  let doneValue: string | undefined
+  let renders = 0
+  const pending = deferred<{ reasoning?: { efforts?: readonly { id: string; name: string }[] } }>()
+  const menu = new ModelSubmenu('p', 'm0', undefined, {
+    listModels: async () => [{ id: 'm0' }],
+    resolveModelInfo: () => pending.promise,
+    apply: (next) => { applied.push(next) },
+    requestRender: () => { renders += 1 },
+    done: (selected) => { doneValue = selected },
+    runOwned: (label, task, options) => {
+      runOwned(label, task, { ...options, diag: createDiag({ filePath: undefined, stderrLevel: 'off' }) })
+    },
+  })
+  await settle()
+  // Open the effort level (the model row has a submenu).
+  menu.handleInput('\r')
+  await settle()
+  const rendersBefore = renders
+  // External teardown (NOT Esc / NOT done()).
+  menu.dispose()
+  assert.equal(doneValue, undefined, 'dispose must not call done')
+  assert.deepEqual(applied, [], 'dispose must not apply')
+  // A late resolve must not repaint or apply.
+  pending.resolve({ reasoning: { efforts: [{ id: 'low', name: 'Low' }] } })
+  await settle()
+  assert.equal(renders, rendersBefore, 'a late resolve after disposal must not requestRender')
+  assert.deepEqual(applied, [], 'a late resolve after disposal must not apply')
+  assert.equal(doneValue, undefined, 'a late resolve after disposal must not call done')
+})
+
+test('externally disposing ModelSubmenu terminates a nested EffortSubmenu', async () => {
+  const applied: ModelSelection[] = []
+  let doneValue: string | undefined
+  let renders = 0
+  const info = deferred<{ reasoning?: { efforts?: readonly { id: string; name: string }[] } }>()
+  const menu = new ModelSubmenu('p', 'm0', undefined, {
+    listModels: async () => [{ id: 'm0' }],
+    resolveModelInfo: () => info.promise,
+    apply: (next) => { applied.push(next) },
+    requestRender: () => { renders += 1 },
+    done: (selected) => { doneValue = selected },
+    runOwned: (label, task, options) => {
+      runOwned(label, task, { ...options, diag: createDiag({ filePath: undefined, stderrLevel: 'off' }) })
+    },
+  })
+  await settle()
+  // Open the effort level: the EffortSubmenu starts resolveModelInfo.
+  menu.handleInput('\r')
+  await settle()
+  const rendersBefore = renders
+  // External teardown of the OWNING ModelSubmenu: the chain must reach
+  // the nested EffortSubmenu (ModelSubmenu → inner SettingsList →
+  // EffortSubmenu) and latch/abort it.
+  menu.dispose()
+  info.resolve({ reasoning: { efforts: [{ id: 'low', name: 'Low' }] } })
+  await settle()
+  assert.equal(renders, rendersBefore, 'the nested effort resolve after disposal must not requestRender')
+  assert.deepEqual(applied, [], 'the nested effort resolve after disposal must not apply')
+  assert.equal(doneValue, undefined, 'the nested effort resolve after disposal must not call done')
+})
+
+test('model submenu: a click on the painted Loading row cannot apply an unpainted effort list (mouse parity)', async () => {
+  const applied: string[] = []
+  const done: string[] = []
+  const models = deferred<readonly { id: string }[]>()
+  const info = deferred<{ reasoning?: { efforts?: readonly { id: string; name: string }[] } }>()
+  const submenu = new ModelSubmenu('p', 'm0', undefined, {
+    listModels: () => models.promise,
+    resolveModelInfo: () => info.promise,
+    apply: (next) => applied.push(next.model),
+    requestRender: () => {},
+    done: (selected) => done.push(selected ?? ''),
+    runOwned: (label, task, options) => {
+      void Promise.resolve(task()).then(result => (options as { onResult?: (value: unknown) => void }).onResult?.(result))
+    },
+  })
+  const mouse = (type: 'press' | 'click', y: number) => ({
+    type, button: 'left' as const, x: 2, y, screenX: 2, screenY: y,
+    width: 80, height: 10, shift: false, alt: false, ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+  })
+  // Paint the Loading row; the models resolve but are NOT repainted.
+  submenu.render(80)
+  models.resolve([{ id: 'm0' }])
+  await settle()
+  // A press+click on the painted Loading row must be fenced (no model
+  // action). y=2 is where the FIRST MODEL row would be once repainted —
+  // the old code (no fence) would activate it from the stale screen.
+  submenu.handleMouse(mouse('press', 2))
+  assert.equal(submenu.handleMouse(mouse('click', 2)), undefined, 'the unpainted inner must not receive the click')
+  assert.deepEqual(applied, [], 'no model must be applied from the stale screen')
+  // Repaint the model list: the click now opens the effort submenu.
+  // The model list has search enabled: row 0 = search, row 1 = blank,
+  // row 2 = the first model.
+  submenu.render(80)
+  submenu.handleMouse(mouse('press', 2))
+  submenu.handleMouse(mouse('click', 2))
+  await settle()
+  // The effort submenu is Loading model info… (unpainted): a click must
+  // be fenced — no effort applied, no done().
+  const modelList = submenu as unknown as { inner: { submenuComponent: { handleMouse(e: unknown): unknown } } }
+  const effortSubmenu = modelList.inner.submenuComponent
+  // The effort list (no search) would put its first row at y=0 once
+  // repainted: a stale press+click there must be fenced.
+  effortSubmenu.handleMouse(mouse('press', 0))
+  assert.equal(effortSubmenu.handleMouse(mouse('click', 0)), undefined, 'the unpainted effort list must not receive the click')
+  assert.deepEqual(applied, [], 'no effort must be applied from the stale screen')
+  assert.deepEqual(done, [], 'the submenu must not close from a stale click')
+  // Resolve the efforts and repaint: the click now applies.
+  info.resolve({ reasoning: { efforts: [{ id: 'e0', name: 'E0' }] } })
+  await settle()
+  const effortList = effortSubmenu as unknown as { render(w: number): string[]; handleMouse(e: unknown): unknown }
+  effortList.render(80)
+  effortList.handleMouse(mouse('press', 0))
+  effortList.handleMouse(mouse('click', 0))
+  assert.deepEqual(applied, ['m0'], 'the painted effort row must apply after repaint')
 })

@@ -48,9 +48,11 @@ function resetKeybindings(): void {
 /** Whether the viewport contains the EXACT rendered line — `includes('line 1')`
  * would also match `line 10`..`line 19`, and the first transcript line
  * carries the bullet prefix (`🐋  line 1`), so the match is a trimmed
- * endsWith. */
+ * endsWith. The v0.85.1 full-track scrollbar paints `│`/`┃`/`█` on the
+ * last column of every scroll-pane row, so the trailing scrollbar char is
+ * stripped before the match. */
 function viewportHasLine(vt: VirtualTerminal, text: string): boolean {
-  return vt.getViewport().some(line => line.trim().endsWith(text))
+  return vt.getViewport().some(line => line.replace(/[│┃█]$/, '').trim().endsWith(text))
 }
 
 // ── the preset itself ────────────────────────────────────────────────────
@@ -328,7 +330,7 @@ test('folder window summaries do not discard the older-page top anchor', async (
     assert.equal(folder.window({ maxTurns: 20 }).messages[0]?.kind, 'summary')
     app.scrollToTop({ disableFollow: true })
     await vt.waitForRender()
-    const viewportRow = (text: string): number => vt.getViewport().findIndex(line => line.trim().endsWith(text))
+    const viewportRow = (text: string): number => vt.getViewport().findIndex(line => line.replace(/[│┃█]$/, '').trim().endsWith(text))
     const beforeAnchor = app.captureTranscriptViewportAnchor()
     assert.equal(beforeAnchor?.top?.turn, 81, 'the top anchor must skip the leading presentation-only summary')
     const beforeRow = viewportRow('turn-81')
@@ -339,6 +341,82 @@ test('folder window summaries do not discard the older-page top anchor', async (
     assert.equal(folder.window({ maxTurns: 20, endTurn: 90 }).messages[0]?.kind, 'summary')
     const afterRow = viewportRow('turn-81')
     assert.equal(afterRow, beforeRow, 'the overlap row must stay at the same viewport row after the summary-bearing window swap')
+  } finally {
+    app.dispose()
+  }
+})
+
+test('older boundary: a short transcript at the top never pages into a bogus history state', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  for (let turn = 0; turn <= 1; turn += 1) {
+    events.push({
+      type: 'assistant/message',
+      seq: turn,
+      time: 1_700_000_000_000 + turn,
+      data: {
+        turn,
+        step: 0,
+        message: {
+          id: MessageId(`short-${turn}`),
+          role: 'assistant',
+          content: [{ type: 'text', text: [`turn-${turn}`, ...Array.from({ length: 30 }, (_, index) => `detail-${turn}-${index}`)].join('\n') }],
+        },
+      },
+    } as SessionEvent)
+  }
+  folder.apply(events)
+  const controller = new TranscriptWindowController({
+    windowTurns: 20,
+    stepTurns: 10,
+    turns: folder.groupedTurns(),
+  })
+  let app!: TuiApp
+  let moveOlderCalls = 0
+  const renderProjection = (): void => {
+    const endTurn = controller.endTurn()
+    const projection = folder.window({
+      maxTurns: controller.windowTurns,
+      ...(endTurn === undefined ? {} : { endTurn }),
+    })
+    app.setTranscript(projection.messages, undefined, {
+      ...controller.state(),
+      firstTurn: projection.firstTurn,
+      lastTurn: projection.lastTurn,
+      hasNewer: projection.hasNewer,
+    })
+  }
+  const moveOlder = (): boolean => {
+    moveOlderCalls += 1
+    const anchor = app.captureTranscriptViewportAnchor()
+    if (!controller.moveOlder()) return false
+    renderProjection()
+    return anchor !== undefined && app.restoreTranscriptViewportAnchor(anchor, 'top')
+  }
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onTranscriptMoveOlder: moveOlder })
+  app.start()
+  startedApps.add(app)
+  try {
+    renderProjection()
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    app.scrollToTop({ disableFollow: true })
+    await vt.waitForRender()
+    const before = vt.getViewport().join('\n')
+    assert.ok(viewportHasLine(vt, 'turn-0'), 'the short transcript must show its oldest turn at the top')
+    // PageUp at the top invokes the registered older-boundary callback.
+    vt.sendInput('\x1b[57421u')
+    await vt.waitForRender()
+    assert.equal(moveOlderCalls, 1, 'the older-boundary callback must fire')
+    const after = vt.getViewport().join('\n')
+    assert.equal(after, before, 'a no-op older move must leave the transcript unchanged')
+    assert.equal(controller.isLatest(), true, 'the window mode must stay latest')
+    assert.equal(controller.endTurn(), undefined, 'no bogus history anchor may appear')
+    assert.ok(viewportHasLine(vt, 'turn-0'), 'the oldest turn must stay visible — the short session must not look empty')
+    const projection = folder.window({ maxTurns: controller.windowTurns })
+    assert.deepEqual(projection.messages.filter(message => message.kind === 'assistant').map(message => message.turn), [0, 1],
+      'the projection must still contain BOTH turns — nothing was paged away')
   } finally {
     app.dispose()
   }
@@ -525,10 +603,9 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     agents: {} as never,
     sessionReader: {
       list: async () => [],
-      search: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),

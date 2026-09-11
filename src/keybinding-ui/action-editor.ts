@@ -3,6 +3,7 @@
  */
 
 import { matchesKey, truncateToWidth, wrapTextWithAnsi, type Component, type KeyId } from '@xmoon76/pi-tui'
+import type { TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { color } from '../theme.ts'
 import { formatKeyId, formatLeaderSequence } from '../keybindings/hints.ts'
 import type {
@@ -62,6 +63,15 @@ function selectedLine(label: string, selected: boolean, width: number): string {
   return truncateToWidth(text, Math.max(1, width))
 }
 
+/** A selectable row in the final viewport: its PHYSICAL row and its
+ * ORIGINAL selectable ordinal. The ordinal is preserved across viewport
+ * scrolling — a scroll marker replacing the first viewport row must not
+ * shift the ordinal of the rows below it. (Mouse parity.) */
+interface SelectableRow {
+  row: number
+  ordinal: number
+}
+
 /** Keep the selected binding visible in a short terminal while retaining the
  * detail footer. The first/last visible content lines double as scroll
  * markers when they are not the selected line. */
@@ -69,13 +79,19 @@ function actionViewport(
   lines: readonly string[],
   selectedLineIndex: number | undefined,
   maxRows: number,
-): string[] {
+  selectableLineIndices: readonly number[] = [],
+): { lines: string[]; selectableRows: SelectableRow[] } {
   const limit = Math.max(1, maxRows)
-  if (lines.length <= limit) return [...lines]
+  if (lines.length <= limit) {
+    return {
+      lines: [...lines],
+      selectableRows: selectableLineIndices.map((row, ordinal) => ({ row, ordinal })),
+    }
+  }
   const footer = lines[lines.length - 1]!
-  if (limit === 1) return [footer]
+  if (limit === 1) return { lines: [footer], selectableRows: [] }
   const content = lines.slice(0, -1)
-  if (content.length === 0) return [footer]
+  if (content.length === 0) return { lines: [footer], selectableRows: [] }
   const windowSize = Math.max(1, limit - 1)
   const selected = selectedLineIndex === undefined
     ? Math.min(content.length - 1, Math.floor(windowSize / 2))
@@ -84,10 +100,27 @@ function actionViewport(
   const start = Math.min(maxStart, Math.max(0, selected - Math.floor(windowSize / 2)))
   const end = Math.min(content.length, start + windowSize)
   const viewport = content.slice(start, end)
-  if (start > 0 && selected > start) viewport[0] = color.textDim(`↑ ${start} more lines`)
-  if (end < content.length && selected < end - 1) viewport[viewport.length - 1] = color.textDim(`↓ ${content.length - end} more lines`)
-  return [...viewport, footer]
+  let selectableRows = selectableLineIndices
+    .map((index, ordinal) => ({ row: index - start, ordinal }))
+    .filter(entry => entry.row >= 0 && entry.row < viewport.length)
+  if (start > 0 && selected > start) {
+    viewport[0] = color.textDim(`↑ ${start} more lines`)
+    selectableRows = selectableRows.filter(entry => entry.row !== 0)
+  }
+  if (end < content.length && selected < end - 1) {
+    viewport[viewport.length - 1] = color.textDim(`↓ ${content.length - end} more lines`)
+    selectableRows = selectableRows.filter(entry => entry.row !== viewport.length - 1)
+  }
+  return { lines: [...viewport, footer], selectableRows }
 }
+
+/** One physical row of the last painted panel frame (mouse hit-testing).
+ * The map is built from the EXACT final rows render() returns (including
+ * the viewport slice), so a click can only act on last-painted geometry.
+ * (Mouse parity.) */
+type ActionEditorMouseHit =
+  | { kind: 'select'; key: string }
+  | { kind: 'inert' }
 
 export class ActionEditorPanel implements Component {
   private model: KeybindingEditorModel
@@ -104,6 +137,16 @@ export class ActionEditorPanel implements Component {
   private mutationGeneration = 0
   private disposed = false
   private message: string | undefined
+  /** Physical row → hit entry from the LAST render (mouse parity). */
+  private hitMap: ActionEditorMouseHit[] = []
+  /** The pressed binding identity (mouse parity): a click may only act on
+   * the exact identity that was pressed. */
+  private mousePressedKey: string | undefined
+  /** The selectable rows' stable identities from the LAST render (the
+   * bindingKey per selectable ordinal; 'add' for the Add row). */
+  private selectableKeys: string[] = []
+  /** The width the hit map was painted at; a stale-width event is rejected. */
+  private lastRenderWidth = 0
 
   constructor(options: ActionEditorOptions) {
     this.model = options.model
@@ -149,19 +192,27 @@ export class ActionEditorPanel implements Component {
     }
     const canEdit = this.row.configurable && !this.row.reserved && !this.row.safeMode
     if (canEdit) {
+      // The selectable rows carry their STABLE binding identity (the
+      // bindingKey), never an ordinal: an async model replacement between
+      // paint and press/click must not transfer the action to whatever
+      // moved into the row.
+      const selectableKeys: string[] = []
       for (let index = 0; index < editable.length; index += 1) {
         const binding = editable[index]!
         const defaultSuffix = this.row.customized ? '' : ' (default)'
         const conditionalSuffix = isConditionalBinding(this.row, binding) ? ' (conditional)' : ''
         const conflictSuffix = this.row.conflict ? color.warning(' !') : ''
         selectableLineIndices.push(lines.length)
+        selectableKeys.push(bindingKey(binding))
         lines.push(selectedLine(`${bindingLabel(binding)}${defaultSuffix}${conditionalSuffix}${conflictSuffix}`, this.selectedIndex === index, safeWidth))
       }
       if (editable.some(binding => isConditionalBinding(this.row, binding))) {
         lines.push(color.textDim(`  Conditional: ${this.row.conditionalDescription ?? 'when its context is active'}`))
       }
       selectableLineIndices.push(lines.length)
+      selectableKeys.push('add')
       lines.push(selectedLine('+ Add shortcut', this.selectedIndex === editable.length, safeWidth))
+      this.selectableKeys = selectableKeys
     } else if (this.row.defaults.length > 0) {
       for (const binding of this.row.defaults) lines.push(`  ${bindingLabel(binding)}`)
     }
@@ -193,7 +244,15 @@ export class ActionEditorPanel implements Component {
     lines.push(color.textDim(this.row.fixed || this.row.reserved || this.row.safeMode
       ? 'Esc: back'
       : 'Enter: edit · a: add · Delete: remove · r: reset · d: disable · Esc: back'))
-    return actionViewport(lines, selectableLineIndices[this.selectedIndex], this.maxRows())
+    const viewport = actionViewport(lines, selectableLineIndices[this.selectedIndex], this.maxRows(), selectableLineIndices)
+    this.lastRenderWidth = safeWidth
+    this.hitMap = viewport.lines.map((_, row) => {
+      const selectable = viewport.selectableRows.find(candidate => candidate.row === row)
+      if (selectable === undefined) return { kind: 'inert' }
+      const key = this.selectableKeys[selectable.ordinal]
+      return key !== undefined ? { kind: 'select', key } : { kind: 'inert' }
+    })
+    return viewport.lines
   }
 
   invalidate(): void {
@@ -210,6 +269,13 @@ export class ActionEditorPanel implements Component {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // Any keyboard input terminates an unfinished mouse gesture: the
+    // semantic state machine (Enter → choose-binding, a → choose-binding,
+    // Esc, mutations, recorder transitions) can reinterpret a pressed
+    // edit-mode key as a different action on release — an edit-mode
+    // "+ Add shortcut" press followed by Enter must never start a leader
+    // recorder when the release click lands before the repaint.
+    this.mousePressedKey = undefined
     if (this.recorder !== undefined) {
       if (this.row.safeMode) {
         this.recorder.handleInput('\x1b')
@@ -290,6 +356,97 @@ export class ActionEditorPanel implements Component {
     }
   }
 
+  /**
+   * Mouse parity: the hit map from the LAST render decides what a pointer
+   * event may act on — a selectable row (a binding or "+ Add shortcut";
+   * press selects, click runs the same action as Enter) or inert chrome.
+   * Wheel moves the selection. While the recorder is capturing, mouse
+   * events are NOT interpreted as keybindings: the TUI mouse path
+   * consumes SGR bytes before they can reach the recorder, and this
+   * handler stays inert.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // A click ends any gesture: release the pressed identity up front —
+    // a click on inert/width-mismatched/pending geometry must not leave
+    // a stale latch that a later click could match. The local copy still
+    // guards the valid-row comparison below.
+    const pressedKey = this.mousePressedKey
+    if (event.type === 'click') this.mousePressedKey = undefined
+    // The hit map is only valid for the last painted width: a resize
+    // that has not been repainted must not dispatch against stale
+    // geometry (last-painted geometry is authoritative).
+    if (event.width !== this.lastRenderWidth) return undefined
+    if (this.recorder !== undefined) return undefined
+    // An async mutation is pending (Saving…): the edit surface is frozen
+    // (mirror the keyboard guard) — wheel/press/click must not move the
+    // selection or start a recorder while the old mutation is in flight.
+    if (this.pending) return undefined
+    const hit = this.hitMap[event.y]
+    if (!hit || hit.kind === 'inert') return undefined
+
+    if (event.type === 'wheel' && event.wheelDelta) {
+      const configured = this.row.customized ? this.row.configured : []
+      const editable = this.row.customized ? this.row.configured : this.row.editableDefaults
+      const total = this.mode === 'choose-binding' ? 2 : editable.length + 1
+      if (total <= 0) return undefined
+      const delta = event.wheelDelta < 0 ? -1 : 1
+      this.selectedIndex = (this.selectedIndex + delta + total) % total
+      this.message = undefined
+      this.requestRender()
+      return { handled: true, render: true }
+    }
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+    if (event.type === 'press') {
+      // Every press starts a fresh gesture: clear any latched pressed
+      // identity first.
+      this.mousePressedKey = undefined
+      if (this.mode === 'choose-binding') {
+        const currentIndex = hit.key === 'choice:direct' ? 0 : hit.key === 'choice:leader' ? 1 : -1
+        if (currentIndex === -1) return undefined
+        this.mousePressedKey = hit.key
+        this.selectedIndex = currentIndex
+        this.message = undefined
+        return { handled: true, focus: true }
+      }
+      // Resolve the CURRENT selectable index by the painted binding
+      // identity (an async model replacement between paint and press may
+      // have reordered the list WITHOUT a repaint). No match => reject.
+      const editable = this.row.customized ? this.row.configured : this.row.editableDefaults
+      const currentIndex = hit.key === 'add' ? editable.length : editable.findIndex(binding => bindingKey(binding) === hit.key)
+      if (currentIndex === -1) return undefined
+      this.mousePressedKey = hit.key
+      this.selectedIndex = currentIndex
+      this.message = undefined
+      return { handled: true, focus: true }
+    }
+    // click: the same action as Enter, but only for the exact pressed
+    // identity (press A → model replacement → release must not act on
+    // whatever moved into the row).
+    if (pressedKey !== hit.key) {
+      // A mismatch (or a click without a fresh press) is rejected; the
+      // identity was already released at handler entry.
+      return undefined
+    }
+    if (this.mode === 'choose-binding') {
+      this.handleBindingChoice(hit.key === 'choice:direct' ? 'd' : 'l')
+      return { handled: true }
+    }
+    const configured = this.row.customized ? this.row.configured : []
+    const editable = this.row.customized ? this.row.configured : this.row.editableDefaults
+    const currentIndex = hit.key === 'add' ? editable.length : editable.findIndex(binding => bindingKey(binding) === hit.key)
+    if (currentIndex === -1) return undefined
+    this.selectedIndex = currentIndex
+    if (this.selectedIndex >= editable.length) {
+      this.mode = 'choose-binding'
+      this.selectedIndex = 0
+      this.message = undefined
+      this.requestRender()
+    } else {
+      this.startRecorder(editable[this.selectedIndex]!.kind, editable[this.selectedIndex])
+    }
+    return { handled: true }
+  }
+
   private renderBindingChoice(width: number): string[] {
     const lines = [
       color.textStrong(`Add shortcut › ${this.row.label}`),
@@ -305,7 +462,11 @@ export class ActionEditorPanel implements Component {
     }
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, width)))
     lines.push('', color.textDim('Enter: choose · d/l: choose directly · Esc: back'))
-    return lines.slice(0, Math.max(1, this.maxRows()))
+    const limit = Math.max(1, this.maxRows())
+    this.lastRenderWidth = Math.max(1, width)
+    this.hitMap = lines.slice(0, limit).map((_, row) =>
+      row === 3 ? { kind: 'select', key: 'choice:direct' } : row === 4 ? { kind: 'select', key: 'choice:leader' } : { kind: 'inert' })
+    return lines.slice(0, limit)
   }
 
   private handleBindingChoice(data: string): void {

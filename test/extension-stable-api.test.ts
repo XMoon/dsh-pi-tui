@@ -1,8 +1,9 @@
 /**
- * M11 tests (plan §16): API v1 hardening — the deprecation policy
- * surface, the /status extension-health rows, and the stability contract
- * (capability feature-detect).
- * @module @xmoon76/dsh-pi-tui/extension-api-v1.test
+ * M11 tests (plan §16): the STABLE API contract — currently API v2 (the
+ * client-command contribution contract; v1 was the M0–M3 foundation). The
+ * deprecation policy surface, the /status extension-health rows, and the
+ * stability contract (capability feature-detect).
+ * @module @xmoon76/dsh-pi-tui/extension-stable-api.test
  */
 
 import assert from 'node:assert/strict'
@@ -23,7 +24,7 @@ afterEach(() => {
   }
 })
 
-test('API v1: the deprecation map is part of the api() contract and empty at v1', async () => {
+test('the deprecation map is part of the api() contract and empty at the current API version', async () => {
   // Mount the REAL service (startup + extension host) and read api()
   // from it — the contract is asserted against the implementation, not a
   // locally fabricated object.
@@ -31,14 +32,19 @@ test('API v1: the deprecation map is part of the api() contract and empty at v1'
   const { service, dispose } = await mountRealService()
   try {
     const info = service.api()
-    assert.equal(info.apiVersion, 1)
-    assert.equal(info.deprecations.size, 0, 'nothing is deprecated at API v1')
+    // The reported version is the exported contract constant, not a literal:
+    // a breaking extension-surface change bumps BOTH together (the
+    // client-command contribution contract is v2).
+    const { API_VERSION } = await import('../src/extension/public-types.ts')
+    assert.equal(info.apiVersion, 2)
+    assert.equal(info.apiVersion, API_VERSION)
+    assert.equal(info.deprecations.size, 0, 'nothing is deprecated at the current API version')
   } finally {
     dispose()
   }
 })
 
-test('API v1: capabilities are feature-detected, never version-parsed', async () => {
+test('stable API: capabilities are feature-detected, never version-parsed', async () => {
   // The REAL service advertises the full slot set from provide-time (no
   // surface attached yet) — the feature-detect contract plugins rely on.
   const { mountRealService } = await import('./extension-lifecycle-helpers.ts')
@@ -78,7 +84,7 @@ test('M11: extensionHealthRows reports the live registry counts', async () => {
   const { RendererRegistry } = await import('../src/renderer-registry.ts')
   const { EditorRegistry } = await import('../src/editor-registry.ts')
   const commands = new CommandBridge()
-  commands.register({ id: 'c1', name: 'vimmode', description: '', execution: 'local' }, 'owner')
+  commands.register({ id: 'c1', name: 'vimmode', description: '', handler: () => ({ kind: 'success' }) }, 'owner')
   const themes = new ThemeRegistry()
   const settings = new SettingsRegistry()
   const autocomplete = new AutocompleteRegistry()
@@ -126,7 +132,7 @@ test('M11: the capability row reflects the real capability set across states (ro
     keybindings: new KeybindingRegistry(),
     renderers: new RendererRegistry(),
     editors: new EditorRegistry(),
-    api: () => ({ apiVersion: 1 as const, hostVersion: '0.2.0', capabilities: new Set(['slot.input.widget', 'surface.snapshot']), deprecations: new Map() }),
+    api: () => ({ apiVersion: 2 as const, hostVersion: '0.2.0', capabilities: new Set(['slot.input.widget', 'surface.snapshot']), deprecations: new Map() }),
   }
   const rows = extensionHealthRows({ extensions: base } as never)
   const capabilities = rows.find(row => row.id === 'ext-capabilities')
@@ -436,7 +442,7 @@ test('the invocation-time command health capture resolves a command registered A
     await startup
     await ctx.plugin(applyExtensionHost)
     const service = ctx.get('piTuiExtensions') as unknown as {
-      registerCommand(contribution: { id: string; name: string; description: string; execution: 'local' }): unknown
+      registerCommand(contribution: { id: string; name: string; description: string; handler: () => { kind: 'success' } }): unknown
       commands: { idFor(name: string): string | undefined }
       _recordRegistryHealthRef(slot: string, id: string): { slot: string; id: string; owner: string } | undefined
     }
@@ -447,8 +453,8 @@ test('the invocation-time command health capture resolves a command registered A
     assert.equal(service._recordRegistryHealthRef('command', 'deploy'), undefined)
     // The plugin loads during the async phase (HMR / first registration).
     const fiber = ctx.plugin({ name: 'late-command', apply(c) {
-      const svc = c.get('piTuiExtensions') as unknown as { registerCommand(contribution: { id: string; name: string; description: string; execution: 'local' }): unknown }
-      svc.registerCommand({ id: 'deploy-cmd', name: 'deploy', description: 'deploy', execution: 'local' })
+      const svc = c.get('piTuiExtensions') as unknown as { registerCommand(contribution: { id: string; name: string; description: string; handler: () => { kind: 'success' } }): unknown }
+      svc.registerCommand({ id: 'deploy-cmd', name: 'deploy', description: 'deploy', handler: () => ({ kind: 'success' }) })
     } })
     await fiber
     // INVOCATION time: the re-capture resolves — the dispatched command

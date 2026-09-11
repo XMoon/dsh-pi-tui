@@ -150,7 +150,13 @@ export class TranscriptWindowController {
     return true
   }
 
-  /** Move one overlapping page toward older turns. */
+  /** Move one overlapping page toward older turns. The move is a no-op
+   * when the CURRENT projected window already reaches the oldest retained
+   * turn: the window's start index is derived from the current anchor, and
+   * at 0 there is no older page to show — the controller state stays
+   * untouched (hasOlder=false ⇒ moveOlder=false + no mutation), so a short
+   * session can never be paged into a bogus history state that hides its
+   * content. */
   moveOlder(): boolean {
     this.refreshTurnOrder()
     if (this.turns.length === 0) return false
@@ -159,6 +165,11 @@ export class TranscriptWindowController {
       ? latestIndex
       : this.turnIndex(this.current.endTurn ?? this.turns[latestIndex]!)
     if (currentIndex < 0) return false
+    // The current projected window already reaches the oldest retained
+    // turn: no older page exists — never switch latest → history and never
+    // move an existing history anchor.
+    const startIndex = Math.max(0, currentIndex - this.windowTurns + 1)
+    if (startIndex === 0) return false
     const nextIndex = Math.max(0, currentIndex - this.stepTurns)
     if (nextIndex === currentIndex) return false
     const endTurn = this.turns[nextIndex]

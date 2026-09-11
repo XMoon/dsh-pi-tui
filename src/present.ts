@@ -13,6 +13,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type {
   FileDiff, ToolCallView, ToolResult, ToolResultView, WebFetchResultView, WebSearchResultView,
 } from '@deepseek-ai/dsh-tools'
+import { finalizedBlockFallbackText, fileAttachmentSummary } from './content-block-presentation.ts'
 import { type IconSemantic } from './icons.ts'
 
 /**
@@ -582,6 +583,12 @@ const SUMMARY_KEYS: Record<string, string[]> = {
   others: [],
 }
 
+/** Return the formal Tool card's preferred argument summary keys. Preparing
+ * extraction treats this order as the best available choice at extraction time. */
+export function toolSummaryKeys(name: string): readonly string[] {
+  return SUMMARY_KEYS[classifyTool(name)] ?? []
+}
+
 /** The first line of a text (the Web's ReasoningRow summary for settled rows). */
 export function firstLine(text: string): string {
   const newline = text.indexOf('\n')
@@ -629,11 +636,11 @@ function pickString(args: Record<string, unknown>, keys: readonly string[]): str
 
 /** The summary key preference for one row variant, falling back to the first
  * string arg value, then to the raw args text (Web deriveSummary). */
-function deriveSummary(variant: ToolVariant, argsRaw: string): string {
+function deriveSummary(name: string, argsRaw: string): string {
   const parsed = parseArgs(argsRaw)
   if (typeof parsed !== 'object' || parsed === null) return firstLine(argsRaw)
   const args = parsed as Record<string, unknown>
-  const picked = pickString(args, SUMMARY_KEYS[variant] ?? [])
+  const picked = pickString(args, toolSummaryKeys(name))
   if (picked !== undefined) return firstLine(picked)
   for (const value of Object.values(args)) {
     if (typeof value === 'string' && value !== '') return firstLine(value)
@@ -1090,7 +1097,7 @@ export function toolCardHeader(name: string, argsRaw: string, cwd?: string): Too
   // generic derivation (Web TodoRow parity: `todo_write` reads
   // `2/3 done` instead of a raw args dump).
   const toolSummary = summarizeToolArgs(name, argsRaw)
-  const base = argsRaw === '' ? '' : toolSummary ?? relativizeToCwd(deriveSummary(variant, argsRaw), cwd)
+  const base = argsRaw === '' ? '' : toolSummary ?? relativizeToCwd(deriveSummary(name, argsRaw), cwd)
   const summary = variant === 'others' && toolTitle === undefined
     ? base === '' ? '' : name + ' · ' + base
     : base
@@ -1203,9 +1210,10 @@ export function genericRawInputLines(name: string, rawInput: unknown): string[] 
 
 /**
  * Flatten a settled result's content blocks to display lines, with the Web's
- * `resultText` semantics: text blocks verbatim, other block shapes as pretty
- * JSON. Empty content on a failed call falls back to the structured error's
- * `name: code` line (the Web's error summary).
+ * `resultText` semantics: text blocks verbatim, known file blocks as a
+ * metadata-only row, images as a compact placeholder, and unknown finalized
+ * blocks as an explicit bounded fallback. Empty content on a failed call
+ * falls back to the structured error's `name: code` line.
  * @param blocks - the result content blocks.
  * @param error - the structured error, when the call failed.
  * @returns the display lines (may be empty).
@@ -1216,9 +1224,14 @@ export function resultTextLines(blocks: readonly ContentBlock[], error?: { name:
     if (block.type === 'text') lines.push(...block.text.split('\n'))
     // An image block carries base64 payload: never dump it into the
     // transcript as pretty JSON (read_image cards render their envelope
-    // summary instead). Other non-text blocks keep the JSON projection.
+    // summary instead).
     else if (block.type === 'image') lines.push('[image]')
-    else lines.push(JSON.stringify(block, null, 2))
+    else if (block.type === 'file') lines.push(fileAttachmentSummary(block.attachment))
+    else if (block.type === 'reasoning' || block.type === 'tool-call' || block.type === 'tool-result') {
+      // Preserve the existing raw projection for known process blocks; their
+      // dedicated transcript surfaces own ordinary rendering.
+      lines.push(JSON.stringify(block, null, 2))
+    } else lines.push(finalizedBlockFallbackText(block))
   }
   if (lines.length === 0 && error !== undefined) lines.push(`${error.name}: ${error.code}`)
   return lines
@@ -1493,10 +1506,7 @@ export function focusToolDisplay(
  * full multiline command (ghost-row fix). */
 function formatOwnedCallForCompactFocus(view: ToolCallView): string {
   if (view.card === 'terminal') return firstLine(view.title.replace(/\r\n|\r/g, '\n'))
-  if (view.card === 'diff') {
-    const path = view.diffs[0]?.path
-    return path === undefined ? view.title : `${view.title} ${path}`
-  }
+  if (view.card === 'diff') return firstLine(view.title.replace(/\r\n|\r/g, '\n'))
   const raw = typeof view.rawInput === 'string' ? view.rawInput.trim() : undefined
   if (raw === undefined || raw === '') return view.title
   return view.title.endsWith(raw) ? view.title : `${view.title} ${firstLine(raw)}`

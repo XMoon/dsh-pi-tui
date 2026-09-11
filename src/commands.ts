@@ -1,18 +1,25 @@
 /**
  * The TUI-owned slash commands (/exit /settings /sessions /skill /model
- * /new /tasks /preset /search /title /copy /export
+ * /new /tasks /preset /search /title /copy /export /transcript
  * /fork /status /login /logout /help), extracted from the runner's
  * monolithic apply() so the registration surface is testable and the runner
  * closure shrinks. Every command reads the live runner state through the
  * {@link TuiCommandRunner} interface, whose accessors re-read the current
  * agent/settings on every access (sessions can swap the live agent).
+ *
+ * /sessions, /resume and /search share ONE Session Browser lifecycle
+ * (`openSessionPicker`): the picker is input-first, the listing is shared,
+ * and a non-empty query enters a GLOBAL search projection — local metadata
+ * matches UNION Host content hits, never scoped by the Current/All browse
+ * tabs (the Host page is a bounded global ranking; scoping it afterwards
+ * would hide real matches). Host content search is a debounced async
+ * augmentation; clearing the query restores the browse state (plan:
+ * temp/20260907/dsh-pi-tui-search-sessions-direct-boundary-plan.md).
  * @module @xmoon76/dsh-pi-tui/commands
  */
 
 import { randomUUID } from 'node:crypto'
-import { writeFileSync } from 'node:fs'
 import { scheduler } from 'node:timers/promises'
-import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -23,6 +30,7 @@ import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefini
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import { createForkedAgent } from './session-fork.ts'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
+import type { ComposerSubmitGesture } from './tui-app.ts'
 import { mergeDraft } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
@@ -50,8 +58,13 @@ import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
 import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
-import { consumeDraftImages, pruneUnreferencedDrafts } from './image/submit.ts'
+import {
+  consumeDraftAttachments,
+  pinDraftAttachments,
+  pruneUnreferencedDraftAttachments,
+} from './image/submit.ts'
 import { readImageFile } from './image/intake.ts'
+import { FileInputError, probeAttachment } from './attachment/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
 import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from './theme-menu.ts'
@@ -61,15 +74,21 @@ import { suggestPathArgument } from './mentions.ts'
 import { FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { ModelSubmenu } from './model-menu.ts'
 import { computeStats, formatStats } from './stats.ts'
-import { renderTranscriptMarkdown, textOf } from './transcript.ts'
+import { textOf } from './transcript.ts'
 import {
+  CONTENT_SEARCH_DEBOUNCE_MS,
   PROJECTION_BATCH_SIZE,
   PROJECTION_FIRST_BATCH,
   buildSessionTree,
   findSessionMatch,
   sameWorkspace,
+  sanitizeSessionSearchInput,
+  sanitizeTerminalText,
   sessionLabelParts,
+  sessionRowMatchesQuery,
+  sessionSearchItem,
   sessionPickerItem,
+  type SessionContentHit,
   type SessionPickerItem,
   type SessionPickerRow,
 } from './sessions.ts'
@@ -198,6 +217,77 @@ export function sessionPickerCategories(
 }
 
 /**
+ * The Session Browser's SEARCH projection category (review P1/P2): with a
+ * non-empty query the picker enters a GLOBAL search view whose membership is
+ * the explicit union of local metadata matches and Host content hits —
+ * never a workspace-scoped post-filter of the bounded Host page (the Host
+ * returns a global top-20; scoping it afterwards would hide a real
+ * current-workspace match ranked beyond the window), and never a fake query
+ * append in the description (membership and presentation stay separate).
+ * The category is EXTERNALLY filtered (review P1): the SelectList renders
+ * without its internal substring filter, so the projection's items ARE the
+ * membership — a Host-authoritative hit is never dropped by a substring
+ * re-filter, regardless of snippet length or query normalization. The
+ * category is non-cyclable: Tab never leaves it while a query is active,
+ * and browse mode skips it.
+ */
+export function sessionSearchCategory(options: {
+  rows: readonly SessionPickerRow[]
+  header: string
+  /** The SEARCH item builder (the cwd joins the searchable description). */
+  itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem
+  /** The LIVE CANONICAL filter text (read at activation time) — the one
+   * semantic query that also drives the Host search. */
+  queryOf: () => string
+  /** The merged Host content hits (live map, Host page order). */
+  contentHitsById: ReadonlyMap<string, SessionContentHit>
+  /** The enriched metadata (title/preset) for the local match — the raw
+   * list rows carry neither until the projection batch lands. */
+  metadataOf: (id: string) => { title?: string; preset?: string }
+  placeholder?: () => SessionPickerItem
+}): PickerCategory {
+  const { rows, header, itemFor, queryOf, contentHitsById, metadataOf, placeholder } = options
+  return {
+    id: 'search',
+    label: 'Search results',
+    header: `${header} · Search results`,
+    cyclable: false,
+    // The externally-filtered mode (review P1): the SelectList renders
+    // WITHOUT its internal substring filter — this projection's items ARE
+    // the membership, and a Host-authoritative hit is never dropped by a
+    // substring re-filter.
+    externalFilter: true,
+    items: () => {
+      if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
+      const mainRows = rows.filter(row => row.origin !== 'subagent')
+      const query = queryOf()
+      // Flat merged search projection (review P2): local metadata matches
+      // keep the newest-first list order; content-only matches keep the
+      // Host page order (the map's insertion order); a row that is both is
+      // a local match with the snippet merged. No browse tree ordering.
+      const localMatches = query === '' ? [] : mainRows.filter(row => {
+        const meta = metadataOf(row.id)
+        return sessionRowMatchesQuery({
+          ...row,
+          title: meta.title,
+          preset: meta.preset ?? row.preset,
+        }, query)
+      })
+      const localIds = new Set(localMatches.map(row => row.id))
+      // Content-only matches keep the HOST PAGE order — iterate the hit
+      // map (its insertion order IS the Host page order), never the
+      // newest-first list order.
+      const rowById = new Map(mainRows.map(row => [row.id, row]))
+      const contentOnly = [...contentHitsById.keys()]
+        .filter(id => !localIds.has(id))
+        .map(id => rowById.get(id))
+        .filter((row): row is SessionPickerRow => row !== undefined)
+      return [...localMatches, ...contentOnly].map(row => itemFor(row, 0))
+    },
+  }
+}
+
+/**
  * Display copy for the four shipped agent presets, fixed in English — the
  * web surface's `BUILT_IN_PRESET_KEYS` mapping (`dsh-client-ui-agent-preset`),
  * TUI-side. The effective roster root is the DSH agent-presets package's
@@ -216,7 +306,7 @@ const BUILT_IN_PRESET_COPY: Readonly<Record<string, { name: string; description:
   },
   minimal: {
     name: 'Minimal mode',
-    description: 'Two-tool coding agent with persistent bash and str_replace_editor.',
+    description: 'Minimal coding agent with a persistent shell.',
   },
   cordis: {
     name: 'Creator mode',
@@ -268,6 +358,48 @@ export interface CommandRegistryLike {
 export interface DefaultIntentRecord {
   readonly id: number
   readonly selection: ModelSelection
+}
+
+/**
+ * The effective mode ONE submission resolved at the submit boundary: whether
+ * an agent-facing delivery steers into the running turn or queues behind it
+ * (web `ComposerSubmissionPolicy` parity — an idle agent queues, plain Enter
+ * takes the preference, and the accelerated chord takes its OPPOSITE).
+ *
+ * It is a property of the GESTURE, not of the persisted settings: a one-shot
+ * gesture exists only inside the dispatch that resolved it, so every
+ * downstream consumer (the TUI skill delivery) accepts this value instead of
+ * re-deriving the mode from `busyEnter`.
+ */
+export type SubmitDelivery = 'steer' | 'queue'
+
+/**
+ * Resolve one submission's delivery mode — the DSH WEB
+ * `ComposerSubmissionPolicy.resolve()` contract (baseline 0.1.5-rc.1,
+ * shared by every UI client):
+ *
+ * ```text
+ * !running              -> queue
+ * gesture === 'enter'   -> the preferred mode (busyEnter)
+ * accelerated           -> the OPPOSITE of the preferred mode
+ * ```
+ *
+ * The accelerated chord is therefore "the other behavior", never a fixed
+ * queue: with the default preference ('queue') it steers. A non-steering
+ * transport always queues (the TUI's Direct surface always steers).
+ * @param running - whether the live agent reports running.
+ * @param gesture - the composer gesture that raised the submission.
+ * @param busyEnter - the persisted preference (''/undefined = queue).
+ */
+export function resolveComposerDelivery(
+  running: boolean,
+  gesture: ComposerSubmitGesture,
+  busyEnter: string | undefined,
+): SubmitDelivery {
+  if (!running) return 'queue'
+  const preferred: SubmitDelivery = busyEnter === 'steer' ? 'steer' : 'queue'
+  if (gesture === 'enter') return preferred
+  return preferred === 'queue' ? 'steer' : 'queue'
 }
 
 /** Everything the TUI-owned commands read from the runner. */
@@ -358,9 +490,10 @@ export interface TuiCommandRunner {
    * (migration M1.11) — a runner assembly dependency, not a Host
    * capability. */
   readonly commandRegistry: CommandRegistryLike | undefined
-  /** The ONE exit orchestration (flush with a hard timeout, cleanup, warn,
-   * resume hint, process exit) — shared by Ctrl+C/Ctrl+D, /exit and /quit.
-   * Command handlers must NEVER stop the app, flush or exit themselves. */
+  /** The ONE exit orchestration (latch → surface cleanup → resume hint →
+   * appExit; the Direct owned-session retirement runs inside the appExit
+   * disposal) — shared by Ctrl+C/Ctrl+D, /exit and /quit. Command handlers
+   * must NEVER stop the app, flush or exit themselves. */
   requestExit(): void
   cwd: string
   /** The per-TUI draft image registry (image pipeline, plan M1). Shared by
@@ -368,6 +501,8 @@ export interface TuiCommandRunner {
    * runner clears it on submit/session-switch/dispose, never on durable
    * attachments. */
   imageStore: import('./image/draft-store.ts').DraftImageStore
+  /** The per-TUI metadata-only generic file draft registry. */
+  readonly fileStore?: import('./attachment/file-draft.ts').DraftFileStore
   /** The shared clipboard WRITE policy (issue #7): tmux → platform helper
    * → OSC 52 best-effort. Used by /copy; the fullscreen drag selection
    * routes through the same policy via the app's copySelection option. */
@@ -417,19 +552,11 @@ export interface TuiCommandRunner {
    * this transaction and must run it inside {@link withSessionTransition}.
    */
   transitionTo<T>(steps: {
-    /** The child's PRE-GENERATED session identity (MANDATORY): the
-     * transaction reserves its lease BEFORE the DSH call (while the old
-     * lock is still held), so a refusal aborts with zero child side
-     * effects; a create/resume rejection is NEVER retried (no same-ID
-     * recovery) — once the DSH boundary is crossed, the target is PINNED
-     * immediately and stays locked for this process's lifetime. */
+    /** The child's PRE-GENERATED session identity (MANDATORY). */
     target: { id: string; header?: { cwd?: string } }
-    /** Whether the target is a FRESH session: the target lock must settle
-     * as acquired, or the transaction aborts before the create. */
-    fresh?: boolean
-    /** An explicit model choice the fresh target must inherit: recorded
-     * durably on the created Agent so its first request never falls back
-     * to a stale global default (the /new seeding path). */
+    /** An explicit model selection the target must observe after creation.
+     * For /new this seeds an explicit default intent; for /fork and /rewind
+     * it preserves the source selection after the inherited historical prefix. */
     inheritSelection?: ModelSelection
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
@@ -928,6 +1055,14 @@ async function askAddProvider(
   const api = answers.find(answer => answer.id === 'api')?.selected[0] ?? PROTOCOL_CHOICES[0]
   const baseURL = (answers.find(answer => answer.id === 'baseURL')?.custom ?? '').trim()
   if (baseURL === '') return { kind: 'error', text: 'base URL is required for a hand-declared provider route' }
+  try {
+    const protocol = new URL(baseURL).protocol
+    if (protocol !== 'http:' && protocol !== 'https:') {
+      return { kind: 'error', text: `invalid base URL "${baseURL}" — expected an absolute http(s) URL` }
+    }
+  } catch {
+    return { kind: 'error', text: `invalid base URL "${baseURL}" — expected an absolute http(s) URL` }
+  }
   const displayName = (answers.find(answer => answer.id === 'displayName')?.custom ?? '').trim() || routeValue
   const key = (answers.find(answer => answer.id === 'key')?.custom ?? '').trim()
 
@@ -1068,6 +1203,26 @@ function mergeFooterCustomItemsForSave(raw: unknown, saved: readonly FooterCusto
 }
 
 /**
+ * The CURRENT host catalog's view of ONE parsed line (the DSH client
+ * `CommandUiRuntime.matchEnter` decision table): whether the host CLAIMS the
+ * line, and — for a claimed line — the claiming descriptor's attachment
+ * declaration, so the dispatch can never consult two different catalog views
+ * for the claim and the declaration.
+ */
+export type HostCommandClaim =
+  | {
+    readonly claimed: true
+    /** The claiming descriptor's `input.attachments`
+     * (DSH `CommandInputDescriptor.attachments`): only a declaring command
+     * may be invoked with composer attachments. */
+    readonly attachments: boolean
+  }
+  // The catalog RESOLVES the name but this LINE is not an invocation (an
+  // argued line of an execute-kind command): the line is never handed to the
+  // command plane, and it is an ordinary submission.
+  | { readonly claimed: false }
+
+/**
  * Register the TUI-owned slash commands on the commands service. The
  * completion list is refreshed after every registration so TUI-owned
  * commands appear in the editor's tab list. Registration is sessionless:
@@ -1087,10 +1242,26 @@ export function registerTuiCommands(
   initial?: InitialCommandCatalog,
 ): {
   wasAdvertised(name: string): boolean
+  /** The CURRENT host catalog's view of ONE parsed line (see
+   * {@link HostCommandClaim}): `undefined` when the catalog does not RESOLVE
+   * the name, `claimed: false` when it resolves the name without claiming
+   * this line. */
+  hostClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** Whether one slash name is a LIVE TUI-owned skill wrapper (an
+   * agent-facing invocation whose `/name` line the host may resolve into an
+   * injected skill body). */
+  isSkillWrapper(name: string): boolean
   /** One synchronous catalog commit (the coordinator's install hook). */
   installSnapshot(snapshot: SurfaceCatalogSnapshot): void
+  /** Re-synthesize the slash completions from the CURRENT host catalog plus
+   * the live client contributions (the extension-invalidate hook: a late
+   * contribution joins the menu without waiting for a session refresh). */
+  refreshCommandCompletions(): void
   /** The revalidating transition (the coordinator's target-change hook). */
   enterTransition(): void
+  /** Bind one submission's resolved delivery mode for the synchronous window
+   * that launches a command execution (see the TUI skill handlers). */
+  withDelivery<T>(delivery: SubmitDelivery, run: () => T): T
 } {
   const { ctx, app } = runner
   const cwd = runner.cwd
@@ -1102,6 +1273,56 @@ export function registerTuiCommands(
   // The commands service is part of the base layer; its absence means the
   // TUI commands cannot be registered at all — the caller surfaces this.
   if (commands === undefined) throw new Error('commands service unavailable')
+
+  // ── submit-resolved delivery binding ────────────────────────────────────
+  /**
+   * The delivery mode bound to the command execution launched in the CURRENT
+   * synchronous window (`withDelivery`). `commands.execute` invokes a
+   * resolved handler in the SAME call stack as the dispatch (the TUI submits
+   * no attachments), so a TUI-owned skill handler captures its invocation's
+   * mode before any await and passes it to the delivery — never re-deriving
+   * the mode from the persisted preference, which cannot reconstruct a
+   * one-shot gesture (the accelerated chord's opposite mode).
+   */
+  let boundDelivery: SubmitDelivery | undefined
+  /**
+   * Bind `delivery` for one synchronous window and run the launch. Commands
+   * that own their own busy semantics (Host commands, dispatched without a
+   * binding) simply never consume it.
+   *
+   * The binding belongs to the dispatch that armed it: it is consumed by the
+   * TUI-owned handler launched in the SAME synchronous window (a handler
+   * that awaits still captures it, because capture is its first statement).
+   * KNOWN LIMITATION: a command handler that SYNCHRONOUSLY re-enters the
+   * command service (`ctx.commands.execute`) for a TUI skill wrapper would
+   * inherit this delivery instead of resolving as "no submission" (queued) —
+   * no in-tree caller does that, and the public `CommandRuntime.execute`
+   * contract has no channel for a per-invocation mode, so such a caller must
+   * pass its own explicit mode rather than rely on the ambient one.
+   * @param delivery - the mode the submit boundary resolved for this gesture.
+   * @param run - the launch (the command execution) to run inside the window.
+   */
+  const withDelivery = <T>(delivery: SubmitDelivery, run: () => T): T => {
+    const previous = boundDelivery
+    boundDelivery = delivery
+    try {
+      return run()
+    } finally {
+      // Restore the enclosing window (undefined at the top level).
+      boundDelivery = previous
+    }
+  }
+  /**
+   * Consume the delivery mode bound for the execution launching in this call
+   * stack. `undefined` means no TUI submission launched it (the command
+   * plane driven from outside the submit boundary): there is no chord to
+   * honor, so the skill delivery falls back to the safe queue mode.
+   */
+  const takeDelivery = (): SubmitDelivery | undefined => {
+    const delivery = boundDelivery
+    boundDelivery = undefined
+    return delivery
+  }
 
   /** The EFFECTIVE key label for user-facing descriptions (plan §18): a
    * remap updates every row; a disabled action shows a neutral dash. */
@@ -1204,25 +1425,162 @@ export function registerTuiCommands(
   // command. The dispatch captures the claim BEFORE any session creation
   // (wasAdvertised below); a probed command that the real session then
   // lacks must be consumed with an explicit error, never sent to the model.
-  /** The advertised names of the currently installed completion list. */
-  let claims = new Set<string>()
+  /** The advertised HOST commands of the currently installed completion
+   * list, by name — the host's AUTHORITY record. A contribution never enters
+   * it, and the descriptor's INPUT KIND is kept with it (see
+   * {@link hostClaimOf}): the DSH command UI distinguishes a `leadingInput`
+   * command (`/goal <objective>`) from an execute-kind one (`/compact`) by
+   * `CommandDescriptor.input`, and only the former claims an argued line. */
+  let claims = new Map<string, { leadingInput: boolean; attachments: boolean }>()
+  /**
+   * The detached human skill catalog for INLINE skill reference completion
+   * (the plain-text `/name` lexicon). A Client presentation cache: it owns
+   * no skill body, no registry, and is NOT an authorization — the Host
+   * pre-step decides invocation. Deliberately NOT part of the command
+   * `claims`: a skill reference is not a command advertisement (the
+   * per-skill command wrappers keep their own completion/claim path, so
+   * the command plane can retire them independently later).
+   */
+  let currentSkillReferences: readonly HumanSkillSummary[] = []
   /** Slash commands whose single argument is a path: the fork's
    * `getArgumentCompletions` extension point completes it against the
    * Client-local cwd (natural typing shows candidates, Tab accepts them).
    * Host session cwd remains reserved for `@` via HostFilePort. */
   const PATH_ARGUMENT_COMMANDS = FILE_ARGUMENT_COMMANDS
   /**
-   * Install one completion list (sorted, claims refreshed). The single
-   * synchronous seam every catalog commit funnels through.
+   * Candidate synthesis (the DSH `CommandUiRuntime.candidates` parity): the
+   * host catalog merged with the live CLIENT command contributions by name.
+   * A contribution whose name is already a host command (or a TUI-owned
+   * name) is a COLLISION: this pass FAILS — no merged list is installed, the
+   * command source is marked failed downstream (`source-failed` parity
+   * withdraws its rows), and EVERY collision of the pass is recorded against
+   * its contribution and reported. Never a silent shadow, never a partial
+   * list.
+   * @param host - the host catalog rows for the current scope.
+   * @throws when a contribution collides with a host name.
    */
-  const installCompletions = (entries: readonly SurfaceCommandSummary[]): void => {
+  const mergeContributions = (host: readonly SurfaceCommandSummary[]): readonly SurfaceCommandSummary[] => {
+    const bridge = runner.extensions?.commands
+    if (bridge === undefined) return host
+    const contributions = bridge.snapshot().entries
+    // PURGE the bookkeeping of contributions that are GONE. A disposed
+    // contribution leaves the snapshot entirely — the recovery loop below
+    // only visits LIVE entries — while its notice key would survive and
+    // silence a RE-registration under the same id/owner (a plugin
+    // reload/HMR): that is a NEW failure generation, and its health record
+    // fails again. The registration's ledger record was untracked with it,
+    // so only these local records remain to drop.
+    const live = new Set(contributions.map(contribution => contributionIdentity(contribution)))
+    for (const identity of [...collisionHealth.keys()]) {
+      if (live.has(identity)) continue
+      collisionHealth.delete(identity)
+      notifiedCollisions.delete(identity)
+    }
+    if (contributions.length === 0) return host
+    const byName = new Map(host.map(entry => [entry.name, entry] as const))
+    // Record EVERY collision of this pass before failing it: the health
+    // surface must list all offenders, not only the first one scanned.
+    const colliding = new Set<string>()
+    const collisions: { identity: string; message: string }[] = []
+    let firstCollision: Error | undefined
+    for (const contribution of contributions) {
+      if (!byName.has(contribution.name)) continue
+      const identity = contributionIdentity(contribution)
+      colliding.add(identity)
+      const collision = new Error(`command contribution /${contribution.name} collides with a host command`)
+      collisions.push({ identity, message: collision.message })
+      const ref = { slot: 'command', id: contribution.id, owner: contribution.owner }
+      collisionHealth.set(identity, { ref, message: collision.message })
+      recordExtensionError?.(ref, collision)
+      firstCollision ??= collision
+    }
+    // HEALTH RECOVERY, scoped to the COLLISION records this synthesis wrote: a
+    // contribution that merges cleanly again is no longer failed — even while
+    // another contribution keeps this pass failing. A handler failure that
+    // OPENED the record is protected by the message guard below (the ledger
+    // deduplicates into it, keeping the handler message); one deduplicated
+    // INTO a live collision record is not — the documented diagnostic
+    // limitation (docs/surface-decisions.md).
+    for (const contribution of contributions) {
+      const identity = contributionIdentity(contribution)
+      if (colliding.has(identity)) continue
+      const recorded = collisionHealth.get(identity)
+      if (recorded === undefined) continue
+      collisionHealth.delete(identity)
+      // A recovered collision may notify again in a later generation.
+      notifiedCollisions.delete(identity)
+      // Clear ONLY when the health record currently shows OUR collision: the
+      // same slot also carries handler runtime failures, and the ledger
+      // DEDUPLICATES a later failure into an already-failed record (keeping
+      // the first message) — clearing blindly would erase a handler failure
+      // that this synthesis never wrote (and that has not recovered). A
+      // failure deduplicated into OUR live collision record is
+      // indistinguishable here (documented limitation). The record identity
+      // is (slot, owner, id): one plugin may legally reuse an id in another
+      // slot (a theme and a command), so the extension point MUST match too.
+      const current = runner.extensions?.health?.().find(
+        entry => entry.extensionPoint === recorded.ref.slot
+          && entry.id === recorded.ref.id
+          && entry.owner === recorded.ref.owner,
+      )
+      if (current === undefined || current.state !== 'failed' || current.lastError !== recorded.message) continue
+      clearExtensionError?.(recorded.ref)
+    }
+    if (firstCollision !== undefined) throw Object.assign(firstCollision, { collisions })
+    for (const contribution of contributions) {
+      byName.set(contribution.name, { name: contribution.name, description: contribution.description })
+    }
+    return [...byName.values()]
+  }
+  /**
+   * One collision notice per contribution IDENTITY and failure GENERATION
+   * (the key is dropped when the collision recovers): a new owner reusing a
+   * released name, or the same contribution colliding again after the host
+   * descriptor went away and came back, is surfaced again. A pass that finds
+   * a fresh collision anywhere re-states the WHOLE current collision set.
+   */
+  const notifiedCollisions = new Set<string>()
+  /** The identity of one contribution GENERATION (id + owner + registration
+   * generation): the owner keeps a reused id honest, and the generation keeps
+   * a dispose + re-register under the same id/owner apart — an HMR reload may
+   * coalesce both into ONE invalidate flush, so a purge that only observes
+   * absent identities can never see the gap. */
+  const contributionIdentity = (entry: { id: string; owner: string; generation: number }): string =>
+    `${entry.id}\u0000${entry.owner}\u0000${entry.generation}`
+  /** The COLLISION records THIS synthesis wrote, by identity — the only
+   * health entries a successful merge may clear, and only while the record
+   * still shows that collision message (see the recovery loop). */
+  const collisionHealth = new Map<string, { ref: { slot: string; id: string; owner: string }; message: string }>()
+  const installCompletions = (
+    entries: readonly SurfaceCommandSummary[],
+    options: { display?: 'merged' | 'none' } = {},
+  ): void => {
     const sorted = [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
+    // HOST CLAIMS first: the claim set is the host's AUTHORITY record (the
+    // dispatch consults it), so it must never depend on the client merge — a
+    // failed synthesis must not cost a host command its claim. The INPUT KIND
+    // and the attachment DECLARATION (`CommandInputDescriptor`) ride in the
+    // same record: which line the command claims and whether that line may
+    // carry attachments are both descriptor facts, so they can never describe
+    // two different catalogs.
+    claims = new Map(sorted.map(command => [command.name, {
+      leadingInput: command.input !== undefined,
+      attachments: command.input?.attachments === true,
+    }]))
+    // The display list carries the client contributions too; the CLAIM set
+    // never does (see the parameter doc). 'none' is the FAILED-SOURCE state
+    // (upstream `source-failed` removes the source's group): no command rows
+    // are offered until a synthesis succeeds again, while the claims above
+    // stay live.
+    const display = options.display === 'none'
+      ? []
+      : [...mergeContributions(sorted)].sort((left, right) => left.name < right.name ? -1 : 1)
     // M5: the plugin autocomplete chain (AutocompleteRegistry) is consulted
     // after the host's own provider returns null. The registry's suggest()
     // handles cancellation (latest-only commit) and per-provider isolation.
     const extensionAutocomplete = runner.extensions?.autocomplete
     app.setCommandCompletions(
-      sorted.map(command => ({
+      display.map(command => ({
         name: command.name,
         description: command.description,
         argumentHint: command.input?.hint,
@@ -1255,11 +1613,14 @@ export function registerTuiCommands(
       () => runner.liveAgent === undefined
         ? { kind: 'workspace', cwd: runner.sessionCwd() }
         : { kind: 'session', sessionId: runner.liveAgent.session.id },
-      // `/image` is Client-local. Direct mode uses the process cwd; a remote
+      // `/attach` and `/image` are Client-local. Direct mode uses the process cwd; a remote
       // adapter can keep this independent from the Host session scope.
       () => runner.cwd,
+      // The inline skill reference lexicon rides the same install: the
+      // provider completes plain-text `/name` tokens from this detached
+      // list, never from the command registry.
+      currentSkillReferences,
     )
-    claims = new Set(sorted.map(command => command.name))
   }
   /** The saved probed scoped overrides (see installSurfaceSnapshot). */
   let savedScopedCommands: readonly SurfaceCommandSummary[] = []
@@ -1284,9 +1645,57 @@ export function registerTuiCommands(
    * `commands.list(undefined)` safely returns the global layer only (the
    * remote RPC path's lookup guard does not apply in-process).
    */
+  /**
+   * The CONTAINING seam every catalog commit funnels through: a failed
+   * candidate synthesis (a contribution/host name collision) installs no
+   * merged list — the source's rows are withdrawn downstream — while every
+   * collision is already recorded on its contribution's health and reported
+   * to the user. The HOST CLAIMS were refreshed before the merge, so a
+   * collision never costs a host command its claim.
+   * @param entries - the host catalog rows for the current scope.
+   */
+  const installCompletionsContained = (entries: readonly SurfaceCommandSummary[]): void => {
+    try {
+      installCompletions(entries)
+    } catch (error) {
+      // The failed pass marks the command SOURCE failed (upstream
+      // `source-failed` parity: the source's whole group is removed): no
+      // command row — client OR host — is offered until a synthesis succeeds
+      // again, so no displayed row can ever execute a different command than
+      // it shows. The HOST CLAIMS were refreshed before the merge, so the
+      // input authority of a host command is never lost while the menu is
+      // empty.
+      const message = safeErrorMessage(error)
+      // A failed pass surfaces EVERY collision it found, not only the first:
+      // with one notice slot, the aggregated text names all offenders. It
+      // notifies only while at least one identity is FRESH (per identity and
+      // failure generation), so a refresh re-failing on the same collisions
+      // stays silent instead of re-raising the notice. A throw carrying no
+      // collision list (a core bug, not a contribution) falls back to its own
+      // message as the notice identity.
+      const reported = (error as { collisions?: readonly { identity: string; message: string }[] })
+        .collisions ?? [{ identity: message, message }]
+      const fresh = reported.filter(entry => !notifiedCollisions.has(entry.identity))
+      if (fresh.length > 0) {
+        for (const entry of fresh) notifiedCollisions.add(entry.identity)
+        app.notify(reported.map(entry => entry.message).join(' · '), 'error')
+      }
+      try {
+        ctx.logger.error(`tui-runner: ${message}`)
+      } catch {
+        // The cordis logger must not block the submission path.
+      }
+      try {
+        installCompletions(entries, { display: 'none' })
+      } catch {
+        // Clearing the display is plain work: a failure here is a core bug,
+        // not a contribution problem — leave the previous list in place.
+      }
+    }
+  }
   const refreshCompletions = (): void => {
     const liveAgent = runner.liveAgent
-    installCompletions(liveAgent === undefined
+    installCompletionsContained(liveAgent === undefined
       ? mergeGlobalAndSavedScoped()
       : commands.list(liveAgent).map(commandSummaryOf))
   }
@@ -1335,6 +1744,7 @@ export function registerTuiCommands(
     input?: { hint: string }
     handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>
     aliasHandlers?: Record<string, (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>>
+    aliasDescriptions?: Record<string, string>
   }): void => {
     commands.register({
       name: spec.name,
@@ -1346,7 +1756,7 @@ export function registerTuiCommands(
       const handler = spec.aliasHandlers?.[alias] ?? spec.handler
       commands.register({
         name: alias,
-        description: `${spec.description} (alias of /${spec.name})`,
+        description: spec.aliasDescriptions?.[alias] ?? `${spec.description} (alias of /${spec.name})`,
         ...(spec.input === undefined ? {} : { input: spec.input }),
         handler,
       })
@@ -1354,10 +1764,11 @@ export function registerTuiCommands(
   }
 
   // Shared by /exit and its /quit alias. The exit orchestration lives in
-  // the runner (createExitController): flush with a hard timeout, idempotent
-  // cleanup, warning, resume hint, process exit. Handlers never stop the app
-  // or flush themselves — that kept /exit diverging from Ctrl+C/Ctrl+D (no
-  // timeout, no catch, no warning) and could hang a stopped UI forever.
+  // the runner (createExitController): latch once, idempotent surface
+  // cleanup, resume hint, appExit (the Direct owned-session retirement runs
+  // inside the appExit disposal). Handlers never stop the app or flush
+  // themselves — that kept /exit diverging from Ctrl+C/Ctrl+D and could
+  // hang a stopped UI forever.
   const exitHandler = (): { kind: 'success' } => {
     runner.requestExit()
     return { kind: 'success' }
@@ -1562,7 +1973,7 @@ export function registerTuiCommands(
           {
             id: 'busy-enter',
             label: 'Submit while busy',
-            description: `Steer injects the draft into the running turn; ${keyHint('app.input.queue')} uses the other behavior`,
+            description: `Steer injects the draft into the running turn; ${keyHint('app.input.submitAccelerated')} uses the other behavior`,
             currentValue: settingsDoc?.busyEnter ?? 'queue',
             values: ['queue', 'steer'],
           },
@@ -2211,34 +2622,58 @@ export function registerTuiCommands(
     },
   })
 
-  // Shared /sessions + /resume body — input-first (the official /resume
-  // fix): the picker overlay opens IMMEDIATELY on a loading placeholder and
-  // owns the input (Esc, arrows, search) while the Host listing and the
-  // combined projection enrichment land in the background. The header
-  // parameter lets the resume alias present itself under its own name.
+  // Shared /sessions + /resume + /search body — input-first (the official
+  // /resume fix): the picker overlay opens IMMEDIATELY on a loading
+  // placeholder and owns the input (Esc, arrows, search) while the Host
+  // listing and the combined projection enrichment land in the background.
+  // The header option lets each entry present itself under its own name.
   /** Generation/staleness fence for the open picker load: a superseding
    * open bumps the generation and aborts the previous scan, and any late
    * settlement from a closed/superseded picker is dropped. */
   let sessionPickerGeneration = 0
   let activeSessionPickerScan: AbortController | undefined
-  const openSessionPicker = async (
-    invocation: { rawInput: string },
-    header: string,
+  /** The debounced content-search timer/controller shared across picker
+   * opens: a superseding open cancels the previous picker's pending or
+   * in-flight content search exactly like its scan. */
+  let activeContentSearchTimer: ReturnType<typeof setTimeout> | undefined
+  let activeContentSearch: AbortController | undefined
+
+  /** The narrow open options the three Session Browser entries really need
+   * (plan §8.2) — not a controller/framework abstraction. */
+  interface SessionPickerOpenOptions {
+    readonly header: 'sessions' | 'resume' | 'search'
     /** `/resume <arg>`: after the ONE shared listing lands, resolve the
      * argument as a direct id/prefix match — a unique match closes the
      * picker and switches; no match falls through to the filtered picker
      * (the argument stays as the live search query). */
-    directMatchQuery?: string,
+    readonly directMatchQuery?: string
+    /** `/search` only: the query is required — an empty argument is
+     * rejected BEFORE the overlay opens. */
+    readonly requireQuery?: boolean
+  }
+  const openSessionPicker = async (
+    invocation: { rawInput: string },
+    options: SessionPickerOpenOptions,
   ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
+    if (options.requireQuery === true && invocation.rawInput.trim() === '') {
+      return { kind: 'error', text: 'search needs a query' }
+    }
     // The current marker is the live session's id; before the first session
     // (deferred start) no row is marked current, and the picker can still
     // browse and switch to a persisted session without creating one.
     const currentId = runner.liveAgent?.session.id
     // A NEW picker open supersedes the previous one outright: bump the
-    // generation, cancel its scan, and take over as the active load.
+    // generation, cancel its scan AND its content search, and take over
+    // as the active load.
     sessionPickerGeneration += 1
     const generation = sessionPickerGeneration
     activeSessionPickerScan?.abort()
+    if (activeContentSearchTimer !== undefined) {
+      clearTimeout(activeContentSearchTimer)
+      activeContentSearchTimer = undefined
+    }
+    activeContentSearch?.abort()
+    activeContentSearch = undefined
     const controller = new AbortController()
     activeSessionPickerScan = controller
     const scanSignal = AbortSignal.any([signal, controller.signal])
@@ -2257,12 +2692,19 @@ export function registerTuiCommands(
     // the old code capped the rows themselves at MAX_PICKER_SESSIONS).
     const titlesById = new Map<string, string>()
     const presetsById = new Map<string, string>()
+    // Content-search enrichment (plan §10.2): Host hits merge onto
+    // already-listed rows — the list stays the row authority, the search
+    // page only adds snippets. Cleared per query; the unavailable notice
+    // fires at most once per picker lifecycle.
+    const contentHitsById = new Map<string, SessionContentHit>()
+    let contentHasMore = false
+    let contentSearchNoticeShown = false
     const itemFor = (row: SessionPickerRow, indent = 0): SessionPickerItem =>
       sessionPickerItem({
         ...row,
         title: titlesById.get(row.id),
         preset: presetsById.get(row.id) ?? row.preset,
-      }, runner.liveAgent?.session.id ?? '', indent)
+      }, runner.liveAgent?.session.id ?? '', indent, contentHitsById.get(row.id))
     // Category tabs (Tab cycles while the picker is open): the session
     // picker is a HUMAN surface, so subagent children never appear in
     // either scope — /tasks and the subagent viewer own that surface now
@@ -2281,7 +2723,28 @@ export function registerTuiCommands(
     // fails (the overlay is already open — an in-picker refusal beats a
     // dead loading frame; Esc still closes it).
     let statusRow = loadingItem
-    const categories = sessionPickerCategories(rows, runner.sessionCwd(), header, itemFor, () => statusRow)
+    const categories = [
+      ...sessionPickerCategories(rows, runner.sessionCwd(), options.header, itemFor, () => statusRow),
+      // The search projection (review P1/P2): with a non-empty query the
+      // picker switches to this GLOBAL view — local metadata matches UNION
+      // Host content hits, never scoped by the Current/All browse tabs.
+      sessionSearchCategory({
+        rows,
+        header: options.header,
+        // The search item builder: the cwd joins the searchable description
+        // (the SelectList never searches the group header), and the
+        // enriched title/preset are synthesized exactly like the browse rows.
+        itemFor: (row, indent = 0) => sessionSearchItem({
+          ...row,
+          title: titlesById.get(row.id),
+          preset: presetsById.get(row.id) ?? row.preset,
+        }, runner.liveAgent?.session.id ?? '', indent, contentHitsById.get(row.id)),
+        queryOf: () => pendingContentQuery,
+        contentHitsById,
+        metadataOf: id => ({ title: titlesById.get(id), preset: presetsById.get(id) }),
+        placeholder: () => statusRow,
+      }),
+    ]
     /** The `/resume <arg>` outcome of the ONE shared listing, resolved by
      * the detached load task — the overlay stays interactive the whole
      * time, and the awaiting handler keeps the OLD synchronous semantics
@@ -2292,7 +2755,7 @@ export function registerTuiCommands(
       | { kind: 'refused'; text: string }
       | { kind: 'cancelled' }
     let settleListing: ((outcome: ListingOutcome) => void) | undefined
-    const listing = directMatchQuery === undefined
+    const listing = options.directMatchQuery === undefined
       ? undefined
       : new Promise<ListingOutcome>(resolve => { settleListing = resolve })
     /** Idempotent outcome settle — later calls are no-ops (the abort
@@ -2307,19 +2770,98 @@ export function registerTuiCommands(
       // overwrite it.
       controller.signal.addEventListener('abort', () => settleOnce({ kind: 'cancelled' }), { once: true })
     }
+    // Content-search lifecycle (plan §9 + review P1/P2): local metadata
+    // filtering is immediate; Host content search is a 250ms-debounced
+    // async augmentation that must never block keyboard input. The query is
+    // only recorded until the list baseline lands; clearing the filter drops
+    // the content enrichment; close/supersede/quit cancels everything. A
+    // non-empty query switches the picker into the GLOBAL search projection
+    // (scope is browse state — it never wraps the bounded Host results);
+    // clearing restores the browse category that was active before.
+    let listLanded = false
+    let pendingContentQuery = ''
+    let browseCategory = 'current'
+    /** Run one Host content search for a settled non-empty query. */
+    const runContentSearch = (query: string): void => {
+      if (stale()) return
+      const controller = new AbortController()
+      activeContentSearch = controller
+      const searchSignal = AbortSignal.any([scanSignal, controller.signal])
+      detach('session content search', async () => {
+        try {
+          const page = await runner.sessionReader.search(query, searchSignal)
+          if (stale() || controller.signal.aborted) return
+          if (page === undefined) {
+            // Capability unavailable/disabled (e.g. the default
+            // `openAt: never` FTS policy): the picker stays open with its
+            // local metadata filtering; notice once per picker lifecycle.
+            if (!contentSearchNoticeShown) {
+              contentSearchNoticeShown = true
+              app.notify('content search unavailable', 'info')
+            }
+            return
+          }
+          // Merge (plan §10.2 + review P2): only already-listed MAIN rows
+          // accept hits — the search page never creates rows, and subagent
+          // children stay out of the human Session Browser. Membership is
+          // the explicit union in the search projection; the row carries
+          // ONLY the real Host snippet (never a fake query append).
+          contentHitsById.clear()
+          contentHasMore = page.hasMore
+          const knownIds = new Set(rows.filter(row => row.origin !== 'subagent').map(row => row.id))
+          for (const item of page.items) {
+            if (knownIds.has(item.sessionId)) {
+              contentHitsById.set(item.sessionId, { snippet: item.snippet })
+            }
+          }
+          picker.refresh?.()
+          if (contentHasMore) app.notify('More content matches exist — refine the search.', 'info')
+        } catch (error) {
+          if (stale() || controller.signal.aborted) return
+          // Non-fatal: local rows stay and the picker stays open. The
+          // error text is a Host/provider boundary value — sanitize it
+          // before the notify writes it to the terminal (a raw ESC/OSC in
+          // an error message must never inject terminal sequences). The
+          // rethrow records the real diagnostic through runDetached.
+          app.notify(`session content search failed: ${sanitizeTerminalText(safeErrorMessage(error))}`, 'error')
+          throw error
+        }
+      })
+    }
+    /** Debounce a non-empty query: 250ms of stability before the Host
+     * content search runs (dsh-web parity). */
+    const scheduleContentSearch = (query: string): void => {
+      if (activeContentSearchTimer !== undefined) clearTimeout(activeContentSearchTimer)
+      activeContentSearchTimer = setTimeout(() => {
+        activeContentSearchTimer = undefined
+        runContentSearch(query)
+      }, CONTENT_SEARCH_DEBOUNCE_MS)
+    }
+    /** Cancel the pending debounce and any in-flight content search. */
+    const cancelContentSearch = (): void => {
+      if (activeContentSearchTimer !== undefined) {
+        clearTimeout(activeContentSearchTimer)
+        activeContentSearchTimer = undefined
+      }
+      activeContentSearch?.abort()
+      activeContentSearch = undefined
+    }
     const picker = app.openPicker(
       categories[0]!.items(),
       (id) => {
-        // Any close — including the loading row's Enter — ends the scan:
-        // the picker is gone, so late enrichment may not touch the UI.
+        // Any close — including the loading row's Enter — ends the scan
+        // and the content search: the picker is gone, so late enrichment
+        // may not touch the UI.
         if (id !== '' && id !== currentId) settleOnce({ kind: 'switched' })
         controller.abort()
+        cancelContentSearch()
         // Enter on the loading placeholder (value '') must never resume.
         if (id === '' || id === currentId) return
         switchSession(id)
       },
       () => {
         controller.abort()
+        cancelContentSearch()
       },
       {
         enableSearch: true,
@@ -2341,6 +2883,49 @@ export function registerTuiCommands(
         // The selected session's long title marquees; the lineage tree
         // connector and the `●` current marker stay fixed (plan §7.6/§7.7).
         marquee: { labelPartsOf: sessionLabelParts },
+        // The Session Browser's content-search hook: every filter change
+        // (typed or programmatic) feeds the 250ms debounce; before the
+        // list baseline lands the query is only recorded. ANY change drops
+        // the previous query's enrichment — stale snippets must never
+        // match the new filter (plan §18), and an unavailable/failed new
+        // search must not leave the old query's hits behind.
+        onFilterChange: (query) => {
+          // ONE canonical client query (review P1): remove NUL → trim →
+          // cap 500 UTF-16 units. The SAME canonical drives the local
+          // metadata projection AND the Host search (whose authoritative
+          // validation is then a no-op) — the input box keeps the raw
+          // text the user typed, but membership never drifts from what
+          // was searched.
+          const canonical = sanitizeSessionSearchInput(query)
+          // The canonical is the semantic identity: a raw edit that does
+          // not change it (e.g. padding whitespace or NULs around the
+          // same term) must not abort/restart the identical Host search.
+          if (canonical === pendingContentQuery) return
+          pendingContentQuery = canonical
+          cancelContentSearch()
+          contentHitsById.clear()
+          contentHasMore = false
+          // A whitespace-only filter is an empty query: no Host request
+          // (the official contract rejects empty queries — a whitespace
+          // filter must not surface as a search failure).
+          if (canonical === '') {
+            // Back to the browse state (the category that was active
+            // before the query started).
+            if (picker.getCategory?.() !== browseCategory) picker.setCategory?.(browseCategory)
+            return
+          }
+          // Enter the GLOBAL search projection: scope is browse state and
+          // never wraps the bounded Host results (review P1). The switch
+          // happens once per query; further typing re-runs the active
+          // factory through refresh.
+          if (picker.getCategory?.() !== 'search') {
+            browseCategory = picker.getCategory?.() ?? 'current'
+            picker.setCategory?.('search')
+          } else {
+            picker.refresh?.()
+          }
+          if (listLanded) scheduleContentSearch(canonical)
+        },
       },
     )
     // The listing + progressive enrichment run behind the open overlay.
@@ -2357,8 +2942,8 @@ export function registerTuiCommands(
       await scheduler.yield()
       scanSignal.throwIfAborted()
 
-      // The session READ port (migration M1.3): live-preferred listing with
-      // the persistence fallback lives in the Direct adapter, never here.
+      // The session READ port (migration M1.3): semantic listing with
+      // capability-aware activity ordering lives in the Direct adapter, never here.
       let listed: readonly SessionSummary[] | undefined
       try {
         listed = await runner.sessionReader.list(currentId, scanSignal)
@@ -2390,8 +2975,8 @@ export function registerTuiCommands(
       // CURRENT session surfaces the already-on notice; no match falls
       // through to the filtered picker with the argument preserved as the
       // live search query.
-      if (directMatchQuery !== undefined) {
-        const match = findSessionMatch(listed, directMatchQuery)
+      if (options.directMatchQuery !== undefined) {
+        const match = findSessionMatch(listed, options.directMatchQuery)
         if (match !== undefined) {
           if (match.id === currentId) {
             // Nothing to switch and nothing to browse: close the overlay —
@@ -2415,6 +3000,8 @@ export function registerTuiCommands(
       // placeholder for the real rows on the next refresh.
       rows.push(...listed)
       picker.refresh?.()
+      // The list baseline is in: content search may start now (plan §9.3).
+      listLanded = true
       // NOW the command argument becomes the live filter — real rows are
       // in, so it narrows sessions instead of hiding the status phase. A
       // query the USER typed during the load is never clobbered.
@@ -2422,15 +3009,24 @@ export function registerTuiCommands(
       if (pendingQuery !== '' && picker.getFilter?.() === '') {
         picker.setFilter?.(pendingQuery)
       }
+      // A filter that was only recorded during the load (or just applied
+      // above) now enters the normal debounced content-search flow. The
+      // query is canonicalized (trimmed) exactly like the interactive
+      // path: trim BEFORE the client cap, so a whitespace-padded filter
+      // never loses a character to the 500-unit window (official
+      // semantics: trim, then cap).
+      if (pendingContentQuery !== '' && activeContentSearchTimer === undefined && activeContentSearch === undefined) {
+        scheduleContentSearch(pendingContentQuery)
+      }
 
       // Progressive combined projection batches: the first
       // PROJECTION_FIRST_BATCH rows fill the visible window, then
       // PROJECTION_BATCH_SIZE chunks refresh behind it. Each row's title
       // and preset arrive TOGETHER from the one DSH projection batch (one
-      // cold read per session, never one scan per field), and the yield
+      // cache lookup per session, never one scan per field), and the yield
       // between batches keeps the event loop responsive to input while the
-      // cold observations drain. The batches cover MAIN rows only (the
-      // categories never show subagents) and the FULL main-row set — NOT
+      // cache hints settle. Cold misses remain unknown. The batches cover MAIN
+      // rows only (the categories never show subagents) and the FULL main-row set — NOT
       // the `shown` window: a session beyond MAX_PICKER_SESSIONS that IS
       // displayed (e.g. an old session in the "Current directory" scope)
       // would otherwise never be enriched and would show a bare short id
@@ -2477,18 +3073,21 @@ export function registerTuiCommands(
     name: 'sessions',
     description: 'List, search, and switch persisted sessions',
     input: { hint: '[query]' },
-    handler: (invocation) => openSessionPicker(invocation, 'sessions'),
+    handler: (invocation) => openSessionPicker(invocation, { header: 'sessions' }),
     aliases: ['resume'],
     // /resume keeps its direct-resume fast path (exact id, a session-
     // prefixed prefix, or the short id prefix) — resolved against the ONE
     // input-first listing inside the shared picker lifecycle: the overlay
     // opens immediately, and a unique match switches as soon as `list()`
     // lands. No match leaves the filtered picker with the argument as the
-    // live search query. Never a second listing.
+    // live search query (content search included). Never a second listing.
     aliasHandlers: {
       resume: (invocation) => {
         const raw = invocation.rawInput.trim()
-        return openSessionPicker(invocation, 'resume', raw === '' ? undefined : raw)
+        return openSessionPicker(invocation, {
+          header: 'resume',
+          directMatchQuery: raw === '' ? undefined : raw,
+        })
       },
     },
   })
@@ -2542,12 +3141,23 @@ export function registerTuiCommands(
    * here — a summary that passed the cold/live filter is never execution
    * authorization. A model-only skill is refused with an explicit error and
    * never injected.
+   * @param delivery - the delivery mode the caller's boundary resolved for
+   *   this gesture, or undefined when no TUI submission launched it.
    */
-  const loadSkill = async (agent: Agent, name: string, args = ''): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
+  const loadSkill = async (
+    agent: Agent,
+    name: string,
+    args = '',
+    signal: AbortSignal = runner.signal,
+    delivery: SubmitDelivery | undefined,
+  ): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
+    const skillSignal = signal === runner.signal ? runner.signal : AbortSignal.any([runner.signal, signal])
+    skillSignal.throwIfAborted()
     // The skill read goes through the catalog port (migration M1.8): the
     // Direct adapter resolves the session's live skill target internally —
     // the loaded definition is a detached DTO, never the registry object.
     const resolved = await runner.catalog.skills.resolveSkill(agent.session.id, name)
+    skillSignal.throwIfAborted()
     if (resolved.kind === 'unavailable') return { kind: 'error', text: 'skill service unavailable' }
     if (resolved.kind === 'unknown') return { kind: 'error', text: 'unknown skill "' + name + '"' }
     if (resolved.kind === 'malformed') return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
@@ -2566,13 +3176,20 @@ export function registerTuiCommands(
     // through the shared prepared-input pipeline so an image-bearing
     // `/skill [image #1 ...]` line is a real multimodal prompt, exactly
     // like a plain prompt (review finding 4). The referenced drafts are
-    // PINNED across the WHOLE invocation — the async prepare, the steer
+    // pinned across the WHOLE invocation — the async prepare, the steer
     // and the draft consumption — so a concurrent /image prune can never
     // delete images this invocation is still admitting (review finding 1).
-    const releasePin = runner.imageStore.pinReferenced(line)
+    const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
+    // The host's pre-step listener (dsh-tool-skill) injects the rendered
+    // body only when ITS tool registration is visible to this agent — the
+    // same visibility test the listener itself uses. Probed BEFORE the
+    // delivery: the queue path below depends on it, and the fallback body
+    // injection after the write needs it too.
+    const hostLoadsSkillBody = runner.catalog.skills.hostLoadsSkillBody(agent.session.id)
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
     try {
       userMessage = await runner.prepareDraftMessage(line)
+      skillSignal.throwIfAborted()
       // The session-transition write fence (review round 5): while a
       // transition is in flight the old agent may be woken again — a steer
       // in that window would target a session whose lock is about to be
@@ -2593,7 +3210,25 @@ export function registerTuiCommands(
       // path, this is the authoritative one).
       try {
         await runner.withSessionWriter(agent.session.id, async () => {
-          agent.steer(userMessage)
+          skillSignal.throwIfAborted()
+          // Web parity (busyEnter): a skill invocation is an agent-facing
+          // prompt — under the queue mode it QUEUES like a plain prompt
+          // (web: session.prompt with the policy-resolved mode). The mode
+          // was resolved ONCE at the gesture's own boundary and handed in;
+          // re-deriving it here from the persisted preference would lose the
+          // accelerated chord's opposite mode, which exists only in the
+          // dispatch that resolved it.
+          // The queue delivery is only safe when the HOST injects the skill
+          // body: the fallback body injection below rides next-step, so a
+          // followup would let the body arrive before the user's words (the
+          // driver claims next-step FIRST). Without the host loader the
+          // invocation keeps the steer path to preserve the
+          // original-line-before-body order — the documented exception.
+          if (delivery !== 'steer' && hostLoadsSkillBody) {
+            agent.followup(userMessage)
+          } else {
+            agent.steer(userMessage)
+          }
         })
       } catch (error) {
         if (error instanceof TransitionInProgressError) {
@@ -2608,7 +3243,7 @@ export function registerTuiCommands(
       // The invocation COMMITTED: consume the image drafts it referenced
       // (the prepared message holds the durable refs now; a concurrent
       // intake's newer draft survives — review finding).
-      consumeDraftImages(line, runner.imageStore)
+      consumeDraftAttachments(line, runner.imageStore, runner.fileStore)
     } finally {
       // The pin releases on EVERY exit — including a synchronous steer
       // throw (review finding: a leaked pin would block pruning and eat
@@ -2631,7 +3266,6 @@ export function registerTuiCommands(
     // would not inject for it either, so the TUI's fallback must cover it.
     // The probe is a SEMANTIC catalog operation now (migration M1.8) — the
     // raw tools service never crosses into the command surface.
-    const hostLoadsSkillBody = runner.catalog.skills.hostLoadsSkillBody(agent.session.id)
     // Deliver the batch through the steer path (and unlike
     // agent.inject alone, which queues for the next pre-step WITHOUT waking
     // the driver): the ORIGINAL line is steered — a running turn takes it
@@ -2645,12 +3279,18 @@ export function registerTuiCommands(
     // body lands as step 2 of the same turn (the loop only ends when
     // next-step drains). Either way the original line reaches the model
     // before the body, exactly like the web's message order.
-    // Never follow-up the original line here: followup parks the line in
-    // next-turn while the body sits in next-step, and the driver's first
-    // step boundary claims next-step FIRST — the body would arrive BEFORE
-    // the user's words, inverting the web's message order. (A second
-    // follow-up would not help either: a turn boundary claims ONE next-turn
-    // message, so the pair would split across two turns.)
+    // The queue delivery (chosen above when the HOST injects the body) is
+    // the web-parity busyEnter path: followup parks the line in next-turn
+    // and the host's pre-step listener injects the body at the next model
+    // request — the same order the web's queued session.prompt produces.
+    // The fallback body injection below is INCOMPATIBLE with followup:
+    // the body would sit in next-step while the line waits in next-turn,
+    // and the driver's first step boundary claims next-step FIRST — the
+    // body would arrive BEFORE the user's words, inverting the web's
+    // message order. (A second follow-up would not help either: a turn
+    // boundary claims ONE next-turn message, so the pair would split
+    // across two turns.) That is why the queue path requires
+    // hostLoadsSkillBody.
     if (!hostLoadsSkillBody) {
       const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
       // Forward the resource base too, so the fallback rendering matches
@@ -2716,8 +3356,12 @@ export function registerTuiCommands(
           // line, never carved out or dropped — the wrapper's own name is
           // the skill name, everything after it is args).
           handler: async (invocation) => {
+            // The FIRST synchronous statement: the submit boundary bound this
+            // invocation's delivery mode for exactly this call stack (see
+            // withDelivery). Everything below may await.
+            const delivery = takeDelivery()
             const agent = await requireAgent()
-            return loadSkill(agent, skill.name, invocation?.rawInput ?? '')
+            return loadSkill(agent, skill.name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery)
           },
         })
         skillDisposers.set(skill.name, dispose)
@@ -2743,8 +3387,14 @@ export function registerTuiCommands(
     const skillsFailed = snapshot.issues.some(issue => issue.provider === 'skills')
     withCommandCommit(() => {
       if (!skillsFailed) replaceSkillCommands(snapshot.skills, scopedNames)
+      // The inline skill lexicon follows the same success rule as the
+      // wrappers: a FAILED or incomplete skills observation never replaces
+      // the current lexicon (a target change already cleared it; a
+      // same-target refresh keeps the last-good list — the coordinator's
+      // mergePartial already retained it in `snapshot.skills`).
+      if (!skillsFailed) currentSkillReferences = snapshot.skills
       savedScopedCommands = snapshot.scopedCommands
-      installCompletions(mergeGlobalAndSavedScoped())
+      installCompletionsContained(mergeGlobalAndSavedScoped())
     })
   }
   /**
@@ -2761,14 +3411,19 @@ export function registerTuiCommands(
       for (const dispose of skillDisposers.values()) dispose()
       skillDisposers.clear()
       savedScopedCommands = []
+      // The inline skill lexicon clears with the target change: the new
+      // owner's suggestions must never come from the old owner's catalog.
+      currentSkillReferences = []
       for (const name of names) {
         try {
           const dispose = commands.register({
             name,
             description: `[skill: revalidating] ${name}`,
             handler: async (invocation) => {
+              // Captured before any await, exactly like the direct wrapper.
+              const delivery = takeDelivery()
               const agent = await requireAgent()
-              return loadSkill(agent, name, invocation?.rawInput ?? '')
+              return loadSkill(agent, name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery)
             },
           })
           skillDisposers.set(name, dispose)
@@ -2776,18 +3431,40 @@ export function registerTuiCommands(
           // Registration raced with another plugin; the picker still works.
         }
       }
-      installCompletions(mergeGlobalAndSavedScoped())
+      installCompletionsContained(mergeGlobalAndSavedScoped())
     })
   }
   /** Whether one command name is advertised by the CURRENT completion list
    * (the claim captured at submit time, before any session creation). */
   const wasAdvertised = (name: string): boolean => claims.has(name)
+  /** The CURRENT host catalog's view of ONE parsed line (see
+   * {@link HostCommandClaim}): `undefined` when the catalog does not RESOLVE
+   * the name at all (a session-scoped command the standing view cannot see —
+   * the command plane decides), `claimed: false` when it resolves the name
+   * but this line is not an invocation (an argued line of an execute-kind
+   * command: a bare token is claimed by every host command, an argued line
+   * only by a `leadingInput` descriptor).
+   * HOST AUTHORITY: a client command contribution never removes a name from
+   * this catalog — upstream's candidate synthesis merges contributions with
+   * the host catalog and FAILS LOUD on a collision instead of shadowing, so
+   * a resolved host command always keeps its execution. A skill wrapper is a
+   * thin agent-facing invocation (loadSkill builds the prompt), never a host
+   * claim. */
+  const hostClaimOf = (parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined => {
+    if (skillDisposers.has(parsed.name)) return undefined
+    const descriptor = claims.get(parsed.name)
+    if (descriptor === undefined) return undefined
+    if (!descriptor.leadingInput && (parsed.rawInput?.trim() ?? '') !== '') return { claimed: false }
+    return { claimed: true, attachments: descriptor.attachments }
+  }
 
   commands.register({
     name: 'skill',
     description: 'Load a skill into the session context',
     input: { hint: '<name>' },
     handler: async (invocation) => {
+      // Captured before any await: the submit boundary's resolved mode.
+      const delivery = takeDelivery()
       const liveAgent = await requireAgent()
       // `/skill <name> [args...]`: the first whitespace token is the skill
       // name, the remainder its arguments (forwarded verbatim on the
@@ -2795,7 +3472,7 @@ export function registerTuiCommands(
       // invocation line is normalized to `/name args` so the host's pre-step
       // gesture (dsh-tool-skill) also recognizes it when visible.
       const [name, ...args] = splitSkillLine(invocation.rawInput)
-      if (name !== '') return loadSkill(liveAgent, name, args.join(' '))
+      if (name !== '') return loadSkill(liveAgent, name, args.join(' '), invocation.signal ?? runner.signal, delivery)
       // No argument: pick from the catalog — the same validated, policy-
       // filtered, sorted view the collector builds (the catalog port's
       // live read), so hostile or model-only entries never reach the
@@ -2813,7 +3490,19 @@ export function registerTuiCommands(
           values: ['✓'],
         })),
         (id) => {
-          detach('skill load', () => loadSkill(liveAgent, id).then(result => {
+          // The SELECTION is the delivery boundary (choosing a row submits
+          // the skill like a plain Enter on the completed `/<name>` line), so
+          // the mode is resolved HERE — the picker may have been open while
+          // the agent went idle (or busy) and while the preference was
+          // edited; a mode frozen at picker-open time would be stale. The
+          // resolved mode is handed to the delivery, which never re-derives
+          // it.
+          const delivery = resolveComposerDelivery(
+            liveAgent.status === 'running',
+            'enter',
+            runner.tuiSettings?.get().busyEnter,
+          )
+          detach('skill load', () => loadSkill(liveAgent, id, '', runner.signal, delivery).then(result => {
             if (result.kind === 'error') app.notify(result.text)
           }), { notify: true })
         },
@@ -3063,17 +3752,15 @@ export function registerTuiCommands(
     description: 'Start a fresh session in this workspace',
     handler: () => runner.withSessionTransition(async () => {
       // The unified transaction: the old session is flushed BEFORE the
-      // fresh session is created, the child's lock is acquired BEFORE the
-      // create publishes it (pre-generated id — review round 6), the commit
-      // is synchronous, and a failure anywhere before the create leaves
-      // the current session untouched (no published child to roll back).
+      // fresh session is created, the commit is synchronous, and a failure
+      // anywhere before the create leaves the current session untouched
+      // (no published child to roll back).
       const sessionId = SessionId(`session-${randomUUID()}`)
       // The concrete preset id is resolved ONCE and rides the create (a
-      // rejected create is NEVER retried — the first DSH call may have left
-      // a hidden lifecycle, so the target is PINNED immediately). The preset
-      // COMPOSITION (setup callback) is resolved inside the Direct session
-      // lifecycle from this id — the command surface only ever sees the
-      // identity (migration M1.11).
+      // rejected create is NEVER retried — the old session stays current).
+      // The preset COMPOSITION (setup callback) is resolved inside the
+      // Direct session lifecycle from this id — the command surface only
+      // ever sees the identity (migration M1.11).
       const resolved = await runner.catalog.presets.resolve(runner.effectivePresetId)
       // Read the DEFAULT selection intent at transition time: a fresh
       // Session observes the global default (official blank-session
@@ -3086,7 +3773,6 @@ export function registerTuiCommands(
       }
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd } },
-        fresh: true,
         // Seed only an explicit default intent: without one the fresh
         // Session observes the persisted default dynamically instead of
         // freezing it into a durable choice.
@@ -3102,10 +3788,11 @@ export function registerTuiCommands(
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
-      // drop the UNPINNED ones now, never before (a failed create keeps
+      // drop the unpinned ones now, never before (a failed create keeps
       // the current session and its drafts intact; in-flight submissions
       // keep their pinned drafts — review finding 2).
       runner.imageStore.clearUnpinned()
+      runner.fileStore?.clearUnpinned()
       return { kind: 'success', text: 'started a fresh session' }
     }),
   })
@@ -3178,9 +3865,9 @@ export function registerTuiCommands(
       const displayedDefault = async (): Promise<string | undefined> => {
         const configured = runner.config.presetDefault.get()
         if (configured !== 'code') return configured ?? presets.defaultId()
-        // A persisted legacy `code` value is resolved through the roster. This
+        // The omitted settings default is resolved through the roster. This
         // keeps status/default display consistent with composition: a real
-        // custom code remains code, while old data without code displays ptc.
+        // custom code remains code, while old settings without code display ptc.
         try {
           return (await presets.resolve()).id ?? configured
         } catch {
@@ -3361,30 +4048,11 @@ export function registerTuiCommands(
     name: 'search',
     description: 'Search persisted sessions for text and switch to a hit',
     input: { hint: '<query>' },
-    handler: async (invocation) => {
-      const currentId = runner.liveAgent?.session.id
-      const query = invocation.rawInput.trim()
-      if (query === '') return { kind: 'error', text: 'search needs a query' }
-      // The session READ port (migration M1.3): the bounded content scan
-      // lives in the Direct adapter, never here.
-      const hits = await runner.sessionReader.search(query)
-      if (hits === undefined) return { kind: 'error', text: 'session persistence unavailable' }
-      if (hits.length === 0) return { kind: 'success', text: `no persisted session contains "${query}"` }
-      const now = Date.now()
-      app.openPicker(
-        hits.map(hit => ({
-          value: hit.id,
-          label: hit.id.length > 26 ? `${hit.id.slice(0, 26)}…` : hit.id,
-          description: `${Math.max(0, Math.floor((now - hit.createdAt) / 60000))}m ago · …${hit.snippet}…`,
-        })),
-        (id) => {
-          if (id === currentId) return
-          switchSession(id)
-        },
-        () => {},
-      )
-      return { kind: 'success' }
-    },
+    // /search is a compatibility entry into the SAME Session Browser as
+    // /sessions and /resume (plan §8): the query is required (rejected
+    // before the overlay opens), then becomes the picker's live filter and
+    // feeds the debounced Host content search. There is no second picker.
+    handler: (invocation) => openSessionPicker(invocation, { header: 'search', requireQuery: true }),
   })
 
   // Shared by /title and its /rename alias. With an argument, pins the
@@ -3465,113 +4133,143 @@ export function registerTuiCommands(
     },
   })
 
-  commands.register({
-    name: 'image',
-    description: 'Attach an image file to the draft (tab completes the path; [image #N (W×H)] placeholder)',
-    input: { hint: '<path>' },
-    handler: (invocation) => {
-      // The /image command is a TUI-LOCAL UI action (plan M2): it stages
-      // the file into the draft store and inserts its placeholder into the
-      // editor — it NEVER submits, so no session is created (deferred
-      // start preserved) and no model call happens here.
-      const words = parseShellWords(invocation.rawInput)
-      if (words.length !== 1 || words[0] === '') {
-        return { kind: 'error', text: 'Usage: /image <path>' }
-      }
-      const raw = words[0]!
-      // The intake is ASYNC: capture the session identity at launch and
-      // discard the result if the user switched sessions meanwhile — a late
-      // intake must never stage an image into the NEW session's draft
-      // (round-5 finding 2).
-      const intakeGeneration = runner.sessionGeneration
-      const detach = (label: string, task: () => unknown): void => {
-        runDetached(label, task, {
-          diag: runner.diag,
-          sessionId: () => runner.liveAgent?.session.id,
-          notify: (message) => app.notify(message, 'error'),
-          recoverable: () => true,
-        })
-      }
-      detach('image intake', () => {
-        // An owned workflow: the intake outcome decides the notice and the
-        // draft insertion — runOwned (AGENTS.md), never a bare void. The
-        // limits are read INSIDE the task so a mid-run policy change is
-        // honored (round-2 finding 5); the intake itself is ASYNC
-        // (fs/promises) so a slow disk or NFS never blocks the TUI event
-        // loop (review finding 1).
-        runOwned('image intake', () => {
-          // Attach-time prune: a placeholder deleted (or Ctrl+C-cleared)
-          // since the last attach must not hold its bytes hostage until the
-          // store fills up (review finding 2).
-          pruneUnreferencedDrafts(app.getDraft(), runner.imageStore)
-          // The intake's pre-read cap is the SMALLEST of the attachment
-          // limit and the draft store's remaining RESIDENT budget — a file
-          // that could never be staged is refused before any read.
-          const intake = readImageFile(raw, runner.sessionCwd(), runner.imageLimits(), runner.imageStore.remainingBytes())
-          return intake.then((resolved) => {
-            if (runner.sessionGeneration !== intakeGeneration) {
-              app.notify('the session changed while reading the image — try again', 'error')
-              return undefined
-            }
-            // Re-prune AFTER the async read: the user may have deleted the
-            // placeholder or Ctrl+C-cleared the editor while the file was
-            // in flight — those drafts must not linger past the attach
-            // (review finding 2 follow-up).
-            pruneUnreferencedDrafts(app.getDraft(), runner.imageStore)
-            const draft = runner.imageStore.add({
-              bytes: resolved.bytes,
-              mediaType: resolved.mediaType,
-              width: resolved.width,
-              height: resolved.height,
-              source: { type: 'path', path: resolved.path },
-              name: resolved.name,
-            })
-            runner.insertIntoEditor(`${draft.placeholder} `)
-            app.notify(`attached ${draft.placeholder} — Enter to send`)
-            return undefined
-          })
-        }, {
-          diag: runner.diag,
-          sessionId: () => runner.liveAgent?.session.id,
-          onError: (error) => {
-            app.notify(safeErrorMessage(error), 'error')
-          },
-        })
+  const stageAttachmentCommand = (
+    invocation: CommandInvocation,
+    intent: 'attach' | 'image',
+  ): CommandResult => {
+    const words = parseShellWords(invocation.rawInput)
+    if (words.length !== 1 || words[0] === '') {
+      return { kind: 'error', text: `Usage: /${intent} <path>` }
+    }
+    const raw = words[0]!
+    const intakeGeneration = runner.sessionGeneration
+    // The command registry supplies the runner-owned lifecycle signal. The
+    // fallback keeps direct headless handler calls honest without weakening
+    // teardown cancellation in the real dispatch path.
+    const intakeSignal = invocation.signal === undefined || invocation.signal === runner.signal
+      ? runner.signal
+      : AbortSignal.any([runner.signal, invocation.signal])
+    const detach = (task: () => unknown): void => {
+      runDetached('attachment intake', task, {
+        diag: runner.diag,
+        sessionId: () => runner.liveAgent?.session.id,
+        notify: (message) => app.notify(message, 'error'),
+        recoverable: () => true,
       })
-      return { kind: 'success' }
+    }
+    detach(() => {
+      runOwned('attachment intake', async () => {
+        intakeSignal.throwIfAborted()
+        if (runner.sessionTransitionPending()) {
+          app.notify('a session transition is in progress — try again in a moment', 'error')
+          return
+        }
+        pruneUnreferencedDraftAttachments(app.getDraft(), runner.imageStore, runner.fileStore)
+        const stageImage = async (path: string): Promise<void> => {
+          intakeSignal.throwIfAborted()
+          const resolved = await readImageFile(path, runner.cwd, runner.imageLimits(), runner.imageStore.remainingBytes())
+          intakeSignal.throwIfAborted()
+          if (runner.sessionGeneration !== intakeGeneration) {
+            app.notify(`the session changed while reading the ${intent} — try again`, 'error')
+            return
+          }
+          if (runner.sessionTransitionPending()) {
+            app.notify(`a session transition is in progress while reading the ${intent} — try again`, 'error')
+            return
+          }
+          pruneUnreferencedDraftAttachments(app.getDraft(), runner.imageStore, runner.fileStore)
+          const draft = runner.imageStore.add({
+            bytes: resolved.bytes,
+            mediaType: resolved.mediaType,
+            width: resolved.width,
+            height: resolved.height,
+            source: { type: 'path', path: resolved.path },
+            name: resolved.name,
+          })
+          runner.insertIntoEditor(`${draft.placeholder} `)
+          app.notify(`attached ${draft.placeholder} — Enter to send`)
+        }
+
+        if (intent === 'image') {
+          await stageImage(raw)
+          return
+        }
+        const probe = await probeAttachment(raw, runner.cwd, intakeSignal)
+        intakeSignal.throwIfAborted()
+        if (runner.sessionGeneration !== intakeGeneration) {
+          app.notify('the session changed while reading the attachment — try again', 'error')
+          return
+        }
+        if (runner.sessionTransitionPending()) {
+          app.notify('a session transition is in progress while reading the attachment — try again', 'error')
+          return
+        }
+        if (probe.kind === 'image') {
+          await stageImage(probe.path)
+          return
+        }
+        pruneUnreferencedDraftAttachments(app.getDraft(), runner.imageStore, runner.fileStore)
+        const fileStore = runner.fileStore
+        if (fileStore === undefined) throw new FileInputError('File draft storage is unavailable.')
+        const draft = fileStore.add({
+          name: probe.name,
+          byteLength: probe.byteLength,
+          source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+        })
+        runner.insertIntoEditor(`${draft.placeholder} `)
+        app.notify(`attached ${draft.placeholder} — Enter to send`)
+      }, {
+        diag: runner.diag,
+        sessionId: () => runner.liveAgent?.session.id,
+        isCancellation: () => intakeSignal.aborted,
+        onError: (error) => {
+          app.notify(safeErrorMessage(error), 'error')
+        },
+      })
+    })
+    return { kind: 'success' }
+  }
+
+  registerTuiCommand({
+    name: 'attach',
+    aliases: ['image'],
+    description: 'Attach an image or file to the draft (tab completes the path)',
+    input: { hint: '<path>' },
+    handler: (invocation) => stageAttachmentCommand(invocation, 'attach'),
+    aliasHandlers: {
+      image: (invocation) => stageAttachmentCommand(invocation, 'image'),
+    },
+    aliasDescriptions: {
+      image: 'Attach an image to the draft (image-only compatibility command)',
     },
   })
 
   commands.register({
     name: 'export',
-    description: 'Export this session log (JSONL by default, `md` for a readable transcript)',
-    input: { hint: '[md|<path>]' },
-    handler: async (invocation) => {
-      const liveAgent = await requireAgent()
-      const arg = invocation.rawInput.trim()
-      const shortId = liveAgent.session.id.replace(/^session-/, '').slice(0, 8)
-      const markdown = arg === 'md'
-      const target = arg !== '' && !markdown
-        ? arg
-        : join(cwd, markdown ? `dsh-session-${shortId}.md` : `dsh-session-${shortId}.jsonl`)
-      try {
-        if (markdown) {
-          writeFileSync(target, renderTranscriptMarkdown(liveAgent.session))
-          return { kind: 'success', text: `exported markdown transcript to ${target}` }
-        }
-        // The raw artifact is the backend's verbatim JSONL (decoded from
-        // its physical encoding) — a faithful, portable session log. The
-        // log READ is a session-read semantic (migration M1.11); only the
-        // FILE WRITE below is client-local export behavior.
-        const raw = await runner.sessionReader.readExportData(liveAgent.session.id)
-        if (raw.kind === 'unavailable') return { kind: 'error', text: 'session persistence unavailable' }
-        if (raw.kind === 'none') return { kind: 'error', text: 'no materialized session log to export' }
-        if (raw.kind === 'error') return { kind: 'error', text: raw.message }
-        writeFileSync(target, raw.data.content)
-        return { kind: 'success', text: `exported ${raw.data.filename} to ${target}` }
-      } catch (error) {
-        return { kind: 'error', text: safeErrorMessage(error) }
+    description: 'Export this session as a full archive (ZIP with descendants and attachments)',
+    handler: (invocation) => {
+      // Pre-Stage-D export convergence: /export accepts NO arguments — the
+      // acknowledgement only; the Client-local save workflow starts AFTER
+      // the command lifecycle settles (the runner's post-success seam), never
+      // inside the handler.
+      if (invocation.rawInput.trim() !== '') {
+        return { kind: 'error', text: 'The /export command does not accept a path.' }
       }
+      return { kind: 'success', text: 'Session log download requested.' }
+    },
+  })
+
+  commands.register({
+    name: 'transcript',
+    description: 'Export a readable Markdown transcript of this session',
+    handler: (invocation) => {
+      // /transcript mirrors /export: no arguments, acknowledgement only; the
+      // Client-local save workflow starts after successful command
+      // settlement.
+      if (invocation.rawInput.trim() !== '') {
+        return { kind: 'error', text: 'The /transcript command does not accept a path.' }
+      }
+      return { kind: 'success', text: 'Transcript export requested.' }
     },
   })
 
@@ -3582,33 +4280,35 @@ export function registerTuiCommands(
       const source = runner.liveAgent
       const seed = source === undefined ? undefined : forkSeed(source.session.snapshotEvents())
       if (seed === undefined || source === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
+      const sourceSelection = runner.selected.current
       // Shared child creation with rewind (plan §6.2): preset inheritance,
-      // live session cwd, provider/model inheritance, parentSession +
+      // live session cwd, base provider/model options plus effective selection,
+      // parentSession +
       // isSeeded/inheritedEventCount metadata — one chain, no drift between the two surfaces.
-      // The child's id is PRE-GENERATED so the transaction acquires its
-      // open lock BEFORE the create publishes it (review round 6); the
-      // create runs inside the unified transaction, and a failure before
-      // the create leaves nothing behind (no published child, no ghost,
-      // no rollback attempt).
+      // The child's id is PRE-GENERATED so the create publishes it under a
+      // known identity (review round 6); the create runs inside the unified
+      // transaction, and a failure before the create leaves nothing behind
+      // (no published child, no ghost, no rollback attempt).
       const sessionId = SessionId(`session-${randomUUID()}`)
       const childCwd = source.session.header.cwd || runner.sessionCwd()
       // The current preset is read once from the DSH projection and rides the
-      // create (a rejected create is NEVER retried — the first DSH call may
-      // have left a hidden lifecycle, so the target is PINNED immediately).
-      // The composition setup stays inside the Direct session lifecycle — the
-      // command surface only ever sees the identity (migration M1.11).
+      // create (a rejected create is NEVER retried — the old session stays
+      // current). The composition setup stays inside the Direct session
+      // lifecycle — the command surface only ever sees the identity
+      // (migration M1.11).
       const sourcePreset = runner.currentPreset()
       const result = await runner.transitionTo({
         target: { id: String(sessionId), header: { cwd: childCwd } },
-        fresh: true,
+        ...(sourceSelection === undefined ? {} : { inheritSelection: sourceSelection }),
         create: () => createForkedAgent(runner, source, seed, sessionId, sourcePreset),
       })
       if (!result.ok) return { kind: 'error', text: result.message }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
-      // drop the UNPINNED ones now (durable attachments are untouched, plan
+      // drop the unpinned ones now (durable attachments are untouched, plan
       // §14; in-flight submissions keep their pinned drafts — review
       // finding 2).
       runner.imageStore.clearUnpinned()
+      runner.fileStore?.clearUnpinned()
       // A Direct create always yields the live agent (port contract);
       // Remote handles surface the session identity only.
       return { kind: 'success', text: `forked as ${result.next.session.id}` }
@@ -3870,7 +4570,7 @@ export function registerTuiCommands(
         return label === '' ? '—' : label
       }
       const rows: SettingItem[] = [        { id: 'k-enter', label: keysLabel('app.input.submit'), description: 'Submit the draft; while the agent is busy, delivery follows the "Submit while busy" preference (skill commands steer too, UI commands run locally)', currentValue: '' },
-        { id: 'k-queue', label: keysLabel('app.input.queue'), description: 'Queue the draft while the agent is busy (the opposite of "Submit while busy")', currentValue: '' },
+        { id: 'k-queue', label: keysLabel('app.input.submitAccelerated'), description: 'Submit with the OPPOSITE of the "Submit while busy" behavior (the web accelerated-submit chord)', currentValue: '' },
         { id: 'k-exit', label: keysLabel('app.exit.request'), description: 'Quit the TUI (flushes the session)', currentValue: '' },
         { id: 'k-cancel', label: keysLabel('app.agent.interrupt'), description: 'Cancel the active turn / tool / shell command (one interrupt while the agent is busy; press the interrupt action twice while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
         { id: 'k-fold', label: keysLabel('app.transcript.toggleExpand'), description: `Expand/collapse recent tool and system output; in regular Focus it reveals the recent Thoughts; in fullscreen Focus it bulk-expands the recent Thoughts or collapses them all (per-card detail stays mouse-owned). Thinking detail is ${keysLabel('app.transcript.toggleThinking')}`, currentValue: '' },
@@ -4028,8 +4728,9 @@ export function registerTuiCommands(
     // exist before a session, so the merge base is the current global view.
     withCommandCommit(() => {
       replaceSkillCommands(initial.skills!.skills, new Set())
+      currentSkillReferences = initial.skills!.skills
       savedScopedCommands = []
-      installCompletions(mergeGlobalAndSavedScoped())
+      installCompletionsContained(mergeGlobalAndSavedScoped())
     })
   } else {
     refreshCompletions()
@@ -4052,9 +4753,20 @@ export function registerTuiCommands(
   return {
     /** The claim test for the dispatch: is /name advertised right now? */
     wasAdvertised,
+    /** The host catalog's view of ONE parsed line (see
+     * {@link HostCommandClaim}): the name is advertised by the completion list
+     * and owned by neither the TUI as a skill wrapper nor an extension
+     * contribution (the dispatch caller excludes TUI-local commands itself via
+     * LOCAL_COMMANDS). */
+    hostClaimOf,
+    /** Whether one slash name is a LIVE TUI-owned skill wrapper (the
+     * revalidating transition wrappers included). */
+    isSkillWrapper: (name: string): boolean => skillDisposers.has(name),
     /** One synchronous catalog commit (the coordinator's install hook). */
     installSnapshot: (snapshot: SurfaceCatalogSnapshot): void => installSurfaceSnapshot(snapshot),
+    refreshCommandCompletions: (): void => refreshCompletions(),
     /** The revalidating transition (the coordinator's target-change hook). */
     enterTransition: (): void => enterCatalogTransition(),
+    withDelivery,
   }
 }

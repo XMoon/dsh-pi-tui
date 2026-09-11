@@ -231,7 +231,7 @@ function main() {
           }
           return {
             api: () => ({
-              apiVersion: 1,
+              apiVersion: 2,
               hostVersion: 'test',
               capabilities: new Set(['unstable.input.raw', 'unstable.surface.handle']),
               deprecations: new Map(),

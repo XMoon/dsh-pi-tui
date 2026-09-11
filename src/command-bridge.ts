@@ -1,42 +1,48 @@
 /**
- * The CommandBridge (M5, plan §10): the extension seam over the host's
- * slash-command execution. It does NOT re-implement command execution —
- * actual execution continues through the existing `ctx.commands` service
- * (register + execute). The bridge adds the TUI's OWNERSHIP metadata:
- *
- * - `execution: 'local'` — the command ALWAYS executes locally (TUI
- *   control commands like /status, /settings), never steered, regardless
- *   of the busyEnter preference. This is exactly the semantic of the
- *   static LOCAL_COMMANDS set, now extensible by plugins.
- * - `execution: 'submission'` — the command flows through the session
- *   submission policy (steer/queue) like any skill invocation.
+ * The CommandBridge (M5, plan §10): the extension seam for CLIENT-OWNED
+ * commands. A contribution is exactly the DSH client command contribution
+ * (`ui-commands` CommandContribution): a slash name whose behavior lives
+ * entirely on the client (no host descriptor) and which is merged into the
+ * `/` menu with the host catalog. The bridge itself never executes
+ * anything — the runner runs the contribution's own handler locally, never
+ * steered, exactly like the static LOCAL_COMMANDS set (the TUI's own
+ * /status, /settings). A contribution whose name is a host command FAILS
+ * LOUD at candidate synthesis and never shadows it.
  *
  * Contract (plan §10):
- * - `/name args...` ALWAYS keeps `invocation.rawInput` verbatim — the
- *   bridge never re-parses or rewrites arguments (the skill rawInput
- *   regression gate);
- * - busy Enter keeps classifying by the EFFECTIVE ownership: a dynamic
- *   local command is local while registered, submission after unload;
+ * - a contribution needs a declared handler (its client behavior) and needs
+ *   no commands-service definition;
+ * - a contribution is a slash-MENU entry, so it claims the BARE `/name`
+ *   token only (DSH `matchEnter`: `if (!bare) return undefined`). An argued
+ *   line (`/deploy explain`) is an ordinary submission that reaches the
+ *   model — the handler never runs for it. A handler therefore always sees
+ *   `invocation.rawInput` with no non-whitespace input (trailing whitespace is
+ *   preserved verbatim, exactly like every other command surface);
+ * - a contribution is CLIENT-OWNED while registered; after unload the name
+ *   returns to the ordinary routes (a host claim, or an unclaimed prompt —
+ *   never a lingering client route);
  * - dynamic unload removes the contribution (fiber-bound, like every
  *   extension registration);
  * - near-synonym command conflicts keep the AGENTS hard rule: the bridge
  *   reports a conflicting registration loudly instead of guessing;
  * - P1-04: a dynamic command can NEVER shadow a host-owned command. The
- *   authoritative static catalog (TUI-registered commands + the
- *   LOCAL_COMMANDS/SESSIONLESS_COMMANDS ownership sets) is validated at
+ *   STATIC ownership catalog (the LOCAL_COMMANDS/SESSIONLESS_COMMANDS sets
+ *   plus `/plan`, handed over by the extension host) is validated at
  *   register time — an exact-name or near-synonym collision with a
- *   host-owned command name is rejected loudly, never silently overriding
- *   the built-in behavior.
+ *   TUI-owned command name is rejected loudly, never silently overriding
+ *   the built-in behavior. A name the CURRENT (session-scoped) host catalog
+ *   owns is NOT visible here: that collision is caught at candidate
+ *   synthesis, which fails the whole pass (see `mergeContributions` in
+ *   commands.ts).
  * @module @xmoon76/dsh-pi-tui/command-bridge
  */
 
-import type { TuiAutocompleteProvider } from './extension/public-types.ts'
 import type { TuiCommandContribution, TuiCommandHandle, TuiLocalCommandHandler, TuiCommandBridgeSnapshot } from './extension/public-types.ts'
 
-/** One command contribution: ownership metadata over an existing command. */
+/** One client command contribution: a slash name the client owns. */
 
 
-/** Conflict-detection outcome for a new registration. */
+/** Registration outcome for a new contribution. */
 type RegisterOutcome =
   | { kind: 'registered'; handle: TuiCommandHandle }
   | { kind: 'conflict'; existingOwner: string; nearSynonym?: string }
@@ -46,11 +52,17 @@ interface Contribution {
   readonly id: string
   readonly name: string
   readonly description: string
-  readonly execution: 'local' | 'submission'
   readonly sessionless: boolean
   readonly owner: string
-  readonly argumentProvider: TuiAutocompleteProvider | undefined
-  readonly handler: TuiLocalCommandHandler | undefined
+  /** Monotonic registration generation: a dispose + re-register under the
+   * same id/owner is a NEW generation (the consumer's notice/de-duplication
+   * identity must follow it — a coalesced invalidate batch never exposes the
+   * empty snapshot in between). */
+  readonly generation: number
+  readonly handler: TuiLocalCommandHandler
+  /** The handle minted for THIS registration (identity for the caller's
+   * generation-aware cleanup). */
+  handle?: TuiCommandHandle
   disposed: boolean
 }
 
@@ -62,15 +74,20 @@ interface Contribution {
 export class CommandBridge {
   /** Contributions by id (diagnostic identity; also the registry key). */
   private readonly contributions = new Map<string, Contribution>()
-  /** The AUTHORITATIVE host-owned command names (P1-04): TUI-registered
-   * commands + the LOCAL_COMMANDS/SESSIONLESS_COMMANDS ownership sets. A
-   * dynamic contribution colliding with this catalog (exact or
-   * near-synonym) is rejected at register time — a plugin can never
-   * shadow a built-in command. Defaults to empty for standalone tests
-   * that exercise the dynamic-vs-dynamic rules only. */
+  /** The STATIC host-owned command names (P1-04): the
+   * LOCAL_COMMANDS/SESSIONLESS_COMMANDS ownership sets plus `/plan` — the
+   * names the TUI owns and registers itself. A dynamic contribution
+   * colliding with this catalog (exact or near-synonym) is rejected at
+   * register time — a plugin can never shadow a built-in command. Dynamic
+   * and session-scoped host names are NOT in this catalog (it is a fixed
+   * set); those collisions surface at candidate synthesis instead.
+   * Defaults to empty for standalone tests that exercise the
+   * dynamic-vs-dynamic rules only. */
   private readonly staticCatalog: ReadonlySet<string>
   /** Local names, derived on demand (never stored twice). */
   private revision = 0
+  /** Per-registration generation counter (see {@link Contribution.generation}). */
+  private nextGeneration = 0
   private readonly onInvalidate: () => void
 
   constructor(onInvalidate: () => void = () => {}, staticCatalog: ReadonlySet<string> = new Set()) {
@@ -90,6 +107,20 @@ export class CommandBridge {
       throw new Error(`duplicate command contribution id "${spec.id}" (owner "${this.contributions.get(spec.id)?.owner}")`)
     }
     if (spec.name === '') throw new Error('command contribution name must not be empty')
+    // A contribution IS its client behavior: a caller that bypasses the
+    // public types (plain JS, a stale compiled plugin) must fail LOUD at the
+    // boundary rather than install a menu row that can never run.
+    if (typeof spec.handler !== 'function') {
+      throw new Error(`command contribution "${spec.name}" must declare its handler (the client behavior)`)
+    }
+    // The removed `execution` ownership metadata must never be SILENTLY
+    // reinterpreted: a stale plugin still declaring it is rejected loudly
+    // (breaking API, explicit migration — see docs/extension-api.md).
+    if ('execution' in spec) {
+      throw new Error(
+        `command contribution "${spec.name}" declares the removed 'execution' ownership metadata — a contribution is a client-owned command now; drop 'execution' and declare 'handler' (see docs/extension-api.md)`,
+      )
+    }
     // P1-04: the host-owned catalog is authoritative — an EXACT collision
     // with a host command is rejected loudly (a plugin can never shadow
     // /status, /sessions, ...). Near-synonyms of host names are rejected
@@ -131,31 +162,44 @@ export class CommandBridge {
       id: spec.id,
       name: spec.name,
       description: spec.description,
-      execution: spec.execution,
       sessionless: spec.sessionless ?? false,
       owner,
-      argumentProvider: spec.argumentProvider,
+      generation: this.nextGeneration += 1,
       handler: spec.handler,
       disposed: false,
     }
+    // IDENTITY-bound handle: a handle captured before a re-registration under
+    // the same id must never remove the NEWER registration (a repeated or
+    // late fiber cleanup would otherwise kill a live contribution —
+    // `dispose(id)` cannot tell the generations apart).
+    const handle: TuiCommandHandle = {
+      id: spec.id,
+      dispose: () => this.disposeContribution(contribution),
+    }
+    contribution.handle = handle
     this.contributions.set(spec.id, contribution)
     this.revision += 1
     this.onInvalidate()
-    return {
-      kind: 'registered',
-      handle: {
-        id: spec.id,
-        dispose: () => this.dispose(spec.id),
-      },
-    }
+    return { kind: 'registered', handle }
   }
 
   /** Remove one contribution by id (idempotent). */
   dispose(id: string): void {
     const contribution = this.contributions.get(id)
     if (contribution === undefined || contribution.disposed) return
+    this.disposeContribution(contribution)
+  }
+
+  /** Remove ONE registration by identity (the handle's own record).
+   * Idempotent, and a no-op for an entry the map no longer holds: the id may
+   * already belong to a NEWER registration (a dispose + re-register under the
+   * same id is a new generation, and a late cleanup of the old handle must
+   * leave it alive). */
+  private disposeContribution(contribution: Contribution): void {
+    if (contribution.disposed) return
     contribution.disposed = true
-    this.contributions.delete(id)
+    if (this.contributions.get(contribution.id) !== contribution) return
+    this.contributions.delete(contribution.id)
     this.revision += 1
     this.onInvalidate()
   }
@@ -167,6 +211,16 @@ export class CommandBridge {
     }
   }
 
+  /** Whether one handle still names the LIVE registration for its id. The
+   * caller's cleanup consults it before touching state that is keyed by id
+   * alone — the extension ledger's health record is (slot, owner, id), so a
+   * STALE handle's cleanup would otherwise untrack a NEWER generation's
+   * record. */
+  isCurrent(handle: TuiCommandHandle): boolean {
+    const contribution = this.contributions.get(handle.id)
+    return contribution !== undefined && !contribution.disposed && contribution.handle === handle
+  }
+
   /** The owning fiber of one contribution id (the runner-facing health
    * bridge resolves owners HERE — the runner never passes owners
    * around, which is what keeps the bridge protocol stable). */
@@ -174,25 +228,14 @@ export class CommandBridge {
     return this.contributions.get(id)?.owner
   }
 
-  /** Whether a command name is EFFECTIVELY local (static core set OR a
-   * live dynamic local contribution). The static set stays the baseline —
-   * the bridge only ADDS dynamic ownership. */
+  /** Whether a command name is a CLIENT-OWNED local command (static core
+   * set OR a live contribution). The static set stays the baseline — the
+   * bridge only ADDS client-owned names. */
   isLocal(name: string, staticLocal: ReadonlySet<string>): boolean {
     if (staticLocal.has(name)) return true
     for (const contribution of this.contributions.values()) {
       if (contribution.disposed) continue
-      if (contribution.name === name && contribution.execution === 'local') return true
-    }
-    return false
-  }
-
-  /** Whether a command name is sessionless (static set OR a live dynamic
-   * sessionless contribution). */
-  isSessionless(name: string, staticSessionless: ReadonlySet<string>): boolean {
-    if (staticSessionless.has(name)) return true
-    for (const contribution of this.contributions.values()) {
-      if (contribution.disposed) continue
-      if (contribution.name === name && contribution.sessionless) return true
+      if (contribution.name === name) return true
     }
     return false
   }
@@ -213,15 +256,10 @@ export class CommandBridge {
     return this.find(name)?.id
   }
 
-  /** The handler for one name, or undefined (dispatch falls back to the
-   * commands service). */
+  /** The client handler for one name, or undefined (the dispatch falls
+   * back to the commands service for TUI-owned sessionless names). */
   handlerFor(name: string): TuiLocalCommandHandler | undefined {
     return this.find(name)?.handler
-  }
-
-  /** The argument autocomplete provider for one name, or undefined. */
-  argumentProviderFor(name: string): TuiAutocompleteProvider | undefined {
-    return this.find(name)?.argumentProvider
   }
 
   /** An immutable snapshot (diagnostics + /status). */
@@ -233,9 +271,9 @@ export class CommandBridge {
         id: contribution.id,
         name: contribution.name,
         description: contribution.description,
-        execution: contribution.execution,
         sessionless: contribution.sessionless,
         owner: contribution.owner,
+        generation: contribution.generation,
       }))
     return { entries, revision: this.revision }
   }

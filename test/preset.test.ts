@@ -12,13 +12,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import { composeAgent, recordedPreset, recomposeBlank, type RecomposableSession } from '../src/index.ts'
 import { presetDisplayText } from '../src/commands.ts'
 import { sessionPresetOf, type SessionObservationLike } from '../src/runtime/direct/session-preset-direct.ts'
-import {
-  normalizePersistedSessionPresetId,
-  resolvePersistedSessionPresetId,
-} from '../src/runtime/session-preset.ts'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
-import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 
 /** Minimal roster double recording every mount. */
@@ -53,7 +49,7 @@ function ctxWith(get: (name: string) => unknown): Context {
 
 function sessionHeader(id: string, agentPreset?: string): SessionHeader {
   return {
-    version: 0,
+    version: SESSION_FORMAT_VERSION,
     id: SessionId(id),
     createdAt: 1,
     cwd: '/tmp',
@@ -100,48 +96,61 @@ function queryObserving(
   }
 }
 
-const rosterWithoutCode = {
-  resolve: async (id?: string) => {
-    if (id === 'code') throw new Error('agent-presets: preset "code" not found (available: ptc)')
-    return { id: id ?? 'ptc' }
-  },
-}
-
-const emptyRoster = {
-  resolve: async (id?: string) => {
-    throw new Error(`agent-presets: preset "${id}" not found (available: none)`)
-  },
-}
-
-test('persisted code normalization is roster-aware and inert without roster data', async () => {
-  assert.equal(normalizePersistedSessionPresetId('code'), 'code')
-  assert.equal(normalizePersistedSessionPresetId('code', ['ptc']), 'ptc')
-  assert.equal(normalizePersistedSessionPresetId('code', []), undefined)
-  assert.equal(normalizePersistedSessionPresetId('code', ['ptc', 'code']), 'code')
-  assert.equal(await resolvePersistedSessionPresetId('code', undefined, undefined), undefined)
-  assert.equal(await resolvePersistedSessionPresetId('code', [], emptyRoster), undefined)
-})
-
-/** A minimal unpublished-agent scope: model selection registers two listeners. */
+/** Minimal unpublished-agent setup inputs for the explicit rc.1 seam. */
 function agentCtx(): Context {
   return { on: () => () => {} } as unknown as Context
 }
 
-function selection(): ModelSelectionRef {
-  return { current: { provider: 'p', model: 'm' }, assembled: undefined }
+function recordingAgentCtx(events: string[]): Context {
+  return {
+    on: (event: string) => {
+      events.push(event)
+      return () => {}
+    },
+  } as unknown as Context
 }
+
+const installSelection = (_agentCtx: Context, _agent: Agent): void => {}
+const unpublishedAgent = {} as Agent
 
 test('composeAgent without a roster composes nothing and installs only model selection', async () => {
   const ctx = ctxWith(() => undefined)
-  const composition = await composeAgent(ctx, selection())
+  const composition = await composeAgent(ctx, installSelection)
   assert.equal(composition.agentPreset, undefined)
   assert.equal(typeof composition.setup, 'function')
+})
+
+test('composeAgent preserves ModelSelectionRef standalone compatibility', async () => {
+  const selection: ModelSelectionRef = { current: undefined, assembled: undefined }
+  const events: string[] = []
+  const composition = await composeAgent(ctxWith(() => undefined), selection)
+  await composition.setup(recordingAgentCtx(events))
+  assert.deepEqual(events, ['system-prompt/assemble', 'agent/request', 'agent/pre-step'])
+})
+
+test('composeAgent installs a legacy selection before mounting a roster', async () => {
+  const fake = roster()
+  const selection: ModelSelectionRef = { current: undefined, assembled: undefined }
+  const events: string[] = []
+  const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)
+  const composition = await composeAgent(ctx, selection)
+  await composition.setup(recordingAgentCtx(events))
+  assert.deepEqual(events, ['system-prompt/assemble', 'agent/request', 'agent/pre-step'])
+  assert.deepEqual(fake.mounted, ['standard'])
+})
+
+test('composeAgent passes the composed Agent to the explicit installer', async () => {
+  let received: Agent | undefined
+  const installer = (_agentCtx: Context, agent: Agent): void => { received = agent }
+  const composition = await composeAgent(ctxWith(() => undefined), installer)
+  await composition.setup(agentCtx(), unpublishedAgent)
+  assert.equal(received, unpublishedAgent)
 })
 
 test('composeAgent rejects code when no preset roster exists', async () => {
   const ctx = ctxWith(() => undefined)
   await assert.rejects(
-    composeAgent(ctx, selection(), 'code'),
+    composeAgent(ctx, installSelection, 'code'),
     /preset "code" is unavailable/,
   )
 })
@@ -149,27 +158,27 @@ test('composeAgent rejects code when no preset roster exists', async () => {
 test('composeAgent with a roster resolves the default and mounts it in setup', async () => {
   const fake = roster()
   const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)
-  const composition = await composeAgent(ctx, selection())
+  const composition = await composeAgent(ctx, installSelection)
   assert.equal(composition.agentPreset, 'standard')
-  await composition.setup(agentCtx())
+  await composition.setup(agentCtx(), unpublishedAgent)
   assert.deepEqual(fake.mounted, ['standard'])
 })
 
 test('composeAgent mounts the named preset, not the default', async () => {
   const fake = roster()
   const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)
-  const composition = await composeAgent(ctx, selection(), 'minimal')
+  const composition = await composeAgent(ctx, installSelection, 'minimal')
   assert.equal(composition.agentPreset, 'minimal')
-  await composition.setup(agentCtx())
+  await composition.setup(agentCtx(), unpublishedAgent)
   assert.deepEqual(fake.mounted, ['minimal'])
 })
 
 test('composeAgent accepts a legal custom code preset', async () => {
   const fake = roster()
   const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)
-  const composition = await composeAgent(ctx, selection(), 'code')
+  const composition = await composeAgent(ctx, installSelection, 'code')
   assert.equal(composition.agentPreset, 'code')
-  await composition.setup(agentCtx())
+  await composition.setup(agentCtx(), unpublishedAgent)
   assert.deepEqual(fake.mounted, ['code'])
 })
 
@@ -177,7 +186,7 @@ test('composeAgent keeps a real custom code default instead of applying the lega
   const fake = roster()
   const service = { ...fake.service, defaultId: 'code' }
   const ctx = ctxWith(name => name === 'agentPresets' ? service : undefined)
-  const composition = await composeAgent(ctx, selection())
+  const composition = await composeAgent(ctx, installSelection)
   assert.equal(composition.agentPreset, 'code')
 })
 
@@ -194,17 +203,17 @@ test('composeAgent resolves an absent legacy code default as ptc', async () => {
     },
   }
   const ctx = ctxWith(name => name === 'agentPresets' ? service : undefined)
-  const composition = await composeAgent(ctx, selection())
+  const composition = await composeAgent(ctx, installSelection)
   assert.deepEqual(resolvedIds, ['code', 'ptc'])
   assert.equal(composition.agentPreset, 'ptc')
-  await composition.setup(agentCtx())
+  await composition.setup(agentCtx(), unpublishedAgent)
   assert.deepEqual(fake.mounted, ['ptc'])
 })
 
 test('composeAgent propagates an unknown-preset rejection', async () => {
   const fake = roster({ unknown: true })
   const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)
-  await assert.rejects(composeAgent(ctx, selection(), 'nope'), /not found/)
+  await assert.rejects(composeAgent(ctx, installSelection, 'nope'), /not found/)
 })
 
 test('recordedPreset returns undefined without the observation seam', async () => {
@@ -212,9 +221,9 @@ test('recordedPreset returns undefined without the observation seam', async () =
   assert.equal(await recordedPreset(ctx, 's1'), undefined)
 })
 
-test('recordedPreset drops persisted code when the roster service is absent', async () => {
+test('recordedPreset preserves a native V3 code projection without a roster', async () => {
   const ctx = projectedCtx(undefined, undefined, queryObserving(() => observation('code')))
-  assert.equal(await recordedPreset(ctx, 's1'), undefined)
+  assert.equal(await recordedPreset(ctx, 's1'), 'code')
 })
 
 test('recordedPreset propagates an unknown-session observation rejection', async () => {
@@ -234,16 +243,6 @@ test('recordedPreset preserves an unreadable session error instead of falling ba
 test('recordedPreset uses the projection: the newest selection wins over the header', async () => {
   const ctx = projectedCtx(undefined, undefined, queryObserving(() => observation('minimal')))
   assert.equal(await recordedPreset(ctx, 's1'), 'minimal')
-})
-
-test('recordedPreset normalizes a legacy code selection to canonical ptc', async () => {
-  const ctx = projectedCtx(undefined, rosterWithoutCode, queryObserving(() => observation('code')))
-  assert.equal(await recordedPreset(ctx, 's1'), 'ptc')
-})
-
-test('recordedPreset normalizes a legacy code header to canonical ptc', async () => {
-  const ctx = projectedCtx(undefined, rosterWithoutCode, queryObserving(() => observation('code')))
-  assert.equal(await recordedPreset(ctx, 's1'), 'ptc')
 })
 
 test('recordedPreset preserves code when the current roster has a custom code preset', async () => {
@@ -272,7 +271,7 @@ function sessionWith(events: readonly SessionEvent[]): { session: RecomposableSe
   const appended: unknown[] = []
   return {
     appended,
-    // The alpha.4 Session shape: the log is served through snapshot reads,
+    // The current Session shape: the log is served through snapshot reads,
     // never a live `events` array.
     session: {
       id: 's1',

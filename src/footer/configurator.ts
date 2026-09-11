@@ -39,6 +39,8 @@ import {
   visibleWidth,
   type Component,
   type KeyId,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import { color } from '../theme.ts'
 import type { StatusSnapshot } from '../status/types.ts'
@@ -88,6 +90,40 @@ export interface FooterConfiguratorOptions {
   readonly onCancel: () => void
 }
 
+/** One physical row of the last painted panel frame (mouse hit-testing).
+ * The map is built from the EXACT final rows render() returns (including
+ * the body scrollport slice), so a click can only act on last-painted
+ * geometry. `select` moves the cursor to the target row through the
+ * model's own move operations; `save`/`exit` route through the panel's
+ * single save path. Text-editing rows (custom-text/command/name,
+ * create-name/text/command, advanced editing) expose no cursor model and
+ * stay keyboard-only. (Mouse parity.) */
+type ConfiguratorMouseHit =
+  | { kind: 'select'; target: number }
+  | { kind: 'save' }
+  | { kind: 'exit'; choice: 'save' | 'discard' | 'keep' }
+  | { kind: 'inert' }
+
+/** The actionable subset of a hit, used as the press-time gesture
+ * identity (mouse parity): a click may only run the EXACT semantic
+ * action that was pressed — a resize/repaint between press and release
+ * must not transfer the click to whatever action repainted into the
+ * same cell (a transaction-level wrong action, e.g. Keep Editing →
+ * Save & Exit). */
+type ConfiguratorMouseAction =
+  | { kind: 'select'; target: number }
+  | { kind: 'save' }
+  | { kind: 'exit'; choice: 'save' | 'discard' | 'keep' }
+
+/** The pressed semantic action equals the current hit's action. */
+function sameMouseAction(a: ConfiguratorMouseAction | undefined, b: ConfiguratorMouseHit): boolean {
+  if (a === undefined) return false
+  if (a.kind === 'select') return b.kind === 'select' && b.target === a.target
+  if (a.kind === 'save') return b.kind === 'save'
+  if (a.kind === 'exit') return b.kind === 'exit' && b.choice === a.choice
+  return false
+}
+
 /** The footer configurator overlay panel. */
 export class FooterConfiguratorPanel implements Component {
   private readonly model: FooterConfiguratorModel
@@ -103,6 +139,13 @@ export class FooterConfiguratorPanel implements Component {
   /** The body scrollport's top offset (stable across renders — the cursor
    * scrolls the body minimally; the fixed shell never moves). */
   private scrollTop = 0
+  /** Physical row → hit entry from the LAST render (mouse parity). */
+  private hitMap: ConfiguratorMouseHit[] = []
+  /** The semantic action the last left press latched (mouse parity): a
+   * click may only run the exact pressed action. */
+  private mousePressedAction: ConfiguratorMouseAction | undefined
+  /** The width the hit map was painted at; a stale-width event is rejected. */
+  private lastRenderWidth = 0
   /** Bracketed-paste buffering (the fork's Input-component pattern):
    * `isInPaste` between the \x1b[200~/\x1b[201~ markers, `pasteBuffer`
    * accumulating the chunks — the markers (and the content) may split
@@ -129,6 +172,13 @@ export class FooterConfiguratorPanel implements Component {
     this.onSave = options.onSave
     this.onCancel = options.onCancel
     this.handleInput = (data: string): void => {
+      // Any keyboard input ends the mouse gesture identity: the
+      // layout/item semantic mutations (Enter/Space/A/M/F/arrows/Esc)
+      // can move a different item onto the pressed cell, so a later
+      // synthesized click must not match the stale ordinal target
+      // (press A → Space removes A → B moves onto the same cell →
+      // release must not activate B).
+      this.mousePressedAction = undefined
       const state = this.model.state()
       // A save in flight freezes INPUT (PR E §10): the draft captured for
       // the pending write must stay the draft on screen, duplicate
@@ -309,6 +359,7 @@ export class FooterConfiguratorPanel implements Component {
     // The budget is re-read EVERY render (resize-safe); the caller's
     // getter already leaves room for the Frame's border rows.
     const budget = Math.max(1, this.maxVisible())
+    this.lastRenderWidth = Math.max(1, width)
     const rule = color.border('─'.repeat(Math.max(0, width - 2)))
     const head = [
       color.textStrong(this.title(state)),
@@ -331,7 +382,9 @@ export class FooterConfiguratorPanel implements Component {
     if (left <= 0) {
       // A tiny terminal: the fixed shell wins, the body drops (the Frame
       // borders stay visible — the physical minimum).
-      return [...head, ...pre].slice(0, budget).map(line => truncateToWidth(line, Math.max(1, width), '…'))
+      const lines = [...head, ...pre].slice(0, budget).map(line => truncateToWidth(line, Math.max(1, width), '…'))
+      this.hitMap = lines.map((): ConfiguratorMouseHit => ({ kind: 'inert' }))
+      return lines
     }
     const bodyMin = state.mode === 'exit-confirm' || state.mode === 'rows'
       ? body.lines.length // PR E §17.9: the guard's question + three actions, and the whole
@@ -358,14 +411,112 @@ export class FooterConfiguratorPanel implements Component {
     if (body.cursor < this.scrollTop) this.scrollTop = body.cursor
     if (body.cursor >= this.scrollTop + scrollBudget) this.scrollTop = body.cursor - scrollBudget + 1
     this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
-    return [
+    const bodySlice = body.lines.slice(this.scrollTop, this.scrollTop + scrollBudget)
+    const bodyHits = body.hits.slice(this.scrollTop, this.scrollTop + scrollBudget)
+    const lines = [
       ...head,
       ...previewBlock,
       rule,
       ...pre,
-      ...body.lines.slice(this.scrollTop, this.scrollTop + scrollBudget),
+      ...bodySlice,
       ...tail,
     ].map(line => truncateToWidth(line, Math.max(1, width), '…'))
+    this.hitMap = [
+      ...head.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
+      ...previewBlock.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
+      { kind: 'inert' },
+      ...pre.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
+      ...bodyHits,
+      ...tail.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
+    ]
+    return lines
+  }
+
+  /**
+   * Mouse parity: the hit map from the LAST render decides what a pointer
+   * event may act on — a selectable row (moves the cursor through the
+   * model's own move operations), the "Save changes" action, the
+   * exit-confirm choices, or inert chrome (title, help, rule, preview,
+   * text-editing rows). A click routes through the SAME operations as
+   * Enter: requestSave / runExitChoice / model.activate(). While a save
+   * is in flight every mouse mutation is ignored, exactly like keyboard
+   * input — no click can create a second save.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // A click ends any gesture, and every left press starts a fresh
+    // one: release the pressed action up front — BEFORE the width
+    // guard / hit lookup / inert return / saving gate, so a press on
+    // stale-width or inert geometry still replaces the old identity
+    // (the TUI keeps the frame as the press target for a handled
+    // press, so a later release on the same cell synthesizes a click
+    // that must not match a stale action). The local copy still guards
+    // the valid-row comparison below.
+    const pressedAction = this.mousePressedAction
+    if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) {
+      this.mousePressedAction = undefined
+    }
+    // The hit map is only valid for the last painted width: a resize
+    // that has not been repainted must not dispatch against stale
+    // geometry (last-painted geometry is authoritative).
+    if (event.width !== this.lastRenderWidth) return undefined
+    const hit = this.hitMap[event.y]
+    if (!hit || hit.kind === 'inert') return undefined
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+    // A save in flight freezes mouse mutations (PR E §10), exactly like
+    // keyboard input.
+    if (this.model.state().saving) return undefined
+    if (event.type === 'press') {
+      if (hit.kind === 'select') {
+        // In row-move mode the keyboard ↑/↓ REORDER the active item; a
+        // mouse click must not implicitly reorder (mouse-plan boundary:
+        // "row-move: click row selects it only"). Item rows are
+        // mouse-inert in that mode.
+        if (this.model.state().mode !== 'row-move') {
+          this.moveCursorTo(hit.target)
+          this.mousePressedAction = { kind: 'select', target: hit.target }
+        }
+      } else if (hit.kind === 'save') {
+        this.mousePressedAction = { kind: 'save' }
+      } else if (hit.kind === 'exit') {
+        this.mousePressedAction = { kind: 'exit', choice: hit.choice }
+      }
+      return { handled: true, focus: true }
+    }
+    // click: the same operations as Enter, but only for the exact
+    // pressed semantic action (a resize/repaint between press and
+    // release must not transfer the click to a different action).
+    if (!sameMouseAction(pressedAction, hit)) return undefined
+    if (hit.kind === 'save') {
+      this.requestSave()
+    } else if (hit.kind === 'exit') {
+      this.runExitChoice(hit.choice)
+    } else if (hit.kind === 'select') {
+      // Same boundary: a click in row-move mode must not both reorder
+      // (via the press above) and exit the mode (via activate) — the
+      // item rows are inert, and Done stays a keyboard action.
+      if (this.model.state().mode !== 'row-move') this.model.activate()
+    }
+    return { handled: true }
+  }
+
+  /** Move the current cursor to `target` through the model's own move
+   * operations (the keyboard's ↑/↓ semantics — never a mouse-specific
+   * cursor path). In row-move mode the model's move operations reorder
+   * the active item, which is the keyboard contract; no drag-reorder is
+   * invented. */
+  private moveCursorTo(target: number): void {
+    const state = this.model.state()
+    const current = state.mode === 'rows' ? state.homeCursor
+      : state.mode === 'row' || state.mode === 'row-move' ? state.cursor
+      : state.mode === 'item' ? state.itemCursor
+      : state.mode === 'advanced'
+        ? Math.max(0, ['prefix', 'suffix', 'importance', 'reset'].indexOf(state.advancedField))
+        : state.pickerIndex
+    const delta = target - current
+    for (let step = 0; step < Math.abs(delta); step += 1) {
+      if (delta > 0) this.model.moveDown()
+      else this.model.moveUp()
+    }
   }
 
   /** Feed one chunk through the bracketed-paste protocol. Returns true
@@ -714,10 +865,11 @@ export class FooterConfiguratorPanel implements Component {
   }
 
   /** The scrollable body + the line index the cursor sits on. */
-  private bodyLines(state: ReturnType<FooterConfiguratorModel['state']>, width: number): { lines: string[]; cursor: number } {
+  private bodyLines(state: ReturnType<FooterConfiguratorModel['state']>, width: number): { lines: string[]; cursor: number; hits: ConfiguratorMouseHit[] } {
     switch (state.mode) {
       case 'rows': {
         const lines = [color.textStrong('Select row to edit')]
+        const hits: ConfiguratorMouseHit[] = [{ kind: 'inert' }]
         state.layout.rows.forEach((row, index) => {
           // The home cursor — not rowIndex — drives the selector highlight
           // (PR E §4.2: rowIndex stays the EDITED row).
@@ -730,6 +882,7 @@ export class FooterConfiguratorPanel implements Component {
           const pad = Math.max(1, width - visibleWidth(label) - tail.length - 4)
           const line = `${marker} ${active ? color.textStrong(label) : color.text(label)}${' '.repeat(pad)}${color.textMuted(tail)}`
           lines.push(line)
+          hits.push({ kind: 'select', target: index })
         })
         // The trailing "Save changes" action (PR E §4/§6): the discoverable
         // save entry with its transactional status.
@@ -742,7 +895,8 @@ export class FooterConfiguratorPanel implements Component {
           : color.warning(status)
         const pad = Math.max(1, width - 'Save changes'.length - status.length - 4)
         lines.push(`${saveActive ? color.primary('›') : ' '} ${saveActive ? color.textStrong('Save changes') : color.text('Save changes')}${' '.repeat(pad)}${statusPainted}`)
-        return { lines, cursor: 1 + Math.min(state.homeCursor, state.layout.rows.length) }
+        hits.push({ kind: 'save' })
+        return { lines, cursor: 1 + Math.min(state.homeCursor, state.layout.rows.length), hits }
       }
       case 'exit-confirm': {
         // PR E §7.2: three explicit exits, no Y/N pair. The save action
@@ -750,6 +904,7 @@ export class FooterConfiguratorPanel implements Component {
         const choices = ['Save & Exit', 'Discard & Exit', 'Keep Editing']
         const activeIndex = Math.min(state.exitConfirmCursor, choices.length - 1)
         const lines = [color.warning('Save changes before exiting?')]
+        const hits: ConfiguratorMouseHit[] = [{ kind: 'inert' }]
         choices.forEach((label, index) => {
           const active = index === activeIndex
           const marker = active ? color.primary('›') : ' '
@@ -759,19 +914,23 @@ export class FooterConfiguratorPanel implements Component {
             line += `${' '.repeat(Math.max(1, 16 - label.length))}${color.textMuted('Saving…')}`
           }
           lines.push(line)
+          hits.push({ kind: 'exit', choice: index === 0 ? 'save' : index === 1 ? 'discard' : 'keep' })
         })
-        return { lines, cursor: 1 + activeIndex }
+        return { lines, cursor: 1 + activeIndex, hits }
       }
       case 'row':
       case 'row-move': {
         const row = state.layout.rows[Math.min(state.rowIndex, state.layout.rows.length - 1)]!
         const lines: string[] = []
+        const hits: ConfiguratorMouseHit[] = []
         let cursor = 0
         const emitZone = (zone: 'left' | 'right'): void => {
           lines.push(color.textStrong(zone === 'left' ? 'Left' : 'Right'))
+          hits.push({ kind: 'inert' })
           const refs = zone === 'left' ? row.left : row.right
           if (refs.length === 0) {
             lines.push(color.textMuted('  (empty)'))
+            hits.push({ kind: 'inert' })
             return
           }
           refs.forEach((ref, index) => {
@@ -789,11 +948,12 @@ export class FooterConfiguratorPanel implements Component {
               line += `${' '.repeat(pad)}${color.textMuted(style)}`
             }
             lines.push(line)
+            hits.push({ kind: 'select', target: flat })
           })
         }
         emitZone('left')
         emitZone('right')
-        return { lines, cursor }
+        return { lines, cursor, hits }
       }
       case 'item': {
         const ref = this.refAt(state.rowIndex, state.cursor)
@@ -839,7 +999,7 @@ export class FooterConfiguratorPanel implements Component {
           if (entry.kind === 'custom-delete') return this.menuRow(marker, 'Delete definition', undefined, active)
           return this.menuRow(marker, 'Advanced…', undefined, active)
         })
-        return { lines, cursor: Math.min(state.itemCursor, Math.max(0, menu.length - 1)) }
+        return { lines, cursor: Math.min(state.itemCursor, Math.max(0, menu.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
       }
       case 'style': {
         const ref = this.refAt(state.rowIndex, state.cursor)
@@ -859,7 +1019,7 @@ export class FooterConfiguratorPanel implements Component {
           const padded = `${names[index]!}${' '.repeat(Math.max(0, nameWidth + 2 - visibleWidth(names[index]!)))}`
           return `${marker} ${active ? color.textStrong(padded) : color.text(padded)}${example === '' ? '' : ` ${example}`}`
         })
-        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, formats.length - 1)) }
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, formats.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
       }
       case 'tone': {
         const ref = this.refAt(state.rowIndex, state.cursor)
@@ -871,7 +1031,7 @@ export class FooterConfiguratorPanel implements Component {
           const suffix = (ref?.tone ?? 'auto') === choice.value ? color.textMuted('  (current)') : ''
           return `${marker} ${painted}${suffix}`
         })
-        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)) }
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
       }
       case 'custom-tone': {
         const ref = this.refAt(state.rowIndex, state.cursor)
@@ -884,7 +1044,7 @@ export class FooterConfiguratorPanel implements Component {
           const suffix = current === choice.value ? color.textMuted('  (current)') : ''
           return `${marker} ${painted}${suffix}`
         })
-        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)) }
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
       }
       case 'custom-refresh': {
         const ref = this.refAt(state.rowIndex, state.cursor)
@@ -898,7 +1058,7 @@ export class FooterConfiguratorPanel implements Component {
           const suffix = current === ms ? color.textMuted('  (current)') : ''
           return `${marker} ${active ? color.textStrong(label) : color.text(label)}${suffix}`
         })
-        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)) }
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
       }
       case 'custom-timeout': {
         const ref = this.refAt(state.rowIndex, state.cursor)
@@ -912,7 +1072,7 @@ export class FooterConfiguratorPanel implements Component {
           const suffix = current === ms ? color.textMuted('  (current)') : ''
           return `${marker} ${active ? color.textStrong(label) : color.text(label)}${suffix}`
         })
-        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)) }
+        return { lines, cursor: Math.min(state.pickerIndex, Math.max(0, choices.length - 1)), hits: lines.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })) }
       }
       case 'custom-text':
       case 'custom-command':
@@ -922,7 +1082,9 @@ export class FooterConfiguratorPanel implements Component {
         const value = raw === '' ? color.textMuted('(empty)') : color.textStrong(`${raw}▏`)
         const lines = [this.menuRow(color.primary('›'), label, value, true)]
         if (state.customError !== '') lines.push(color.error(state.customError))
-        return { lines, cursor: 0 }
+        // Text rows expose no cursor model (append/backspace-only): they
+        // stay keyboard-only — no fake cursor is invented for mouse.
+        return { lines, cursor: 0, hits: lines.map(() => ({ kind: 'inert' })) }
       }
       case 'custom-delete': {
         const ref = this.refAt(state.rowIndex, state.cursor)
@@ -935,7 +1097,7 @@ export class FooterConfiguratorPanel implements Component {
             : `${count} layout reference${count === 1 ? '' : 's'} will be removed.`),
         ]
         if (state.customError !== '') lines.push(color.error(state.customError))
-        return { lines, cursor: 0 }
+        return { lines, cursor: 0, hits: lines.map(() => ({ kind: 'inert' })) }
       }
       case 'create-name': {
         const lines = [
@@ -943,7 +1105,7 @@ export class FooterConfiguratorPanel implements Component {
           color.textMuted('Use a stable name; it is stored as user:<name>.'),
         ]
         if (state.customError !== '') lines.push(color.error(state.customError))
-        return { lines, cursor: 0 }
+        return { lines, cursor: 0, hits: lines.map(() => ({ kind: 'inert' })) }
       }
       case 'create-text': {
         const name = state.customName === '' ? color.textMuted('(unnamed)') : color.text(state.customName)
@@ -953,7 +1115,7 @@ export class FooterConfiguratorPanel implements Component {
           this.menuRow(color.primary('›'), 'Text', value, true),
         ]
         if (state.customError !== '') lines.push(color.error(state.customError))
-        return { lines, cursor: 1 }
+        return { lines, cursor: 1, hits: lines.map(() => ({ kind: 'inert' })) }
       }
       case 'create-command': {
         const name = state.customName === '' ? color.textMuted('(unnamed)') : color.text(state.customName)
@@ -963,7 +1125,7 @@ export class FooterConfiguratorPanel implements Component {
           this.menuRow(color.primary('›'), 'Command', value, true),
         ]
         if (state.customError !== '') lines.push(color.error(state.customError))
-        return { lines, cursor: 1 }
+        return { lines, cursor: 1, hits: lines.map(() => ({ kind: 'inert' })) }
       }
       case 'create-refresh': {
         const lines = [
@@ -981,7 +1143,14 @@ export class FooterConfiguratorPanel implements Component {
           }),
         ]
         if (state.customError !== '') lines.push(color.error(state.customError))
-        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1) }
+        const hits: ConfiguratorMouseHit[] = [
+          { kind: 'inert' },
+          { kind: 'inert' },
+          { kind: 'inert' },
+          ...CUSTOM_COMMAND_REFRESH_CHOICES_MS.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })),
+        ]
+        if (state.customError !== '') hits.push({ kind: 'inert' })
+        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1), hits }
       }
       case 'create-timeout': {
         const lines = [
@@ -999,7 +1168,14 @@ export class FooterConfiguratorPanel implements Component {
           }),
         ]
         if (state.customError !== '') lines.push(color.error(state.customError))
-        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1) }
+        const hits: ConfiguratorMouseHit[] = [
+          { kind: 'inert' },
+          { kind: 'inert' },
+          { kind: 'inert' },
+          ...CUSTOM_COMMAND_TIMEOUT_CHOICES_MS.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })),
+        ]
+        if (state.customError !== '') hits.push({ kind: 'inert' })
+        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1), hits }
       }
       case 'create-tone': {
         const contentLabel = state.customKind === 'command' ? 'Command' : 'Text'
@@ -1018,7 +1194,14 @@ export class FooterConfiguratorPanel implements Component {
           }),
         ]
         if (state.customError !== '') lines.push(color.error(state.customError))
-        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1) }
+        const hits: ConfiguratorMouseHit[] = [
+          { kind: 'inert' },
+          { kind: 'inert' },
+          { kind: 'inert' },
+          ...FOOTER_TONE_CHOICES.map((_, index): ConfiguratorMouseHit => ({ kind: 'select', target: index })),
+        ]
+        if (state.customError !== '') hits.push({ kind: 'inert' })
+        return { lines, cursor: Math.min(3 + state.pickerIndex, lines.length - 1), hits }
       }
       case 'advanced': {
         const ref = this.refAt(state.rowIndex, state.cursor)
@@ -1048,7 +1231,13 @@ export class FooterConfiguratorPanel implements Component {
             : color.textStrong(editing ? `${raw}▏` : raw)
           return this.menuRow(marker, entry.label, display, active)
         })
-        return { lines, cursor: Math.min(fields.findIndex(entry => entry.field === state.advancedField), fields.length - 1) }
+        // Field rows are selectable; an EDITING field row is a text input
+        // (no cursor model — keyboard-only, documented).
+        const hits: ConfiguratorMouseHit[] = fields.map((_, index) => ({
+          kind: state.editing && fields[index]!.field === state.advancedField ? 'inert' : 'select',
+          target: index,
+        }))
+        return { lines, cursor: Math.min(fields.findIndex(entry => entry.field === state.advancedField), fields.length - 1), hits }
       }
       case 'add': {
         const matches = this.model.addMatches()
@@ -1068,7 +1257,11 @@ export class FooterConfiguratorPanel implements Component {
         const createCommandActive = state.pickerIndex === createIndex + 1
         lines.push(`${createTextActive ? color.primary('›') : ' '} ${createTextActive ? color.textStrong('+ Create Custom Text') : color.text('+ Create Custom Text')}`)
         lines.push(`${createCommandActive ? color.primary('›') : ' '} ${createCommandActive ? color.textStrong('+ Create Custom Command') : color.text('+ Create Custom Command')}`)
-        return { lines, cursor: Math.min(state.pickerIndex, createIndex + 1) }
+        const hits: ConfiguratorMouseHit[] = matches.map((_, index) => ({ kind: 'select', target: index }))
+        if (matches.length === 0) hits.push({ kind: 'inert' })
+        hits.push({ kind: 'select', target: createIndex })
+        hits.push({ kind: 'select', target: createIndex + 1 })
+        return { lines, cursor: Math.min(state.pickerIndex, createIndex + 1), hits }
       }
     }
   }

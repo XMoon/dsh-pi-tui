@@ -4,8 +4,9 @@
  * stays pristine). After every handled key, if the cursor sits on an
  * `@dir/` mention with the autocomplete closed, re-trigger completion so
  * Tab-accepting a directory immediately shows its children (kimi's
- * reopenAutocompleteAfterInput). Esc while autocomplete is active closes
- * it WITHOUT re-triggering (kimi parity).
+ * reopenAutocompleteAfterInput). The same path-argument behavior covers
+ * `/attach` and `/image`. Esc while autocomplete is active closes it WITHOUT
+ * re-triggering (kimi parity).
  *
  * The editor also carries the terminal-prompt prefix: the fork's Editor is
  * constructed with `paddingX: 2` (kimi's CustomEditor reserves padding for
@@ -21,10 +22,12 @@
  * @module @xmoon76/dsh-pi-tui/tui-editor
  */
 
-import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type EditorTheme, type TUI } from '@xmoon76/pi-tui'
+import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type EditorTheme, type SelectListLayoutOptions, type TUI } from '@xmoon76/pi-tui'
+import { SelectedMarquee } from './marquee.ts'
 import { color } from './theme.ts'
 import { classifyFileCompletionContext, FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input-mode.ts'
+import { extractInlineSkillPrefix } from './skill-reference-completion.ts'
 
 /** Host render-routing options for the host editor. */
 export interface TuiEditorOptions {
@@ -67,8 +70,8 @@ function routeEditorRenders(tui: TUI, route: ((force?: boolean) => void) | undef
  * three prompts (`❯ `, `! `, `!!`) are exactly this wide. */
 const PROMPT_WIDTH = 2
 
-/** Whether the cursor sits in a declared path-argument position (`/image
- * <arg>`): the classifier's `image-argument` kind, which the reopen gate
+/** Whether the cursor sits in a declared path-argument position (`/attach`/`/image
+ * <arg>`): the classifier's `path-argument` kind, which the reopen gate
  * consumes (plan §11 — ONE classifier, never a per-command hardcode). */
 function isFileArgumentContext(textBeforeCursor: string): boolean {
   return classifyFileCompletionContext(textBeforeCursor, FILE_ARGUMENT_COMMANDS).kind !== 'none'
@@ -148,6 +151,8 @@ export class TuiEditor extends Editor {
   private placeholderText = ''
   /** The current input mode: `!` / `!!` are state, never document text. */
   private inputMode: EditorInputMode = 'prompt'
+  /** The selected file-completion row's horizontal marquee. */
+  private readonly fileCompletionMarquee: SelectedMarquee
   /** An in-flight bracketed paste captured at the RAW layer: whether it
    * began in an EMPTY PROMPT (the normalization gate) and the content
    * accumulated so far. While set, every input chunk belongs to the
@@ -167,6 +172,9 @@ export class TuiEditor extends Editor {
     // state repaints, incl. async autocomplete commits) at the host's
     // active screen — see TuiEditorOptions.requestRender.
     super(routeEditorRenders(tui, options.requestRender), theme, { paddingX: PROMPT_WIDTH })
+    this.fileCompletionMarquee = new SelectedMarquee({
+      requestRender: () => this.tui.requestRender(),
+    })
     // Dynamic border: shell modes use the shellMode token, the prompt the
     // normal border. The function reads the LIVE color helpers on every
     // call, so a theme switch repaints correctly (never a cached Chalk
@@ -193,6 +201,13 @@ export class TuiEditor extends Editor {
   /** The current input mode (read-only for the host). */
   getInputMode(): EditorInputMode {
     return this.inputMode
+  }
+
+  /** Dispose resources owned by the permanent host editor at final surface
+   * teardown. EditorSeatHolder is deliberately non-owning: plugin editor
+   * handoffs must never dispose this host editor. */
+  disposeHostResources(): void {
+    this.fileCompletionMarquee.dispose()
   }
 
   /** Close any open autocomplete dropdown and abort any pending completion
@@ -246,8 +261,44 @@ export class TuiEditor extends Editor {
     return this.inputMode
   }
 
+  protected override getAutocompleteSelectListLayout(
+    prefix: string,
+  ): SelectListLayoutOptions | undefined {
+    if (this.inputMode !== 'prompt') {
+      this.fileCompletionMarquee.reset()
+      return super.getAutocompleteSelectListLayout(prefix)
+    }
+
+    const lines = this.getLines()
+    const cursor = this.getCursor()
+    const currentLine = lines[cursor.line] ?? ''
+    const textBeforeCursor = currentLine.slice(0, cursor.col)
+    const context = classifyFileCompletionContext(
+      textBeforeCursor,
+      FILE_ARGUMENT_COMMANDS,
+    )
+
+    if (context.kind === 'none') {
+      this.fileCompletionMarquee.reset()
+      return super.getAutocompleteSelectListLayout(prefix)
+    }
+
+    return {
+      truncatePrimary: ({ text, maxWidth, item, isSelected }) =>
+        this.fileCompletionMarquee.render({
+          key: item.value,
+          text,
+          maxWidth,
+          selected: isSelected,
+        }),
+    }
+  }
+
   override render(width: number): string[] {
     const lines = super.render(width)
+    if (!this.isShowingAutocomplete()) {
+      this.fileCompletionMarquee.reset()
+    }
     if (this.inputMode === 'prompt' && this.placeholderText !== '' && this.getText().trim() === '') {
       return injectEditorPlaceholder(lines, this.placeholderText, width)
     }
@@ -308,7 +359,7 @@ export class TuiEditor extends Editor {
       const { line, col } = this.getCursor()
       const beforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
       const context = classifyFileCompletionContext(beforeCursor, FILE_ARGUMENT_COMMANDS)
-      if (context.kind === 'mention' || context.kind === 'image-argument') {
+      if (context.kind === 'mention' || context.kind === 'path-argument') {
         this.requestAutocomplete({ force: true, explicitTab: true })
         return
       }
@@ -352,13 +403,17 @@ export class TuiEditor extends Editor {
       // complete paste segments — recursion per segment would overflow
       // the stack. The autocomplete reopen runs AFTER the normalized
       // pastes and the residual input landed, so a pasted `@dir/` reopens
-      // like ordinary input.
+      // like ordinary input. The inline skill check runs on the POST-PASTE
+      // document state (never the raw paste event, which carries ESC and
+      // would trip the per-keystroke gate below).
       this.processPasteChunks(data)
+      this.requestInlineSkillCompletionIfSeated()
       this.reopenAutocompleteAfterInput()
       return
     }
     if (data !== '') super.handleInput(data)
     this.triggerNonstandardMentionCompletion(data)
+    this.triggerInlineSkillCompletion(data)
     this.reopenAutocompleteAfterInput()
   }
 
@@ -388,6 +443,37 @@ export class TuiEditor extends Editor {
     const quotedMention = context.query.startsWith('@"')
     const nonstandardBoundary = beforeAt !== undefined && beforeAt !== ' ' && beforeAt !== '\t'
     if (!quotedMention && !nonstandardBoundary) return
+    this.requestAutocomplete({ force: false, explicitTab: false })
+  }
+
+  /** Trigger the provider for an INLINE SKILL REFERENCE position (a
+   * `/name` token at a whitespace boundary in prompt mode). The vendored
+   * editor's generic symbol gate REJECTS `/` as a trigger character
+   * (slash commands own the line-start seat —
+   * `setAutocompleteTriggerCharacters` filters it), so the host editor
+   * re-triggers on the pure classifier — the same consumer-side pattern
+   * as {@link triggerNonstandardMentionCompletion}. The provider itself
+   * decides the candidates; this seam only opens the dropdown. */
+  private triggerInlineSkillCompletion(data: string): void {
+    const printable = decodePrintableKey(data) ?? (data.length === 1 && data.charCodeAt(0) >= 32 ? data : undefined)
+    // Escape sequences are navigation/control keys, not text, even though
+    // their bytes include printable characters (same rule as the mention
+    // trigger).
+    if (printable === undefined && data.includes('\x1b')) return
+    if (printable === undefined && ![...data].some(character => character.charCodeAt(0) >= 32)) return
+    this.requestInlineSkillCompletionIfSeated()
+  }
+
+  /** The shared post-input check: when the cursor now sits in an inline
+   * skill seat (and the dropdown is closed), open the provider. Used by
+   * the per-keystroke trigger AND the bracketed-paste path — the paste
+   * path must judge the POST-PASTE document state, never the raw paste
+   * event (which carries ESC and would trip the per-keystroke gate). */
+  private requestInlineSkillCompletionIfSeated(): void {
+    if (this.isShowingAutocomplete()) return
+    if (this.inputMode !== 'prompt') return
+    const { line, col } = this.getCursor()
+    if (extractInlineSkillPrefix(this.getLines(), line, col) === undefined) return
     this.requestAutocomplete({ force: false, explicitTab: false })
   }
 

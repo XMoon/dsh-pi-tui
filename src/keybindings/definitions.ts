@@ -40,10 +40,26 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     // disabled — not just the hints (PR review finding).
     hostResolved: false,
   },
+  'app.input.submitAccelerated': {
+    id: 'app.input.submitAccelerated',
+    defaultKeys: ['ctrl+enter'],
+    // The web composer's accelerated submit gesture: it resolves to the
+    // OPPOSITE of the busy-Enter preference (never a fixed queue mode).
+    description: 'Submit with the opposite busy-Enter behavior',
+    category: 'Input',
+    scope: 'editor',
+    configurable: true,
+  },
   'app.input.queue': {
     id: 'app.input.queue',
-    defaultKeys: ['ctrl+enter'],
-    description: 'Queue input (the busy-Enter opposite chord)',
+    // NO default key: Ctrl+Enter belongs to the accelerated gesture. The
+    // action itself is DEPRECATED but keeps its ORIGINAL fixed-queue
+    // semantic for stored remaps (`app.input.queue: alt+q` still queues) —
+    // re-interpreting an old action id as the new gesture would silently
+    // migrate a user's explicit choice. `/keybindings` lists it (and can
+    // reset/disable it) like any other action.
+    defaultKeys: [],
+    description: 'Queue the draft (deprecated: use the accelerated submit action)',
     category: 'Input',
     scope: 'editor',
     configurable: true,
@@ -123,7 +139,10 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   },
   'app.transcript.search.close': {
     id: 'app.transcript.search.close',
-    defaultKeys: ['escape'],
+    // Ctrl+C is the Input's generic cancel (tui.select.cancel) — without
+    // this key the overlay's own shared Input swallows it and search stays
+    // open. The semantic close keeps ownership: Esc AND Ctrl+C both close.
+    defaultKeys: ['escape', 'ctrl+c'],
     description: 'Close transcript search',
     category: 'Transcript',
     scope: 'search',
@@ -518,6 +537,7 @@ export const PROTECTED_HOST_ACTIONS: ReadonlySet<AppKeybindingId> = new Set([
  * remap automatically stays blocked. */
 export const VIEWER_BLOCKED_PARENT_ACTIONS: ReadonlySet<AppKeybindingId> = new Set([
   'app.input.steer',
+  'app.input.submitAccelerated',
   'app.input.queue',
   'app.input.dequeue',
   'app.permission.cycle',

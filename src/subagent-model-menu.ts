@@ -23,7 +23,7 @@
  * @module @xmoon76/dsh-pi-tui/subagent-model-menu
  */
 
-import { SettingsList, Text, matchesKey, type Component, type RowBudgetAware } from '@xmoon76/pi-tui'
+import { SettingsList, Text, matchesKey, type Component, type Focusable, type RowBudgetAware, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import type { OwnedTaskOptions } from './detached.ts'
 import type { SubagentAllowedModelRoute, SubagentModelSelectionConfig } from './runtime/config-port.ts'
 import { settingsListTheme } from './theme.ts'
@@ -74,8 +74,12 @@ export function lastRouteWhileEnabled(
 }
 
 /** The two-level allowlist picker. */
-export class SubagentModelAllowlistSubmenu implements Component {
+export class SubagentModelAllowlistSubmenu implements Component, Focusable {
   private inner: Component
+  /** The inner that was ACTUALLY PAINTED last (mouse parity): an async
+   * inner swap between paint and pointer event must not let the new inner
+   * eat a click aimed at the old screen (Loading…). */
+  private paintedInner: Component | undefined
   private readonly requestRender: () => void
   /** Latched by every close path; late async results must not act after. */
   private disposed = false
@@ -97,6 +101,24 @@ export class SubagentModelAllowlistSubmenu implements Component {
   private mutationChain: Promise<void> = Promise.resolve()
   /** The last host row grant, re-applied to each swapped-in inner list. */
   private rowGrant = Number.POSITIVE_INFINITY
+  /** Focus state for the CURRENT inner (re-applied after async swaps). */
+  private _focused = false
+
+  get focused(): boolean {
+    return this._focused
+  }
+
+  set focused(value: boolean) {
+    this._focused = value
+    this.applyFocused()
+  }
+
+  /** Forward the stored focus flag to the current inner when it is
+   * Focusable (mouse parity: a swapped-in SettingsList must receive the
+   * focused flag for its search Input's cursor/IME state). */
+  private applyFocused(): void {
+    if ('focused' in this.inner) (this.inner as Focusable).focused = this._focused
+  }
 
   /** Host row-budget seam: keep the grant and forward it to the inner
    * list, so a list swapped in asynchronously after a resize still
@@ -120,6 +142,7 @@ export class SubagentModelAllowlistSubmenu implements Component {
     }
     this.inner = this.providerList(deps, close)
     this.setMaxRows(this.rowGrant)
+    this.applyFocused()
   }
 
   private providerList(deps: AllowlistSubmenuDeps, close: (selected?: string) => void): Component {
@@ -158,6 +181,7 @@ export class SubagentModelAllowlistSubmenu implements Component {
       this.modelListIds = []
       this.inner = this.providerList(deps, close)
       this.setMaxRows(this.rowGrant)
+      this.applyFocused()
       this.requestRender()
     }
     this.inner = new EscDismissText('Loading models…', backToProviders)
@@ -191,11 +215,13 @@ export class SubagentModelAllowlistSubmenu implements Component {
         this.inner = list
         // The async list lands AFTER any resize: re-apply the last grant.
         this.setMaxRows(this.rowGrant)
+        this.applyFocused()
         this.requestRender()
       },
       onError: () => {
         if (this.disposed) return
         this.inner = new EscDismissText('models unavailable', backToProviders)
+        this.applyFocused()
         this.requestRender()
       },
     })
@@ -284,11 +310,24 @@ export class SubagentModelAllowlistSubmenu implements Component {
     this.inner.handleInput?.(data)
   }
 
+  /** Transparent mouse forwarding (mouse parity): the outer SettingsList
+   * dispatches submenu events here; the current inner (a SettingsList
+   * once loaded) owns row hit-testing and wheel selection. Loading/error
+   * text rows stay inert. A pointer event is fenced to the PAINTED
+   * inner: an async swap that has not repainted yet must not receive a
+   * click aimed at the previous screen (a stale click must never write
+   * the allowlist). */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.inner !== this.paintedInner) return undefined
+    return this.inner.handleMouse?.(event)
+  }
+
   invalidate(): void {
     this.inner.invalidate?.()
   }
 
   render(width: number): string[] {
+    this.paintedInner = this.inner
     return this.inner.render(width)
   }
 }

@@ -657,3 +657,179 @@ test('a scope switch MID-FLIGHT drops the in-flight candidate list (no cross-ses
   release!()
   assert.equal(await pending, null, 'a result resolved for the OLD session must never commit')
 })
+
+// ── inline skill reference completion (the 2026-09-07 next plan) ──────────
+
+/** The detached human skill catalog used by the inline tests. */
+const SKILLS = [
+  { name: 'eli5', description: 'Explain like I am five' },
+  { name: 'html-maker', description: 'Make HTML' },
+  { name: 'diagnosing-skills', description: 'Diagnose skills' },
+]
+
+test('inline skill completion returns ONLY skill candidates at ordinary positions', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider(
+    [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
+    root,
+    fallbackSeam(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    SKILLS,
+  )
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result !== null, `请用 /el must suggest:\n${JSON.stringify(result)}`)
+  assert.equal(result.prefix, 'el', 'the inline prefix is the QUERY part, never /-prefixed')
+  assert.deepEqual(result.items.map(item => item.value), ['eli5'], 'only skill names, never commands')
+  assert.equal(result.items[0]!.description, 'Explain like I am five', 'the skill description rides along')
+  // A later line's leading `/` is an inline seat too.
+  const second = await provider.getSuggestions(['foo', '/ht'], 1, 3, { signal: abort })
+  assert.ok(second !== null, `line-2 /ht must suggest:\n${JSON.stringify(second)}`)
+  assert.deepEqual(second.items.map(item => item.value), ['html-maker'])
+  // An empty query lists the whole catalog (typing a bare `/`).
+  const all = await provider.getSuggestions(['请用 /'], 0, 4, { signal: abort })
+  assert.ok(all !== null, `请用 / must suggest:\n${JSON.stringify(all)}`)
+  assert.equal(all.prefix, '')
+  assert.deepEqual(all.items.map(item => item.value), ['eli5', 'html-maker', 'diagnosing-skills'])
+})
+
+test('inline skill completion never leaks commands and never claims the command seat', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider(
+    [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
+    root,
+    fallbackSeam(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    SKILLS,
+  )
+  // The inline namespace is the skill catalog ONLY: `/set` in prose must
+  // not surface the `/settings` command — with no matching skill the
+  // dropdown stays closed (a command-leaking implementation would list
+  // `settings` here).
+  const inline = await provider.getSuggestions(['请执行 /set'], 0, 8, { signal: abort })
+  assert.equal(inline, null, `请执行 /set must not leak commands:\n${JSON.stringify(inline)}`)
+  // The FIRST logical line's leading command seat stays command completion.
+  const leading = await provider.getSuggestions(['/se'], 0, 3, { signal: abort })
+  assert.ok(leading !== null, `/se must suggest:\n${JSON.stringify(leading)}`)
+  assert.ok(leading.items.some(item => item.value === 'settings'), `the command must answer the command seat:\n${JSON.stringify(leading.items)}`)
+  assert.ok(leading.items.every(item => item.value !== 'eli5'), `skills must not claim the command seat:\n${JSON.stringify(leading.items)}`)
+  // A path-like token is never a skill seat.
+  assert.equal(await provider.getSuggestions(['foo /usr/lo'], 0, 10, { signal: abort }), null)
+  assert.equal(await provider.getSuggestions(['foo 5/8'], 0, 7, { signal: abort }), null)
+})
+
+test('inline skill completion stays closed in shell mode (shell/path logic unchanged)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider(
+    [],
+    root,
+    fallbackSeam(),
+    () => 'shell-context',
+    undefined,
+    undefined,
+    undefined,
+    SKILLS,
+  )
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result === null || result.items.every(item => item.value !== 'eli5'),
+    `shell mode must never answer inline skills:\n${JSON.stringify(result)}`)
+})
+
+test('inline skill accept applies the reference and never submits', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS)
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result !== null)
+  const applied = provider.applyCompletion(['请用 /el'], 0, 6, result.items[0]!, result.prefix)
+  assert.deepEqual(applied, { lines: ['请用 /eli5 '], cursorLine: 0, cursorCol: 9 },
+    'the accept must insert the reference with a separator and keep the draft')
+  // A non-skill item value is never applied as an inline reference: the
+  // inline branch requires catalog membership, so a foreign value falls
+  // through to the fork's argument-apply (the pre-existing fallback).
+  const foreign = provider.applyCompletion(['请用 /el'], 0, 6, { value: 'not-a-skill', label: 'not-a-skill' }, 'el')
+  assert.deepEqual(foreign, { lines: ['请用 /not-a-skill'], cursorLine: 0, cursorCol: 15 },
+    'a value outside the skill catalog must not take the inline path')
+  // A suffix already separated by whitespace keeps exactly one space.
+  const spaced = await provider.getSuggestions(['请用 /el 看看'], 0, 6, { signal: abort })
+  assert.ok(spaced !== null)
+  const appliedSpaced = provider.applyCompletion(['请用 /el 看看'], 0, 6, spaced.items[0]!, spaced.prefix)
+  assert.deepEqual(appliedSpaced, { lines: ['请用 /eli5 看看'], cursorLine: 0, cursorCol: 9 })
+})
+
+test('a scope switch fences the open inline dropdown (no stale accept)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  let scope: import('../src/mentions.ts').MentionScope = { kind: 'workspace', cwd: root }
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, () => scope, undefined, undefined, SKILLS)
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result !== null)
+  // The session/workspace generation changes while the dropdown is open.
+  scope = { kind: 'workspace', cwd: '/other-workspace' }
+  const applied = provider.applyCompletion(['请用 /el'], 0, 6, result.items[0]!, result.prefix)
+  assert.deepEqual(applied, { lines: ['请用 /el'], cursorLine: 0, cursorCol: 6 },
+    'a switched scope must fence the old dropdown')
+})
+
+test('a changed draft fences the open inline dropdown (no stale accept)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS)
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result !== null)
+  // The user typed more after the dropdown opened: the strict snapshot
+  // fence must reject the accept.
+  const applied = provider.applyCompletion(['请用 /eli'], 0, 7, result.items[0]!, result.prefix)
+  assert.deepEqual(applied, { lines: ['请用 /eli'], cursorLine: 0, cursorCol: 7 },
+    'a changed draft must fence the old dropdown')
+})
+
+test('an inline no-match clears the previous snapshot (no stale accept after null)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS)
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result !== null, `请用 /el must suggest:\n${JSON.stringify(result)}`)
+  // A later request at an inline seat with NO matching candidates returns
+  // null and must clear the snapshot (the null-clears contract).
+  assert.equal(await provider.getSuggestions(['请用 /zz'], 0, 6, { signal: abort }), null)
+  // The old dropdown must no longer apply — even to the exact document
+  // state that produced it.
+  const applied = provider.applyCompletion(['请用 /el'], 0, 6, result.items[0]!, result.prefix)
+  assert.deepEqual(applied, { lines: ['请用 /el'], cursorLine: 0, cursorCol: 6 },
+    'a null result must clear the previous inline snapshot')
+})
+
+test('a NON-STRICT legacy snapshot never feeds the inline apply (shell/command leak)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // The command `git` and the skill `git` share a name: a stale non-strict
+  // command snapshot must not be consumable at an inline seat.
+  const provider = new MentionProvider(
+    [{ name: 'git', description: 'VCS' }],
+    root,
+    fallbackSeam(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    [{ name: 'git', description: 'Git skill' }],
+  )
+  // The command seat produces a NON-STRICT snapshot (strict=false).
+  const command = await provider.getSuggestions(['/gi'], 0, 3, { signal: abort })
+  assert.ok(command !== null, `/gi must suggest:\n${JSON.stringify(command)}`)
+  assert.ok(command.items.some(item => item.value === 'git'))
+  // A later inline accept at a DIFFERENT document position must be
+  // rejected: the snapshot is not the strict inline one.
+  const applied = provider.applyCompletion(['foo /g'], 0, 6, { value: 'git', label: 'git' }, 'g')
+  assert.deepEqual(applied, { lines: ['foo /g'], cursorLine: 0, cursorCol: 6 },
+    'a non-strict legacy snapshot must never feed the inline apply')
+})

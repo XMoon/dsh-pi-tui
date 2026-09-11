@@ -1,5 +1,5 @@
 /**
- * Direct session-preset adapter for DSH 0.1.2+.
+ * Direct session-preset adapter for DSH 0.1.5-rc.1+.
  *
  * The Harness owns the `agentPreset` projection. TUI callers must not fold the
  * session log themselves: the projection initializes from the creation header
@@ -11,24 +11,19 @@
  * Cold sessions are read through the official `sessionQuery.observeSession()`
  * observation seam: the engine owns live/cold source selection, persistence
  * borrow/preparation, projection-cache hydration, tail replay, and the
- * projection cut. The TUI only reads the `agentPreset` projection value and
- * applies roster-aware legacy normalization — it never reconstructs a detached
- * Session just to read a projection.
+ * projection cut. The TUI only reads the current DSH V3 `agentPreset` value —
+ * it never reconstructs a detached Session or reinterprets the projection.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-preset-direct
  */
 
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
-import {
-  normalizePersistedSessionPresetId,
-  resolvePersistedSessionPresetId,
-} from '../session-preset.ts'
 
 type AgentPresetProjectionKey = typeof agentPresetProjectionDefinition.key
 
-/** The projection read surface supplied by DSH 0.1.2+. */
+/** The projection read surface supplied by DSH 0.1.5-rc.1+. */
 export interface SessionProjectionReader {
   stateOf(session: Session, key: AgentPresetProjectionKey): string | null | undefined
 }
@@ -51,10 +46,13 @@ export interface SessionQueryObservationLike {
 
 /** The zero-I/O projection-cache hint (structural subset of
  * `sessionProjectionCache`). A row is possibly stale but never wrong; the
- * caller's header is the identity witness, so no log read is needed. */
+ * caller's header is the identity witness, so no log read is needed. The
+ * master contract completes the checkpoint identity with the EXACT
+ * inherited prefix length. */
 export interface SessionProjectionCacheLike {
   cachedSnapshot(
     meta: SessionHeader,
+    inheritedEventCount: ReturnType<typeof SessionLogOffset>,
     keys?: readonly AgentPresetProjectionKey[],
   ): { readonly values?: { readonly agentPreset?: string | null } } | undefined
 }
@@ -68,11 +66,10 @@ export interface SessionPresetContext {
 export function sessionPresetOf(
   ctx: SessionPresetContext,
   session: Session,
-  availablePresetIds?: readonly string[],
 ): string | undefined {
   const projections = ctx.get('sessionProjections') as SessionProjectionReader | undefined
   if (projections === undefined) return undefined
-  return normalizePersistedSessionPresetId(projections.stateOf(session, 'agentPreset'), availablePresetIds)
+  return projections.stateOf(session, 'agentPreset') ?? undefined
 }
 
 /**
@@ -80,18 +77,15 @@ export function sessionPresetOf(
  * The official `sessionQuery.observeSession()` seam owns the whole cold read:
  * live/cold source selection, persistence borrow/preparation, projection-cache
  * hydration, tail replay, and the projection cut. The TUI only reads the
- * `agentPreset` projection value and applies roster-aware legacy
- * normalization. An absent observation seam returns no preset rather than
- * reconstructing DSH observation semantics in the TUI.
+ * current DSH V3 `agentPreset` value and never reinterprets it. An absent
+ * observation seam returns no preset rather than reconstructing DSH observation
+ * semantics in the TUI.
  * @param signal - cancellation for the cold observation.
- * @param availablePresetIds - one roster snapshot shared by a batch caller;
- *   omitting it performs the single-session resolver probe when needed.
  */
 export async function recordedSessionPreset(
   ctx: SessionPresetContext,
   sessionId: string,
   signal?: AbortSignal,
-  availablePresetIds?: readonly string[],
 ): Promise<string | undefined> {
   const query = ctx.get('sessionQuery') as SessionQueryObservationLike | undefined
   if (query === undefined) return undefined
@@ -99,32 +93,8 @@ export async function recordedSessionPreset(
   signal?.throwIfAborted()
   const observation = await query.observeSession(SessionId(sessionId), { signal, projectionMode: 'all' })
   try {
-    const projected = observation.projections?.values?.agentPreset
-    return resolvePersistedSessionPresetId(
-      normalizePersistedSessionPresetId(projected, availablePresetIds),
-      availablePresetIds,
-      ctx.get('agentPresets') as { readonly defaultId?: string; resolve(id?: string): Promise<{ readonly id: string }> } | undefined,
-    )
+    return observation.projections?.values?.agentPreset ?? undefined
   } finally {
     observation[Symbol.dispose]()
   }
-}
-
-/**
- * Resolve a raw `agentPreset` projection value (from an observation cut or a
- * projection-cache snapshot) to an effective preset id: roster-aware legacy
- * `code` normalization first, then the persisted-session resolver. Shared by
- * the single-session observation path and the picker's cache-hit path so both
- * apply exactly the same identity rules.
- */
-export async function resolveProjectedPresetId(
-  value: string | null | undefined,
-  availablePresetIds: readonly string[] | undefined,
-  presets: { readonly defaultId?: string; resolve(id?: string): Promise<{ readonly id: string }> } | undefined,
-): Promise<string | undefined> {
-  return resolvePersistedSessionPresetId(
-    normalizePersistedSessionPresetId(value, availablePresetIds),
-    availablePresetIds,
-    presets,
-  )
 }

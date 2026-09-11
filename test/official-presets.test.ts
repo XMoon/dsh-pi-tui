@@ -46,7 +46,6 @@ test('the TUI overlay keeps the complete agent-plane disable closure', () => {
     'tool-jobs',
     'tool-fs',
     'tool-fs-search',
-    'tool-str-replace-editor',
     'skill-filesystem',
     'tool-skill',
     'command-goal',
@@ -81,7 +80,7 @@ test('DSH owns the complete official shipped preset roster', async () => {
   const loader = ctx.plugin(Loader)
   await loader
   ctx.baseUrl = pathToFileURL(`${process.cwd()}/`).href
-  // alpha.2 agent-presets registers its projection unit at construction and
+  // rc.1 agent-presets registers its projection unit at construction and
   // requires the shared projection registry to be composed first.
   const projectionsFiber = ctx.plugin(SessionProjectionRegistry)
   await projectionsFiber
@@ -99,23 +98,22 @@ test('DSH owns the complete official shipped preset roster', async () => {
     const official = rows.filter(row => (OFFICIAL_IDS as readonly string[]).includes(row.id))
     assert.deepEqual(official.map(row => row.id), [...OFFICIAL_IDS])
     assert.deepEqual(official.map(row => row.trust), OFFICIAL_IDS.map(() => 'system'))
-    assert.deepEqual(official.map(row => row.broken), OFFICIAL_IDS.map(() => undefined),
-      'the DSH-shipped rows must be healthy at discovery time')
+    // rc.1 discovery records an optional unresolved plugin row as `broken`;
+    // this package-only test intentionally does not install every Host plugin
+    // named by the official rows. Full mount health belongs to the target DSH
+    // profile integration, where the official distribution supplies those
+    // plugins.
     for (const id of OFFICIAL_IDS) {
       const resolved = await presets.resolve(id)
       assert.equal(resolved.id, id, `official preset ${id} must resolve`)
-      assert.equal(resolved.broken, undefined, `official preset ${id} must not resolve as broken`)
     }
-    // Full mount health belongs to the target DSH profile integration: this
-    // package-only test does not install every Host plugin named by the
-    // official rows. The real-profile smoke is the blocking mount check.
   } finally {
     await dispose([presetsFiber, projectionsFiber, loader])
   }
 })
 
 test('the official subagent model-selection service ships default-off and validates the official rules', async () => {
-  // The REAL alpha.4 service package (never a TUI copy): the TUI overlay
+  // The official service package (never a TUI copy): the TUI overlay
   // mounts this Host row so the standard preset's `modelSelectionSettings:
   // true` tool row resolves. Mounting the service alone enables nothing —
   // `current()` reads the (absent) settings section and answers the shipped

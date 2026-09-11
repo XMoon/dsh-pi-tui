@@ -4,15 +4,16 @@
  * callback is pure, synchronous, I/O-free and reads only the
  * StatusSnapshot + the host surface context.
  *
- * Default-preset composition: the status row is view-conditional — the
- * main-only badges (model/permission/plan/task/context/branch/extension)
- * render only on the main subject, while the data-source items
- * (cwd/turns-steps and the stats-row placements: token-usage/cache-hit/
- * performance) follow the display subject's section values. The default
- * stats row composes semantic placements (token-usage:pi · cache-hit:pi ·
- * performance:latency · performance:speed — the RECENT performance
- * contract); `stats-line` stays registered as the legacy composite for
- * existing custom layouts, never in the default preset.
+ * Default-preset composition: row 1 leads with the view-scope item and
+ * composes the main-only identity badges (permission/model/tasks/branch)
+ * and the extension bridge on the LEFT, with plan-state and focus-mode on
+ * the RIGHT; row 2 composes the stats-line facts as real semantic
+ * placements (token-usage:pi, cache-hit:pi, performance:latency and
+ * performance:speed — the RECENT performance contract) plus the turn/step
+ * counters on the LEFT, with the full context pressure on the RIGHT. The
+ * data-source items (cwd/turns-steps/usage placements) follow the display
+ * subject's section values. `stats-line` stays registered as the legacy
+ * composite for existing custom layouts, never in the default preset.
  * @module @xmoon76/dsh-pi-tui/footer/builtin-items
  */
 

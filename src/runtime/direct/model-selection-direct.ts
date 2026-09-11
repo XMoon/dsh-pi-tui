@@ -10,7 +10,6 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/model-selection-direct
  */
 
-import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import {
@@ -84,13 +83,6 @@ export class DirectModelSelectionOwner implements SessionModelSelectionOwnerLike
   /** Read the current process default without retaining its object identity. */
   private defaultSelection(): ModelSelection | undefined {
     return agentSelection(selectionValue(this.defaultModel.currentSelection()))
-  }
-
-  /** Install the selection for the Agent associated with an unpublished setup context. */
-  installForContext(agentCtx: Context): void {
-    const agent = agentCtx.agent
-    if (agent === undefined) throw new Error('model selection setup has no scoped Agent')
-    this.installForAgent(agent)
   }
 
   /** Install once for an Agent and return its own mutable selection reference. */

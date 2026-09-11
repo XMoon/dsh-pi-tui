@@ -21,6 +21,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { Text } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
+import type { SaveLocationDeps } from '../src/save-location.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -172,6 +173,86 @@ test('fullscreen keeps the seat correct through the screen swap', async () => {
   await vt.waitForRender()
   await settle()
   assert.equal(seatOf(host), 'editor', 'returning to regular mode keeps the editor seat')
+  app.stop()
+})
+
+test('fullscreen closes the ordinary search overlay with its close callback', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  let searchOpens = 0
+  let searchCloses = 0
+  const vt = new VirtualTerminal(80, 24)
+  const host = new SurfaceHost(ledger, () => app.requestRender())
+  let app: TuiApp
+  app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSearchOpen: () => { searchOpens += 1 },
+    onSearchClose: () => { searchCloses += 1 },
+  }, { extensionHost: host })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+
+  app.startTranscriptSearch()
+  await settle()
+  assert.equal(searchOpens, 1)
+  assert.equal(searchCloses, 0)
+
+  // The screen swap does not remount the ordinary search overlay: it must
+  // be closed properly (the runner's onSearchClose resets the search
+  // state/anchor), so the next Ctrl+F reopens a FRESH search.
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  await settle()
+  assert.equal(searchCloses, 1, 'the fullscreen teardown closes the search with its callback')
+
+  app.startTranscriptSearch()
+  await settle()
+  assert.equal(searchOpens, 2, 'the next search opens a fresh overlay')
+  app.closeTranscriptSearch()
+  await settle()
+  assert.equal(searchCloses, 2)
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  app.stop()
+})
+
+test('a Save Location prompt owns the overlay seat even across an async overlay close', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+
+  // Open a search overlay first, then mount the Save Location prompt (it
+  // suspends the search overlay). Closing the suspended search overlay
+  // re-derives the seat — the prompt must keep reporting overlay.
+  app.startTranscriptSearch()
+  await settle()
+  const deps: SaveLocationDeps = {
+    resolveDirectory: (input) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async () => null,
+  }
+  const prompt = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
+    deps,
+  )
+  await settle()
+  assert.equal(seatOf(host), 'overlay', 'Save Location must report overlay while active')
+
+  app.closeTranscriptSearch()
+  await settle()
+  assert.equal(seatOf(host), 'overlay', 'closing a suspended overlay must not publish editor behind the prompt')
+
+  // Cancel the prompt: the seat returns to editor.
+  vt.sendInput('\x1b')
+  assert.deepEqual(await prompt, { kind: 'cancelled' })
+  await settle()
+  assert.equal(seatOf(host), 'editor', 'closing the prompt must restore editor')
   app.stop()
 })
 

@@ -1,6 +1,6 @@
 /**
- * Headless tests for the REAL /image argument-completion wiring: the
- * registerTuiCommands → installCompletions → MentionProvider chain must end
+ * Headless tests for the REAL /image + /attach argument-completion wiring:
+ * the registerTuiCommands → installCompletions → MentionProvider chain must end
  * with a working completion menu down in the editor (the natural-typing and
  * Tab flows), exactly like the @ mention menu. The unit tests in
  * mentions.test.ts cover suggestPathArgument in isolation; this file drives
@@ -88,10 +88,9 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     agents: {} as never,
     sessionReader: {
       list: async () => [],
-      search: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
@@ -169,10 +168,22 @@ test('the installed /image completion answers natural typing with a menu', async
   await vt.waitForRender()
   vt.sendInput('/image sh')
   const view = await waitForDropdownRow(vt, 'shot.png', 'natural typing')
-  // The menu row renders exactly like the @ mention menu: item + absolute
-  // path description.
+  // The menu row renders exactly like the @ mention menu: one full display
+  // path, with no duplicated basename + path description column.
   assert.ok(view.includes('shot.png'), 'the candidate row is visible')
+  assert.equal(view.split('shot.png').length - 1, 1, 'the candidate path must appear once')
   assert.ok(!app.getDraft().includes('shot.png'), 'typing alone must not apply anything')
+})
+
+test('the installed /attach completion shares the local path chain', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = setup(life)
+  await vt.waitForRender()
+  vt.sendInput('/attach no')
+  const view = await waitForDropdownRow(vt, 'notes.txt', 'attach natural typing')
+  assert.ok(view.includes('notes.txt'), 'generic files are offered by /attach')
+  assert.equal(view.split('notes.txt').length - 1, 1, 'the /attach candidate path must appear once')
+  assert.ok(!app.getDraft().includes('notes.txt'), 'typing alone must not apply anything')
 })
 
 test('Tab on an empty /image argument lists the workspace through the real chain', async (t) => {

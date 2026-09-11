@@ -19,7 +19,7 @@
  * @module @xmoon76/dsh-pi-tui/model-menu
  */
 
-import { SettingsList, Text, matchesKey, type Component, type RowBudgetAware } from '@xmoon76/pi-tui'
+import { SettingsList, Text, matchesKey, type Component, type Focusable, type RowBudgetAware, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { OwnedTaskOptions } from './detached.ts'
@@ -87,14 +87,36 @@ class EscDismiss implements Component {
  * parent close latches `disposed` and aborts the info load; a resolve or
  * reject that settles afterwards is ignored (debug diagnostics only).
  */
-class EffortSubmenu implements Component, RowBudgetAware {
+class EffortSubmenu implements Component, RowBudgetAware, Focusable {
   private inner: Component
+  /** The inner that was ACTUALLY PAINTED last (mouse parity): an async
+   * inner swap between paint and pointer event must not let the new inner
+   * eat a click aimed at the old screen (Loading…). */
+  private paintedInner: Component | undefined
   private readonly requestRender: () => void
   /** Latched by every close path; late async results must not act after. */
   private disposed = false
   private readonly abort = new AbortController()
   /** The last host row grant, re-applied to each swapped-in inner list. */
   private rowGrant = Number.POSITIVE_INFINITY
+  /** Focus state for the CURRENT inner (re-applied after async swaps). */
+  private _focused = false
+
+  get focused(): boolean {
+    return this._focused
+  }
+
+  set focused(value: boolean) {
+    this._focused = value
+    this.applyFocused()
+  }
+
+  /** Forward the stored focus flag to the current inner when it is
+   * Focusable (mouse parity: a swapped-in SettingsList must receive the
+   * focused flag for its search Input's cursor/IME state). */
+  private applyFocused(): void {
+    if ('focused' in this.inner) (this.inner as Focusable).focused = this._focused
+  }
 
   /** Host row-budget seam: keep the grant and forward it to the inner
    * list, so a list swapped in asynchronously after a resize still
@@ -166,6 +188,7 @@ class EffortSubmenu implements Component, RowBudgetAware {
         )
         // The async list lands AFTER any resize: re-apply the last grant.
         this.setMaxRows(this.rowGrant)
+        this.applyFocused()
         this.requestRender()
       },
       onError: () => {
@@ -173,6 +196,7 @@ class EffortSubmenu implements Component, RowBudgetAware {
         // menu closed was already classified as a cancellation by the
         // disposed classifier and logged debug-only).
         this.inner = new EscDismiss(new Text('model info unavailable', 0, 0), () => close())
+        this.applyFocused()
         this.requestRender()
       },
     })
@@ -182,11 +206,41 @@ class EffortSubmenu implements Component, RowBudgetAware {
     this.inner.handleInput?.(data)
   }
 
+  /**
+   * Ownership-safe external disposal (X007 lifecycle): the owning
+   * SettingsList calls dispose() when the list itself is removed or
+   * replaced (app teardown, overlay replacement, owner disposal — NOT the
+   * submenu's own Esc/selection). Latch + abort the owned async work and
+   * dispose the owned inner component exactly once (a SettingsList inner
+   * forwards to its own open EffortSubmenu, closing the nested chain).
+   * NEVER calls deps.done()/apply/navigation — teardown is ownership, not
+   * a user choice — and a late result/error is already fenced by the
+   * disposed latch, so it cannot requestRender after disposal.
+   */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.abort.abort()
+    this.inner.dispose?.()
+  }
+
+  /** Transparent mouse forwarding (mouse parity): the outer SettingsList
+   * dispatches submenu events here; the current inner (a SettingsList
+   * once loaded) owns row hit-testing, search-Input positioning, and
+   * wheel selection. Loading/error text rows stay inert. A pointer event
+   * is fenced to the PAINTED inner: an async swap that has not repainted
+   * yet must not receive a click aimed at the previous screen. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.inner !== this.paintedInner) return undefined
+    return this.inner.handleMouse?.(event)
+  }
+
   invalidate(): void {
     this.inner.invalidate?.()
   }
 
   render(width: number): string[] {
+    this.paintedInner = this.inner
     return this.inner.render(width)
   }
 }
@@ -196,14 +250,36 @@ class EffortSubmenu implements Component, RowBudgetAware {
  * cancellation discipline as {@link EffortSubmenu}: a late model list must
  * neither repaint a closed menu nor swap in stale content.
  */
-export class ModelSubmenu implements Component, RowBudgetAware {
+export class ModelSubmenu implements Component, RowBudgetAware, Focusable {
   private inner: Component
+  /** The inner that was ACTUALLY PAINTED last (mouse parity): an async
+   * inner swap between paint and pointer event must not let the new inner
+   * eat a click aimed at the old screen (Loading…). */
+  private paintedInner: Component | undefined
   private readonly requestRender: () => void
   /** Latched by every close path; late async results must not act after. */
   private disposed = false
   private readonly abort = new AbortController()
   /** The last host row grant, re-applied to each swapped-in inner list. */
   private rowGrant = Number.POSITIVE_INFINITY
+  /** Focus state for the CURRENT inner (re-applied after async swaps). */
+  private _focused = false
+
+  get focused(): boolean {
+    return this._focused
+  }
+
+  set focused(value: boolean) {
+    this._focused = value
+    this.applyFocused()
+  }
+
+  /** Forward the stored focus flag to the current inner when it is
+   * Focusable (mouse parity: a swapped-in SettingsList must receive the
+   * focused flag for its search Input's cursor/IME state). */
+  private applyFocused(): void {
+    if ('focused' in this.inner) (this.inner as Focusable).focused = this._focused
+  }
 
   /** Host row-budget seam: keep the grant and forward it to the inner
    * list, so a list swapped in asynchronously after a resize still
@@ -258,6 +334,7 @@ export class ModelSubmenu implements Component, RowBudgetAware {
         )
         // The async list lands AFTER any resize: re-apply the last grant.
         this.setMaxRows(this.rowGrant)
+        this.applyFocused()
         this.requestRender()
       },
       onError: () => {
@@ -265,6 +342,7 @@ export class ModelSubmenu implements Component, RowBudgetAware {
         // menu closed was already classified as a cancellation by the
         // disposed classifier and logged debug-only).
         this.inner = new EscDismiss(new Text('models unavailable', 0, 0), () => close())
+        this.applyFocused()
         this.requestRender()
       },
     })
@@ -274,11 +352,41 @@ export class ModelSubmenu implements Component, RowBudgetAware {
     this.inner.handleInput?.(data)
   }
 
+  /**
+   * Ownership-safe external disposal (X007 lifecycle): the owning
+   * SettingsList calls dispose() when the list itself is removed or
+   * replaced (app teardown, overlay replacement, owner disposal — NOT the
+   * submenu's own Esc/selection). Latch + abort the owned async work and
+   * dispose the owned inner component exactly once (a SettingsList inner
+   * forwards to its own open EffortSubmenu, closing the nested chain).
+   * NEVER calls deps.done()/apply/navigation — teardown is ownership, not
+   * a user choice — and a late result/error is already fenced by the
+   * disposed latch, so it cannot requestRender after disposal.
+   */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.abort.abort()
+    this.inner.dispose?.()
+  }
+
+  /** Transparent mouse forwarding (mouse parity): the outer SettingsList
+   * dispatches submenu events here; the current inner (a SettingsList
+   * once loaded) owns row hit-testing, search-Input positioning, and
+   * wheel selection. Loading/error text rows stay inert. A pointer event
+   * is fenced to the PAINTED inner: an async swap that has not repainted
+   * yet must not receive a click aimed at the previous screen. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.inner !== this.paintedInner) return undefined
+    return this.inner.handleMouse?.(event)
+  }
+
   invalidate(): void {
     this.inner.invalidate?.()
   }
 
   render(width: number): string[] {
+    this.paintedInner = this.inner
     return this.inner.render(width)
   }
 }

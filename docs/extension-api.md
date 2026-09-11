@@ -1,10 +1,16 @@
-# Extension API v1 — Stable author guide and stability contract
+# Extension API v2 — Stable author guide and stability contract
 
 The dsh-pi-tui STABLE extension surface (`@xmoon76/dsh-pi-tui/extensions`)
 is the compatibility-oriented public seam for third-party plugins. This
 document is the STABLE API author guide and stability record (plan §16 —
-M11 API v1 hardening). Advanced and Unstable tiers are documented in
-`docs/extension-tiers.md`.
+M11 hardening, now at **API v2**). Advanced and Unstable tiers are
+documented in `docs/extension-tiers.md`.
+
+`api().apiVersion` reports **2**. The version was bumped with the breaking
+client-command contribution contract below; a plugin that must support both
+schemas branches on `api().apiVersion` (`1` = the M0–M3 foundation), and a
+plugin that declared the removed v1 ownership shape is rejected loudly at
+registration instead of being silently reinterpreted.
 
 ## Import rules (hard gate — Stable)
 
@@ -155,6 +161,92 @@ construction or restore failure leaves the old seat available.
 Always `service.api().capabilities.has(...)` before relying on a
 capability — never parse the package version.
 
+## Command ownership (M5)
+
+`registerCommand(contribution)` declares a CLIENT-OWNED command — the DSH
+client command contribution shape: a slash name whose behavior lives
+entirely on the client (no host descriptor), carried by the required
+`handler`. It is merged into the `/` menu with the host catalog and runs
+locally, never steered.
+
+- **Bare-token invocation.** A contribution is a slash-MENU entry, so it
+  claims the BARE `/name` token only — the DSH decision table
+  (`ui-commands` `matchEnter`) checks a contribution with `if (!bare) return
+  undefined`. `/deploy` runs the handler; `/deploy explain` is NOT an
+  invocation: it is an ordinary submission that reaches the model (with its
+  attachments), and the handler never runs for it. A contribution therefore
+  receives an `invocation.rawInput` with no non-whitespace input (trailing
+  whitespace is preserved verbatim, like every other command surface), and one
+  can never be invoked with a composer attachment (any attachment makes the line
+  argued).
+- **Host authority.** A LINE the current host catalog CLAIMS is a host
+  command: it executes through the command plane and a contribution can
+  never shadow it — not in the dispatch, and not in the attachment gate (a
+  host command's own `input.attachments` declaration decides whether the
+  composer may attach anything). The claim belongs to the line, exactly like
+  the DSH decision table: every host command claims its BARE token, and a
+  `leadingInput` descriptor claims its argued line too. An argued line of an
+  execute-kind command (`/compact now`) is not an invocation at all — it is an
+  ordinary submission. A name the host catalog RESOLVES is host territory in
+  both states: the contribution of that name never runs for such a line, and
+  the line is never classified as a local client command.
+- **Two collision mechanisms.** A name owned by the TUI's OWN static catalog
+  (`/status`, `/kill`, ...) is rejected at REGISTRATION: `registerCommand`
+  throws and the plugin fails to load loudly. A name the SESSION's host
+  catalog resolves (a preset/plugin command that may appear only after the
+  session exists) is a SYNTHESIS-time collision: the candidate pass fails as
+  a whole — upstream `source-failed` parity, so its command rows are removed
+  until a synthesis succeeds again — while the host claims stay refreshed
+  (input authority is never lost) and the collision is recorded on the
+  contribution's health and surfaced once, naming every collision of that
+  failed pass. That health record is a best-effort diagnostic: a handler
+  failure overlapping a live collision can be masked or cleared by it (see
+  the diagnostic-limitation note in `docs/surface-decisions.md`).
+  "The host keeps its claim" is a claim on the LINES its descriptor owns: the
+  bare token for every command, plus the argued line for a `leadingInput` one.
+  A contribution colliding with an execute-kind host command therefore loses
+  that command's ARGUED line as well — the host never claimed it, so neither
+  the host nor the colliding contribution runs it: the line falls through to an
+  ordinary submission.
+- **`sessionless`.** `true` lets the command run before a session exists
+  (pure client commands: an overlay toggle, a picker). `false` (default)
+  resolves/creates the session first — the host command surface is
+  session-keyed — and only then runs the handler.
+- **Deferred reloads.** A `sessionless: false` contribution submitted before
+  the first session exists resolves the session first; if the plugin unloads
+  or replaces it during that window, the submission is aborted with a
+  `/<name> is no longer available` notice and the draft is restored — the new
+  generation's handler never runs, and the line never reaches the model.
+  The session's own catalog is consulted first, in both directions: a command
+  that appears and CLAIMS the line executes it, and a command that resolves the
+  name without claiming the line (an argued line of an execute-kind command)
+  makes the submission an ordinary one — the contribution does not run for it.
+- **`handler`** receives `invocation.rawInput` verbatim, like every other
+  command surface — for a contribution that is the bare token's remainder,
+  which carries no non-whitespace input (only the bare `/name` line invokes
+  one).
+
+**Breaking change (Unreleased) — API v1 → v2.** `api().apiVersion` reports
+`2` from this release on. The previous `execution: 'local' |
+'submission'` ownership metadata is REMOVED, and the never-wired
+`argumentProvider` field is gone with it (use `registerAutocomplete` for
+plugin suggestions — it was a dead public surface). A contribution is a client
+command, full stop: the `'submission'` variant is gone, and an unclaimed slash
+line is an ordinary prompt (the host pre-step owns skill expansion, and the
+inline skill lexicon owns its discovery). Migration: drop `execution` (and
+declare `handler`, now required); a contribution that used `submission` to
+advertise a prompt-style name should instead not register a contribution at all
+— its line reaches the model as an ordinary prompt.
+
+The bare-token invocation is part of the same alignment and is itself a
+behaviour change for plugins that declared arguments before: `/name args` no
+longer reaches `handler` (the line is an ordinary submission, and its
+`rawInput` was never a stable argument channel to begin with — the handler is
+the CLI-entered *bare* command gesture on the web too, where a contribution
+opens its popup). A plugin that needs arguments should own them client-side
+(a picker/overlay opened by the bare command) or expose the capability to the
+MODEL as a tool instead.
+
 ## Theme registry (M5)
 
 `registerTheme(contribution)` registers a named color palette into the
@@ -280,7 +372,10 @@ shell, or keyboard focus — the host owns all of it.
 
 - Every registration is FIBER-BOUND: the host disposes it when the
   plugin's Cordis fiber unloads (HMR, disable). Explicit `dispose()` is
-  idempotent.
+  idempotent, and a handle names ONE registration: a repeated or LATE
+  `dispose()` (a fiber cleanup arriving after an HMR reload re-registered the
+  same id) never removes the newer registration, and it never drops that
+  registration's health record.
 - Registrations may happen BEFORE any surface exists; the host renders
   them when the surface attaches.
 - The surface GENERATION is stable across start/stop/fullscreen/

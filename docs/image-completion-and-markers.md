@@ -1,10 +1,10 @@
-# Image completion and markers: `/image` path completion, the `🖼️` marker, flat-text image placeholders
+# Attachment completion and markers: `/attach`/`/image` path completion, attachment markers, flat-text placeholders
 
 Three consumer-side fixes on the image pipeline (branch `feat/image-pipeline`).
 Every change lives in the root bundle — the vendored fork stays pristine
 (AGENTS.md decision 8).
 
-## 1. `/image <path>`: natural + Tab completion
+## 1. `/attach <path>` and `/image <path>`: natural + Tab completion
 
 ### Why
 
@@ -26,9 +26,9 @@ nothing. Tab had two more gaps:
 ### Design
 
 - **Attach the fork's own extension point**: `SlashCommand.getArgumentCompletions`
-  is a first-class fork hook (autocomplete.ts). The `/image` completion entry
-  (installed by `installCompletions` in commands.ts, gated by the
-  `PATH_ARGUMENT_COMMANDS` set) carries it, backed by `suggestPathArgument`
+  is a first-class fork hook (autocomplete.ts). The `/attach` and `/image`
+  completion entries (installed by `installCompletions` in commands.ts, gated
+  by the `PATH_ARGUMENT_COMMANDS` set) carry it, backed by `suggestPathArgument`
   (mentions.ts). The session cwd is read at CALL time, so a session switch
   mid-edit stays correct.
 - **`suggestPathArgument(argumentText, cwd)`** is shell-style and
@@ -113,8 +113,9 @@ had the right convention (`🖼️ shot.png` inline).
 
 ### Fix
 
-- `textWithImageMarkers(blocks)` (src/transcript.ts): text blocks verbatim,
-  image blocks as an inline `🖼️ name` marker AT their position. A marker
+- `textWithAttachmentMarkers(blocks)` (src/content-block-presentation.ts,
+  re-exported by `src/transcript.ts`): text blocks verbatim,
+  image/file blocks as inline `🖼️ name` / `📄 name` markers AT their position. A marker
   boundary always carries one separating space — the `/image` insertion
   leaves NO space before the placeholder, so `这张图是啥[image…]` must not
   read as `这张图是啥🖼️ shot.png` — while a space the user already typed is
@@ -134,6 +135,17 @@ had the right convention (`🖼️ shot.png` inline).
 - `textOf` is unchanged: assistant/tool text paths (markdown rendering,
   their search text) are not polluted. Assistant image blocks still render
   via thumbnails; their flat text keeps the old join.
+
+## Stage C2: unified attachment intake
+
+`/attach <path>` is the canonical Client-local intake. It stages supported
+PNG/JPEG/WebP/GIF inputs through the existing image pipeline and stages other
+regular files as metadata-only drafts. Generic files are reopened and streamed
+through `ctx.attachments.saveFileStream()` only when an agent-bound submission
+is admitted. `/image <path>` remains strict image-only compatibility behavior.
+
+The path completion base and both attachment commands use the Client-local
+`runner.cwd`; `@` mentions remain Host/session-scoped.
 
 ## 4. Fullscreen attachment collapse (click to hide/show the image)
 

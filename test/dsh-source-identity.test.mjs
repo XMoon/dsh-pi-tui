@@ -9,6 +9,7 @@ import test from 'node:test'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import {
   DshDistributionError,
+  npmDshVersion,
   requiredDshPackages,
   validateDshSourceConfig,
   validateSourceIdentity,
@@ -260,8 +261,16 @@ test('source verification delegates packing to the dedicated pack script', () =>
   assert.doesNotMatch(sourceVerify, /const args = \[SCRIPT_PATH, '--dsh-dir'/u)
 })
 
-test('official preset npm target uses the current validated DSH version', () => {
-  assert.equal(currentValidatedDshVersion(), '0.1.2-rc.1')
+test('official preset npm target uses the checkout npm dependency version', () => {
+  const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const expectedNpmVersion = Object.entries(packageJson.devDependencies ?? {})
+    .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
+  const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.5-rc.1'
+  assert.equal(expectedNpmVersion, expectedNpmTarget, 'the package must keep the declared npm target')
+  assert.equal(currentValidatedDshVersion(), '0.1.5-rc.1')
+  assert.equal(npmDshVersion(), expectedNpmVersion)
+  assert.equal(npmDshVersion({ devDependencies: { '@deepseek-ai/dsh-agent': '0.1.5-rc.1' } }), '0.1.5-rc.1')
+  assert.throws(() => npmDshVersion({ devDependencies: { '@deepseek-ai/dsh-agent': 'workspace:*' } }), /exact SemVer/u)
 })
 
 test('official preset source args retain effective source overrides', () => {

@@ -16,66 +16,92 @@
  * @module @xmoon76/dsh-pi-tui/transcript
  */
 
+import { parseExitStatus } from '@deepseek-ai/dsh-shell'
 import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { expandAssistantStream, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
+import { finalizedBlockFallbackText, fileAttachmentSummary, textWithAttachmentMarkers, userBlocksVisibleNow } from './content-block-presentation.ts'
+import { displayFailure, displayFailureText } from './failure-presentation.ts'
 import type { IconSemantic } from './icons.ts'
 import { firstLine, latestLine, type JsonValue } from './present.ts'
-import { StepUsageAccumulator, totalTokens, type TokenUsageTotals } from './token-usage.ts'
+import {
+  StepUsageAccumulator,
+  totalTokens,
+  usageFromAssistantSettlement,
+  type TokenUsageTotals,
+} from './token-usage.ts'
+import type {
+  AssistantLiveChunk,
+  AssistantLiveContentBlock,
+  AssistantLiveInput,
+} from './runtime/assistant-stream-port.ts'
 // Load the official command event declarations.
 import type {} from '@deepseek-ai/dsh-commands'
 // Load the official subagent event declarations.
 import type {} from '@deepseek-ai/dsh-subagent'
-// Load the official workflow event declarations.
-import type {} from '@deepseek-ai/dsh-tool-workflow/types'
+// The official workflow durable event payloads. The branded run/session
+// identities are derived from them (indexed access on the direct dependency
+// — no new dependency surface, plan §4.1).
+import type { ToolWorkflowAgentStartData, ToolWorkflowRunStartData } from '@deepseek-ai/dsh-tool-workflow/types'
 // Load the official retry event declarations.
 import type {} from '@deepseek-ai/dsh-llm-retry'
+
+/**
+ * Presentation-only Assistant blocks. An `open-opaque` item records that a
+ * block has started without inventing a finalized ContentBlock or payload.
+ */
+export type AssistantDisplayBlock =
+  | { readonly kind: 'content'; readonly block: ContentBlock }
+  | { readonly kind: 'open-opaque'; readonly blockType: string }
 
 /** One renderable message in the TUI transcript. */
 export type TranscriptMessage =
   /**
    * A direct human prompt. `text` is the flat text (search/title/queue
    * recall); `content` carries the FULL ordered blocks when the message had
-   * images — the image pipeline renders them in order (plan §15).
+   * non-text content — attachment and generic presentation renders it in
+   * order (plan §15).
    */
-  | { kind: 'user'; turn: number; text: string; content?: readonly ContentBlock[] }
+  | {
+    kind: 'user'
+    turn: number
+    text: string
+    content?: readonly ContentBlock[]
+    /** Presentation-only marker for a next-step input inserted during this turn. */
+    steer?: true
+  }
   /**
    * One step's model output. `text` is the flat markdown; `content` is the
-   * settled message's full blocks when the step carried any (role-neutral
-   * `ImageBlock`s render rather than crash, plan §15.3).
+   * settled message's full blocks when the step carried any role-neutral
+   * non-text content (attachments and future blocks render rather than crash,
+   * plan §15.3). `displayBlocks` is presentation-only evidence for an open
+   * opaque block and is never durable model content.
    */
-  | { kind: 'assistant'; turn: number; text: string; content?: readonly ContentBlock[] }
+  | {
+    kind: 'assistant'
+    turn: number
+    text: string
+    content?: readonly ContentBlock[]
+    /** Ordered presentation blocks while an opaque block is still open. */
+    displayBlocks?: readonly AssistantDisplayBlock[]
+    /** Durable interruption evidence; presentation metadata, not body text. */
+    interrupted?: true
+  }
   | { kind: 'thinking'; turn: number; text: string; /** Still streaming reasoning deltas for its step. */ running?: boolean }
   /**
    * Injected context (system reminders, skill content) from non-user sources.
    * Labeled entries carry the Web-provenance producer name (e.g. AGENTS.md,
    * @deepseek-ai/dsh-system-prompt, skill-catalog), a source-kind icon
    * SEMANTIC (never a concrete glyph — the renderer resolves the palette),
-   * and, for notice forms, the producer's one-line summary.
+   * and, for notice forms, the producer's one-line summary. `context` is the
+   * source-derived semantic marker distinguishing injected context from
+   * other `kind: 'system'` presentation rows (llm/retry, max-tokens), which
+   * are orchestration and must never be treated as turn foundation.
    */
-  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; icon?: IconSemantic }
-  | {
-    kind: 'tool'
-    turn: number
-    name: string
-    args: string
-    result: string
-    status: 'ok' | 'error' | 'running'
-    /** The completed result's content blocks, for tool-owned presentation. */
-    resultBlocks?: readonly ContentBlock[]
-    /** The tool-private presentation payload from the tool/result event. */
-    meta?: JsonValue
-    /** The structured internal failure identity (`{name, code}`), when the
-     * tool/result event carried one (e.g. `UserQuestionError` with
-     * `ASK_CANCELLED` / `ASK_ABORTED` for a cancelled question flow). */
-    error?: { name: string; code: string }
-    /**
-     * Workflow run cards only: the run's member rows, folded into the card
-     * (Web WorkflowRunPanel parity) instead of standalone member cards.
-     */
-    members?: WorkflowMemberView[]
-  }
+  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; icon?: IconSemantic; context?: true }
+  | TranscriptToolMessage
+  | TranscriptWorkflowMessage
   /** Older-than-window turns collapsed into one line (windowing). */
   | { kind: 'summary'; text: string }
   /**
@@ -100,14 +126,355 @@ export type TranscriptMessage =
     error?: string
   }
 
+const assistantPresentationRevisions = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
+const assistantStepIdentities = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
+
+/** Return the mutation revision of an Assistant's live indexed projection. */
+export function assistantPresentationRevision(message: TranscriptMessage): number {
+  return message.kind === 'assistant' ? assistantPresentationRevisions.get(message) ?? 0 : 0
+}
+
+/** Return the internal step identity used to protect Focus final ownership. */
+export function assistantStepOf(message: TranscriptMessage): number | undefined {
+  return message.kind === 'assistant' ? assistantStepIdentities.get(message) : undefined
+}
+
+/** Read the private latest-step fence without exposing it on the public
+ * TurnActivity shape. Focus uses this only to select the structural owner. */
+export function assistantLatestStepOf(activity: TurnActivity): number | undefined {
+  return (activity as MutableTurnActivity).lastAssistantStep
+}
+
+/** Whether an Assistant crossed an admitted human-steer boundary and is
+ * therefore a persistent conversation answer rather than Focus process. */
+export function assistantCommittedBeforeSteer(
+  activity: TurnActivity,
+  message: TranscriptMessage,
+): boolean {
+  if (message.kind !== 'assistant') return false
+  const step = assistantStepOf(message)
+  return step !== undefined
+    && (activity as MutableTurnActivity).committedAnswerSteps.has(step)
+}
+
+function rememberAssistantStep(message: Extract<TranscriptMessage, { kind: 'assistant' }>, step: number): void {
+  assistantStepIdentities.set(message, step)
+}
+
+function bumpAssistantPresentationRevision(message: Extract<TranscriptMessage, { kind: 'assistant' }>): void {
+  assistantPresentationRevisions.set(message, assistantPresentationRevision(message) + 1)
+}
+
+/** The official branded workflow run identity (agent-start/run-end
+ * `runId`), derived from the direct dependency's event payload. */
+export type WorkflowRunId = ToolWorkflowRunStartData['runId']
+
+/** The official branded child-session identity (agent-start `childId`),
+ * derived from the direct dependency's event payload. */
+export type WorkflowChildSessionId = ToolWorkflowAgentStartData['childId']
+
+/** The run status vocabulary of one Workflow run or member (plan §2.2).
+ * `interrupted` is a presentation projection of a MISSING terminal fact plus
+ * a closed owner location — it is never a durable stop reason. */
+export type WorkflowRunStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+
 /** One member row of a workflow run card. */
 export interface WorkflowMemberView {
+  /** The member's durable sequence within its run (agent-start `seq`). */
+  seq: number
   /** The member agent's label. */
   label: string
-  /** The run phase the member ran under, when the event carried one. */
-  phase?: string
+  /** The run phase the member ran under: `null` when the event carried no
+   * phase, `''` when it carried an explicit empty phase — the two stay
+   * distinct identities (plan §4.2). */
+  phase: string | null
+  /** The member's child session identity (agent-start `childId`), kept for
+   * PR2 child-session navigation. */
+  childId: WorkflowChildSessionId
   /** The member's settled state (running until agent-end). */
+  status: WorkflowRunStatus
+}
+
+/** The collision-free phase identity key: `null` (absent) and `''` (explicit
+ * empty) must never share a group (plan §4.2 — the renderer must stop using
+ * `member.phase ?? ''` as the grouping key). */
+export function workflowPhaseKey(phase: string | null): string {
+  return phase === null ? 'missing' : `value:${phase.length}:${phase}`
+}
+
+/** The human-readable phase label (Web WorkflowRunPanel parity, plan §2.4):
+ * `null` (absent) and `''` (explicit empty) stay DISTINCT identities with
+ * distinct readable labels — the renderer and the search corpus share this
+ * single mapping so the two can never drift. */
+export function workflowReadablePhase(phase: string | null): string {
+  if (phase === null) return 'Unassigned'
+  if (phase === '') return 'Empty'
+  return phase
+}
+
+/** Strict member-outcome mapping (plan §6.3): exhaustive so a new official
+ * union variant fails typecheck instead of collapsing into a generic error. */
+function workflowMemberStatus(outcome: 'completed' | 'failed' | 'cancelled'): WorkflowRunStatus {
+  switch (outcome) {
+    case 'completed': return 'completed'
+    case 'failed': return 'failed'
+    case 'cancelled': return 'cancelled'
+  }
+}
+
+/** Strict run stop-reason mapping (plan §6.4): `error` becomes the
+ * Transcript `failed` vocabulary (Web alpha2 parity) — never stored as
+ * `error`. Exhaustive like the member mapping. */
+function workflowRunStatus(stopReason: 'completed' | 'cancelled' | 'error'): WorkflowRunStatus {
+  switch (stopReason) {
+    case 'completed': return 'completed'
+    case 'cancelled': return 'cancelled'
+    case 'error': return 'failed'
+  }
+}
+
+/** The owner location captured at run-start: the authoritative open
+ * lifecycle state at fold time (plan §5.2) — never a look-back guess over
+ * nearby events. */
+export type WorkflowOwner =
+  | { kind: 'step'; turn: number; step: number }
+  | { kind: 'turn'; turn: number }
+  | { kind: 'session' }
+
+/** One active Workflow run inside the shared projection. The
+ * `TranscriptWorkflowMessage` itself is the durable model; this state only
+ * serves the projection (owner matching, interruption projection). */
+interface WorkflowProjectionRun {
+  message: TranscriptWorkflowMessage
+  /** The owner location captured at run-start. */
+  owner: WorkflowOwner
+  /** Whether the owner location has closed (step/end or turn/end). */
+  ownerClosed: boolean
+}
+
+/**
+ * The shared Workflow semantic projection (plan §5/§6): ONE owner-tracking
+ * state machine consumed by BOTH the visual Transcript fold and the
+ * `/transcript` markdown export, so the two can never drift on run/member
+ * statuses. It owns the open step/turn lifecycle, the run-start owner
+ * capture, member/run settlement, and the `interrupted` projection of a
+ * MISSING terminal fact plus a closed owner location (plan §6.4 — never a
+ * durable stop reason). The optional `onChange` hook fires whenever a run's
+ * message mutated (run-end status, interruption projection) so the visual
+ * fold can mark its search entry dirty; the export passes no hook.
+ */
+export class WorkflowProjection {
+  private readonly runs = new Map<string, WorkflowProjectionRun>()
+  /** The currently open step (owner capture for run-start). */
+  private openStep: { turn: number; step: number } | undefined
+  /** The currently open turn (owner capture for run-start). */
+  private openTurn: number | undefined
+
+  private readonly onChange: ((runId: WorkflowRunId) => void) | undefined
+
+  constructor(onChange?: (runId: WorkflowRunId) => void) {
+    this.onChange = onChange
+  }
+
+  /** A step opened (owner capture). The caller applies its own replay fence
+   * (a late step/start after turn/end must not reopen the step). */
+  onStepStart(turn: number, step: number): void {
+    this.openStep = { turn, step }
+  }
+
+  /** A step closed: clear the matching open step and project `interrupted`
+   * on step-owned runs of that step without a terminal fact. */
+  onStepEnd(turn: number, step: number): void {
+    if (this.openStep?.turn === turn && this.openStep.step === step) {
+      this.openStep = undefined
+    }
+    this.closeWorkflowOwner({ kind: 'step', turn, step })
+  }
+
+  /** A turn opened (owner capture). Monotonic: a replayed turn/start for an
+   * OLDER turn must never regress the open turn. */
+  onTurnStart(turn: number): void {
+    if (this.openTurn === undefined || turn > this.openTurn) this.openTurn = turn
+  }
+
+  /** A turn closed: clear the open step/turn and project `interrupted` on
+   * every turn-owned AND step-owned run of that turn without a terminal
+   * fact (plan §5.3 — upstream `locationClosed(step)` is `step closed OR
+   * owning turn closed`). Re-projection on a replayed turn/end is
+   * idempotent (already-closed runs are skipped). */
+  onTurnEnd(turn: number): void {
+    if (this.openTurn === turn) this.openTurn = undefined
+    if (this.openStep?.turn === turn) this.openStep = undefined
+    this.closeWorkflowOwner({ kind: 'turn', turn })
+  }
+
+  /** One run opened: capture the authoritative owner (open step wins, then
+   * the open turn, else the session) and create the durable message. */
+  onRunStart(runId: WorkflowRunId, name: string, turn: number): TranscriptWorkflowMessage {
+    const owner: WorkflowOwner = this.openStep !== undefined
+      ? { kind: 'step', turn: this.openStep.turn, step: this.openStep.step }
+      : this.openTurn !== undefined
+        ? { kind: 'turn', turn: this.openTurn }
+        : { kind: 'session' }
+    const message: TranscriptWorkflowMessage = {
+      kind: 'workflow',
+      turn,
+      runId,
+      name,
+      status: 'running',
+      members: [],
+    }
+    this.runs.set(runId, { message, owner, ownerClosed: false })
+    return message
+  }
+
+  /** One member published: fold it into the run card (Web WorkflowRunPanel
+   * parity). A member starting after its owner closed is interrupted from
+   * birth (plan §6.2 — the projection comes from the current fold facts, no
+   * invented recovery flow). The member's label/phase/status entered the
+   * search corpus (PR2 plan §13.3): the onChange hook marks it dirty. */
+  onAgentStart(runId: WorkflowRunId, seq: number, label: string, phase: string | null, childId: WorkflowChildSessionId): void {
+    const state = this.runs.get(runId)
+    if (state === undefined) return
+    const member: WorkflowMemberView = {
+      seq,
+      label,
+      phase,
+      childId,
+      status: state.ownerClosed ? 'interrupted' : 'running',
+    }
+    // Replace the members array reference so render caches observe the live
+    // append (plan §6.2 — never rely on in-place push).
+    state.message.members = [...state.message.members, member]
+    this.onChange?.(runId)
+  }
+
+  /** One member settled: only the started member with the matching runId +
+   * seq settles (plan §6.3 — never infer a member outcome from run-end).
+   * The member's status word changed in the search corpus (PR2 plan
+   * §13.3): the onChange hook marks it dirty. */
+  onAgentEnd(runId: WorkflowRunId, seq: number, outcome: 'completed' | 'failed' | 'cancelled'): void {
+    const state = this.runs.get(runId)
+    if (state === undefined) return
+    const target = state.message.members.find(member => member.seq === seq)
+    if (target === undefined) return
+    const status = workflowMemberStatus(outcome)
+    // Replace the settled member AND the members array reference so render
+    // caches observe the live update (plan §6.2).
+    state.message.members = state.message.members.map(member =>
+      member === target ? { ...member, status } : member,
+    )
+    this.onChange?.(runId)
+  }
+
+  /** One run settled: set the terminal status, notify, and drop the fold
+   * state (the message itself stays in the transcript items / export).
+   * @returns the final message, or `undefined` when the run was unknown. */
+  onRunEnd(runId: WorkflowRunId, stopReason: 'completed' | 'cancelled' | 'error'): TranscriptWorkflowMessage | undefined {
+    const state = this.runs.get(runId)
+    if (state === undefined) return undefined
+    state.message.status = workflowRunStatus(stopReason)
+    this.onChange?.(runId)
+    this.runs.delete(runId)
+    return state.message
+  }
+
+  /** Every run still active (no terminal event yet), in run-start order —
+   * the export's full-log flush. */
+  activeRuns(): readonly TranscriptWorkflowMessage[] {
+    return [...this.runs.values()].map(state => state.message)
+  }
+
+  /** Project `interrupted` on every active run whose owner location just
+   * closed and which has no terminal fact yet (plan §5.3). */
+  private closeWorkflowOwner(closed: WorkflowOwner): void {
+    for (const state of this.runs.values()) {
+      if (state.ownerClosed) continue
+      const owner = state.owner
+      const matches = owner.kind === 'step'
+        ? (closed.kind === 'step' && closed.turn === owner.turn && closed.step === owner.step)
+          || (closed.kind === 'turn' && closed.turn === owner.turn)
+        : owner.kind === 'turn' && closed.kind === 'turn' && closed.turn === owner.turn
+      if (matches) this.projectWorkflowInterrupted(state)
+    }
+  }
+
+  /** The owner-close projection: `interrupted` is a presentation/model
+   * projection of a MISSING terminal fact plus a closed owner — never a
+   * durable stop reason (plan §6.4). Members without an agent-end follow
+   * the run; settled members keep their durable outcome. */
+  private projectWorkflowInterrupted(state: WorkflowProjectionRun): void {
+    state.ownerClosed = true
+    state.message.status = 'interrupted'
+    state.message.members = state.message.members.map(member =>
+      member.status === 'running' ? { ...member, status: 'interrupted' } : member,
+    )
+    this.onChange?.(state.message.runId)
+  }
+}
+
+/**
+ * One tool card — a top-level surface item OR a PTC nested sub-call.
+ * Nested sub-calls (DSH `tool/ptc-dispatch` events) are recursively
+ * attached to their parent card via `subCalls` and NEVER join the top-level
+ * surface flow (upstream PTC contract: sub-calls never join nodes). Each
+ * child reuses the ordinary tool-card shape and carries its durable
+ * `subCallId` so renderers can rebuild the recursive tree from card
+ * identity.
+ */
+export interface TranscriptToolMessage {
+  kind: 'tool'
+  turn: number
+  name: string
+  args: string
+  result: string
   status: 'ok' | 'error' | 'running'
+  /** The completed result's content blocks, for tool-owned presentation. */
+  resultBlocks?: readonly ContentBlock[]
+  /** The tool-private presentation payload from the tool/result event. */
+  meta?: JsonValue
+  /** The structured internal failure identity (`{name, code}`), when the
+   * tool/result event carried one (e.g. `UserQuestionError` with
+   * `ASK_CANCELLED` / `ASK_ABORTED` for a cancelled question flow). */
+  error?: { name: string; code: string }
+  /** PTC nested sub-calls, recursively attached to this card. */
+  subCalls?: TranscriptToolMessage[]
+  /** PTC sub-call identity (the durable `subCallId`), for tree rebuilds. */
+  subCallId?: string
+  /** PTC sub-call topology: the immediate parent call identity and the
+   * outer `run_code` call identity, preserved from the durable event
+   * payload so replay and tree rebuilds keep the full parent chain. */
+  parentCallId?: string
+  rootCallId?: string
+  /** PTC subtree mutation revision: bumped on every sub-call start/settle
+   * under this card. The render cache compares it so live PTC updates
+   * (in-place child mutations) invalidate the component even though the
+   * `subCalls` array reference never changes. */
+  subtreeRevision?: number
+}
+
+/**
+ * One workflow run card — a durable lifecycle record, NOT a model
+ * tool/call (it never enters the Focus Tool slot or the tool count). The
+ * run and its members keep the full alpha.2 status vocabulary; `seq`,
+ * `childId` and the exact phase identity are preserved for PR2 navigation
+ * and disclosure (plan §4).
+ */
+export interface TranscriptWorkflowMessage {
+  kind: 'workflow'
+  turn: number
+  /** The durable run identity (the official branded WorkflowRunId). */
+  runId: WorkflowRunId
+  /** The run's display name (run-start `name`). */
+  name: string
+  status: WorkflowRunStatus
+  /** The run's member rows in durable `agent-start` arrival order. */
+  members: WorkflowMemberView[]
 }
 
 /** Stable identity of one raw transcript item within ONE TranscriptFolder
@@ -133,9 +500,30 @@ export interface TranscriptSearchMatch {
 /** The searchable text of one message — the SINGLE source of truth for the
  * search corpus (the legacy full-history search semantics: tools search
  * `name args result`, every other kind searches `text`). `summary` rows
- * never reach `items`, so the projection never indexes them. */
-export function transcriptSearchText(message: TranscriptMessage): string {
-  if (message.kind === 'tool') return `${message.name} ${message.args} ${message.result}`
+ * never reach `items`, so the projection never indexes them. A PTC root
+ * card's corpus recursively includes its sub-call descendants (their
+ * name/args/result), so nested output stays searchable and matches locate
+ * the root Code card. */
+export function transcriptSearchText(message: TranscriptMessage, depth = 0): string {
+  if (message.kind === 'tool') {
+    const own = `${message.name} ${message.args} ${message.result}`
+    if (message.subCalls === undefined || message.subCalls.length === 0 || depth >= PTC_MAX_DEPTH) return own
+    return `${own} ${message.subCalls.map(child => transcriptSearchText(child, depth + 1)).join(' ')}`
+  }
+  if (message.kind === 'workflow') {
+    // The run's search identity (PR2 plan §13): the kind, the run name, the
+    // current status, every phase's readable label (Unassigned/Empty stay
+    // distinct) and every member's label + status. Machine identities
+    // (childId/runId) are deliberately NOT indexed. A member hidden inside
+    // a large phase's summary still hits its Workflow card (plan §13.1).
+    const phases = new Set<string>()
+    const members: string[] = []
+    for (const member of message.members) {
+      phases.add(workflowReadablePhase(member.phase))
+      members.push(`${member.label} ${member.status}`)
+    }
+    return `workflow ${message.name} ${message.status} ${[...phases].join(' ')} ${members.join(' ')}`
+  }
   return message.text ?? ''
 }
 
@@ -200,12 +588,20 @@ export interface TurnActivity {
     readonly name: string
     readonly args: string
     readonly status: 'running' | 'ok' | 'error'
+    /** PTC active descendants (running sub-calls), aggregated by tool
+     * name in durable dispatch order — presentation metadata ONLY: never
+     * part of the tool stats, never the root Tool slot. */
+    readonly activeSubCalls?: readonly { readonly name: string; readonly count: number }[]
   }
   /** The per-turn token totals (committed steps + open steps' current
    * usage); absent when the turn has no usage fact at all. */
   readonly usage?: TokenUsageTotals
   /** The display total (input + cache read + cache write + output). */
   readonly totalTokens?: number
+  /** Whether the exact last assistant has a visible Assistant projection.
+   * This remains separate from the visible row list so an empty authoritative
+   * settlement cannot make final selection fall back to an earlier answer. */
+  readonly lastAssistantVisible?: boolean
   /** Settled assistant/message count for the turn. */
   readonly assistantMessages: number
   /** tool/call count (never double-counted on tool/result). */
@@ -228,6 +624,8 @@ interface MutableTurnActivity {
   thinkingTail: string
   /** The materialized Think slot (latest meaningful line). */
   think?: { text: string }
+  /** The step that currently owns the Focus reasoning preview. */
+  thinkingStep?: number
   /** The streaming assistant text of the CURRENT step (bounded tail —
    * the authoritative settled text replaces the tail once
    * assistant/message lands; never a second full copy of the output,
@@ -252,10 +650,21 @@ interface MutableTurnActivity {
    * is ignored — it must never corrupt the settled preview (review
    * finding). */
   settledSteps: Set<number>
+  /** The exact previous assistant step that may become persistent when the
+   * next step admits a same-turn human steer. */
+  pendingPreSteerAnswerStep?: number
+  /** First visible Assistant output timestamp per step. This is private
+   * timing evidence for the steer boundary, not a rendered fact. */
+  firstVisibleAssistantTimes: Map<number, number>
+  /** Assistant steps that crossed an admitted human-steer boundary and are
+   * therefore persistent conversation answers rather than Focus process. */
+  committedAnswerSteps: Set<number>
   /** The step of the turn's LAST assistant output (streaming or settled)
    * — the turn/end final-answer check compares the candidate's step
    * against this. */
   lastAssistantStep?: number
+  /** Whether the exact last assistant has a visible Assistant projection. */
+  lastAssistantVisible?: boolean
   /** The materialized Message slot (candidate ?? confirmed, bounded
    * multiline tail). */
   message?: { text: string }
@@ -265,6 +674,10 @@ interface MutableTurnActivity {
     name: string
     args: string
     status: 'running' | 'ok' | 'error'
+    /** PTC active descendants (running sub-calls), aggregated by tool
+     * name in durable dispatch order — presentation metadata ONLY: never
+     * part of the tool stats, never the root Tool slot. */
+    activeSubCalls?: readonly { name: string; count: number }[]
   }
   /** The per-turn token totals (committed + open steps' current usage). */
   usage?: TokenUsageTotals
@@ -308,40 +721,391 @@ export function textOf(blocks: readonly ContentBlock[]): string {
     .join('')
 }
 
-/** Flat text with image positions preserved: text blocks verbatim, image
- * blocks as an inline `🖼️ name` marker AT their position (the queue-preview
- * format; U+FE0F keeps the marker 2 cells wide in emoji fonts). A marker
- * boundary always carries a single separating space — the /image insertion
- * leaves NO space before the placeholder, so `what is this [image…]` must
- * not read as `what is this 🖼️ shot.png` — while a space the user already
- * typed is never doubled. The structured `content` blocks stay the canonical form
- * for thumbnail rendering; this projection feeds the flat-text consumers
- * (transcript search, loader-less fallback rendering, the user bubble's
- * inline marker) so a mixed message never reads as if the image was not
- * there, and an image-only message is not empty. Identical to
- * {@link textOf} for text-only content. */
-export function textWithImageMarkers(blocks: readonly ContentBlock[]): string {
-  let text = ''
-  // A marker boundary: the previous block was an image and the next text
-  // block needs a separator unless it brings its own whitespace.
-  let boundary = false
+/** Whether the alpha.2 terminal result tail marker marks a failure: the
+ * official `parseExitStatus` recovers the terminal exit code or signal
+ * from the LAST marker line (a preceding truncation notice does not affect
+ * parsing). A nonzero exit or a signal is a terminal failure even when the
+ * tool call itself settled with `isError: false`; a missing marker is
+ * NOT a failure — the status is never invented from text. */
+/** The PTC sub-call tree depth cap (upstream alpha.2 Web MAX_DEPTH): the
+ * ingestion gate in {@link attachSubCall} rejects any edge that would push
+ * a sub-call past this depth (root = depth 1, so at most 255 child levels),
+ * and the recursive consumers keep a defensive guard at the same bound — a
+ * corrupted/replayed input can never overflow the stack. */
+export const PTC_MAX_DEPTH = 256
+
+export function terminalFailureFromResult(result: string): boolean {
+  const parsed = parseExitStatus(result)
+  if ('signal' in parsed) return true
+  if ('exitCode' in parsed) return parsed.exitCode !== 0
+  return false
+}
+
+/** The DISPLAY status of one PTC sub-call: the durable lifecycle status
+ * (`isError` only) PLUS the alpha.2 terminal contract for bash/pwsh — a
+ * trailing `[exit code: N]` / `[killed by signal: ...]` marker (parsed by
+ * the official `parseExitStatus`; a preceding truncation notice does not
+ * affect it) renders the child failed even when the tool call settled
+ * normally. Spilled/generic content without a marker never invents a
+ * status. */
+export function subCallDisplayStatus(child: {
+  name: string
+  status: 'ok' | 'error' | 'running'
+  result: string
+}): 'ok' | 'error' | 'running' {
+  if (child.status !== 'ok') return child.status
+  if ((child.name === 'bash' || child.name === 'pwsh') && terminalFailureFromResult(child.result)) return 'error'
+  return 'ok'
+}
+
+/** Reconstruct the logical blocks used by any Assistant entry. */
+function assistantEntryBlocks(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): readonly ContentBlock[] {
+  if (entry.content !== undefined) return entry.content
+  return entry.text === '' ? [] : [{ type: 'text', text: entry.text }]
+}
+
+interface AssistantVisibilityChunk {
+  readonly type: string
+  readonly text?: string
+  readonly block?: { readonly type: string; readonly text?: string }
+}
+
+/** Whether one Assistant stream chunk produces Focus-visible reply content.
+ * Reasoning, tool-call protocol, and open block starts are process evidence;
+ * text deltas and finalized visible blocks are the answer boundary. */
+function assistantChunkHasVisibleReply(chunk: AssistantVisibilityChunk): boolean {
+  if (chunk.type === 'text-delta') return typeof chunk.text === 'string' && chunk.text.trim() !== ''
+  if (chunk.type !== 'block-end') return false
+  const block = chunk.block
+  if (block === undefined) return false
+  if (block.type === 'text') return typeof block.text === 'string' && block.text.trim() !== ''
+  if (block.type === 'reasoning' || block.type === 'tool-call') return false
+  return true
+}
+
+/** Rebuild the first Focus-visible Assistant timestamp from a durable compact
+ * stream. Missing or empty streams deliberately provide no timing evidence. */
+function firstVisibleAssistantTimeFromStream(stream: readonly unknown[] | undefined): number | undefined {
+  if (stream === undefined) return undefined
+  for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
+    if (assistantChunkHasVisibleReply(member.chunk)) return member.time
+  }
+  return undefined
+}
+
+/** Whether Assistant content is visible before an interruption override. */
+export function assistantBlocksVisibleNow(blocks: readonly ContentBlock[]): boolean {
   for (const block of blocks) {
     if (block.type === 'text') {
-      if (boundary && text !== '' && !/\s$/.test(text) && !/^\s/.test(block.text)) text += ' '
-      boundary = false
-      text += block.text
-    } else if (block.type === 'image') {
-      if (text !== '' && !/\s$/.test(text)) text += ' '
-      text += `🖼️ ${block.attachment.name ?? 'image'}`
-      boundary = true
+      if (block.text.trim() !== '') return true
+      continue
     }
+    if (block.type === 'reasoning' || block.type === 'tool-call') continue
+    // Any finalized non-text block is visible content, including future
+    // ContentBlock extensions the TUI does not name yet.
+    return true
   }
-  return text
+  return false
 }
+
+/** Whether Assistant blocks retain evidence at a closed attempt boundary. */
+function assistantBlocksHaveInterruptionEvidence(blocks: readonly ContentBlock[]): boolean {
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      if (block.text.trim() !== '') return true
+      continue
+    }
+    if (block.type === 'reasoning') continue
+    // Tool calls are hidden while running but become evidence at closure;
+    // every other finalized block is evidence as well.
+    return true
+  }
+  return false
+}
+
+/**
+ * Flat text with known attachment positions preserved. The structured
+ * `content` blocks remain canonical for rich rendering; this lightweight
+ * projection feeds transcript search and loader-less user rendering. Unknown
+ * finalized blocks stay in `content` so their explicit fallback can render
+ * without polluting ordinary text previews.
+ */
+export { textWithAttachmentMarkers }
+
+/** Whether a user message has human-visible finalized content. */
+export { userBlocksVisibleNow }
 
 /** Key identifying one step's model output (turn + step). */
 function stepKey(turn: number, step: number): string {
   return `${turn}/${step}`
+}
+
+type AssistantBlockState =
+  | { kind: 'text'; text: string }
+  | { kind: 'reasoning'; text: string }
+  | { kind: 'tool-call'; id: string; name: string; arguments: string }
+  | { kind: 'complete'; block: AssistantLiveContentBlock | ContentBlock }
+  | { kind: 'opaque'; blockType: string }
+
+type AssistantBlockChunk =
+  | { readonly type: 'block-start'; readonly index: number; readonly blockType: string }
+  | { readonly type: 'text-delta'; readonly index: number; readonly text: string }
+  | { readonly type: 'reasoning-delta'; readonly index: number; readonly text: string }
+  | { readonly type: 'tool-call-delta'; readonly index: number; readonly id: string; readonly name?: string; readonly argumentsDelta: string }
+  | { readonly type: 'block-end'; readonly index: number; readonly block: AssistantLiveContentBlock | ContentBlock }
+
+interface AssistantStreamProjection {
+  states: Map<number, AssistantBlockState>
+  blocks: ContentBlock[]
+  displayBlocks: AssistantDisplayBlock[]
+  firstLane: 'thinking' | 'assistant' | undefined
+}
+
+/**
+ * The live arrays are intentionally retained and updated in place: streaming
+ * projection must not copy the complete pending row for every indexed chunk.
+ * TranscriptFolder already mutates its message objects in place; the separate
+ * presentation revision is the cache identity for this live-only optimization.
+ * Durable stream projections remain fresh arrays.
+ */
+interface LiveAssistantProjection {
+  states: Map<number, AssistantBlockState>
+  /** First-seen stream order of every block index (append-only; the
+   * canonical BlockAssembler order — never numeric index order). */
+  order: number[]
+  /** index → position in `order`. */
+  orderPos: Map<number, number>
+  blockIndexes: number[]
+  blocks: ContentBlock[]
+  displayIndexes: number[]
+  displayBlocks: AssistantDisplayBlock[]
+  assistantVisibleCount: number
+  thinkingVisibleCount: number
+  openOpaqueCount: number
+}
+
+/** Start one typed partial block without pretending it is a finalized block. */
+function emptyAssistantBlockState(blockType: string): AssistantBlockState {
+  switch (blockType) {
+    case 'text': return { kind: 'text', text: '' }
+    case 'reasoning': return { kind: 'reasoning', text: '' }
+    case 'tool-call': return { kind: 'tool-call', id: '', name: '', arguments: '' }
+    default: return { kind: 'opaque', blockType }
+  }
+}
+
+/**
+ * Apply the shared block-folding semantics used by both transient live input
+ * and durable embedded assistant streams. A numeric upstream index owns one
+ * state at a time; its first block-end replaces the partial state
+ * authoritatively and then freezes the completed block.
+ */
+function applyAssistantBlockChunk(blocks: Map<number, AssistantBlockState>, chunk: AssistantBlockChunk): boolean {
+  switch (chunk.type) {
+    case 'block-start':
+      // The first block-start owns the index; duplicate starts must not erase
+      // deltas already accepted for that block.
+      if (blocks.has(chunk.index)) return false
+      blocks.set(chunk.index, emptyAssistantBlockState(chunk.blockType))
+      return true
+    case 'text-delta': {
+      const previous = blocks.get(chunk.index)
+      if (previous?.kind === 'complete') return false
+      if (previous?.kind === 'text' && chunk.text === '') return false
+      blocks.set(chunk.index, {
+        kind: 'text',
+        text: previous?.kind === 'text' ? previous.text + chunk.text : chunk.text,
+      })
+      return true
+    }
+    case 'reasoning-delta': {
+      const previous = blocks.get(chunk.index)
+      if (previous?.kind === 'complete') return false
+      if (previous?.kind === 'reasoning' && chunk.text === '') return false
+      blocks.set(chunk.index, {
+        kind: 'reasoning',
+        text: previous?.kind === 'reasoning' ? previous.text + chunk.text : chunk.text,
+      })
+      return true
+    }
+    case 'tool-call-delta': {
+      const previous = blocks.get(chunk.index)
+      if (previous?.kind === 'complete') return false
+      const base = previous?.kind === 'tool-call'
+        ? previous
+        : { kind: 'tool-call' as const, id: '', name: '', arguments: '' }
+      const id = base.id || chunk.id
+      const name = chunk.name ?? base.name
+      const args = base.arguments + chunk.argumentsDelta
+      if (previous?.kind === 'tool-call'
+        && previous.id === id && previous.name === name && previous.arguments === args) return false
+      blocks.set(chunk.index, {
+        kind: 'tool-call',
+        id,
+        name,
+        arguments: args,
+      })
+      return true
+    }
+    case 'block-end':
+      if (blocks.get(chunk.index)?.kind === 'complete') return false
+      blocks.set(chunk.index, { kind: 'complete', block: chunk.block })
+      return true
+  }
+}
+
+/** Preserve an already-authoritative block-end payload without using a
+ * finalized ContentBlock shape for incomplete block-start state. The live port
+ * is intentionally structural and the adapter guarantees block-end payloads
+ * are complete official blocks. */
+function authoritativeContentBlock(block: AssistantLiveContentBlock | ContentBlock): ContentBlock {
+  return block as unknown as ContentBlock
+}
+
+function assistantContentFromBlockState(state: AssistantBlockState): ContentBlock | undefined {
+  switch (state.kind) {
+    case 'text': return { type: 'text', text: state.text }
+    case 'reasoning': return { type: 'reasoning', text: state.text }
+    case 'tool-call':
+      return state.id === ''
+        ? undefined
+        : { type: 'tool-call', id: ToolCallId(state.id), name: state.name, arguments: state.arguments }
+    case 'complete': return authoritativeContentBlock(state.block)
+    case 'opaque': return undefined
+  }
+}
+
+/** Project indexed block state in FIRST-SEEN stream order — the canonical
+ * DSH BlockAssembler order (the numeric block index is a protocol handle,
+ * never a content ordering key; the Map's insertion order is the first-seen
+ * order, and re-setting an existing key keeps its position). */
+function assistantContentFromBlocks(blocks: Map<number, AssistantBlockState>): ContentBlock[] {
+  return [...blocks.entries()]
+    .map(([, state]) => assistantContentFromBlockState(state))
+    .filter((block): block is ContentBlock => block !== undefined)
+}
+
+/** Project one block state for rendering without promoting open opaque state to content. */
+function assistantDisplayBlockFromState(state: AssistantBlockState): AssistantDisplayBlock | undefined {
+  switch (state.kind) {
+    case 'text': return { kind: 'content', block: { type: 'text', text: state.text } }
+    case 'reasoning': return { kind: 'content', block: { type: 'reasoning', text: state.text } }
+    case 'tool-call':
+      return state.id === ''
+        ? undefined
+        : { kind: 'content', block: { type: 'tool-call', id: ToolCallId(state.id), name: state.name, arguments: state.arguments } }
+    case 'complete': return { kind: 'content', block: authoritativeContentBlock(state.block) }
+    case 'opaque': return { kind: 'open-opaque', blockType: state.blockType }
+  }
+}
+
+/** Project all indexed states in FIRST-SEEN stream order for Assistant
+ * display (the canonical BlockAssembler order — see
+ * {@link assistantContentFromBlocks}). */
+function assistantDisplayBlocksFromStates(blocks: Map<number, AssistantBlockState>): AssistantDisplayBlock[] {
+  return [...blocks.entries()]
+    .map(([, state]) => assistantDisplayBlockFromState(state))
+    .filter((block): block is AssistantDisplayBlock => block !== undefined)
+}
+
+interface AssistantBlockProjection {
+  content: ContentBlock | undefined
+  display: AssistantDisplayBlock | undefined
+  assistantVisible: boolean
+  thinkingVisible: boolean
+  opaque: boolean
+}
+
+function assistantBlockProjection(state: AssistantBlockState): AssistantBlockProjection {
+  const content = assistantContentFromBlockState(state)
+  const display = assistantDisplayBlockFromState(state)
+  return {
+    content,
+    display,
+    assistantVisible: state.kind === 'opaque'
+      || (content !== undefined && assistantBlocksVisibleNow([content])),
+    thinkingVisible: content !== undefined && content.type === 'reasoning' && content.text !== '',
+    opaque: state.kind === 'opaque',
+  }
+}
+
+/** Replace one indexed projection without rescanning the other indexes.
+ * The projection arrays follow FIRST-SEEN stream order (the canonical DSH
+ * BlockAssembler order), never numeric index order: `order` records each
+ * block's first-seen position (append-only), and a block that gains a
+ * projection after later blocks first-seen is inserted at its first-seen
+ * rank — so the live order always matches the durable settlement, and an
+ * occurrence identity derived from the projection never renumbers. */
+function updateIndexedProjection<T>(
+  order: number[],
+  orderPos: Map<number, number>,
+  indexes: number[],
+  values: T[],
+  index: number,
+  value: T | undefined,
+): void {
+  let rank = orderPos.get(index)
+  if (rank === undefined) {
+    rank = order.length
+    orderPos.set(index, rank)
+    order.push(index)
+  }
+  // The block's position in the projection = its rank among the order
+  // entries before it that are currently in the projection. Both arrays
+  // are in first-seen order, so a lockstep walk counts the members.
+  let position = 0
+  let j = 0
+  for (let i = 0; i < rank; i += 1) {
+    if (j < indexes.length && indexes[j] === order[i]) {
+      position += 1
+      j += 1
+    }
+  }
+  const present = j < indexes.length && indexes[j] === index
+  if (value === undefined) {
+    if (!present) return
+    indexes.splice(position, 1)
+    values.splice(position, 1)
+    return
+  }
+  if (present) {
+    values[position] = value
+    return
+  }
+  indexes.splice(position, 0, index)
+  values.splice(position, 0, value)
+}
+
+/** Whether a display projection contains user-visible Assistant output. */
+function assistantDisplayBlocksVisibleNow(blocks: readonly AssistantDisplayBlock[]): boolean {
+  for (const block of blocks) {
+    if (block.kind === 'open-opaque') return true
+    if (assistantBlocksVisibleNow([block.block])) return true
+  }
+  return false
+}
+
+/** Whether a display projection retains evidence at a closed attempt boundary. */
+function assistantDisplayBlocksHaveInterruptionEvidence(blocks: readonly AssistantDisplayBlock[]): boolean {
+  for (const block of blocks) {
+    if (block.kind === 'open-opaque') return true
+    if (assistantBlocksHaveInterruptionEvidence([block.block])) return true
+  }
+  return false
+}
+
+/** Use the semantic or display-only projection for entry visibility. */
+export function assistantEntryVisibleNow(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
+  return entry.displayBlocks === undefined
+    ? assistantBlocksVisibleNow(assistantEntryBlocks(entry))
+    : assistantDisplayBlocksVisibleNow(entry.displayBlocks)
+}
+
+/** Use the semantic or display-only projection for attempt evidence. */
+function assistantEntryHasInterruptionEvidence(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
+  return entry.displayBlocks === undefined
+    ? assistantBlocksHaveInterruptionEvidence(assistantEntryBlocks(entry))
+    : assistantDisplayBlocksHaveInterruptionEvidence(entry.displayBlocks)
 }
 
 /**
@@ -429,6 +1193,8 @@ export function windowMessages(messages: readonly TranscriptMessage[], maxTurns:
 /**
  * Merge consecutive completed `read` tool cards into one card ("N files").
  * A single read stays untouched; groups break on any other kind or status.
+ * Nested PTC sub-calls never reach this top-level projection (they live in
+ * their parent card's `subCalls` tree).
  * @param messages - the folded transcript.
  * @returns a new list with grouped read cards (same object references).
  */
@@ -488,10 +1254,47 @@ interface TranscriptSearchEntry {
   normalizedText: string
 }
 
+interface NextStepInboxIdentity {
+  id: string
+  /** The turn that was open when this identity entered next-step, if any. */
+  insertionTurn: number | undefined
+  /** The Session timestamp when this identity entered next-step. */
+  insertionTime: number
+}
+
+/** The raw item index of each active run's card (search dirty marking);
+ * the shared {@link WorkflowProjection} owns the projection itself. */
+
 export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
+  /** Durable next-step identities awaiting a claim or replacement. */
+  private readonly pendingNextSteps: NextStepInboxIdentity[] = []
+  /** Claimed next-step identities, including their insertion time. */
+  private readonly claimedNextStepTurns = new Map<string, NextStepInboxIdentity>()
   /** The assistant message object per (turn, step); streaming text lands in place. */
   private readonly assistantEntries = new Map<string, Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** In-flight live block state keyed by logical step. This is required for
+   * authoritative block-end replacement: deltas may be partial, while a
+   * completed block replaces the entire indexed state without duplication. */
+  private readonly liveAssistantBlocks = new Map<string, LiveAssistantProjection>()
+  /** Assistant entries created by the LIVE stream path and not yet taken
+   * over by a durable settlement. Attempt evidence remains transient until
+   * retry or turn end; abandoned attempts have no durable surface and are
+   * tombstoned so live and reopen agree. */
+  private readonly transientAssistantEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** Entries reconstructed from a durable `assistant/attempt`. They remain
+   * diagnostic evidence until a retry resets them or turn/end marks them as
+   * interrupted; they never become a normal settled message. */
+  private readonly attemptAssistantEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** Assistant entries REMOVED by a failed-attempt settlement. They stay in
+   * the raw item list so every index-keyed projection (turn starts, search
+   * entries, groups) keeps its stable indexes, but every visible projection
+   * skips them — a tombstone, never a mid-array splice. */
+  private readonly hiddenAssistantEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** Reasoning entries from a live-abandoned attempt are transient too. Keep
+   * their raw indexes stable, but tombstone them so abandoned live and cold
+   * replay projections agree. */
+  private readonly hiddenThinkingEntries = new WeakSet<Extract<TranscriptMessage, { kind: 'thinking' }>>()
   /** The thinking entry object per (turn, step), for in-place text updates. */
   private readonly thinkingEntries = new Map<string, Extract<TranscriptMessage, { kind: 'thinking' }>>()
   /** Thinking entries that still need a lifecycle boundary to settle. The
@@ -500,18 +1303,42 @@ export class TranscriptFolder {
   private readonly openThinkingByTurn = new Map<number, Set<Extract<TranscriptMessage, { kind: 'thinking' }>>>()
   /** Tool calls awaiting their result, keyed by callId with their running card. */
   private readonly pendingCalls = new Map<string, { name: string; args: string; turn: number; card: Extract<TranscriptMessage, { kind: 'tool' }>; index: number }>()
+  /** Nested PTC sub-dispatches awaiting their settle, keyed by subCallId
+   * (`tool/ptc-dispatch-start` → `tool/ptc-dispatch`). The child
+   * card lives INSIDE its parent's `subCalls` tree, never in `items`. */
+  private readonly pendingSubCalls = new Map<string, TranscriptToolMessage>()
+  /** Every mounted PTC sub-call card by subCallId, for parent lookup of
+   * deeper nesting (a sub-call's parent may itself be a sub-call). */
+  private readonly subCallIndex = new Map<string, TranscriptToolMessage>()
+  /** The depth of every mounted PTC sub-call (root = 1): the ingestion-side
+   * topology gate keeps the tree within {@link PTC_MAX_DEPTH} so the
+   * recursive consumers only need a defensive fallback. */
+  private readonly subCallDepth = new Map<string, number>()
+  /** PTC sub-call events whose parent is not yet mounted (an incomplete
+   * replay fragment): start/settle facts are parked here and connected
+   * when the parent appears — never promoted to top-level surface rows. */
+  private readonly orphanSubCalls = new Map<string, {
+    start?: { rootCallId: string; parentCallId: string; name: string; arguments: unknown }
+    settle?: { rootCallId: string; parentCallId: string; name: string; arguments: unknown; isError: boolean; content: readonly ContentBlock[] }
+  }>()
   /** Tool names by callId, for result pairing. */
   private readonly callNames = new Map<string, string>()
   /** Command names by commandId, from command/run events. */
   private readonly commandNames = new Map<string, string>()
-  /** Workflow run cards by runId, for member/run settlement. */
-  private readonly workflowRuns = new Map<string, Extract<TranscriptMessage, { kind: 'tool' }>>()
-  /** Workflow member rows by `${runId}/${seq}`, for agent-end settlement. */
-  private readonly workflowMembers = new Map<string, WorkflowMemberView>()
+  /** Active Workflow runs: the shared semantic projection (owner tracking,
+   * interruption projection, member/run settlement) plus the raw item index
+   * of each active run's card for search dirty marking. */
+  private readonly workflow = new WorkflowProjection(runId => {
+    const index = this.workflowIndexes.get(runId)
+    if (index !== undefined) this.markSearchEntryDirty(index)
+  })
+  private readonly workflowIndexes = new Map<string, number>()
   /** Compaction lifecycle: compactionId → items index (start/summary/end). */
   private readonly compacting = new Map<string, number>()
   /** The turn most recently opened by turn/start. */
   private currentTurn = 0
+  /** The turn currently between its turn/start and turn/end boundaries. */
+  private openTurn: number | undefined
   /**
    * Incremental consecutive-read grouping (stage J): `groupOf` maps an item
    * index to its merged group card (only the FIRST member emits it in the
@@ -548,8 +1375,6 @@ export class TranscriptFolder {
    * stepKey(turn, step) — an un-namespaced map would let one kind's deltas
    * land on the other kind's searchable entry. */
   private readonly searchIndexByStepKey = new Map<string, number>()
-  /** Workflow run card indices by runId (run-end fills the result text). */
-  private readonly workflowRunIndex = new Map<string, number>()
   // Test-only counters exposed by searchDiagnosticsForTest().
   private searchRefreshCount = 0
   /** Test-only: the number of dirty entries scanned by lazy normalization
@@ -620,11 +1445,210 @@ export class TranscriptFolder {
         thinkingTail: '',
         confirmedSteps: new Set(),
         settledSteps: new Set(),
+        firstVisibleAssistantTimes: new Map(),
+        committedAnswerSteps: new Set(),
         revision: 0,
       }
       this.activityByTurn.set(turn, activity)
     }
     return activity
+  }
+
+  /** Attach one PTC sub-call to its real parent card (never the top-level
+   * surface flow), then connect any parked orphans waiting for it and apply
+   * a parked settle for the same subCallId (a settle may arrive before its
+   * start when the parent is already mounted). This method is the topology
+   * gate for the whole sub-call tree: every edge is validated here (root
+   * collision, ancestry, depth cap), so the mounted tree always satisfies
+   * the alpha.2 cap and a corrupted/replayed input can never overflow the
+   * stack during ingestion. A duplicate subCallId with a conflicting
+   * identity is impossible on a valid alpha.2 durable stream — fail fast
+   * instead of silently keeping one. */
+  private attachSubCall(
+    parent: TranscriptToolMessage,
+    parentId: string,
+    data: { rootCallId: string; parentCallId: string; subCallId: string; name: string; arguments: unknown },
+  ): void {
+    // Cross-root coherence: a sub-call's parent must belong to the same
+    // root the event claims (a run_code parent has no rootCallId — its own
+    // callId IS the root).
+    if (parent.rootCallId !== undefined && parent.rootCallId !== data.rootCallId) {
+      throw new Error(`cross-root PTC sub-call ${data.subCallId}: parent ${parentId} belongs to root ${parent.rootCallId}, event claims root ${data.rootCallId}`)
+    }
+    if (parent.rootCallId === undefined && data.rootCallId !== parentId) {
+      throw new Error(`cross-root PTC sub-call ${data.subCallId}: parent ${parentId} is the root call, event claims root ${data.rootCallId}`)
+    }
+    if (parent.rootCallId === undefined && parent.name !== 'run_code') {
+      throw new Error(`PTC sub-call ${data.subCallId}: top-level parent ${parentId} is ${parent.name}, expected run_code`)
+    }
+    const existing = this.subCallIndex.get(data.subCallId)
+    if (existing !== undefined) {
+      if (existing.rootCallId !== data.rootCallId
+        || existing.parentCallId !== data.parentCallId
+        || existing.name !== data.name
+        || existing.args !== JSON.stringify(data.arguments)) {
+        throw new Error(`conflicting PTC sub-call identity for ${data.subCallId}: start root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}, mounted root=${existing.rootCallId} parent=${existing.parentCallId} name=${existing.name}`)
+      }
+      return
+    }
+    // A parked start for the same subCallId (its parent was unknown when it
+    // arrived) must agree with this one — a conflict is impossible on a
+    // valid alpha.2 stream and fails fast.
+    const parked = this.orphanSubCalls.get(data.subCallId)
+    if (parked?.start !== undefined
+      && (parked.start.rootCallId !== data.rootCallId
+        || parked.start.parentCallId !== data.parentCallId
+        || parked.start.name !== data.name
+        || JSON.stringify(parked.start.arguments) !== JSON.stringify(data.arguments))) {
+      throw new Error(`conflicting PTC sub-call start identity for ${data.subCallId}: parked root=${parked.start.rootCallId} parent=${parked.start.parentCallId} name=${parked.start.name}, duplicate root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}`)
+    }
+    // Topology gate: a sub-call must never collide with its root callId
+    // (the root is not in subCallIndex, so this malformed edge would
+    // otherwise be accepted), repeat a subCallId already on its parent
+    // chain, or exceed the alpha.2 depth cap (root = depth 1, so at most
+    // 255 child levels).
+    if (data.subCallId === data.rootCallId) {
+      throw new Error(`PTC sub-call ${data.subCallId} collides with its root callId`)
+    }
+    let ancestor: TranscriptToolMessage | undefined = parent
+    while (ancestor !== undefined && ancestor.subCallId !== undefined) {
+      if (ancestor.subCallId === data.subCallId) {
+        throw new Error(`PTC sub-call ${data.subCallId} repeats an ancestor subCallId`)
+      }
+      ancestor = ancestor.parentCallId === undefined ? undefined : this.subCallIndex.get(ancestor.parentCallId)
+    }
+    const parentDepth = parent.subCallId === undefined ? 1 : this.subCallDepth.get(parent.subCallId)!
+    const depth = parentDepth + 1
+    if (depth > PTC_MAX_DEPTH) {
+      throw new Error(`PTC sub-call ${data.subCallId} exceeds the depth cap ${PTC_MAX_DEPTH}: parent ${parentId} is at depth ${parentDepth}`)
+    }
+    const child: TranscriptToolMessage = {
+      kind: 'tool',
+      turn: parent.turn,
+      name: data.name,
+      args: JSON.stringify(data.arguments),
+      result: '',
+      status: 'running',
+      subCallId: data.subCallId,
+      parentCallId: data.parentCallId,
+      rootCallId: data.rootCallId,
+    }
+    if (parent.subCalls === undefined) parent.subCalls = []
+    parent.subCalls.push(child)
+    this.pendingSubCalls.set(data.subCallId, child)
+    this.subCallIndex.set(data.subCallId, child)
+    this.subCallDepth.set(data.subCallId, depth)
+    this.attachPendingOrphans(child, data.subCallId)
+    this.consumeParkedSettle(data.subCallId)
+    this.refreshActiveSubCallsFor(child)
+  }
+
+  /** Connect parked PTC orphans whose parent just became available. The
+   * orphan entry itself (including a parked settle) is consumed inside
+   * {@link attachSubCall} — one attach semantics for every path. */
+  private attachPendingOrphans(parent: TranscriptToolMessage, parentId: string): void {
+    for (const [id, orphan] of [...this.orphanSubCalls]) {
+      if (orphan.start !== undefined && orphan.start.parentCallId === parentId) {
+        this.attachSubCall(parent, parentId, { ...orphan.start, subCallId: id })
+      }
+    }
+  }
+
+  /** Apply a parked settle for a just-attached sub-call (a settle may
+   * arrive before its start when the parent is already mounted) and drop
+   * the consumed orphan entry. */
+  private consumeParkedSettle(subCallId: string): void {
+    const parked = this.orphanSubCalls.get(subCallId)
+    if (parked === undefined) return
+    this.orphanSubCalls.delete(subCallId)
+    if (parked.settle !== undefined) this.settleSubCall(subCallId, parked.settle)
+  }
+
+  /** Settle one PTC sub-call by subCallId; a settle without a mounted child
+   * is parked and applied when its start/parent appears. The lifecycle
+   * status is the durable `isError` flag ONLY — the alpha.2 terminal
+   * contract (a nonzero `[exit code: N]` / `[killed by signal: ...]` tail
+   * marker) is a PRESENTATION concern applied by
+   * {@link subCallDisplayStatus} at render time, never baked into the
+   * durable card. The settle's durable identity (root/parent/name/
+   * arguments) is cross-checked against the mounted child — a mismatch is
+   * impossible on a valid alpha.2 stream and fails fast. */
+  private settleSubCall(subCallId: string, data: {
+    rootCallId: string
+    parentCallId: string
+    name: string
+    arguments: unknown
+    isError: boolean
+    content: readonly ContentBlock[]
+  }): void {
+    const child = this.pendingSubCalls.get(subCallId)
+    if (child !== undefined) {
+      if (child.rootCallId !== data.rootCallId
+        || child.parentCallId !== data.parentCallId
+        || child.name !== data.name
+        || child.args !== JSON.stringify(data.arguments)) {
+        throw new Error(`conflicting PTC sub-call settle identity for ${subCallId}: settle root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}, mounted root=${child.rootCallId} parent=${child.parentCallId} name=${child.name}`)
+      }
+      const text = textOf(data.content ?? [])
+      child.status = data.isError === true ? 'error' : 'ok'
+      child.result = text
+      child.resultBlocks = data.content
+      this.pendingSubCalls.delete(subCallId)
+      this.refreshActiveSubCallsFor(child)
+      return
+    }
+    const orphan = this.orphanSubCalls.get(subCallId)
+    if (orphan !== undefined) {
+      // A second parked settle with a conflicting durable identity is
+      // impossible on a valid alpha.2 stream — fail fast instead of
+      // silently overwriting the first (last-write-wins).
+      if (orphan.settle !== undefined
+        && (orphan.settle.rootCallId !== data.rootCallId
+          || orphan.settle.parentCallId !== data.parentCallId
+          || orphan.settle.name !== data.name
+          || JSON.stringify(orphan.settle.arguments) !== JSON.stringify(data.arguments))) {
+        throw new Error(`conflicting PTC sub-call settle identity for ${subCallId}: first settle root=${orphan.settle.rootCallId} parent=${orphan.settle.parentCallId} name=${orphan.settle.name}, duplicate root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}`)
+      }
+      orphan.settle = data
+    } else {
+      this.orphanSubCalls.set(subCallId, { settle: data })
+    }
+  }
+
+  /** Recompute the Focus active-descendant projection for the root card of
+   * one PTC sub-call, bump the root's subtree revision (render-cache
+   * invalidation for the in-place child mutations) and mark the root's
+   * search entry dirty (the recursive corpus changed). Tool stats are
+   * NEVER touched. */
+  private refreshActiveSubCallsFor(child: TranscriptToolMessage): void {
+    const root = child.rootCallId === undefined
+      ? undefined
+      : this.pendingCalls.get(child.rootCallId)?.card ?? this.subCallIndex.get(child.rootCallId)
+    if (root === undefined) return
+    root.subtreeRevision = (root.subtreeRevision ?? 0) + 1
+    const rootEntry = child.rootCallId === undefined ? undefined : this.pendingCalls.get(child.rootCallId)
+    if (rootEntry !== undefined) this.markSearchEntryDirty(rootEntry.index)
+    const activity = this.activityFor(root.turn)
+    if (activity.tool === undefined) return
+    const counts = new Map<string, number>()
+    const order: string[] = []
+    const visit = (card: TranscriptToolMessage, depth: number): void => {
+      if (depth >= PTC_MAX_DEPTH) return
+      for (const sub of card.subCalls ?? []) {
+        if (sub.status === 'running') {
+          if (!counts.has(sub.name)) order.push(sub.name)
+          counts.set(sub.name, (counts.get(sub.name) ?? 0) + 1)
+        }
+        visit(sub, depth + 1)
+      }
+    }
+    visit(root, 0)
+    if (order.length === 0) {
+      activity.tool.activeSubCalls = undefined
+    } else {
+      activity.tool.activeSubCalls = order.map(name => ({ name, count: counts.get(name)! }))
+    }
+    activity.revision += 1
   }
 
   /** The Focus activity of one turn (read-only view; the same object the
@@ -641,14 +1665,36 @@ export class TranscriptFolder {
     return this.activityByTurn as ReadonlyMap<number, TurnActivity>
   }
 
+  /** Restore one authoritative reasoning body into the bounded Focus preview. */
+  private restoreThinkingPreview(activity: MutableTurnActivity, step: number, text: string): void {
+    if (step < (activity.lastAssistantStep ?? step)) return
+    activity.thinkingStep = step
+    activity.thinkingTail = text.slice(-TranscriptFolder.THINKING_TAIL_CAP)
+    const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
+    activity.think = line === '' ? undefined : { text: line }
+    activity.revision += 1
+  }
+
+  /** Clear the Focus reasoning preview owned by one authoritative step. */
+  private clearThinkingPreview(activity: MutableTurnActivity, step: number): void {
+    if (step < (activity.lastAssistantStep ?? step)) return
+    if (activity.thinkingStep !== step) return
+    activity.thinkingStep = undefined
+    if (activity.thinkingTail === '' && activity.think === undefined) return
+    activity.thinkingTail = ''
+    activity.think = undefined
+    activity.revision += 1
+  }
+
   /** Fold one reasoning delta into the activity's Think slot: the rolling
    * tail keeps the LAST fragment (bounded), and the preview is the tail's
    * latest non-empty line — never the whole stream (plan §10.6). */
-  private foldThinking(activity: MutableTurnActivity, delta: string): void {
+  private foldThinking(activity: MutableTurnActivity, step: number, delta: string): void {
     // After turn/end the Think slot was settled: a late reasoning delta
     // (replay artifact) must not mutate it (review finding). The thinking
     // transcript entry still accumulates the delta.
-    if (activity.completed) return
+    if (activity.completed || step < (activity.lastAssistantStep ?? step)) return
+    activity.thinkingStep = step
     activity.thinkingTail = (activity.thinkingTail + delta).slice(-TranscriptFolder.THINKING_TAIL_CAP)
     const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
     activity.think = line === '' ? undefined : { text: line }
@@ -713,6 +1759,23 @@ export class TranscriptFolder {
     activity.messageConfirmedStep = candidate.step
     activity.confirmedSteps.add(candidate.step)
     activity.messageCandidate = undefined
+  }
+
+  /** Commit the exact previous text-only answer once its next step admits a
+   * same-turn human steer. It leaves the replay fences intact and only moves
+   * that step out of the transient Message slot. */
+  private commitPreSteerAnswer(activity: MutableTurnActivity): void {
+    const step = activity.pendingPreSteerAnswerStep
+    if (step === undefined) return
+    activity.pendingPreSteerAnswerStep = undefined
+    activity.committedAnswerSteps.add(step)
+    if (activity.messageCandidate?.step === step) activity.messageCandidate = undefined
+    if (activity.messageConfirmedStep === step) {
+      activity.messageConfirmed = undefined
+      activity.messageConfirmedStep = undefined
+    }
+    this.syncMessage(activity)
+    activity.revision += 1
   }
 
   /** Materialize the Message slot from the candidate (running) or the
@@ -794,7 +1857,7 @@ export class TranscriptFolder {
         this.appendTurnIndex(turn)
       }
     }
-    if (turn !== undefined) this.addGroupedTurn(turn)
+    if (turn !== undefined && message.kind !== 'assistant') this.addGroupedTurn(turn)
     if (message.kind === 'tool') this.groupedToolCount += 1
     return index
   }
@@ -857,7 +1920,9 @@ export class TranscriptFolder {
     return first === undefined ? id : first
   }
 
-  /** Whether an item is groupable as a consecutive read (settled ok). */
+  /** Whether an item is groupable as a consecutive read (settled ok).
+   * Nested PTC sub-calls never reach the top-level items (they live in
+   * their parent card's `subCalls` tree), so no exclusion is needed here. */
   private static groupable(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'tool' }> {
     return message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
   }
@@ -949,9 +2014,45 @@ export class TranscriptFolder {
         continue
       }
       const item = this.items[index]
-      if (item !== undefined && 'turn' in item) this.addGroupedTurn(item.turn)
+      // Tombstoned failed-attempt text is never visible output.
+      if (item !== undefined && 'turn' in item && this.isVisible(item)) this.addGroupedTurn(item.turn)
     }
    this.groupedTurnIndexDirty = false
+  }
+
+  /** Whether one raw item is still visible output. Every Assistant entry uses
+   * the same DSH block predicate; an interruption flag overrides it, while
+   * hidden entries remain internal for authoritative settlement/final choice.
+   * Thinking and Tool rows own their corresponding non-visible Assistant
+   * blocks. */
+  private isVisible(item: TranscriptMessage): boolean {
+    if (item.kind === 'assistant') {
+      if (this.hiddenAssistantEntries.has(item)) return false
+      if (item.interrupted === true) return true
+      return assistantEntryVisibleNow(item)
+    }
+    if (item.kind === 'thinking') return !this.hiddenThinkingEntries.has(item)
+    return true
+  }
+
+  /**
+   * Apply one Assistant visibility transition to every derived projection.
+   * Authoritative hidden entries stay in `items`, but their grouped-turn and
+   * search memberships follow the same edge in one place.
+   */
+  private syncAssistantVisibility(
+    turn: number,
+    step: number,
+    item: Extract<TranscriptMessage, { kind: 'assistant' }>,
+    wasVisible: boolean,
+    markSearchDirty = true,
+  ): void {
+    const visible = this.isVisible(item)
+    if (visible === wasVisible) return
+    if (markSearchDirty) this.markStreamingEntryDirty(`assistant:${stepKey(turn, step)}`)
+    if (this.groupedTurnIndexDirty) return
+    if (visible) this.addGroupedTurn(turn)
+    else this.removeGroupedTurn(turn)
   }
 
   /** Ensure exact grouped-turn counts before a cross-turn projection. */
@@ -1035,6 +2136,12 @@ export class TranscriptFolder {
     this.crossTurnGroups = 0
     for (let start = 0; start < this.items.length;) {
       const item = this.items[start]!
+      // Tombstoned failed-attempt text is never visible output and never
+      // separates an adjacent read run.
+      if (!this.isVisible(item)) {
+        start += 1
+        continue
+      }
       if (item.kind !== 'tool' || item.name !== 'read' || item.status !== 'ok') {
         if (item.kind === 'tool') this.groupedToolCount += 1
          if ('turn' in item) this.addGroupedTurn(item.turn)
@@ -1257,6 +2364,559 @@ export class TranscriptFolder {
     for (const event of events) this.applyEvent(event)
   }
 
+  /** The number of active workflow run index entries (test hook): completed
+   * runs drop their index at run-end so long sessions do not accumulate. */
+  activeWorkflowIndexCount(): number {
+    return this.workflowIndexes.size
+  }
+
+  /**
+   * Apply one live assistant stream input (Session v2 TRANSIENT plane —
+   * `agent/assistant-stream` mapped through the neutral port). Live model
+   * output NEVER rides the durable log anymore: text/reasoning/usage
+   * deltas accumulate here, and the authoritative settlement arrives
+   * through the durable `assistant/message` / `assistant/attempt` events
+   * on the `session/event` plane. The `end` frame is a notification only:
+   * a committed attempt's durable event already settled the entries, and
+   * an abandoned attempt (no durable settlement) closes the open thinking
+   * entries so no live candidate stays "running" forever.
+   */
+  applyLiveInput(input: AssistantLiveInput): void {
+    switch (input.kind) {
+      case 'start': {
+        // A RETRY reopens the same (turn, step) after a failed attempt:
+        // the previous attempt's reasoning entry was CLOSED but kept as
+        // diagnostic evidence — reset its text (and the Focus preview
+        // tail) so the new attempt's reasoning never concatenates onto
+        // the failed one's. Reopen parity: the durable log restores the
+        // step's reasoning from its LATEST source.
+        const key = stepKey(input.turn, input.step)
+        const activity = this.activityByTurn.get(input.turn)
+        if (activity !== undefined && !activity.settledSteps.has(input.step)) {
+          activity.firstVisibleAssistantTimes.delete(input.step)
+        }
+        this.liveAssistantBlocks.set(key, {
+          states: new Map(),
+          order: [],
+          orderPos: new Map(),
+          blockIndexes: [],
+          blocks: [],
+          displayIndexes: [],
+          displayBlocks: [],
+          assistantVisibleCount: 0,
+          thinkingVisibleCount: 0,
+          openOpaqueCount: 0,
+        })
+        const thinking = this.thinkingEntries.get(key)
+        if (thinking !== undefined && thinking.running === false) {
+          thinking.text = ''
+          thinking.running = true
+          this.markStreamingEntryDirty(`thinking:${key}`)
+          let open = this.openThinkingByTurn.get(input.turn)
+          if (open === undefined) {
+            open = new Set()
+            this.openThinkingByTurn.set(input.turn, open)
+          }
+          open.add(thinking)
+          const activity = this.activityByTurn.get(input.turn)
+          if (activity !== undefined) this.clearThinkingPreview(activity, input.step)
+        }
+        break
+      }
+      case 'chunk':
+        this.applyAssistantChunk(input.turn, input.step, input.chunk, input.time)
+        break
+      case 'end':
+        // An abandoned attempt has no durable settlement and is tombstoned.
+        // A committed `assistant/attempt` keeps its durable evidence visible
+        // as transient until `llm/retry` or `turn/end`; `assistant/message`
+        // owns the normal settled surface entry.
+        this.liveAssistantBlocks.delete(stepKey(input.turn, input.step))
+        if (input.status === 'abandoned') {
+          this.settleFailedAttempt(input.turn, input.step, true, true)
+        }
+        // Any remaining open reasoning entries stop animating at settlement.
+        {
+          const open = this.openThinkingByTurn.get(input.turn)
+          if (open !== undefined) {
+            for (const entry of open) entry.running = false
+            this.openThinkingByTurn.delete(input.turn)
+          }
+        }
+        break
+    }
+  }
+
+  /** Tombstone one transient assistant entry at a retry boundary. The
+   * first-token timing and usage live in their separate folds and are not
+   * touched here; only the presentation state is reset. */
+  private hideTransientAssistantEntry(turn: number, step: number): boolean {
+    const key = stepKey(turn, step)
+    const entry = this.assistantEntries.get(key)
+    if (entry === undefined || !this.transientAssistantEntries.has(entry)) return false
+    const activity = this.activityByTurn.get(turn)
+    const clearLatestVisibility = activity !== undefined
+      && activity.lastAssistantStep === step
+      && activity.lastAssistantVisible === true
+    if (clearLatestVisibility) activity.lastAssistantVisible = false
+    const wasVisible = this.isVisible(entry)
+    this.assistantEntries.delete(key)
+    entry.text = ''
+    entry.content = undefined
+    entry.displayBlocks = undefined
+    entry.interrupted = undefined
+    this.transientAssistantEntries.delete(entry)
+    this.attemptAssistantEntries.delete(entry)
+    this.hiddenAssistantEntries.add(entry)
+    this.markStreamingEntryDirty(`assistant:${key}`)
+    this.syncAssistantVisibility(turn, step, entry, wasVisible, false)
+    return clearLatestVisibility
+  }
+
+  /** A failed live attempt has no durable evidence and is therefore
+   * tombstoned. A committed `assistant/attempt` is restored separately and
+   * remains available as interruption evidence until retry/turn end. */
+  private settleFailedAttempt(turn: number, step: number, abandoned = false, discardUsage = true): void {
+    const visibilityReset = abandoned ? this.hideTransientAssistantEntry(turn, step) : false
+    if (abandoned) {
+      // Tombstone abandoned reasoning too: the raw item remains index-stable
+      // while every visible/search/grouped projection skips it.
+      this.hideThinkingEntry(turn, step)
+    }
+    if (discardUsage) this.usage.discardStep(turn, step)
+    const activity = this.activityByTurn.get(turn)
+    if (activity === undefined) return
+    if (abandoned) this.clearThinkingPreview(activity, step)
+    if (abandoned) {
+      let changed = visibilityReset
+      const candidate = activity.messageCandidate
+      if (candidate !== undefined && candidate.step === step
+        && !activity.settledSteps.has(step) && !activity.confirmedSteps.has(step)) {
+        activity.messageCandidate = undefined
+        this.syncMessage(activity)
+        changed = true
+      }
+      if (changed) activity.revision += 1
+    }
+    this.syncUsage(activity)
+  }
+
+  /** Fold one live assistant chunk (Session v2 transient plane) into the
+   * streaming entries and Focus aggregation. Live block state is retained per
+   * logical step so a completed block can replace earlier deltas exactly. */
+  private applyAssistantChunk(turn: number, step: number, chunk: AssistantLiveChunk, time: number): void {
+    // After turn/end a late assistant event is a replay artifact: it
+    // must not mutate the finalized surface entry — the final-answer
+    // selection reads the exact last assistant (review finding).
+    const activity = this.activityFor(turn)
+    const key = stepKey(turn, step)
+    if (activity.completed) return
+    // A late reasoning replay remains diagnostic transcript evidence, but a
+    // late text/block surface frame must never overwrite the durable message.
+    if (activity.settledSteps.has(step)) {
+      if (chunk.type === 'reasoning-delta') {
+        const thinking = this.thinkingEntry(turn, step)
+        thinking.text += chunk.text
+        thinking.running = false
+        this.closeThinking(thinking)
+        this.markStreamingEntryDirty(`thinking:${key}`)
+        this.foldThinking(activity, step, chunk.text)
+      } else if (chunk.type === 'block-end' && chunk.block.type === 'reasoning' && 'text' in chunk.block && typeof chunk.block.text === 'string') {
+        const thinking = this.thinkingEntry(turn, step)
+        thinking.text = chunk.block.text
+        thinking.running = false
+        this.closeThinking(thinking)
+        this.markStreamingEntryDirty(`thinking:${key}`)
+        this.restoreThinkingPreview(activity, step, chunk.block.text)
+      } else if (chunk.type === 'usage') {
+        this.usage.onUsageChunk(turn, step, chunk.usage)
+        this.syncUsage(activity)
+      }
+      return
+    }
+    const existing = this.assistantEntries.get(key)
+    if (existing !== undefined && this.attemptAssistantEntries.has(existing)) return
+    const reasoningFrame = chunk.type === 'reasoning-delta'
+      || (chunk.type === 'block-start' && chunk.blockType === 'reasoning')
+      || (chunk.type === 'block-end' && chunk.block.type === 'reasoning')
+    // Usage facts deliberately bypass the presentation-only stale fence so
+    // Focus accounting remains aligned with the independent stats fold.
+    if (chunk.type !== 'usage'
+      && existing === undefined && step < (activity.lastAssistantStep ?? -1) && !reasoningFrame) return
+    // An existing older row may still receive an interleaved late chunk; keep
+    // that semantic transcript evidence current. The no-entry fence above
+    // prevents replay from resurrecting a removed surface, while candidate and
+    // latest-step bookkeeping below keep Focus ownership on the newer step.
+    const projection = this.liveAssistantProjectionFor(turn, step)
+    switch (chunk.type) {
+      case 'block-start':
+      case 'text-delta':
+      case 'reasoning-delta':
+      case 'tool-call-delta':
+      case 'block-end': {
+        const previous = projection.states.get(chunk.index)
+        if (applyAssistantBlockChunk(projection.states, chunk)) {
+          this.updateLiveAssistantProjection(projection, chunk.index, previous)
+          if (assistantChunkHasVisibleReply(chunk)) {
+            const firstVisible = activity.firstVisibleAssistantTimes.get(step)
+            if (firstVisible === undefined || time < firstVisible) {
+              activity.firstVisibleAssistantTimes.set(step, time)
+            }
+          }
+          this.syncLiveAssistantPresentation(turn, step)
+        }
+        break
+      }
+      case 'usage':
+        // Focus aggregation: per-turn token facts (the shared
+        // accumulator — the footer and Focus can never drift).
+        this.usage.onUsageChunk(turn, step, chunk.usage)
+        this.syncUsage(activity)
+        break
+      case 'finish':
+        break
+    }
+  }
+
+  /** Return the mutable live projection for one logical step. */
+  private liveAssistantProjectionFor(turn: number, step: number): LiveAssistantProjection {
+    const key = stepKey(turn, step)
+    let projection = this.liveAssistantBlocks.get(key)
+    if (projection === undefined) {
+      projection = {
+        states: new Map(),
+        order: [],
+        orderPos: new Map(),
+        blockIndexes: [],
+        blocks: [],
+        displayIndexes: [],
+        displayBlocks: [],
+        assistantVisibleCount: 0,
+        thinkingVisibleCount: 0,
+        openOpaqueCount: 0,
+      }
+      this.liveAssistantBlocks.set(key, projection)
+    }
+    return projection
+  }
+
+  /** Update only the indexed projection affected by one accepted chunk. */
+  private updateLiveAssistantProjection(
+    projection: LiveAssistantProjection,
+    index: number,
+    previous: AssistantBlockState | undefined,
+  ): void {
+    const previousProjection = previous === undefined ? undefined : assistantBlockProjection(previous)
+    const current = projection.states.get(index)
+    const currentProjection = current === undefined ? undefined : assistantBlockProjection(current)
+    if (previousProjection?.assistantVisible === true) projection.assistantVisibleCount -= 1
+    if (previousProjection?.thinkingVisible === true) projection.thinkingVisibleCount -= 1
+    if (previousProjection?.opaque === true) projection.openOpaqueCount -= 1
+    if (currentProjection?.assistantVisible === true) projection.assistantVisibleCount += 1
+    if (currentProjection?.thinkingVisible === true) projection.thinkingVisibleCount += 1
+    if (currentProjection?.opaque === true) projection.openOpaqueCount += 1
+    updateIndexedProjection(projection.order, projection.orderPos, projection.blockIndexes, projection.blocks, index, currentProjection?.content)
+    updateIndexedProjection(projection.order, projection.orderPos, projection.displayIndexes, projection.displayBlocks, index, currentProjection?.display)
+  }
+
+  /** Replace the Focus message candidate with authoritative assembled text. */
+  private replaceMessageCandidate(activity: MutableTurnActivity, step: number, text: string): void {
+    if (activity.completed || activity.confirmedSteps.has(step) || activity.settledSteps.has(step)) return
+    if (step < (activity.lastAssistantStep ?? step)) return
+    const candidate = activity.messageCandidate
+    if (candidate !== undefined && candidate.step !== step) this.confirmMessageCandidate(activity)
+    activity.messageCandidate = text === ''
+      ? undefined
+      : { step, tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP) }
+    if (text !== '') activity.lastAssistantStep = Math.max(activity.lastAssistantStep ?? -1, step)
+    this.syncMessage(activity)
+    activity.revision += 1
+  }
+
+  /** Project the current live block map without duplicating block-end text. */
+  private syncLiveAssistantPresentation(turn: number, step: number): void {
+    const key = stepKey(turn, step)
+    const projection = this.liveAssistantProjectionFor(turn, step)
+    const { blocks, displayBlocks } = projection
+    const hasOpenOpaque = projection.openOpaqueCount > 0
+    const displayProjection = hasOpenOpaque ? displayBlocks : undefined
+    const text = textOf(blocks)
+    const activity = this.activityFor(turn)
+    const visibleNow = projection.assistantVisibleCount > 0
+    const priorLastAssistantStep = activity.lastAssistantStep ?? -1
+    const priorLastAssistantVisible = activity.lastAssistantVisible
+    if (step >= priorLastAssistantStep) {
+      activity.lastAssistantVisible = visibleNow
+      // Any accepted indexed block state owns the latest-step fence, even
+      // when its current projection is hidden (empty text/reasoning/tool-call).
+      // This is structural state only; it never creates a Focus candidate.
+      if (projection.states.size > 0) activity.lastAssistantStep = Math.max(priorLastAssistantStep, step)
+    }
+    if (activity.lastAssistantStep !== priorLastAssistantStep
+      || activity.lastAssistantVisible !== priorLastAssistantVisible) {
+      activity.revision += 1
+    }
+    const entry = this.assistantEntries.get(key)
+    const wasVisible = entry !== undefined && this.isVisible(entry)
+    const staleStep = step < priorLastAssistantStep
+    if (!visibleNow) {
+      // A late reasoning frame may reopen an empty block map after a committed
+      // step was closed. Preserve that step's existing transcript rows; only
+      // the diagnostic Thinking text below may be refreshed.
+      if (!staleStep) {
+        if (entry !== undefined && this.transientAssistantEntries.has(entry)) this.hideTransientAssistantEntry(turn, step)
+        this.replaceMessageCandidate(activity, step, '')
+      }
+    } else {
+      const target = entry ?? this.assistantEntry(turn, step)
+      this.transientAssistantEntries.add(target)
+      this.attemptAssistantEntries.delete(target)
+      this.hiddenAssistantEntries.delete(target)
+      target.text = text
+      target.content = blocks.some(block => block.type !== 'text') ? blocks : undefined
+      target.displayBlocks = displayProjection
+      target.interrupted = undefined
+      bumpAssistantPresentationRevision(target)
+      this.markStreamingEntryDirty(`assistant:${key}`)
+      if (text.trim() !== '') {
+        this.replaceMessageCandidate(activity, step, text)
+      } else if (!hasOpenOpaque) {
+        this.replaceMessageCandidate(activity, step, '')
+      } else {
+        // A new opaque step confirms an older real-text candidate, but never
+        // creates a candidate from the pending fallback itself. If this same
+        // step's semantic text was replaced by an empty block, clear its old
+        // candidate instead of leaving stale Focus text behind.
+        const candidate = activity.messageCandidate
+        if (candidate !== undefined && candidate.step === step) {
+          this.replaceMessageCandidate(activity, step, '')
+        } else if (candidate !== undefined && candidate.step < step) {
+          this.confirmMessageCandidate(activity)
+          this.syncMessage(activity)
+          activity.revision += 1
+        }
+      }
+      this.syncAssistantVisibility(turn, step, target, wasVisible, false)
+    }
+
+    const reasoning = projection.thinkingVisibleCount === 0
+      ? ''
+      : blocks
+        .filter((block): block is Extract<ContentBlock, { type: 'reasoning' }> => block.type === 'reasoning')
+        .map(block => block.text)
+        .join('')
+    const thinkingKey = `thinking:${key}`
+    if (reasoning === '') {
+      if (!staleStep) {
+        this.hideThinkingEntry(turn, step)
+        this.clearThinkingPreview(this.activityFor(turn), step)
+      }
+      return
+    }
+    const thinking = this.thinkingEntry(turn, step)
+    this.hiddenThinkingEntries.delete(thinking)
+    thinking.text = reasoning
+    thinking.running = true
+    this.markStreamingEntryDirty(thinkingKey)
+    this.restoreThinkingPreview(this.activityFor(turn), step, reasoning)
+  }
+
+  /** Fold one durable assistant stream once for both presentation order and
+   * restored content. The indexed state is updated in O(1) per accepted chunk;
+   * only the final projections sort the retained indexes. */
+  private assistantStreamProjection(stream: readonly unknown[]): AssistantStreamProjection {
+    const states = new Map<number, AssistantBlockState>()
+    const rowOrder: Array<'thinking' | 'assistant'> = []
+    let assistantVisibleCount = 0
+    let thinkingVisibleCount = 0
+    let assistantPresent = false
+    let thinkingPresent = false
+
+    const adjustVisibility = (state: AssistantBlockState, amount: number): void => {
+      const projection = assistantBlockProjection(state)
+      if (projection.assistantVisible) assistantVisibleCount += amount
+      if (projection.thinkingVisible) thinkingVisibleCount += amount
+    }
+
+    for (const { chunk } of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
+      if (chunk.type === 'usage' || chunk.type === 'finish') continue
+      const previous = states.get(chunk.index)
+      if (!applyAssistantBlockChunk(states, chunk)) continue
+      if (previous !== undefined) adjustVisibility(previous, -1)
+      const current = states.get(chunk.index)
+      if (current !== undefined) adjustVisibility(current, 1)
+
+      const visibleNow = assistantVisibleCount > 0
+      const nextThinking = thinkingVisibleCount > 0
+      // Match live step-level materialization: a hidden aggregate lane is
+      // removed, and a later recreation is appended after surviving rows.
+      if (visibleNow !== assistantPresent) {
+        if (visibleNow) rowOrder.push('assistant')
+        else {
+          const index = rowOrder.indexOf('assistant')
+          if (index >= 0) rowOrder.splice(index, 1)
+        }
+        assistantPresent = visibleNow
+      }
+      if (nextThinking !== thinkingPresent) {
+        if (nextThinking) rowOrder.push('thinking')
+        else {
+          const index = rowOrder.indexOf('thinking')
+          if (index >= 0) rowOrder.splice(index, 1)
+        }
+        thinkingPresent = nextThinking
+      }
+    }
+
+    return {
+      states,
+      blocks: assistantContentFromBlocks(states),
+      displayBlocks: assistantDisplayBlocksFromStates(states),
+      firstLane: rowOrder[0],
+    }
+  }
+
+  private restoreThinkingFromProjection(turn: number, step: number, projection: AssistantStreamProjection): void {
+    const activity = this.activityByTurn.get(turn)
+    const staleStep = activity !== undefined && step < (activity.lastAssistantStep ?? step)
+    const key = stepKey(turn, step)
+    // A late replay may supply the first diagnostic row for an older step, but
+    // it must not replace reasoning already restored from that step's earlier
+    // authoritative attempt.
+    if (staleStep && this.thinkingEntries.has(key)) return
+    const text = projection.blocks
+      .filter((block): block is Extract<ContentBlock, { type: 'reasoning' }> => block.type === 'reasoning')
+      .map(block => block.text)
+      .join('')
+    if (text === '') {
+      if (!staleStep) {
+        this.hideThinkingEntry(turn, step)
+        const activity = this.activityByTurn.get(turn)
+        if (activity !== undefined) this.clearThinkingPreview(activity, step)
+      }
+      return
+    }
+    const entry = this.thinkingEntry(turn, step)
+    this.hiddenThinkingEntries.delete(entry)
+    entry.text = text
+    this.markStreamingEntryDirty(`thinking:${key}`)
+    this.closeThinking(entry)
+    this.restoreThinkingPreview(this.activityFor(turn), step, text)
+  }
+
+  /** Restore assistant interruption evidence from a durable attempt. Text and
+   * finalized non-text blocks are retained; reasoning remains in the Think
+   * entry. Tool-call-only content is retained as hidden evidence until the
+   * closed boundary. An open opaque block keeps display-only evidence while
+   * the attempt is live. The attempt entry is still transient so `llm/retry`
+   * can reset it. */
+  private restoreAssistantAttempt(turn: number, step: number, projection: AssistantStreamProjection): void {
+    const { states, blocks, displayBlocks } = projection
+    const hasOpenOpaque = displayBlocks.some(block => block.kind === 'open-opaque')
+    const displayProjection = hasOpenOpaque ? displayBlocks : undefined
+    const visibleNow = displayProjection === undefined
+      ? assistantBlocksVisibleNow(blocks)
+      : assistantDisplayBlocksVisibleNow(displayProjection)
+    const hasEvidence = displayProjection === undefined
+      ? assistantBlocksHaveInterruptionEvidence(blocks)
+      : assistantDisplayBlocksHaveInterruptionEvidence(displayProjection)
+    // An explicitly decoded block state is authoritative even when it has no
+    // visible Assistant row (reasoning/tool-call/empty text). Only an entirely
+    // empty stream may preserve a live prefix as attempt evidence.
+    const hasAuthoritativeBlockState = states.size > 0
+    const text = textOf(blocks)
+    const key = stepKey(turn, step)
+    const activity = this.activityFor(turn)
+    const existing = this.assistantEntries.get(key)
+    if (existing === undefined && step < (activity.lastAssistantStep ?? -1)) return
+    if (hasAuthoritativeBlockState && step >= (activity.lastAssistantStep ?? -1)) {
+      // Durable attempt evidence owns the same structural stale-event fence
+      // as live opaque presentation. Hidden authoritative state clears the
+      // latest-visible bit while preserving the monotonic step fence.
+      activity.lastAssistantVisible = visibleNow
+      // Hidden authoritative state is still the latest structural output and
+      // must fence late older steps without creating a Message candidate.
+      activity.lastAssistantStep = Math.max(activity.lastAssistantStep ?? -1, step)
+    }
+    if (hasAuthoritativeBlockState && text.trim() === '' && activity.messageCandidate?.step === step) {
+      // A hidden authoritative state replaces semantic text for this step; do
+      // not leave the earlier live candidate visible in Focus.
+      this.replaceMessageCandidate(activity, step, '')
+    }
+    const wasVisible = existing !== undefined && this.isVisible(existing)
+    if (!visibleNow && !hasEvidence && !hasAuthoritativeBlockState) {
+      // A live prefix may be the only evidence when the compact settlement
+      // carries no block state. Keep that prefix as attempt evidence instead
+      // of promoting it to a normal settled message.
+      if (existing !== undefined && this.transientAssistantEntries.has(existing)) {
+        const hasOpenOpaque = existing.displayBlocks?.some(block => block.kind === 'open-opaque') === true
+        if (hasOpenOpaque) this.hideTransientAssistantEntry(turn, step)
+        else this.attemptAssistantEntries.add(existing)
+      }
+      return
+    }
+    const entry = existing ?? this.assistantEntry(turn, step)
+    this.hiddenAssistantEntries.delete(entry)
+    this.transientAssistantEntries.add(entry)
+    this.attemptAssistantEntries.add(entry)
+    entry.text = text
+    entry.content = blocks.some(block => block.type !== 'text') ? blocks : undefined
+    entry.displayBlocks = displayProjection
+    entry.interrupted = undefined
+    this.markStreamingEntryDirty(`assistant:${key}`)
+    this.syncAssistantVisibility(turn, step, entry, wasVisible, false)
+  }
+
+  /** Mark durable attempt evidence visible at the closed boundary. Empty and
+   * reasoning-only attempts remain hidden; tool-call and generic finalized
+   * blocks become interrupted assistant evidence here, not while running. */
+  private markAttemptEvidenceInterrupted(turn: number, step?: number): void {
+    for (const [key, item] of this.assistantEntries) {
+      if (item.turn !== turn || !this.attemptAssistantEntries.has(item)) continue
+      const itemStep = Number(key.slice(key.indexOf('/') + 1))
+      if (step !== undefined && itemStep !== step) continue
+      if (!assistantEntryHasInterruptionEvidence(item)) continue
+      if (this.hiddenAssistantEntries.has(item)) continue
+      const wasVisible = this.isVisible(item)
+      item.interrupted = true
+      this.syncAssistantVisibility(turn, itemStep, item, wasVisible)
+    }
+  }
+
+  /** Restore a SETTLED thinking entry from the reasoning blocks of a
+   * durable assistant message (Session v2 cold replay — the assembled
+   * `message.content` carries `reasoning` blocks the live plane streamed
+   * as deltas). The durable message is authoritative: it replaces any
+   * earlier same-step reasoning, including replacing it with no entry. */
+  private restoreThinkingFromMessage(turn: number, step: number, blocks: readonly ContentBlock[]): void {
+    const key = stepKey(turn, step)
+    let text = ''
+    for (const block of blocks) {
+      if (block.type === 'reasoning') text += block.text
+    }
+    if (text === '') {
+      const existing = this.thinkingEntries.get(key)
+      // Legacy/live messages may omit reasoning blocks even though the live
+      // entry already has useful text; close that entry in place. A closed
+      // retry entry (or an empty reset entry) is authoritative-empty and is
+      // tombstoned instead.
+      if (existing !== undefined && existing.running && existing.text !== '') {
+        this.closeThinking(existing)
+      } else {
+        this.hideThinkingEntry(turn, step)
+        const activity = this.activityByTurn.get(turn)
+        if (activity !== undefined) this.clearThinkingPreview(activity, step)
+      }
+      return
+    }
+    const entry = this.thinkingEntry(turn, step)
+    this.hiddenThinkingEntries.delete(entry)
+    entry.text = text
+    this.markStreamingEntryDirty(`thinking:${key}`)
+    this.closeThinking(entry)
+    this.restoreThinkingPreview(this.activityFor(turn), step, text)
+  }
+
   /**
    * Hydrate a cold session log in one batch. Folding remains event-ordered,
    * but expensive read-run reflow is deferred until every event has settled;
@@ -1294,7 +2954,11 @@ export class TranscriptFolder {
         if (members !== undefined && members[0] === index) grouped.push(group)
         continue
       }
-      grouped.push(this.items[index]!)
+      const item = this.items[index]
+      if (item === undefined) continue
+      // Tombstoned failed-attempt text never renders.
+      if (!this.isVisible(item)) continue
+      grouped.push(item)
     }
     return grouped
   }
@@ -1370,6 +3034,8 @@ export class TranscriptFolder {
       }
       const message = this.items[index]
       if (message === undefined) continue
+      // Tombstoned failed-attempt text never renders.
+      if (!this.isVisible(message)) continue
       kept.push(message)
       if (message.kind === 'tool') tools += 1
     }
@@ -1533,6 +3199,9 @@ export class TranscriptFolder {
       // merged group's text lives ONLY on the representative entry (a
       // group expansion marks exactly that one entry dirty).
       if (representative !== id) return
+      // Tombstoned failed-attempt text is not part of the corpus.
+      const item = this.items[id]
+      if (item !== undefined && !this.isVisible(item)) return
       if (!entry.normalizedText.includes(needle)) return
       if (seen.has(representative)) return
       seen.add(representative)
@@ -1587,6 +3256,42 @@ export class TranscriptFolder {
     if (open.size === 0) this.openThinkingByTurn.delete(entry.turn)
   }
 
+  /** Tombstone one thinking entry while preserving raw item indexes. */
+  private hideThinkingEntry(turn: number, step: number): void {
+    const key = stepKey(turn, step)
+    const entry = this.thinkingEntries.get(key)
+    if (entry === undefined) return
+    entry.text = ''
+    this.closeThinking(entry)
+    this.thinkingEntries.delete(key)
+    if (!this.hiddenThinkingEntries.has(entry)) {
+      this.hiddenThinkingEntries.add(entry)
+      this.markStreamingEntryDirty(`thinking:${key}`)
+      this.removeGroupedTurn(entry.turn)
+    }
+  }
+
+  /** Reset same-step presentation and first-visible boundary at the scheduled
+   * retry boundary. The separate usage fold intentionally remains untouched so
+   * first-token timing and committed usage span the retry wait. */
+  private resetThinkingForRetry(turn: number, step: number): void {
+    this.liveAssistantBlocks.delete(stepKey(turn, step))
+    this.hideTransientAssistantEntry(turn, step)
+    this.hideThinkingEntry(turn, step)
+    const activity = this.activityByTurn.get(turn)
+    if (activity === undefined) return
+    if (!activity.settledSteps.has(step)) activity.firstVisibleAssistantTimes.delete(step)
+    this.clearThinkingPreview(activity, step)
+    const candidate = activity.messageCandidate
+    if (candidate !== undefined && candidate.step === step
+      && !activity.settledSteps.has(step) && !activity.confirmedSteps.has(step)) {
+      activity.messageCandidate = undefined
+      this.syncMessage(activity)
+    }
+    this.syncUsage(activity)
+    activity.revision += 1
+  }
+
   /** Settle only the thinking entries owned by one ended turn. */
   private closeThinkingForTurn(turn: number): void {
     const open = this.openThinkingByTurn.get(turn)
@@ -1619,6 +3324,7 @@ export class TranscriptFolder {
     let entry = this.assistantEntries.get(key)
     if (entry === undefined) {
       entry = { kind: 'assistant', turn, text: '' }
+      rememberAssistantStep(entry, step)
       this.assistantEntries.set(key, entry)
       this.searchIndexByStepKey.set(`assistant:${key}`, this.appendItem(entry))
     }
@@ -1693,14 +3399,83 @@ export class TranscriptFolder {
     // Only an EXPLICIT replacement is filtered; unmarked legacy events
     // keep their current behavior (no surfaceOp = not a surface event at
     // all — the helper requires the event type AND the marker).
-    if (isReplacementSurfaceEvent(event)) return
+    if (isReplacementSurfaceEvent(event)) {
+      if (event.type === 'user/message') this.claimedNextStepTurns.delete(event.data.id)
+      return
+    }
     // Compaction lifecycle events are typed STRUCTURALLY: dsh-compaction
     // is not a peer dependency, so its session-event augmentation never
     // enters our type graph (the same pattern as the structural service
     // types). An unknown event type is otherwise skipped by the switch.
     const kind = event.type as string
+    if (kind === 'agent/inbox/spliced') {
+      const data = event.data as {
+        target: 'next-turn' | 'next-step'
+        start: number
+        removedCount?: number
+        inserted: readonly { id: string }[]
+        outcome?: 'canceled'
+      }
+      const inserted = data.inserted.map(message => ({ id: message.id, insertionTurn: this.openTurn, insertionTime: event.time }))
+      let removed: NextStepInboxIdentity[] = []
+      if (data.target === 'next-step') {
+        removed = this.pendingNextSteps.splice(
+          data.start,
+          data.removedCount ?? 0,
+          ...inserted,
+        )
+      }
+      for (const { id } of inserted) this.claimedNextStepTurns.delete(id)
+      if (data.target === 'next-step' && data.outcome !== 'canceled') {
+        for (const identity of removed) this.claimedNextStepTurns.set(identity.id, identity)
+      }
+      return
+    }
     if (kind === 'compaction/start' || kind === 'compaction/summary' || kind === 'compaction/end' || kind === 'session/end-seed') {
       this.applyCompactionEvent(event as { type: string; data: Record<string, unknown> }, kind)
+      return
+    }
+    if (kind === 'llm/retry-started') {
+      const data = event.data as { turn: number; step: number }
+      if (this.activityByTurn.get(data.turn)?.completed === true) return
+      // This event only closes the usage replacement slot. Presentation was
+      // reset at the earlier scheduled `llm/retry` boundary. Keeping the two
+      // boundaries separate preserves the first-token timing across the wait.
+      this.usage.onRetryStarted(data.turn, data.step)
+      return
+    }
+    // `assistant/attempt` is a Session v2 durable settlement (master
+    // vocabulary — the installed dsh-session may lag, so it is typed
+    // structurally). It has no settled surface message, but its complete
+    // stream remains interruption evidence until a retry resets it or the
+    // turn closes. Usage is folded independently from the stream.
+    if (kind === 'assistant/attempt') {
+      const data = event.data as { turn: number; step: number; stream?: readonly unknown[] }
+      const existingActivity = this.activityByTurn.get(data.turn)
+      if (existingActivity?.completed === true) return
+      // An authoritative assistant/message owns this step permanently; a
+      // later attempt replay must not turn the settled row back into a
+      // transient/open presentation. Its usage is still folded independently
+      // below so Focus and Stats keep the same late-fact policy.
+      const alreadySettled = existingActivity?.settledSteps.has(data.step) === true
+      const stream = data.stream ?? []
+      this.liveAssistantBlocks.delete(stepKey(data.turn, data.step))
+      const projection = alreadySettled ? undefined : this.assistantStreamProjection(stream)
+      // The durable embedded stream is COMPLETE and authoritative for
+      // reasoning; restore the first lane before the other one so cold replay
+      // preserves the live Thinking → Assistant / Assistant → Thinking order.
+      if (projection?.firstLane === 'thinking') this.restoreThinkingFromProjection(data.turn, data.step, projection)
+      if (projection !== undefined) this.restoreAssistantAttempt(data.turn, data.step, projection)
+      this.usage.onAssistantAttempt(data.turn, data.step, usageFromAssistantSettlement('attempt', undefined, stream))
+      const activity = this.activityFor(data.turn)
+      const key = stepKey(data.turn, data.step)
+      if (projection !== undefined && projection.firstLane !== 'thinking') {
+        this.restoreThinkingFromProjection(data.turn, data.step, projection)
+      }
+      this.syncUsage(activity)
+      const thinking = this.thinkingEntries.get(key)
+      if (thinking !== undefined && thinking.running) this.closeThinking(thinking)
+      activity.revision += 1
       return
     }
     switch (event.type) {
@@ -1712,7 +3487,23 @@ export class TranscriptFolder {
         // accumulator state (review finding).
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
+        activity.pendingPreSteerAnswerStep = undefined
+        const previousStep = event.data.step - 1
+        if (activity.lastAssistantStep === previousStep
+          && activity.settledSteps.has(previousStep)) {
+          const previous = this.assistantEntries.get(stepKey(event.data.turn, previousStep))
+          if (previous !== undefined && previous.interrupted !== true) {
+            const blocks = assistantEntryBlocks(previous)
+            const visible = assistantBlocksVisibleNow(blocks)
+            const hasToolCall = blocks.some(block => block.type === 'tool-call')
+            if (visible && !hasToolCall) activity.pendingPreSteerAnswerStep = previousStep
+          }
+        }
         this.usage.onStepStart(event.data.turn, event.data.step)
+        // Owner lifecycle: the step is now open (plan §5.1). Guarded by the
+        // same replay fence as the usage accounting — a late step/start
+        // after turn/end must not reopen the step for owner capture.
+        this.workflow.onStepStart(event.data.turn, event.data.step)
         const candidate = activity.messageCandidate
         if (candidate !== undefined && candidate.step < event.data.step) {
           this.confirmMessageCandidate(activity)
@@ -1731,8 +3522,15 @@ export class TranscriptFolder {
         // a late step/end (replay artifact) is a no-op (review finding).
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
+        // A failed attempt closes at step/end even when the turn continues;
+        // expose its preserved evidence without waiting for turn/end.
+        this.markAttemptEvidenceInterrupted(event.data.turn, event.data.step)
         this.usage.onStepEnd(event.data.turn, event.data.step)
         this.syncUsage(activity)
+        // Owner lifecycle: the step closed — clear the matching open step
+        // and project interrupted for step-owned Workflow runs without a
+        // terminal fact (plan §5.1/§5.3).
+        this.workflow.onStepEnd(event.data.turn, event.data.step)
         break
       }
       case 'turn/start': {
@@ -1753,24 +3551,54 @@ export class TranscriptFolder {
         activity.startedAt = event.time
         activity.completed = false
         activity.reason = undefined
+        if (event.data.turn === this.currentTurn) {
+          this.openTurn = event.data.turn
+          this.workflow.onTurnStart(event.data.turn)
+        }
         activity.revision += 1
         break
       }
       case 'user/message': {
+        const claimedIdentity = this.claimedNextStepTurns.get(event.data.id)
+        const wasClaimedFromNextStep = this.claimedNextStepTurns.delete(event.data.id)
+        // Only a next-step identity inserted during this admission turn is a
+        // mid-turn steer; an idle wake or a claim carried across turns is an
+        // ordinary opening/follow-up user message.
+        const isMidTurnSteer = wasClaimedFromNextStep
+          && claimedIdentity !== undefined
+          && claimedIdentity.insertionTurn === this.currentTurn
         const blocks = event.data.content
-        // User messages keep an inline `🖼️ name` marker at every image's
-        // position in the FLAT text too (textWithImageMarkers): the search
-        // and loader-less rendering paths consume `text`, and a mixed
-        // message must never read as if the image was not there. The
-        // ordered `content` blocks stay the canonical form for thumbnails.
-        const text = textWithImageMarkers(blocks)
-        if (text === '' && !blocks.some(block => block.type === 'image')) break
-        // Only direct human prompts are user messages; plugin-injected
-        // context (system reminders, skill content) folds into a collapsible
-        // system entry.
+        // User messages keep known attachment markers at their original
+        // positions in the FLAT text; the ordered `content` blocks stay the
+        // canonical form for rich rendering. A finalized non-text block is
+        // human-visible content for a direct user prompt even when the
+        // lightweight projection is empty, so a future block cannot disappear.
+        const text = textWithAttachmentMarkers(blocks)
+        // Only direct human prompts use the generalized finalized-content
+        // predicate. Injected context keeps its text-only empty gate: a
+        // process block must not turn into an empty system row.
         if (event.data.source.kind === 'user') {
-          this.appendItem({ kind: 'user', turn: this.currentTurn, text, content: blocks })
+          if (!userBlocksVisibleNow(blocks)) break
+          const activity = this.activityFor(this.currentTurn)
+          if (activity.pendingPreSteerAnswerStep !== undefined) {
+            const firstVisible = activity.firstVisibleAssistantTimes.get(activity.pendingPreSteerAnswerStep)
+            // Keep an early same-turn steer pending for a later message in
+            // the same admitted next-step batch.
+            if (isMidTurnSteer
+               && claimedIdentity !== undefined
+               && firstVisible !== undefined
+               && firstVisible < claimedIdentity.insertionTime) this.commitPreSteerAnswer(activity)
+            else if (!isMidTurnSteer) activity.pendingPreSteerAnswerStep = undefined
+          }
+          this.appendItem({
+            kind: 'user',
+            turn: this.currentTurn,
+            text,
+            content: blocks,
+            ...(isMidTurnSteer ? { steer: true as const } : {}),
+          })
         } else {
+          if (text === '') break
           // Injected context: name the producer the way the Web row does
           // (contextProvenance), plus a notice form's one-line account. The
           // fold stores the icon SEMANTIC (never the concrete glyph), so a
@@ -1784,49 +3612,15 @@ export class TranscriptFolder {
             ...provenance.label === null ? {} : { label: provenance.label },
             ...summary === null ? {} : { summary },
             icon: contextIconSemantic(event.data.source),
+            // The source-derived semantic marker: this row IS injected
+            // context (never orchestration like llm/retry or max-tokens),
+            // so Focus may treat it as turn foundation.
+            context: true as const,
           })
           // Focus aggregation: injected context (skill-invocation,
           // skill-catalog, system reminders) is orchestration, NOT one of
           // the three process slots — it never enters Think/Message/Tool
           // (plan §16).
-        }
-        break
-      }
-      case 'assistant/chunk': {
-        const { chunk } = event.data
-        const step = event.data.step
-        // After turn/end a late assistant event is a replay artifact: it
-        // must not mutate the transcript entries — the final-answer
-        // selection reads the exact last assistant (review finding).
-        const activity = this.activityFor(event.data.turn)
-        if (activity.completed) break
-        // Streaming text accumulates in place on the entry itself; there is
-        // no separate accumulator map, so a long session's text is stored
-        // once, not twice.
-        if (chunk.type === 'text-delta') {
-          this.assistantEntry(event.data.turn, step).text += chunk.text
-          // Search projection: O(1) dirty mark — the entry is re-normalized
-          // as a WHOLE string at the next search (Unicode lowercasing is
-          // not chunk-splittable — Greek sigma — but the live streaming
-          // path must never pay per-chunk lowercase).
-          this.markStreamingEntryDirty(`assistant:${stepKey(event.data.turn, step)}`)
-          // Focus aggregation: the streaming assistant text feeds the
-          // Message candidate IMMEDIATELY (no assistant/message wait —
-          // plan §5.2), so the running card previews the intermediate
-          // message in real time.
-          this.foldMessageCandidate(this.activityFor(event.data.turn), step, chunk.text)
-        } else if (chunk.type === 'reasoning-delta') {
-          this.thinkingEntry(event.data.turn, step).text += chunk.text
-          // Search projection: O(1) dirty mark (see the text-delta path).
-          this.markStreamingEntryDirty(`thinking:${stepKey(event.data.turn, step)}`)
-          // Focus aggregation: keep a compact reasoning preview (the
-          // rolling tail — never the full stream, plan §10.6/§42).
-          this.foldThinking(this.activityFor(event.data.turn), chunk.text)
-        } else if (chunk.type === 'usage') {
-          // Focus aggregation: per-turn token facts (the shared
-          // accumulator — the footer and Focus can never drift).
-          this.usage.onUsageChunk(event.data.turn, step, chunk.usage)
-          this.syncUsage(activity)
         }
         break
       }
@@ -1837,26 +3631,49 @@ export class TranscriptFolder {
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
         const key = stepKey(event.data.turn, event.data.step)
+        const priorLast = activity.lastAssistantStep ?? -1
+        const entry = this.assistantEntries.get(key)
+        // A durable assistant/message is always a transcript surface fact.
+        // A stale step may not own Focus final selection, but it must remain
+        // available in the ordinary transcript and search projections.
+        this.liveAssistantBlocks.delete(key)
+        const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
         const text = textOf(messageBlocks)
-        const entry = this.assistantEntries.get(key)
+        const firstVisible = firstVisibleAssistantTimeFromStream(event.data.stream)
+        if (firstVisible === undefined) activity.firstVisibleAssistantTimes.delete(event.data.step)
+        else activity.firstVisibleAssistantTimes.set(event.data.step, firstVisible)
+        const wasVisible = entry !== undefined && this.isVisible(entry)
         if (entry !== undefined) {
+          rememberAssistantStep(entry, event.data.step)
           entry.text = text
-          // The settled full blocks (kept when the step carried images or
-          // other non-text blocks — text-only steps stay on the text path).
-          if (messageBlocks.some(block => block.type !== 'text')) entry.content = messageBlocks
+          // The durable message takes over the live/attempt entry: it is no
+          // longer transient, so retry cleanup can never remove settled text.
+          this.transientAssistantEntries.delete(entry)
+          this.attemptAssistantEntries.delete(entry)
+          entry.displayBlocks = undefined
+          entry.interrupted = event.data.interrupted === true ? true : undefined
+          // The settled full blocks replace any earlier attempt evidence;
+          // text-only messages must also clear stale non-text content.
+          entry.content = messageBlocks.some(block => block.type !== 'text') ? messageBlocks : undefined
           // The settled text REPLACES the streamed tail: the search
           // projection must mirror the authoritative text, not the chunks
           // (lazy — mark dirty, O(1)).
           const searchIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
           if (searchIndex !== undefined) this.markSearchEntryDirty(searchIndex)
         } else {
-          // ALWAYS preserve the entry — an empty settled message with no
-          // preceding chunk (replay edge) must still own the exact-last
-          // assistant slot, so the final selection never falls back to an
-          // earlier answer (review finding).
-          const created: TranscriptMessage = { kind: 'assistant', turn: event.data.turn, text, ...(messageBlocks.some(block => block.type !== 'text') ? { content: messageBlocks } : {}) }
+          // ALWAYS preserve the durable entry — including an empty message
+          // and an older step with no preceding chunk. Focus ownership is
+          // fenced separately below; it must never delete a real settlement.
+          const created: Extract<TranscriptMessage, { kind: 'assistant' }> = {
+            kind: 'assistant',
+            turn: event.data.turn,
+            text,
+            ...(messageBlocks.some(block => block.type !== 'text') ? { content: messageBlocks } : {}),
+            ...(event.data.interrupted === true ? { interrupted: true as const } : {}),
+          }
+          rememberAssistantStep(created, event.data.step)
           this.assistantEntries.set(key, created)
           // The created entry must register its search index too: a later
           // replay replacement or text delta mutates this entry in place
@@ -1864,10 +3681,14 @@ export class TranscriptFolder {
           // finding — the streaming-created path already registers).
           this.searchIndexByStepKey.set(`assistant:${key}`, this.appendItem(created))
         }
+        const settledEntry = this.assistantEntries.get(key)
+        if (settledEntry !== undefined) this.syncAssistantVisibility(event.data.turn, event.data.step, settledEntry, wasVisible, false)
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.
-        const thinking = this.thinkingEntries.get(key)
-        if (thinking !== undefined) this.closeThinking(thinking)
+        // On a COLD replay no live reasoning deltas ever arrived — the
+        // assembled `reasoning` blocks in the durable message restore the
+        // settled thinking entry (Session v2 embedded-stream parity).
+        this.restoreThinkingFromMessage(event.data.turn, event.data.step, messageBlocks)
         // Focus aggregation: the settled assistant text OVERWRITES the
         // candidate's text (authoritative — plan §5.4) but does NOT decide
         // whether it is the final answer; the candidate keeps its step
@@ -1881,58 +3702,71 @@ export class TranscriptFolder {
         // it is a replay artifact and must never resurrect a preview
         // (review finding).
         activity.settledSteps.add(event.data.step)
-        // A message of a DIFFERENT step than the open candidate proves the
-        // earlier step's output was intermediate: confirm it first (plan
-        // §5.3 C — a later step's output confirms the earlier candidate).
-        const priorLast = activity.lastAssistantStep ?? -1
-        const prior = activity.messageCandidate
-        // Only a message for a NEWER step confirms the open candidate
-        // (plan §5.3 C); a message for an older step is stale and must
-        // never confirm a still-streaming candidate (review finding).
-        if (prior !== undefined && prior.step < event.data.step) {
-          this.confirmMessageCandidate(activity)
+        const staleForFocus = event.data.step < priorLast
+        if (!staleForFocus) {
+          // A message of a DIFFERENT step than the open candidate proves the
+          // earlier step's output was intermediate: confirm it first (plan
+          // §5.3 C — a later step's output confirms the earlier candidate).
+          activity.lastAssistantVisible = event.data.interrupted === true || assistantBlocksVisibleNow(messageBlocks)
         }
         // Monotonic: a late event for an older step never regresses the
         // last assistant step — the final-answer dedup depends on it
         // (review finding).
         activity.lastAssistantStep = Math.max(priorLast, event.data.step)
-        const candidate = activity.messageCandidate
-        if (candidate !== undefined && candidate.step === event.data.step) {
-          // The authoritative text replaces the streaming tail — bounded
-          // to the tail cap, never a second full copy of the assistant
-          // output (plan §34 — the transcript entry owns the full text).
-          candidate.tail = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
-        } else if (activity.messageConfirmedStep === event.data.step) {
-          // The step's candidate was already confirmed (a tool/call
-          // followed the text) and it is still the LATEST confirmed: the
-          // authoritative message updates the confirmed text IN PLACE —
-          // never a stale streamed fragment, never a resurrected
-          // candidate (review finding). An EMPTY authoritative text
-          // clears the confirmed text (the slot shows nothing — the stale
-          // streamed fragment must not survive).
-          activity.messageConfirmed = text === ''
-            ? undefined
-            : text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
-        } else if (activity.confirmedSteps.has(event.data.step)) {
-          // A late message for an OLDER confirmed step: the slot already
-          // shows a newer intermediate — ignore it entirely.
-        } else if (event.data.step < priorLast) {
-          // A late message for an older step that was never a candidate:
-          // stale — ignore it entirely (review finding).
-        } else if (text !== '' && !activity.completed) {
-          // A settled message without a prior candidate (replay edge): the
-          // authoritative text IS the step's output — it becomes the
-          // candidate so a later continuation still confirms it as an
-          // intermediate message (the LATEST intermediate wins, plan §5.6).
-          // After turn/end the final was already resolved: a late message
-          // must never resurrect a candidate (review finding).
-          activity.messageCandidate = {
-            step: event.data.step,
-            tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP),
+        if (staleForFocus) {
+          // A stale durable settlement cannot reclaim candidate or final
+          // ownership. It may still update the confirmed slot when that exact
+          // step already owns the displayed intermediate message: the
+          // authoritative text must replace the streamed preview in place.
+          if (activity.messageConfirmedStep === event.data.step) {
+            activity.messageConfirmed = text === ''
+              ? undefined
+              : text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
+          }
+        } else {
+          const prior = activity.messageCandidate
+          // Only a message for a NEWER step confirms the open candidate
+          // (plan §5.3 C); a message for an older step is stale and must
+          // never confirm a still-streaming candidate (review finding).
+          if (prior !== undefined && prior.step < event.data.step) {
+            this.confirmMessageCandidate(activity)
+          }
+          const candidate = activity.messageCandidate
+          if (candidate !== undefined && candidate.step === event.data.step) {
+            // The authoritative text replaces the streaming tail — bounded
+            // to the tail cap, never a second full copy of the assistant
+            // output (plan §34 — the transcript entry owns the full text).
+            candidate.tail = text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
+          } else if (activity.messageConfirmedStep === event.data.step) {
+            // The step's candidate was already confirmed (a tool/call
+            // followed the text) and it is still the LATEST confirmed: the
+            // authoritative message updates the confirmed text IN PLACE —
+            // never a stale streamed fragment, never a resurrected
+            // candidate (review finding). An EMPTY authoritative text
+            // clears the confirmed text (the slot shows nothing — the stale
+            // streamed fragment must not survive).
+            activity.messageConfirmed = text === ''
+              ? undefined
+              : text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
+          } else if (activity.confirmedSteps.has(event.data.step)) {
+            // A late message for an OLDER confirmed step: the slot already
+            // shows a newer intermediate — ignore it entirely.
+          } else if (text !== '' && !activity.completed) {
+            // A settled message without a prior candidate (replay edge): the
+            // authoritative text IS the step's output — it becomes the
+            // candidate so a later continuation still confirms it as an
+            // intermediate message (the LATEST intermediate wins, plan §5.6).
+            // After turn/end the final was already resolved: a late message
+            // must never resurrect a candidate (review finding).
+            activity.messageCandidate = {
+              step: event.data.step,
+              tail: text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP),
+            }
           }
         }
         this.syncMessage(activity)
-        this.usage.onAssistantMessage(event.data.turn, event.data.step, event.data.usage)
+        this.usage.onAssistantMessage(event.data.turn, event.data.step, messageUsage)
+        // Settled Assistant visibility was synchronized above without deleting its authoritative entry.
         this.syncUsage(activity)
         activity.revision += 1
         break
@@ -1960,6 +3794,9 @@ export class TranscriptFolder {
           card,
           index: this.items.length - 1,
         })
+        // PTC replay fragments may have parked sub-call starts/settles for
+        // this call before its tool/call arrived; connect them now.
+        this.attachPendingOrphans(card, key)
         // Focus aggregation: count calls ONLY here (a call/result pair is
         // ONE call — plan §10.4), confirm the current message candidate
         // (a tool call after text proves the text was intermediate — plan
@@ -2056,10 +3893,87 @@ export class TranscriptFolder {
         }
         break
       }
+      // Nested PTC sub-dispatch STARTING inside a run_code program (alpha.2
+      // log-only events; the outer curated result may not carry the nested
+      // output, so the TUI folds each sub-call into its own tool card).
+      // The events carry no turn: attribute the child card to the parent
+      // call's turn (the parent stays in pendingCalls until its tool/result
+      // lands), falling back to the current turn for fragments.
+      // Nested PTC sub-dispatch STARTING inside a run_code program (alpha.2
+      // log-only events; the outer curated result may not carry the nested
+      // output). Sub-calls NEVER join the top-level surface flow: the child
+      // card is attached to its parent card's `subCalls` tree (the parent is
+      // the pending run_code call or a deeper pending sub-call). A start
+      // without a known parent (an incomplete replay fragment) is parked in
+      // the private orphan index and connected when the parent appears.
+      case 'tool/ptc-dispatch-start': {
+        const data = event.data as {
+          rootCallId: string
+          parentCallId: string
+          subCallId: string
+          name: string
+          arguments: unknown
+        }
+        const parent = this.pendingCalls.get(data.parentCallId)?.card
+          ?? this.subCallIndex.get(data.parentCallId)
+        if (parent !== undefined) {
+          this.attachSubCall(parent, data.parentCallId, data)
+        } else {
+          const orphan = this.orphanSubCalls.get(data.subCallId)
+          if (orphan === undefined) this.orphanSubCalls.set(data.subCallId, { start: data })
+          else if (orphan.start === undefined) orphan.start = data
+          else if (orphan.start.rootCallId !== data.rootCallId
+            || orphan.start.parentCallId !== data.parentCallId
+            || orphan.start.name !== data.name
+            || JSON.stringify(orphan.start.arguments) !== JSON.stringify(data.arguments)) {
+            // A conflicting duplicate start is impossible on a valid
+            // alpha.2 durable stream — fail fast instead of silently
+            // keeping one.
+            throw new Error(`conflicting PTC sub-call start identity for ${data.subCallId}: first root=${orphan.start.rootCallId} parent=${orphan.start.parentCallId} name=${orphan.start.name}, duplicate root=${data.rootCallId} parent=${data.parentCallId} name=${data.name}`)
+          }
+        }
+        break
+      }
+      // One nested PTC sub-dispatch SETTLING: pair with the start by
+      // subCallId; the status comes from the durable isError flag (never
+      // invented from spilled/truncated content). An orphan settle is
+      // parked and applied when its start/parent appears.
+      case 'tool/ptc-dispatch': {
+        const data = event.data as {
+          rootCallId: string
+          parentCallId: string
+          subCallId: string
+          name: string
+          arguments: unknown
+          isError: boolean
+          content: readonly ContentBlock[]
+        }
+        this.settleSubCall(data.subCallId, {
+          rootCallId: data.rootCallId,
+          parentCallId: data.parentCallId,
+          name: data.name,
+          arguments: data.arguments,
+          isError: data.isError,
+          content: data.content,
+        })
+        break
+      }
       case 'turn/end': {
         // Idempotent: a replayed turn/end must not re-append the
         // synthetic cards or re-settle the activity (review finding).
-        const endActivity = this.activityFor(event.data.turn)
+        const endTurn = event.data.turn
+        if (this.openTurn === endTurn) this.openTurn = undefined
+        // Owner lifecycle: the turn closed — a still-open step of this turn
+        // must not leak into the next turn-less/session-level segment (plan
+        // §5.1/§14.2). The shared projection clears its open step/turn and
+        // projects interrupted on every turn-owned AND step-owned Workflow
+        // run of this turn without a terminal fact (plan §5.3 — upstream
+        // `locationClosed(step)` is `step closed OR owning turn closed`).
+        // Called BEFORE the replay fence: a replayed turn/end must still not
+        // leave a stale open step behind (re-projection is idempotent).
+        this.workflow.onTurnEnd(endTurn)
+        const endActivity = this.activityFor(endTurn)
+        endActivity.pendingPreSteerAnswerStep = undefined
         if (endActivity.completed) break
         // Every still-open thinking entry of THIS turn stops streaming when
         // the turn closes (interrupted steps never see their
@@ -2069,14 +3983,17 @@ export class TranscriptFolder {
         // The synthetic cards carry the EVENT's own turn — never
         // this.currentTurn: a turn-start-less fragment's end must land in
         // its own turn (review finding).
-        const endTurn = event.data.turn
+        for (const key of this.liveAssistantBlocks.keys()) {
+          if (key.startsWith(`${endTurn}/`)) this.liveAssistantBlocks.delete(key)
+        }
+        this.markAttemptEvidenceInterrupted(endTurn)
         this.closeThinkingForTurn(endTurn)
         if (event.data.reason.kind === 'error') {
           // Defensive: a malformed/legacy reason without the error detail
           // degrades to the bare marker instead of crashing the fold
           // (plan §10.2 — Focus aggregates the same events).
           const error = event.data.reason.error
-          this.appendItem({ kind: 'tool', turn: endTurn, name: 'error', args: '', result: error === undefined ? 'error' : `${error.code}: ${error.message}`, status: 'error' })
+          this.appendItem({ kind: 'tool', turn: endTurn, name: 'error', args: '', result: displayFailureText(error), status: 'error' })
         } else if (event.data.reason.kind === 'aborted') {
           this.appendItem({ kind: 'tool', turn: endTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error' })
         } else if (event.data.reason.kind === 'max-tokens') {
@@ -2097,7 +4014,10 @@ export class TranscriptFolder {
           ...(reasonError === undefined ? {} : {
             error: {
               code: typeof reasonError.code === 'string' ? reasonError.code : String(reasonError.code ?? ''),
-              message: typeof reasonError.message === 'string' ? reasonError.message : String(reasonError.message ?? ''),
+              message: displayFailure({
+                code: typeof reasonError.code === 'string' ? reasonError.code : String(reasonError.code ?? ''),
+                message: typeof reasonError.message === 'string' ? reasonError.message : String(reasonError.message ?? ''),
+              }).message,
             },
           }),
         }
@@ -2113,69 +4033,57 @@ export class TranscriptFolder {
         break
       }
       case 'tool-workflow/run-start': {
-        const card: Extract<TranscriptMessage, { kind: 'tool' }> = {
-          kind: 'tool',
-          turn: this.currentTurn,
-          name: 'workflow',
-          args: event.data.name,
-          result: '',
-          status: 'running',
-          members: [],
-        }
-        this.workflowRuns.set(event.data.runId, card)
-        this.workflowRunIndex.set(event.data.runId, this.appendItem(card))
+        // The shared projection captures the authoritative owner (the open
+        // step wins, then the open turn, else the session — plan §5.2) and
+        // creates the durable message.
+        const message = this.workflow.onRunStart(event.data.runId, event.data.name, this.currentTurn)
+        const index = this.appendItem(message)
+        this.workflowIndexes.set(event.data.runId, index)
         // Focus aggregation: a workflow run is a durable lifecycle event,
         // NOT a model tool/call — it never touches the Tool slot or the
         // tool count (plan §17).
         break
       }
       case 'tool-workflow/agent-start': {
-        const { runId, seq, label, phase } = event.data
-        const run = this.workflowRuns.get(runId)
+        const { runId, seq, label, phase, childId } = event.data
         // The member folds INTO the run card (Web WorkflowRunPanel parity):
-        // phase grouping happens at render time over the arrival-ordered rows.
-        const member: WorkflowMemberView = {
-          label,
-          ...phase === undefined ? {} : { phase },
-          status: 'running',
-        }
-        this.workflowMembers.set(`${runId}/${seq}`, member)
-        run?.members?.push(member)
+        // phase grouping happens at render time over the arrival-ordered
+        // rows. A member starting after its owner closed is interrupted
+        // from birth (plan §6.2 — the projection comes from the current
+        // fold facts, no invented recovery flow).
+        this.workflow.onAgentStart(runId, seq, label, phase === undefined ? null : phase, childId)
         break
       }
       case 'tool-workflow/agent-end': {
-        const member = this.workflowMembers.get(`${event.data.runId}/${event.data.seq}`)
-        const outcome = event.data.outcome
-        if (member !== undefined) {
-          member.status = outcome === 'completed' ? 'ok' : 'error'
-        }
+        const { runId, seq, outcome } = event.data
+        // Only the started member with the matching runId + seq settles
+        // (plan §6.3 — never infer a member outcome from run-end).
+        this.workflow.onAgentEnd(runId, seq, outcome)
         break
       }
       case 'tool-workflow/run-end': {
-        const card = this.workflowRuns.get(event.data.runId)
-        if (card !== undefined) {
-          card.status = event.data.stopReason === 'completed' ? 'ok' : 'error'
-          card.result = `stop: ${event.data.stopReason}`
-          // The run result became searchable: mark the entry dirty (lazy).
-          const index = this.workflowRunIndex.get(event.data.runId)
-          if (index !== undefined) this.markSearchEntryDirty(index)
-        }
-        // The run's bookkeeping is done: drop the run card and every member
-        // card keyed under it so long sessions do not accumulate stale maps.
-        this.workflowRuns.delete(event.data.runId)
-        this.workflowRunIndex.delete(event.data.runId)
-        for (const memberKey of this.workflowMembers.keys()) {
-          if (memberKey.startsWith(`${event.data.runId}/`)) this.workflowMembers.delete(memberKey)
-        }
+        // The run's bookkeeping is done: the projection drops its fold
+        // state so long sessions do not accumulate stale maps. The
+        // TranscriptWorkflowMessage itself stays in the transcript items.
+        this.workflow.onRunEnd(event.data.runId, event.data.stopReason)
+        // The index map must not retain completed runs either (the
+        // onChange hook already read the index before the projection
+        // dropped its state).
+        this.workflowIndexes.delete(event.data.runId)
         break
       }
       case 'llm/retry': {
-        const { retry, delayMs, failure } = event.data
+        const { retry, delayMs, failure, turn, step } = event.data
+        if (this.activityByTurn.get(turn)?.completed === true) break
+        // The scheduled retry is the presentation reset boundary. It hides
+        // the failed attempt immediately, while the later retry-started event
+        // only opens the next usage replacement slot.
+        this.resetThinkingForRetry(turn, step)
         const maxRetries = 'maxRetries' in event.data ? event.data.maxRetries : undefined
         const label = maxRetries === undefined
           ? `llm retry ${retry} in ${Math.round(delayMs / 1000)}s`
-          : `llm retry ${retry + 1}/${maxRetries} in ${Math.round(delayMs / 1000)}s`
-        this.appendItem({ kind: 'system', turn: this.currentTurn, text: `${label} — ${failure.code}: ${failure.message}` })
+          : `llm retry ${retry}/${maxRetries} in ${Math.round(delayMs / 1000)}s`
+        this.appendItem({ kind: 'system', turn, text: `${label} — ${displayFailureText(failure)}` })
         // Focus aggregation: retries are orchestration, not a Tool — they
         // stay in the expanded process and never touch the Tool slot
         // (plan §16.2).
@@ -2228,10 +4136,10 @@ export class TranscriptFolder {
 
 /**
  * Fold a session event log into the transcript messages, in log order.
- * `assistant/chunk` text deltas accumulate into the assistant message of
- * their own (turn, step); `reasoning-delta` chunks accumulate into a
- * thinking entry. A tool call and its result merge into one card; an
- * unanswered call stays `running`.
+ * Live text deltas accumulate into the assistant message of their own
+ * (turn, step); `reasoning-delta` chunks accumulate into a thinking entry.
+ * A tool call and its result merge into one card; an unanswered call stays
+ * `running`.
  * @param events - the session log.
  * @param options - optional display window (older turns collapse).
  * @returns ordered renderable messages.
@@ -2243,30 +4151,50 @@ export function foldTranscript(events: readonly SessionEvent[], options?: FoldOp
 }
 
 /**
- * A child session's OWN events: everything after the LAST
+ * A child session's OWN events: everything after the LAST tagged inherited
  * `session/end-seed` marker. The fork provider seeds a child with the
  * PARENT's completed-turn prefix (upstream: "a fork seed replays the
  * parent's log"), so the child log's pre-marker events are the parent's
  * history — parent completion notices included. The subagent viewer must
- * never render them as the child's transcript. Spawned children have no
- * seed and no marker: everything is their own. A resumed child carries a
- * second marker (its stored log becomes the new seed), so the LAST marker
- * is the boundary.
+ * never render them as the child's transcript. Ordinary untagged markers
+ * delimit restore/replay lifecycles and do not change child ownership.
+ * Supported seeded logs always carry the tagged marker; an unseeded child has
+ * no ownership marker, so all of its events remain visible.
  */
 export function childOwnEvents(events: readonly SessionEvent[]): readonly SessionEvent[] {
   let cut = 0
   for (let index = 0; index < events.length; index += 1) {
-    if (events[index]!.type === 'session/end-seed') cut = index + 1
+    const event = events[index]!
+    if (event.type === 'session/end-seed' && event.data.inherited === true) cut = index + 1
   }
   return cut === 0 ? events : events.slice(cut)
 }
 
-/** Render one session's log as a readable markdown transcript for `/export md`. */
-/** The markdown projection of content blocks (review finding 4): text
- * blocks verbatim, image blocks as a compact `🖼️` line (U+FE0F marker,
- * same convention as the transcript and queue summaries) with the durable
- * attachment id — the binary is NEVER embedded, and an image-only message
- * still renders a User/Assistant section. */
+/** Build a markdown fence longer than any backtick run in the payload. */
+function markdownCodeFence(payload: string): string {
+  let longestRun = 0
+  let run = 0
+  for (const character of payload) {
+    if (character === '`') run += 1
+    else {
+      longestRun = Math.max(longestRun, run)
+      run = 0
+    }
+  }
+  longestRun = Math.max(longestRun, run)
+  const fence = '`'.repeat(Math.max(3, longestRun + 1))
+  return `${fence}json\n${payload}\n${fence}`
+}
+
+/** Escape inline presentation text without changing ordinary metadata text. */
+function escapeMarkdownInline(text: string): string {
+  return text.replace(/[\\`*_{}\[\]()!<>]/g, '\\$&')
+}
+
+/** The markdown projection of finalized content blocks: rich attachment
+ * metadata remains readable, opaque ids are labeled as attachment identities,
+ * and unknown block payloads use the same bounded explicit fallback as the
+ * ordinary TUI. Attachment bytes are never embedded. */
 function markdownContent(blocks: readonly ContentBlock[]): string {
   const parts: string[] = []
   let buffer = ''
@@ -2283,12 +4211,29 @@ function markdownContent(blocks: readonly ContentBlock[]): string {
       flush()
       const attachment = block.attachment
       parts.push(`> 🖼️ ${attachment.name ?? 'image'} · ${attachment.width}×${attachment.height} · attachment \`${attachment.attachmentId}\``)
+    } else if (block.type === 'file') {
+      flush()
+      const attachment = block.attachment
+      parts.push(`> ${escapeMarkdownInline(fileAttachmentSummary(attachment))} · attachment \`${attachment.attachmentId}\``)
+    } else if (block.type === 'reasoning' || block.type === 'tool-call') {
+      // These known process blocks have their existing dedicated transcript
+      // semantics; a finalized tool-result has no separate assistant surface,
+      // so it uses the explicit bounded fallback below.
+      continue
+    } else {
+      flush()
+      const fallback = finalizedBlockFallbackText(block)
+      const newline = fallback.indexOf('\n')
+      const heading = newline === -1 ? fallback : fallback.slice(0, newline)
+      const payload = newline === -1 ? '' : fallback.slice(newline + 1)
+      parts.push(`> ${escapeMarkdownInline(heading)}${payload === '' ? '' : `\n\n${markdownCodeFence(payload)}`}`)
     }
   }
   flush()
   return parts.join('\n\n')
 }
 
+/** Render one session's log as a readable markdown transcript for `/transcript`. */
 export function renderTranscriptMarkdown(session: {
   header: SessionHeader
   snapshotEvents(): readonly SessionEvent[]
@@ -2301,7 +4246,25 @@ export function renderTranscriptMarkdown(session: {
       : [`- agent preset: ${session.header.agentPreset}`],
     '',
   ]
-  // Alpha.4 Session shape: the raw log arrives as a snapshot read, never a
+  // Workflow runs: the SHARED semantic projection (the same owner-tracking
+  // engine as the visual Transcript fold) folds the durable lifecycle events
+  // into one readable block per run, flushed at run-end (or at export end
+  // for a run without one — plan §7.4: no rich format, the new semantic
+  // kind must not regress the export). Reusing the projection means the
+  // export can never drift from the UI on run/member statuses — an
+  // owner-closed run without a terminal fact exports as `interrupted`, not
+  // `running`.
+  const workflow = new WorkflowProjection()
+  // The visual fold's replay fences: a step/start or step/end for a turn
+  // whose turn/end already passed is a replay artifact and must not reopen
+  // the owner lifecycle (the export applies the same fence so a replayed
+  // fragment can never diverge from the visual projection).
+  const completedTurns = new Set<number>()
+  // The visual fold's current-turn rule: only the turn/start of the NEWEST
+  // turn opens the workflow turn (a late turn/start for an older turn — or
+  // for a closed turn — is a no-op).
+  let currentTurn = -1
+  // Alpha.4 Session shape: the event log arrives as a snapshot read, never a
   // live array — the markdown export is a full-log fold by definition.
   for (const event of session.snapshotEvents()) {
     // The same append-origin contract as the transcript fold: a surface
@@ -2311,6 +4274,34 @@ export function renderTranscriptMarkdown(session: {
     // position. Unmarked legacy events keep their current behavior.
     if (isReplacementSurfaceEvent(event)) continue
     switch (event.type) {
+      // Owner lifecycle: the shared projection tracks the open step/turn so
+      // run-start captures the same owner the visual fold would. The
+      // completed-turn fence mirrors the visual fold's activity.completed
+      // gate (a late step/start or step/end after turn/end is a no-op).
+      case 'step/start': {
+        if (!completedTurns.has(event.data.turn)) workflow.onStepStart(event.data.turn, event.data.step)
+        break
+      }
+      case 'step/end': {
+        if (!completedTurns.has(event.data.turn)) workflow.onStepEnd(event.data.turn, event.data.step)
+        break
+      }
+      case 'turn/start': {
+        // The visual fold's exact gate: the turn is opened only for the
+        // NEWEST turn's first turn/start, and never for a closed turn (the
+        // projection's monotonic open-turn rule covers a mid-turn replay of
+        // the open turn itself).
+        if (event.data.turn > currentTurn) currentTurn = event.data.turn
+        if (!completedTurns.has(event.data.turn) && event.data.turn === currentTurn) {
+          workflow.onTurnStart(event.data.turn)
+        }
+        break
+      }
+      case 'turn/end': {
+        completedTurns.add(event.data.turn)
+        workflow.onTurnEnd(event.data.turn)
+        break
+      }
       case 'user/message': {
         const text = markdownContent(event.data.content)
         if (text !== '') lines.push(`## User\n\n${text}\n`)
@@ -2332,13 +4323,69 @@ export function renderTranscriptMarkdown(session: {
         if (text !== '') lines.push(`<details><summary>result</summary>\n\n${text}\n\n</details>\n`)
         break
       }
+      // PTC nested sub-dispatches (alpha.2 log-only events): the outer
+      // curated result may not carry the nested output, so the export
+      // keeps the sub-call args and rendered content (simple indented
+      // form — no new export format).
+      case 'tool/ptc-dispatch-start': {
+        const data = event.data as { name: string; subCallId: string; arguments: unknown }
+        const args = typeof data.arguments === 'string' ? data.arguments : JSON.stringify(data.arguments)
+        lines.push(`### Nested tool ${data.name} [${data.subCallId}]\n\n\`\`\`json\n${args}\n\`\`\`\n`)
+        break
+      }
+      case 'tool/ptc-dispatch': {
+        const data = event.data as { subCallId: string; isError: boolean; content: readonly ContentBlock[] }
+        const text = markdownContent(data.content ?? [])
+        if (text !== '') {
+          lines.push(`<details><summary>${data.isError === true ? 'nested error' : 'nested result'} [${data.subCallId}]</summary>\n\n${text}\n\n</details>\n`)
+        }
+        break
+      }
       case 'command/run': {
         lines.push(`> /${event.data.name}${event.data.args === '' ? '' : ` ${event.data.args}`}\n`)
+        break
+      }
+      case 'tool-workflow/run-start': {
+        workflow.onRunStart(event.data.runId, event.data.name, 0)
+        break
+      }
+      case 'tool-workflow/agent-start': {
+        const { runId, seq, label, phase, childId } = event.data
+        workflow.onAgentStart(runId, seq, label, phase === undefined ? null : phase, childId)
+        break
+      }
+      case 'tool-workflow/agent-end': {
+        workflow.onAgentEnd(event.data.runId, event.data.seq, event.data.outcome)
+        break
+      }
+      case 'tool-workflow/run-end': {
+        const message = workflow.onRunEnd(event.data.runId, event.data.stopReason)
+        if (message !== undefined) lines.push(workflowMarkdownBlock(message))
         break
       }
       default:
         break
     }
   }
+  // A run without a terminal event still exports its current state (the
+  // export is a full-log fold — never drop the record).
+  for (const message of workflow.activeRuns()) {
+    lines.push(workflowMarkdownBlock(message))
+  }
   return lines.join('\n')
+}
+
+/** One readable Workflow export block (plan §7.4): the run line with its
+ * projected status, then the member rows in arrival order. The statuses
+ * come from the shared {@link WorkflowProjection} — the same vocabulary as
+ * the visual Transcript (`error` renders as `failed`; an owner-closed run
+ * without a terminal fact renders `interrupted`). */
+function workflowMarkdownBlock(message: TranscriptWorkflowMessage): string {
+  const memberLines = message.members.map(member => {
+    const identity = member.phase === null || member.phase === ''
+      ? member.label
+      : `${member.phase} / ${member.label}`
+    return `  ${identity} — ${member.status}`
+  })
+  return [`Workflow: ${message.name} — ${message.status}`, ...memberLines].join('\n')
 }

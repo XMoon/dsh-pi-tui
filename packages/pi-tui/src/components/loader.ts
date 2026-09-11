@@ -61,10 +61,14 @@ export class Loader extends Text {
 		this.updateDisplay();
 	}
 
+	override invalidate(): void {
+		super.invalidate();
+		this.updateDisplay();
+	}
+
 	/** Release the animation timer; containers call this on removal. (dsh-pi-tui divergence X007.) */
-	override dispose(): void {
+	dispose(): void {
 		this.stop();
-		super.dispose();
 	}
 
 	setIndicator(indicator?: LoaderIndicatorOptions): void {
@@ -86,10 +90,14 @@ export class Loader extends Text {
 		}, this.intervalMs);
 	}
 
-	private updateDisplay(): void {
+	protected getRenderedIndicator(): string {
 		const frame = this.frames[this.currentFrame] ?? "";
-		const renderedFrame = this.renderIndicatorVerbatim ? frame : this.spinnerColorFn(frame);
-		const indicator = frame.length > 0 ? `${renderedFrame} ` : "";
+		return this.renderIndicatorVerbatim ? frame : this.spinnerColorFn(frame);
+	}
+
+	private updateDisplay(): void {
+		const renderedFrame = this.getRenderedIndicator();
+		const indicator = renderedFrame.length > 0 ? `${renderedFrame} ` : "";
 		this.setText(`${indicator}${this.messageColorFn(this.message)}`);
 		if (this.ui) {
 			this.ui.requestRender();

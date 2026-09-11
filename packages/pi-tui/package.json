@@ -1,6 +1,6 @@
 {
 	"name": "@xmoon76/pi-tui",
-	"version": "0.84.4",
+	"version": "0.85.1",
 	"private": true,
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications (vendored fork of @earendil-works/pi-tui, see UPSTREAM.json)",
 	"license": "MIT",
@@ -10,7 +10,7 @@
 		"type": "git",
 		"url": "git+https://github.com/XMoon/dsh-pi-tui.git",
 		"directory": "packages/pi-tui",
-		"note": "vendored snapshot of @earendil-works/pi-tui at v0.84.4 (see UPSTREAM.json); carries the structured local divergence ledger in packages/pi-tui/vendor-divergences.json and its generated DIVERGENCES.md report (re-verify all on every re-vendor)"
+		"note": "vendored snapshot of @earendil-works/pi-tui at v0.85.1 (see UPSTREAM.json); carries the structured local divergence ledger in packages/pi-tui/vendor-divergences.json and its generated DIVERGENCES.md report (re-verify all on every re-vendor)"
 	},
 	"keywords": [
 		"tui",

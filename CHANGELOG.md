@@ -7,6 +7,233 @@
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-09-11
+
+### 安装与版本对应
+
+本稳定版最低兼容 DSH `0.1.5-rc.1`，同时兼容 `0.1.5-rc.2`。推荐安装
+rc.2；安装 DSH 时需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.5
+dsh --profile pi-tui
+```
+
+不要把本版本与历史 DSH `0.1.3-alpha.2` 线混用。仍需保留旧版 DSH 的用户，
+请安装对应的历史 TUI 线：DSH `0.1.2-rc.1` 使用
+`@xmoon76/dsh-pi-tui@0.4.1`，DSH `0.1.3-alpha.2` 使用
+`@xmoon76/dsh-pi-tui@0.4.3-alpha.2`，更旧的 DSH `0.1.1-rc.1`/`rc.2`
+使用 `@xmoon76/dsh-pi-tui@0.3`。
+
+### 新增
+
+- **PTC / `run_code` 嵌套工具树。** `run_code` 内的子调用现在会作为递归树显示在
+  根 Code 卡片下，不再散落成顶层工具行；Focus、`/search` 和 Markdown 导出也会
+  保留嵌套关系，并显示紧凑的活跃子调用提示。
+- **会话呈现对齐 DSH Session 语义（兼容 V2/V3 持久化代）。** 实时回答、工具结果、
+  Thinking 与冷恢复会话的显示更加一致；Focus、Transcript 和 Stats 不再把瞬态流内容重复展示。
+- **`/search` 收敛进会话浏览器。** `/sessions`、`/resume` 与 `/search` 共用同一个
+  全局搜索视图，同时匹配会话元数据和内容；早期会话也能被找到，内容搜索不可用时
+  仍可用元数据筛选，浏览器不会关闭。
+- **统一附件摄取。** `@` 提及、`/image` 参数与粘贴内容现在共享一条附件流水线，
+  图片、普通文件、占位符和草稿提交的行为保持一致。
+- **草稿中补全内联 `/skill` 引用。** `/名称` token 可从 detached skill 目录补全；
+  接受后只插入引用，最终普通提问再由 Host 注入识别出的 skill。
+- **Workflow 可扩展 UI。** Run/Phase 卡片在小规模运行中展示成员，在大规模运行中展示
+  聚合摘要、异常预览和可筛选的 Task Viewer；completed、cancelled 与 interrupted
+  状态也有明确的展示。
+- **Workflow 生命周期/模型对齐 DSH alpha.2。** Workflow 保留完整运行与成员状态，
+  冷回放、实时记录、搜索和 `/transcript` 使用同一套结果。
+- **`/export` 现在保存完整 Session 归档。** 导出包含子代理与附件，并生成可恢复的完整
+  Session 文件；旧的单日志 JSONL 导出已移除。
+- **新增 `/transcript` 命令。** 将当前 Session 保存为可读的 Markdown 对话记录到 Client 本地目录,与 `/export` 相同的无参数/保存位置交互。
+- **Welcome Card 视觉重构。** 首屏欢迎卡引入原创圆润鲸鱼 ASCII mascot(5 种变体,每次启动随机一个),按终端宽度使用三档响应式布局:72 列以上鲸鱼与 session facts 左右并排,24～71 列鲸鱼居中、facts 在下,24 列以下切换为紧凑文本布局(🐋 标题)。鲸鱼保留 cyan → blue 品牌渐变,不随主题切换改色;facts 继续完整显示(长值 wrap、不截断),idle 邀请、`setWelcomeCard()` 契约、fullscreen 滚动/锚点/点击映射均保持不变。
+
+### 变更
+
+- **内置 Footer 默认布局更新。** 未自定义 Footer 的默认 statusline 现在是两行:第一行左侧为权限、Model、Tasks、目录、分支与扩展条目,右侧为 Plan 状态和 Focus Mode;第二行左侧为 token 用量、cache 命中、TTFB、吞吐与 turn/step 计数(stats-line 的语义拆解),右侧为完整 Context 用量(`已用/窗口 (百分比)`)。已保存自定义 `footerLayout` 的用户不受影响。
+
+### 改进
+
+- **流式工具准备 UX 增强。** 准备卡片在块结束前的身份迁移更稳：延迟到达的
+  名称保留有界前缀，空 id 在 block 结束时迁移到权威 id，并行预览独立累计
+  字节与摘要。
+- **内容块呈现完善。** 打开中的不透明 assistant 块立即渲染（不再等流结束），
+  pending final 有栅栏防护，过期确认的 assistant 预览会刷新；continuable
+  子代理查看器保留查看历史。
+- **命令与普通输入按"整行"判定，不再按命令名判定。** DSH 的命令判定表
+  （`CommandDescriptor.input`）区分两类命令：`leadingInput` 命令（如 `/goal`）把参数一起当作调用，
+  无参数命令（如 `/compact`）只有**裸命令**才是调用。此前只要名字出现在命令表里，整行就会走命令
+  通道——`/compact 任意内容` 会被当成命令执行，运行中也不跟随 queue/steer 策略，带图片时还会被按
+  命令附件规则拒绝。现在这类"带参数的无参数命令"与普通提示完全一致：跟随忙碌策略（queue/steer、
+  Ctrl+Enter 取反），图片作为多模态提示进入模型；而 `/compact`、`/goal <objective>`、`/plan <message>`
+  等真正的调用仍然走命令通道，附件规则也只在"这一行确实被命令接管"时生效。
+- **`!`/`!!` 本地 shell 行不再把占位符带进 shell。** 本地 shell 本来就不 admit/consume 草稿，`!echo [image #1]`
+  会把占位符当普通 shell 参数执行、图片留在 store 里。现在与其它本地命令一致：直接拒绝，并把草稿（含附件）退回。
+- **命令附件按命令自身的声明处理。** 只有 descriptor 声明了 `input.attachments` 的命令才允许带附件调用；
+  其余命令在派发前直接拒绝（`/<name> does not accept attachments; remove them first`），不再把"只有占位符、
+  没有内容"的行交给 host。声明过的命令会在 host 命令调用上收到编码后的图片附件；命令提交**只在 handler
+  成功后才 consume 附件**——失败的命令会连同附件一起还原草稿。文件附件对命令一律拒绝（host 需要上传
+  receipt，本 client 尚无该通道）。skill 调用不受影响：显式 `/skill <name> [image #1]` 与 skill wrapper
+  仍属 agent-facing，图片随投递的 prompt 进入模型，而不是走命令通道。策略按**最终 authority** 复核：
+  未知的 `/name [image #1]` 若其命令在 session 建立后才出现（session 级 host 命令），会在 session 解析后
+  再判一次——未声明的命令会被拒绝，而不是带着空 payload 执行并把草稿 consume 掉。
+- **带附件的 `/name args` 行不再被当成 client 命令。** client 命令 contribution 只 claim **裸 `/name`**，
+  所以 `/deploy [image #1]` 这类带参数（附件必然引入参数）的行本来就**不是** contribution 调用：它作为
+  普通多模态提交进入模型，插件 handler 不执行、也不会再报 "local command" 附件拒绝。
+- **deferred start 期间插件重载不会串代执行。** 首次输入触发的 session 解析过程中，如果该 contribution
+  被卸载/重载（即使 owner 与 id 相同），已提交的命令**不会**执行新一代的 handler，也**不会**降级成模型
+  prompt：提交被中止、提示 `/<name> is no longer available`，草稿还原后可直接重试。
+- **Ctrl+Enter 与 Web 提交语义对齐。** 运行中按 Ctrl+Enter 现在取"忙碌提交行为"的**相反值**：默认
+  `busyEnter=queue` 时它 steer，`busyEnter=steer` 时它入队（空闲时一律入队）。旧的
+  `app.input.queue` 动作保留为 deprecated、无默认键，已有自定义绑定仍然是"入队"，不会被悄悄改成
+  相反行为；新的 `app.input.submitAccelerated` 独立拥有 Ctrl+Enter。
+
+- **吞吐统计口径统一。** Footer 的 tok/s 现在按可观察到的 decode 输出 token 与对应观测时间窗计算；burst samples 不再与完整 LLM wall time 或其它阶段计数混合。
+- **Focus 中的 steer 时间线更可靠。** 早到、迟到以及时间戳相同的 steer/answer 事件会按可证明的边界处理，跨 steer 的回答不会被错误吞掉或重复显示。
+
+### 修复
+
+- **过期的命令 handle 不再删除新一代注册。** handle 只代表**一次**注册：重复或迟到的 `dispose()`（HMR 重载后才到达的 fiber cleanup）不会删掉同 id 的新 contribution，也不会误清新一代的健康记录。
+- **文本输入态的键盘所有权修正。** 自由输入编辑不再被父层抢走行编辑键：Question 的“Type something.”自由输入里 `←/→` 现在是文本光标（此前会误提交或翻页），`Home/End/Ctrl+A/E/B/F/Delete` 等编辑键统一进入共享输入。无选项的纯文本问题改为明确的两层状态：编辑层里 `←/→` 编辑文本、`↵` 提交、`Esc/Ctrl+C` 只退出编辑回到导航层，导航层里 `↵` 重新进入编辑、`←/→` 翻题（或跳过）、`Esc/Ctrl+C` 才取消整个流程（此前按 Esc 会把这类问题困在无法重新编辑的半死状态，或直接取消整个提问）。Question 编辑态与 Task Center 搜索态的底部提示改为只描述当前模式真实行为（不再宣传 `↑↓ select` / `A active/all` 等列表动作）。Transcript 搜索现在可用 Esc 或 Ctrl+C 关闭（`app.transcript.search.close` 默认键扩充，Ctrl+C 此前被搜索输入框吞掉），并在输入框下显示 `↵ next · ⇧↵ prev · esc/ctrl+c close` 指引。`/keybindings` 的搜索框改为共享 Input 渲染：支持光标移动/Home/End/删除/词移动等完整行编辑，提示随查询是否为空在 `Esc: clear` 与 `Esc: close` 间切换。
+- **退出时完整回收 Direct 会话。** 退出 TUI 时，主 Agent、continuable subagent 与 Agent 作用域后台任务现在按固定顺序回收：取消主 Agent 并等待静默 → 排空 continuable 后代 → 最终持久化 flush → 释放 AgentHandle。此前退出后进程可能残留约 5 分钟（continuable subagent 仍存活）；现在退出在数秒内完成，且诊断日志能区分 surface 关闭、Host 回收与 launcher 退出。会话切换（/new、/fork、rewind、/sessions）提交后也会回收旧 owner 的 continuable 后代。
+- **展示细节修正。** diff 展示对齐官方语义（折叠的多 hunk 有界、编辑 header 与结果 parity 保留）；`@` 文件补全保留完整路径，marquee 提示路由与宿主清理修正；fork/rewind 后模型选择引用保留；Focus thought 后的非用户回合 steer 保留，并区分 opening steer 与回合中途输入；assistant 工具结果展示在呈现流水线后保持不变。
+- **会话打开与切换更稳健。** 打开/切换会话（/new、/resume、fork、rewind、/sessions）期间不再丢状态：新会话加载完成前旧会话保持可见可用，新会话初始化失败也不会卡死表面（重试仍能正常打开）；切换期间旧 Agent 保持写入权威直到新会话接管；迟到的 assistant 流片段按官方语义归位，不再产生残缺或悬空的块。
+
+### 兼容性
+
+- **客户端命令 contribution 改为"仅裸命令"调用（破坏性）。** 对齐 DSH `matchEnter`：contribution 是
+  斜杠**菜单项**，只 claim **裸 `/name`**；`/name args` 不是调用——它作为普通提交进入模型（跟随忙碌
+  策略、附件照常投递），插件的 handler 完全不执行。此前 `/deploy prod` 会执行插件 handler。需要参数的
+  插件应在裸命令里自行打开面板/选择器，或把该能力做成模型可用的工具。
+- **扩展 API 版本升到 2（破坏性）。** `api().apiVersion` 现在返回 `2`：下面的插件命令 contribution
+  契约对 STABLE 面是破坏性变更（移除 `execution`/`argumentProvider`、`handler` 变为必填）；`1` 仍是
+  M0–M3 基础版，插件可据此区分两套 schema。仍声明旧 v1 shape 的插件会在注册时**直接报错**，不会
+  被静默重新解释。
+- **插件命令 contribution 对齐 DSH 客户端命令模型（破坏性）。** `execution: 'local' | 'submission'`
+  已**移除**：contribution 就是"客户端自有的命令"（必有 `handler`，无 host descriptor），会进入 `/`
+  命令菜单并本地执行、永不 steer；名字与当前 host catalog 冲突时**候选合成整体失败**（不安装任何菜单
+  行、记录扩展健康并在界面提示一次，提示中列出该轮全部冲突的 contribution），host 命令始终保留自己的 claim，**绝不会被降级成模型 prompt**。
+  用于广告 prompt 型名字的 `submission` 请直接不要注册 contribution（未 claim 的 `/name args` 本来就
+  是 prompt，发现渠道是 host 侧 skill）。`sessionless: true` 表示可在没有 session 时执行；默认
+  `false` 会先解析/创建 session 再执行。与 **session 级 host catalog 同名**属于合成期冲突：整轮候选
+  合成失败（对齐上游 `source-failed`，该 source 的命令行全部撤下，直到下一次成功合成），但 host claim
+  已先行刷新，输入归属不受影响，冲突记录在该 contribution 的健康上并按 identity/失败代次提示一次（提示列出该轮全部冲突）；
+  TUI 静态命令名冲突则在注册时直接抛错。另外从未接线的 `argumentProvider` 字段一并移除（请用
+  `registerAutocomplete`）。
+- **保留 standalone composition caller 的 `ModelSelectionRef` 兼容性。** 根导出的
+  `composeAgent(ctx, ref)` 形式继续可用，返回的 setup 会安装调用方持有的 selection，
+  无需 Agent；Direct runner 继续使用显式 Agent-local installer 形式。
+
+> **已知限制：** 当前生产默认后端仍为 Direct；remote attach 暂不支持。
+
+## [0.4.3-alpha.2] - 2026-09-08
+
+### 安装与版本对应
+
+当前预发布线建议按以下顺序安装，先安装匹配的 DSH，再将 TUI bundle 加入
+profile：
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.3-alpha.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.3-alpha.2
+dsh --profile pi-tui
+```
+
+需要保留旧 DSH 的用户按下列对应固定 TUI 版本：`0.1.1-rc.2` 用
+`@xmoon76/dsh-pi-tui@0.3`；`0.1.2-alpha.2`/`alpha.3` 用
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.1`；`0.1.2-alpha.4`/`alpha.5` 用
+`@xmoon76/dsh-pi-tui@0.4.0-alpha.2`；`0.1.2-rc.1` 用
+`@xmoon76/dsh-pi-tui@0.4.1`。完整版本矩阵和更新/卸载命令见 README 的
+「安装到 DSH Profile」。
+
+### 新增
+
+- **PTC / `run_code` 嵌套工具树。** `run_code` 程序内派发的子调用现在作为
+  递归子调用树挂在根 Code 卡片下：完整身份链（`subCallId`/`parentCallId`/
+  `rootCallId`）支持孙级拓扑；未知父级的孤儿 start/settle 事实先私有暂存，
+  父级出现时挂接，绝不提升为顶层 surface 行。子调用树与 Focus、展示与搜索
+  等表面对齐：折叠 Focus 中 `run_code` 仍是正式 Tool 槽，并附加紧凑的活跃
+  子调用提示（如 `Bash running` / `Bash ×2 running` / `Bash +1 running`，
+  带宽度降级）；`/search` 语料递归包含子调用（命中定位到根 Code 卡）；
+  markdown 导出保留嵌套输出。
+- **会话呈现对齐 DSH v2 语义。** Direct 适配器按官方语义摄取
+  `agent/assistant-stream` 实时帧（完成回合栅栏、修订间隔重同步），
+  Transcript/Focus/Stats 折叠瞬态平面；冷回放从 assistant/message block
+  恢复 thinking；移除旧的 durable assistant/chunk 私有路径。
+- **`/search` 收敛进会话浏览器。** `/sessions`、`/resume` 与 `/search` 现在共用
+  同一个会话浏览器：输入查询后进入全局搜索结果视图（本地元数据匹配 ∪ 内容
+  匹配），不再按工作区裁剪搜索结果；命中片段直接显示在对应会话行上；内容搜索
+  不可用或失败时，本地元数据筛选照常工作，浏览器不会关闭。
+- **会话内容搜索对齐 DSH 官方语义。** Direct 适配器改用
+  `sessionQuery.searchSessions()`（与 DSH master `ApiSessionList.search()`
+  一致：可见性授权、去重、游标翻页、20 条结果窗口），移除了旧的“最新 100 个
+  会话 + filterEvents”私有搜索规则——很早创建的会话中的匹配现在也能被找到。
+- **统一附件摄取。** `@` 提及、`/image` 参数与粘贴内容走同一条附件 intake
+  流水线：有界签名探测区分图片与普通文件，普通文件保留元数据并在提交时
+  流式送入；占位与草稿提交行为一致化。
+- **草稿中补全内联 `/skill` 引用。** 提示模式草稿中空白边界的 `/名称`
+  token 现在按 detached 的人类 skill 目录补全；接受时插入字面引用而不提交，
+  最终普通提问由 Host 的 `dsh-tool-skill` pre-step 注入所有已识别 skill。
+
+### 改进
+
+- **流式工具准备 UX 增强。** 准备卡片在块结束前的身份迁移更稳：延迟到达的
+  名称保留有界前缀，空 id 在 block 结束时迁移到权威 id，并行预览独立累计
+  字节与摘要。
+- **内容块呈现完善。** 打开中的不透明 assistant 块立即渲染（不再等流
+  结束），pending final 有栅栏防护，过期确认的 assistant 预览会刷新；
+  continuable 子代理查看器保留查看历史。
+
+### 修复
+
+- **过期的命令 handle 不再删除新一代注册。** handle 只代表**一次**注册：重复或迟到的 `dispose()`（HMR 重载后
+  才到达的 fiber cleanup）不会删掉同 id 的新 contribution，也不会误清新一代的健康记录。
+- **文本输入态的键盘所有权修正。** 自由输入编辑不再被父层抢走行编辑键:
+  Question 的“Type something.”自由输入里 `←/→` 现在是文本光标(此前会误
+  提交或翻页),`Home/End/Ctrl+A/E/B/F/Delete` 等编辑键统一进入共享输入;
+  无选项的纯文本问题改为明确的两层状态:编辑层里 `←/→` 编辑文本、`↵` 提交、
+  `Esc/Ctrl+C` 只退出编辑回到导航层,导航层里 `↵` 重新进入编辑、`←/→` 翻题
+  (或跳过)、`Esc/Ctrl+C` 才取消整个流程(此前按 Esc 会把这类问题困在无法
+  重新编辑的半死状态,或直接取消整个提问);Question 编辑态与 Task Center
+  搜索态的底部提示改为只描述当前模式真实行为(不再宣传 `↑↓ select` /
+  `A active/all` 等列表动作)。Transcript 搜索现在可用 Esc 或 Ctrl+C 关闭
+  (`app.transcript.search.close` 默认键扩充,Ctrl+C 此前被搜索输入框吞掉),
+  并在输入框下显示 `↵ next · ⇧↵ prev · esc/ctrl+c close` 指引。
+  `/keybindings` 的搜索框改为共享 Input 渲染:支持光标移动/Home/End/删除/
+  词移动等完整行编辑,提示随查询是否为空在 `Esc: clear` 与 `Esc: close` 间
+  切换。
+- **退出时完整回收 Direct 会话。** 退出 TUI 时,主 Agent、continuable
+  subagent 与 Agent 作用域后台任务现在按固定顺序回收:取消主 Agent 并等待
+  静默 → 排空 continuable 后代 → 最终持久化 flush → 释放 AgentHandle。
+  此前退出后进程可能残留约 5 分钟(continuable subagent 仍存活);现在
+  退出在数秒内完成,且诊断日志能区分 surface 关闭、Host 回收与 launcher
+  退出三个阶段。会话切换(/new、/fork、rewind、/sessions)提交后也会
+  回收旧 owner 的 continuable 后代。
+- **展示细节修正。** diff 展示对齐官方语义（折叠的多 hunk 有界、编辑
+  header 与结果 parity 保留）；`@` 文件补全保留完整路径，marquee 提示
+  路由与宿主清理修正；fork/rewind 后模型选择引用保留；Focus thought 后
+  的非用户回合 steer 保留，并区分 opening steer 与回合中途输入；
+  assistant 工具结果展示在呈现流水线后保持不变。
+- **会话打开与切换更稳健。** 打开/切换会话（/new、/resume、fork、rewind、
+  /sessions）期间不再丢状态：新会话加载完成前旧会话保持可见可用，新会话
+  初始化失败也不会卡死表面（重试仍能正常打开）；切换期间旧 Agent 保持
+  写入权威直到新会话接管；迟到的 assistant 流片段按官方语义归位，不再
+  产生残缺或悬空的块。
+
+### 兼容性
+
+- **`next` 线要求 DeepSeek Harness `0.1.3-alpha.2` 或更高版本。** 旧 runtime
+  的启动提示现在给出精确的 npm 升级命令
+  （`npm install -g @deepseek-ai/dsh@0.1.3-alpha.2`），不再引用未发布的
+  master source baseline。
+- **本次已按精确的 npm `0.1.3-alpha.2` family 验证。** peer floor 为
+  `>=0.1.3-alpha.2`，开发/测试依赖与冻结 lockfile 解析到该精确 family；
+  兼容性与 preset/边界 smoke 直接对 registry 上的该 family 运行。
+
+> **已知限制：** 当前生产默认后端仍为 Direct；remote attach 暂不支持。
+
 ## [0.4.1] - 2026-09-04
 
 ### 安装与版本对应
@@ -627,7 +854,9 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...v0.4.5
+[0.4.3-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...next-v0.4.3-alpha.2
 [0.4.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.3.6...v0.4.0
 [0.4.0-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.0-alpha.1...next-v0.4.0-alpha.2

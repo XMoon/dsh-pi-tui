@@ -1,12 +1,11 @@
 /**
  * Headless tests for the busy-Enter preference surface (web busyEnter
  * parity): the /settings row reflects the persisted value and its Enter
- * toggle persists the other behavior, and the pure dispatch gate
- * (shouldSteerOnEnter) separates LOCAL commands (always execute) from
- * everything else (plain prompts AND per-skill slash commands steer while
- * the agent is running). The steer-side semantics (steerAll onlyDraft)
- * live in steer.test.ts; the Ctrl+Enter chord lives in
- * input-experience.test.ts.
+ * toggle persists the other behavior, and the pure dispatch boundary
+ * (resolveSubmitDelivery) applies the web ComposerSubmissionPolicy to
+ * agent-facing input while LOCAL commands always execute. The steer-side
+ * semantics (steerAll onlyDraft) live in steer.test.ts; the accelerated
+ * chord lives in input-experience.test.ts.
  * @module @xmoon76/dsh-pi-tui/busy-enter.test
  */
 
@@ -15,7 +14,7 @@ import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
-import { LOCAL_COMMANDS, shouldSteerOnEnter } from '../src/index.ts'
+import { LOCAL_COMMANDS, resolveSubmitDelivery } from '../src/index.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -44,7 +43,7 @@ const TUI_OWNED = [
   'copy', 'exit', 'export', 'fork', 'help', 'kill', 'login', 'logout',
   'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
-  'title', 'yolo',
+  'title', 'transcript', 'yolo',
 ]
 
 test('LOCAL_COMMANDS covers every TUI-owned command and nothing else', () => {
@@ -61,28 +60,42 @@ test('LOCAL_COMMANDS covers every TUI-owned command and nothing else', () => {
   }
 })
 
-test('shouldSteerOnEnter: plain prompts and skill commands steer; local commands never do', () => {
+test('resolveSubmitDelivery: plain prompts and skill commands follow the policy; local commands never do', () => {
   const cmd = (name: string) => ({ name })
-  // Plain prompt (no slash command): steers while running with the
-  // preference set — the web parity baseline.
-  assert.equal(shouldSteerOnEnter(undefined, true, 'steer', false), true, 'plain prompt + running + steer')
-  assert.equal(shouldSteerOnEnter(undefined, true, 'queue', false), false, 'queue preference queues')
-  assert.equal(shouldSteerOnEnter(undefined, false, 'steer', false), false, 'idle never steers')
-  assert.equal(shouldSteerOnEnter(undefined, true, undefined, false), false, 'absent preference queues')
+  // Plain prompt (no slash command): the web ComposerSubmissionPolicy
+  // baseline — an idle agent queues, plain Enter takes the preference.
+  assert.equal(resolveSubmitDelivery(undefined, true, 'enter', 'steer'), 'steer', 'plain prompt + running + steer')
+  assert.equal(resolveSubmitDelivery(undefined, true, 'enter', 'queue'), 'queue', 'queue preference queues')
+  assert.equal(resolveSubmitDelivery(undefined, false, 'enter', 'steer'), 'queue', 'idle never steers')
+  assert.equal(resolveSubmitDelivery(undefined, true, 'enter', undefined), 'queue', 'absent preference queues')
+  // The ACCELERATED chord is the OPPOSITE of the preference (never a fixed
+  // queue): with the DEFAULT preference it steers, with 'steer' it queues.
+  assert.equal(resolveSubmitDelivery(undefined, true, 'accelerated', 'queue'), 'steer',
+    'the accelerated chord steers under the default queue preference')
+  assert.equal(resolveSubmitDelivery(undefined, true, 'accelerated', 'steer'), 'queue',
+    'the accelerated chord queues under the steer preference')
+  assert.equal(resolveSubmitDelivery(undefined, true, 'accelerated', undefined), 'steer',
+    'an absent preference reads as queue, so the chord steers')
+  assert.equal(resolveSubmitDelivery(undefined, false, 'accelerated', 'queue'), 'queue',
+    'an idle agent queues every gesture')
   // Local commands ALWAYS execute, even with the preference set.
-  assert.equal(shouldSteerOnEnter(cmd('status'), true, 'steer', false), false, '/status must execute')
-  assert.equal(shouldSteerOnEnter(cmd('settings'), true, 'steer', false), false, '/settings must execute')
-  assert.equal(shouldSteerOnEnter(cmd('subagents'), true, 'steer', false), false, '/subagents alias must execute (alias of /tasks)')
-  assert.equal(shouldSteerOnEnter(cmd('skill'), true, 'steer', false), false, '/skill picker must execute')
-  // Non-local commands (per-skill slash commands) steer like plain prompts:
-  // the raw `/name` line lands in the running turn and the host's pre-step
-  // listener (dsh-tool-skill) resolves the skill body — web parity.
-  assert.equal(shouldSteerOnEnter(cmd('grilling'), true, 'steer', false), true, 'skill command steers while running')
-  assert.equal(shouldSteerOnEnter(cmd('grilling'), true, 'queue', false), false, 'queue preference queues the skill')
-  assert.equal(shouldSteerOnEnter(cmd('grilling'), false, 'steer', false), false, 'idle skill executes normally')
-  // The Ctrl+Enter chord forces queue mode for EVERYTHING.
-  assert.equal(shouldSteerOnEnter(undefined, true, 'steer', true), false, 'the chord never steers')
-  assert.equal(shouldSteerOnEnter(cmd('grilling'), true, 'steer', true), false, 'the chord queues skill commands')
+  assert.equal(resolveSubmitDelivery(cmd('status'), true, 'enter', 'steer'), 'queue', '/status must execute')
+  assert.equal(resolveSubmitDelivery(cmd('settings'), true, 'enter', 'steer'), 'queue', '/settings must execute')
+  assert.equal(resolveSubmitDelivery(cmd('subagents'), true, 'enter', 'steer'), 'queue', '/subagents alias must execute (alias of /tasks)')
+  assert.equal(resolveSubmitDelivery(cmd('skill'), true, 'enter', 'steer'), 'queue', '/skill picker must execute')
+  // A local command's delivery value is never consumed, so the accelerated
+  // chord must not turn one into a steer either.
+  assert.equal(resolveSubmitDelivery(cmd('status'), true, 'accelerated', 'queue'), 'queue',
+    'a local command never steers, whatever the gesture')
+  // Non-local commands (per-skill slash commands) follow the policy like
+  // plain prompts: under steer the raw `/name` line lands in the running
+  // turn and the host's pre-step listener (dsh-tool-skill) resolves the
+  // skill body — web parity.
+  assert.equal(resolveSubmitDelivery(cmd('grilling'), true, 'enter', 'steer'), 'steer', 'skill command steers while running')
+  assert.equal(resolveSubmitDelivery(cmd('grilling'), true, 'enter', 'queue'), 'queue', 'queue preference queues the skill')
+  assert.equal(resolveSubmitDelivery(cmd('grilling'), false, 'enter', 'steer'), 'queue', 'idle skill executes normally')
+  assert.equal(resolveSubmitDelivery(cmd('grilling'), true, 'accelerated', 'steer'), 'queue', 'the chord queues skill commands')
+  assert.equal(resolveSubmitDelivery(cmd('grilling'), true, 'accelerated', 'queue'), 'steer', 'the chord steers skill commands under the default preference')
 })
 
 // themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /
@@ -112,15 +125,25 @@ function fakeTuiSettings(busyEnter: string, localShellSandbox = 'bypass'): { val
 
 /** A fake commands service recording the registered definitions. */
 function fakeCommands() {
-  const defs: { name: string; handler?: unknown }[] = []
+  const defs: { name: string; handler?: unknown; input?: { hint: string; attachments?: boolean } }[] = []
   return {
     defs,
     service: {
-      register: (def: { name: string; handler?: unknown }): (() => void) => {
+      register: (def: { name: string; handler?: unknown; input?: { hint: string; attachments?: boolean } }): (() => void) => {
         defs.push(def)
         return () => {}
       },
-      list: () => [{ name: 'builtin', description: 'a builtin', input: { hint: '' } }],
+      // The completion list mirrors the registry (like the real service's
+      // effective view), so the advertised-claim surface sees registrations —
+      // INCLUDING the descriptor's input kind: fabricating an `input` for an
+      // execute-kind command would erase the DSH distinction between a
+      // `leadingInput` command (`/goal <objective>`) and a bare one
+      // (`/compact`) and make the claim tests pass for the wrong reason.
+      list: () => defs.map(def => ({
+        name: def.name,
+        description: 'a command',
+        ...(def.input === undefined ? {} : { input: def.input }),
+      })),
       find: () => undefined,
       execute: async () => undefined,
     },
@@ -128,7 +151,7 @@ function fakeCommands() {
 }
 
 /** Register the TUI commands with a stubbed runner and return /settings. */
-function setup(options: { busyEnter?: string; localShellSandbox?: string } = {}) {
+function setup(options: { busyEnter?: string; localShellSandbox?: string; extensions?: unknown } = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -155,10 +178,9 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     agents: {} as never,
     sessionReader: {
       list: async () => [],
-      search: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
@@ -211,10 +233,10 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: undefined,
+    extensions: options.extensions as never,
     exit: () => {},
   }
-  registerTuiCommands(runner)
+  const installed = registerTuiCommands(runner)
   const def = commands.defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   const run = async (rawInput: string): Promise<unknown> =>
@@ -240,7 +262,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string } = {})
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, run, runCommand, view, settings, registered: commands.defs.map(def => def.name) }
+  return { vt, app, run, runCommand, view, settings, installed, commands, registered: commands.defs.map(def => def.name) }
 }
 
 test('every command registerTuiCommands registers is in LOCAL_COMMANDS', () => {
@@ -337,13 +359,13 @@ test('the local-shell-sandbox row Enter toggle persists the other behavior', asy
   t.app.stop()
 })
 
-test('shouldSteerOnEnter: /skill <name> with args steers; the bare picker does not (review finding)', () => {
-  const withArgs = shouldSteerOnEnter({ name: 'skill', rawInput: 'grilling [image #1 (800×600)]' }, true, 'steer', false)
-  assert.equal(withArgs, true, '/skill <name> [image ...] is agent input while running')
-  const bare = shouldSteerOnEnter({ name: 'skill', rawInput: '' }, true, 'steer', false)
-  assert.equal(bare, false, 'the bare /skill picker stays local')
-  const idle = shouldSteerOnEnter({ name: 'skill', rawInput: 'grilling x' }, false, 'steer', false)
-  assert.equal(idle, false, 'idle never steers')
+test('resolveSubmitDelivery: /skill <name> with args follows the policy; the bare picker does not (review finding)', () => {
+  const withArgs = resolveSubmitDelivery({ name: 'skill', rawInput: 'grilling [image #1 (800×600)]' }, true, 'enter', 'steer')
+  assert.equal(withArgs, 'steer', '/skill <name> [image ...] is agent input while running')
+  const bare = resolveSubmitDelivery({ name: 'skill', rawInput: '' }, true, 'enter', 'steer')
+  assert.equal(bare, 'queue', 'the bare /skill picker stays local')
+  const idle = resolveSubmitDelivery({ name: 'skill', rawInput: 'grilling x' }, false, 'enter', 'steer')
+  assert.equal(idle, 'queue', 'idle never steers')
 })
 
 test('/help copy is key-neutral after a remap — no stale bare Esc/Enter claims (review round 37)', async () => {
@@ -375,4 +397,140 @@ test('/help copy is key-neutral after a remap — no stale bare Esc/Enter claims
   assert.ok(!view.includes('one Esc while'), `the cancel copy must not claim physical Esc:\n${view}`)
   assert.ok(view.includes('interrupt action twice'), 'the cancel prose is key-neutral (semantic action)')
   t.app.stop()
+})
+
+test('/settings SettingsList row responds to a fullscreen mouse click (v0.85.1 mouse integration)', async () => {
+  const t = setup({ busyEnter: 'steer' })
+  t.app.setFullscreen(true)
+  await t.run('')
+  await t.view()
+  const viewport = t.vt.getViewport()
+  const rowY = viewport.findIndex(line => line.includes('Submit while busy'))
+  assert.ok(rowY >= 0, `busy-enter row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[rowY]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'frame left border missing')
+  // SGR click on the row's content (1-based): the content starts two cells
+  // right of the left border (`│` + one padding cell).
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${rowY + 1}M`)
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${rowY + 1}m`)
+  await t.view()
+  assert.ok(t.settings.writes.length >= 1, 'the mouse click must toggle and persist a write')
+  const last = t.settings.writes[t.settings.writes.length - 1]
+  assert.equal(last?.busyEnter, 'queue', `the click must flip steer -> queue, wrote: ${JSON.stringify(last)}`)
+  t.app.stop()
+})
+
+test('/settings frame borders do not activate SettingsList rows (v0.85.1 mouse integration)', async () => {
+  const t = setup({ busyEnter: 'steer' })
+  t.app.setFullscreen(true)
+  await t.run('')
+  await t.view()
+  const viewport = t.vt.getViewport()
+  const borderY = viewport.findIndex(line => line.includes('╰'))
+  assert.ok(borderY >= 0, `frame bottom border missing:\n${viewport.join('\n')}`)
+  const rowY = viewport.findIndex(line => line.includes('Submit while busy'))
+  const leftBorder = viewport[rowY]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'frame left border missing')
+  // Click the bottom border (inside the frame, on the border row): it must
+  // NOT reach the child as a valid row.
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${borderY + 1}M`)
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${borderY + 1}m`)
+  await t.view()
+  assert.equal(t.settings.writes.length, 0, 'a bottom-border click must not toggle a row')
+  t.app.stop()
+})
+
+test('/settings frame left padding does not activate SettingsList rows (v0.85.1 mouse integration)', async () => {
+  const t = setup({ busyEnter: 'steer' })
+  t.app.setFullscreen(true)
+  await t.run('')
+  await t.view()
+  const viewport = t.vt.getViewport()
+  const rowY = viewport.findIndex(line => line.includes('Submit while busy'))
+  assert.ok(rowY >= 0, `busy-enter row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[rowY]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'frame left border missing')
+  // Click the padding cell between the left border and the content
+  // (frame-local x=1): it must NOT reach the child as column 0.
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${rowY + 1}M`)
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 2};${rowY + 1}m`)
+  await t.view()
+  assert.equal(t.settings.writes.length, 0, 'a left-padding click must not toggle a row')
+  t.app.stop()
+})
+
+test('hostClaimOf claims the LINE an advertised host command owns, never a skill wrapper (PR115-fix problem 1)', () => {
+  const t = setup()
+  // A Host command (e.g. /compact) registered by the Host WITHOUT an input
+  // descriptor is execute-kind: it claims the BARE token only, exactly like
+  // the DSH client's `matchEnter` decision table.
+  t.commands.service.register({ name: 'compact', handler: () => ({ kind: 'success' }) })
+  t.installed.installSnapshot({ commands: [], scopedCommands: [], skills: [], issues: [] })
+  assert.deepEqual(t.installed.hostClaimOf({ name: 'compact', rawInput: '' }), { claimed: true, attachments: false },
+    'the bare token of an advertised Host command must be claimed')
+  assert.deepEqual(t.installed.hostClaimOf({ name: 'compact', rawInput: ' extra' }), { claimed: false },
+    'an argued line of an execute-kind command is NOT a command invocation')
+  // A leadingInput descriptor claims its argued line too.
+  t.commands.service.register({ name: 'goal', handler: () => ({ kind: 'success' }), input: { hint: '<objective>' } })
+  t.installed.installSnapshot({ commands: [], scopedCommands: [], skills: [], issues: [] })
+  assert.deepEqual(t.installed.hostClaimOf({ name: 'goal', rawInput: ' ship it' }), { claimed: true, attachments: false },
+    'a leadingInput command claims its argued line (without an attachment declaration)')
+  // A TUI-owned skill wrapper is advertised too, but it is an agent-facing
+  // invocation — never a Host-command claim.
+  t.installed.installSnapshot({
+    commands: [],
+    scopedCommands: [],
+    skills: [{ name: 'grilling', description: 'a skill' }],
+    issues: [],
+  })
+  assert.equal(t.installed.hostClaimOf({ name: 'grilling', rawInput: ' args' }), undefined,
+    'a TUI-owned skill wrapper must never be claimed as a Host command')
+  // The claim is catalog-driven: a name absent from the effective catalog
+  // is not claimed (it keeps the ordinary prompt semantics).
+  assert.equal(t.installed.hostClaimOf({ name: 'not-a-command', rawInput: '' }), undefined,
+    'an unadvertised name must not be claimed')
+  t.app.stop()
+})
+
+test('hostClaimOf keeps HOST AUTHORITY: a client contribution never removes a host claim', () => {
+  // A client command contribution only ADDS a client-owned name. When the
+  // host catalog resolves the same name, the host command keeps its claim —
+  // upstream's candidate synthesis fails loud on the collision instead of
+  // shadowing, so the dispatch can never downgrade it to a prompt.
+  const contributions = new Map<string, { name: string }>([
+    ['deploy', { name: 'deploy' }],
+    ['panel', { name: 'panel' }],
+  ])
+  const t = setup({
+    extensions: {
+      commands: { find: (name: string) => contributions.get(name) },
+    },
+  })
+  t.commands.service.register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
+  t.commands.service.register({ name: 'compact', handler: () => ({ kind: 'success' }) })
+  t.installed.installSnapshot({ commands: [], scopedCommands: [], skills: [], issues: [] })
+  assert.deepEqual(t.installed.hostClaimOf({ name: 'deploy', rawInput: ' prod' }), { claimed: true, attachments: false },
+    'a host command keeps its claim even when a client contribution shares the name')
+  assert.deepEqual(t.installed.hostClaimOf({ name: 'compact', rawInput: '' }), { claimed: true, attachments: false },
+    'a real Host command stays claimed')
+  assert.equal(t.installed.hostClaimOf({ name: 'panel', rawInput: '' }), undefined,
+    'a client-only name is not a host claim (it never entered the host list)')
+  t.app.stop()
+})
+
+test('the deprecated app.input.queue action keeps its own (fixed-queue) identity', () => {
+  // The chord became the web accelerated gesture, but the OLD action id is a
+  // settings-level public name: a stored remap must keep meaning "queue the
+  // draft" — never be silently re-interpreted as the opposite behavior, and
+  // never be dropped as an unknown action.
+  const parsed = parseUserKeybindings({ 'app.input.queue': 'ctrl+y' })
+  assert.equal(parsed.bindings['app.input.queue'], 'ctrl+y', 'the deprecated action keeps its own declaration')
+  assert.equal(parsed.bindings['app.input.submitAccelerated'], undefined,
+    'the accelerated action must not inherit the legacy declaration')
+  assert.deepEqual(parsed.diagnostics, [], 'the deprecated id is a KNOWN action — no diagnostic')
+  // The two actions are independent: declaring both binds both.
+  const both = parseUserKeybindings({ 'app.input.queue': 'ctrl+y', 'app.input.submitAccelerated': 'ctrl+k' })
+  assert.equal(both.bindings['app.input.queue'], 'ctrl+y')
+  assert.equal(both.bindings['app.input.submitAccelerated'], 'ctrl+k')
+  assert.deepEqual(both.diagnostics, [], 'two distinct actions never collide')
 })

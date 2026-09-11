@@ -7,12 +7,13 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { writeFileSync } from 'node:fs'
+import { truncateSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftFileStore } from '../src/attachment/file-draft.ts'
 import { consumeDraftImages, pruneUnreferencedDrafts } from '../src/image/submit.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
@@ -33,7 +34,6 @@ afterEach(() => {
     try { app.dispose() } catch {}
   }
 })
-
 
 /** A tiny PNG (1×1) byte header. */
 function pngBytes(): Buffer {
@@ -59,11 +59,13 @@ function fakeCommands(): { commands: { register: (def: { name: string; handler?:
   return { commands, defs }
 }
 
-function setup(): {
+function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSignal; transitionPending?: () => boolean } = {}): {
   app: TuiApp
   runner: TuiCommandRunner
   imageStore: DraftImageStore
-  imageHandler: (invocation: { rawInput: string }) => unknown
+  fileStore: DraftFileStore
+  imageHandler: (invocation: { rawInput: string; signal?: AbortSignal }) => unknown
+  attachHandler: (invocation: { rawInput: string; signal?: AbortSignal }) => unknown
 } {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -73,6 +75,9 @@ function setup(): {
   const services = fakeCommands()
   ctx.provide('commands', services.commands as never)
   const store = new DraftImageStore()
+  const fileStore = new DraftFileStore()
+  const clientCwd = options.cwd ?? '/ws'
+  const sessionCwd = options.sessionCwd ?? '/ws'
   const runner: TuiCommandRunner = {
     ctx,
     app,
@@ -90,10 +95,9 @@ function setup(): {
     agents: {} as never,
     sessionReader: {
       list: async () => [],
-      search: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
@@ -112,14 +116,15 @@ function setup(): {
       rename: () => true,
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
-    cwd: '/ws',
-    sessionCwd: () => '/ws',
+    cwd: clientCwd,
+    sessionCwd: () => sessionCwd,
+    fileStore,
     imageStore: store,
     copyToClipboard: async () => true,
     imageLimits: () => undefined,
     insertIntoEditor: (text) => app.insertIntoEditor(text),
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
-    signal: new AbortController().signal,
+    signal: options.signal ?? new AbortController().signal,
     get sessionGeneration() { return 1 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
@@ -140,7 +145,7 @@ function setup(): {
     openJobView: () => {},
     openTasksBrowser: () => {},
     openRewindPicker: () => {},
-    sessionTransitionPending: () => false,
+    sessionTransitionPending: options.transitionPending ?? (() => false),
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withSessionWriter: async <T>(_sessionId: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
@@ -150,8 +155,17 @@ function setup(): {
   }
   registerTuiCommands(runner)
   const image = services.defs.find(def => def.name === 'image')
+  const attach = services.defs.find(def => def.name === 'attach')
   assert.ok(image !== undefined, '/image registered')
-  return { app, runner, imageStore: store, imageHandler: image.handler as (p: { rawInput: string }) => unknown }
+  assert.ok(attach !== undefined, '/attach registered')
+  return {
+    app,
+    runner,
+    imageStore: store,
+    fileStore,
+    imageHandler: image.handler as (p: { rawInput: string; signal?: AbortSignal }) => unknown,
+    attachHandler: attach.handler as (p: { rawInput: string; signal?: AbortSignal }) => unknown,
+  }
 }
 
 /** Poll until the predicate holds (bounded) — never a fixed sleep, which
@@ -177,6 +191,63 @@ test('/image stages the file into the draft store and inserts its placeholder', 
   const draft = imageStore.values()[0]!
   assert.equal(draft.placeholder, '[image #1 (1×1)]')
   assert.ok(app.getDraft().includes(draft.placeholder), 'placeholder inserted into the editor')
+})
+
+test('/attach stages a generic file from the Client cwd, not the session cwd', async (t) => {
+  const life = testLifecycle(t)
+  const client = life.tempDir('dsh-attach-client-')
+  const session = life.tempDir('dsh-attach-session-')
+  const file = join(client, 'report.pdf')
+  writeFileSync(file, Buffer.from('%PDF-1.7 report'))
+  const { app, fileStore, attachHandler } = setup({ cwd: client, sessionCwd: session })
+  const result = await attachHandler({ rawInput: 'report.pdf' })
+  assert.deepEqual(result, { kind: 'success' })
+  await waitFor(() => fileStore.values().length === 1)
+  const draft = fileStore.values()[0]!
+  assert.equal(draft.name, 'report.pdf')
+  assert.ok(app.getDraft().includes(draft.placeholder), 'generic placeholder inserted into the editor')
+})
+
+test('/attach drops intake that finishes during a session transition', async (t) => {
+  const life = testLifecycle(t)
+  const client = life.tempDir('dsh-attach-transition-')
+  writeFileSync(join(client, 'report.pdf'), Buffer.from('%PDF-1.7 report'))
+  let transitionChecks = 0
+  const { app, fileStore, attachHandler } = setup({
+    cwd: client,
+    transitionPending: () => ++transitionChecks >= 2,
+  })
+  assert.deepEqual(await attachHandler({ rawInput: 'report.pdf' }), { kind: 'success' })
+  await waitFor(() => transitionChecks >= 2)
+  assert.equal(fileStore.values().length, 0)
+  assert.equal(app.getDraft(), '')
+})
+
+test('/attach accepts a sparse generic file larger than the image resident cap', async (t) => {
+  const life = testLifecycle(t)
+  const client = life.tempDir('dsh-attach-large-')
+  const file = join(client, 'large.tar')
+  writeFileSync(file, '')
+  truncateSync(file, 64 * 1024 * 1024 + 1)
+  const { fileStore, attachHandler } = setup({ cwd: client, sessionCwd: '/different-session' })
+  assert.deepEqual(await attachHandler({ rawInput: 'large.tar' }), { kind: 'success' })
+  await waitFor(() => fileStore.values().length === 1)
+  assert.equal(fileStore.values()[0]!.byteLength, 64 * 1024 * 1024 + 1)
+})
+
+test('/attach drops late intake after lifecycle teardown aborts', async (t) => {
+  const life = testLifecycle(t)
+  const client = life.tempDir('dsh-attach-abort-')
+  writeFileSync(join(client, 'report.pdf'), Buffer.from('%PDF-1.7 report'))
+  const controller = new AbortController()
+  const requestController = new AbortController()
+  const { app, fileStore, attachHandler } = setup({ cwd: client, signal: controller.signal })
+  const pending = attachHandler({ rawInput: 'report.pdf', signal: requestController.signal })
+  controller.abort()
+  await pending
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fileStore.values().length, 0)
+  assert.equal(app.getDraft(), '')
 })
 
 test('/image prunes drafts whose placeholder left the editor while the intake was in flight', async (t) => {

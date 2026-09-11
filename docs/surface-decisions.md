@@ -340,6 +340,263 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   state, and neither Focus ON/OFF nor fullscreen ON/OFF nor session
   switches reset it. The old `hideThinking` / `focusThinkingVisible`
   visibility pair is deleted.
+- **Focus separates turn foundation from process chronology
+  (projection-only)**: a LEADING injected-context prefix that wakes a
+  turn is persistent input context and renders before the Thought —
+  expanded and collapsed. Only the leading prefix counts; mid-turn
+  injected context stays process content at its real position. Collapsed
+  Focus summarizes inputs: opening injected context + ALL human user rows
+  precede the Thought, even when a user row was a same-turn steer.
+  Expanded Focus preserves process chronology after the foundation: later
+  steers and mid-turn injected context return to their real positions.
+  The durable `steer`/source facts are never rewritten, and injected
+  context still does not occupy Think/Tool/Message slots and never counts
+  as a tool.
+- **The foundation is identified by a source-derived `context` marker,
+  never by bare `kind: 'system'`**: the fold writes `context: true` only
+  on injected-context rows (the non-user `user/message` path); llm/retry
+  and max-tokens rows are also `kind: 'system'` but are orchestration and
+  stay inside the expanded process (owner-marked) and hidden under the
+  collapsed Thought. The original leading-`kind` heuristic was falsified
+  by the retry-before-any-visible-output case, so the presentation-only
+  marker was added to the system row (a plan deviation from
+  "projection-only": the marker is not a durable field and no new session
+  event, and the icon stays a display field, never a semantic signal).
+
+## The composer submission policy is the WEB policy
+
+The busy-Enter preference (`busyEnter`, default `queue`) is owned by the
+gesture, not by the command: the boundary applies the WEB
+`ComposerSubmissionPolicy.resolve()` contract (baseline
+`dsh-v0.1.3-alpha.2`) verbatim and resolves ONCE per submission.
+
+```text
+!running              -> queue
+gesture === 'enter'   -> the preferred mode (busyEnter)
+accelerated           -> the OPPOSITE of the preferred mode
+```
+
+The Cmd/Ctrl-accelerated chord (Ctrl+Enter) is therefore "the other
+behavior", never a fixed queue: with the DEFAULT `busyEnter=queue` it
+STEERS, and under `busyEnter=steer` it queues. The public `queue-draft` /
+`submit-draft` extension actions and the replacement editor's
+`queue-submit` are EXPLICIT delivery commands, not gestures — they deliver
+exactly what they say (the app raises `explicit-queue`). Those two
+semantics must never be merged again: a fixed-queue chord gets the default
+configuration backwards.
+
+## Skill invocation delivery follows the resolved mode
+
+A human skill invocation (`/skill <name>` or a per-skill wrapper) is an
+agent-facing prompt, not a Host command: it follows the resolved mode.
+`loadSkill` owns the delivery in BOTH modes — it builds the NORMALIZED
+`/<name> <args>` line, steers or queues it, and injects the body whenever
+the HOST's `dsh-tool-skill` pre-step listener does not (a composition
+without that loader, where the TUI fallback rides next-step). Without the
+loader the invocation keeps the order-preserving steer even under a queue
+mode: a followup would let the body arrive before the user's words (the
+driver claims next-step first) — the documented exception, confined to
+compositions without the loader.
+
+The mode is resolved once, at the submitting gesture's own boundary, and
+then only executed:
+
+- The dispatch boundary resolves `queue | steer` (the policy above) and
+  binds it for the command execution that launches the delivery
+  (`withDelivery`). The skill delivery accepts that value; it never
+  re-reads `busyEnter` or `agent.status` — a gesture is a property of the
+  dispatch that settings cannot reconstruct, and an async draft
+  preparation must not let a concurrent settings edit or status change
+  re-decide the mode.
+- The `/skill` picker (a modal selection with no dispatcher above it) is
+  its own boundary, and its SELECTION is the boundary moment: the mode is
+  resolved when a row is chosen, never when the modal opened (the agent
+  may have gone idle, or busy, while it was up).
+- A TUI-owned skill command executed with no submission behind it (the
+  command plane driven from outside the submit boundary) has no gesture to
+  honor and delivers queued.
+
+## Host commands outrank client contributions
+
+The command surface follows the DSH client contribution contract
+(`ui-commands` `CommandUiRuntime.candidates`): the host catalog is merged
+with the live CLIENT command contributions by name, and a host/contribution
+name collision **fails loud — it never shadows**.
+
+- A LINE the current effective host catalog CLAIMS is a host command: it
+  executes through the command plane, and neither a TUI nor an extension
+  contribution can remove that claim. The claim belongs to the LINE, not to
+  the name — the DSH decision table (`ui-commands` `matchEnter`) claims the
+  BARE token of every host command and, for a `leadingInput` descriptor
+  (`CommandDescriptor.input !== undefined`: `/goal <objective>`, `/plan`),
+  its argued line as well. An argued line of an execute-kind command
+  (`/compact now`) is not a command invocation: it is an ordinary submission
+  (busy policy included) and the command plane is never asked to run it. A
+  claimed command the real session then lacks is consumed by the
+  advertised-miss gate — never a plain model message.
+- **A contribution is a slash-MENU entry: it claims the BARE token only.**
+  Upstream checks a contribution with `if (!bare) return undefined`, so
+  `/deploy` runs the client handler while `/deploy explain` is an ordinary
+  submission that reaches the model (busy policy and attachments included),
+  and the handler never runs for it. A contribution can therefore never be
+  invoked with a composer attachment — an attachment makes the line argued —
+  and its `handler` only ever sees `rawInput` without non-whitespace input
+  (trailing whitespace stays verbatim, like every other command surface).
+- **A name the host catalog RESOLVES is host territory in BOTH states.** The
+  catalog's view of a line has three outcomes: it CLAIMS the line, it resolves
+  the name but does not claim THIS line (an argued line of an execute-kind
+  command), or it does not resolve the name at all. The LAST outcome leaves the
+  name to the client layers — an unknown slash line, or a live client
+  contribution, which may then run locally. The other two are host territory:
+  such a line is never classified as a local client command for the attachment
+  gate, a same-named contribution never runs for it, and the middle state is an
+  ordinary submission (`/compact <args>`). A contribution can only coexist with
+  a resolved host name in the failed-source collision state, so the middle
+  state's contribution rule is the shape that state takes.
+- **The claim is resolved against the FINAL catalog, and submit-time
+  NON-invocations are sticky.** On a deferred start the standing view cannot
+  see the session-scoped catalog, so the plane's ownership of the line is asked
+  AGAIN after `ensureSession()` and the advertised-miss gate follows that same
+  answer: a name the committed catalog resolves without claiming the line is
+  delivered as an ordinary submission (never consumed as an "advertised miss"),
+  and a name the committed catalog DOES claim on this line is executed by the
+  plane even when the standing view had classified the line as unclaimed.
+  A line the catalog already resolved WITHOUT claiming it when it was submitted
+  can never become an invocation afterwards: if that name disappears from the
+  final catalog, the line stays an ordinary submission (the plane is not asked,
+  and the submit-time name claim does not consume it as a miss), and the
+  attachment gate keeps treating it as host territory — it never falls back to
+  a same-named client contribution that the submit-time routing had already
+  excluded.
+  The CLIENT-LOCAL eligibility is sticky in the same way: only a line whose
+  initial route was a LIVE client contribution keeps the client-local
+  classification under the final authority (that is the deferral case above),
+  so a contribution that appears DURING the deferred window never reclassifies
+  a generic line as a UI control — the routing already decided, its handler
+  never runs for that submission, and an attachment on the line is delivered
+  as an ordinary multimodal prompt.
+- A contribution is a client-owned command (menu row + client handler); it
+  executes locally and never steers. `sessionless: true` runs it before a
+  session exists, otherwise the session resolves first.
+- A **deferred start** settles a session-backed contribution's authority only
+  AFTER the session exists (the session commits the catalog the standing view
+  could not see): a host claim or skill wrapper that appears with it takes the
+  line, otherwise the client handler runs. A name the committed catalog
+  resolves — claimed or not — ends the contribution's ownership of the line.
+  Two rules follow, both regression-pinned (the deferred line is always the
+  BARE token, so there is no attachment to carry across the window and no
+  deferred refusal to fire):
+  - **The captured registration is fenced.** The deferred resolution runs the
+    EXACT contribution the user submitted. A dispose + reload during the
+    window (even under the same owner and id) is a NEW generation that must
+    never run in place of the submitted one, and a vanished name must never
+    fall through to the command plane or the MODEL. The submission is aborted
+    with a `/<name> is no longer available` notice and the draft is restored.
+  - **The line's final owner is re-asked.** A late host descriptor that
+    resolves the name owns the bare line (the plane executes it, or — for a
+    name resolved without claiming the line, which can only be an argued
+    line — the submission becomes an ordinary delivery). The plane's ownership
+    and the advertised-miss gate are resolved from that same final answer.
+- A colliding contribution fails the candidate synthesis as a whole: the
+  command SOURCE is marked failed (upstream `source-failed` parity — the
+  source's whole group is removed), so no command row, client or host, is
+  offered until a synthesis succeeds again. Nothing stale survives: a
+  displayed row can never execute a different command than it shows. The
+  HOST CLAIMS are refreshed before the merge, so a failed synthesis never
+  costs a host command its input authority; the collision is recorded on the
+  contribution's health (cleared when it merges cleanly again, and only while
+  the record still shows that very collision message — so a handler failure
+  that OPENED the record is preserved; see the limitation note below for the
+  failure order that is not protected) and surfaced once per
+  contribution identity and failure generation — one failed pass states EVERY
+  collision it found in the single notice slot.
+- Everything unclaimed is an ordinary prompt; TUI-local commands
+  (`LOCAL_COMMANDS`) and TUI-owned skill wrappers keep their own routes
+  (local execution, `loadSkill`) — they are the one thing the line-level host
+  claim must not steal, because the dispatch excludes them from the host
+  route in the same way.
+- **Known diagnostic limitation — the health record is lossy.** One
+  contribution identity has THREE writers of its single extension-health
+  record: the candidate synthesis above, the client handler's settlement,
+  and the session command path that reports the HOST command executing under
+  a colliding name. The ledger keeps ONE failure generation per record and
+  deduplicates a repeat (the first message wins), so the record is not an
+  authoritative summary of every unrecovered failure. The recovery rule above
+  is message-based, which protects one failure order only:
+  - a client handler that fails while its name is colliding keeps its
+    failure out of the record (the collision message wins), and the
+    collision recovery then clears the record although the handler never
+    recovered;
+  - a client handler that succeeds while its name is colliding clears the
+    still-active collision record;
+  - a HOST command's own settlement under a colliding name is attributed to
+    the contribution's health record.
+
+  The user-visible behavior is unaffected and is asserted alongside: the
+  handler failure is notified and logged when it happens, the collision is
+  notified and withdraws the menu rows, and dispatch, claims and the menu
+  never consult health. The three flows are pinned by the `known limitation`
+  regressions in `test/submit-hot-path.test.ts`. Making the record
+  authoritative requires separating the failure SOURCES (and no longer
+  attributing a host execution to the contribution), which is deliberately
+  out of scope here.
+
+## Command attachments follow the descriptor declaration
+
+The composer's attachment policy is the DSH client contract
+(`ui-commands` `CommandInputDescriptor.attachments` +
+`CommandUiRuntime`/leading-claim submit), not a TUI-local guess:
+
+- A command may be invoked with attachments ONLY when the descriptor that
+  CLAIMS the line declares `input.attachments: true`. An attachment-bearing
+  line for any other CLAIMED command is refused before dispatch
+  (`/<name> does not accept attachments; remove them first`) and the draft —
+  attachment placeholder included — comes back. The host executor re-enforces
+  the same declaration at admission.
+- The claim is asked for the LINE, never for the name
+  (`CommandDescriptor.input`, upstream `matchEnter`): a `leadingInput`
+  command (`/goal <objective>`) claims its argued line, while an execute-kind
+  command (`/compact`) claims the BARE token only. `/compact <anything>` is
+  therefore no command invocation at all — it is an ordinary submission that
+  keeps its attachments and follows the busy policy — and the command plane
+  is never asked to run it (the host registry resolves by NAME, so handing it
+  over would run the command anyway).
+- A DECLARING **HOST** command receives the submitted IMAGES as encoded
+  `CommandSubmitAttachment`s on `commands.execute`; the host admits them
+  through its own attachment store (the client never saves them locally for a
+  command invocation). A TUI-owned command never carries a payload on that
+  wire: `/skill <name> ...` is itself a registered TUI command and a live
+  skill wrapper is TUI-owned, and neither declares `input.attachments` — the
+  host executor would reject the invocation before `loadSkill` ran. Their
+  placeholder line is delivered as-is and the images are admitted by the
+  delivery path (`loadSkill` → `prepareUserMessage`), which is what makes an
+  explicit `/skill <name> [image #1]` multimodal.
+- A FILE attachment is refused even for a declaring command: the host
+  contract carries files as upload receipts, and this client has no seam to
+  produce one — fail closed rather than hand the host a placeholder with no
+  payload (`/<name> cannot receive file attachments in this client; remove
+  them first`).
+- A command submission CONSUMES its attachments only after handler success
+  (web parity): an error outcome restores the draft and KEEPS the staged
+  attachments, so a failed command never swallows the user's image.
+- TUI/core local commands AND `!`/`!!` local shell lines keep refusing
+  attachments outright: their line is a UI control, never agent-facing input.
+  The shell has no attachment delivery path (`runLocalShell` neither admits nor
+  consumes drafts), so the refusal is what keeps a placeholder from becoming
+  shell arguments. A client command contribution needs no refusal: its
+  invocation is the BARE token only, so an attachment-bearing `/deploy [image
+  #1]` line is never its invocation — it is an ordinary multimodal submission.
+  A skill wrapper, a `/skill <name>` invocation and a plain prompt stay
+  agent-facing and deliver their attachments to the model.
+- The policy is applied against the FINAL authority, not only at submit time.
+  A deferred start may commit a session-scoped host command the standing view
+  could not see, so the dispatch RE-APPLIES the policy after
+  `ensureSession()` and before `commands.execute` (the host executor only
+  validates the payload it is handed — an empty one would run the handler with
+  the placeholder as a plain argument and then consume the draft). An unknown
+  `/name [image #1]` line that becomes an undeclared host command is refused,
+  a late declaring command receives its images, and a late declaring command
+  still refuses a file.
 
 ## Focus is surface-adaptive
 

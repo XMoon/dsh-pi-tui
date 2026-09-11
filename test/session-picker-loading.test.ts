@@ -175,10 +175,9 @@ const pendingList = (): Promise<never> => new Promise(() => {})
 test('the picker opens and Esc cancels while list() pends forever', async (t) => {
   const h = harness({
     list: pendingList,
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -197,10 +196,9 @@ test('the picker opens and Esc cancels while list() pends forever', async (t) =>
 test('Enter on the loading placeholder never triggers a resume', async (t) => {
   const h = harness({
     list: pendingList,
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -220,10 +218,9 @@ test('arrows, search, and Esc stay responsive while a projection batch pends', a
   }))
   const h = harness({
     list: async () => rows,
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: () => new Promise<ProjectionMap>(() => {}),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -255,13 +252,12 @@ test('closing the picker aborts the pending projection batch', async (t) => {
   const rows = [{ id: 'session-a', createdAt: 10, cwd: '/ws', live: false }]
   const h = harness({
     list: async () => rows,
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: (_batch: unknown, signal?: AbortSignal) => {
       observedSignal = signal
       return new Promise<ProjectionMap>(resolve => { settleBatch = () => resolve(new Map()) })
     },
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -293,10 +289,9 @@ test('a superseding open fences the previous load out of the UI', async (t) => {
       secondListed += 1
       return rows
     },
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -312,10 +307,9 @@ test('a superseding open fences the previous load out of the UI', async (t) => {
 test('a listing failure swaps the loading row for the refusal row', async (t) => {
   const h = harness({
     list: async () => undefined,
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -334,7 +328,7 @@ test('progressive title enrichment preserves the live search query', async (t) =
   let resolveBatch!: (value: ProjectionMap) => void
   const h = harness({
     list: async () => rows,
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => {
       calls += 1
       if (calls === 1) {
@@ -343,7 +337,6 @@ test('progressive title enrichment preserves the live search query', async (t) =
       return new Map()
     },
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -364,10 +357,9 @@ test('progressive title enrichment preserves the live search query', async (t) =
 test('/resume <arg> is input-first: the overlay opens while list() pends forever', async (t) => {
   const h = harness({
     list: pendingList,
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -401,10 +393,9 @@ test('/resume <arg> with NO match lists exactly once and keeps the argument as t
       listCalls += 1
       return rows
     },
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 
@@ -432,10 +423,9 @@ test('/resume <arg> with a unique match switches after exactly one listing', asy
       listCalls += 1
       return rows
     },
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' }),
   })
   t.after(() => h.app.stop())
 

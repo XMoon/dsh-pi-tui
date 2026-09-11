@@ -4,9 +4,9 @@
  *
  * Every path that changes which session owns the surface — /new, /fork,
  * conversation rewind, `/sessions` switch/resume, the first-session
- * creation — must run its whole workflow (prepare/create/resume → flush →
- * dispose old → assign new → generation bump) inside {@link
- * SessionTransitionGate.run}. Without it, two interleaved transitions can:
+ * creation — must run its whole workflow (quiesce old → preflight →
+ * create/resume → COMMIT (assign new + generation bump) → retire old)
+ * inside {@link SessionTransitionGate.run}. Without it, two interleaved transitions can:
  *
  * - create a child whose metadata mixes two surfaces (parent captured
  *   before an await, cwd read after a concurrent switch — the P2 "cwd
@@ -16,7 +16,7 @@
  *   durable ghost branch the user never entered — `handle.dispose()` stops
  *   the agent but does NOT delete the persisted session;
  * - pass a stale identity check and then yield inside the swap (flush /
- *   old-handle dispose), letting a second transition land in between and
+ *   old-owner retirement), letting a second transition land in between and
  *   later get overwritten by the first continuation.
  *
  * The gate is a promise chain (a single-writer queue): tasks run strictly
@@ -38,11 +38,21 @@ const transitionContext = new AsyncLocalStorage<boolean>()
 export class SessionTransitionGate {
   private tail: Promise<unknown> = Promise.resolve()
   private active = false
+  private queued = 0
 
   /** Whether a transition task is currently executing (visible to every
    * caller — the AsyncLocalStorage context is task-internal only). */
   get busy(): boolean {
     return this.active
+  }
+
+  /** Whether a transition task is QUEUED or executing. The exit retirement
+   * pre-cancel keys on this, not on `busy`: a queued-but-not-started
+   * transition is about to quiesce the old agent, whose `whenIdle()` does
+   * not observe the lifecycle signal — the pre-cancel must fire before the
+   * task starts, or the retirement queued behind it can never unblock it. */
+  get pending(): boolean {
+    return this.queued > 0
   }
 
   /**
@@ -59,6 +69,7 @@ export class SessionTransitionGate {
     if (transitionContext.getStore() === true) {
       throw new Error('session transition re-entered while one is in flight')
     }
+    this.queued += 1
     const start = this.tail.then(() => transitionContext.run(true, () => {
       this.active = true
       return task()
@@ -68,8 +79,8 @@ export class SessionTransitionGate {
     // task's continuation finishes — before the next queued task starts —
     // so `busy` is true for the whole exclusive section.
     this.tail = start.then(
-      () => { this.active = false },
-      () => { this.active = false },
+      () => { this.active = false; this.queued -= 1 },
+      () => { this.active = false; this.queued -= 1 },
     )
     return start
   }

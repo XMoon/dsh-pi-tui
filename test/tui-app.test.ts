@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { toolPresenterFrom } from '../src/present.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { Text, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
@@ -56,6 +57,35 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; ge
  * deliberate second todo click must be a NEW gesture, never coalesced. */
 function sleepBeyondTodoCoalesce(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 550))
+}
+
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(turn: number, step: number, chunk: AssistantLiveChunk, time: number): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+type LegacyChunkEvent = {
+  readonly type: 'assistant/chunk'
+  readonly seq: SessionSeq
+  readonly time: number
+  readonly data: { readonly turn: number; readonly step: number; readonly chunk: AssistantLiveChunk }
+}
+type MixedEvent = SessionEvent | LegacyChunkEvent
+
+/** Apply a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function applyMixed(folder: TranscriptFolder, events: readonly MixedEvent[]): void {
+  for (const event of events) {
+    if (event.type === 'assistant/chunk') {
+      const data = event.data
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
 }
 
 test('renders the header and the editor frame', async () => {
@@ -264,6 +294,7 @@ test('tool cards present through the real registry: read shows the relativized p
     assert.equal(outcome.isError, false)
     const resultEvent: SessionEvent = {
       type: 'tool/result',
+       surfaceOp: 'append',
       seq: SessionSeq(1),
       time: 1_700_000_000_001,
       data: {
@@ -966,28 +997,369 @@ test('fullscreen click on the todo summary dock row opens the todo panel', async
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('☑'), `todo summary must render in the dock:\n${view}`)
   assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
-  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
-  // at the bottom on the 80x24 test terminal; the closed panel renders
-  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
-  // row).
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer; the closed
+  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // exactly the dock row).
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'click on the summary row must open the panel')
   assert.ok(!app.isTodoPanelExpanded(), 'opens compact')
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('todo item 0'), `compact panel must show after the click:\n${view}`)
   // With the panel open the summary is hidden and the panel owns rows
-  // 12..19 — the same cell is now a panel row, so the next click runs the
+  // 13..19 — the same cell is now a panel row, so the next click runs the
   // compact → full step of the loop. Paced beyond the todo click-coalescing
   // window: a DELIBERATE second gesture, not a rapid double-click.
   await sleepBeyondTodoCoalesce()
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'panel must stay open (the cell is now a panel row)')
   assert.ok(app.isTodoPanelExpanded(), 'the click now expands the panel (compact → full)')
   app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen todo: a dock press cannot run the panel action after a keyboard toggle (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 9 }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? ('in_progress' as const) : i % 3 === 1 ? ('pending' as const) : ('completed' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
+  assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer; the closed
+  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // exactly the dock row).
+  const dockY = 19
+  // Press the dock row (no release): the press identity is todo:dock.
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  await vt.waitForRender()
+  // Keyboard todo-toggle (Ctrl+T) while the mouse is held: the panel
+  // opens, the dock vanishes, and the same physical cell becomes a panel
+  // row.
+  vt.sendInput('\x14')
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(app.isTodoPanelVisible(), 'the keyboard toggle must open the panel')
+  assert.ok(!app.isTodoPanelExpanded(), 'opens compact')
+  assert.ok((view[dockY] ?? '').includes('todo item'), `the pressed cell must now be a panel row:\n${view.join('\n')}`)
+  // Release on the same cell: the click must NOT run the panel action
+  // (the press identity is todo:dock, the current surface is the panel).
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'the panel must stay open')
+  assert.ok(!app.isTodoPanelExpanded(), `the dock press must not expand the panel:\n${vt.getViewport().join('\n')}`)
+  // A fresh panel press/release runs the panel action (compact → full).
+  await sleepBeyondTodoCoalesce()
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelExpanded(), `a fresh panel press must expand the panel:\n${vt.getViewport().join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen todo: a dock press cannot toggle the panel across a session switch (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 9 }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? ('in_progress' as const) : i % 3 === 1 ? ('pending' as const) : ('completed' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
+  assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer; the closed
+  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // exactly the dock row).
+  const dockY = 19
+  // Press the dock row (no release): the press identity is todo:dock.
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  await vt.waitForRender()
+  // Session switch while the mouse is held: the new session reuses the
+  // same dock geometry, and the todo identities are generic (todo:dock /
+  // todo:panel) — only the session-boundary gesture clear rejects the
+  // stale press.
+  app.clearSessionOverrides()
+  app.setTodoSummary(todos)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `the dock must still render after the switch:\n${view.join('\n')}`)
+  // Release on the same cell: the click must NOT toggle the panel (the
+  // session boundary cancelled the in-flight gesture).
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), `the stale session press must not toggle the panel:\n${vt.getViewport().join('\n')}`)
+  // A fresh dock press/release opens the panel (the identity works).
+  await sleepBeyondTodoCoalesce()
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), `a fresh dock press must open the panel:\n${vt.getViewport().join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen transcript click: a click that resolves to no cell consumes the stale latch (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release): the press-time identity is A.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  const gesture = (app as unknown as { fullscreenCellGesture: unknown }).fullscreenCellGesture
+  assert.ok(gesture !== undefined, 'the press must record a gesture')
+  // Remove the message: the release cell now resolves to no transcript
+  // cell.
+  app.setTranscript([])
+  await vt.waitForRender()
+  // Release on the same cell: the click resolves to nothing and must
+  // consume the stale latch (the identity-fence invariant is literal).
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const after = (app as unknown as { fullscreenCellGesture: unknown }).fullscreenCellGesture
+  assert.equal(after, undefined, 'a click that resolves to no cell must consume the stale latch')
+  app.stop()
+})
+
+test('fullscreen todo: a session switch resets the click-coalescing window (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const todos = Array.from({ length: 9 }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? ('in_progress' as const) : i % 3 === 1 ? ('pending' as const) : ('completed' as const),
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.join('\n').includes('☑'), `todo summary must render in the dock:\n${view.join('\n')}`)
+  assert.ok(!app.isTodoPanelVisible(), 'panel starts closed')
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer).
+  const dockY = 19
+  // A completed todo click in session A opens the panel AND sets the
+  // click-coalescing window.
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;20;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), 'the click must open the panel')
+  // Session switch while the coalescing window is still active.
+  app.clearSessionOverrides()
+  app.setTodoSummary(todos)
+  await vt.waitForRender()
+  // Close the panel (keyboard toggle — it does not touch the mouse
+  // coalescing window).
+  vt.sendInput('\x14')
+  await vt.waitForRender()
+  assert.ok(!app.isTodoPanelVisible(), 'the panel must close')
+  // A fresh dock press/release in session B IMMEDIATELY (inside the old
+  // session's coalescing window; a different column so the fork never
+  // reads a double-click): the panel must open — the new session must not
+  // inherit the old click-coalescing window.
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}M`)
+  vt.sendInput(`\x1b[<0;30;${dockY + 1}m`)
+  await vt.waitForRender()
+  assert.ok(app.isTodoPanelVisible(), `a fresh click in the new session must open the panel:\n${vt.getViewport().join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press on the tool message row (no release yet): the press-time
+  // identity is msg:tool:0.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // Replace the transcript with a DIFFERENT message (turn 1) and repaint:
+  // the same physical row now shows the new message.
+  app.setTranscript([{
+    kind: 'tool', turn: 1, name: 'grep', args: '{"pattern":"BBB"}',
+    result: 'BBB', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok((after[row] ?? '').includes('BBB'), `new message must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the synthesized click must NOT toggle the
+  // new message (press identity msg:tool:0 ≠ current identity msg:tool:1).
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  // The new message must stay FOLDED (exactly its one header row): a
+  // stale press must not expand whatever repainted onto the cell.
+  assert.equal(final.filter(line => line.includes('BBB')).length, 1, `the repainted message must not be expanded by the stale press:\n${final.join('\n')}`)
+  app.stop()
+})
+
+test('fullscreen transcript click: a press on a local card cannot transfer to a repainted local card (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Two local shell cards share kind 'tool' AND turn Infinity — the
+  // content-derived identity is not unique; only the per-message token
+  // distinguishes them.
+  app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: '!first', result: 'FIRST_RESULT', status: 'ok',
+  })
+  app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: '!second', result: '', status: 'running',
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('!first'))
+  assert.ok(row >= 0, `first card row missing:\n${view.join('\n')}`)
+  // Press the first card's row (no release yet): the press-time identity
+  // is first's per-message token.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // clearSettledLocalMessages removes the settled first card; the running
+  // second card survives and shifts onto the pressed cell.
+  app.clearSettledLocalMessages()
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.ok((after[row] ?? '').includes('!second'), `the running card must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the synthesized click must NOT expand the
+  // running card (press identity = first's token ≠ current = second's token).
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const overrides = (app as unknown as { expandedOverride: Map<unknown, boolean> }).expandedOverride
+  assert.equal(overrides.size, 0, `the stale press must not expand the repainted card:\n${vt.getViewport().join('\n')}`)
+  app.stop()
+})
+
+test('fullscreen transcript click: a resize between press and release cannot act against the stale frame (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release yet).
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // Resize WITHOUT repainting: the snapshot still reflects the old frame,
+  // so the release must not act against it (the release-time geometry
+  // guard consumes the gesture).
+  vt.resize(100, 30)
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  assert.equal(final.filter(line => line.includes('AAA')).length, 1, `the stale-frame release must not expand the message:\n${final.join('\n')}`)
+  app.stop()
+})
+
+test('fullscreen transcript click: a resize + repaint between press and release cannot transfer the gesture (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release yet): the press resolved
+  // against the 80x24 frame.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // Resize AND repaint: the new frame commits a snapshot at the new
+  // dimensions — the same owner/row may sit on the release cell, but the
+  // press began on the OLD geometry, so the gesture must not transfer.
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  assert.equal(final.filter(line => line.includes('AAA')).length, 1, `the cross-frame release must not expand the message:\n${final.join('\n')}`)
+  app.stop()
+})
+
+test('fullscreen transcript click: a question-frame press clears the stale background gesture (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
+    result: 'AAA', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const row = view.findIndex(line => line.includes('AAA'))
+  assert.ok(row >= 0, `tool message row missing:\n${view.join('\n')}`)
+  // Press the tool message row (no release): the press-time identity is A.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  await vt.waitForRender()
+  // A question takes over the seat (its frame covers the bottom rows).
+  const answers = app.askQuestions([{ id: 'q1', question: 'Q1', options: [{ label: 'Yes' }] }])
+  answers.catch(() => {})
+  await vt.waitForRender()
+  // Press the SAME row again while the question is up — at a DIFFERENT
+  // column (a different word, so the fork never reads a double-click):
+  // the question branch must clear the stale background gesture — a
+  // release after the question closes must not resurrect it.
+  vt.sendInput(`\x1b[<0;20;${row + 1}M`)
+  await vt.waitForRender()
+  // Esc closes the question before the mouse release.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  // Release on the same cell: the click must NOT toggle the background
+  // message (the stale gesture was cleared by the question-frame press).
+  vt.sendInput(`\x1b[<0;20;${row + 1}m`)
+  await vt.waitForRender()
+  const final = vt.getViewport()
+  assert.equal(final.filter(line => line.includes('AAA')).length, 1, `the stale background gesture must not toggle the message:\n${final.join('\n')}`)
+  answers.catch(() => {})
   app.stop()
 })
 
@@ -1062,23 +1434,24 @@ test('todo state machine: ≤5 items is a two-state summary ↔ list (no redunda
   app.setTodoSummary(todos)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // The dock summary row sits at 0-based row 18 (editor seat 3 + footer 2
-  // at the bottom on the 80x24 test terminal; the closed panel renders
-  // zero rows, so the todo region clamps to [18, 19) — exactly the dock
-  // row). Click it: summary → list.
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer; the closed
+  // panel renders zero rows, so the todo region clamps to [19, 20) —
+  // exactly the dock row). Click it: summary → list.
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
   assert.ok(!app.isTodoPanelExpanded(), 'opens compact (visually identical to full at ≤5)')
-  // With the panel open (border + title + 5 rows = rows 15..21) the same
+  // With the panel open (border + title + 5 rows = rows 14..19) the same
   // cell is a panel row: a DELIBERATE second click (paced beyond the
   // coalescing window) must close the panel DIRECTLY — the second click
   // returns to the summary, no third click needed, and no intermediate
   // todoExpanded state exists.
   await sleepBeyondTodoCoalesce()
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelVisible(), 'second click closes the panel (list → summary)')
   assert.ok(!app.isTodoPanelExpanded(), 'no ghost expanded state at ≤5')
@@ -1096,20 +1469,22 @@ test('todo rapid double-click at the SAME coordinate is ONE gesture (no flash op
   app.setTodoSummary(todos)
   app.setFullscreen(true)
   await vt.waitForRender()
-  // The dock summary row sits at 0-based row 18. Two press/release groups
-  // at the SAME coordinate, the first render landing between them, both
-  // inside the double-click window (no pacing): the first click opens the
-  // panel, the layout mutates (the dock vanishes, the panel takes its
-  // rows), and the second click would land on a panel row — WITHOUT the
-  // todo coalescing it would immediately close the panel (the todo
-  // "flashes and vanishes"). The coalesced pair must leave the todo in
-  // the state the FIRST click produced.
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  // The dock summary row sits at 0-based row 19 (editor seat 3 + footer 1
+  // at the bottom on the 80x24 test terminal: an all-unavailable status
+  // row renders nothing, so the stats row is the whole footer). Two
+  // press/release groups at the SAME coordinate, the first render landing
+  // between them, both inside the double-click window (no pacing): the
+  // first click opens the panel, the layout mutates (the dock vanishes,
+  // the panel takes its rows), and the second click would land on a panel
+  // row — WITHOUT the todo coalescing it would immediately close the panel
+  // (the todo "flashes and vanishes"). The coalesced pair must leave the
+  // todo in the state the FIRST click produced.
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'fixture: the first click opens the panel')
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'the rapid second click must be coalesced — the panel stays open')
   assert.ok(!app.isTodoPanelExpanded(), 'and stays in the first click\'s state (compact)')
@@ -1118,8 +1493,8 @@ test('todo rapid double-click at the SAME coordinate is ONE gesture (no flash op
   vt.sendInput('\x1b[<0;40;5M')
   vt.sendInput('\x1b[<0;40;5m')
   await vt.waitForRender()
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelVisible(), 'after a different-target click the next todo click works')
   app.setFullscreen(false)
@@ -1132,14 +1507,16 @@ test('todo state machine: 1 item also closes on the second click (boundary)', as
   app.setTodoSummary([{ content: 'only todo', status: 'in_progress' }])
   app.setFullscreen(true)
   await vt.waitForRender()
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  // The dock summary row: 0-based 19 (editor seat 3 + footer 1 on the
+  // 80x24 terminal with an all-unavailable status row).
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(app.isTodoPanelVisible(), 'dock click opens the panel')
   // Deliberate second gesture (paced beyond the coalescing window).
   await sleepBeyondTodoCoalesce()
-  vt.sendInput('\x1b[<0;20;19M')
-  vt.sendInput('\x1b[<0;20;19m')
+  vt.sendInput('\x1b[<0;20;20M')
+  vt.sendInput('\x1b[<0;20;20m')
   await vt.waitForRender()
   assert.ok(!app.isTodoPanelVisible(), 'second click closes the 1-item panel')
   assert.ok(!app.isTodoPanelExpanded(), 'no expanded state with 1 item')
@@ -1345,8 +1722,48 @@ test('the pre-session welcome invites the first message and clears on facts', as
   app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-1', model: 'p/m', version: '0.1.0' })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('session session-1'), `welcome card missing:\n${view}`)
+  assert.ok(view.includes('session-1'), `welcome card missing:\n${view}`)
   assert.ok(!view.includes('type a message to start'), `invitation survived:\n${view}`)
+  // No preset was provided: the preset row is omitted entirely.
+  assert.ok(!view.includes('preset'), `preset row must be omitted when undefined:\n${view}`)
+})
+
+test('the idle welcome adapts to stacked and compact widths', async () => {
+  // One unique marker per whale variant; any of them proves the whale is
+  // rendered (the variant is picked randomly once per process).
+  const whaleMarkers = [".--'---._", '.------._', '.-------.', ".---'--.", '/ /~~~~~~']
+  const hasWhale = (text: string): boolean => whaleMarkers.some(marker => text.includes(marker))
+  // Stacked (60): the whale stays, the invitation reads without the emoji.
+  const stackedVt = new VirtualTerminal(60, 24)
+  const stackedApp = new TuiApp(stackedVt, { onSubmit: () => {}, onExit: () => {} })
+  stackedApp.start()
+  startedApps.add(stackedApp)
+  stackedApp.setWelcomeIdle(true)
+  await stackedVt.waitForRender()
+  let view = stackedVt.getViewport().join('\n')
+  assert.ok(view.includes('type a message to start a session'), `stacked idle invitation missing:\n${view}`)
+  assert.ok(hasWhale(view), `stacked idle whale missing:\n${view}`)
+  assert.ok(!view.includes('🐋 dsh-pi-tui'), `stacked idle must not use the compact emoji title:\n${view}`)
+  // Dispose releases the process-global TuiApp slot before the next app.
+  stackedApp.dispose()
+  // Compact (23): the whale is replaced by the emoji title; the invitation
+  // wraps, so join the stripped rows with a space (the wrap boundary is a
+  // word boundary) before matching.
+  const compactVt = new VirtualTerminal(23, 24)
+  const compactApp = new TuiApp(compactVt, { onSubmit: () => {}, onExit: () => {} })
+  compactApp.start()
+  startedApps.add(compactApp)
+  compactApp.setWelcomeIdle(true)
+  await compactVt.waitForRender()
+  view = compactVt.getViewport().join('\n')
+  const joined = view.split('\n')
+    .map(line => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/[│╭╮╰╯]/g, '').trimEnd())
+    .join(' ')
+    .replace(/\s+/g, ' ')
+  assert.ok(joined.includes('🐋 dsh-pi-tui'), `compact idle emoji title missing:\n${view}`)
+  assert.ok(joined.includes('type a message to start a session'), `compact idle invitation missing:\n${view}`)
+  assert.ok(!hasWhale(joined), `compact idle must not show the full whale:\n${view}`)
+  compactApp.dispose()
 })
 
 test('overlay frame borders stay aligned when content is narrower than the panel', async () => {
@@ -1362,7 +1779,7 @@ test('overlay frame borders stay aligned when content is narrower than the panel
   await vt.waitForRender()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   const lines = vt.getViewport().map(strip)
-  // Locate the picker box around its first row, not the welcome card's frame.
+  // Locate the picker box around its first row, not the welcome card above it.
   const pickerRow = lines.findIndex(line => line.includes('short label one'))
   assert.ok(pickerRow >= 0, `picker row missing:\n${lines.join('\n')}`)
   let top = pickerRow
@@ -1526,24 +1943,39 @@ function diffCallArgs(): string {
   return JSON.stringify({ file_path: 'src/foo.ts', old_string: 'a\nb\nc', new_string: 'a\nB\nc' })
 }
 
-function diffCallEvent(seq: number, callId: string): SessionEvent {
+function diffCallEvent(seq: number, callId: string, args = diffCallArgs()): SessionEvent {
   return {
     type: 'tool/call',
     seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
-    data: { turn: 0, step: 0, callId: ToolCallId(callId), name: 'edit', arguments: diffCallArgs() },
+    data: { turn: 0, step: 0, callId: ToolCallId(callId), name: 'edit', arguments: args },
   }
 }
 
-function diffResultEvent(seq: number, callId: string, text: string): SessionEvent {
+function diffResultEvent(seq: number, callId: string, text: string, isError = false): SessionEvent {
   return {
     type: 'tool/result',
+       surfaceOp: 'append',
     seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
     data: {
       turn: 0,
       step: 0,
-      message: createToolResultMessage({ callId: ToolCallId(callId), content: [{ type: 'text', text }], isError: false }),
+      message: createToolResultMessage({ callId: ToolCallId(callId), content: [{ type: 'text', text }], isError }),
+    },
+  }
+}
+
+function emptyResultEvent(seq: number, callId: string, isError = false): SessionEvent {
+  return {
+    type: 'tool/result',
+       surfaceOp: 'append',
+    seq: SessionSeq(seq),
+    time: 1_700_000_000_000 + seq,
+    data: {
+      turn: 0,
+      step: 0,
+      message: createToolResultMessage({ callId: ToolCallId(callId), content: [], isError }),
     },
   }
 }
@@ -1560,6 +1992,7 @@ function subagentRouteCallEvent(seq: number, callId: string, args: string): Sess
 function subagentRouteResultEvent(seq: number, callId: string): SessionEvent {
   return {
     type: 'tool/result',
+       surfaceOp: 'append',
     seq: SessionSeq(seq),
     time: 1_700_000_000_000 + seq,
     data: {
@@ -1581,7 +2014,7 @@ test('a running edit card renders its call-time diff', async () => {
       call: () => ({
         card: 'diff' as const,
         title: 'Edit src/foo.ts',
-        diffs: [{ path: 'src/foo.ts', oldText: 'a\nb\nc', newText: 'a\nB\nc' }],
+        diffs: [{ path: 'src/foo.ts', oldText: 'PRESENTER_OLD', newText: 'PRESENTER_NEW' }],
         locations: [],
       }),
       result: () => undefined,
@@ -1596,9 +2029,11 @@ test('a running edit card renders its call-time diff', async () => {
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('+1 -1 src/foo.ts'), `diff header missing:\n${view}`)
+  assert.ok(view.includes('Edit src/foo.ts [running]  +1 -1'), `diff stats missing from the card header:\n${view}`)
+  assert.ok(!view.includes('+1 -1 src/foo.ts'), `the Edit body must not repeat its path header:\n${view}`)
   assert.ok(view.includes('- b'), `delete row missing:\n${view}`)
   assert.ok(view.includes('+ B'), `add row missing:\n${view}`)
+  assert.ok(!view.includes('PRESENTER_OLD') && !view.includes('PRESENTER_NEW'), `running Edit must use call-time data:\n${view}`)
   app.stop()
 })
 
@@ -1669,9 +2104,393 @@ test('a completed diff card renders the applied result diffs', async () => {
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('+2 -1 src/foo.ts'), `applied diff header missing:\n${view}`)
+  assert.ok(view.includes('Edit src/foo.ts [ok]  +2 -1'), `applied diff stats missing from the card header:\n${view}`)
+  assert.ok(!view.includes('+2 -1 src/foo.ts'), `the Edit body must not repeat its path header:\n${view}`)
   assert.ok(view.includes('+ Y'), `applied add row missing:\n${view}`)
   assert.ok(!view.includes('updated successfully'), `raw result text must not replace the diff:\n${view}`)
+  app.stop()
+})
+
+test('a settled Edit keeps folded and expanded views on the applied result diff', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const resultOld = ['context before', 'RESULT_OLD', 'context after 1', 'context after 2', 'context after 3'].join('\n')
+  const resultNew = ['context before', 'RESULT_NEW', 'context after 1', 'context after 2', 'context after 3'].join('\n')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'CALL_OLD', newText: 'CALL_NEW' }],
+        locations: [],
+      }),
+      result: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: resultOld, newText: resultNew }],
+        locations: [],
+      }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-applied'), diffResultEvent(1, 'call-diff-applied', 'The file src/foo.ts has been updated successfully.')])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('Edit src/foo.ts [ok]  +1 -1'), `folded result stats missing:\n${folded}`)
+  assert.ok(folded.includes('RESULT_OLD') && folded.includes('RESULT_NEW'), `folded card must use applied diff:\n${folded}`)
+  assert.ok(!folded.includes('CALL_OLD') && !folded.includes('CALL_NEW'), `folded card used call-time diff:\n${folded}`)
+  assert.ok(!folded.includes('updated successfully'), `structured success must suppress raw result text:\n${folded}`)
+  assert.equal(folded.split('src/foo.ts').length - 1, 1, `Edit path must belong only to the card header:\n${folded}`)
+  assert.ok(folded.includes('more diff lines hidden'), `folded cap must explain hidden context:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('Edit src/foo.ts [ok]  +1 -1'), `expanded result stats missing:\n${expanded}`)
+  assert.ok(expanded.includes('RESULT_OLD') && expanded.includes('RESULT_NEW') && expanded.includes('context after 3'), `expanded card must reveal the same applied diff:\n${expanded}`)
+  assert.ok(!expanded.includes('CALL_OLD') && !expanded.includes('CALL_NEW'), `expanded card switched to call-time diff:\n${expanded}`)
+  assert.equal(expanded.split('src/foo.ts').length - 1, 1, `expanded Edit path must appear once:\n${expanded}`)
+  app.stop()
+})
+
+test('a folded settled Edit caps the result diff across all hunks', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const resultDiffs = Array.from({ length: 8 }, (_, index) => ({
+    path: 'src/foo.ts',
+    oldText: `old-${index}`,
+    newText: `new-${index}`,
+  }))
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: resultDiffs,
+        locations: [],
+      }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-folded-hunks'), diffResultEvent(1, 'call-diff-folded-hunks', 'updated')])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  const changedRows = folded.split('\n').filter(line => /(?:old|new)-\d+/.test(line))
+  assert.equal(changedRows.length, 4, `folded result body must share one global four-row budget:\n${folded}`)
+  assert.ok(folded.includes('more changes hidden'), `folded multi-hunk result must show an omission marker:\n${folded}`)
+  app.stop()
+})
+
+test('a multi-hunk Edit keeps path ownership in the card header', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'call-old', newText: 'call-new' }],
+        locations: [],
+      }),
+      result: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [
+          { path: 'src/foo.ts', oldText: 'first-old', newText: 'first-new' },
+          { path: 'src/foo.ts', oldText: 'second-old', newText: 'second-new' },
+        ],
+        locations: [],
+      }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setToolOutputExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-multi'), diffResultEvent(1, 'call-diff-multi', 'The file src/foo.ts has been updated successfully.')])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(view.includes('Edit src/foo.ts [ok]  +2 -2'), `aggregate stats missing:\n${view}`)
+  assert.ok((view.match(/\+1 -1/g) ?? []).length >= 2, `multi-hunk stats-only separators missing:\n${view}`)
+  assert.equal(view.split('src/foo.ts').length - 1, 1, `multi-hunk Edit path must appear once:\n${view}`)
+  assert.ok(!view.includes('+1 -1 src/foo.ts'), `multi-hunk body must not repeat the path:\n${view}`)
+  app.stop()
+})
+
+test('expanded Edit headers reflow with terminal width changes', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/very-long-file-name.ts', old_string: 'old', new_string: 'new' })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/very-long-file-name.ts',
+        diffs: [{ path: 'src/very-long-file-name.ts', oldText: 'old', newText: 'new' }],
+        locations: [],
+      }),
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setToolOutputExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-resize', args), diffResultEvent(1, 'call-diff-resize', 'done')])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+
+  vt.resize(24, 24)
+  await vt.waitForRender()
+  const narrowRows = vt.getViewport()
+  const narrowHeader = narrowRows.find(line => line.includes('Edit') && line.includes('[ok]')) ?? ''
+  assert.notEqual(narrowHeader, '', `expanded Edit header lost status after narrowing:\n${narrowRows.join('\\n')}`)
+
+  vt.resize(100, 24)
+  await vt.waitForRender()
+  const wideRows = vt.getViewport()
+  const wideHeader = wideRows.find(line => line.includes('Edit')) ?? ''
+  assert.ok(wideHeader.includes('src/very-long-file-name.ts') && wideHeader.includes('[ok]'), `expanded Edit header did not recover at wide width:\n${wideRows.join('\\n')}`)
+  app.stop()
+})
+
+test('narrow Edit headers preserve status across running, success, and error states', async () => {
+  const vt = new VirtualTerminal(24, 24)
+  const args = JSON.stringify({
+    file_path: 'src/very-long-file-name.ts',
+    old_string: 'old',
+    new_string: 'new',
+  })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/very-long-file-name.ts',
+        diffs: [{ path: 'src/very-long-file-name.ts', oldText: 'old', newText: 'new' }],
+        locations: [],
+      }),
+      result: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/very-long-file-name.ts',
+        diffs: [{ path: 'src/very-long-file-name.ts', oldText: 'old', newText: 'new' }],
+        locations: [],
+      }),
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setToolOutputExpanded(true)
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const assertHeaderStatus = async (expected: string, events: SessionEvent[]): Promise<void> => {
+    const folder = new TranscriptFolder()
+    folder.apply(events)
+    app.setTranscript(folder.messages())
+    await vt.waitForRender()
+    const rows = vt.getViewport().map(stripAnsi)
+    const header = rows.find(line => line.includes('Edit')) ?? ''
+    assert.ok(header.includes(expected), `operation/path/status must stay on one header row:\n${rows.join('\n')}`)
+    assert.equal(rows.filter(line => line.includes('Edit')).length, 1, `Edit header wrapped unexpectedly:\n${rows.join('\n')}`)
+  }
+
+  await assertHeaderStatus('[running]', [diffCallEvent(0, 'call-diff-narrow', args)])
+  await assertHeaderStatus('[ok]', [diffCallEvent(2, 'call-diff-narrow-ok', args), diffResultEvent(3, 'call-diff-narrow-ok', 'done')])
+  await assertHeaderStatus('[error]', [diffCallEvent(4, 'call-diff-narrow-error', args), diffResultEvent(5, 'call-diff-narrow-error', 'failed', true)])
+  app.stop()
+})
+
+test('expanded non-Edit headers retain full wrapped descriptions', async () => {
+  const vt = new VirtualTerminal(28, 24)
+  const pattern = 'needle-that-must-wrap-12345'
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  app.setToolOutputExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep',
+    args: JSON.stringify({ pattern, path: 'src' }),
+    result: 'match', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.replace(/\n/g, '').includes(pattern), `non-Edit expanded header must wrap instead of truncating:\n${view}`)
+  app.stop()
+})
+
+test('a successful Edit with a non-diff result view falls back consistently', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/foo.ts', old_string: 'CALL_OLD', new_string: 'CALL_NEW' })
+  const resultErrors: boolean[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'CALL_OLD', newText: 'CALL_NEW' }],
+        locations: [],
+      }),
+      result: (_name, _args, result) => {
+        resultErrors.push(result.isError)
+        return { card: 'generic' as const, title: 'Not an applied diff', content: [{ type: 'text', text: 'GENERIC_RESULT' }] }
+      },
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-generic', args), diffResultEvent(1, 'call-diff-generic', 'raw result')])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `folded fallback diff missing:\n${folded}`)
+  assert.ok(!folded.includes('GENERIC_RESULT'), `folded card must not use a non-diff result view:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded fallback diff missing:\n${expanded}`)
+  assert.ok(!expanded.includes('GENERIC_RESULT'), `expanded card switched to a non-diff result view:\n${expanded}`)
+  assert.deepEqual(resultErrors, [false, false], 'each folded/expanded rebuild resolves the successful result without an error flag')
+  app.stop()
+})
+
+test('metadata-only successful Edit results render in folded and expanded views', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/foo.ts', old_string: 'CALL_OLD', new_string: 'CALL_NEW' })
+  const resultErrors: boolean[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: (_name, _args, result) => {
+        resultErrors.push(result.isError)
+        return {
+          card: 'diff' as const,
+          title: 'Edit src/foo.ts',
+          diffs: [{ path: 'src/foo.ts', oldText: 'RESULT_OLD', newText: 'RESULT_NEW' }],
+          locations: [],
+        }
+      },
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-empty-success', args), emptyResultEvent(1, 'call-diff-empty-success')])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('RESULT_OLD') && folded.includes('RESULT_NEW'), `folded metadata diff missing:\n${folded}`)
+  assert.ok(!folded.includes('CALL_OLD') && !folded.includes('CALL_NEW'), `folded view used call data over structured result:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('RESULT_OLD') && expanded.includes('RESULT_NEW'), `expanded metadata diff missing:\n${expanded}`)
+  assert.ok(!expanded.includes('CALL_OLD') && !expanded.includes('CALL_NEW'), `expanded view lost the structured result diff:\n${expanded}`)
+  assert.deepEqual(resultErrors, [false, false], 'metadata-only success remains non-error in both views')
+  app.stop()
+})
+
+test('metadata-only error Edit results stay error and use the attempted call diff', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/foo.ts', old_string: 'CALL_OLD', new_string: 'CALL_NEW' })
+  const resultErrors: boolean[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'CALL_OLD', newText: 'CALL_NEW' }],
+        locations: [],
+      }),
+      result: (_name, _args, result) => {
+        resultErrors.push(result.isError)
+        return {
+          card: 'diff' as const,
+          title: 'Edit src/foo.ts',
+          diffs: [{ path: 'src/foo.ts', oldText: 'RESULT_OLD', newText: 'RESULT_NEW' }],
+          locations: [],
+        }
+      },
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-empty-error', args), emptyResultEvent(1, 'call-diff-empty-error', true)])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('Edit src/foo.ts [error]'), `folded error identity missing:\n${folded}`)
+  assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `folded attempted diff missing:\n${folded}`)
+  assert.ok(!folded.includes('RESULT_OLD') && !folded.includes('RESULT_NEW'), `folded error used applied data:\n${folded}`)
+  assert.ok(!folded.includes('+1 -1'), `folded error fabricated success stats:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('Edit src/foo.ts [error]'), `expanded error identity missing:\n${expanded}`)
+  assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded attempted diff missing:\n${expanded}`)
+  assert.ok(!expanded.includes('RESULT_OLD') && !expanded.includes('RESULT_NEW'), `expanded error used applied data:\n${expanded}`)
+  assert.deepEqual(resultErrors, [true], 'expanded error forwards isError to the presenter')
+  app.stop()
+})
+
+test('malformed Edit args never substitute presenter call diffs', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let callCount = 0
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => {
+        callCount += 1
+        return {
+          card: 'diff' as const,
+          title: 'Edit src/presenter-only.ts',
+          diffs: [{ path: 'src/presenter-only.ts', oldText: 'PRESENTER_OLD', newText: 'PRESENTER_NEW' }],
+          locations: [],
+        }
+      },
+      result: () => undefined,
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-malformed-edit', '{not-json'), diffResultEvent(1, 'call-malformed-edit', 'unstructured result')])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(!folded.includes('PRESENTER_OLD') && !folded.includes('PRESENTER_NEW'), `folded malformed Edit used presenter call data:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(!expanded.includes('PRESENTER_OLD') && !expanded.includes('PRESENTER_NEW'), `expanded malformed Edit used presenter call data:\n${expanded}`)
+  assert.equal(callCount, 0, 'malformed Edit args must not invoke a presenter call diff fallback')
   app.stop()
 })
 
@@ -1697,20 +2516,108 @@ test('a completed diff card without a result view falls back to the call-time di
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('+1 -1 src/foo.ts'), `call diff header missing:\n${view}`)
+  assert.ok(view.includes('Edit src/foo.ts [ok]  +1 -1'), `call diff stats missing from the card header:\n${view}`)
+  assert.ok(!view.includes('+1 -1 src/foo.ts'), `the Edit body must not repeat its path header:\n${view}`)
   assert.ok(!view.includes('updated successfully'), `raw result text must not replace the diff:\n${view}`)
+  app.stop()
+})
+
+test('an error Edit stays an error and never renders an applied result diff', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/foo.ts', old_string: 'CALL_OLD', new_string: 'CALL_NEW' })
+  const resultErrors: boolean[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'CALL_OLD', newText: 'CALL_NEW' }],
+        locations: [],
+      }),
+      result: (_name, _args, result) => {
+        resultErrors.push(result.isError)
+        return {
+          card: 'diff' as const,
+          title: 'Edit src/foo.ts',
+          diffs: [{ path: 'src/foo.ts', oldText: 'RESULT_OLD', newText: 'RESULT_NEW' }],
+          locations: [],
+        }
+      },
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-error', args), diffResultEvent(1, 'call-diff-error', 'edit failed', true)])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('Edit src/foo.ts [error]'), `error identity missing:\n${folded}`)
+  assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `error card should show the attempted call diff:\n${folded}`)
+  assert.ok(!folded.includes('RESULT_OLD') && !folded.includes('RESULT_NEW'), `error card must not show an applied result diff:\n${folded}`)
+  assert.ok(!folded.includes('+1 -1'), `error card must not fabricate success stats:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('Edit src/foo.ts [error]'), `expanded error identity missing:\n${expanded}`)
+  assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded error card switched diff source:\n${expanded}`)
+  assert.ok(!expanded.includes('RESULT_OLD') && !expanded.includes('RESULT_NEW'), `expanded error card rendered applied data:\n${expanded}`)
+  assert.deepEqual(resultErrors, [true], 'expanded error rendering preserves isError')
+  app.stop()
+})
+
+test('an error Edit ignores non-diff result views and keeps the call diff', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const args = JSON.stringify({ file_path: 'src/foo.ts', old_string: 'CALL_OLD', new_string: 'CALL_NEW' })
+  const resultErrors: boolean[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'diff' as const,
+        title: 'Edit src/foo.ts',
+        diffs: [{ path: 'src/foo.ts', oldText: 'CALL_OLD', newText: 'CALL_NEW' }],
+        locations: [],
+      }),
+      result: (_name, _args, result) => {
+        resultErrors.push(result.isError)
+        return { card: 'generic' as const, title: 'Failed Edit', content: [{ type: 'text', text: 'RESULT_GENERIC' }] }
+      },
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([diffCallEvent(0, 'call-diff-error-generic', args), diffResultEvent(1, 'call-diff-error-generic', 'edit failed', true)])
+  app.setTranscript(folder.messages())
+  app.setToolOutputExpanded(false)
+  await vt.waitForRender()
+  const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const folded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `folded attempted diff missing:\n${folded}`)
+  assert.ok(!folded.includes('RESULT_GENERIC'), `folded error should not show result content:\n${folded}`)
+
+  app.setToolOutputExpanded(true)
+  await vt.waitForRender()
+  const expanded = stripAnsi(vt.getViewport().join('\n'))
+  assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded attempted diff missing:\n${expanded}`)
+  assert.ok(!expanded.includes('RESULT_GENERIC'), `expanded error must not use a non-diff result view:\n${expanded}`)
+  assert.deepEqual(resultErrors, [true], 'expanded error forwards isError to the presenter')
   app.stop()
 })
 
 test('a big diff card caps in the default view with an expand hint', async () => {
   const vt = new VirtualTerminal(100, 40)
-  const oldLines = Array.from({ length: 30 }, (_, i) => `old ${i}`).join('\n')
   const newLines = Array.from({ length: 30 }, (_, i) => `new ${i}`).join('\n')
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     present: {
       call: () => ({
         card: 'diff' as const,
-        title: 'Write src/big.ts',
+        title: 'Edit src/big.ts',
         diffs: [{ path: 'src/big.ts', oldText: null, newText: newLines }],
         locations: [],
       }),
@@ -1722,11 +2629,23 @@ test('a big diff card caps in the default view with an expand hint', async () =>
   startedApps.add(app)
   app.setToolOutputExpanded(true)
   const folder = new TranscriptFolder()
-  folder.apply([diffCallEvent(0, 'call-diff-4')])
+  folder.apply([{
+    type: 'tool/call',
+    seq: SessionSeq(0),
+    time: 1_700_000_000_000,
+    data: {
+      turn: 0,
+      step: 0,
+      callId: ToolCallId('call-diff-4'),
+      name: 'edit',
+      arguments: JSON.stringify({ file_path: 'src/big.ts', old_string: '', new_string: newLines }),
+    },
+  }])
   app.setTranscript(folder.messages())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('+30 src/big.ts'), `create header missing:\n${view}`)
+  assert.ok(view.includes('Edit src/big.ts [running]  +30'), `create stats missing from the card header:\n${view}`)
+  assert.ok(!view.includes('+30 src/big.ts'), `the Edit body must not repeat its path header:\n${view}`)
   assert.ok(view.includes('more changes hidden (click to expand)'), `cap footer missing:\n${view}`)
   app.stop()
 })
@@ -1963,7 +2882,7 @@ test('submitDraft with an empty draft and a staged image submits (image-only gat
   await vt.waitForRender()
   // The runner resolves the placeholders to image blocks (plan §11.1): an
   // empty-text draft with images is NOT empty.
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submitted, [''])
   app.stop()
@@ -1981,7 +2900,7 @@ test('submitDraft with an empty draft and no image stays a no-op even with the g
 
   startedApps.add(app)
   await vt.waitForRender()
-  app.submitDraft(false)
+  app.submitDraft('enter')
   await vt.waitForRender()
   assert.deepEqual(submitted, [])
   app.stop()
@@ -2140,6 +3059,38 @@ test('fullscreen drag selection copies through the host copySelection policy (is
   app.stop()
 })
 
+test('an interrupted assistant message keeps its body and renders a separate marker', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    {
+      type: 'assistant/message',
+      seq: 0,
+      time: 1_700_000_000_000,
+      data: {
+        turn: 0,
+        step: 0,
+        message: {
+          id: MessageId('interrupted-message'),
+          role: 'assistant',
+          content: [{ type: 'text', text: 'partial answer' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        interrupted: true,
+      },
+    } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('partial answer'), `interrupted body must remain visible:\n${view}`)
+  assert.ok(view.includes('(interrupted)'), `interrupted marker must render separately:\n${view}`)
+  const [message] = folder.messages()
+  assert.ok(message?.kind === 'assistant')
+  assert.equal(message.text, 'partial answer')
+  app.stop()
+})
+
 test('a reasoning-only assistant message (no text) adds no blank row between cards', async () => {
   const vt = new VirtualTerminal(60, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -2147,13 +3098,14 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
 
   startedApps.add(app)
   const folder = new TranscriptFolder()
-  folder.apply([
+  applyMixed(folder, [
     { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
-    // Thinking streams, then the step settles with a reasoning-only message
-    // (NO text block): the image pipeline's non-text-block retention keeps
-    // the empty assistant entry — it must not occupy a spacer row, or the
-    // thinking card and the next card read two blank rows apart.
-    { type: 'assistant/chunk', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', text: 'think one\nthink two\n' } } } as SessionEvent,
+    // Thinking streams (Session v2: THROUGH THE LIVE SEAM), then the step
+    // settles with a reasoning-only message (NO text block): the image
+    // pipeline's non-text-block retention keeps the empty assistant entry —
+    // it must not occupy a spacer row, or the thinking card and the next
+    // card read two blank rows apart.
+    { type: 'assistant/chunk', seq: SessionSeq(1), time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think one\nthink two\n' } } },
     { type: 'assistant/message', seq: 2, time: 1_700_000_000_002, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'reasoning', text: 'think one\nthink two' }] } } } as SessionEvent,
     { type: 'tool/call', seq: 3, time: 1_700_000_000_003, data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } } as SessionEvent,
     { type: 'tool/result', seq: 4, time: 1_700_000_000_004, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: ToolCallId('c1'), content: [{ type: 'text', text: 'file.txt' }], isError: false }) } } as SessionEvent,
@@ -2192,5 +3144,296 @@ test('applyPluginPalette records the live plugin-theme selection (the unload-fal
   // applies to it) — the review's P2 contract.
   app.clearActivePluginTheme()
   assert.equal(app.activePluginTheme(), undefined)
+  app.stop()
+})
+
+test('picker onFilterChange reports typed filter edits with the new query', async () => {
+  const { vt, app } = startApp()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    { enableSearch: true, onFilterChange: (query) => changes.push(query) },
+  )
+  await vt.waitForRender()
+  vt.sendInput('fo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['fo'], 'a typed edit must report the new filter value')
+  handle.close()
+})
+
+test('picker onFilterChange reports programmatic setFilter like a typed edit', async () => {
+  const { vt, app } = startApp()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    { enableSearch: true, onFilterChange: (query) => changes.push(query) },
+  )
+  await vt.waitForRender()
+  handle.setFilter?.('foo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'])
+  // The same value again must NOT repeat the callback.
+  handle.setFilter?.('foo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'], 'an unchanged filter must not re-report')
+  // Clearing reports the empty query.
+  handle.setFilter?.('')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo', ''], 'clearing the filter must report the empty query')
+  handle.close()
+})
+
+test('picker onFilterChange never fires after the picker closed', async () => {
+  const { vt, app } = startApp()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    { enableSearch: true, onFilterChange: (query) => changes.push(query) },
+  )
+  await vt.waitForRender()
+  handle.setFilter?.('foo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'])
+  handle.close()
+  handle.setFilter?.('bar')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'], 'a closed picker must not report filter changes')
+})
+
+test('categorized picker onFilterChange reports typed and programmatic edits', async () => {
+  const { vt, app } = startApp()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    {
+      enableSearch: true,
+      onFilterChange: (query) => changes.push(query),
+      categories: [
+        { id: 'one', label: 'One', header: 'one', items: () => [{ value: 'a', label: 'alpha', description: '', group: '' }] },
+        { id: 'two', label: 'Two', header: 'two', items: () => [{ value: 'b', label: 'beta', description: '', group: '' }] },
+      ],
+    },
+  )
+  await vt.waitForRender()
+  vt.sendInput('be')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['be'], 'a typed edit must report on a categorized picker')
+  handle.setFilter?.('al')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['be', 'al'], 'a programmatic edit must report on a categorized picker')
+  handle.close()
+})
+
+test('picker onFilterChange never fires after a pre-aborted signal', async () => {
+  const { vt, app } = startApp()
+  const controller = new AbortController()
+  controller.abort()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    { enableSearch: true, signal: controller.signal, onFilterChange: (query) => changes.push(query) },
+  )
+  await vt.waitForRender()
+  handle.setFilter?.('foo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, [], 'a pre-aborted picker must never report filter changes')
+})
+
+test('categorized picker onFilterChange never fires after the app is disposed', async () => {
+  const { vt, app } = startApp()
+  const changes: string[] = []
+  const handle = app.openPicker(
+    [{ value: 'a', label: 'alpha', description: '', group: '' }],
+    () => {},
+    () => {},
+    {
+      enableSearch: true,
+      onFilterChange: (query) => changes.push(query),
+      categories: [
+        { id: 'one', label: 'One', header: 'one', items: () => [{ value: 'a', label: 'alpha', description: '', group: '' }] },
+      ],
+    },
+  )
+  await vt.waitForRender()
+  handle.setFilter?.('foo')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'])
+  // The app's final dispose hides overlays WITHOUT the handle's close
+  // path — the disposal fence must still silence the callback.
+  app.dispose()
+  handle.setFilter?.('bar')
+  await vt.waitForRender()
+  assert.deepEqual(changes, ['foo'], 'a disposed app must not report filter changes')
+})
+
+test('fullscreen openPicker responds to mouse clicks (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const picked: string[] = []
+  app.openPicker(
+    [
+      { value: 'first', label: 'first choice' },
+      { value: 'second', label: 'second choice' },
+      { value: 'third', label: 'third choice' },
+    ],
+    (value) => { picked.push(value) },
+    () => {},
+    { header: 'Choices', showHint: true },
+  )
+  await vt.waitForRender()
+  const viewport = vt.getViewport()
+  const secondRow = viewport.findIndex(line => line.includes('second choice'))
+  assert.ok(secondRow >= 0, `second choice row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[secondRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'picker frame left border missing')
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${secondRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${secondRow + 1}m`)
+  await vt.waitForRender()
+  assert.deepEqual(picked, ['second'], 'clicking the second item must activate it')
+  app.dispose()
+})
+
+test('question: press Q1 option → keyboard advance → release same cell must not activate Q2 (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Q2', options: [{ label: 'C' }, { label: 'D' }] },
+  ])
+  await vt.waitForRender()
+  // Q1: option A on some row.
+  const view = vt.getViewport()
+  const rowA = view.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, `option A missing:\n${view.join('\n')}`)
+  // Press option A (no release yet): the press-time identity is Q1/A.
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}M`)
+  await vt.waitForRender()
+  // Keyboard Enter advances to Q2.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  // Q2: option C now occupies the same physical row.
+  const after = vt.getViewport()
+  assert.ok((after[rowA] ?? '').includes('[1] C'), `option C must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the synthesized click must NOT activate C
+  // (press identity Q1/A ≠ current identity Q2/C).
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}m`)
+  await vt.waitForRender()
+  // Q2 must not be answered: the flow stays on Q2 (not advanced to submit).
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('?  Q2')), `the flow must still be on Q2:\n${final.join('\n')}`)
+  // stop() cancels the still-open flow: consume the rejection.
+  answers.catch(() => {})
+  app.stop()
+})
+
+test('question: a queued flow cannot consume the previous flow press (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers1 = app.askQuestions([
+    { id: 'q1', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+  ])
+  const answers2 = app.askQuestions([
+    { id: 'q1', question: 'Q1', options: [{ label: 'C' }, { label: 'D' }] },
+  ])
+  await vt.waitForRender()
+  // F1: option A on some row. Press it (no release): the press-time
+  // identity belongs to F1's flow instance.
+  const view = vt.getViewport()
+  const rowA = view.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, `option A missing:\n${view.join('\n')}`)
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}M`)
+  await vt.waitForRender()
+  // Keyboard completes F1: Enter confirms A, Enter submits the review.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  // F2 (queued, same question id) takes over: option C on the same row.
+  const after = vt.getViewport()
+  assert.ok((after[rowA] ?? '').includes('[1] C'), `option C must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: F2 must NOT consume F1's press (the
+  // gesture object belongs to F1's flow instance).
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}m`)
+  await vt.waitForRender()
+  // F2 must not be answered: the flow stays on F2's Q1.
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('?  Q1')), `the flow must still be on F2's Q1:\n${final.join('\n')}`)
+  answers1.catch(() => {})
+  answers2.catch(() => {})
+  app.stop()
+})
+
+test('question: a press cannot transfer to the next question with a duplicate id (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'same', question: 'Q1', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'same', question: 'Q2', options: [{ label: 'C' }, { label: 'D' }] },
+  ])
+  await vt.waitForRender()
+  // Q1: option A on some row. Press it (no release): the press-time
+  // identity is Q1's question INDEX + option A.
+  const view = vt.getViewport()
+  const rowA = view.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, `option A missing:\n${view.join('\n')}`)
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}M`)
+  await vt.waitForRender()
+  // Keyboard Enter confirms A and advances to Q2 (same caller id).
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  // Q2: option C now occupies the same physical row.
+  const after = vt.getViewport()
+  assert.ok((after[rowA] ?? '').includes('[1] C'), `option C must occupy the pressed row:\n${after.join('\n')}`)
+  // Release on the SAME cell: the press from Q1 must NOT activate Q2's C
+  // (the question INDEX changed even though the caller id is duplicated).
+  vt.sendInput(`\x1b[<0;9;${rowA + 1}m`)
+  await vt.waitForRender()
+  // Q2 must not be answered: the flow stays on Q2.
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('?  Q2')), `the flow must still be on Q2:\n${final.join('\n')}`)
+  answers.catch(() => {})
+  app.stop()
+})
+
+test('question: Esc between press and release cannot re-enter the free-text edit (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Type your answer' },
+  ])
+  await vt.waitForRender()
+  // Enter the free-text edit.
+  vt.sendInput('h')
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const pinnedRow = view.findIndex(line => line.includes('h') && !line.includes('dsh'))
+  assert.ok(pinnedRow >= 0, `pinned input row missing:\n${view.join('\n')}`)
+  // ONE continuous batch: press the input row, Esc (exits the edit),
+  // release the same cell — all before the next repaint. The stale
+  // edit-state press must NOT re-enter the edit.
+  vt.sendInput(`\x1b[<0;3;${pinnedRow + 1}M`)
+  vt.sendInput('\x1b')
+  vt.sendInput(`\x1b[<0;3;${pinnedRow + 1}m`)
+  await vt.waitForRender()
+  // The flow must stay in the navigation state.
+  const final = vt.getViewport()
+  assert.ok(final.some(line => line.includes('↵ edit')), `the flow must stay in the navigation state:\n${final.join('\n')}`)
+  assert.ok(!final.some(line => line.includes('↵ confirm')), 'the release must not re-enter the edit')
+  answers.catch(() => {})
   app.stop()
 })

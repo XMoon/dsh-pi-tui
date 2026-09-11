@@ -135,8 +135,11 @@ test('MOVED_TO_HOST requires a capability replacement mapping', () => {
 test('REDUNDANT_SHIM requires the atomic replacement and its evidence', () => {
   const manifest = fixture()
   const good = errorsFor(manifest)
-  assert.deepEqual(good, [], 'the real X019 inheritance edge has a complete atomic retirement record')
+  assert.deepEqual(good, [], 'the checked-in ledger (X019 SUPERSEDED) has a complete retirement record')
 
+  // X019 is SUPERSEDED in the checked-in ledger; re-classify it as the
+  // REDUNDANT_SHIM fixture so the gate rule stays covered.
+  manifest.divergences.X019.status = 'REDUNDANT_SHIM'
   manifest.divergences.X019.retirement.replacementMapping = ['remove the base method']
   const missingAtomic = errorsFor(manifest)
   assertHasError(missingAtomic, 'REDUNDANT_SHIM mapping must state the atomic replacement')
@@ -177,8 +180,8 @@ test('report rendering is deterministic and naturally sorts mixed IDs', () => {
   assert.ok(first.indexOf('### X044') < first.indexOf('### X045'))
   assert.ok(first.indexOf('### X045') < first.indexOf('### X046'))
   assert.ok(first.indexOf('### X046') < first.indexOf('### X047'))
-  assert.ok(first.includes('- Baseline compared: `earendil-works/pi@b79e4cc834970cca69daebffab7df1da7d1e52c4`'))
-  assert.ok(first.includes('- Reference snapshot: `earendil-works/pi@b8b873b9872db04a938fb4357b5e8e824ddc051c`'))
+  assert.ok(first.includes('- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`'))
+  assert.ok(first.includes('- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`'))
   assert.equal(first.endsWith('\n'), true)
   assert.equal(first.endsWith('\n\n'), false)
   assert.equal(first.includes('\n\n\n'), false)

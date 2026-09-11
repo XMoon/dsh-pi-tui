@@ -43,6 +43,10 @@ import type { KeyId } from '@xmoon76/pi-tui'
 export type AppKeybindingId =
   // Input / Agent
   | 'app.input.submit'
+  | 'app.input.submitAccelerated'
+  /** Deprecated (no default key): the historical fixed-queue action. Kept as
+   * a REAL action so a stored remap keeps meaning "queue the draft" — never
+   * silently re-interpreted as the accelerated gesture. */
   | 'app.input.queue'
   | 'app.input.steer'
   | 'app.input.dequeue'

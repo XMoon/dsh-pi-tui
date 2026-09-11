@@ -13,9 +13,9 @@ import { dirname, join } from 'node:path'
 import type {
   EditorTheme,
   MarkdownTheme,
-  SelectListTheme,
   SettingsListTheme,
 } from '@xmoon76/pi-tui'
+import type { SearchablePickerTheme } from './searchable-picker.ts'
 
 /** Semantic palette tokens, mirroring pi's ColorPalette vocabulary. */
 export interface ColorPalette {
@@ -291,6 +291,11 @@ export function themeOptOut(): boolean {
 const chalk = new Chalk({ level: 3 })
 const hex = (token: string): InstanceType<typeof Chalk> => chalk.hex(currentPalette[token as keyof ColorPalette] ?? currentPalette.text)
 
+/** Paint text with an explicit hex colour. Brand assets (the welcome whale
+ * gradient) use a fixed ramp that is NOT a semantic token: it must not
+ * follow the active palette, and custom themes do not override it. */
+export const hexPaint = (hexValue: string, text: string): string => chalk.hex(hexValue)(text)
+
 /** Style helpers by token name. The strong/dim/italic helpers accept an
  * optional TONE OVERRIDE (the footer layout's semantic tone override):
  * the override replaces the token, the style stays. */
@@ -331,8 +336,10 @@ export const color = {
   textDimItalic: (text: string) => chalk.italic.hex(currentPalette.textDim)(text),
 }
 
-/** SelectList palette from the semantic tokens. */
-export const selectListTheme: SelectListTheme = {
+/** SearchablePicker palette from the semantic tokens (a structural
+ * superset of the upstream SelectListTheme, so it still satisfies the
+ * Editor's autocomplete theme slot). */
+export const selectListTheme: SearchablePickerTheme = {
   selectedPrefix: (text: string) => color.primary(text),
   selectedText: (text: string) => chalk.bold(text),
   description: (text: string) => color.textDim(text),

@@ -12,7 +12,7 @@ import test, { afterEach } from 'node:test'
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
+import { CURSOR_MARKER, SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { customThemesDir, darkColors, loadCustomTheme, settingsListTheme } from '../src/theme.ts'
 import { ThemeRegistry } from '../src/theme-registry.ts'
 import { resolveThemeSelection, themePickerRows } from '../src/theme-source.ts'
@@ -576,4 +576,61 @@ test('INTEGRATION: the Theme submenu inherits the live row budget and keeps the 
   assert.ok(view.includes('Esc to cancel'), `theme submenu hint must survive the shrink:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
+})
+
+/** A minimal left-button mouse event for direct component tests. */
+function mouse(type: 'press' | 'click', x: number, y: number, width = 80, height = 24): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type,
+    button: 'left',
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width,
+    height,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    ...(type === 'click' ? { clickCount: 1 } : {}),
+  }
+}
+
+test('ThemeSubmenu mouse click selects a theme (mouse parity)', () => {
+  const registry = new ThemeRegistry()
+  let picked: string | undefined
+  const menu = new ThemeSubmenu('auto', registry, (value) => { picked = value })
+  menu.render(80)
+  // enableSearch: the search row is y=0 and item rows start at y=2.
+  const press = menu.handleMouse(mouse('press', 5, 2, 80, 24))
+  assert.ok(press?.handled, 'press on a theme row must be handled')
+  assert.equal(press?.focus, true, 'press must request focus')
+  menu.handleMouse(mouse('click', 5, 2, 80, 24))
+  assert.equal(picked, 'auto', 'clicking the first theme row must apply the source-qualified value')
+})
+
+test('ThemeSubmenu search Input click positions the search cursor (mouse parity)', () => {
+  const registry = new ThemeRegistry()
+  const menu = new ThemeSubmenu('auto', registry, () => {})
+  menu.render(80)
+  menu.handleInput('dark')
+  menu.render(80)
+  // Click between "da" and "rk": the search row is y=0 and the search
+  // Input's default prompt "> " is 2 columns, so value column 2 is at x=4.
+  const result = menu.handleMouse(mouse('press', 4, 0, 80, 24))
+  assert.ok(result?.handled, 'press on the search row must be handled')
+  menu.handleInput('X')
+  const rendered = menu.render(80).map(line => line.replace(/\x1b\[[0-9;]*m/gu, '')).join('\n')
+  assert.ok(rendered.includes('daXrk'), 'typing after the click must insert at the clicked filter column')
+})
+
+test('ThemeSubmenu forwards focused state to the search Input (CURSOR_MARKER)', () => {
+  const registry = new ThemeRegistry()
+  const menu = new ThemeSubmenu('auto', registry, () => {})
+  menu.focused = true
+  const focusedRender = menu.render(80).join('\n')
+  assert.ok(focusedRender.includes(CURSOR_MARKER), 'focused render must emit the hardware cursor marker')
+  menu.focused = false
+  const unfocusedRender = menu.render(80).join('\n')
+  assert.ok(!unfocusedRender.includes(CURSOR_MARKER), 'unfocused render must not emit the marker')
 })

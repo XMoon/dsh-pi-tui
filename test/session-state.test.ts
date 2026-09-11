@@ -147,10 +147,9 @@ function stubRunner(
     agents: {} as never,
     sessionReader: {
       list: async () => [],
-      search: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     },
     catalog: new DirectCatalogPort(ctx as never, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined, owner),
     config: new DirectConfigPort(ctx as never, undefined, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
@@ -1719,6 +1718,76 @@ test('/settings theme pick persists the BUILTIN choice too (review P1: the trans
   const view = vt.getViewport().join('\n')
   const lightMarked = view.split('\n').filter(line => line.includes('light') && line.includes('← current'))
   assert.equal(lightMarked.length, 1, `the light row carries the marker after the pick:\n${view}`)
+  app.stop()
+})
+
+test('/settings nested Theme submenu responds to fullscreen mouse clicks (mouse parity)', async () => {
+  // The full nested chain through the REAL /settings handler: click the
+  // outer Theme row (through the Frame), the ThemeSubmenu opens in place,
+  // click a theme row inside the submenu, and the transactional commit
+  // persists the clicked source-qualified value.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  app.setFullscreen(true)
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const userFooterCustomItems: unknown[] = [
+    { schemaVersion: 1, id: 'user:prod', kind: 'text', text: 'PROD' },
+  ]
+  const projectFooterCustomItems: unknown[] = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
+  ctx.provide('settings', {
+    describe: () => [{
+      ns: 'dsh-pi-tui',
+      value: { footerCustomItems: projectFooterCustomItems },
+      user: { footerCustomItems: userFooterCustomItems },
+    }],
+  } as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  const doc: Record<string, unknown> = {
+    theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
+    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
+    footerCustomItems: projectFooterCustomItems,
+  }
+  const persisted: string[] = []
+  Object.assign(runner, {
+    tuiSettings: {
+      get: () => doc as never,
+      replace: (next: Record<string, unknown>) => {
+        persisted.push(next.theme as string)
+        Object.assign(doc, next)
+        return next
+      },
+    },
+  })
+  registerTuiCommands(runner)
+  const settingsDef = services.defs.find(def => def.name === 'settings')
+  assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
+  ;(settingsDef!.handler as () => unknown)()
+  await vt.waitForRender()
+  // Click the outer Theme row (approval is first; the doc starts dark).
+  let viewport = vt.getViewport()
+  const themeRow = viewport.findIndex(line => line.includes('Theme'))
+  assert.ok(themeRow >= 0, `Theme row missing:\n${viewport.join('\n')}`)
+  const leftBorder = viewport[themeRow]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'frame left border missing')
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${themeRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${leftBorder + 3};${themeRow + 1}m`)
+  await vt.waitForRender()
+  // The ThemeSubmenu is open in place: click the "light" row.
+  viewport = vt.getViewport()
+  const lightRow = viewport.findIndex(line => line.includes('light'))
+  assert.ok(lightRow >= 0, `light row missing in the submenu:\n${viewport.join('\n')}`)
+  const subLeftBorder = viewport[lightRow]?.indexOf('│') ?? -1
+  assert.ok(subLeftBorder >= 0, 'submenu frame left border missing')
+  vt.sendInput(`\x1b[<0;${subLeftBorder + 3};${lightRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${subLeftBorder + 3};${lightRow + 1}m`)
+  await vt.waitForRender()
+  for (let spin = 0; spin < 50; spin += 1) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(persisted.length, 1, 'the submenu click must persist exactly one write')
+  assert.equal(persisted[0], 'light', 'the submenu click must apply the clicked theme')
   app.stop()
 })
 

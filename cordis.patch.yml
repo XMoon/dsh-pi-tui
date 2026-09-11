@@ -42,11 +42,12 @@
     - id: authorization
       name: '@deepseek-ai/dsh-authorization'
 
-    # Consume DSH 0.1.2's official shipped presets directly. The upstream
+    # Official shipped presets are the composition authority. The upstream
     # service defaults includeShippedRoot/includeUserRoot to true, so this
     # bundle deliberately owns no duplicate standard/ptc/minimal/cordis root.
-    # The legacy persisted id `code` is normalized at the data boundary to
-    # `ptc`; it is not another preset row.
+    # DSH's V2→V3 format migration owns historical session preset conversion;
+    # the settings/default compatibility shim is kept separately at the TUI
+    # request boundary and does not add another preset row.
     - id: agent-presets
       name: '@deepseek-ai/dsh-agent-presets'
       config:
@@ -108,9 +109,6 @@
   disabled: true
 
 - id: tool-fs-search
-  disabled: true
-
-- id: tool-str-replace-editor
   disabled: true
 
 - id: skill-filesystem

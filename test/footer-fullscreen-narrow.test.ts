@@ -111,8 +111,11 @@ function assertPinnedChromeIntact(
     )
   }
   if (expectStats) {
+    // The stats row's floor is the session usage pair (the highest
+    // importance placement on the row): the shadowing latency/speed
+    // placements legitimately compact or drop at narrower cells.
     assert.ok(
-      view.includes('12.3s'),
+      view.includes('↑0 ↓0'),
       `the stats row was clipped out of the viewport at ${columns}x${viewportRows}:\n${view}`,
     )
   }
@@ -150,11 +153,11 @@ test('the footer never clips out of a narrow fullscreen viewport', async () => {
   // old 4-line budget pushed the stats row below the screen while the
   // transcript was already at zero. 20x10 is the documented EXTREME cell:
   // the 20-column todo panel wraps the chrome, so only TWO footer slots
-  // remain — the surface hands the composer total=2, the footer renders
-  // status + stats (both one line, both visible) and the status row
-  // COMPACTS (ww/flash/ctx 10%) instead of dropping the model, which the
+  // remain — the surface hands the composer total=2, the footer renders its
+  // two rows (the status row compacted to ww/flash/task-badge, the stats
+  // row's squeezed left zone beside the context right zone), and the
   // plan's "footer must not disappear + one high-importance status must
-  // survive" contract covers.
+  // survive" contract covers it.
   for (const [columns, viewportRows, expectStats, expectModel] of [
     [80, 24, true, true], [60, 16, true, true], [40, 12, true, true],
     [40, 10, true, true], [30, 10, true, true], [20, 10, true, false],
@@ -171,11 +174,11 @@ test('the footer never clips out of a narrow fullscreen viewport', async () => {
 })
 
 test('the armed Ctrl+D instruction never pushes the footer out of a narrow fullscreen viewport', async () => {
-  // Ctrl+D (arm) shows the Host instruction: 3 physical lines were then
-  // spent on the status row + the exit hint and the stats row clipped.
   // The instruction is an INDEPENDENT surface with a 1-line contract
   // (plan §7): 1 status line + 1 stats line + 1 instruction line must fit
-  // — inside the same 3-line budget, read from the footer component.
+  // — inside the same 3-line budget, read from the footer component. (The
+  // historical shape of this regression: the old status row spent 3
+  // physical lines beside the hint and the stats row was clipped.)
   const { vt, app } = await startFullscreenApp(40, 10)
   try {
     vt.sendInput('\x04') // arm the exit window: the hint owns its own line
@@ -184,7 +187,7 @@ test('the armed Ctrl+D instruction never pushes the footer out of a narrow fulls
     const view = lines.join('\n')
     assert.ok(view.includes('Press Ctrl+D again to exit'), `the exit hint must stay visible:\n${view}`)
     assert.ok(view.includes('workspace-write') || view.includes('ww'), `the status row must survive beside the hint:\n${view}`)
-    assert.ok(view.includes('TTFB 12.3s'), `the stats row must survive beside the hint:\n${view}`)
+    assert.ok(view.includes('12.3s'), `the stats row must survive beside the hint (the latency keeps its compact form):\n${view}`)
     const footerLines = [...app.footerRenderRowsForTest()]
     assert.equal(footerLines.length, 3, `the footer with its instruction must stay inside the effective budget:\n${view}`)
     assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+D again'), `the hint must be the footer's last line:\n${view}`)
@@ -295,11 +298,12 @@ test('a regular -> fullscreen switch recomposes the budget (widgets are fullscre
   // REGULAR at 80x8: the regular surface is a FLOWING document — overflow
   // enters the terminal scrollback and the footer is never
   // viewport-clipped there, so it always receives the FULL capacity
-  // (demand-limited to 3 rows here) and populated widgets never squeeze
-  // it (PR #57 review P2: do not trade fullscreen clipping for regular
-  // information loss).
+  // (demand-limited to 2 rows here: the status row fits one line at 80
+  // columns and the stats row is a single-line right-zone row) and
+  // populated widgets never squeeze it (PR #57 review P2: do not trade
+  // fullscreen clipping for regular information loss).
   const regularRows = [...app.footerRenderRowsForTest()]
-  assert.equal(regularRows.length, 3, `the regular footer keeps its full demand inside the capacity, saw ${regularRows.length}:\n${regularRows.join('\n')}`)
+  assert.equal(regularRows.length, 2, `the regular footer keeps its full demand inside the capacity, saw ${regularRows.length}:\n${regularRows.join('\n')}`)
   // FULLSCREEN at unchanged geometry: the widgets are NOT mounted (and
   // the widgets stay unrendered), but the pinned chrome IS — the budget
   // recomposes to the surface capacity (8 - header 1 - editor 3 = 4 →

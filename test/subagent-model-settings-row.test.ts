@@ -173,7 +173,7 @@ function makeHarness(initial: SettingsDoc): {
     settleIntent: () => {},
     tuiSettings: undefined,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => [], projectionBatch: async () => new Map(), measureContext: () => undefined, readExportData: async () => ({ kind: 'none' }) },
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), measureContext: () => undefined },
     sessionWriter: { followup: () => {}, steer: () => {}, dequeue: () => {}, cancel: () => {}, rename: () => true, refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),

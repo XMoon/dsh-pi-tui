@@ -17,9 +17,9 @@ import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { SessionHandle } from '../src/runtime/session-lifecycle-port.ts'
 import {
   collectRewindCandidates,
@@ -55,9 +55,18 @@ afterEach(() => {
 
 // ── event fixtures ─────────────────────────────────────────────────────────
 
-/** Build a minimal event envelope for tests. */
-function event<K extends SessionEvent['type']>(type: K, data: SessionEvent<K>['data'], seq: number): SessionEvent {
-  return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+/** Build a minimal event envelope for tests. The type parameter is widened
+ * to any string so legacy v1 `assistant/chunk` events (absent from master's
+ * SessionEventMap) can be constructed; known types keep their typed data
+ * surface, widened with `Record<string, unknown>` so Session v2 fields the
+ * installed dsh-session may lag (e.g. `assistant/message.stream`) can be
+ * supplied. */
+function event<K extends string>(
+  type: K,
+  data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
+  seq: number,
+): SessionEvent {
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
 }
 
 function turnStart(seq: number, turn: number): SessionEvent {
@@ -107,6 +116,7 @@ function turn(seq: number, turnNo: number, prompt: string): SessionEvent[] {
         content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
       },
+      stream: [],
     }, seq + 2),
     turnEnd(seq + 3, turnNo),
   ]
@@ -141,7 +151,7 @@ test('R03: log-only state events between turns stay in the seed', () => {
   const events = [
     ...turn(0, 1, 'A'),
     event('todo/write', { todos: [] }, 4),
-    { type: 'permission/preset', seq: 5, time: 1_700_000_000_005, data: { agentPreset: 'standard' } } as SessionEvent,
+    { type: 'permission/preset', seq: SessionSeq(5), time: 1_700_000_000_005, data: { preset: 'standard' } } as SessionEvent,
     ...turn(6, 2, 'B'),
   ]
   const candidates = collectRewindCandidates(events)
@@ -190,11 +200,11 @@ test('R06: steers inside one turn do not create new rewind points', () => {
 test('R07: compaction-shadowed history still yields candidates from the raw log', () => {
   // The raw append-only log keeps the ORIGINAL user events even after a
   // compaction replacement — the source of truth is the session log
-  // (served through the alpha.4 snapshot reads), never the folded surface
+  // (served through snapshot reads), never the folded surface
   // projection. Compaction events are structural (dsh-compaction augments
   // the map; the transcript treats them the same).
   const compaction = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
-    ({ type, seq, time: 1_700_000_000_000 + seq, data }) as SessionEvent
+    ({ type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data }) as SessionEvent
   const events = [
     ...turn(0, 1, 'old prompt'),
     compaction('compaction/start', { id: 'c1' }, 4),
@@ -215,7 +225,7 @@ test('R08: a multimodal prompt sets hasNonTextContent and restores text only', (
   assert.equal(candidate.hasNonTextContent, true)
   assert.equal(candidate.editorText, 'analyse this screenshot', 'text blocks only')
   const item = rewindPickerItem(candidate)
-  assert.ok(item.label.startsWith('turn 1 · [image] '), `image marker missing: ${item.label}`)
+  assert.ok(item.label.startsWith('turn 1 · [attachment] '), `attachment marker missing: ${item.label}`)
 })
 
 test('R08: an image-only prompt is still a candidate with an explicit marker', () => {
@@ -233,7 +243,7 @@ test('R08: an image-only prompt is still a candidate with an explicit marker', (
   assert.equal(candidates.length, 1)
   assert.equal(candidates[0]!.hasNonTextContent, true)
   assert.equal(candidates[0]!.editorText, '')
-  assert.ok(rewindPickerItem(candidates[0]!).label.includes('(image only)'))
+  assert.ok(rewindPickerItem(candidates[0]!).label.includes('(attachment only)'))
 })
 
 test('R09: malformed spans are skipped, never thrown to the UI', () => {
@@ -301,6 +311,7 @@ interface ForkRig {
   resolved: string[]
   committed: SessionHandle[]
   drafts: string[]
+  transitionSelections: (ModelSelection | undefined)[]
   state: { sessionId: string; generation: number }
 }
 
@@ -316,13 +327,14 @@ function makeRig(options: {
   composePreset?: string
   createError?: string
   /** Full transitionTo override (wins over the default implementation). */
-  transitionTo?: <T>(steps: { target?: { id: string; header?: { cwd?: string } }; fresh?: boolean; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
+  transitionTo?: <T>(steps: { target?: { id: string; header?: { cwd?: string } }; inheritSelection?: ModelSelection; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
   createHook?: (call: CreatedCall) => void
 } = {}): ForkRig {
   const created: CreatedCall[] = []
   const resolved: string[] = []
   const committed: SessionHandle[] = []
   const drafts: string[] = []
+  const transitionSelections: (ModelSelection | undefined)[] = []
   const state = { sessionId: 'session-source', generation: 1 }
   const host: RewindCommitHost = {
     sessionCwd: () => options.sessionCwd ?? '/live-ws',
@@ -352,7 +364,8 @@ function makeRig(options: {
       resume: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
     },
     liveIdentity: () => ({ sessionId: state.sessionId, generation: state.generation }),
-    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; fresh?: boolean; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; inheritSelection?: ModelSelection; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      transitionSelections.push(steps.inheritSelection)
       if (options.transitionTo !== undefined) return options.transitionTo(steps)
       await steps.prepare?.()
       try {
@@ -369,11 +382,11 @@ function makeRig(options: {
     },
     replaceDraft: (text) => { drafts.push(text) },
   }
-  return { host, created, resolved, committed, drafts, state }
+  return { host, created, resolved, committed, drafts, transitionSelections, state }
 }
 
 function sourceAgent(sessionId = 'session-source', events: readonly SessionEvent[] = [], agentPreset?: string, cwd = '/ws'): Agent {
-  // The alpha.4 Session shape: the log is served through the snapshot
+  // The current Session shape: the log is served through the snapshot
   // reads (the comment at the fold below still explains WHY the log is
   // the source of truth — the accessor, not the field).
   return {
@@ -469,6 +482,26 @@ test('I01: commitRewind creates, swaps and restores the selected prompt', async 
   assert.equal(rig.committed.length, 1, 'the transaction commits the created child')
   assert.equal(rig.committed[0]!.session.id, rig.created[0]!.sessionId)
   assert.deepEqual(rig.drafts, ['B'], 'the selected prompt restores into the editor')
+})
+
+test('issue #93: commitRewind forwards the full current selection after historical seed', async () => {
+  const rig = makeRig()
+  const historicalHeader = event('request/header', {
+    header: { config: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' } },
+  } as never, 0)
+  const events = [historicalHeader, ...turn(1, 1, 'A'), ...turn(5, 2, 'B')]
+  const candidates = collectRewindCandidates(events)
+  const sourceSelection = { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' } as ModelSelection
+  const source = sourceAgent('session-source', events)
+  const outcome = await commitRewind(rig.host, source, candidates[0]!, {
+    sessionId: 'session-source',
+    generation: 1,
+  }, sourceSelection)
+  assert.equal(outcome.kind, 'rewound')
+  assert.deepEqual(rig.transitionSelections, [sourceSelection])
+  assert.deepEqual(rig.created[0]!.seed, events.slice(0, 5), 'the historical seed stays exact')
+  assert.equal(rig.created[0]!.inheritedEventCount, 5)
+  assert.deepEqual(source.session.snapshotEvents(), events, 'the source log is never modified')
 })
 
 test('review: the preflight and the Direct lifecycle compose the SAME concrete id (no drift)', async () => {
@@ -742,10 +775,9 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     agents: {} as never,
     sessionReader: {
       list: async () => [],
-      search: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     },
     catalog: new DirectCatalogPort(options.ctx as never, () => undefined),
     config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),
@@ -883,6 +915,7 @@ test('review round 23: /new resolves ONE compose and passes NO recovery step', a
   let resolves = 0
   let createPreset: string | undefined
   let sawRecover = false
+  let inheritedSelection: ModelSelection | undefined
   const runner: TuiCommandRunner = {
     ...base,
     // The preset identity comes from the catalog port (migration M1.11):
@@ -901,8 +934,9 @@ test('review round 23: /new resolves ONE compose and passes NO recovery step', a
         return { session: { id: 'session-new' } } as SessionHandle
       },
     } as never,
-    transitionTo: async <T>(steps: { create: () => Promise<T> }) => {
+    transitionTo: async <T>(steps: { inheritSelection?: ModelSelection; create: () => Promise<T> }) => {
       sawRecover = 'recover' in steps
+      inheritedSelection = steps.inheritSelection
       return { ok: true, next: await steps.create() }
     },
   }
@@ -930,9 +964,12 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
   let resolves = 0
   let createPreset: string | undefined
   let sawRecover = false
+  let inheritedSelection: ModelSelection | undefined
+  const sourceSelection = { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' } as ModelSelection
   const runner: TuiCommandRunner = {
     ...base,
     liveAgent: sourceAgent('session-source', turn(0, 1, 'A')),
+    selected: { current: sourceSelection, assembled: undefined },
     currentPreset: () => { resolves += 1; return 'minimal' },
     agents: {
       create: async (opts: { agentPreset?: string }) => {
@@ -940,8 +977,9 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
         return { session: { id: 'session-fork' } } as SessionHandle
       },
     } as never,
-    transitionTo: async <T>(steps: { create: () => Promise<T> }) => {
+    transitionTo: async <T>(steps: { inheritSelection?: ModelSelection; create: () => Promise<T> }) => {
       sawRecover = 'recover' in steps
+      inheritedSelection = steps.inheritSelection
       return { ok: true, next: await steps.create() }
     },
   }
@@ -952,6 +990,7 @@ test('review round 23/24: /fork resolves ONE compose and passes NO recovery step
   assert.equal(resolves, 1, 'the preset id is resolved exactly once (for the create)')
   assert.equal(sawRecover, false, 'a rejected create is NEVER retried — no recovery step is passed')
   assert.equal(createPreset, 'minimal', 'the semantic create request carries the resolved preset id')
+  assert.deepEqual(inheritedSelection, sourceSelection, '/fork forwards the source current selection, including reasoning effort')
   app.stop()
 })
 

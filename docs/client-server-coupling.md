@@ -45,6 +45,16 @@
 | `CLIENT_LOCAL` | No Host coupling today; must stay that way | never |
 | `TEMPORARY_EXCEPTION` | Allowed by design, not migration debt | never (documented carve-outs) |
 
+The Direct owned-session retirement
+(`src/runtime/direct/owned-session-retirement.ts`) is a structural,
+callback-only helper: it imports no Host package and touches no `ctx`, so it
+adds ZERO baseline entries. The runner (`src/index.ts`, already the primary
+Direct coupling point) wires the live Agent / AgentHandle / sessions /
+subagents into it — the same Direct ownership escape the runner already
+owns. This is Direct ownership retirement, not a semantic-port or Remote
+capability (see `docs/client-server-migration.md` §Direct ownership
+retirement).
+
 ## Inventory (baseline, generated from the current tree)
 
 ### DIRECT_HOST_REQUIRED
@@ -52,12 +62,7 @@
 | File | Coupling | Notes |
 |---|---|---|
 | `src/index.ts` | `agents`, `sessions`, `subagents`, `jobs`, `attachments`, `llm`, `commands`, `settings`, `sessionPersistence`, `agentPresets`, `tools`, `permissionPresets`, `tokenMeter`, `agentDefaultModel`, `shell`, `planMode`, `sandboxPolicy`; `import:dsh-agent`, `import:dsh-session` | The runner: agent create/resume, session ownership, event subscription, input dispatch, queue/steer, lifecycle. The primary migration coupling point (plan §4.1). M1.8/M1.9 relocated `credentials`, `authorization` and `userQuestions` into the config/interaction adapters; `llm`/`tools`/`permissionPresets`/`tokenMeter` remain here ONLY for the runner's own non-command paths (boot diagnostics, status footer, the pre-mount surface prefetch and the image-submission preparation — never for command handlers). `planMode`/`sandboxPolicy` are the M0 status-seam wiring (the derives consume them through structural interfaces). |
-| `src/session-lock.ts`, `src/session-lock-proc.ts` | owner.lock open/steal | Direct-mode session ownership; never removed as "cleanup" (AGENTS.md guardrail). |
-| `src/session-lease-manager.ts`, `src/session-lease-cooling.ts` | lease/cooling state machine | Same. |
-| `src/transition-gate.ts`, `src/transition.ts` | transition gate | Same. |
-| `src/session-operation-barrier.ts` | operation barrier | Same. |
-| `src/open-locks.ts` | lock bookkeeping | Same. |
-| `src/session-fork.ts` | `import:dsh-agent`, `import:dsh-session` | Fork/rewind mechanics; Direct-mode agent handles. |
+| `src/session-fork.ts` | `import:dsh-agent`, `import:dsh-session` | Fork/rewind mechanics; Direct-mode agent handles (the AgentHandle escape, M8). |
 | `src/rewind.ts` | `import:dsh-session` | Rewind mechanics. |
 
 ### MIGRATABLE
@@ -70,14 +75,15 @@
 | `src/skill-catalog-refresh.ts` | `import:dsh-agent` | Coordinator; agent-scoped refresh. |
 | `src/subagent-viewer-submit.ts` | (structural `ctx.subagents` official prompt surface, injected) | The pure human-prompt delivery core (alpha.4's `ctx.subagents.prompt`); consumed by the `SubagentPort` (M1.2). |
 | `src/runtime/direct/subagent-direct.ts` | `subagents` | The Direct `SubagentPort` adapter (M1.2) — the ONLY module in the prompt path that touches `ctx` (and the only one minting the caller-owned `requestId`); the runner depends on the port. Baseline entry added by the M1.2 relocation. |
-| `src/runtime/direct/session-direct.ts` | `import:dsh-session`, `sessionPersistence`, `sessionQuery`, `agentPresets`, `tokenMeter` | The Direct `SessionReader` adapter (M1.3, extended M1.11 + alpha.2, picker-projection alignment) — owns the lightweight live-preferred listing, bounded content search, best-effort context measurement (`measureContext`, the /status row) and export read (`readExportData`); the combined `title`+`agentPreset` projection batch delegates to `session-projection-direct.ts` (the official live-snapshot/cache-checkpoint/observation ladder, at most ONE cold observation per session resolving BOTH fields). The TUI-local title cache and the `readTitleSnapshots()` path are retired — the adapter's structural query surface no longer even declares them. The consumer (commands.ts) depends on the port. The runtime `SessionId` import was added for the DSH 0.1.2 semantic query boundary. Baseline entries added by the M1.3/M1.11 relocations, the alpha.2 projection-cache hint, and the projection module split (the cache/`sessionProjections` reads moved with it). |
-| `src/runtime/direct/session-preset-direct.ts` | `import:dsh-agent`, `import:dsh-session`, `sessionQuery`, `agentPresets` | The Direct session-preset adapter — cold sessions are read through the official `sessionQuery.observeSession()` observation seam (the engine owns live/cold source selection, persistence borrow/preparation, projection-cache hydration, tail replay, and the projection cut); the TUI only reads the `agentPreset` projection value and applies roster-aware legacy normalization. Legacy `code` → `ptc` translation is roster-aware and stays at the persisted identity seam in `src/runtime/session-preset.ts`. |
-| `src/runtime/direct/session-projection-direct.ts` | `import:dsh-agent`, `import:dsh-session`, `sessionQuery`, `agentPresets`, (`sessionProjections` / `sessionProjectionCache` structural reads) | The Direct combined session-projection batch (the picker-projection alignment) — `SessionReader.projectionBatch()` implementation: live rows read the official `sessionProjections.snapshot()`, cold rows read the `sessionProjectionCache.cachedSnapshot()` checkpoint keyed by the `list()` header identity, and remaining misses perform at most ONE bounded `sessionQuery.observeSession()` whose cut resolves title AND agentPreset together. This is Host coupling INSIDE the Direct adapter by design (the projection semantics are DSH-owned), not Client debt: a future Remote adapter maps the same port method onto the official client projection contract instead of copying this ladder. Baseline entry added with the module itself. |
+| `src/runtime/direct/session-direct.ts` | `import:dsh-session`, `sessionPersistence`, `sessionQuery`, `agentPresets`, `tokenMeter` | The Direct `SessionReader` adapter (M1.3, extended M1.11 + master alignment) — owns master-visible semantic session-query listing (live rows remain visible without `cwd`; cold rows require `cwd`), official-parity content search (`SessionReader.search()` → `sessionQuery.searchSessions()` with master `ApiSessionList.search()` business semantics — the pure cursor/authorization/dedupe loop lives in `session-search-direct.ts`, the retired TUI-owned newest-100 + `filterEvents` private rule is gone) and best-effort context measurement (`measureContext`, the /status row); the combined `title`+`agentPreset` projection batch delegates to `session-projection-direct.ts` (the official live-cached-snapshot/cache-checkpoint ladder, with cold misses left unknown). The TUI-local title cache and the `readTitleSnapshots()` path are retired — the adapter's structural query surface no longer even declares them. The migration-era `readExportData` seam is RETIRED (Pre-Stage-D export convergence): the export plane is the `SessionArchivePort` (`session-archive-direct.ts`), never this reader. The consumer (commands.ts) depends on the port. Baseline entries added by the M1.3/M1.11 relocations, the master projection-cache contract, and the projection module split (the cache/`sessionProjections` reads moved with it). |
+| `src/runtime/direct/session-archive-direct.ts` | `import:dsh-session` (the `dsh-session-log-export` utility package — the gate's prefix pattern classifies it under `import:dsh-session`) | The Direct `SessionArchivePort` adapter (Pre-Stage-D export convergence) — the ONLY module in the export path that touches the Host archive primitives: `sessionLogExportDeps` service resolution, `flushLiveSessionLog` through the store's durability barrier, the committed-log READ handle (never the cold-view observation seam), and the official full-tree ZIP stream (`streamSessionLogZip`, descendants + attachments). The FILE WRITE stays Client-local (`client-artifact-save.ts`); a future Remote adapter maps the same port onto `GET/HEAD /api/session.export`. Baseline entry added with the module itself. |
+| `src/runtime/direct/session-preset-direct.ts` | `import:dsh-session`, `sessionQuery`, `sessionProjections` | The Direct session-preset adapter — explicit resume/preset paths read cold sessions through the official `sessionQuery.observeSession()` observation seam (the engine owns live/cold source selection, persistence borrow/preparation, projection-cache hydration, tail replay, and the projection cut); picker enrichment stays on the live/cache-only projection path. The TUI reads the current DSH V3 `agentPreset` projection value as-is; DSH owns historical V2→V3 preset migration, while the TUI retains only the narrow omitted-settings-default shim in `src/runtime/session-preset.ts`. |
+| `src/runtime/direct/session-projection-direct.ts` | `import:dsh-session`, (`sessionProjections` / `sessionProjectionCache` structural reads) | The Direct combined session-projection batch (the picker-projection alignment) — `SessionReader.projectionBatch()` implementation: live rows read only already-materialized cells through the official `sessionProjections.cachedSnapshot()`, cold rows read the `sessionProjectionCache.cachedSnapshot()` checkpoint keyed by the `list()` header identity (or its predecessor-title hint), and cold misses remain unknown without activating a historical Session. Current DSH V3 preset identities are consumed as-is; this is Host coupling INSIDE the Direct adapter by design (the projection semantics are DSH-owned), not Client debt: a future Remote adapter maps the same port method onto the official client projection contract instead of copying this ladder. Baseline entry added with the module itself. |
 | `src/runtime/direct/session-writer-direct.ts` | `sessionTitle` | The Direct `SessionWriter` adapter (M1.4, contract round 2) — identity-based (sessionId) operations over the live agents (runner-injected resolver) and the `ctx.sessionTitle` service; steer ORCHESTRATION stays in the runner (steerAll), the FINAL steer delivery goes through this port. Baseline entry added by the M1.4 relocation. |
 | `src/runtime/host-file-port.ts` | (none) | The Host-file port interface (M1.10, contract review) — path-only candidates (`{path, kind}`, the official `FileReferenceCandidate` shape); the TUI's ranking/quoting/`@`-insertion value/label/description/directory-continuation are CLIENT policy in mentions.ts, never Host data. Zero Host coupling. |
 | `src/runtime/direct/host-file-direct.ts` | (fs only; no ctx services) | The Direct `HostFilePort` adapter (M1.10) — the ONLY module in the `@`-file path that touches the filesystem: fd discovery (fork delegation) or the bounded recursive fallback scan, stat existence probes, `~` expansion. Returns path-only DTOs; discovery bounds only, no presentation. No ctx-service coupling (baseline-free). |
-| `src/runtime/session-lifecycle-port.ts` | (none) | The session LIFECYCLE port interface (M1.5, contract-reviewed) — transport-neutral: serializable requests, `SessionHandle` (no Host types). Zero Host coupling. |
-| `src/runtime/direct/session-lifecycle-direct.ts` | `agents`, `import:dsh-agent`, `import:dsh-session` | The Direct `SessionLifecycle` adapter (M1.5, contract-reviewed) — the ONLY module converting the semantic request into the Direct shapes (preset composition → `setup` callback, `SessionId`, seed). The runner keeps the ownership machinery (lock/lease/PINNED/transition/barrier) around the port calls. Baseline entries updated by the M1.5 contract revision (the port itself dropped to zero coupling). |
+| `src/runtime/session-lifecycle-port.ts` | (none) | The session LIFECYCLE port interface (M1.5, contract-reviewed) — transport-neutral: serializable requests, `SessionHandle` (no Host types). `CreateSessionRequest` and `ResumeSessionRequest` may carry a client-local, creation-only cancellation signal; it is never serialized. Zero Host coupling. |
+| `src/runtime/direct/session-lifecycle-direct.ts` | `agents`, `import:dsh-agent`, `import:dsh-session` | The Direct `SessionLifecycle` adapter (M1.5, contract-reviewed) — the ONLY module converting the semantic request into the Direct shapes (preset composition → `setup` callback, `SessionId`, seed) and mapping its client-local cancellation signal to `agents.create` / `agents.resume`. The runner keeps the process-local surface coordination (transition gate, operation barrier, generation/stale fences) around the port calls; DSH `SessionHandle` / `SessionWriteLease` is the cross-process writer authority. Baseline entries updated by the M1.5 contract revision (the port itself dropped to zero coupling). |
 | `src/runtime/interaction-port.ts` | (type-only peer imports) | The interaction port interface (M1.6) — uses the official dsh-user-approval / dsh-user-questions types (declared peers). |
 | `src/runtime/direct/interaction-direct.ts` | `approval`, `userQuestions` | The Direct `InteractionPort` adapter (M1.6) — owns the `userQuestions` / `approval` service access and the `approval/request` subscription; the listeners/providers stay runner-owned. Baseline entries added by the M1.6 relocation (commands.ts and index.ts drop `approval` / `userQuestions`). |
 | `src/runtime/direct/catalog-direct.ts` | `llm`, `agentDefaultModel`, `agentPresets`, `tools`; `import:dsh-agent` (type-only, dsh-agent-presets) | The Direct `Catalog` adapter (M1.8) — owns the model/provider directory, the preset roster (read side), and the skill sub-domain's service discovery (`skills`/`agentPresets` through the skill-catalog.ts seam plus the `tools` loader probe for the host-vs-fallback injection decision); consumers depend on the port DTOs. Baseline entries added by the M1.8 relocation (commands.ts drops `llm`/`agentDefaultModel`/`agentPresets`/`tools` access). |
@@ -95,10 +101,22 @@
 Terminal rendering, editor, keybindings, clipboard/OSC52, input history,
 search UI state, picker cursor, overlay state, fullscreen, theme, draft
 state, local shell card display, question/approval *presentation* (the
-authority stays Host-owned). Representative files: `src/tui-app.ts`,
-`src/tui-editor.ts`, `src/theme.ts`, `src/present.ts` (rendering half),
-`src/clipboard.ts`, `src/history.ts`, `src/search.ts`, `src/overlay-broker.ts`,
-`src/keybinding-registry.ts`, `src/editor-registry.ts`, `src/renderer-registry.ts`.
+authority stays Host-owned), and session transition coordination
+(`src/transition-gate.ts`, `src/transition.ts`,
+`src/session-operation-barrier.ts` — the process-local single-writer
+transition rules; zero Host coupling). Representative files:
+`src/tui-app.ts`, `src/tui-editor.ts`, `src/theme.ts`, `src/present.ts`
+(rendering half), `src/clipboard.ts`, `src/history.ts`, `src/search.ts`,
+`src/overlay-broker.ts`, `src/keybinding-registry.ts`,
+`src/editor-registry.ts`, `src/renderer-registry.ts`.
+`src/session-artifact-filename.ts` (Pre-Stage-D export convergence) is
+Client-local filename policy with ZERO Host coupling: the archive name
+mirrors the upstream `sessionLogZipFilename` convention exactly and is
+test-pinned against the upstream function (parity test in
+`test/export-command.test.ts`), and the transcript name shares the same
+safe full-Session-id convention. `src/client-artifact-save.ts` and
+`src/save-location.ts` are the Client-local temp/atomic-commit sink and the
+Save Location UI — zero Host coupling.
 
 ### TEMPORARY_EXCEPTION
 

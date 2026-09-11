@@ -40,6 +40,7 @@ function fakeHandle(label: string): OverlayHandle & { label: string; hiddenLog: 
     focus() {},
     unfocus() {},
     isFocused() { return false },
+    getBounds() { return undefined },
   }
   return handle
 }
@@ -74,6 +75,86 @@ test('OverlayBroker: a question suspension absorbs new overlays and restores on 
   assert.equal(a.isHidden(), true, 'the overlay joins the suspension hidden')
   assert.ok(suspension.suspendedOverlays.has(a), 'the suspension tracks the overlay')
   // Settle the question: the suspended overlay is revealed by the host.
+  for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
+  suspension.suspendedOverlays.clear()
+  assert.equal(a.isHidden(), false)
+})
+
+test('OverlayBroker: a Save Location suspension absorbs new overlays and restores on settle', () => {
+  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+  const broker = new OverlayBroker({ saveLocation: () => suspension })
+  const a = fakeHandle('a')
+  broker.track(a)
+  assert.equal(a.isHidden(), true, 'the overlay joins the suspension hidden')
+  assert.ok(suspension.suspendedOverlays.has(a), 'the suspension tracks the overlay')
+  // Settle the prompt: the suspended overlay is revealed by the host.
+  for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
+  suspension.suspendedOverlays.clear()
+  assert.equal(a.isHidden(), false)
+})
+
+test('OverlayBroker: closing a suspended overlay while Save Location is active keeps its dependents hidden', () => {
+  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+  const broker = new OverlayBroker({ saveLocation: () => suspension })
+  const a = fakeHandle('a')
+  const b = fakeHandle('b')
+  // b hides a (a becomes b's dependent).
+  broker.track(a)
+  broker.track(b)
+  assert.equal(a.isHidden(), true)
+  // The Save prompt mounts: it suspends every visible overlay (b; a is
+  // already hidden) into its suspension set.
+  for (const handle of broker.handles()) {
+    if (!handle.isHidden()) {
+      handle.setHidden(true)
+      suspension.suspendedOverlays.add(handle)
+    }
+  }
+  // Close b while the prompt is active: a must NOT flash back over the
+  // prompt — it stays hidden and joins the prompt's suspension.
+  broker.closeForHost(b)
+  assert.equal(a.isHidden(), true, 'the dependent stays hidden under the prompt')
+  assert.ok(suspension.suspendedOverlays.has(a), 'the dependent joins the prompt suspension')
+  // Settle the prompt: the suspended overlays are revealed.
+  for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
+  suspension.suspendedOverlays.clear()
+  assert.equal(a.isHidden(), false)
+})
+
+test('OverlayBroker: a stale close while Save Location is active does not republish the seat', () => {
+  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+  const seatCalls: string[] = []
+  const broker = new OverlayBroker({
+    saveLocation: () => suspension,
+    setFocusSeat: (seat) => seatCalls.push(seat),
+  })
+  const a = fakeHandle('a')
+  broker.track(a)
+  broker.closeForHost(a)
+  assert.deepEqual(seatCalls, ['overlay', 'editor'], 'a tracked close republishes the seat')
+  // A STALE close (already untracked, e.g. after a fullscreen teardown)
+  // must NOT republish the seat: the live state (an active Save prompt)
+  // is authoritative, and a dead handle's hide() requests no render to
+  // correct it later.
+  broker.closeForHost(a)
+  assert.deepEqual(seatCalls, ['overlay', 'editor'], 'a stale close must not republish the seat')
+})
+
+test('OverlayBroker: an explicit show of a suspended overlay is an ownership override (documented)', () => {
+  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+  const broker = new OverlayBroker({ saveLocation: () => suspension })
+  const a = fakeHandle('a')
+  const wrapped = broker.track(a)
+  assert.equal(a.isHidden(), true, 'the overlay joins the suspension hidden')
+  assert.ok(suspension.suspendedOverlays.has(a), 'the suspension tracks the overlay')
+  // An EXPLICIT show is an ownership override: the caller takes
+  // responsibility for the modal consistency (the same forwarding
+  // contract as the question branch — documented, not guarded).
+  wrapped.setHidden(false)
+  assert.equal(a.isHidden(), false, 'the explicit show overrides the suspension')
+  // The prompt remains active and answerable; the settle still reveals the
+  // remaining suspended handles.
+  wrapped.setHidden(true)
   for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
   suspension.suspendedOverlays.clear()
   assert.equal(a.isHidden(), false)

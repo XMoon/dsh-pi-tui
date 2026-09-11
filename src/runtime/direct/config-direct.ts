@@ -217,13 +217,13 @@ class DirectFooterCustomItems implements FooterCustomItemsConfig {
   }
 
   get(): FooterCustomItemsParseResult {
-    const raw = this.readRaw()
+    const raw = this.readConfigRaw()
     if (raw.failed) return { items: [], invalidCount: 1 }
     return parseFooterCustomItems(raw.value)
   }
 
   rawForPersistence(): FooterCustomItemsRaw {
-    const raw = this.readRaw()
+    const raw = this.readConfigRaw()
     if (raw.failed) return { kind: 'unavailable' }
     try {
       return { kind: 'available', value: structuredClone(raw.value) }
@@ -232,7 +232,7 @@ class DirectFooterCustomItems implements FooterCustomItemsConfig {
     }
   }
 
-  private readRaw(): { value: unknown; failed: boolean } {
+  private readConfigRaw(): { value: unknown; failed: boolean } {
     try {
       const settings = this.ctx.get('settings') as { describe?(): readonly SettingsDescriptorLike[] | undefined } | undefined
       if (settings === undefined || typeof settings.describe !== 'function') return { value: undefined, failed: true }

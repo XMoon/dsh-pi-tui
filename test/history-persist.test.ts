@@ -300,7 +300,7 @@ test('a deferred-start steer persists with the FINAL session id (Ctrl+S / steer-
   assert.equal(loadHistoryRecords(file).length, 1, 'a rejected creation must not write a row')
 })
 
-test('persistHistoryRecord skips empty, consecutive repeats and image-bearing submissions', async (t) => {
+test('persistHistoryRecord skips empty, consecutive repeats and attachment-bearing submissions', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const cwd = '/work/a'
@@ -319,6 +319,8 @@ test('persistHistoryRecord skips empty, consecutive repeats and image-bearing su
     'a consecutive repeat is skipped')
   assert.equal(persistHistoryRecord({ ...base, content: 'with image', hasImages: true }), false,
     'an image-bearing submission is never persisted')
+  assert.equal(persistHistoryRecord({ ...base, content: 'with file', hasAttachments: true }), false,
+    'a file-bearing submission is never persisted')
   const records = loadHistoryRecords(file)
   assert.equal(records.length, 1)
   assert.equal(records[0]?.content, 'hello')

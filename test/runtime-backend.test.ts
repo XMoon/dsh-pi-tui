@@ -23,6 +23,7 @@ test('the capability vocabulary covers the migration domains', () => {
     'catalog',
     'config',
     'host-file',
+    'session-archive',
   ])
 })
 
@@ -32,10 +33,9 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   }
   const sessionReader = {
     list: async () => [],
-    search: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
-    readExportData: async () => ({ kind: 'none' as const }),
   }
   const sessionWriter = {
     followup: () => {},
@@ -141,7 +141,10 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     resolveReference: async () => ({ kind: 'missing' as const }),
     canonicalizeMentions: async (_scope: unknown, text: string) => text,
   }
-  const backend = createDirectBackend(subagent, sessionReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile)
+  const sessionArchive = {
+    open: async () => ({ kind: 'unavailable' as const }),
+  }
+  const backend = createDirectBackend(subagent, sessionReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
@@ -151,6 +154,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   assert.equal(backend.catalog, catalog)
   assert.equal(backend.config, config)
   assert.equal(backend.hostFile, hostFile)
+  assert.equal(backend.sessionArchive, sessionArchive)
   // Truthful advertisement: the backend serves EXACTLY the implemented
   // ports — nothing is advertised without a port.
   for (const capability of DIRECT_IMPLEMENTED_CAPABILITIES) {

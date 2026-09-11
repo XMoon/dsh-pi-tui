@@ -18,7 +18,7 @@ import { ThemeRegistry } from '../src/theme-registry.ts'
 import { SettingsRegistry } from '../src/settings-registry.ts'
 import { AutocompleteRegistry } from '../src/autocomplete-registry.ts'
 import { KeybindingRegistry } from '../src/keybinding-registry.ts'
-import { HOST_COMMAND_CATALOG, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldSteerOnEnter } from '../src/index.ts'
+import { HOST_COMMAND_CATALOG, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, resolveSubmitDelivery } from '../src/index.ts'
 
 /** A minimal valid structural autocomplete provider for tests. */
 function provider(getSuggestions: () => Promise<import('../src/extension/public-types.ts').TuiAutocompleteSuggestions | null>): import('../src/extension/public-types.ts').TuiAutocompleteProvider {
@@ -33,7 +33,7 @@ test('CommandBridge: dynamic local commands join the effective-local set', () =>
     id: 'plugin-cmd',
     name: 'mycommand',
     description: 'a plugin command',
-    execution: 'local',
+    handler: () => ({ kind: 'success' }),
   }, 'owner-a')
   assert.equal(outcome.kind, 'registered')
   assert.equal(bridge.isLocal('mycommand', LOCAL_COMMANDS), true)
@@ -41,25 +41,50 @@ test('CommandBridge: dynamic local commands join the effective-local set', () =>
   assert.equal(bridge.isLocal('grilling', LOCAL_COMMANDS), false, 'unregistered is not local')
 })
 
+test('CommandBridge: a disposed handle never removes a LATER registration of the same id', () => {
+  // Caller-owned lifecycle: the handle names ONE registration. A repeated or
+  // late cleanup of a disposed handle (a fiber disposer running after an HMR
+  // reload re-registered the same id) must never remove the NEW generation.
+  const bridge = new CommandBridge()
+  const spec = { id: 'plugin-cmd', name: 'mycommand', description: 'a plugin command', handler: () => ({ kind: 'success' as const }) }
+  const first = bridge.register(spec, 'owner-a')
+  assert.equal(first.kind, 'registered')
+  if (first.kind !== 'registered') return
+  first.handle.dispose()
+  assert.equal(bridge.snapshot().entries.length, 0, 'the first registration is gone')
+  const second = bridge.register(spec, 'owner-a')
+  assert.equal(second.kind, 'registered')
+  if (second.kind !== 'registered') return
+  // The LATE / REPEATED dispose of the old handle: idempotent for itself and
+  // a no-op for the new generation.
+  first.handle.dispose()
+  first.handle.dispose()
+  assert.equal(bridge.snapshot().entries.length, 1, 'the new generation stays registered')
+  assert.equal(bridge.isLocal('mycommand', LOCAL_COMMANDS), true, 'the new generation stays live')
+  assert.equal(bridge.snapshot().entries[0]?.generation, 2, 'the live entry is the SECOND generation')
+  second.handle.dispose()
+  assert.equal(bridge.snapshot().entries.length, 0, 'the new handle still disposes its own registration')
+})
+
 test('CommandBridge: a plugin command can NEVER shadow a host-owned command (P1-04)', () => {
   // The authoritative host catalog (TUI commands + ownership sets).
   const catalog = new Set(['status', 'sessions', 'help', 'exit', 'kill', 'settings'])
   const bridge = new CommandBridge(() => {}, catalog)
   // EXACT collision with a TUI-registered command: rejected loudly.
-  const status = bridge.register({ id: 's1', name: 'status', description: '', execution: 'local' }, 'plugin')
+  const status = bridge.register({ id: 's1', name: 'status', description: '', handler: () => ({ kind: 'success' }) }, 'plugin')
   assert.equal(status.kind, 'conflict')
   assert.equal(status.existingOwner, 'host', 'the conflict is owned by the HOST, not another plugin')
   // EXACT collision with a core command the TUI dispatches locally (/kill).
-  const kill = bridge.register({ id: 's2', name: 'kill', description: '', execution: 'local' }, 'plugin')
+  const kill = bridge.register({ id: 's2', name: 'kill', description: '', handler: () => ({ kind: 'success' }) }, 'plugin')
   assert.equal(kill.kind, 'conflict')
   assert.equal(kill.existingOwner, 'host')
   // NEAR-SYNONYM of a host command (/session vs /sessions): rejected too.
-  const near = bridge.register({ id: 's3', name: 'session', description: '', execution: 'local' }, 'plugin')
+  const near = bridge.register({ id: 's3', name: 'session', description: '', handler: () => ({ kind: 'success' }) }, 'plugin')
   assert.equal(near.kind, 'conflict')
   assert.equal(near.existingOwner, 'host')
   assert.ok(near.nearSynonym !== undefined, 'the near-synonym pair is reported')
   // A genuinely NEW name still registers (the catalog never blocks growth).
-  const fresh = bridge.register({ id: 's4', name: 'vimish', description: '', execution: 'local' }, 'plugin')
+  const fresh = bridge.register({ id: 's4', name: 'vimish', description: '', handler: () => ({ kind: 'success' }) }, 'plugin')
   assert.equal(fresh.kind, 'registered')
   assert.equal(bridge.snapshot().entries.length, 1)
   // The built-in is still local and still routes to the HOST handler.
@@ -68,13 +93,13 @@ test('CommandBridge: a plugin command can NEVER shadow a host-owned command (P1-
 
   assert.equal(HOST_COMMAND_CATALOG.has('plan'), true, 'special-cased /plan is host-owned')
   const plan = new CommandBridge(() => {}, HOST_COMMAND_CATALOG)
-  assert.equal(plan.register({ id: 'plan-plugin', name: 'plan', description: '', execution: 'local' }, 'plugin').kind, 'conflict')
+  assert.equal(plan.register({ id: 'plan-plugin', name: 'plan', description: '', handler: () => ({ kind: 'success' }) }, 'plugin').kind, 'conflict')
 })
 
 test('CommandBridge: a name conflict is reported, never silently overridden', () => {
   const bridge = new CommandBridge()
-  bridge.register({ id: 'a', name: 'dup', description: '', execution: 'local' }, 'owner-a')
-  const outcome = bridge.register({ id: 'b', name: 'dup', description: '', execution: 'local' }, 'owner-b')
+  bridge.register({ id: 'a', name: 'dup', description: '', handler: () => ({ kind: 'success' }) }, 'owner-a')
+  const outcome = bridge.register({ id: 'b', name: 'dup', description: '', handler: () => ({ kind: 'success' }) }, 'owner-b')
   assert.equal(outcome.kind, 'conflict')
   assert.equal(outcome.existingOwner, 'owner-a')
   assert.equal(bridge.snapshot().entries.length, 1, 'the second registration is not stored')
@@ -82,51 +107,62 @@ test('CommandBridge: a name conflict is reported, never silently overridden', ()
 
 test('CommandBridge: near-synonym names are reported (AGENTS hard rule)', () => {
   const bridge = new CommandBridge()
-  bridge.register({ id: 'a', name: 'session', description: '', execution: 'local' }, 'owner-a')
+  bridge.register({ id: 'a', name: 'session', description: '', handler: () => ({ kind: 'success' }) }, 'owner-a')
   // Exact prefix of an existing name: a confusion risk, rejected.
-  const outcome = bridge.register({ id: 'b', name: 'sessions', description: '', execution: 'local' }, 'owner-b')
+  const outcome = bridge.register({ id: 'b', name: 'sessions', description: '', handler: () => ({ kind: 'success' }) }, 'owner-b')
   assert.equal(outcome.kind, 'conflict')
   assert.equal(outcome.nearSynonym, 'session ↔ sessions')
   // The bridge stores only the first.
   assert.equal(bridge.snapshot().entries.length, 1)
   // Unrelated names are fine.
-  const ok = bridge.register({ id: 'c', name: 'grilling', description: '', execution: 'submission' }, 'owner-c')
+  const ok = bridge.register({ id: 'c', name: 'grilling', description: '', handler: () => ({ kind: 'success' }) }, 'owner-c')
   assert.equal(ok.kind, 'registered')
+})
+
+test('CommandBridge: a sessionless client command records its flag', () => {
+  const bridge = new CommandBridge()
+  const outcome = bridge.register({
+    id: 'vimmode', name: 'vimmode', description: '', sessionless: true,
+    handler: () => ({ kind: 'success' }),
+  }, 'owner-a')
+  assert.equal(outcome.kind, 'registered')
+  assert.equal(bridge.find('vimmode')?.sessionless, true)
+  assert.equal(bridge.find('vimmode')?.sessionless, true, 'the sessionless classification lives on the contribution record')
 })
 
 test('CommandBridge: a duplicate id is an error', () => {
   const bridge = new CommandBridge()
-  bridge.register({ id: 'x', name: 'a', description: '', execution: 'local' }, 'o1')
-  assert.throws(() => bridge.register({ id: 'x', name: 'b', description: '', execution: 'local' }, 'o2'), /duplicate/)
+  bridge.register({ id: 'x', name: 'a', description: '', handler: () => ({ kind: 'success' }) }, 'o1')
+  assert.throws(() => bridge.register({ id: 'x', name: 'b', description: '', handler: () => ({ kind: 'success' }) }, 'o2'), /duplicate/)
 })
 
 test('CommandBridge: owner unload removes exactly the owner contributions', () => {
   const bridge = new CommandBridge()
-  bridge.register({ id: 'p1', name: 'one', description: '', execution: 'local' }, 'owner-a')
-  bridge.register({ id: 'p2', name: 'two', description: '', execution: 'submission' }, 'owner-b')
+  bridge.register({ id: 'p1', name: 'one', description: '', handler: () => ({ kind: 'success' }) }, 'owner-a')
+  bridge.register({ id: 'p2', name: 'two', description: '', handler: () => ({ kind: 'success' }) }, 'owner-b')
   bridge.disposeOwner('owner-a')
   assert.equal(bridge.isLocal('one', LOCAL_COMMANDS), false)
-  assert.equal(bridge.find('two')?.execution, 'submission')
+  assert.equal(bridge.find('two')?.name, 'two')
   assert.equal(bridge.snapshot().entries.length, 1)
 })
 
-test('CommandBridge: dynamic unload makes the command submission again (busy-enter regression)', () => {
+test('CommandBridge: dynamic unload drops the client ownership (busy-enter regression)', () => {
   const bridge = new CommandBridge()
   const handle = bridge.register({
-    id: 'dyn', name: 'dyncmd', description: '', execution: 'local',
+    id: 'dyn', name: 'dyncmd', description: '', handler: () => ({ kind: 'success' }),
   }, 'owner-a')
   assert.equal(handle.kind, 'registered')
-  // While registered: never steers.
+  // While registered it is a CLIENT command: the namespace dispatch routes it
+  // before the busy policy (the resolver is never consulted for it).
+  assert.equal(bridge.isLocal('dyncmd', LOCAL_COMMANDS), true)
   assert.equal(
-    shouldSteerOnEnter({ name: 'dyncmd' }, true, 'steer', false, name => bridge.isLocal(name, LOCAL_COMMANDS)),
-    false,
+    resolveSubmitDelivery({ name: 'dyncmd' }, true, 'enter', 'steer'),
+    'steer',
+    'a client name is not TUI-local for the resolver: it would follow the busy policy',
   )
-  // After unload: submission policy applies.
+  // After unload the name returns to the ordinary routes.
   if (handle.kind === 'registered') handle.handle.dispose()
-  assert.equal(
-    shouldSteerOnEnter({ name: 'dyncmd' }, true, 'steer', false, name => bridge.isLocal(name, LOCAL_COMMANDS)),
-    true,
-  )
+  assert.equal(bridge.isLocal('dyncmd', LOCAL_COMMANDS), false)
 })
 
 test('CommandBridge: rawInput is preserved verbatim (skill rawInput regression)', () => {
@@ -136,7 +172,6 @@ test('CommandBridge: rawInput is preserved verbatim (skill rawInput regression)'
     id: 'arg-cmd',
     name: 'argcmd',
     description: '',
-    execution: 'local',
     handler: (invocation) => {
       received = invocation.rawInput
       return { kind: 'success' as const }
@@ -149,12 +184,12 @@ test('CommandBridge: rawInput is preserved verbatim (skill rawInput regression)'
   assert.equal(received, raw, 'the bridge must never re-parse or rewrite rawInput')
 })
 
-test('CommandBridge: sessionless contributions join the sessionless set', () => {
+test('CommandBridge: the sessionless flag stays on the contribution record (the static set is the TUI core)', () => {
   const bridge = new CommandBridge()
-  bridge.register({ id: 's', name: 'nosession', description: '', execution: 'local', sessionless: true }, 'o')
-  assert.equal(bridge.isSessionless('nosession', SESSIONLESS_COMMANDS), true)
-  assert.equal(bridge.isSessionless('exit', SESSIONLESS_COMMANDS), true, 'static core stays')
-  assert.equal(bridge.isSessionless('nosession2', SESSIONLESS_COMMANDS), false)
+  bridge.register({ id: 's', name: 'nosession', description: '', sessionless: true, handler: () => ({ kind: 'success' }) }, 'o')
+  assert.equal(bridge.find('nosession')?.sessionless, true, 'the contribution declares it')
+  assert.equal(bridge.find('nosession2'), undefined, 'an unknown name has no record')
+  assert.equal(SESSIONLESS_COMMANDS.has('exit'), true, 'the static TUI core stays the dispatch baseline')
 })
 
 // ── ThemeRegistry ──────────────────────────────────────────────────────────
@@ -702,4 +737,15 @@ test('KeybindingRegistry: duplicate keys conflict; unload removes bindings', () 
   assert.equal(registry.actionFor({ key: 'y', ctrl: true, alt: true, shift: false, super: false }), 'open-search')
   handle.dispose()
   assert.equal(registry.actionFor({ key: 'y', ctrl: false, alt: true, shift: false, super: false }), undefined)
+})
+
+test('CommandBridge: a contribution without a handler fails loud at the boundary', () => {
+  // TypeScript requires `handler`, but a plain-JS / stale compiled caller can
+  // bypass it: installing a menu row with no behavior would be silent.
+  const bridge = new CommandBridge()
+  assert.throws(
+    () => bridge.register({ id: 'x', name: 'broken', description: '' } as never, 'o1'),
+    /must declare its handler/,
+  )
+  assert.equal(bridge.find('broken'), undefined, 'nothing malformed is stored')
 })

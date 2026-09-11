@@ -15,6 +15,7 @@
 
 import { normalize } from 'node:path'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
+import { stripTerminalSequences } from '@xmoon76/pi-tui'
 
 /**
  * Legacy exported window size: how many most-recent sessions the picker's
@@ -30,6 +31,9 @@ export const MAX_PICKER_SESSIONS = 200
 export const PROJECTION_FIRST_BATCH = 20
 /** Batch size for the remaining projection loads after the first batch. */
 export const PROJECTION_BATCH_SIZE = 50
+/** Content-search debounce (dsh-web parity): a filter must stay stable for
+ * this long before the Host content search runs. */
+export const CONTENT_SEARCH_DEBOUNCE_MS = 250
 
 /**
  * Session persistence refuses logs containing a format/event vocabulary this
@@ -50,10 +54,38 @@ export function shortSessionId(id: string): string {
   return id.replace(/^session[-_]/i, '').slice(0, 8)
 }
 
-/** kimicode-style workspace key: the last two path segments, or a placeholder. */
+/** The official search-query cap in JavaScript UTF-16 code units (master
+ * `ApiSessionList.search()` parity). */
+export const SESSION_SEARCH_QUERY_MAX_CHARS = 500
+
+/**
+ * The ONE canonical Client-side search query (review): remove NUL
+ * (officially illegal) → trim → cap at 500 UTF-16 code units without
+ * splitting a surrogate pair. This exact value drives BOTH the local
+ * metadata projection and the Host search — the Direct adapter's
+ * authoritative validation (trim → non-empty → ≤500 → no NUL) is then a
+ * no-op, so the local and Host queries can never drift (e.g. NUL adjacent
+ * to padding whitespace must not leave a padded canonical behind).
+ */
+export function sanitizeSessionSearchInput(value: string): string {
+  const trimmed = value.replace(/\0/g, '').trim()
+  if (trimmed.length <= SESSION_SEARCH_QUERY_MAX_CHARS) return trimmed
+  const truncated = trimmed.slice(0, SESSION_SEARCH_QUERY_MAX_CHARS)
+  const last = truncated.charCodeAt(SESSION_SEARCH_QUERY_MAX_CHARS - 1)
+  // A lone high surrogate at the cut is the first half of a pair — drop it
+  // so the remaining text is well-formed.
+  return last >= 0xD800 && last <= 0xDBFF
+    ? truncated.slice(0, SESSION_SEARCH_QUERY_MAX_CHARS - 1)
+    : truncated
+}
+
+/** kimicode-style workspace key: the last two path segments, or a placeholder.
+ * The cwd is a Host/persistence boundary value — the group header is
+ * rendered straight to the terminal, so the output is sanitized here (the
+ * single group-derivation point covers the browse AND search views). */
 export function workspaceKey(cwd: string | undefined): string {
   if (cwd === undefined || cwd === '') return '(no workspace)'
-  return cwd.split('/').slice(-2).join('/')
+  return sanitizeTerminalText(cwd.split('/').slice(-2).join('/'))
 }
 
 /** Whether two cwd values denote the same workspace: lexical path
@@ -89,6 +121,19 @@ export function formatSessionAge(createdAt: number, now: number = Date.now()): s
   return `${Math.floor(months / 12)}y`
 }
 
+/** Whether a session row's METADATA matches a search query (id, title,
+ * cwd, preset — case-insensitive substring). This is the local half of the
+ * search projection's explicit membership: `localMatches ∪ hostContentHits`.
+ * It deliberately does NOT look at the content snippet — content membership
+ * comes from the Host page, never from re-scanning text here. */
+export function sessionRowMatchesQuery(row: SessionPickerRow, query: string): boolean {
+  const needle = query.toLowerCase()
+  return row.id.toLowerCase().includes(needle)
+    || (row.title ?? '').toLowerCase().includes(needle)
+    || (row.cwd ?? '').toLowerCase().includes(needle)
+    || (row.preset ?? '').toLowerCase().includes(needle)
+}
+
 /** One session as the picker renders it. */
 export interface SessionPickerRow {
   /** Full session id (the picker's value). */
@@ -118,11 +163,36 @@ export interface SessionPickerItem {
   group: string
 }
 
+/** One content-search hit merged onto an already-listed picker row (the
+ * Host page's bounded snippet; the row identity always comes from the
+ * list, never from the search page). */
+export interface SessionContentHit {
+  /** Host-selected bounded plain-text excerpt. */
+  readonly snippet: string
+}
+
+/** Strip terminal control characters from untrusted text before it enters
+ * the picker presentation. Complete ANSI/OSC/APC sequences are removed
+ * first (the fork's parser), then every remaining C0 control (including a
+ * lone ESC), DEL, and C1 control (U+0080–U+009F — CSI/OSC/APC in 8-bit
+ * form) is dropped: the picker writes descriptions straight to the
+ * terminal, and a terminal decoding UTF-8 interprets C1 code points as
+ * control sequences, not text. Host snippets may carry persisted control
+ * bytes (message/tool output) — a raw ESC/OSC would be interpreted, not
+ * displayed. */
+export function sanitizeTerminalText(value: string): string {
+  // eslint-disable-next-line no-control-regex -- the C0/C1 classes are the point
+  return stripTerminalSequences(value).replace(/[\u0000-\u001f\u007f-\u009f]/gu, '')
+}
+
 /** Assemble one session row for the picker, marking the current session.
  * @param indent - tree depth for the "All" category: rows hang under their
  *   parent with a `└─` prefix so subagent lineage reads at a glance.
+ * @param contentHit - optional Host content-search hit for this row: the
+ *   snippet joins the description so the local filter (which matches
+ *   descriptions) surfaces content-only hits.
  */
-export function sessionPickerItem(row: SessionPickerRow, currentId: string, indent = 0): SessionPickerItem {
+export function sessionPickerItem(row: SessionPickerRow, currentId: string, indent = 0, contentHit?: SessionContentHit): SessionPickerItem {
   const marker = row.id === currentId ? '● ' : ''
   const treePrefix = indent <= 0 ? '' : `${'  '.repeat(indent)}└─ `
   const meta: string[] = [shortSessionId(row.id), formatSessionAge(row.createdAt)]
@@ -130,12 +200,35 @@ export function sessionPickerItem(row: SessionPickerRow, currentId: string, inde
   if (row.parentSession !== undefined) meta.push('fork')
   if (row.preset !== undefined) meta.push(`preset:${row.preset}`)
   if (row.live) meta.push('live')
+  if (contentHit !== undefined) meta.push(`…${sanitizeTerminalText(contentHit.snippet)}…`)
   return {
     value: row.id,
     label: `${treePrefix}${marker}${row.title ?? shortSessionId(row.id)}`,
     description: meta.join(' · '),
     group: workspaceKey(row.cwd),
   }
+}
+
+/** Assemble one SEARCH-projection row: the browse presentation plus the
+ * workspace in the searchable description. The search projection's
+ * membership considers cwd, and the SelectList's substring filter searches
+ * value/label/description only (never the group header) — so the search
+ * view must carry the cwd in the description, or a cwd query would match
+ * the union yet stay invisible. */
+export function sessionSearchItem(
+  row: SessionPickerRow,
+  currentId: string,
+  indent = 0,
+  contentHit?: SessionContentHit,
+): SessionPickerItem {
+  const item = sessionPickerItem(row, currentId, indent, contentHit)
+  // The cwd is a Host/persistence boundary value — sanitize it before it
+  // enters the searchable description (a raw ESC/C1/newline in a workspace
+  // path must never reach the terminal).
+  if (row.cwd !== undefined && row.cwd !== '') {
+    item.description = `${item.description} · ${sanitizeTerminalText(row.cwd)}`
+  }
+  return item
 }
 
 /**

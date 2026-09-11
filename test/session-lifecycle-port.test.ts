@@ -76,6 +76,33 @@ test('resume resolves the preset composition internally and delegates with the D
   assert.equal(typeof calls[0].setup, 'function')
 })
 
+test('create and resume forward the caller-owned signal unchanged and do not invent one', async () => {
+  const createSignals: (AbortSignal | undefined)[] = []
+  const resumeSignals: (AbortSignal | undefined)[] = []
+  const lifecycle = new DirectSessionLifecycle(host({
+    create: async (options: { signal?: AbortSignal }) => {
+      createSignals.push(options.signal)
+      return { agent: { session: { id: 'session-new' } }, dispose: async () => {} }
+    },
+    resume: async (options: { signal?: AbortSignal }) => {
+      resumeSignals.push(options.signal)
+      return { agent: { session: { id: 'session-old' } }, dispose: async () => {} }
+    },
+  }), compose('preset-a'))
+  const createSignal = new AbortController().signal
+  const resumeSignal = new AbortController().signal
+
+  await lifecycle.create({ ...createRequest, signal: createSignal })
+  await lifecycle.resume({ ...resumeRequest, signal: resumeSignal })
+  await lifecycle.create(createRequest)
+  await lifecycle.resume(resumeRequest)
+
+  assert.equal(createSignals[0], createSignal)
+  assert.equal(resumeSignals[0], resumeSignal)
+  assert.equal(createSignals[1], undefined)
+  assert.equal(resumeSignals[1], undefined)
+})
+
 test('create and resume fail loudly when the agents service is absent', async () => {
   const lifecycle = new DirectSessionLifecycle(host(undefined), compose('preset-a'))
   await assert.rejects(() => lifecycle.create(createRequest), /agents service unavailable/)

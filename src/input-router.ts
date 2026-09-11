@@ -204,9 +204,12 @@ export class InputRouter {
     // The transcript-search overlay owns its keys. The toggle follows the
     // EFFECTIVE key (a remap of the configurable app.transcript.search
     // still closes/owns the overlay); the fixed close/next/previous stay
-    // physical (non-configurable overlay contracts).
+    // physical (non-configurable overlay contracts — close is Esc AND
+    // Ctrl+C, since the overlay's own shared Input would otherwise
+    // swallow Ctrl+C as its generic cancel and keep search open).
     if (ctx.searchActive) {
-      if (matchesKey(data, 'escape') || matchesKey(data, 'enter')
+      if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')
+        || matchesKey(data, 'enter')
         || matchesKey(data, 'shift+enter')
         || (ctx.matchesEffective?.(TUI_ACTION_SEARCH, data) ?? matchesKey(data, 'ctrl+f'))) {
         return { kind: 'consumed' }

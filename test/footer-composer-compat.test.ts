@@ -3,15 +3,16 @@
  * the REFERENCE layout for the same state — same parts, same order, same
  * separators, same wrap/cap/dim behavior. The reference is re-implemented
  * here as the string-level oracle (plan 2026-08-31 §6.2: each logical row
- * occupies 1..2 physical lines; the tail line truncates ANSI-safely to its
- * one row; the Host instruction APPENDS as an independent line and never
- * replaces a user row — the legacy replace-last-row swap is gone).
+ * occupies 1..2 physical lines inside the global budget; a row WITH a
+ * right zone keeps its single-line fitted contract; the Host instruction
+ * APPENDS as an independent line and never replaces a user row — the
+ * legacy replace-last-row swap is gone).
  * @module @xmoon76/dsh-pi-tui/footer-composer-compat.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { wrapTextWithAnsi, truncateToWidth } from '@xmoon76/pi-tui'
+import { wrapTextWithAnsi, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import { color } from '../src/theme.ts'
 import { FooterComposer, mergeCommandSurface } from '../src/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
@@ -86,54 +87,303 @@ function sec(ms: number): string {
   return `${text.endsWith('.0') ? text.slice(0, -2) : text}s`
 }
 
-/** The NEW default stats row: real semantic placements (token-usage:pi,
- * cache-hit:pi, performance:latency, performance:speed) joined by the
- * row separator ' · '. Items whose fact is absent (no cache activity →
- * no cacheHitPct) drop WITH their separator — mirrored here, including
- * the semantic span tones (success = usage/cache, muted = performance). */
-function defaultStatsRow(snap: StatusSnapshot): string {
-  const t = snap.usage.tokens
-  const p = snap.usage.performance
-  const usage = [
-    `↑${fmt(t.input)}`,
-    `↓${fmt(t.output)}`,
-    t.cacheRead > 0 ? `R${fmt(t.cacheRead)}` : '',
-    t.cacheWrite > 0 ? `W${fmt(t.cacheWrite)}` : '',
-  ].filter(part => part !== '').join(' ')
-  const spans: Array<{ text: string; tone: 'success' | 'textMuted' }> = [
-    { text: usage, tone: 'success' },
-  ]
-  if (snap.usage.cacheHitPct !== undefined) {
-    spans.push({ text: `CH${snap.usage.cacheHitPct.toFixed(1)}%`, tone: 'success' })
-  }
-  spans.push({ text: `TTFB ${sec(p.firstTokenMs)}`, tone: 'textMuted' })
-  spans.push({ text: `${p.tokensPerSec} tok/s`, tone: 'textMuted' })
-  return spans
-    .map(span => span.tone === 'success' ? color.success(span.text) : color.textMuted(span.text))
-    .join(' · ')
+/** The row separator the default layout renders with: no persisted
+ * separator → the composer's two-space join. */
+const SEP = '  '
+
+/** One reference zone item: the preferred text, the compact density form
+ * the composer falls back to under pressure, the drop importance and the
+ * reverse-layout-order tie-break position. */
+interface RefItem {
+  text: string
+  readonly compact: string
+  readonly importance: number
+  readonly order: number
 }
 
-/** The REFERENCE footer rows (plan 2026-08-31 §6.2): the first row wraps
- * into 1..2 physical lines (its cap boundary cut with '…'); the tail line
- * row's allowance is the LEFTOVER capacity (up to two lines at generous
- * widths), ANSI-safely truncated to the allowance when it still
- * overflows. The composer's
- * item-level fitting can only DROP more than this reference (semantic
- * importance), never render wider or taller. */
-function referenceFooter(line1: string[], line2: string, width: number): string {
-  const line1Rows = wrapTextWithAnsi(line1.join('  '), width)
-  const rows: string[] = []
-  for (let index = 0; index < Math.min(line1Rows.length, FOOTER_MAX_PHYSICAL_LINES_PER_ROW); index += 1) {
-    const row = line1Rows[index]!
-    rows.push(index === FOOTER_MAX_PHYSICAL_LINES_PER_ROW - 1 && line1Rows.length > FOOTER_MAX_PHYSICAL_LINES_PER_ROW
-      ? `${truncateToWidth(row, Math.max(1, width - 1), '')}…`
-      : row)
+/** The reference zone fit (the composer's compact → drop → truncate
+ * discipline, plan §9.2–§9.4 — the string-level oracle for zone width
+ * pressure: importance ASC, then reverse layout order as the tie-break,
+ * the tail ANSI-safely truncated with '…'). */
+function fitZoneRef(items: RefItem[], budget: number): string {
+  const totalOf = (list: readonly RefItem[]): number =>
+    list.reduce((sum, item, index) => sum + visibleWidth(item.text) + (index === 0 ? 0 : SEP.length), 0)
+  if (totalOf(items) <= budget) return items.map(item => item.text).join(SEP)
+  const kept = [...items]
+  const byImportance = [...kept].sort((a, b) => a.importance - b.importance || b.order - a.order)
+  for (const victim of byImportance) {
+    if (totalOf(kept) <= budget) break
+    if (visibleWidth(victim.compact) < visibleWidth(victim.text)) victim.text = victim.compact
   }
-  if (line2 !== '') {
-    const allowance = Math.min(FOOTER_MAX_PHYSICAL_LINES_PER_ROW, Math.max(1, FOOTER_MAX_PHYSICAL_LINES - rows.length))
-    rows.push(...wrapTextWithAnsi(truncateToWidth(line2, allowance * width, '…'), width).slice(0, allowance))
+  if (totalOf(kept) <= budget) return kept.map(item => item.text).join(SEP)
+  for (const victim of byImportance) {
+    if (kept.length === 1) break
+    const without = kept.filter(item => item !== victim)
+    if (totalOf(without) <= budget) {
+      kept.splice(0, kept.length, ...without)
+      break
+    }
+    if (totalOf(without) < totalOf(kept)) kept.splice(0, kept.length, ...without)
   }
-  return rows.map(row => color.textDim(row)).join('\n')
+  while (totalOf(kept) > budget && kept.length > 1) kept.pop()
+  if (totalOf(kept) > budget && kept.length > 0) {
+    const last = kept[kept.length - 1]!
+    const prefixWidth = totalOf(kept.slice(0, -1))
+    const room = Math.max(1, budget - prefixWidth - (kept.length === 1 ? 0 : SEP.length))
+    last.text = truncateToWidth(last.text, room, '…')
+  }
+  return kept.map(item => item.text).join(SEP)
+}
+
+/** The reference physical rows of ONE logical row (plan 2026-08-31 §6.2):
+ * a row WITHOUT a right zone wraps its preferred form into its 1..2-line
+ * allowance; a row WITH a right zone keeps the composer's single-line fit
+ * contract (the right zone reserves its ideal width first, the left zone
+ * fits the remainder, the right zone re-fits the leftover room and drops
+ * entirely when even one cell is left). */
+function referenceRow(row: { left: RefItem[]; right: RefItem[] }, width: number, allowance: number): string[] {
+  if (row.right.length === 0) {
+    const preferred = wrapTextWithAnsi(row.left.map(item => item.text).join(SEP), width)
+    if (preferred.length <= allowance) return preferred
+    // The fitted form may still wrap past the allowance (word-boundary
+    // waste): shrink the multi-line CELL budget until it fits, then fall
+    // back to the ANSI-safe tail cap — never a slice of the wrapped lines.
+    let cells = width * allowance
+    for (;;) {
+      const wrapped = wrapTextWithAnsi(fitZoneRef(row.left, cells), width)
+      if (wrapped.length <= allowance) return wrapped
+      if (cells <= 1) return [`${truncateToWidth(wrapped[0] ?? '', Math.max(0, width - 1), '')}…`]
+      cells = Math.max(1, cells - Math.max(1, wrapped.length - allowance))
+    }
+  }
+  if (row.left.length === 0) {
+    const fitted = fitZoneRef(row.right, width)
+    return [`${' '.repeat(Math.max(0, width - visibleWidth(fitted)))}${fitted}`]
+  }
+  const rightFull = row.right.map(item => item.text).join(SEP)
+  const leftBudget = Math.max(1, width - visibleWidth(rightFull) - 1)
+  const leftText = fitZoneRef(row.left, leftBudget)
+  const leftWidth = visibleWidth(leftText)
+  const rightRoom = Math.max(0, width - leftWidth - 1)
+  if (rightRoom < 1) return [leftText]
+  const finalRight = fitZoneRef(row.right, rightRoom)
+  const gap = ' '.repeat(Math.max(0, width - leftWidth - visibleWidth(finalRight)))
+  return [`${leftText}${gap}${finalRight}`]
+}
+
+/** The reference footer: the sequential physical-line allocation (every
+ * renderable row earns a baseline line first, the leftover then buys the
+ * demanding rows their second line in layout order, capped at the hard
+ * per-row capability) + the legacy dim pass over every physical row. */
+function referenceFooter(rows: Array<{ left: RefItem[]; right: RefItem[] }>, width: number): string {
+  const renderable = rows.filter(row => row.left.length > 0 || row.right.length > 0)
+  const demands = renderable.map(row => row.right.length === 0
+    ? wrapTextWithAnsi(row.left.map(item => item.text).join(SEP), width).length
+    : 1)
+  const allowances = renderable.map(() => 0)
+  let remaining = FOOTER_MAX_PHYSICAL_LINES
+  for (let index = 0; index < renderable.length; index += 1) {
+    const baseline = Math.min(1, remaining)
+    allowances[index] = baseline
+    remaining -= baseline
+  }
+  for (let index = 0; index < renderable.length && remaining > 0; index += 1) {
+    if (demands[index]! <= 1) continue
+    const extra = Math.min(demands[index]! - 1, FOOTER_MAX_PHYSICAL_LINES_PER_ROW - 1, remaining)
+    allowances[index]! += extra
+    remaining -= extra
+  }
+  const physical: string[] = []
+  renderable.forEach((row, index) => {
+    if (allowances[index]! < 1) return
+    physical.push(...referenceRow(row, width, allowances[index]!))
+  })
+  return physical.map(row => color.textDim(row)).join('\n')
+}
+
+/** The reference short cwd (last two path segments). */
+function shortCwdRef(cwd: string): string {
+  const parts = cwd.split('/').filter(Boolean)
+  return parts.slice(-2).join('/') || cwd
+}
+
+/** The reference cwd basename (the compact density form). */
+function basenameRef(cwd: string): string {
+  const parts = cwd.split('/').filter(Boolean)
+  return parts.at(-1) ?? cwd
+}
+
+/** A reference item tone (the semantic token the definition would carry). */
+type RefTone = 'warning' | 'textMuted' | 'text' | 'primary' | 'success'
+
+/** Apply an item's semantic tone exactly like the composer's renderSpans
+ * (an absent tone leaves the text plain for the final dim pass). */
+function toneText(text: string, tone: RefTone): string {
+  switch (tone) {
+    case 'warning': return color.warning(text)
+    case 'textMuted': return color.textMuted(text)
+    case 'text': return color.text(text)
+    case 'primary': return color.primary(text)
+    case 'success': return color.success(text)
+  }
+}
+
+/** The default layout's row-1 LEFT zone (the identity facts + the
+ * extension bridge; the leading view-scope item renders nothing on the
+ * main subject). The tasks badge mirrors the LEGACY count shape the
+ * compat snapshots carry (no Task Center totals). */
+function defaultRow1Left(snap: StatusSnapshot, context: { taskBrowserAvailable: boolean }, extensionText: string): RefItem[] {
+  const items: RefItem[] = []
+  const push = (text: string, compact: string, importance: number, tone?: RefTone): void => {
+    if (text === '') return
+    items.push({
+      text: tone === undefined ? text : toneText(text, tone),
+      compact: tone === undefined ? compact : toneText(compact, tone),
+      importance,
+      order: items.length,
+    })
+  }
+  const preset = snap.access.permissionPreset
+  if (preset !== undefined) {
+    const badge = preset.id === 'danger-full-access' ? '[yolo]'
+      : preset.id === 'read-only' ? '[read-only]'
+        : preset.id === 'workspace-write' ? '[workspace-write]'
+          : preset.id === 'custom' ? '[custom]' : ''
+    const compact = preset.id === 'read-only' ? 'ro' : preset.id === 'workspace-write' ? 'ww' : badge.slice(1, -1)
+    const tone: RefTone = preset.id === 'danger-full-access' || preset.id === 'custom'
+      ? 'warning'
+      : preset.id === 'read-only' ? 'textMuted' : 'text'
+    push(badge, compact, 110, tone)
+  }
+  const model = snap.composition.model
+  if (model !== undefined) {
+    const label = `${model.provider === undefined ? '' : `${model.provider}/`}${model.id}`
+      + (model.reasoningEffort === undefined ? '' : ` @${model.reasoningEffort}`)
+    push(`[${label}]`, model.id, 100)
+  }
+  const tasks = snap.activity.taskCount
+  const agents = snap.activity.childAgentCount
+  if (tasks > 0 || agents > 0) {
+    const parts: string[] = []
+    const compactParts: string[] = []
+    if (tasks > 0) {
+      parts.push(`${tasks} task${tasks === 1 ? '' : 's'} running`)
+      compactParts.push(`${tasks}t`)
+    }
+    if (agents > 0) {
+      parts.push(`${agents} agent${agents === 1 ? '' : 's'}`)
+      compactParts.push(`${agents}a`)
+    }
+    if (context.taskBrowserAvailable) compactParts.push('↓')
+    push(
+      `[${parts.join(' · ')}${context.taskBrowserAvailable ? ' · ↓ view' : ''}]`,
+      `[${compactParts.join('·')}]`,
+      85,
+      'primary',
+    )
+  }
+  push(snap.workspace.cwd === '' ? '' : shortCwdRef(snap.workspace.cwd), basenameRef(snap.workspace.cwd), 80)
+  push(snap.workspace.branch ?? '', snap.workspace.branch ?? '', 70)
+  push(extensionText, extensionText, 0)
+  return items
+}
+
+/** The default layout's row-1 RIGHT zone: the plan state and the Focus
+ * Mode indicator (both render nothing when inactive). */
+function defaultRow1Right(snap: StatusSnapshot): RefItem[] {
+  const items: RefItem[] = []
+  const state = snap.collaboration.plan.pending !== undefined
+    ? 'plan pending'
+    : snap.collaboration.plan.effective ? 'plan' : undefined
+  if (state !== undefined) {
+    items.push({
+      text: toneText(`[${state}]`, 'warning'),
+      compact: toneText(state, 'warning'),
+      importance: 115,
+      order: 0,
+    })
+  }
+  if (snap.interaction.focusMode) {
+    items.push({
+      text: toneText('focus', 'textMuted'),
+      compact: toneText('focus', 'textMuted'),
+      importance: 120,
+      order: items.length,
+    })
+  }
+  return items
+}
+
+/** The default layout's row-2 LEFT zone: the stats-line facts as REAL
+ * semantic placements (session usage, cache hit, recent latency and
+ * speed) plus the turn/step counters, each with its persisted importance
+ * override (the drop order: cache-hit → latency → speed/turns-steps →
+ * usage). */
+function defaultRow2Left(snap: StatusSnapshot): RefItem[] {
+  const t = snap.usage.tokens
+  const p = snap.usage.performance
+  const items: RefItem[] = [{
+    text: toneText(`↑${fmt(t.input)} ↓${fmt(t.output)}`
+      + (t.cacheRead > 0 ? ` R${fmt(t.cacheRead)}` : '')
+      + (t.cacheWrite > 0 ? ` W${fmt(t.cacheWrite)}` : ''), 'success'),
+    compact: toneText(`↑${fmt(t.input)} ↓${fmt(t.output)}`, 'success'),
+    importance: 55,
+    order: 0,
+  }]
+  if (snap.usage.cacheHitPct !== undefined) {
+    items.push({
+      text: toneText(`CH${snap.usage.cacheHitPct.toFixed(1)}%`, 'success'),
+      compact: toneText(`${snap.usage.cacheHitPct.toFixed(1)}%`, 'success'),
+      importance: 30,
+      order: items.length,
+    })
+  }
+  items.push({
+    text: toneText(`TTFB ${sec(p.firstTokenMs)}`, 'textMuted'),
+    compact: toneText(sec(p.firstTokenMs), 'textMuted'),
+    importance: 40,
+    order: items.length,
+  })
+  items.push({
+    text: toneText(`${p.tokensPerSec} tok/s`, 'textMuted'),
+    compact: toneText(`${p.tokensPerSec}t/s`, 'textMuted'),
+    importance: 45,
+    order: items.length,
+  })
+  items.push({
+    text: `t${snap.usage.turns}/s${snap.usage.steps}`,
+    compact: `t${snap.usage.turns}/s${snap.usage.steps}`,
+    importance: 45,
+    order: items.length,
+  })
+  return items
+}
+
+/** The default layout's row-2 RIGHT zone: the full context pressure. */
+function defaultRow2Right(snap: StatusSnapshot): RefItem[] {
+  const context = snap.usage.context
+  if (context === undefined || context.windowTokens === undefined || context.windowTokens <= 0) return []
+  const used = context.usedTokens ?? 0
+  const window = context.windowTokens
+  const percent = context.percent ?? Math.min(100, Math.max(0, Math.ceil((used * 100) / window)))
+  return [{
+    text: toneText(`${fmt(used)}/${fmt(window)} (${percent}%)`, 'primary'),
+    compact: toneText(`ctx ${percent}%`, 'primary'),
+    importance: 100,
+    order: 0,
+  }]
+}
+
+/** The two reference rows of the builtin default layout. */
+function defaultReferenceRows(
+  snap: StatusSnapshot,
+  context: { taskBrowserAvailable: boolean },
+  extensionText: string,
+): Array<{ left: RefItem[]; right: RefItem[] }> {
+  return [
+    { left: defaultRow1Left(snap, context, extensionText), right: defaultRow1Right(snap) },
+    { left: defaultRow2Left(snap), right: defaultRow2Right(snap) },
+  ]
 }
 
 /** A realistic main-subject snapshot. */
@@ -156,23 +406,34 @@ function mainSnapshot(): StatusSnapshot {
 
 const CONTEXT = { taskBrowserAvailable: true, extensionFooterText: '' }
 
+/** The compact preset's row as reference items (the legacy parts; the
+ * tested width never engages the compact density, so the compact form
+ * mirrors the preferred one). */
+function compactReferenceRows(snap: StatusSnapshot, editorEmpty: boolean, extensionText: string): Array<{ left: RefItem[]; right: RefItem[] }> {
+  const parts = legacyLine1(snap, editorEmpty, extensionText)
+  return [{
+    left: parts.map((text, order) => ({ text, compact: text, importance: 100 - order, order })),
+    right: [],
+  }]
+}
+
 test('default preset output is byte-equivalent to the reference footer (wide)', () => {
   const snap = mainSnapshot()
-  const expected = referenceFooter(legacyLine1(snap, true, ''), defaultStatsRow(snap), 100)
+  const expected = referenceFooter(defaultReferenceRows(snap, CONTEXT, ''), 100)
   const actual = composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
   assert.equal(actual, expected)
 })
 
 test('default preset output is byte-equivalent to the reference footer (narrow, wrapped)', () => {
   const snap = mainSnapshot()
-  const expected = referenceFooter(legacyLine1(snap, true, ''), defaultStatsRow(snap), 40)
+  const expected = referenceFooter(defaultReferenceRows(snap, CONTEXT, ''), 40)
   const actual = composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 40, context: CONTEXT })
   assert.equal(actual, expected)
 })
 
 test('compact preset output is byte-equivalent to the reference compact footer', () => {
   const snap = mainSnapshot()
-  const expected = referenceFooter(legacyLine1(snap, true, ''), '', 100)
+  const expected = referenceFooter(compactReferenceRows(snap, true, ''), 100)
   const actual = composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
   assert.equal(actual, expected)
 })
@@ -183,7 +444,7 @@ test('the dynamic exit instruction appends as an INDEPENDENT line (the stats row
   // render beside it, position-independent.
   const snap = mainSnapshot()
   const expected = [
-    referenceFooter(legacyLine1(snap, true, ''), defaultStatsRow(snap), 100),
+    referenceFooter(defaultReferenceRows(snap, CONTEXT, ''), 100),
     color.textDim('Press Ctrl+Shift+X again to exit'),
   ].join('\n')
   const actual = composer.render({
@@ -196,16 +457,17 @@ test('the dynamic exit instruction appends as an INDEPENDENT line (the stats row
   assert.equal(actual, expected)
 })
 
-test('permission/plan/task variants stay byte-equivalent', () => {
+test('permission/plan/task/focus variants stay byte-equivalent', () => {
   for (const permission of ['danger-full-access', 'read-only', 'custom'] as const) {
     const snap = mainSnapshot()
     const variant: StatusSnapshot = {
       ...snap,
       access: { permissionPreset: { id: permission, label: permission, matched: permission !== 'custom' } },
       collaboration: { plan: { effective: true } },
+      interaction: { ...snap.interaction, focusMode: true },
       activity: { ...snap.activity, taskCount: 1, childAgentCount: 2 },
     }
-    const expected = referenceFooter(legacyLine1(variant, true, ''), defaultStatsRow(variant), 100)
+    const expected = referenceFooter(defaultReferenceRows(variant, CONTEXT, ''), 100)
     const actual = composer.render({ snapshot: variant, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
     assert.equal(actual, expected, `permission ${permission}`)
   }
@@ -213,7 +475,7 @@ test('permission/plan/task variants stay byte-equivalent', () => {
 
 test('extension segments merge at the reference position', () => {
   const snap = mainSnapshot()
-  const expected = referenceFooter(legacyLine1(snap, true, '[EXT-SEG]'), defaultStatsRow(snap), 100)
+  const expected = referenceFooter(defaultReferenceRows(snap, CONTEXT, '[EXT-SEG]'), 100)
   const actual = composer.render({
     snapshot: snap,
     layout: DEFAULT_FOOTER_LAYOUT,
@@ -338,32 +600,49 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
-    // The stats row is the semantic placements joined by ' · '; with no
-    // cache activity the cache-hit placement drops WITH its separator.
-    '[workspace-write]  [deepseek/flash]  x/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k · TTFB 0s · 0 tok/s',
+    // The status row (identity facts; the inactive plan/focus right zone
+    // renders nothing) and the stats row: the stats-line facts as semantic
+    // placements plus the counters on the left, the full context pressure
+    // flush right (no cache activity → the cache-hit placement is absent).
+    '[workspace-write]  [deepseek/flash]  x/proj  main\n↑1.2k ↓3.4k  TTFB 0s  0 tok/s  t2/s5                                                  25k/100k (25%)',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 40, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
-    // 40 columns: the status row fills its 2-line allowance (75 cells →
-    // 2 rows) and the 29-cell stats row keeps a single line.
-    '[workspace-write]  [deepseek/flash]\nx/proj  main  [███░░░░░░░░░] 25%  t2/s5\n↑1.2k ↓3.4k · TTFB 0s · 0 tok/s',
+    // 40 columns: the status row fills its 2-line allowance (50 cells → 2
+    // rows); the stats row is a RIGHT-ZONE row (its single-line fit
+    // contract), so the left zone compacts then drops the latency
+    // placement against the context's reserved width.
+    '[workspace-write]  [deepseek/flash]\nx/proj  main\n↑1.2k ↓3.4k  0t/s  t2/s5  25k/100k (25%)',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 20, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
-    // 20 columns: the status row's preferred form (75 cells) exceeds the
-    // 2×20-cell row budget — the responsive compact pass shortens the
-    // items FIRST (ww/flash/proj/ctx 25%), and only what still does not
-    // fit drops by importance; never a slice of the wrapped lines (plan
-    // §6.2). The stats row's preferred form (31 cells) fits its 2-line
-    // allowance by WRAPPING — no compaction, no drop.
-    'ww  flash  proj\nmain  ctx 25%  t2/s5\n↑1.2k ↓3.4k · TTFB\n0s · 0 tok/s',
+    // 20 columns: the status row compact-pass shortens its items first
+    // (ww/flash/proj); only the model/cwd/branch survive. The stats row's
+    // left zone loses every placement but the (truncated) usage pair — the
+    // right-zone context stays reserved and renders flush right.
+    '[workspace-write]\nflash  proj  main\n↑1.2… 25k/100k (25%)',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
     '[workspace-write]  [deepseek/flash]  x/proj  main  [███░░░░░░░░░] 25%  t2/s5',
+  )
+  // The status row's right zone (plan state + Focus Mode) renders flush
+  // right when active — only the left zone is fitted to the remainder.
+  const focusSnap = mainSnapshot() as DeepMutable<StatusSnapshot>
+  focusSnap.interaction = { ...focusSnap.interaction, focusMode: true }
+  assert.equal(
+    composer.render({ snapshot: focusSnap as StatusSnapshot, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
+      .replace(/\x1b\[[0-9;]*m/g, ''),
+    '[workspace-write]  [deepseek/flash]  x/proj  main                                              focus\n↑1.2k ↓3.4k  TTFB 0s  0 tok/s  t2/s5                                                  25k/100k (25%)',
+  )
+  // The extension bridge keeps its position at the status row's tail.
+  assert.equal(
+    composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: { ...CONTEXT, extensionFooterText: '[EXT-SEG]' } })
+      .replace(/\x1b\[[0-9;]*m/g, ''),
+    '[workspace-write]  [deepseek/flash]  x/proj  main  [EXT-SEG]\n↑1.2k ↓3.4k  TTFB 0s  0 tok/s  t2/s5                                                  25k/100k (25%)',
   )
   // The dim pass wraps EVERY physical row in the textDim SGR pair.
   const ansi = composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })

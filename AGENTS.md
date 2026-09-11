@@ -100,11 +100,13 @@ extension-facing contract.
 
 ## Correctness invariants
 
-- **One Direct surface per session.** Until Host-owned writes and cross-client
-  concurrency are proven, Direct permits one process-owned surface per session;
-  `owner.lock`, lease/cooling, PINNED, the transition gate, and
-  `SessionOperationBarrier` remain authoritative. Do not weaken them or
-  reintroduce per-submit persistence reads on the hot path. See
+- **One Direct surface per session.** DSH `SessionHandle` / `SessionWriteLease`
+  is the sole cross-process Session writer ownership authority on the master
+  baseline; one process-owned surface per session is guaranteed by DSH
+  authority. Do not add a second persistence/artifact-level owner lock in the
+  TUI. The TUI still owns process-local surface correctness:
+  `SessionTransitionGate`, `SessionOperationBarrier`, and stale/generation
+  fences. Keep the submit hot path free of persistence reads. See
   `docs/concurrency.md`.
 - **No bare fire-and-forget promises.** Use the repository's `runDetached` /
   `runOwned` ownership model and preserve its failure semantics. See
@@ -125,10 +127,6 @@ extension-facing contract.
 - **Context presentation does not rewrite model input.** Keep model-facing bytes
   untouched; render parsed skill/system envelopes, never raw XML. See
   `test/rendering.test.ts`.
-- **Repair real DSH frames only.** Never rewrite a whole log as one zstd frame;
-  refuse ambiguous duplicate-seq references, and make `--yes` repairs with a
-  backup, verification, and 0600 output. Do not validate serializers solely
-  through a self round-trip. See `docs/repair-session.md`.
 
 ## Development
 
@@ -149,9 +147,19 @@ When entering a development worktree:
 pnpm dev:doctor
 ```
 
-Use `pnpm dev:bootstrap` only when the environment is not ready. Keep each
-worktree's `node_modules` and `dist` independent; never symlink them, and build
-in that worktree before using a profile.
+Use `pnpm dev:bootstrap` only when the environment is not ready. On a
+source-mode worktree (a worktree whose tracked `test/compat/dsh-mode.json`
+selects `source` — `next` is not always source-mode), a plain `pnpm install`
+before bootstrap leaves the DSH workspace state incorrect (`workspace DSH
+incorrect` / `local state missing`); run `pnpm dev:doctor` first and let
+`pnpm dev:bootstrap` perform the dependency install itself, then re-run
+`pnpm dev:doctor` until it reports `READY`. A plain `pnpm install` after
+bootstrap re-resolves `@deepseek-ai/*` to registry versions and breaks the
+source-mode workspace again; use `pnpm dev:shell` (or
+`source ./.dsh-dev-env`) for commands that need the source environment, and
+re-run `pnpm dev:bootstrap` after any real install. Keep each worktree's
+`node_modules` and `dist` independent; never symlink them, and build in that
+worktree before using a profile.
 
 * `main` is the released npm-backed compatibility line; `next` is the
   forward-integration line and may use its tracked Source Mode.
@@ -162,7 +170,11 @@ in that worktree before using a profile.
   replace `next`'s newer DSH target/policy with `main`'s released one.
 * Do not modify the real-use `pi-tui` profile during development.
 * `compat:dsh:source` is a full distribution-boundary verification, not a
-  routine test after ordinary TUI changes.
+  routine test after ordinary TUI changes. Run it only when the DSH source or
+  distribution boundary changes (source pin, target metadata, distribution
+  infrastructure, source/npm discrepancy, or an unpublished DSH commit), or
+  when explicitly requested; skip it for TUI-only changes when DSH is
+  unchanged.
 
 Read `docs/local-development.md` before changing DSH mode, worktree/bootstrap
 behavior, or promoting `main`/`next`. Read `docs/dsh-compatibility.md` for
@@ -191,7 +203,6 @@ Read these only when the task touches the corresponding area:
 * `docs/tmux-testing.md` — visual/TTY verification and real-testing traps.
 * `docs/dsh-compatibility.md` — DSH distribution compatibility.
 * `docs/releasing.md` — release/tag/publish procedure.
-* `docs/repair-session.md` — session-log repair contract.
 * `packages/pi-tui/AGENTS.md` — vendored-fork rules.
 
 When a subsystem already has a dedicated contract document, keep detailed

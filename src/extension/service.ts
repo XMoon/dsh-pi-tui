@@ -23,6 +23,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import { ExtensionLedger } from './internal/ledger.ts'
 import { InvalidateBatcher } from './internal/batcher.ts'
 import { isSlotName, slotNames, slotSemantic } from './slot-map.ts'
+import { API_VERSION } from './public-types.ts'
 import type { PiTuiApiInfo, PiTuiCapability, PiTuiSlotName, RegistrationHandle, RegistrationSpec, SurfaceStateValues } from './public-types.ts'
 import type {
   AdvancedConfirmOptions,
@@ -219,9 +220,12 @@ export interface PiTuiExtensionService {
    */
   subscribeState(listener: (state: SurfaceStateValues) => void): () => void
   /**
-   * Register a TUI command contribution (M5): execution ownership metadata
-   * over an existing command. The bridge does NOT execute — actual
-   * execution stays in the commands service. Owned by the calling fiber.
+   * Register a CLIENT-OWNED command contribution (M5): a slash name whose
+   * behavior lives entirely on the client (the DSH client command
+   * contribution shape). It joins the `/` menu merged with the host catalog
+   * and the runner executes its own `handler` locally; a name that is also a
+   * host command fails loud at candidate synthesis and never shadows it.
+   * Owned by the calling fiber.
    * @param contribution - the command contribution.
    */
   registerCommand(contribution: TuiCommandContribution): TuiCommandHandle
@@ -523,12 +527,15 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     // attachment-gated: the snapshot contract only holds while a surface
     // is attached. The runner's attachSurface() adds the live set.
     return {
-      apiVersion: 1,
+      // The ONE source of truth for the reported version (`public-types`):
+      // never a literal, so a bump cannot leave the runtime behind.
+      apiVersion: API_VERSION,
       hostVersion: this.hostVersion,
       capabilities: new Set([...PiTuiExtensionServiceImpl.ADVERTISED_CAPABILITIES, ...this.liveCapabilities]),
       // M11 deprecation policy (plan §16): currently nothing is
       // deprecated — the map stays empty. When a surface is deprecated,
-      // its note lands here AND the capability/API is removed in API v2.
+      // its note lands here AND the capability/API is removed in the NEXT
+      // API version.
       deprecations: new Map(),
     }
   }
@@ -871,22 +878,28 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
       throw new Error(`command contribution "${contribution.name}" conflicts: ${detail} — resolve the conflict before registering`)
     }
     this.trackRegistryHealth('command', contribution.id, owner)
+    // The health record is keyed (slot, owner, id) — it cannot tell two
+    // registrations of the same id apart, so every cleanup asks the bridge
+    // whether THIS handle is still the live registration before untracking:
+    // a stale cleanup (a repeated explicit dispose, or a late fiber effect
+    // after an HMR re-registration) must never drop a newer generation's
+    // record.
+    const disposeOwn = (): void => {
+      const current = this.commands.isCurrent(outcome.handle)
+      outcome.handle.dispose()
+      if (current) this.untrackRegistryHealth('command', contribution.id, owner)
+    }
     let dispose: () => void
     try {
-      dispose = caller.fiber.effect(() => () => {
-        outcome.handle.dispose()
-        this.untrackRegistryHealth('command', contribution.id, owner)
-      }, 'piTuiExtensions.registerCommand()')
+      dispose = caller.fiber.effect(() => disposeOwn, 'piTuiExtensions.registerCommand()')
     } catch (error) {
-      outcome.handle.dispose()
-      this.untrackRegistryHealth('command', contribution.id, owner)
+      disposeOwn()
       throw error
     }
     return {
       id: outcome.handle.id,
       dispose: () => {
-        outcome.handle.dispose()
-        this.untrackRegistryHealth('command', contribution.id, owner)
+        disposeOwn()
         dispose()
       },
     }

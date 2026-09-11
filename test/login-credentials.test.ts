@@ -114,10 +114,9 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     agents: {} as never,
     sessionReader: {
       list: async () => [],
-      search: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(),
       measureContext: () => undefined,
-      readExportData: async () => ({ kind: 'none' }),
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
@@ -477,6 +476,29 @@ test('/login wizard reports a profile that persisted but whose key write failed'
   assert.equal(result.kind, 'error')
   assert.match(result.text ?? '', /provider acme-gateway added, but storing the key failed/)
   assert.equal(t.settings!.mutations.length, 1)
+  t.app.stop()
+})
+
+test('/login add-provider rejects invalid base URLs before discovery or persistence', async () => {
+  let baseURL = ''
+  const t = setup({
+    llm: fakeLlm([]),
+    questions: () => [
+      { id: 'api', selected: ['openai-completions'], custom: '' },
+      { id: 'baseURL', selected: [], custom: baseURL },
+      { id: 'displayName', selected: [], custom: '' },
+      { id: 'key', selected: [], custom: 'sk-acme' },
+    ],
+  })
+  for (const candidate of ['gateway.example.com/v1', 'ftp://example.com', 'https://']) {
+    baseURL = candidate
+    const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme-gateway')
+    assert.equal(result.kind, 'error')
+    assert.match(result.text ?? '', /invalid base URL/)
+    assert.equal(t.llm!.probes.length, 0, `${candidate} must fail before model discovery`)
+    assert.equal(t.settings!.mutations.length, 0, `${candidate} must fail before profile persistence`)
+    assert.deepEqual(t.credentials.sets, [], `${candidate} must fail before credential persistence`)
+  }
   t.app.stop()
 })
 
