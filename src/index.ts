@@ -144,7 +144,7 @@ import {
 import type { TaskBrowserViewState, TaskPanelItem } from './task-panel.ts'
 import { TaskBrowserRuntime, type TaskBrowserDatasetScope } from './task-browser-runtime.ts'
 import type { ComposerSubmitGesture, ComposerSubmitRequest, TaskBrowserHandle, WorkflowAction } from './tui-app.ts'
-import { resolveComposerDelivery, registerTuiCommands, type DefaultIntentRecord, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
+import { resolveComposerDelivery, registerTuiCommands, type DefaultIntentRecord, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
@@ -330,16 +330,18 @@ export const LOCAL_COMMANDS = new Set([
  * @param parsed - the parsed slash command, undefined for a plain prompt.
  * @param text - the submission text.
  * @param store - the live draft store.
- * @param isLocal - whether the command name is a LOCAL (TUI-owned/UI)
- *   command; skill names answer false.
+ * @param isLocal - whether THIS LINE is a LOCAL (TUI-owned/UI) command; skill
+ *   names answer false. Never derived from the name alone: a host command's
+ *   input KIND decides which line it claims (see
+ *   {@link commandIsLocalForAttachments}).
  */
 export function commandRejectsImages(
-  parsed: { name: string } | undefined,
+  parsed: { name: string; rawInput?: string } | undefined,
   text: string,
   store: import('./image/types.ts').DraftImageStoreLike,
-  isLocal: (name: string) => boolean,
+  isLocal: boolean,
 ): boolean {
-  return parsed !== undefined && isLocal(parsed.name) && draftHasImages(text, store)
+  return parsed !== undefined && isLocal && draftHasImages(text, store)
 }
 
 /**
@@ -372,51 +374,62 @@ export const HOST_COMMAND_CATALOG: ReadonlySet<string> = new Set([
  * @param name - the slash name.
  * @param isSkillWrapper - the live skill-wrapper test (absent = none).
  * @param isDynamicLocal - the live client-contribution test (absent = none).
+ * @param hostView - the host catalog's view of THIS LINE (`undefined` = the
+ *   catalog does not resolve the name at all; see {@link HostCommandClaim}).
+ *   A name the catalog RESOLVES is never a client-local line: when the
+ *   catalog claims the line the host's own `input.attachments` declaration
+ *   decides, and when it does not (an argued line of an execute-kind
+ *   command) the line is an ordinary submission — never a same-named client
+ *   contribution's.
  */
 export function isLocalCommandLine(
   name: string,
   isSkillWrapper: ((name: string) => boolean) | undefined,
   isDynamicLocal: ((name: string) => boolean) | undefined,
-  isHostCommand?: ((name: string) => boolean) | undefined,
+  hostView?: HostCommandClaim | undefined,
 ): boolean {
-  // The NAMESPACE ORDER decides: a TUI-owned local command is local, while
-  // the agent-facing routes (a live skill wrapper, a live HOST claim) outrank
-  // a client contribution — a host claim's own `input.attachments`
-  // declaration decides whether it may carry attachments (never classified
-  // local here), and a contribution must never suppress that claim.
+  // A TUI-owned name is local no matter what the host catalog holds: the
+  // dispatch excludes LOCAL_COMMANDS from the host route, so the
+  // classification must not claim a host authority the route never grants.
   if (LOCAL_COMMANDS.has(name)) return true
   if (isSkillWrapper?.(name) === true) return false
-  if (isHostCommand?.(name) === true) return false
+  if (hostView !== undefined) return false
   return isDynamicLocal?.(name) ?? false
 }
 
 /**
- * The attachment gate's local-command predicate for one parsed line — the
- * SINGLE classification the dispatch and its regression tests share:
- * `/skill <name> ...` is agent-facing (loadSkill), a LIVE skill wrapper is
- * agent-facing (multimodal) even when a client contribution shares its name,
- * and everything else follows {@link isLocalCommandLine} (TUI/core local
- * commands and live client command contributions are local).
+ * The attachment gate's local-command classification for ONE parsed line —
+ * the SINGLE classification the dispatch and its regression tests share, and
+ * the DSH client namespace order applied to a LINE:
+ * - a TUI/core local command is local;
+ * - `/skill <name> ...` and a LIVE skill wrapper are agent-facing
+ *   (multimodal) even when a client contribution shares the name;
+ * - a name the HOST catalog RESOLVES is never local: when the catalog claims
+ *   the line, the claiming descriptor's `input.attachments` declaration
+ *   decides (`/goal <objective>` is claimed), and when it does not (an argued
+ *   line of an execute-kind command, `/compact extra`) the line is an
+ *   ordinary submission — never a command and never a same-named client
+ *   contribution's;
+ * - everything else follows the live client contribution of that name.
  * @param parsed - the parsed slash command (undefined = plain prompt).
  * @param isSkillWrapper - the live skill-wrapper test (absent = none).
  * @param isDynamicLocal - the live client-contribution test (absent = none).
- * @param isHostCommand - the live HOST-claim test (absent = none): a host
- *   command is never classified local here — its own `input.attachments`
- *   declaration decides whether the composer may attach anything
- *   ({@link attachmentRefusal}).
- * @returns the predicate for `commandRejectsImages` /
- *   {@link attachmentRefusal} (the dispatch's composer attachment policy).
+ * @param hostClaim - the live HOST-catalog view of THIS LINE (absent = none).
+ * @returns whether the line is a local command line.
  */
 export function commandIsLocalForAttachments(
   parsed: { name: string; rawInput?: string } | undefined,
   isSkillWrapper: ((name: string) => boolean) | undefined,
   isDynamicLocal: ((name: string) => boolean) | undefined,
-  isHostCommand?: ((name: string) => boolean) | undefined,
-): (name: string) => boolean {
-  return name => {
-    if (name === 'skill' && (parsed?.rawInput?.trim() ?? '') !== '') return false
-    return isLocalCommandLine(name, isSkillWrapper, isDynamicLocal, isHostCommand)
-  }
+  hostClaim?: ((parsed: { name: string; rawInput?: string }) => HostCommandClaim | undefined) | undefined,
+): boolean {
+  if (parsed === undefined) return false
+  // `/skill <name> ...` is agent-facing (loadSkill owns it) even though the
+  // bare `/skill` picker is a TUI-local command.
+  if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return false
+  // The host catalog's view of THIS LINE outranks a same-named client
+  // contribution, exactly like the dispatch's namespace order.
+  return isLocalCommandLine(parsed.name, isSkillWrapper, isDynamicLocal, hostClaim?.(parsed))
 }
 
 /**
@@ -487,7 +500,10 @@ export function normalizeSkillInvocation(text: string): string | undefined {
  * unadvertised miss keeps the existing plain-input fallback (the user may
  * deliberately send slash text to the model).
  * @param execution - the settled `commands.execute` outcome.
- * @param wasAdvertised - the claim captured BEFORE session creation.
+ * @param wasAdvertised - whether the submission was an advertised command
+ *   INVOCATION: the submit-time name claim AND the command plane's final
+ *   ownership of the line (an argued line of an execute-kind command never
+ *   reached the plane, so it is an ordinary submission).
  * @returns whether the miss must be consumed as an advertised miss.
  */
 export function shouldConsumeAdvertisedMiss(
@@ -4129,8 +4145,11 @@ export function apply(ctx: Context, config: Config): void {
      * - an explicit `/skill <name> ...` invocation and a LIVE skill wrapper
      *   are agent-facing — loadSkill delivers them and their attachments to
      *   the model (never classified as a command);
-     * - a HOST command accepts attachments ONLY when its descriptor declares
-     *   `input.attachments` (upstream refuses otherwise before dispatch);
+     * - a line the HOST catalog CLAIMS accepts attachments ONLY when the
+     *   claiming descriptor declares `input.attachments` (upstream refuses
+     *   otherwise before dispatch). The claim is LINE-level: an argued line
+     *   of an execute-kind command is no invocation at all (it falls back to
+     *   the ordinary submission) and keeps its attachments;
      * - a declared command still refuses a FILE attachment: the host expects
      *   an upload receipt, which this client has no seam to produce (fail
      *   closed rather than silently drop the file).
@@ -4139,7 +4158,11 @@ export function apply(ctx: Context, config: Config): void {
     const attachmentRefusal = (
       parsed: { name: string; rawInput?: string },
       draft: string,
-      isLocalLine: (name: string) => boolean,
+      // Whether THIS LINE is a local command line — the dispatch's ONE
+      // classification (`commandIsLocalForAttachments`), computed by the
+      // caller because it must be re-readable against the FINAL catalog for a
+      // deferred start.
+      isLocal: boolean,
       // The ONE skill-invocation predicate (`isSkillInvocation`: an explicit
       // `/skill <name> ...` or a live skill wrapper) — TUI-owned agent-facing
       // input that loadSkill owns. It is supplied rather than re-derived: the
@@ -4150,9 +4173,10 @@ export function apply(ctx: Context, config: Config): void {
     ): string | undefined => {
       if (!draftHasAttachments(draft, draftImages, draftFiles)) return undefined
       if (skillInvocation) return undefined
-      if (!isLocalLine(parsed.name)) {
-        if (isHostCommandName?.(parsed.name) === true) {
-          if (isHostCommandAcceptingAttachments?.(parsed.name) !== true) {
+      if (!isLocal) {
+        const claim = hostClaimOf?.(parsed)
+        if (claim?.claimed === true) {
+          if (claim.attachments !== true) {
             return `/${parsed.name} does not accept attachments; remove them first`
           }
           if (draftHasFiles(draft, draftImages, draftFiles)) {
@@ -4419,13 +4443,55 @@ export function apply(ctx: Context, config: Config): void {
       // authoritative event lands. The TOKEN arms every terminal exit of
       // THIS workflow: a newer gesture supersedes them.
       const submitAckToken = acceptLocalSubmitAck()
-      // Capture the advertised claim BEFORE any session creation: the
-      // boolean must reflect the completion generation at submit time, never
-      // a re-query after ensureSession (a refresh may have already revoked
-      // the claim). A probed command the real session then lacks is consumed
-      // with an explicit error below — it must never fall through to the
-      // model as a plain user message.
       const parsedAtSubmit = parseCommand(text)
+      // The advertised NAME claim, captured BEFORE any session creation: a
+      // refresh may have revoked it since (the completion generation the user
+      // saw is the one that promised the command), and a probed command the
+      // real session then lacks must be consumed with an explicit error —
+      // never a plain model message. It is only consumed for a line the
+      // command plane actually OWNS at invocation time (`planeAdvertised`).
+      const wasAdvertisedAtSubmit = parsedAtSubmit !== undefined
+        && wasAdvertisedClaim?.(parsedAtSubmit.name) === true
+      // The host catalog's view of the line at SUBMIT time, captured before any
+      // session creation: a line it already knew to be a NON-invocation (an
+      // argued line of an execute-kind command) stays one — no later catalog
+      // change may turn it into an invocation except the final catalog
+      // actually CLAIMING it.
+      const submitView = parsedAtSubmit === undefined ? undefined : hostClaimOf?.(parsedAtSubmit)
+      // The CLIENT-LOCAL eligibility of the submitted line, captured with the
+      // routing decision (before any session creation): only a line whose
+      // initial route was a LIVE client contribution keeps the client-local
+      // attachment classification under the final authority. A contribution
+      // that appears LATER never turns a generic line into a UI control
+      // (upstream `matchEnter` checks the contribution once, before the session
+      // work), and this route never runs the new handler anyway — the line is
+      // an ordinary submission.
+      const clientLocalAtSubmit = parsedAtSubmit !== undefined
+        && extensionService?.commands.find(parsedAtSubmit.name) !== undefined
+      // Whether the command plane OWNS the submitted line, asked against the
+      // LIVE catalog at INVOCATION time (after ensureSession: a deferred start
+      // commits a session-scoped catalog the standing view could not see, and
+      // the descriptor of a resolved name may differ there — in either
+      // direction). The plane owns a TUI-owned route (a local command, or a
+      // live skill wrapper whose `/name args` line the plane's own handler
+      // turns into loadSkill) and every line the FINAL catalog CLAIMS. It does
+      // NOT own an argued line of an execute-kind host command: upstream
+      // `matchEnter` makes it an ordinary submission, and the host registry
+      // resolves by NAME, so asking it would run the command anyway.
+      const commandPlaneOwnsLine = (): boolean => {
+        if (parsedAtSubmit === undefined) return true
+        if (LOCAL_COMMANDS.has(parsedAtSubmit.name)) return true
+        if (isSkillWrapperName?.(parsedAtSubmit.name) === true) return true
+        const finalView = hostClaimOf?.(parsedAtSubmit)
+        // A resolved final catalog answers for itself (claimed = the plane
+        // runs the command; unclaimed = an ordinary submission).
+        if (finalView !== undefined) return finalView.claimed
+        // The final catalog does not resolve the name at all: the plane decides
+        // (a session-scoped command the standing view cannot see) — UNLESS the
+        // line was ALREADY a known non-invocation when it was submitted, which
+        // no disappearance can turn into an invocation.
+        return submitView?.claimed !== false
+      }
       const extensionCommandId = parsedAtSubmit === undefined
         ? undefined
         : extensionService?.commands.idFor(parsedAtSubmit.name)
@@ -4436,7 +4502,13 @@ export function apply(ctx: Context, config: Config): void {
       // reload in between means the REAL invocation runs the NEW owner's
       // command). It is re-captured inside the runOwned factory,
       // immediately before execute() — see below (the review's P2).
-      const wasAdvertised = parsedAtSubmit !== undefined && wasAdvertisedClaim?.(parsedAtSubmit.name) === true
+      // Whether the submission reached the plane AS AN ADVERTISED COMMAND
+      // INVOCATION: the submit-time advertised claim AND the plane's final
+      // ownership of the line (resolved in the factory below). The
+      // advertised-miss gate may consume only a line the plane actually
+      // owned — an argued line of an execute-kind command is an ordinary
+      // submission even when its name was advertised.
+      let planeAdvertised = false
       // An owned workflow: the chain's outcome drives the editor draft, the
       // notices and the queue — runOwned (AGENTS.md), never a bare void.
       // Reserve the referenced drafts SYNCHRONOUSLY, in the SAME call stack
@@ -4533,8 +4605,19 @@ export function apply(ctx: Context, config: Config): void {
             commandIsLocalForAttachments(
               parsed,
               isSkillWrapperName,
-              n => extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false,
-              isHostCommandName,
+              // The dynamic (client contribution) term is STICKY to the
+              // submit-time route: a contribution that appeared during the
+              // deferred window does not reclassify an ordinary line as a UI
+              // control under the final authority.
+              n => clientLocalAtSubmit && (extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false),
+              // STICKY SUBMIT-TIME AUTHORITY: once the host catalog RESOLVED
+              // this name when the line was submitted, the name is host
+              // territory for the lifetime of the submission — the line never
+              // falls back to a same-named client contribution (which only
+              // ever owns names the host catalog does not resolve at all),
+              // even when the name disappears from the final catalog. The
+              // final catalog still decides the CLAIM itself.
+              line => hostClaimOf?.(line) ?? submitView,
             ),
             isSkillInvocation(parsed, text),
           )
@@ -4577,7 +4660,9 @@ export function apply(ctx: Context, config: Config): void {
             // `CommandSubmitAttachment`) ONLY for a HOST command that
             // DECLARES `input.attachments` — the web composer's
             // `leadingClaim.submit(args, attachments)` path; the host admits
-            // them through its own store before the handler runs. A
+            // them through its own store before the handler runs. The claim
+            // is asked for THIS LINE: an argued line of an execute-kind
+            // command is not an invocation at all (see the routing gate). A
             // TUI-owned command must never carry them on this wire: its
             // descriptor does not declare attachments (`/skill <name>` is
             // itself a registered TUI command, and a live skill wrapper is
@@ -4585,12 +4670,22 @@ export function apply(ctx: Context, config: Config): void {
             // invocation BEFORE the handler — their placeholder line is
             // delivered as-is and the images are admitted by the delivery
             // path (loadSkill → prepareUserMessage).
-            const submittedAttachments = parsedAtSubmit !== undefined
-              && isHostCommandName?.(parsedAtSubmit.name) === true
-              && isHostCommandAcceptingAttachments?.(parsedAtSubmit.name) === true
+            const submittedClaim = parsedAtSubmit === undefined ? undefined : hostClaimOf?.(parsedAtSubmit)
+            const submittedAttachments = submittedClaim?.claimed === true && submittedClaim.attachments
               ? commandSubmitAttachments(text)
               : []
-            return withCommandDelivery(delivery, () => commands.execute(agent as Agent, toggled, submittedAttachments, signal))
+            // The plane is asked only for a line it owns, resolved against the
+            // FINAL catalog here (see commandPlaneOwnsLine): the host registry
+            // resolves by NAME, so handing it an argued line of an execute-kind
+            // command would run the command the DSH decision table never made
+            // an invocation. An unowned line resolves undefined and keeps the
+            // ordinary delivery below; the advertised-miss gate follows the
+            // SAME resolution.
+            const commandPlaneLine = commandPlaneOwnsLine()
+            planeAdvertised = commandPlaneLine && wasAdvertisedAtSubmit
+            return withCommandDelivery(delivery, () => commandPlaneLine
+              ? commands.execute(agent as Agent, toggled, submittedAttachments, signal)
+              : Promise.resolve(undefined))
           }, {
             diag,
             sessionId: () => agent.session.id,
@@ -4611,7 +4706,7 @@ export function apply(ctx: Context, config: Config): void {
               // message. Attachment-bearing drafts are restored below; plain slash lines
                // remain consumed (the refreshed completions already revoked the
                // claim, and a mechanical retry could ride the unadvertised fallback).
-               if (shouldConsumeAdvertisedMiss(execution, wasAdvertised)) {
+               if (shouldConsumeAdvertisedMiss(execution, planeAdvertised)) {
                 restoreCommandAttachmentDraft()
                 app.notify(`/${parsedAtSubmit?.name ?? '?'} is not available in the created session`, 'error')
                 settleLocalSubmitAck('submit consumed by an unadvertised command', { token: submitAckToken, terminal: true })
@@ -5287,6 +5382,13 @@ export function apply(ctx: Context, config: Config): void {
       // like /plan, and plain prompts — creates the session lazily. M5: a
       // plugin-declared sessionless command (CommandBridge) joins the set.
       const parsed = parseCommand(text)
+      // The CURRENT host catalog's view of THIS LINE, asked ONCE for the
+      // synchronous routing decisions below (the deferred resolution asks
+      // again, against the catalog the session committed). A name the
+      // catalog RESOLVES is host territory even when it does not claim this
+      // line: `/compact extra` is an ordinary submission, never a same-named
+      // client contribution's.
+      const hostView = parsed === undefined ? undefined : hostClaimOf?.(parsed)
       // Command semantics matrix (plan §19.3): slash commands are not LLM
       // prompts — an image-bearing command line is REJECTED explicitly
       // (never a silent drop, never a stray placeholder sent to the model).
@@ -5295,13 +5397,15 @@ export function apply(ctx: Context, config: Config): void {
       // plain prompts AND per-skill slash lines, including `/skill <name>
       // [image #N ...]` (`skill` is local only as the bare picker; with
       // arguments it is a loadSkill agent prompt — review finding).
-      // The line's attachment classification is computed ONCE and reused by
-      // the deferred resolution below (the same predicate, live view).
-      const localForAttachments = commandIsLocalForAttachments(
+      // The line's attachment classification is RE-EVALUATED at every ask
+      // (a thunk, never a snapshot): the deferred resolution below must
+      // classify against the catalog the session committed, not the standing
+      // view the gesture saw.
+      const localForAttachments = (): boolean => commandIsLocalForAttachments(
         parsed,
         isSkillWrapperName,
         n => extensionService?.commands.isLocal(n, LOCAL_COMMANDS) ?? false,
-        isHostCommandName,
+        hostClaimOf,
       )
       // A session-backed client contribution on a DEFERRED START is the ONE
       // classification the standing view cannot settle: the session commits
@@ -5316,9 +5420,9 @@ export function apply(ctx: Context, config: Config): void {
       const deferredClientAttachments = parsed !== undefined
         && liveAgent === undefined
         && extensionService?.commands.find(parsed.name)?.sessionless === false
-        && localForAttachments(parsed.name)
+        && localForAttachments()
       if (!deferredClientAttachments && parsed !== undefined) {
-        const refusal = attachmentRefusal(parsed, text, localForAttachments, isSkillInvocation(parsed, text))
+        const refusal = attachmentRefusal(parsed, text, localForAttachments(), isSkillInvocation(parsed, text))
         if (refusal !== undefined) {
           app.setEditorText(mergeDraft(app.getDraft(), text))
           app.notify(refusal, 'error')
@@ -5344,24 +5448,31 @@ export function apply(ctx: Context, config: Config): void {
       //   3. TUI-owned sessionless command;
       //   4. agent-facing input (steer / prompt).
       //
-      // 1. HOST AUTHORITY: a slash name the CURRENT effective host catalog
-      // resolves is a host command — a client contribution can never shadow
-      // it (upstream: candidate synthesis fails loud, never shadows; the host
-      // handler decides the busy outcome). TUI-owned LOCAL_COMMANDS execute
-      // through their own surface and are excluded here; a TUI skill wrapper
-      // is agent-facing input (also excluded from the claim). A claimed
-      // command the real session then lacks is consumed by the
-      // advertised-miss gate inside dispatchViaSession — never a plain model
-      // message.
+      // 1. HOST AUTHORITY: a line the CURRENT effective host catalog CLAIMS
+      // is a host command — a client contribution can never shadow it
+      // (upstream: candidate synthesis fails loud, never shadows; the host
+      // handler decides the busy outcome). The claim belongs to the LINE, not
+      // to the name: a `leadingInput` descriptor claims its argued line
+      // (`/goal ship`), an execute-kind one claims the bare token only, so
+      // `/compact extra` is an ordinary submission (upstream `matchEnter`
+      // parity). TUI-owned LOCAL_COMMANDS execute through their own surface
+      // and are excluded here; a TUI skill wrapper is agent-facing input
+      // (also excluded from the claim). A claimed command the real session
+      // then lacks is consumed by the advertised-miss gate inside
+      // dispatchViaSession — never a plain model message.
       if (parsed !== undefined
         && !LOCAL_COMMANDS.has(parsed.name)
-        && isHostCommandName?.(parsed.name) === true) {
+        && hostView?.claimed === true) {
         dispatchViaSession(text, persistHistory, delivery)
         return
       }
       // 2. CLIENT-OWNED command contribution: its behavior lives entirely on
       // the client, so it executes locally and never steers — the namespace
-      // decision is NOT the generic sessionless branch's to make.
+      // decision is NOT the generic sessionless branch's to make. A name the
+      // host catalog RESOLVES is host territory even when the catalog does
+      // not claim THIS line (an argued line of an execute-kind command): the
+      // line is an ordinary submission, so the contribution of that name
+      // never runs for it.
       // `sessionless` decides whether it may run before a session exists:
       // true runs immediately (no session is created); false (default)
       // resolves/creates the session FIRST — the host command surface is
@@ -5369,7 +5480,14 @@ export function apply(ctx: Context, config: Config): void {
       // TUI-owned agent-facing input and outranks a contribution of the same
       // name (the contribution may have been registered before the skill
       // catalog loaded).
-      const contribution = parsed === undefined || isSkillWrapperName?.(parsed.name) === true
+      const contribution = parsed === undefined
+        || isSkillWrapperName?.(parsed.name) === true
+        // A name the host catalog RESOLVES is host territory even when it does
+        // not claim THIS line: the line is an ordinary submission (upstream
+        // `matchEnter` `if (!bare) return undefined`), so a same-named
+        // contribution — reachable only in the failed-source collision state —
+        // never runs for it.
+        || hostView !== undefined
         ? undefined
         : extensionService?.commands.find(parsed.name)
       if (parsed !== undefined && contribution !== undefined) {
@@ -5402,7 +5520,7 @@ export function apply(ctx: Context, config: Config): void {
             // delivers to the model; a contribution that keeps the line
             // refuses as a local command — the synchronous gate's outcome,
             // only now final.
-            const refusal = attachmentRefusal(parsed, text, localForAttachments, isSkillInvocation(parsed, text))
+            const refusal = attachmentRefusal(parsed, text, localForAttachments(), isSkillInvocation(parsed, text))
             if (refusal !== undefined) {
               restoreSubmissionDraft(text)
               app.notify(refusal, 'error')
@@ -5411,9 +5529,14 @@ export function apply(ctx: Context, config: Config): void {
             // AUTHORITY RE-CHECK after the session exists: the deferred start
             // commits a session whose scoped catalog the standing view could
             // not see, and the skill catalog may load with it. A live HOST
-            // claim or a TUI skill wrapper outranks the contribution that was
-            // decided before the session existed.
-            if (isHostCommandName?.(parsed.name) === true || isSkillWrapperName?.(parsed.name) === true) {
+            // claim FOR THIS LINE or a TUI skill wrapper outranks the
+            // contribution that was decided before the session existed — and a
+            // name the committed catalog resolves WITHOUT claiming this line
+            // is an ordinary submission the contribution must not run either.
+            // The delivery resolved before the session existed, so it is a
+            // queue-mode submission: `dispatchViaSession` delivers the line
+            // itself (its command-plane gate refuses the unclaimed line).
+            if (hostClaimOf?.(parsed) !== undefined || isSkillWrapperName?.(parsed.name) === true) {
               dispatchViaSession(text, persistHistory, delivery)
               return
             }
@@ -7636,16 +7759,12 @@ export function apply(ctx: Context, config: Config): void {
      * advertised by the CURRENT completion list? The dispatch captures it
      * BEFORE any session creation (see dispatchViaSession). */
     let wasAdvertisedClaim: ((name: string) => boolean) | undefined
-    /** The claim test installed by registerTuiCommands: is a slash name a
-     * HOST command in the current effective catalog (advertised, not a
-     * TUI-owned skill wrapper)? The dispatch consults it BEFORE the busy
-     * queue/steer policy (PR115-fix problem 1). */
-    let isHostCommandName: ((name: string) => boolean) | undefined
-    /** The declaration test installed by registerTuiCommands: does the
-     * current host catalog's command for this name declare
-     * `input.attachments`? The composer refuses an attachment-bearing line
-     * for any other command (web `CommandUiRuntime.candidates` parity). */
-    let isHostCommandAcceptingAttachments: ((name: string) => boolean) | undefined
+    /** The claim test installed by registerTuiCommands: does the CURRENT
+     * effective host catalog claim THIS LINE (and does the claiming
+     * descriptor declare `input.attachments`)? The dispatch consults it
+     * BEFORE the busy queue/steer policy and for every attachment decision
+     * (PR115-fix problem 1). */
+    let hostClaimOf: ((parsed: { name: string; rawInput?: string }) => HostCommandClaim | undefined) | undefined
     /** The skill-wrapper test installed by registerTuiCommands: is a slash
      * name a LIVE TUI-owned skill wrapper? The steer path consults it to
      * decide whether a composition without the host skill-body loader must
@@ -8003,8 +8122,7 @@ export function apply(ctx: Context, config: Config): void {
       try {
         const installed = registerTuiCommands(runner, initial)
         wasAdvertisedClaim = installed.wasAdvertised
-        isHostCommandName = installed.isHostCommand
-        isHostCommandAcceptingAttachments = installed.isHostCommandAcceptingAttachments
+        hostClaimOf = installed.hostClaimOf
         isSkillWrapperName = installed.isSkillWrapper
         refreshCommandCompletions = installed.refreshCommandCompletions
         withCommandDelivery = installed.withDelivery

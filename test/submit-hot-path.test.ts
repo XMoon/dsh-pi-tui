@@ -204,7 +204,11 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   /** The session ids `agents.create` produced (the deferred-start gate). */
   createdSessionIds: string[]
   /** Register a hook that runs as each session is created. */
-  onCreateSession(hook: (sessionId: string) => void): void
+  /** Register a hook that runs as each session is created. The harness
+   * AWAITS it, so an async hook (e.g. registering a late contribution) is
+   * deterministic and a rejection fails the creation loudly — never a bare
+   * fire-and-forget promise. */
+  onCreateSession(hook: (sessionId: string) => void | Promise<void>): void
   armCreateGate(): void
   releaseCreateGate(): void
 } {
@@ -249,11 +253,11 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   const createdSessionIds: string[] = []
   /** Test hook: invoked with each CREATED session id, before the handle is
    * returned — the place a session-scoped host catalog can appear. */
-  let onCreateSession: ((sessionId: string) => void) | undefined
+  let onCreateSession: ((sessionId: string) => void | Promise<void>) | undefined
   const agents = {
     create: async ({ sessionId }: { sessionId: string }) => {
       createdSessionIds.push(String(sessionId))
-      onCreateSession?.(String(sessionId))
+      await onCreateSession?.(String(sessionId))
       if (createGate !== undefined) await createGate
       const session = makeLiveSession(String(sessionId), { id: String(sessionId), cwd: home, createdAt: Date.now(), version: 0 }, [])
       persisted.set(session.id, session)
@@ -293,10 +297,15 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
         if (definitions.get(definition.name) === definition) definitions.delete(definition.name)
       }
     },
+    // The effective catalog mirrors the registry EXACTLY, the descriptor's
+    // input kind included: `input` is the DSH distinction between a
+    // `leadingInput` command (`/goal <objective>`) and an execute-kind one
+    // (`/compact`). Fabricating an `input` for every row would erase the
+    // command KIND and let a name-level routing bug pass.
     list: () => [...definitions.values()].map(({ name, description, input }) => ({
       name,
       description: description ?? '',
-      input: input ?? { hint: '' },
+      ...(input === undefined ? {} : { input }),
     })),
     // The real commands service resolves a definition by name for the
     // global layer too (`find(undefined, name)`); the harness mirrors it so
@@ -343,7 +352,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   return {
     counting,
     createdSessionIds,
-    onCreateSession: (hook: (sessionId: string) => void) => { onCreateSession = hook },
+    onCreateSession: (hook: (sessionId: string) => void | Promise<void>) => { onCreateSession = hook },
     agents,
     sessions,
     defaultModel,
@@ -966,7 +975,12 @@ async function bootCommandHarness(
   options: {
     busyEnter: 'queue' | 'steer'
     status: 'idle' | 'running'
-    hostCommands?: readonly string[]
+    /** Pre-registered Host commands. A bare NAME registers the execute-kind
+     * shape (DSH `CommandDescriptor` without `input`: `/compact`), which
+     * claims its BARE token only; the object form registers the exact
+     * descriptor, so a `leadingInput` command (`/goal <objective>`) can claim
+     * its argued line. */
+    hostCommands?: readonly (string | { name: string; input: { hint: string; attachments?: boolean } })[]
     /** Provide a skills registry (resolveSkill succeeds) and/or a tools
      * service shaped like the dsh-tool-skill loader (hostLoadsSkillBody). */
     skills?: boolean
@@ -990,6 +1004,10 @@ async function bootCommandHarness(
        * candidate synthesis fails loud). Default false — a client command is
        * bridge-only, exactly like the vim fixture. */
       registerDefinition?: boolean
+      /** The descriptor of that host definition: a `leadingInput` command
+       * (the DSH `/goal` shape) claims its argued line; absent = the
+       * execute-kind shape (`/compact`), which claims the bare token only. */
+      hostInput?: { hint: string; attachments?: boolean }
     }[]
   },
 ): Promise<{
@@ -1005,6 +1023,9 @@ async function bootCommandHarness(
   }): Promise<void>
   /** The recorded image-admission batches (only with `attachments: true`). */
   imageSaves: readonly (readonly { mediaType: string; byteLength: number }[])[]
+  /** Dispose one pre-registered `hostCommands` definition (a catalog name that
+   * disappears — e.g. while a deferred session is being created). */
+  disposeHostCommand(name: string): void
   /** The mounted extension service (health assertions). */
   extensionService: {
     _ledger(): {
@@ -1046,11 +1067,18 @@ async function bootCommandHarness(
     } as never)
   }
   const harness = makeHarness(home, { id: 'command-session', events: sessionEvents('resumed answer') })
-  for (const name of options.hostCommands ?? []) {
-    ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void }).register({
-      name,
+  const hostCommandDisposers = new Map<string, () => void>()
+  for (const entry of options.hostCommands ?? []) {
+    const command: { name: string; input?: { hint: string; attachments?: boolean } } =
+      typeof entry === 'string' ? { name: entry } : entry
+    const dispose = (harness.commands as {
+      register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): () => void
+    }).register({
+      name: command.name,
       handler: () => ({ kind: 'success' }),
+      ...(command.input === undefined ? {} : { input: command.input }),
     })
+    hostCommandDisposers.set(command.name, dispose)
   }
   if (options.skills === true) {
     const summary = {
@@ -1134,20 +1162,30 @@ async function bootCommandHarness(
       // The plugin's own commands-service registration: the effective
       // completion surface (and with it the advertised claim) sees the
       // name, exactly like a real plugin's `ctx.commands.register`.
-      ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void }).register({
+      ;(harness.commands as {
+        register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
+      }).register({
         name: contribution.name,
         handler: () => ({ kind: 'success' }),
+        ...(contribution.hostInput === undefined ? {} : { input: contribution.hostInput }),
       })
     }
   }
   const mounted = await mountRunner(context, home, harness,
     options.deferredStart === true ? {} : { sessionId: 'command-session' })
   harness.host.status = options.status
-  return { harness, mounted, registerContribution, imageSaves, extensionService: extensionService as {
-    _ledger(): {
-      healthSnapshot(): readonly { id: string; owner: string; extensionPoint: string; state: string; lastError?: string }[]
-    }
-  } }
+  return {
+    harness,
+    mounted,
+    registerContribution,
+    imageSaves,
+    disposeHostCommand: (name: string) => { hostCommandDisposers.get(name)?.() },
+    extensionService: extensionService as {
+      _ledger(): {
+        healthSnapshot(): readonly { id: string; owner: string; extensionPoint: string; state: string; lastError?: string }[]
+      }
+    },
+  }
 }
 
 test('idle /compact executes as a Host command: no followup, no queue, no prompt (PR115-fix problem 1)', async (t) => {
@@ -1181,6 +1219,59 @@ test('running + steer: /compact executes, never steers into the turn (PR115-fix 
   assert.equal(harness.executed.length, 1, 'the command path must be taken before the steer policy')
   assert.equal(harness.host.steered.length, 0, '/compact must never be steered as a prompt')
   assert.equal(harness.host.followedUp.length, 0, 'no followup')
+})
+
+// The claim belongs to the LINE, not to the name (DSH `CommandDescriptor.input`
+// + `CommandUiRuntime.matchEnter`): an execute-kind command (`/compact`, no
+// `input`) claims its BARE token only, so its argued line is an ordinary
+// submission and follows the busy policy like any other prompt.
+
+test('running + queue: an argued execute-kind line queues as an ordinary followup', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running', hostCommands: ['compact'] })
+  mounted.app.setDraft('/compact extra')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'argued execute-kind line')
+  assert.equal(harness.executed.length, 0, 'an argued execute-kind line is not a command invocation')
+  assert.equal(harness.host.followedUp.length, 1, 'it takes the ordinary queue delivery')
+  assert.equal(harness.host.steered.length, 0, 'the queue preference never steers')
+})
+
+test('running + steer: an argued execute-kind line steers as an ordinary prompt', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'steer', status: 'running', hostCommands: ['compact'] })
+  mounted.app.setDraft('/compact extra')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'argued execute-kind line')
+  assert.equal(harness.executed.length, 0, 'an argued execute-kind line is not a command invocation')
+  assert.equal(harness.host.steered.length, 1, 'it takes the ordinary steer delivery')
+  assert.equal(harness.host.followedUp.length, 0, 'the steer preference never queues')
+})
+
+test('running + accelerated chord: an argued execute-kind line takes the OPPOSITE policy', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running', hostCommands: ['compact'] })
+  mounted.app.setDraft('/compact extra')
+  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
+  await waitForDelivery(harness.host, 'accelerated argued execute-kind line')
+  assert.equal(harness.executed.length, 0, 'the chord cannot turn the line into a command either')
+  assert.equal(harness.host.steered.length, 1, 'the accelerated chord takes the opposite of the queue preference')
+  assert.equal(harness.host.followedUp.length, 0, 'the chord must not queue')
+})
+
+test('a leadingInput host command claims its argued line under the busy policy (/goal <objective>)', async (t) => {
+  // The other half of the line-level rule: a descriptor WITH `input` claims
+  // its argued line, so the busy queue/steer policy never applies to it.
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    hostCommands: [{ name: 'goal', input: { hint: '<objective>' } }],
+  })
+  mounted.app.setDraft('/goal ship it')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'a leadingInput invocation executes through the command plane')
+  assert.equal(harness.executed[0]?.line, '/goal ship it', 'the host receives the raw argued line')
+  assert.equal(harness.executed[0]?.outcome, 'executed', 'the handler runs')
+  assert.equal(harness.host.steered.length, 0, 'a claimed command is never steered')
+  assert.equal(harness.host.followedUp.length, 0, 'a claimed command never queues')
 })
 
 test('running + queue: an ordinary prompt still queues (PR115-fix problem 1)', async (t) => {
@@ -1339,6 +1430,9 @@ test('a client command colliding with a host command never shadows it: the host 
       // The plugin ALSO registers a commands-service definition: the host
       // catalog resolves /deploy, so the client contribution collides.
       registerDefinition: true,
+      // The `leadingInput` shape (`/goal <objective>`): the host claims the
+      // argued line, which is the line this test submits.
+      hostInput: { hint: '<target>' },
     }],
   })
   mounted.app.setDraft('/deploy now')
@@ -1346,9 +1440,78 @@ test('a client command colliding with a host command never shadows it: the host 
   await waitForCommand(harness)
   assert.equal(harness.executed.length, 1, 'the HOST command keeps its claim and executes through the plane')
   assert.equal(harness.executed[0]?.line, '/deploy now', 'the host command receives the raw line')
-  assert.deepEqual(calls, [], 'the client handler must not run for a host-owned name')
+  assert.deepEqual(calls, [], 'the client handler must not run for a host-claimed line')
   assert.equal(harness.host.steered.length, 0, 'a host command is never steered')
   assert.equal(harness.host.followedUp.length, 0, 'a host command is never downgraded to a model prompt')
+})
+
+test('a name the host catalog resolves with an UNCLAIMED line never runs the colliding client handler', async (t) => {
+  // The collision state (the candidate synthesis failed and withdrew the
+  // source, but the bridge contribution is still live) with an EXECUTE-KIND
+  // host command: the host catalog resolves /compact, and `/compact extra` is
+  // not an invocation. The line is an ordinary submission — upstream
+  // `matchEnter` returns undefined before any contribution route — so the
+  // same-named client handler must not run and the model receives the line.
+  const calls: string[] = []
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    extensionCommands: [{
+      id: 'compact-cmd', name: 'compact', description: 'client compact',
+      bridgeHandler: () => { calls.push('compact'); return { kind: 'success' } },
+      // The plugin ALSO registers the commands-service definition, so the
+      // host catalog resolves /compact and the synthesis fails loud.
+      registerDefinition: true,
+    }],
+  })
+  const rows = mounted.app.commandCompletionsForTest()
+  assert.equal(rows.some(row => row.name === 'compact'), false,
+    'the failed source offers no rows (the collision is live)')
+  mounted.app.setDraft('/compact extra')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'unclaimed line of a host-resolved name')
+  assert.deepEqual(calls, [], 'the colliding client handler must not run for a line the host catalog did not claim')
+  assert.equal(harness.executed.length, 0, 'the command plane is never asked to run it either')
+  assert.equal(harness.host.steered.length, 1, 'the busy policy applies: it is an ordinary submission')
+  assert.equal(harness.host.followedUp.length, 0, 'the steer preference never queues')
+  const steered = harness.host.steered[0] as { content: readonly { type: string; text?: string }[] }
+  assert.deepEqual(steered.content.map(block => block.text), ['/compact extra'],
+    'the MODEL receives the raw line')
+})
+
+test('an unclaimed line of a host-resolved name keeps its attachment: ordinary multimodal submission', async (t) => {
+  // The same collision state with a staged image: the attachment gate must not
+  // classify the line as a local client command (the host catalog resolves the
+  // name, so the contribution is not the owner), the image rides the ordinary
+  // submission, and no command refusal is surfaced.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-unclaimed-host-line-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(2, 2))
+  const calls: string[] = []
+  const { harness, mounted, imageSaves } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    attachments: true,
+    extensionCommands: [{
+      id: 'compact-cmd', name: 'compact', description: 'client compact',
+      bridgeHandler: () => { calls.push('compact'); return { kind: 'success' } },
+      registerDefinition: true,
+    }],
+  })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/compact ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'unclaimed image line')
+  assert.equal(mounted.app.notifyTextForTest(), '', 'no local-command refusal is surfaced')
+  assert.deepEqual(calls, [], 'the colliding client handler never runs')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/compact')),
+    `never the command plane: ${JSON.stringify(harness.executed)}`)
+  assert.equal(imageSaves.length, 1, 'the image is admitted through the ordinary model path')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.type), ['text', 'image'],
+    'the model receives the multimodal prompt')
 })
 
 test('a host/client name collision fails the candidate synthesis loud (never a partial menu)', async (t) => {
@@ -1359,6 +1522,7 @@ test('a host/client name collision fails the candidate synthesis loud (never a p
       id: 'deploy', name: 'deploy', description: 'deploy the app',
       bridgeHandler: () => ({ kind: 'success' }),
       registerDefinition: true,
+      hostInput: { hint: '<target>' },
     }],
   })
   // The synthesis pass throws; the containment seam marks the command SOURCE
@@ -1547,9 +1711,13 @@ test('a host command that appears only AFTER the deferred session outranks the c
     }],
   })
   harness.onCreateSession(() => {
-    ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void }).register({
+    ;(harness.commands as {
+      register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
+    }).register({
       name: 'deploy',
       handler: () => ({ kind: 'success' }),
+      // The `leadingInput` shape: the argued line below is a real invocation.
+      input: { hint: '<target>' },
     })
   })
   mounted.app.setDraft('/deploy prod')
@@ -1557,9 +1725,219 @@ test('a host command that appears only AFTER the deferred session outranks the c
   await waitForCommand(harness)
   assert.equal(harness.executed.length, 1, 'the LATE host claim executes through the command plane')
   assert.equal(harness.executed[0]?.line, '/deploy prod', 'the host command receives the raw line')
-  assert.deepEqual(calls, [], 'the client handler must not run once the live host catalog claims the name')
+  assert.deepEqual(calls, [], 'the client handler must not run once the live host catalog claims the line')
   assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a model prompt')
   assert.equal(harness.host.steered.length, 0, 'never steered')
+})
+
+test('a deferred session that resolves an execute-kind host command does not run its argued line', async (t) => {
+  // A deferred start whose standing catalog does not resolve /compact: the
+  // command plane is initially the decider. The session then commits an
+  // EXECUTE-KIND /compact, so `/compact extra` is NOT an invocation
+  // (upstream `matchEnter`: `if (!bare) return undefined`) — the plane's final
+  // ownership must be re-asked after ensureSession(), or the host registry
+  // resolves the NAME and runs the command anyway.
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  harness.onCreateSession(() => {
+    // No `input`: the execute-kind shape.
+    ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void })
+      .register({ name: 'compact', handler: () => ({ kind: 'success' }) })
+  })
+  mounted.app.setDraft('/compact extra')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'late execute-kind argued line')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/compact')),
+    `the late execute-kind command never runs its argued line: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.followedUp.length, 1, 'the line is an ordinary submission')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.text), ['/compact extra'],
+    'the MODEL receives the raw line')
+  assert.doesNotMatch(mounted.app.notifyTextForTest(), /not available in the created session/,
+    'an ordinary submission is never consumed as an advertised command miss')
+})
+
+test('a contribution that appears DURING the deferred window never turns an ordinary image line into a local command', async (t) => {
+  // The line is a generic ordinary submission when it is made: no host command
+  // resolves /deploy and no client contribution exists, so its route is the
+  // model (upstream `matchEnter` checks the contribution ONCE, before the
+  // session work). A bridge contribution registered while the session is being
+  // created must not reclassify the line as a UI control under the final
+  // authority — the routing already decided, the new handler never runs, and
+  // the image is an ordinary multimodal submission.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-late-contribution-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(3, 3))
+  const calls: string[] = []
+  const { harness, mounted, imageSaves, registerContribution } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    attachments: true,
+    // Mount the extension host with an unrelated contribution so
+    // `registerContribution` has a live service to register into; /deploy
+    // itself is registered later, during the deferred window.
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  // The harness AWAITS this hook: the contribution is provably live before the
+  // session resolves (so the dispatch really classifies against it), and a
+  // registration failure fails the creation loudly instead of becoming an
+  // invisible unhandled rejection.
+  harness.onCreateSession(async () => {
+    await registerContribution({
+      id: 'late-cmd', name: 'deploy', description: 'late deploy',
+      bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
+    })
+  })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/deploy ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'late contribution with an image')
+  assert.equal(mounted.app.notifyTextForTest(), '', 'no local-command refusal is surfaced')
+  assert.deepEqual(calls, [], 'the late contribution never runs for a line it did not own')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/deploy')),
+    `never the command plane: ${JSON.stringify(harness.executed)}`)
+  assert.equal(imageSaves.length, 1, 'the image is admitted through the ordinary model path')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.type), ['text', 'image'],
+    'the model receives the multimodal prompt')
+})
+
+test('a DISAPPEARED host name never turns an attachment-bearing line into a local command', async (t) => {
+  // The execute-kind -> unresolved mutation with a staged IMAGE and a
+  // same-named bridge contribution: the host catalog resolved /deploy (a known
+  // non-invocation) when the line was submitted, so the contribution never
+  // owned it. When the name then disappears from the session's catalog, the
+  // late attachment classification must not fall back to the contribution and
+  // refuse the line as a local command — it is an ordinary multimodal
+  // submission.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-vanished-host-attachment-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(2, 2))
+  const calls: string[] = []
+  const { harness, mounted, imageSaves, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    attachments: true,
+    // Execute-kind at submit time; a bridge contribution shares the name.
+    hostCommands: ['deploy'],
+    extensionCommands: [{
+      id: 'deploy-cmd', name: 'deploy', description: 'client deploy',
+      bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
+    }],
+  })
+  harness.onCreateSession(() => { disposeHostCommand('deploy') })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/deploy ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'vanished host name with an image')
+  assert.equal(mounted.app.notifyTextForTest(), '', 'no local-command refusal is surfaced')
+  assert.deepEqual(calls, [], 'the colliding client handler never runs')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/deploy')),
+    `never the command plane: ${JSON.stringify(harness.executed)}`)
+  assert.equal(imageSaves.length, 1, 'the image is admitted through the ordinary model path')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.type), ['text', 'image'],
+    'the model receives the multimodal prompt')
+})
+
+test('a deferred session where the host name DISAPPEARS keeps the argued line an ordinary submission', async (t) => {
+  // The execute-kind -> unresolved mutation. The standing catalog resolves
+  // /deploy as EXECUTE-KIND, so `/deploy prod` is a known NON-invocation when
+  // submitted; the name then vanishes from the session's catalog. An
+  // unresolved name normally leaves the decision to the plane (a
+  // session-scoped command the standing view cannot see), but no
+  // disappearance turns a line that was already not an invocation into one —
+  // and the submit-time advertised claim must not consume it as a miss either.
+  const { harness, mounted, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    // Execute-kind at submit time (no `input`).
+    hostCommands: ['deploy'],
+  })
+  harness.onCreateSession(() => { disposeHostCommand('deploy') })
+  mounted.app.setDraft('/deploy prod')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'disappeared host name')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/deploy')),
+    `the vanished command is never asked to run the argued line: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.followedUp.length, 1, 'the line is an ordinary submission')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.text), ['/deploy prod'],
+    'the MODEL receives the raw line')
+  assert.doesNotMatch(mounted.app.notifyTextForTest(), /not available in the created session/,
+    'a known non-invocation is never consumed as an advertised command miss, even when the name disappears')
+})
+
+test('a deferred session that resolves a leadingInput host command executes its argued line', async (t) => {
+  // The reverse descriptor mutation: the standing catalog resolves /deploy as
+  // EXECUTE-KIND, so `/deploy prod` is not an invocation when submitted. The
+  // session then commits a `leadingInput` /deploy — the argued line IS an
+  // invocation for the FINAL catalog, so the plane must run it.
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    // Execute-kind at submit time (no `input`).
+    hostCommands: ['deploy'],
+  })
+  harness.onCreateSession(() => {
+    ;(harness.commands as {
+      register(def: { name: string; handler: () => unknown; input?: { hint: string } }): void
+    }).register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
+  })
+  mounted.app.setDraft('/deploy prod')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1, 'the final leadingInput claim owns the argued line')
+  assert.equal(harness.executed[0]?.line, '/deploy prod', 'the host command receives the raw line')
+  assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a model prompt')
+})
+
+test('a deferred session that resolves an EXECUTE-KIND host command takes the argued line back', async (t) => {
+  // The exact claimed -> unclaimed mutation (the reverse of the test above): the
+  // standing catalog CLAIMS `/deploy prod` (a `leadingInput` descriptor), so the
+  // submission is routed to the command plane. The committed session then
+  // resolves /deploy as EXECUTE-KIND, where the argued line is NOT an
+  // invocation — the plane's ownership must be re-asked after ensureSession(),
+  // or the old submit-time answer would run the command by NAME. The line is an
+  // ordinary submission, and it is NOT consumed as an advertised miss: its name
+  // WAS advertised at submit time, so the miss gate must follow the final
+  // (non-plane) answer too.
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    // `leadingInput` at submit time: `/deploy prod` is a real invocation.
+    hostCommands: [{ name: 'deploy', input: { hint: '<target>' } }],
+  })
+  harness.onCreateSession(() => {
+    // The session's catalog replaces the descriptor with the execute-kind
+    // shape (no `input`).
+    ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void })
+      .register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+  })
+  mounted.app.setDraft('/deploy prod')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'claimed -> unclaimed argued line')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/deploy')),
+    `the final execute-kind command never runs its argued line: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.followedUp.length, 1, 'the line is an ordinary submission')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.text), ['/deploy prod'],
+    'the MODEL receives the raw line')
+  assert.doesNotMatch(mounted.app.notifyTextForTest(), /not available in the created session/,
+    'the submit-time advertised claim must not consume a line the plane no longer owns')
 })
 
 /** A minimal PNG header (magic + IHDR): the intake parses headers only, so a
@@ -1583,14 +1961,21 @@ function pngHeader(width: number, height: number): Uint8Array {
 /** Stage ONE real generic-file attachment through the REAL `/attach`
  * sessionless command: the intake inserts its placeholder into the editor,
  * which is exactly the draft text the user submits next. */
-async function stageAttachmentDraft(mounted: { app: TuiApp }, path: string): Promise<string> {
+async function stageAttachmentDraft(
+  harness: { commands: unknown },
+  mounted: { app: TuiApp },
+  path: string,
+): Promise<string> {
   // The runner registers its TUI commands during mount, and the mount's
   // readiness can lag under a loaded suite (the full product run mounts many
-  // surfaces in parallel): submitting before `/attach` is advertised makes
-  // the line fall back to the session dispatch, where the intake lands much
-  // later. Wait for the catalog row first (bounded, drain-based).
+  // surfaces in parallel): submitting before `/attach` is registered makes the
+  // line fall back to the session dispatch, where the intake lands much later.
+  // The readiness signal is the REGISTRATION, never the completion ROW: a
+  // colliding client contribution fails the candidate synthesis as a whole
+  // (upstream `source-failed`), so the row list is legitimately EMPTY in those
+  // harnesses while `/attach` itself is perfectly routable.
   await drainUntil(
-    () => mounted.app.commandCompletionsForTest().some(row => row.name === 'attach'),
+    () => (harness.commands as { list(): readonly { name: string }[] }).list().some(def => def.name === 'attach'),
     10_000,
   )
   mounted.app.setDraft(`/attach ${path}`)
@@ -1630,7 +2015,7 @@ test('an attachment-bearing client command defers to a LATE declared host claim 
       register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
     }).register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '', attachments: true } })
   })
-  const staged = await stageAttachmentDraft(mounted, path)
+  const staged = await stageAttachmentDraft(harness, mounted, path)
   assert.match(staged, /\[image #1/, `the image is staged through the real intake: ${JSON.stringify(staged)}`)
   assert.deepEqual(harness.createdSessionIds, [], 'the sessionless intake creates no session')
   mounted.app.setDraft(`/deploy ${staged.trim()}`)
@@ -1683,7 +2068,7 @@ for (const form of [
       attachments: true,
     })
     await waitForSkillWrapper(harness, 'grilling')
-    const staged = await stageAttachmentDraft(mounted, path)
+    const staged = await stageAttachmentDraft(harness, mounted, path)
     assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
     mounted.app.setDraft(form.line(staged))
     ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
@@ -1713,7 +2098,9 @@ test('an unknown slash line that becomes an UNDECLARED host command refuses its 
   // policy against the FINAL catalog before the command plane runs. The host
   // executor only validates the SUBMITTED payload, so passing `[]` would let
   // the handler run with the placeholder as a raw argument and then consume
-  // the draft: the attachment would be silently dropped.
+  // the draft: the attachment would be silently dropped. The command is
+  // `leadingInput` (`input.hint`): its argued line IS an invocation, which is
+  // exactly the line an attachment-bearing refusal has to catch.
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-pi-tui-late-host-attachment-')
   const path = join(root, 'shot.png')
@@ -1728,9 +2115,9 @@ test('an unknown slash line that becomes an UNDECLARED host command refuses its 
   harness.onCreateSession(() => {
     ;(harness.commands as {
       register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
-    }).register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+    }).register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
   })
-  const staged = await stageAttachmentDraft(mounted, path)
+  const staged = await stageAttachmentDraft(harness, mounted, path)
   assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
   assert.deepEqual(harness.createdSessionIds, [], 'the sessionless intake creates no session')
   mounted.app.setDraft(`/deploy ${staged.trim()}`)
@@ -1767,7 +2154,7 @@ test('an unknown slash line that becomes a DECLARED host command delivers and co
       register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
     }).register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '', attachments: true } })
   })
-  const staged = await stageAttachmentDraft(mounted, path)
+  const staged = await stageAttachmentDraft(harness, mounted, path)
   mounted.app.setDraft(`/deploy ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   await drainUntil(() => harness.executed.some(entry => entry.line.startsWith('/deploy')), 5000)
@@ -1807,7 +2194,7 @@ test('an unknown slash line that becomes a DECLARED host command still refuses a
       register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
     }).register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '', attachments: true } })
   })
-  const staged = await stageAttachmentDraft(mounted, path)
+  const staged = await stageAttachmentDraft(harness, mounted, path)
   assert.match(staged, /\[file #1/, `the file is staged: ${JSON.stringify(staged)}`)
   mounted.app.setDraft(`/deploy ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
@@ -1838,7 +2225,7 @@ for (const form of [
       status: 'idle',
       attachments: true,
     })
-    const staged = await stageAttachmentDraft(mounted, image)
+    const staged = await stageAttachmentDraft(harness, mounted, image)
     assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
     // The shell command would create the marker if it ever ran.
     mounted.app.setDraft(form.line(staged).replace('echo ', `touch ${marker} # `))
@@ -1855,11 +2242,13 @@ for (const form of [
   })
 }
 
-test('a HOST command that does not declare input.attachments refuses an attachment (web composer parity)', async (t) => {
-  // Upstream `CommandUiRuntime` refuses an attachment-bearing invocation of a
-  // command whose descriptor does not declare `input.attachments`. The TUI
-  // must not let the line through and then hand the host a placeholder with
-  // no bytes (the attachment would be silently dropped).
+test('an EXECUTE-KIND host command does not claim its argued line: the image rides the ordinary submission', async (t) => {
+  // DSH `CommandDescriptor.input` decides which LINE a host command claims.
+  // `/compact` is execute-kind (no `input`), so `matchEnter` claims the BARE
+  // token only and `/compact <anything>` is NOT a command invocation: it is
+  // an ordinary multimodal submission. Applying the command's attachment
+  // policy to it would refuse a line the host never owned and drop a real
+  // image prompt.
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-pi-tui-command-attachment-')
   const path = join(root, 'shot.png')
@@ -1870,31 +2259,68 @@ test('a HOST command that does not declare input.attachments refuses an attachme
     attachments: true,
     extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
   })
-  // /compact is a HOST command without an attachment declaration; a registry
-  // change (any extension invalidation) refreshes the effective catalog.
+  // /compact is an execute-kind HOST command; a registry change (any
+  // extension invalidation) refreshes the effective catalog.
   ;(harness.commands as {
     register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
   }).register({ name: 'compact', handler: () => ({ kind: 'success' }) })
   await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
-  const staged = await stageAttachmentDraft(mounted, path)
+  const staged = await stageAttachmentDraft(harness, mounted, path)
   assert.match(staged, /\[image #1/, `the image is staged through the real intake: ${JSON.stringify(staged)}`)
   mounted.app.setDraft(`/compact ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  for (let round = 0; round < 40 && !/does not accept attachments/.test(mounted.app.notifyTextForTest()); round += 1) {
-    await new Promise<void>(resolve => setImmediate(resolve))
-  }
-  assert.match(mounted.app.notifyTextForTest(), /\/compact does not accept attachments; remove them first/)
+  await waitForDelivery(harness.host, 'argued execute-kind line')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/compact')),
+    `the argued line is not a command invocation: ${JSON.stringify(harness.executed)}`)
+  assert.equal(mounted.app.notifyTextForTest(), '', 'no command refusal is surfaced')
+  assert.match(mounted.app.getDraft(), /^$|^\/compact/, 'the submission consumed the draft')
+  assert.equal(imageSaves.length, 1, 'the image is admitted through the ordinary model path')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.type), ['text', 'image'],
+    'the model receives the multimodal prompt ("/compact " + the image)')
+  assert.equal(harness.host.steered.length, 0, 'an idle agent queues')
+})
+
+test('an undeclared LEADING-INPUT host command refuses the attachment on its argued line (web composer parity)', async (t) => {
+  // Upstream `CommandUiRuntime.matchEnter`: `/goal ship` + attachments is an
+  // INVOCATION (the descriptor declares `input`) whose descriptor does not
+  // declare `input.attachments` → the composer refuses before dispatch. The
+  // TUI must not let the line through and then hand the host a placeholder
+  // with no bytes (the attachment would be silently dropped).
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-command-attachment-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(4, 4))
+  const { harness, mounted, registerContribution, imageSaves } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    attachments: true,
+    extensionCommands: [{ id: 'stub-cmd', name: 'stub', description: 'stub', bridgeHandler: () => ({ kind: 'success' }) }],
+  })
+  // A `leadingInput` host command WITHOUT the attachment declaration (the
+  // upstream `/goal` fixture shape): it claims the argued line and refuses
+  // the attachment.
+  ;(harness.commands as {
+    register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
+  }).register({ name: 'goal', handler: () => ({ kind: 'success' }), input: { hint: '<objective>' } })
+  await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged through the real intake: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/goal ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => /does not accept attachments/.test(mounted.app.notifyTextForTest()), 5000)
+  assert.match(mounted.app.notifyTextForTest(), /\/goal does not accept attachments; remove them first/)
   // The COMPOSER refuses before dispatch: the host never sees the line, so
   // there is neither an execution nor an admission rejection. (A rejected
   // command-plane call would mean the gate let an undeclared invocation
   // through and the executor had to catch it.)
-  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/compact')),
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/goal')),
     `the undeclared command never reaches the command plane: ${JSON.stringify(harness.executed)}`)
   assert.ok(!harness.executed.some(entry => entry.outcome === 'rejected'),
     'the refusal happened before dispatch, not at host admission')
   assert.equal(harness.host.followedUp.length, 0, 'never a model prompt')
   assert.deepEqual(imageSaves, [], 'nothing is admitted either')
-  assert.match(mounted.app.getDraft(), /^\/compact /, 'the draft comes back')
+  assert.match(mounted.app.getDraft(), /^\/goal /, 'the draft comes back')
   assert.match(mounted.app.getDraft(), /\[image #1/, 'with its attachment placeholder intact')
 })
 
@@ -1916,7 +2342,7 @@ test('a declared HOST command still refuses a FILE attachment (no host receipt s
     register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): void
   }).register({ name: 'goal', handler: () => ({ kind: 'success' }), input: { hint: '<objective>', attachments: true } })
   await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
-  const staged = await stageAttachmentDraft(mounted, path)
+  const staged = await stageAttachmentDraft(harness, mounted, path)
   assert.match(staged, /\[file #1/)
   mounted.app.setDraft(`/goal ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
@@ -1956,7 +2382,7 @@ test('a FAILED declared command keeps its attachment (consume only after handler
     input: { hint: '<objective>', attachments: true },
   })
   await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
-  const staged = await stageAttachmentDraft(mounted, path)
+  const staged = await stageAttachmentDraft(harness, mounted, path)
   assert.match(staged, /\[image #1/, `the image is staged through the real intake: ${JSON.stringify(staged)}`)
   mounted.app.setDraft(`/goal ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
@@ -2001,7 +2427,7 @@ test('an attachment-bearing client command is refused AFTER the session resolves
       bridgeHandler: () => { calls.push('deploy'); return { kind: 'success' } },
     }],
   })
-  const staged = await stageAttachmentDraft(mounted, path)
+  const staged = await stageAttachmentDraft(harness, mounted, path)
   mounted.app.setDraft(`/deploy ${staged.trim()}`)
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   for (let round = 0; round < 60 && !/Attachments cannot be included/.test(mounted.app.notifyTextForTest()); round += 1) {
@@ -2126,10 +2552,12 @@ test('a dynamic host collision fails the command source (upstream source-failed 
   const t0 = mounted.app.commandCompletionsForTest().map(row => row.name)
   assert.ok(t0.includes('deploy') && t0.includes('keep'), `both client rows installed: ${t0.join(',')}`)
   assert.ok(t0.includes('compact'), `the host row shares the source: ${t0.join(',')}`)
-  // T1: the host catalog gains /deploy; a later registration flushes the
-  // extension invalidation into a completion refresh.
-  const disposeHost = (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
-    .register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+  // T1: the host catalog gains /deploy (a `leadingInput` command — the line
+  // below is argued, so only that shape claims it); a later registration
+  // flushes the extension invalidation into a completion refresh.
+  const disposeHost = (harness.commands as {
+    register(def: { name: string; handler: () => unknown; input?: { hint: string } }): () => void
+  }).register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
   await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
   const names = mounted.app.commandCompletionsForTest().map(row => row.name)
   // The command SOURCE failed: its whole group is removed (upstream
@@ -2260,8 +2688,8 @@ test('known limitation: a handler failure under a colliding name is masked, then
   const extensionServiceOf = (): readonly { id: string; state: string; lastError?: string }[] =>
     extensionService._ledger().healthSnapshot()
   const registerHost = (name: string): (() => void) =>
-    (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
-      .register({ name, handler: () => ({ kind: 'success' }) })
+    (harness.commands as { register(def: { name: string; handler: () => unknown; input?: { hint: string } }): () => void })
+      .register({ name, handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
   // 1. The async client handler is IN FLIGHT (no claim yet: the local route).
   mounted.app.setDraft('/deploy')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
@@ -2312,8 +2740,8 @@ test('known limitation: a handler success clears the still-active collision reco
   const extensionServiceOf = (): readonly { id: string; state: string; lastError?: string }[] =>
     extensionService._ledger().healthSnapshot()
   const registerHost = (name: string): (() => void) =>
-    (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
-      .register({ name, handler: () => ({ kind: 'success' }) })
+    (harness.commands as { register(def: { name: string; handler: () => unknown; input?: { hint: string } }): () => void })
+      .register({ name, handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
   // 1. The async client handler is IN FLIGHT.
   mounted.app.setDraft('/deploy')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
@@ -2363,8 +2791,8 @@ test('known limitation: a HOST command run under a colliding name settles the co
   const extensionServiceOf = (): readonly { id: string; state: string; lastError?: string }[] =>
     extensionService._ledger().healthSnapshot()
   const registerHost = (name: string): (() => void) =>
-    (harness.commands as { register(def: { name: string; handler: () => unknown }): () => void })
-      .register({ name, handler: () => ({ kind: 'success' }) })
+    (harness.commands as { register(def: { name: string; handler: () => unknown; input?: { hint: string } }): () => void })
+      .register({ name, handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
   const disposeHost = registerHost('deploy')
   await registerContribution({ id: 'zeta-cmd', name: 'zeta', description: 'zeta', bridgeHandler: () => ({ kind: 'success' }) })
   assert.equal(healthOf('deploy-cmd')?.state, 'failed', 'the collision is recorded')

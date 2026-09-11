@@ -1195,6 +1195,26 @@ function mergeFooterCustomItemsForSave(raw: unknown, saved: readonly FooterCusto
 }
 
 /**
+ * The CURRENT host catalog's view of ONE parsed line (the DSH client
+ * `CommandUiRuntime.matchEnter` decision table): whether the host CLAIMS the
+ * line, and — for a claimed line — the claiming descriptor's attachment
+ * declaration, so the dispatch can never consult two different catalog views
+ * for the claim and the declaration.
+ */
+export type HostCommandClaim =
+  | {
+    readonly claimed: true
+    /** The claiming descriptor's `input.attachments`
+     * (DSH `CommandInputDescriptor.attachments`): only a declaring command
+     * may be invoked with composer attachments. */
+    readonly attachments: boolean
+  }
+  // The catalog RESOLVES the name but this LINE is not an invocation (an
+  // argued line of an execute-kind command): the line is never handed to the
+  // command plane, and it is an ordinary submission.
+  | { readonly claimed: false }
+
+/**
  * Register the TUI-owned slash commands on the commands service. The
  * completion list is refreshed after every registration so TUI-owned
  * commands appear in the editor's tab list. Registration is sessionless:
@@ -1214,13 +1234,11 @@ export function registerTuiCommands(
   initial?: InitialCommandCatalog,
 ): {
   wasAdvertised(name: string): boolean
-  /** Whether one slash name is a HOST command in the current effective
-   * catalog (advertised, owned by neither the TUI nor an extension). */
-  isHostCommand(name: string): boolean
-  /** Whether the current host catalog's command for one name declares
-   * `input.attachments` (the composer-side attachment gate — only a
-   * declaring command may be invoked with staged attachments). */
-  isHostCommandAcceptingAttachments(name: string): boolean
+  /** The CURRENT host catalog's view of ONE parsed line (see
+   * {@link HostCommandClaim}): `undefined` when the catalog does not RESOLVE
+   * the name, `claimed: false` when it resolves the name without claiming
+   * this line. */
+  hostClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
   /** Whether one slash name is a LIVE TUI-owned skill wrapper (an
    * agent-facing invocation whose `/name` line the host may resolve into an
    * injected skill body). */
@@ -1399,15 +1417,13 @@ export function registerTuiCommands(
   // command. The dispatch captures the claim BEFORE any session creation
   // (wasAdvertised below); a probed command that the real session then
   // lacks must be consumed with an explicit error, never sent to the model.
-  /** The advertised names of the currently installed completion list. */
-  let claims = new Set<string>()
-  /** The advertised HOST command names whose descriptor DECLARES
-   * `input.attachments` (DSH `CommandInputDescriptor.attachments`): the
-   * composer-side half of the attachment contract — only these may be
-   * invoked with staged attachments, everything else refuses before
-   * dispatch (the host executor re-enforces at admission). Contributions are
-   * never in this set: a contribution has no host descriptor. */
-  let hostAttachmentCommands = new Set<string>()
+  /** The advertised HOST commands of the currently installed completion
+   * list, by name — the host's AUTHORITY record. A contribution never enters
+   * it, and the descriptor's INPUT KIND is kept with it (see
+   * {@link hostClaimOf}): the DSH command UI distinguishes a `leadingInput`
+   * command (`/goal <objective>`) from an execute-kind one (`/compact`) by
+   * `CommandDescriptor.input`, and only the former claims an argued line. */
+  let claims = new Map<string, { leadingInput: boolean; attachments: boolean }>()
   /**
    * The detached human skill catalog for INLINE skill reference completion
    * (the plain-text `/name` lexicon). A Client presentation cache: it owns
@@ -1534,11 +1550,15 @@ export function registerTuiCommands(
     const sorted = [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
     // HOST CLAIMS first: the claim set is the host's AUTHORITY record (the
     // dispatch consults it), so it must never depend on the client merge — a
-    // failed synthesis must not cost a host command its claim.
-    claims = new Set(sorted.map(command => command.name))
-    hostAttachmentCommands = new Set(sorted
-      .filter(command => command.input?.attachments === true)
-      .map(command => command.name))
+    // failed synthesis must not cost a host command its claim. The INPUT KIND
+    // and the attachment DECLARATION (`CommandInputDescriptor`) ride in the
+    // same record: which line the command claims and whether that line may
+    // carry attachments are both descriptor facts, so they can never describe
+    // two different catalogs.
+    claims = new Map(sorted.map(command => [command.name, {
+      leadingInput: command.input !== undefined,
+      attachments: command.input?.attachments === true,
+    }]))
     // The display list carries the client contributions too; the CLAIM set
     // never does (see the parameter doc). 'none' is the FAILED-SOURCE state
     // (upstream `source-failed` removes the source's group): no command rows
@@ -3409,25 +3429,25 @@ export function registerTuiCommands(
   /** Whether one command name is advertised by the CURRENT completion list
    * (the claim captured at submit time, before any session creation). */
   const wasAdvertised = (name: string): boolean => claims.has(name)
-  /** Whether one slash name is a HOST command in the CURRENT effective
-   * catalog: advertised by the host list and NOT a TUI-owned skill wrapper.
+  /** The CURRENT host catalog's view of ONE parsed line (see
+   * {@link HostCommandClaim}): `undefined` when the catalog does not RESOLVE
+   * the name at all (a session-scoped command the standing view cannot see —
+   * the command plane decides), `claimed: false` when it resolves the name
+   * but this line is not an invocation (an argued line of an execute-kind
+   * command: a bare token is claimed by every host command, an argued line
+   * only by a `leadingInput` descriptor).
    * HOST AUTHORITY: a client command contribution never removes a name from
-   * this claim — upstream's candidate synthesis merges contributions with
+   * this catalog — upstream's candidate synthesis merges contributions with
    * the host catalog and FAILS LOUD on a collision instead of shadowing, so
    * a resolved host command always keeps its execution. A skill wrapper is a
    * thin agent-facing invocation (loadSkill builds the prompt), never a host
    * claim. */
-  const isHostCommand = (name: string): boolean => {
-    if (skillDisposers.has(name)) return false
-    return claims.has(name)
-  }
-  /** Whether the CURRENT host catalog's command for one name DECLARES
-   * `input.attachments` (see {@link hostAttachmentCommands}): the composer
-   * consults it before letting an attachment-bearing line through. A skill
-   * wrapper is never an attachment-declaring host command. */
-  const isHostCommandAcceptingAttachments = (name: string): boolean => {
-    if (skillDisposers.has(name)) return false
-    return hostAttachmentCommands.has(name)
+  const hostClaimOf = (parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined => {
+    if (skillDisposers.has(parsed.name)) return undefined
+    const descriptor = claims.get(parsed.name)
+    if (descriptor === undefined) return undefined
+    if (!descriptor.leadingInput && (parsed.rawInput?.trim() ?? '') !== '') return { claimed: false }
+    return { claimed: true, attachments: descriptor.attachments }
   }
 
   commands.register({
@@ -4725,14 +4745,12 @@ export function registerTuiCommands(
   return {
     /** The claim test for the dispatch: is /name advertised right now? */
     wasAdvertised,
-    /** Whether one slash name is a HOST command in the CURRENT effective
-     * catalog: advertised by the completion list but owned by neither the
-     * TUI as a skill wrapper nor an extension contribution (the dispatch
-     * caller excludes TUI-local commands itself via LOCAL_COMMANDS). */
-    isHostCommand,
-    /** Whether the current host catalog's command for one name declares
-     * `input.attachments` (the composer-side attachment gate). */
-    isHostCommandAcceptingAttachments,
+    /** The host catalog's view of ONE parsed line (see
+     * {@link HostCommandClaim}): the name is advertised by the completion list
+     * and owned by neither the TUI as a skill wrapper nor an extension
+     * contribution (the dispatch caller excludes TUI-local commands itself via
+     * LOCAL_COMMANDS). */
+    hostClaimOf,
     /** Whether one slash name is a LIVE TUI-owned skill wrapper (the
      * revalidating transition wrappers included). */
     isSkillWrapper: (name: string): boolean => skillDisposers.has(name),
