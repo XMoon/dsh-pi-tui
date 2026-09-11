@@ -653,6 +653,9 @@ interface MutableTurnActivity {
   /** The exact previous assistant step that may become persistent when the
    * next step admits a same-turn human steer. */
   pendingPreSteerAnswerStep?: number
+  /** First visible Assistant output timestamp per step. This is private
+   * timing evidence for the steer boundary, not a rendered fact. */
+  firstVisibleAssistantTimes: Map<number, number>
   /** Assistant steps that crossed an admitted human-steer boundary and are
    * therefore persistent conversation answers rather than Focus process. */
   committedAnswerSteps: Set<number>
@@ -759,6 +762,35 @@ export function subCallDisplayStatus(child: {
 function assistantEntryBlocks(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): readonly ContentBlock[] {
   if (entry.content !== undefined) return entry.content
   return entry.text === '' ? [] : [{ type: 'text', text: entry.text }]
+}
+
+interface AssistantVisibilityChunk {
+  readonly type: string
+  readonly text?: string
+  readonly block?: { readonly type: string; readonly text?: string }
+}
+
+/** Whether one Assistant stream chunk produces Focus-visible reply content.
+ * Reasoning, tool-call protocol, and open block starts are process evidence;
+ * text deltas and finalized visible blocks are the answer boundary. */
+function assistantChunkHasVisibleReply(chunk: AssistantVisibilityChunk): boolean {
+  if (chunk.type === 'text-delta') return typeof chunk.text === 'string' && chunk.text.trim() !== ''
+  if (chunk.type !== 'block-end') return false
+  const block = chunk.block
+  if (block === undefined) return false
+  if (block.type === 'text') return typeof block.text === 'string' && block.text.trim() !== ''
+  if (block.type === 'reasoning' || block.type === 'tool-call') return false
+  return true
+}
+
+/** Rebuild the first Focus-visible Assistant timestamp from a durable compact
+ * stream. Missing or empty streams deliberately provide no timing evidence. */
+function firstVisibleAssistantTimeFromStream(stream: readonly unknown[] | undefined): number | undefined {
+  if (stream === undefined) return undefined
+  for (const member of expandAssistantStream(stream as Parameters<typeof expandAssistantStream>[0])) {
+    if (assistantChunkHasVisibleReply(member.chunk)) return member.time
+  }
+  return undefined
 }
 
 /** Whether Assistant content is visible before an interruption override. */
@@ -1226,6 +1258,8 @@ interface NextStepInboxIdentity {
   id: string
   /** The turn that was open when this identity entered next-step, if any. */
   insertionTurn: number | undefined
+  /** The Session timestamp when this identity entered next-step. */
+  insertionTime: number
 }
 
 /** The raw item index of each active run's card (search dirty marking);
@@ -1235,8 +1269,8 @@ export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
   /** Durable next-step identities awaiting a claim or replacement. */
   private readonly pendingNextSteps: NextStepInboxIdentity[] = []
-  /** Claimed next-step ids and the turn that was open at insertion. */
-  private readonly claimedNextStepTurns = new Map<string, number | undefined>()
+  /** Claimed next-step identities, including their insertion time. */
+  private readonly claimedNextStepTurns = new Map<string, NextStepInboxIdentity>()
   /** The assistant message object per (turn, step); streaming text lands in place. */
   private readonly assistantEntries = new Map<string, Extract<TranscriptMessage, { kind: 'assistant' }>>()
   /** In-flight live block state keyed by logical step. This is required for
@@ -1411,6 +1445,7 @@ export class TranscriptFolder {
         thinkingTail: '',
         confirmedSteps: new Set(),
         settledSteps: new Set(),
+        firstVisibleAssistantTimes: new Map(),
         committedAnswerSteps: new Set(),
         revision: 0,
       }
@@ -2356,6 +2391,10 @@ export class TranscriptFolder {
         // the failed one's. Reopen parity: the durable log restores the
         // step's reasoning from its LATEST source.
         const key = stepKey(input.turn, input.step)
+        const activity = this.activityByTurn.get(input.turn)
+        if (activity !== undefined && !activity.settledSteps.has(input.step)) {
+          activity.firstVisibleAssistantTimes.delete(input.step)
+        }
         this.liveAssistantBlocks.set(key, {
           states: new Map(),
           order: [],
@@ -2385,7 +2424,7 @@ export class TranscriptFolder {
         break
       }
       case 'chunk':
-        this.applyAssistantChunk(input.turn, input.step, input.chunk)
+        this.applyAssistantChunk(input.turn, input.step, input.chunk, input.time)
         break
       case 'end':
         // An abandoned attempt has no durable settlement and is tombstoned.
@@ -2465,7 +2504,7 @@ export class TranscriptFolder {
   /** Fold one live assistant chunk (Session v2 transient plane) into the
    * streaming entries and Focus aggregation. Live block state is retained per
    * logical step so a completed block can replace earlier deltas exactly. */
-  private applyAssistantChunk(turn: number, step: number, chunk: AssistantLiveChunk): void {
+  private applyAssistantChunk(turn: number, step: number, chunk: AssistantLiveChunk, time: number): void {
     // After turn/end a late assistant event is a replay artifact: it
     // must not mutate the finalized surface entry — the final-answer
     // selection reads the exact last assistant (review finding).
@@ -2518,6 +2557,12 @@ export class TranscriptFolder {
         const previous = projection.states.get(chunk.index)
         if (applyAssistantBlockChunk(projection.states, chunk)) {
           this.updateLiveAssistantProjection(projection, chunk.index, previous)
+          if (assistantChunkHasVisibleReply(chunk)) {
+            const firstVisible = activity.firstVisibleAssistantTimes.get(step)
+            if (firstVisible === undefined || time < firstVisible) {
+              activity.firstVisibleAssistantTimes.set(step, time)
+            }
+          }
           this.syncLiveAssistantPresentation(turn, step)
         }
         break
@@ -3226,15 +3271,16 @@ export class TranscriptFolder {
     }
   }
 
-  /** Reset same-step presentation at the scheduled retry boundary. The
-   * separate usage fold intentionally remains untouched so first-token timing
-   * and committed usage span the retry wait. */
+  /** Reset same-step presentation and first-visible boundary at the scheduled
+   * retry boundary. The separate usage fold intentionally remains untouched so
+   * first-token timing and committed usage span the retry wait. */
   private resetThinkingForRetry(turn: number, step: number): void {
     this.liveAssistantBlocks.delete(stepKey(turn, step))
     this.hideTransientAssistantEntry(turn, step)
     this.hideThinkingEntry(turn, step)
     const activity = this.activityByTurn.get(turn)
     if (activity === undefined) return
+    if (!activity.settledSteps.has(step)) activity.firstVisibleAssistantTimes.delete(step)
     this.clearThinkingPreview(activity, step)
     const candidate = activity.messageCandidate
     if (candidate !== undefined && candidate.step === step
@@ -3370,7 +3416,7 @@ export class TranscriptFolder {
         inserted: readonly { id: string }[]
         outcome?: 'canceled'
       }
-      const inserted = data.inserted.map(message => ({ id: message.id, insertionTurn: this.openTurn }))
+      const inserted = data.inserted.map(message => ({ id: message.id, insertionTurn: this.openTurn, insertionTime: event.time }))
       let removed: NextStepInboxIdentity[] = []
       if (data.target === 'next-step') {
         removed = this.pendingNextSteps.splice(
@@ -3381,7 +3427,7 @@ export class TranscriptFolder {
       }
       for (const { id } of inserted) this.claimedNextStepTurns.delete(id)
       if (data.target === 'next-step' && data.outcome !== 'canceled') {
-        for (const { id, insertionTurn } of removed) this.claimedNextStepTurns.set(id, insertionTurn)
+        for (const identity of removed) this.claimedNextStepTurns.set(identity.id, identity)
       }
       return
     }
@@ -3513,12 +3559,14 @@ export class TranscriptFolder {
         break
       }
       case 'user/message': {
-        const claimedInsertionTurn = this.claimedNextStepTurns.get(event.data.id)
+        const claimedIdentity = this.claimedNextStepTurns.get(event.data.id)
         const wasClaimedFromNextStep = this.claimedNextStepTurns.delete(event.data.id)
         // Only a next-step identity inserted during this admission turn is a
         // mid-turn steer; an idle wake or a claim carried across turns is an
         // ordinary opening/follow-up user message.
-        const isMidTurnSteer = wasClaimedFromNextStep && claimedInsertionTurn === this.currentTurn
+        const isMidTurnSteer = wasClaimedFromNextStep
+          && claimedIdentity !== undefined
+          && claimedIdentity.insertionTurn === this.currentTurn
         const blocks = event.data.content
         // User messages keep known attachment markers at their original
         // positions in the FLAT text; the ordered `content` blocks stay the
@@ -3533,7 +3581,11 @@ export class TranscriptFolder {
           if (!userBlocksVisibleNow(blocks)) break
           const activity = this.activityFor(this.currentTurn)
           if (activity.pendingPreSteerAnswerStep !== undefined) {
-            if (isMidTurnSteer) this.commitPreSteerAnswer(activity)
+            const firstVisible = activity.firstVisibleAssistantTimes.get(activity.pendingPreSteerAnswerStep)
+            if (isMidTurnSteer
+               && claimedIdentity !== undefined
+               && firstVisible !== undefined
+               && firstVisible <= claimedIdentity.insertionTime) this.commitPreSteerAnswer(activity)
             else activity.pendingPreSteerAnswerStep = undefined
           }
           this.appendItem({
@@ -3587,6 +3639,9 @@ export class TranscriptFolder {
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
         const text = textOf(messageBlocks)
+        const firstVisible = firstVisibleAssistantTimeFromStream(event.data.stream)
+        if (firstVisible === undefined) activity.firstVisibleAssistantTimes.delete(event.data.step)
+        else activity.firstVisibleAssistantTimes.set(event.data.step, firstVisible)
         const wasVisible = entry !== undefined && this.isVisible(entry)
         if (entry !== undefined) {
           rememberAssistantStep(entry, event.data.step)

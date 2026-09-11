@@ -2320,10 +2320,12 @@ function assistantSettlement(
   time: number,
   seq: number,
   content: readonly unknown[] = [{ type: 'text', text }],
+  firstVisibleTime: number = time,
 ): SessionEvent {
   return eventAt('assistant/message', {
     turn,
     step,
+    stream: [{ type: 'text-chunks', time0: firstVisibleTime, index: 0, dt: [], texts: [text] }],
     message: {
       id: MessageId(id),
       role: 'assistant',
@@ -2403,9 +2405,10 @@ test('a settled text-only answer crossed by a human steer stays persistent befor
       turn: 0,
       step: 1,
       chunk: { type: 'text-delta', index: 0, text: 'assistant A' },
-    }, 1003, 3),
+    }, 1004, 3),
+    // Same-millisecond output and insertion still count as pre-steer.
     queueSteer(steer, 1004, 4),
-    assistantSettlement(0, 1, 'focus-a', 'assistant A', 1005, 5),
+    assistantSettlement(0, 1, 'focus-a', 'assistant A', 1005, 5, [{ type: 'text', text: 'assistant A' }], 1004),
     eventAt('step/end', { turn: 0, step: 1 }, 1006, 6),
     claimSteer(1007, 7),
     eventAt('step/start', { turn: 0, step: 2 }, 1008, 8),
@@ -2459,6 +2462,98 @@ test('a settled text-only answer crossed by a human steer stays persistent befor
   const off = projectFocus(raw, folder.turnActivities(), new Set(), false)
   assert.deepEqual(off.map(block => block.kind === 'message' ? block.message : undefined), raw,
     'Focus off leaves the raw transcript chronology unchanged')
+})
+
+test('a steer inserted before the first visible assistant output does not commit that answer', () => {
+  const initial = steerMessage('late-initial', 'initial prompt')
+  const steer = steerMessage('late-steer', 'human steer')
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 7000, 100),
+    eventAt('step/start', { turn: 0, step: 1 }, 7001, 101),
+    eventAt('user/message', initial, 7002, 102),
+    eventAt('assistant/chunk', {
+      turn: 0,
+      step: 1,
+      chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' },
+    }, 7003, 103),
+    queueSteer(steer, 7004, 104),
+    eventAt('assistant/chunk', {
+      turn: 0,
+      step: 1,
+      chunk: { type: 'text-delta', index: 0, text: 'assistant A' },
+    }, 7005, 105),
+    assistantSettlement(0, 1, 'late-a', 'assistant A', 7006, 106, [{ type: 'text', text: 'assistant A' }], 7005),
+    eventAt('step/end', { turn: 0, step: 1 }, 7007, 107),
+    claimSteer(7008, 108),
+    eventAt('step/start', { turn: 0, step: 2 }, 7009, 109),
+    eventAt('user/message', steer, 7010, 110),
+    assistantSettlement(0, 2, 'late-b', 'assistant B', 7011, 111),
+    eventAt('step/end', { turn: 0, step: 2 }, 7012, 112),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7013, 113),
+  ]
+  const live = new TranscriptFolder()
+  applyMixed(live, events)
+  const activity = live.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.message?.text, 'assistant A', 'A remains process evidence after the early steer')
+  const collapsed = projectTools(live.messages(), live.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'user', 'activity', 'assistant'])
+  assert.deepEqual(
+    collapsed.flatMap(block => block.kind === 'message' && block.message.kind === 'assistant' ? [block.message.text] : []),
+    ['assistant B'],
+  )
+
+  const replay = new TranscriptFolder()
+  replay.hydrate(events)
+  const replayCollapsed = projectTools(replay.messages(), replay.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(replayCollapsed), blockKinds(collapsed), 'durable timed stream preserves the same boundary')
+  assert.deepEqual(
+    replayCollapsed.map(block => block.kind === 'message' && 'text' in block.message ? block.message.text : 'Thought'),
+    collapsed.map(block => block.kind === 'message' && 'text' in block.message ? block.message.text : 'Thought'),
+  )
+})
+
+test('a retry resets earlier visible timing before a later steer boundary', () => {
+  const initial = steerMessage('retry-initial', 'initial prompt')
+  const steer = steerMessage('retry-steer', 'human steer')
+  const live = new TranscriptFolder()
+  live.apply([
+    eventAt('turn/start', { turn: 0 }, 8000, 120),
+    eventAt('step/start', { turn: 0, step: 1 }, 8001, 121),
+    eventAt('user/message', initial, 8002, 122),
+  ])
+  live.applyLiveInput({ kind: 'start', sessionId: 'test', attemptId: 'attempt-a', turn: 0, step: 1 })
+  live.applyLiveInput(liveChunk(0, 1, { type: 'text-delta', index: 0, text: 'failed A' }, 8003))
+  live.apply([queueSteer(steer, 8004, 123)])
+  live.apply([eventAt('llm/retry', {
+    turn: 0,
+    step: 1,
+    retry: 1,
+    delayMs: 0,
+    failure: { code: 'RETRY', message: 'failed' },
+  }, 8005, 124)])
+  live.applyLiveInput({ kind: 'start', sessionId: 'test', attemptId: 'attempt-b', turn: 0, step: 1 })
+  live.applyLiveInput(liveChunk(0, 1, { type: 'text-delta', index: 0, text: 'final A' }, 8006))
+  live.apply([
+    assistantSettlement(0, 1, 'retry-a', 'final A', 8007, 125, [{ type: 'text', text: 'final A' }], 8006),
+    eventAt('step/end', { turn: 0, step: 1 }, 8008, 126),
+    claimSteer(8009, 127),
+    eventAt('step/start', { turn: 0, step: 2 }, 8010, 128),
+    eventAt('user/message', steer, 8011, 129),
+    assistantSettlement(0, 2, 'retry-b', 'assistant B', 8012, 130),
+    eventAt('step/end', { turn: 0, step: 2 }, 8013, 131),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 8014, 132),
+  ])
+  const collapsed = projectTools(live.messages(), live.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'user', 'activity', 'assistant'])
+  assert.deepEqual(
+    collapsed.flatMap(block => block.kind === 'message' && block.message.kind === 'assistant' ? [block.message.text] : []),
+    ['assistant B'],
+    'the retry output after the steer remains process evidence',
+  )
+  const activity = live.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.equal(activity.message?.text, 'final A')
 })
 
 test('an assistant with text plus tool-call stays process evidence across a steer boundary', () => {
