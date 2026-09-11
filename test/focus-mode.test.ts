@@ -2539,7 +2539,14 @@ test('a later steer in one claimed batch can still commit the answer boundary', 
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9146, 154),
   ]
   const live = new TranscriptFolder()
-  applyMixed(live, events)
+  const firstSteerIndex = events.findIndex(event => event.type === 'user/message'
+    && (event.data as { id?: unknown }).id === firstSteer.id)
+  assert.ok(firstSteerIndex >= 0)
+  applyMixed(live, events.slice(0, firstSteerIndex + 1))
+  const afterFirstSteer = live.turnActivity(0)
+  assert.ok(afterFirstSteer !== undefined)
+  assert.equal(afterFirstSteer.message?.text, 'assistant A', 'the early steer does not consume the pending boundary')
+  applyMixed(live, events.slice(firstSteerIndex + 1))
   const collapsed = projectTools(live.messages(), live.turnActivities(), new Set())
   assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant', 'user', 'user', 'assistant'])
   assert.deepEqual(
