@@ -67,7 +67,7 @@ function host(services: Record<string, unknown>): HostContextLike {
 }
 
 function row(id: string, createdAt: number, live = false) {
-  return { id, createdAt, live }
+  return { id, updatedAt: createdAt, createdAt, live }
 }
 
 test('list prefers the semantic query engine and sorts newest-first', async () => {
@@ -85,6 +85,8 @@ test('list prefers the semantic query engine and sorts newest-first', async () =
   const rows = await reader.list('session-new')
   assert.ok(rows !== undefined)
   assert.deepEqual(rows.map(r => r.id), ['session-new', 'session-old'])
+  assert.deepEqual(rows.map(r => r.updatedAt), [300, 100])
+  assert.deepEqual(rows.map(r => r.createdAt), [300, 100])
   assert.equal(rows[0].live, true)
 })
 
@@ -139,6 +141,8 @@ test('list uses sessionListMetadata activity when the optional capability exists
   const rows = await reader.list(undefined)
   assert.ok(rows !== undefined)
   assert.deepEqual(rows.map(r => r.id), ['session-old', 'session-new'])
+  assert.deepEqual(rows.map(r => r.updatedAt), [900, 300])
+  assert.deepEqual(rows.map(r => r.createdAt), [100, 300])
 })
 
 test('list falls back to createdAt when activity projection is unavailable', async () => {
@@ -284,7 +288,7 @@ test('list captures the attached Session header and live activity after query li
     agentOf: () => undefined,
   })
   const rows = await reader.list(undefined)
-  assert.deepEqual(rows, [{ id: 'session-live-header', createdAt: 900, cwd: '/attached', parentSession: undefined, origin: undefined, live: true }])
+  assert.deepEqual(rows, [{ id: 'session-live-header', updatedAt: 1_200, createdAt: 900, cwd: '/attached', parentSession: undefined, origin: undefined, live: true }])
 })
 
 test('projectionBatch classifies live rows from the attached Session without cold fallback', async () => {
@@ -309,10 +313,10 @@ test('projectionBatch classifies live rows from the attached Session without col
     sessionOf: id => attached && String(id) === 'session-toctou' ? session : undefined,
     agentOf: id => attached && String(id) === 'session-toctou' ? agent : undefined,
   })
-  const liveNow = await reader.projectionBatch([{ id: 'session-toctou', createdAt: 500, live: false }])
+  const liveNow = await reader.projectionBatch([{ id: 'session-toctou', updatedAt: 500, createdAt: 500, live: false }])
   assert.deepEqual(liveNow.get('session-toctou'), { title: 'attached title', preset: 'attached' })
   attached = false
-  const staleRows = await reader.projectionBatch([{ id: 'session-toctou', createdAt: 500, live: true }])
+  const staleRows = await reader.projectionBatch([{ id: 'session-toctou', updatedAt: 500, createdAt: 500, live: true }])
   assert.deepEqual(staleRows, new Map())
   assert.equal(coldReads, 0)
 })
@@ -333,7 +337,7 @@ test('projectionBatch treats a row that became live after listing as live', asyn
     agentOf: id => attached && String(id) === 'session-late-live' ? agent : undefined,
   })
   attached = true
-  const projections = await reader.projectionBatch([{ id: 'session-late-live', createdAt: 600, live: false }])
+  const projections = await reader.projectionBatch([{ id: 'session-late-live', updatedAt: 600, createdAt: 600, live: false }])
   assert.equal(projections.get('session-late-live')?.title, 'late live title')
   assert.equal(coldReads, 0)
 })

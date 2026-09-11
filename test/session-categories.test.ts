@@ -51,13 +51,13 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; picked: string[] } {
 
 test('buildSessionTree hangs every parentSession row under its parent chain', () => {
   const rows: SessionPickerRow[] = [
-    { id: 'session-root-1', createdAt: 5, live: false },
-    { id: 'session-child-1', createdAt: 4, origin: 'subagent', parentSession: 'session-root-1', live: false },
-    { id: 'session-root-2', createdAt: 3, live: false },
-    { id: 'session-grandchild', createdAt: 2, origin: 'subagent', parentSession: 'session-child-1', live: false },
+    { id: 'session-root-1', createdAt: 5, updatedAt: 5, live: false },
+    { id: 'session-child-1', createdAt: 4, updatedAt: 4, origin: 'subagent', parentSession: 'session-root-1', live: false },
+    { id: 'session-root-2', createdAt: 3, updatedAt: 3, live: false },
+    { id: 'session-grandchild', createdAt: 2, updatedAt: 2, origin: 'subagent', parentSession: 'session-child-1', live: false },
     // A subagent WITHOUT a parentSession is a root now: `parentSession`
     // decides the hierarchy, `origin` only the badge (plan §20).
-    { id: 'session-unparented', createdAt: 1, origin: 'subagent', live: false },
+    { id: 'session-unparented', createdAt: 1, updatedAt: 1, origin: 'subagent', live: false },
   ]
   const tree = buildSessionTree(rows)
   const byId = new Map(tree.map(entry => [entry.row.id, entry.depth]))
@@ -75,8 +75,8 @@ test('buildSessionTree hangs every parentSession row under its parent chain', ()
 
 test('S01: a plain /fork child hangs under its parent', () => {
   const rows: SessionPickerRow[] = [
-    { id: 'session-parent', createdAt: 4, live: false },
-    { id: 'session-fork', createdAt: 3, parentSession: 'session-parent', live: false },
+    { id: 'session-parent', createdAt: 4, updatedAt: 4, live: false },
+    { id: 'session-fork', createdAt: 3, updatedAt: 3, parentSession: 'session-parent', live: false },
   ]
   const tree = buildSessionTree(rows)
   assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
@@ -87,9 +87,9 @@ test('S01: a plain /fork child hangs under its parent', () => {
 
 test('S02: a rewind-of-rewind chain nests deeper', () => {
   const rows: SessionPickerRow[] = [
-    { id: 'session-parent', createdAt: 5, live: false },
-    { id: 'session-child1', createdAt: 4, parentSession: 'session-parent', live: false },
-    { id: 'session-child2', createdAt: 3, parentSession: 'session-child1', live: false },
+    { id: 'session-parent', createdAt: 5, updatedAt: 5, live: false },
+    { id: 'session-child1', createdAt: 4, updatedAt: 4, parentSession: 'session-parent', live: false },
+    { id: 'session-child2', createdAt: 3, updatedAt: 3, parentSession: 'session-child1', live: false },
   ]
   const tree = buildSessionTree(rows)
   assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
@@ -101,8 +101,8 @@ test('S02: a rewind-of-rewind chain nests deeper', () => {
 
 test('S03: a subagent still hangs under its parent', () => {
   const rows: SessionPickerRow[] = [
-    { id: 'session-parent', createdAt: 4, live: false },
-    { id: 'session-sub', createdAt: 3, origin: 'subagent', parentSession: 'session-parent', live: false },
+    { id: 'session-parent', createdAt: 4, updatedAt: 4, live: false },
+    { id: 'session-sub', createdAt: 3, updatedAt: 3, origin: 'subagent', parentSession: 'session-parent', live: false },
   ]
   const tree = buildSessionTree(rows)
   assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
@@ -113,11 +113,11 @@ test('S03: a subagent still hangs under its parent', () => {
 
 test('S04: fork and subagent siblings keep the input order', () => {
   const rows: SessionPickerRow[] = [
-    { id: 'session-parent', createdAt: 5, live: false },
-    { id: 'session-fork', createdAt: 4, parentSession: 'session-parent', live: false },
-    { id: 'session-sub', createdAt: 3, origin: 'subagent', parentSession: 'session-parent', live: false },
-    { id: 'session-parent2', createdAt: 2, live: false },
-    { id: 'session-fork2', createdAt: 1, parentSession: 'session-parent2', live: false },
+    { id: 'session-parent', createdAt: 5, updatedAt: 5, live: false },
+    { id: 'session-fork', createdAt: 4, updatedAt: 4, parentSession: 'session-parent', live: false },
+    { id: 'session-sub', createdAt: 3, updatedAt: 3, origin: 'subagent', parentSession: 'session-parent', live: false },
+    { id: 'session-parent2', createdAt: 2, updatedAt: 2, live: false },
+    { id: 'session-fork2', createdAt: 1, updatedAt: 1, parentSession: 'session-parent2', live: false },
   ]
   const tree = buildSessionTree(rows)
   assert.deepEqual(tree.map(entry => [entry.row.id, entry.depth]), [
@@ -131,9 +131,9 @@ test('S04: fork and subagent siblings keep the input order', () => {
 
 test('S05: an orphan child (parent outside the window) sits at depth 1', () => {
   const rows: SessionPickerRow[] = [
-    { id: 'session-orphan-fork', createdAt: 3, parentSession: 'session-missing', live: false },
-    { id: 'session-root', createdAt: 2, live: false },
-    { id: 'session-orphan-sub', createdAt: 1, origin: 'subagent', parentSession: 'session-missing', live: false },
+    { id: 'session-orphan-fork', createdAt: 3, updatedAt: 3, parentSession: 'session-missing', live: false },
+    { id: 'session-root', createdAt: 2, updatedAt: 2, live: false },
+    { id: 'session-orphan-sub', createdAt: 1, updatedAt: 1, origin: 'subagent', parentSession: 'session-missing', live: false },
   ]
   const tree = buildSessionTree(rows)
   const byId = new Map(tree.map(entry => [entry.row.id, entry.depth]))
@@ -144,9 +144,9 @@ test('S05: an orphan child (parent outside the window) sits at depth 1', () => {
 
 test('S06: parent cycles never loop and each row appears once', () => {
   const rows: SessionPickerRow[] = [
-    { id: 'session-a', createdAt: 3, parentSession: 'session-b', live: false },
-    { id: 'session-b', createdAt: 2, parentSession: 'session-a', live: false },
-    { id: 'session-self', createdAt: 1, parentSession: 'session-self', live: false },
+    { id: 'session-a', createdAt: 3, updatedAt: 3, parentSession: 'session-b', live: false },
+    { id: 'session-b', createdAt: 2, updatedAt: 2, parentSession: 'session-a', live: false },
+    { id: 'session-self', createdAt: 1, updatedAt: 1, parentSession: 'session-self', live: false },
   ]
   const tree = buildSessionTree(rows)
   const ids = tree.map(entry => entry.row.id)
@@ -159,9 +159,9 @@ test('the All category indents fork children under their parent (plan §20)', ()
     sessionPickerItem(row, '', indent)
   const categories = sessionPickerCategories(
     [
-      { id: 'session-parent', createdAt: 4, cwd: '/ws', live: false },
-      { id: 'session-fork', createdAt: 3, cwd: '/ws', parentSession: 'session-parent', live: false },
-      { id: 'session-other', createdAt: 2, cwd: '/ws', live: false },
+      { id: 'session-parent', createdAt: 4, updatedAt: 4, cwd: '/ws', live: false },
+      { id: 'session-fork', createdAt: 3, updatedAt: 3, cwd: '/ws', parentSession: 'session-parent', live: false },
+      { id: 'session-other', createdAt: 2, updatedAt: 2, cwd: '/ws', live: false },
     ],
     '/ws',
     'sessions',
@@ -179,11 +179,11 @@ test('the All category indents fork children under their parent (plan §20)', ()
 // ── the Current directory / All directories scopes (plan item 3) ──────────
 
 const pickerRows: SessionPickerRow[] = [
-  { id: 'session-current-1', createdAt: 5, cwd: '/ws/project-a', live: false },
-  { id: 'session-current-2', createdAt: 4, cwd: '/ws/project-a/', live: false },
-  { id: 'session-other', createdAt: 3, cwd: '/ws/project-b', live: false },
-  { id: 'session-child', createdAt: 2, cwd: '/ws/project-a', origin: 'subagent', parentSession: 'session-current-1', live: false },
-  { id: 'session-unrooted', createdAt: 1, live: false },
+  { id: 'session-current-1', createdAt: 5, updatedAt: 5, cwd: '/ws/project-a', live: false },
+  { id: 'session-current-2', createdAt: 4, updatedAt: 4, cwd: '/ws/project-a/', live: false },
+  { id: 'session-other', createdAt: 3, updatedAt: 3, cwd: '/ws/project-b', live: false },
+  { id: 'session-child', createdAt: 2, updatedAt: 2, cwd: '/ws/project-a', origin: 'subagent', parentSession: 'session-current-1', live: false },
+  { id: 'session-unrooted', createdAt: 1, updatedAt: 1, live: false },
 ]
 
 /** The picker's plain item mapper (no titles, no current marker). */
@@ -221,10 +221,10 @@ test('the Current category indents fork children in the current workspace', () =
   const treeItem = (row: SessionPickerRow, indent = 0): SessionPickerItem => sessionPickerItem(row, '', indent)
   const categories = sessionPickerCategories(
     [
-      { id: 'session-parent', createdAt: 4, cwd: '/ws', live: false },
-      { id: 'session-fork', createdAt: 3, cwd: '/ws', parentSession: 'session-parent', live: false },
-      { id: 'session-other-cwd', createdAt: 2, cwd: '/other', parentSession: 'session-parent', live: false },
-      { id: 'session-orphan', createdAt: 1, cwd: '/ws', parentSession: 'session-missing', live: false },
+      { id: 'session-parent', createdAt: 4, updatedAt: 4, cwd: '/ws', live: false },
+      { id: 'session-fork', createdAt: 3, updatedAt: 3, cwd: '/ws', parentSession: 'session-parent', live: false },
+      { id: 'session-other-cwd', createdAt: 2, updatedAt: 2, cwd: '/other', parentSession: 'session-parent', live: false },
+      { id: 'session-orphan', createdAt: 1, updatedAt: 1, cwd: '/ws', parentSession: 'session-missing', live: false },
     ],
     '/ws',
     'sessions',
@@ -244,7 +244,7 @@ test('the Current category indents fork children in the current workspace', () =
 test('sessionPickerItem indents subagent rows in the All category', () => {
   const row: SessionPickerRow = {
     id: 'session-child-1',
-    createdAt: 4,
+    createdAt: 4, updatedAt: 4,
     origin: 'subagent',
     parentSession: 'session-root-1',
     live: false,

@@ -457,7 +457,7 @@ test('/sessions opens input-first and shows projection-pending rows before enric
   const batch = new Promise<Map<string, { title?: string; preset?: string }>>(resolve => { resolveBatch = resolve })
   const t = setup({
     sessionReader: {
-      list: async () => [{ id: 'session-cold', createdAt: 10, cwd: '/ws', live: false }],
+      list: async () => [{ id: 'session-cold', updatedAt: 10, createdAt: 10, cwd: '/ws', live: false }],
       projectionBatch: async () => batch,
     },
   })

@@ -147,10 +147,12 @@
     "@xmoon76/pi-tui": "workspace:^0.84.4",
     "@xterm/headless": "5.5.0",
     "husky": "^9.1.7",
+    "immer": "^10.1.1",
     "semver": "7.8.5",
     "tsdown": "0.22.0",
     "tsx": "^4.23.12",
     "typescript": "^5.9.0",
+    "zustand": "~4.4.7",
     "@deepseek-ai/dsh-session-projection": "0.1.5-rc.1",
     "@deepseek-ai/dsh-persona": "0.1.5-rc.1",
     "@deepseek-ai/dsh-agent-instructions": "0.1.5-rc.1",
@@ -176,7 +178,12 @@
     "@deepseek-ai/dsh-tool-str-replace-editor": "0.1.5-rc.1",
     "@deepseek-ai/dsh-tool-cordis": "0.1.5-rc.1",
     "@deepseek-ai/dsh-agent-loop-testkit": "0.1.5-rc.1",
-    "@deepseek-ai/dsh-subagent-spawn-in-process": "0.1.5-rc.1"
+    "@deepseek-ai/dsh-api-gateway": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-api-session-controller": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-connection": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-store": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-subagent-spawn-in-process": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-typert-registry": "0.1.5-rc.1"
   },
   "engines": {
     "node": "^22.19.0 || >=24"
@@ -202,6 +209,7 @@
     "smoke:unstable": "node scripts/unstable-plugin-smoke.mjs",
     "smoke:pi2dsh": "node scripts/pi2dsh-compat-smoke.mjs",
     "smoke:official-presets": "node scripts/official-presets-smoke.mjs",
+    "smoke:remote-session-read": "node --import tsx/esm scripts/dsh-remote-session-read-smoke.mjs",
     "smoke:boundary": "node scripts/dsh-runtime-boundary-smoke.mjs",
     "dsh:source:pack": "node scripts/dsh-source-pack.mjs",
     "compat:dsh:source": "node scripts/dsh-source-verify.mjs",

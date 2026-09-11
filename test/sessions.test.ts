@@ -87,6 +87,7 @@ test('formatSessionAge is compact and bounded', () => {
 test('sessionPickerItem assembles a titled row with meta and group', () => {
   const row: SessionPickerRow = {
     id: 'session-0123456789abcdef',
+    updatedAt: 1_000,
     createdAt: 1_000,
     title: 'fix footer rendering',
     cwd: '/home/user/project/me/dsh-pi-tui',
@@ -104,9 +105,19 @@ test('sessionPickerItem assembles a titled row with meta and group', () => {
   assert.ok(!item.description.includes('live'), `unexpected live marker: ${item.description}`)
 })
 
+test('sessionPickerItem uses updatedAt when a Remote row has no createdAt', () => {
+  const row: SessionPickerRow = {
+    id: 'session-remote-age',
+    updatedAt: Date.now() - 2 * 86_400_000,
+    live: false,
+  }
+  assert.ok(sessionPickerItem(row, '').description.includes('2d'))
+})
+
 test('sessionPickerItem marks the current session, subagents, forks, live', () => {
   const row: SessionPickerRow = {
     id: 'session-0123456789abcdef',
+    updatedAt: 1_000,
     createdAt: 1_000,
     cwd: '/home/user/project',
     origin: 'subagent',
@@ -133,6 +144,7 @@ test('headerToPickerRow maps a header onto the row shape', () => {
     origin: 'subagent',
   }, true)
   assert.equal(row.id, 'session-0123456789abcdef')
+  assert.equal(row.updatedAt, 42)
   assert.equal(row.createdAt, 42)
   assert.equal(row.cwd, '/w')
   assert.equal(row.preset, 'minimal')
@@ -261,9 +273,9 @@ test('picker Esc cancels', async () => {
 
 test('findSessionMatch resolves full ids, session- prefixes, and short ids', () => {
   const rows: SessionPickerRow[] = [
-    { id: 'session-11111111-2222-3333-4444-555555555555', createdAt: 2, live: false },
-    { id: 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', createdAt: 3, live: false },
-    { id: 'session-99999999-8888-7777-6666-555555555555', createdAt: 1, live: false },
+    { id: 'session-11111111-2222-3333-4444-555555555555', updatedAt: 2, createdAt: 2, live: false },
+    { id: 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', updatedAt: 3, createdAt: 3, live: false },
+    { id: 'session-99999999-8888-7777-6666-555555555555', updatedAt: 1, createdAt: 1, live: false },
   ]
   assert.equal(findSessionMatch(rows, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
   assert.equal(findSessionMatch(rows, 'session-aaaaaaaa-bbbb')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')

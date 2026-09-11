@@ -21,7 +21,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
-import type { SessionContentSearchPage } from '../src/runtime/session-reader-port.ts'
+import type { SessionContentSearchPage, SessionReader } from '../src/runtime/session-reader-port.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -62,7 +62,7 @@ interface Harness {
 
 interface Row {
   id: string
-  createdAt: number
+  updatedAt: number
   cwd?: string
   origin?: 'subagent'
   live?: boolean
@@ -111,7 +111,20 @@ function harness(options: {
   const searchCalls: SearchCall[] = []
   const rows = options.rows ?? []
   const search = options.search ?? (async () => ({ items: [], hasMore: false }))
-  const list = options.list ?? (async () => rows)
+  const rawList = options.list ?? (async () => rows)
+  const list: SessionReader['list'] = async (id, signal) => {
+    const listed = await rawList(id, signal)
+    return listed?.map(row => ({ ...row, live: row.live ?? false }))
+  }
+  const sessionReader: SessionReader = {
+    list,
+    search: async (query: string, signal?: AbortSignal) => {
+      searchCalls.push({ query, signal })
+      return search(query, signal)
+    },
+    projectionBatch: options.projectionBatch ?? (async () => new Map()),
+    measureContext: () => undefined,
+  }
   const runner: TuiCommandRunner = {
     ctx,
     app,
@@ -126,15 +139,7 @@ function harness(options: {
     settleIntent: () => {},
     tuiSettings: undefined,
     agents: {} as never,
-    sessionReader: {
-      list,
-      search: async (query: string, signal?: AbortSignal) => {
-        searchCalls.push({ query, signal })
-        return search(query, signal)
-      },
-      projectionBatch: options.projectionBatch ?? (async () => new Map()),
-      measureContext: () => undefined,
-    } as never,
+    sessionReader,
     sessionWriter: {
       followup: () => {},
       steer: () => {},
@@ -218,8 +223,8 @@ function harness(options: {
 }
 
 const rows = (): Row[] => [
-  { id: 'session-alpha', createdAt: 300, cwd: '/ws' },
-  { id: 'session-beta', createdAt: 200, cwd: '/ws' },
+  { id: 'session-alpha', updatedAt: 300, cwd: '/ws' },
+  { id: 'session-beta', updatedAt: 200, cwd: '/ws' },
 ]
 
 test('/search with an empty argument is rejected before any overlay opens', async (t) => {
@@ -286,7 +291,7 @@ test('a content-only hit becomes visible through its snippet under the local fil
 
 test('unknown hit ids are ignored and subagent hits never enter the browser', async (t) => {
   const h = harness({
-    rows: [...rows(), { id: 'session-child', createdAt: 100, cwd: '/ws', origin: 'subagent' }],
+    rows: [...rows(), { id: 'session-child', updatedAt: 100, cwd: '/ws', origin: 'subagent' }],
     search: async () => ({
       items: [
         { sessionId: 'session-ghost', snippet: 'needle ghost' },
@@ -313,8 +318,8 @@ test('search results are global: the browse scope never hides Host hits (review 
   // must show Host hits from ANY workspace.
   const h = harness({
     rows: [
-      { id: 'session-here', createdAt: 300, cwd: '/ws' },
-      { id: 'session-there', createdAt: 200, cwd: '/other' },
+      { id: 'session-here', updatedAt: 300, cwd: '/ws' },
+      { id: 'session-there', updatedAt: 200, cwd: '/other' },
     ],
     search: async () => ({
       items: [
@@ -456,8 +461,8 @@ test('a query change drops the previous query enrichment immediately', async (t)
   let resolveFirst!: (page: SessionContentSearchPage) => void
   const h = harness({
     rows: [
-      { id: 'session-one', createdAt: 300, cwd: '/ws' },
-      { id: 'session-two', createdAt: 200, cwd: '/ws' },
+      { id: 'session-one', updatedAt: 300, cwd: '/ws' },
+      { id: 'session-two', updatedAt: 200, cwd: '/ws' },
     ],
     search: async (query) => {
       if (query === 'needle') {
@@ -698,8 +703,8 @@ test('enriched title and preset feed the local metadata search', async (t) => {
 test('a cwd query finds rows through the searchable description', async (t) => {
   const h = harness({
     rows: [
-      { id: 'session-aaa', createdAt: 300, cwd: '/ws' },
-      { id: 'session-bbb', createdAt: 200, cwd: '/other' },
+      { id: 'session-aaa', updatedAt: 300, cwd: '/ws' },
+      { id: 'session-bbb', updatedAt: 200, cwd: '/other' },
     ],
     search: async () => ({ items: [], hasMore: false }),
   })
@@ -717,7 +722,7 @@ test('a cwd query finds rows through the searchable description', async (t) => {
 
 test('a malicious cwd never reaches the terminal through the search description', async (t) => {
   const h = harness({
-    rows: [{ id: 'session-evil', createdAt: 300, cwd: '/ws\x1b]0;PWNED\x07' }],
+    rows: [{ id: 'session-evil', updatedAt: 300, cwd: '/ws\x1b]0;PWNED\x07' }],
     search: async () => ({ items: [], hasMore: false }),
   })
   t.after(() => h.app.stop())
@@ -741,8 +746,8 @@ test('content-only matches keep the Host page order (review P2)', async (t) => {
   // the newest-first list order.
   const h = harness({
     rows: [
-      { id: 'session-a', createdAt: 300, cwd: '/ws' },
-      { id: 'session-b', createdAt: 200, cwd: '/ws' },
+      { id: 'session-a', updatedAt: 300, cwd: '/ws' },
+      { id: 'session-b', updatedAt: 200, cwd: '/ws' },
     ],
     search: async () => ({
       items: [
@@ -769,7 +774,7 @@ test('the search projection overlay keeps the full row budget (no bottom truncat
   // truncates the bottom (hint/border). Many distinct groups force the
   // item window to fill the budget, which is what triggers the overflow
   // (review round 6).
-  const many = Array.from({ length: 30 }, (_, i) => ({ id: `session-${i}`, createdAt: 1_000_000_000_000 + i, cwd: `/ws-${i}` }))
+  const many = Array.from({ length: 30 }, (_, i) => ({ id: `session-${i}`, updatedAt: 1_000_000_000_000 + i, cwd: `/ws-${i}` }))
   const h = harness({ rows: many, search: async () => ({ items: [], hasMore: false }) })
   t.after(() => h.app.stop())
   await h.runSessions('')

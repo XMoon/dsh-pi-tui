@@ -11,7 +11,7 @@
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
-M2  NOT STARTED   (experimental Remote backend against an existing DSH Host)
+M2  IN PROGRESS   (D1.1 DONE: Remote Session read adapter + generation-fenced shadow; writes remain unimplemented)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -20,8 +20,10 @@ M7  NOT STARTED   (default flip; direct rollback kept for >= 1 release)
 M8  NOT STARTED   (Direct ownership retirement — only after concurrency proof)
 
 Current production backend: direct
-Experimental backend:      none
-Remote attach:             unsupported
+Experimental backend:      none (no complete Backend(kind=remote))
+Experimental Remote:        read-shadow only (diagnostic/test opt-in)
+Remote writes:              none
+Remote attach:              unsupported
 Direct rollback:           available
 ```
 
@@ -48,7 +50,7 @@ The semantic catalog names these operations explicitly as
 `selectSessionModel`, so a future Remote adapter can map them without moving
 Agent, Session, or Context objects across the boundary.
 
-### Direct ownership retirement (pre-M2)
+### Direct ownership retirement (remaining M2 work)
 
 The current Direct backend owns the in-process top-level Agent and must
 quiesce/drain/dispose it during runner teardown (interactive exit, HMR
@@ -60,8 +62,9 @@ Remote client closes its client-side observation/connection state through
 official DSH client contracts; this fix does not invent a host
 session-destroy RPC, does not add `close()`/`dispose()`/`drainSubagents()`
 to the `SessionLifecycle` port, and does not expose
-`drainContinuableDescendants` as a cross-backend capability. M2 remains
-NOT STARTED and Direct remains the production backend.
+`drainContinuableDescendants` as a cross-backend capability. The ownership-
+retirement portion remains pending; D1.1 does not change this Direct-only
+semantic, and Direct remains the production backend.
 
 ### Lifecycle creation cancellation (Stage B / pre-M2)
 
@@ -85,7 +88,7 @@ text-only by policy. Readable markdown export uses the richer projection.
 Queue/steer/dequeue behavior remains outside this finalized-only stage; only
 its rewind notification wording is generalized, and rewind does not re-stage
 content. No attachment bytes/paths are resolved; migration remains
-M2 NOT STARTED with Direct as the production backend.
+D1.1 is now in progress with Direct as the production backend.
 
 ### Unified attachment intake (Stage C2 / pre-M2)
 
@@ -94,7 +97,7 @@ keeps `/image <path>` as an image-only compatibility command. Generic files
 remain Client-local draft metadata until an agent-bound submission has
 resolved/created its Session; Direct then streams the exact local file into
 `ctx.attachments.saveFileStream()` and records only the resulting durable
-FileBlock. This does not start M2: no Session Controller file-upload receipt,
+FileBlock. This Stage C2 surface remains outside D1.1: no Session Controller file-upload receipt,
 Connection transport, or Remote upload state is implemented here.
 
 Locality is explicit: `/attach` and `/image` use the Client-local cwd, while
@@ -120,7 +123,7 @@ The first block-end remains authoritative and replaces the open
 presentation with the finalized ContentBlock. No synthetic ContentBlock is
 persisted or exposed through semantic text/search state.
 
-Stage C is complete after this change; M2 remains NOT STARTED and Direct
+Stage C is complete after this change; D1.1 is now in progress and Direct
 remains the production backend.
 
 ## Target
@@ -219,7 +222,8 @@ Client destination:
 SessionReader.readExportData:
     retired
 
-M2 remains NOT STARTED.
+D1.1 does not add a Remote archive adapter; the Remote Session read-shadow is
+experimental only and Direct remains the production backend.
 ```
 
 The Direct archive adapter (`DirectSessionArchive`) implements the narrow
@@ -460,6 +464,39 @@ improved it:
 
 The TUI Remote Adapter must not stack a second transport watchdog on top of
 the official Connection.
+
+## D1.1 status — Remote Session read shadow
+
+D1.1 is the first M2 slice. It is complete for the experimental read surface,
+while the overall M2 remains in progress:
+
+- `RemoteSessionReader` maps the official Session Controller Client list,
+  projection, and search faces to the existing `SessionReader` port.
+- A list is available only when the official Connection generation exists and
+  the Client list snapshot is `ready`; a ready snapshot with empty `ids` is a
+  valid empty list. The adapter uses official `ids` order, maps `updatedAt`,
+  omits `createdAt`, and keeps `live: false` because `running` is not the
+  Direct attached-session equivalent.
+- Projection values come from the official list row first, then the bound
+  Client Session projection face. Search delegates to `ctx.sessions.search()`;
+  disabled capability is unavailable, cancellation remains abort-shaped, and
+  business/transport failures are not converted to empty results.
+- `measureContext()` is explicitly unavailable until an official equivalent
+  exists.
+- `RemoteSessionReadShadow` compares only bounded detached facts (IDs/order,
+  activity, cwd/lineage/origin, projections, and search). It explicitly skips
+  `createdAt`, the unresolved `live` badge, and `measureContext`. Every async
+  completion and failure is fenced by both operation epoch and Connection
+  generation identity; stale results are reported as `discarded`.
+- `scripts/dsh-remote-session-read-smoke.mjs` assembles the official rc1
+  Connection, API Gateway, generated Session Remotes, and Session Controller
+  Client over the official fixture. It exercises list/projection/search,
+  `SessionBinding` `loadThrough`/`loadOlder` history paging, Connection reconnect,
+  contiguous-window recovery, and a write-endpoint spy. The package dependencies
+  used by this harness are development-only.
+
+Production remains Direct. No Remote Backend, Session writer, UI wiring, retry
+loop, raw persistence access, or duplicate event fold is introduced by D1.1.
 
 ## Known blockers
 
