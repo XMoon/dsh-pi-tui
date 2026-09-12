@@ -598,11 +598,13 @@ function thoughtLeadBoundary(group: readonly TranscriptMessage[]): number {
   return leadingInjectedContextPrefixEnd(group)
 }
 
-/** Whether one Assistant entry has semantic/finalized content. Pending
- * display-only open-opaque rows remain transcript evidence but cannot become a
- * completed/max-token final; finalized generic blocks stay eligible. */
+/** Whether one Assistant entry has semantic/finalized content or an explicit
+ * delivered-file tail. Pending display-only open-opaque rows remain transcript
+ * evidence but cannot become a completed/max-token final; finalized generic
+ * blocks stay eligible. */
 function assistantRenderable(assistant: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
   if (assistant.displayBlocks?.some(block => block.kind === 'open-opaque') === true) return false
+  if (assistant.deliverables !== undefined && assistant.deliverables.length > 0) return true
   if (assistant.content !== undefined) return assistantBlocksVisibleNow(assistant.content)
   return assistant.text.trim() !== ''
 }
@@ -610,8 +612,9 @@ function assistantRenderable(assistant: Extract<TranscriptMessage, { kind: 'assi
 /** The turn's final assistant selection: only after the authoritative
  * turn/end, only for a reason the system presents output (completed /
  * max-tokens), and only when the Assistant owning the structural latest step
- * has semantic/finalized content. An empty or pending latest step yields NO
- * final — never an earlier assistant (review fix). The max-tokens final carries
+ * has semantic/finalized content or explicit delivered files. An empty or
+ * pending latest step without either yields NO final — never an earlier assistant
+ * (review fix). The max-tokens final carries
  * the truncated marker (plan §13.8). */
 function finalAssistantSelection(
   activity: TurnActivity | undefined,
