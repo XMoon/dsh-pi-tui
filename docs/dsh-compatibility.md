@@ -18,7 +18,7 @@ fallback was checked against the peer manifest at its corresponding TUI tag.
 | `0.4.1` (published) | `dsh-v0.1.2-rc.1` | Historical stable |
 | `0.4.3-alpha.2` (historical next npm line) | `dsh-v0.1.3-alpha.2` | Last official runtime tag for this TUI line |
 | `0.4.5` (published stable) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable; validated against the published npm rc.1 family |
-| `next` npm line (current checkout) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Same target while the next prerelease is being qualified |
+| `next` Source Mode line (current checkout) | exact `deepseek-harness` master `c291e7961a515f6d7af9304e7fd1d257929aef26` (`0.1.5-rc.2`) | Unpublished forward-integration target; not a package-install promise |
 | No historical fallback | `dsh-v0.1.0-rc.7`, `dsh-v0.1.2-alpha.1`, `dsh-v0.1.3-alpha.1`, `dsh-v0.1.5-alpha.1`, `dsh-v0.1.5-alpha.2` | Upgrade DSH to a supported release |
 
 The table is keyed to the official release tags above. Do not widen a pairing
@@ -41,13 +41,19 @@ npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 ```
 
-The current `next` checkout is npm mode. Use the isolated npm driver, which
-installs the exact DSH version declared by the checkout's `package.json`
-(`0.1.5-rc.1`) from the public registry and exercises the TUI build/test/
-package path:
+The current `next` checkout is Source Mode. Use the local development flow to
+materialize the exact pinned DSH master family:
 
 ```sh
-pnpm compat:dsh:npm
+pnpm dev:doctor
+pnpm dev:bootstrap
+pnpm dev:doctor
+```
+
+For the full source-boundary validation, use the isolated source driver:
+
+```sh
+pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
 ```
 
 The startup notice on an old runtime suggests the exact published upgrade:
@@ -128,10 +134,13 @@ cannot be consulted for unpublished DSH metadata;
 The CI policy is deliberately explicit: pushes to `next` and pull requests
 whose base is `next` follow the tracked `test/compat/dsh-mode.json` policy;
 `main` and every tag, including `next-v*`, always use registry-backed npm mode
-with a frozen lockfile. Source Mode builds and validates the pinned source
-family from `test/compat/dsh-source.json`'s `expectedVersion`; npm Mode uses the
-exact DSH version declared by the checkout's `package.json` and resolved by its
-frozen lockfile. The Source Mode ecosystem check prints
+with a frozen lockfile. This checkout's `next` policy is Source Mode and pins
+`deepseek-harness` to `c291e7961a515f6d7af9304e7fd1d257929aef26`, whose source
+package family version is `0.1.5-rc.2`; that is an unpublished development
+identity, not a package-install promise. Source Mode builds and validates that
+family from `test/compat/dsh-source.json`; npm Mode uses the exact DSH version
+declared by the checkout's `package.json` and resolved by its frozen lockfile.
+The Source Mode ecosystem check prints
 `SKIPPED: requires published compatible DSH/pi2dsh combination` because the
 published `pi2dsh` bridge cannot prove compatibility against an unpublished
 source family. That check remains blocking in npm mode.

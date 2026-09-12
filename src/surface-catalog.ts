@@ -13,7 +13,6 @@
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { CommandDescriptor } from '@deepseek-ai/dsh-commands'
 import { safeErrorMessage } from './error-boundary.ts'
 import {
   readHumanSkillCatalog,
@@ -22,9 +21,24 @@ import {
   type SkillCatalogContext,
 } from './skill-catalog.ts'
 
+/** Local structural command face, compatible with both npm and Source Mode DSH.
+ * The optional identity is absent from the npm rc.1 descriptor but present in
+ * the pinned Source Mode descriptor. */
+interface SurfaceCommandDescriptor {
+  readonly definitionId?: string
+  readonly name: string
+  readonly description: string
+  readonly input?: {
+    readonly hint: string
+    readonly attachments?: boolean
+  }
+}
+
 /** One effective command's discovery metadata (the official descriptor's
- * display fields; never a handler or a definition). */
+ * display fields and optional stable identity; never a handler or definition). */
 export interface SurfaceCommandSummary {
+  /** Stable plugin-owned identity from the official command descriptor. */
+  readonly definitionId?: string
   readonly name: string
   readonly description: string
   readonly input?: {
@@ -60,7 +74,7 @@ export interface SurfaceCatalogSnapshot {
 
 /** The commands-service surface the collector reads. */
 export interface SurfaceCommandsService {
-  list(agent: Agent): readonly CommandDescriptor[]
+  list(agent: Agent): readonly SurfaceCommandDescriptor[]
 }
 
 /** The narrow context surface {@link readSurfaceCatalog} consumes. The
@@ -81,13 +95,14 @@ export interface SurfaceCatalogContext {
  * @param commands - the commands service.
  * @returns the global-layer descriptors (name-sorted by the registry).
  */
-export function listGlobalCommands(commands: SurfaceCommandsService): readonly CommandDescriptor[] {
+export function listGlobalCommands(commands: SurfaceCommandsService): readonly SurfaceCommandDescriptor[] {
   return commands.list(undefined as unknown as Agent)
 }
 
 /** Copy one descriptor into a fresh frozen summary (never borrowed). */
-export function commandSummaryOf(descriptor: CommandDescriptor): SurfaceCommandSummary {
+export function commandSummaryOf(descriptor: SurfaceCommandDescriptor): SurfaceCommandSummary {
   return Object.freeze({
+    ...descriptor.definitionId === undefined ? {} : { definitionId: descriptor.definitionId },
     name: descriptor.name,
     description: descriptor.description,
     ...descriptor.input === undefined
@@ -101,11 +116,12 @@ export function commandSummaryOf(descriptor: CommandDescriptor): SurfaceCommandS
   })
 }
 
-/** Whether two descriptors expose identical display fields (origin-blind:
+/** Whether two descriptors expose identical authority metadata (origin-blind:
  * an identical scoped entry needs no override because the visible result and
  * the real-agent execution are the same either way). */
-function sameCommand(left: CommandDescriptor, right: CommandDescriptor): boolean {
-  return left.name === right.name
+function sameCommand(left: SurfaceCommandDescriptor, right: SurfaceCommandDescriptor): boolean {
+  return left.definitionId === right.definitionId
+    && left.name === right.name
     && left.description === right.description
     && left.input?.hint === right.input?.hint
     // The attachment DECLARATION is part of the effective behavior (it

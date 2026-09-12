@@ -72,11 +72,12 @@ test('the collector uses snapshot-first, filters with the official policy, sorts
   const catalog = await readHumanSkillCatalog(registry, { cwd: '/ws', scope: {}, signal: new AbortController().signal })
   assert.deepEqual(catalog.skills.map(item => item.name), ['aaa', 'zzz'], 'only user-invocable skills, name-sorted')
   assert.equal(catalog.skills[1]?.whenToUse, 'late alphabet', 'whenToUse is copied')
+  assert.equal(catalog.skills[1]?.modelInvocable, true, 'modelInvocable is copied')
   assert.equal(catalog.complete, true)
   assert.ok(Object.isFrozen(catalog) && Object.isFrozen(catalog.skills))
   assert.ok(Object.isFrozen(catalog.skills[0]))
-  assert.deepEqual(Object.keys(catalog.skills[1]!).sort(), ['description', 'name', 'whenToUse'],
-    'the entry carrying whenToUse keeps exactly the supported display fields')
+  assert.deepEqual(Object.keys(catalog.skills[1]!).sort(), ['description', 'modelInvocable', 'name', 'whenToUse'],
+    'the entry carrying metadata keeps exactly the supported display fields')
   assert.equal(options?.cwd, '/ws')
 })
 

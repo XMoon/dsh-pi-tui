@@ -259,6 +259,10 @@ jobs:
       - name: Remote Session same-Host parity smoke
         run: pnpm smoke:remote-session-read-parity
 
+      - name: Remote command/skill authority parity smoke
+        if: env.DSH_MODE == 'source'
+        run: pnpm smoke:remote-surface-authority-parity
+
       # This was missing from the previous CI.
       - name: Test documentation
         run: pnpm test:docs
@@ -306,7 +310,7 @@ jobs:
   client-family-compat:
     name: DSH Client release-family compatibility
     needs: dsh-context
-    if: ${{ needs.dsh-context.result == 'success' }}
+    if: ${{ needs.dsh-context.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
     runs-on: ubuntu-latest
     timeout-minutes: 70
 

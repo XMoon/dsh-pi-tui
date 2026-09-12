@@ -9,7 +9,7 @@ import {
   resolveDshMode,
 } from '../scripts/dsh-ci-context.mjs'
 
-const nextSha = '183f08e9c6dde7e36cd2318eaee70b0da08fb35e'
+const nextSha = 'c291e7961a515f6d7af9304e7fd1d257929aef26'
 const expectedNpmDshVersion = Object.entries(JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).devDependencies ?? {})
   .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
 const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.5-rc.1'
@@ -27,13 +27,15 @@ function tempModeConfig(mode, life) {
 }
 
 test('DSH mode resolver follows the tracked policy for next, npm elsewhere', () => {
-  // The tracked test/compat/dsh-mode.json currently says npm: next events
-  // run the published npm rc.1 distribution.
-  assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/next' }), 'npm')
-  assert.equal(resolveDshMode({ eventName: 'pull_request', ref: 'refs/pull/1/merge', baseRef: 'next' }), 'npm')
+  // The tracked test/compat/dsh-mode.json routes next events to the pinned
+  // source family; unrelated branches and release behavior remain npm.
+  assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/next' }), 'source')
+  assert.equal(resolveDshMode({ eventName: 'pull_request', ref: 'refs/pull/1/merge', baseRef: 'next' }), 'source')
   assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/main' }), 'npm')
   assert.equal(resolveDshMode({ eventName: 'pull_request', ref: 'refs/pull/2/merge', baseRef: 'main' }), 'npm')
   assert.equal(resolveDshMode({ eventName: 'push', ref: 'refs/heads/feature/next' }), 'npm')
+  // Manual/scheduled runs remain npm unless the workflow explicitly supplies
+  // the source mode context; only push and next-targeted PRs follow the policy.
   assert.equal(resolveDshMode({ eventName: 'workflow_dispatch', ref: 'refs/heads/next' }), 'npm')
   assert.equal(resolveDshMode({ eventName: 'schedule', ref: 'refs/heads/next' }), 'npm')
 })
@@ -74,18 +76,20 @@ test('context uses the current DSH target in every mode and exposes the source p
   assert.equal(main.sourceRef, '')
   assert.equal(main.sourceExpectedVersion, '')
 
-  // The tracked policy routes next to the published npm distribution;
-  // the source pin is exposed only in source mode.
+  // The tracked policy routes next to the pinned source distribution; the
+  // root package's npm metadata remains the independent main/release target.
   const source = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next' })
-  assert.equal(source.mode, 'npm')
-  assert.equal(source.version, expectedNpmDshVersion)
-  assert.equal(source.sourceRef, '')
-  assert.equal(source.sourceExpectedVersion, '')
+  assert.equal(source.mode, 'source')
+  assert.equal(source.version, '0.1.5-rc.2')
+  assert.equal(source.sourceRef, nextSha)
+  assert.equal(source.sourceExpectedVersion, '0.1.5-rc.2')
 
-  // A PR targeting next resolves the same npm context.
+  // A PR targeting next resolves the same source context.
   const pr = resolveDshContext({ eventName: 'pull_request', ref: 'refs/pull/94/merge', baseRef: 'next' })
-  assert.equal(pr.mode, 'npm')
-  assert.equal(pr.version, expectedNpmDshVersion)
+  assert.equal(pr.mode, 'source')
+  assert.equal(pr.version, '0.1.5-rc.2')
+  assert.equal(pr.sourceRef, nextSha)
+  assert.equal(pr.sourceExpectedVersion, '0.1.5-rc.2')
 
   // The injectable policy still overrides for other branches.
   const { path } = tempModeConfig('source', life)
