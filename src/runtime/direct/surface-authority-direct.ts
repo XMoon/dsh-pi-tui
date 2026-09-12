@@ -10,7 +10,6 @@
 
 import {
   readSurfaceCatalog,
-  type SurfaceCatalogAgent,
   type SurfaceCatalogContext,
 } from '../../surface-catalog.ts'
 import type {
@@ -24,9 +23,14 @@ export interface DirectSurfaceAuthorityContext {
 }
 
 /** Structural live-Agent slice needed by the surface collector. */
-export interface DirectSurfaceAuthorityAgent extends SurfaceCatalogAgent {
+export interface DirectSurfaceAuthorityAgent {
   /** The agent-scoped context is required for preset-local skill resolution. */
   readonly ctx: DirectSurfaceAuthorityContext
+  readonly session: {
+    readonly header: {
+      readonly cwd?: string
+    }
+  }
 }
 
 /** Read the Direct authority for an already-live Session. */
