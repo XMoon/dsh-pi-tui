@@ -267,6 +267,14 @@ export interface ListAgentsCallPresentation {
   readonly scope: 'children' | 'descendants'
 }
 
+/** The declared files in one `present` call, kept separate from execution. */
+export interface PresentCallPresentation {
+  readonly files: readonly {
+    readonly path: string
+    readonly description?: string
+  }[]
+}
+
 function nonBlankString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value : undefined
 }
@@ -314,6 +322,26 @@ export function listAgentsCallPresentation(argsRaw: string): ListAgentsCallPrese
   const scope = (parsed as Record<string, unknown>).scope
   if (scope === undefined) return { scope: 'children' }
   return scope === 'children' || scope === 'descendants' ? { scope } : undefined
+}
+
+/** Parse the display-only file declarations from a `present` call. */
+export function presentCallPresentation(argsRaw: string): PresentCallPresentation | undefined {
+  const parsed = parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const files = (parsed as Record<string, unknown>).files
+  if (!Array.isArray(files)) return undefined
+  const presented: Array<{ path: string; description?: string }> = []
+  for (const file of files) {
+    if (typeof file !== 'object' || file === null || Array.isArray(file)) return undefined
+    const value = file as Record<string, unknown>
+    if (typeof value.path !== 'string' || value.path.trim() === '') return undefined
+    if (value.description !== undefined && typeof value.description !== 'string') return undefined
+    presented.push({
+      path: value.path,
+      ...(value.description === undefined ? {} : { description: value.description }),
+    })
+  }
+  return { files: presented }
 }
 
 /** Count one structured list_agents snapshot. */
@@ -492,6 +520,19 @@ export function compactToolPresentation(
   result = '',
   options: CompactToolPresentationOptions = {},
 ): CompactToolPresentation | undefined {
+  // `present` keeps a stable identity even while its streamed arguments are
+  // incomplete; only a valid file list contributes the count summary.
+  if (name === 'present') {
+    const call = presentCallPresentation(argsRaw)
+    const failed = options.isError === true || options.error !== undefined
+    const resultText = failed ? actionErrorResult(result, options) : undefined
+    const count = call === undefined ? undefined : `${call.files.length} ${call.files.length === 1 ? 'file' : 'files'}`
+    return {
+      title: 'Present files',
+      ...(count === undefined ? {} : { summary: count }),
+      ...(resultText === undefined ? {} : { result: resultText }),
+    }
+  }
   const send = name === 'send_message' ? sendMessageCallPresentation(argsRaw) : undefined
   if (send !== undefined) {
     const failed = options.isError === true || options.error !== undefined
@@ -559,6 +600,16 @@ export function compactToolExpandedLines(
 ): string[] | undefined {
   const presentation = compactToolPresentation(name, argsRaw, result, options)
   if (presentation === undefined) return undefined
+  if (name === 'present') {
+    const call = presentCallPresentation(argsRaw)
+    const lines = call?.files.map(file =>
+      file.description === undefined || file.description === ''
+        ? file.path
+        : `${file.path} — ${file.description}`,
+    ) ?? []
+    if (presentation.result !== undefined) lines.push(presentation.result)
+    return lines
+  }
   if (name === 'list_agents' && options.isError !== true && options.error === undefined) {
     const parsed = parseJsonValue(result)
     if (Array.isArray(parsed)) return JSON.stringify(parsed, null, 2).split('\n')

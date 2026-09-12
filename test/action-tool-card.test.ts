@@ -7,6 +7,7 @@ import {
   compactToolExpandedLines,
   compactToolPresentation,
   formatAgentListSummary,
+  presentCallPresentation,
   focusToolDisplay,
   interruptAgentCallPresentation,
   listAgentsCallPresentation,
@@ -225,6 +226,121 @@ test('CompactTextPreview is Unicode-safe, capped, and re-derived on resize', () 
   assert.equal(stripTerminalSequences(kept[1] ?? ''), '  ', 'the paragraph row must render as the bare indent')
 })
 
+test('present cards summarize declarations and hide successful receipts', () => {
+  const args = JSON.stringify({ files: [
+    { path: 'out/report.md', description: 'Final report' },
+    { path: 'LICENSE' },
+  ] })
+  assert.deepEqual(presentCallPresentation(args), {
+    files: [
+      { path: 'out/report.md', description: 'Final report' },
+      { path: 'LICENSE' },
+    ],
+  })
+  assert.deepEqual(compactToolPresentation('present', args, 'Presented out/report.md\nPresented LICENSE'), {
+    title: 'Present files', summary: '2 files',
+  })
+  assert.deepEqual(compactToolExpandedLines('present', args, 'Presented out/report.md\nPresented LICENSE'), [
+    'out/report.md — Final report',
+    'LICENSE',
+  ])
+  assert.equal(focusToolDisplay({ name: 'present', args }), 'Present files 2 files')
+
+  const malformed = '{"files":[{"path":"out/report.md"}'
+  assert.equal(presentCallPresentation(malformed), undefined)
+  assert.deepEqual(compactToolPresentation('present', malformed), { title: 'Present files' })
+  assert.deepEqual(compactToolExpandedLines('present', malformed), [])
+
+  const failure = compactToolPresentation('present', args, 'Cannot present LICENSE: file not found', { isError: true })
+  assert.equal(failure?.title, 'Present files')
+  assert.equal(failure?.summary, '2 files')
+  assert.equal(failure?.result, 'Cannot present LICENSE: file not found')
+  assert.deepEqual(compactToolExpandedLines('present', args, 'Cannot present LICENSE: file not found', { isError: true }), [
+    'out/report.md — Final report',
+    'LICENSE',
+    'Cannot present LICENSE: file not found',
+  ])
+})
+
+test('assistant delivery tails cap folded files and expand with transcript details', async () => {
+  const vt = new VirtualTerminal(90, 40)
+  const app = new TuiApp(
+    vt,
+    { onSubmit: () => {}, onExit: () => {} },
+    { workspaceRoot: '/workspace' },
+  )
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 1,
+    text: 'Completed the requested work.',
+    deliverables: [
+      { path: '/workspace/dist/one.js', description: 'first file' },
+      { path: '/workspace/dist/two.js', description: 'second file' },
+      { path: '/workspace/dist/three.js' },
+      { path: '/workspace/dist/four.js' },
+      { path: '/workspace/dist/five.js', description: 'fifth file' },
+    ],
+  }])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('Delivered files · 5'), folded)
+  assert.ok(folded.includes('dist/one.js'), folded)
+  assert.ok(folded.includes('dist/four.js'), folded)
+  assert.ok(!folded.includes('dist/five.js'), folded)
+  assert.ok(folded.includes('… +1'), folded)
+  assert.ok(!folded.includes('Presented /workspace'), folded)
+  for (const line of folded.split('\n')) assert.ok(visibleWidth(stripTerminalSequences(line)) <= 90, JSON.stringify(line))
+
+  app.setToolOutputExpanded(true)
+  const expanded = await viewport(vt)
+  assert.ok(expanded.includes('dist/five.js'), expanded)
+  assert.ok(expanded.includes('fifth file'), expanded)
+  assert.ok(!expanded.includes('… +1'), expanded)
+  for (const line of expanded.split('\n')) assert.ok(visibleWidth(stripTerminalSequences(line)) <= 90, JSON.stringify(line))
+
+  app.setToolOutputExpanded(false)
+  const collapsedAgain = await viewport(vt)
+  assert.ok(!collapsedAgain.includes('dist/five.js'), collapsedAgain)
+  assert.ok(collapsedAgain.includes('… +1'), collapsedAgain)
+})
+
+test('an extension renderer keeps ownership of present body while host appends delivery tail', async () => {
+  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const registry = new RendererRegistry()
+  registry.registerToolRenderer({
+    id: 'custom-present', toolName: 'present',
+    render: () => ({ kind: 'text', spans: [{ text: 'CUSTOM PRESENT' }] }),
+  }, 'plugin')
+  registry.registerMessageRenderer({
+    id: 'custom-assistant', kind: 'assistant',
+    render: () => ({ kind: 'text', spans: [{ text: 'CUSTOM ASSISTANT' }] }),
+  }, 'plugin')
+  const vt = new VirtualTerminal(90, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'tool',
+    turn: 1,
+    name: 'present',
+    args: JSON.stringify({ files: [{ path: 'out/report.md', description: 'report' }] }),
+    result: 'Presented out/report.md',
+    status: 'ok',
+  }, {
+    kind: 'assistant',
+    turn: 1,
+    text: 'done',
+    deliverables: [{ path: 'out/report.md', description: 'report' }],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('CUSTOM PRESENT'), view)
+  assert.ok(view.includes('CUSTOM ASSISTANT'), view)
+  assert.ok(view.includes('Delivered files · 1'), view)
+  assert.ok(view.includes('out/report.md'), view)
+  assert.ok(!view.includes('Present files'), view)
+})
+
 test('folded action cards show payloads and suppress successful receipts', async () => {
   const vt = new VirtualTerminal(100, 32)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -235,6 +351,7 @@ test('folded action cards show payloads and suppress successful receipts', async
     actionMessage('terminal_send', { sessionId: 'pty-3', text: 'make test' }, 'viewport output\n[wait: stdin_read]'),
     actionMessage('interrupt_agent', { agent_id: 'child-1' }, 'interrupt requested for agent child-1'),
     actionMessage('list_agents', { scope: 'children' }, '1 [running] — a\n2 [idle] — b\n3 [ready] — c'),
+    actionMessage('present', { files: [{ path: 'out/report.md', description: 'Final report' }, { path: 'LICENSE' }] }, 'Presented out/report.md\nPresented LICENSE'),
     actionMessage('send_message', { target: 'reviewer', message: 'Inspect the failed target.' }, JSON.stringify({ messageId: 'm1', status: 'accepted' })),
     actionMessage('send_message', { target: 'sleeper', message: 'Wake up.' }, JSON.stringify({ messageId: 'm2', status: 'queued' })),
   ])
@@ -247,6 +364,9 @@ test('folded action cards show payloads and suppress successful receipts', async
   assert.ok(view.includes('Interrupt agent · child-1 [ok]'), view)
   assert.ok(view.includes('List agents · children [ok]'), view)
   assert.ok(view.includes('3 agents · 1 running · 1 idle · 1 ready'), view)
+  assert.ok(view.includes('Present files · 2 files [ok]'), view)
+  assert.ok(!view.includes('Presented out/report.md'), view)
+  assert.ok(!view.includes('Final report'), view)
   assert.ok(view.includes('Inspect the failed target.'), view)
   assert.ok(view.includes('Wake up.'), view)
   // A team queued state is the one receipt that adds information: it keeps a
@@ -268,6 +388,7 @@ test('expanded action cards keep payloads, historical snapshots, and terminal ou
     actionMessage('send_message', { agent_id: 'child-1', message: 'First instruction.\n\nSecond instruction.' }, 'message delivered to agent child-1'),
     actionMessage('terminal_send', { sessionId: 'pty-3', text: 'export FOO=1\nmake test' }, 'viewport output\n[wait: stdin_read]'),
     actionMessage('list_agents', { scope: 'children' }, '1 [running] — a\n2 [ready] — b'),
+    actionMessage('present', { files: [{ path: 'out/report.md', description: 'Final report' }, { path: 'LICENSE' }] }, 'Presented out/report.md\nPresented LICENSE'),
   ])
   const view = await viewport(vt)
   const clean = view.split('\n').map(stripTerminalSequences)
@@ -284,6 +405,9 @@ test('expanded action cards keep payloads, historical snapshots, and terminal ou
   assert.ok(view.includes('[wait: stdin_read]'), view)
   assert.ok(view.includes('1 [running] — a'), view)
   assert.ok(view.includes('2 [ready] — b'), view)
+  assert.ok(view.includes('out/report.md — Final report'), view)
+  assert.ok(view.includes('LICENSE'), view)
+  assert.ok(!view.includes('Presented out/report.md'), view)
   assert.ok(!view.includes('message delivered to agent'), view)
 })
 
@@ -335,17 +459,29 @@ test('action errors remain visible in folded cards', async () => {
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
-  app.setTranscript([actionMessage(
-    'interrupt_agent',
-    { target: 'missing-child' },
-    'target is not interruptible',
+  app.setTranscript([
+    actionMessage(
+      'interrupt_agent',
+      { target: 'missing-child' },
+      'target is not interruptible',
+      'error',
+      { name: 'SubagentError', code: 'NOT_INTERRUPTIBLE' },
+  ),
+  actionMessage(
+    'present',
+    { files: [{ path: 'missing.txt' }] },
+    'file not found',
     'error',
-    { name: 'SubagentError', code: 'NOT_INTERRUPTIBLE' },
-  )])
+    { name: 'PresentError', code: 'NOT_FOUND' },
+  ),
+  ])
   const view = await viewport(vt)
   assert.ok(view.includes('Interrupt agent · missing-child [error]'), view)
   assert.ok(view.includes('SubagentError: NOT_INTERRUPTIBLE'), view)
   assert.ok(view.includes('target is not interruptible'), view)
+  assert.ok(view.includes('Present files · 1 file [error]'), view)
+  assert.ok(view.includes('PresentError: NOT_FOUND'), view)
+  assert.ok(view.includes('file not found'), view)
 })
 
 test('folded CJK payloads stay width-safe on a tiny terminal', async () => {

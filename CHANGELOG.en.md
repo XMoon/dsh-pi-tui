@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Explicit delivered-file presentation.** `present` tool cards now show a human-readable file list, while the final assistant answer summarizes the delivered paths and descriptions in a compact turn tail.
+
 ## [0.4.5] - 2026-09-11
 
 ### Installation and version pairing

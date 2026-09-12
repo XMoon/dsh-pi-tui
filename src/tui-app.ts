@@ -138,7 +138,7 @@ import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
-import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type TranscriptMessage, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
+import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
 import {
   workflowCountsText,
   workflowPhasePresentations,
@@ -1337,6 +1337,54 @@ export class UserBubbleComponent implements Component {
       return this.bg(prefix + line + pad)
     })
     return this.cached
+  }
+}
+
+/** Host-owned tail for explicit files delivered by the present tool. Paths
+ * are always shown first; the folded view caps entries while an expanded
+ * transcript view re-renders the complete declaration list. */
+class DeliveredFilesComponent implements Component {
+  private static readonly FOLDED_LIMIT = 4
+  private readonly files: readonly PresentedFilePresentation[]
+  private readonly workspaceRoot: string | undefined
+  private readonly expanded: boolean
+  private readonly cached = new Map<number, string[]>()
+
+  constructor(
+    files: readonly PresentedFilePresentation[],
+    workspaceRoot: string | undefined,
+    expanded: boolean,
+  ) {
+    this.files = files
+    this.workspaceRoot = workspaceRoot
+    this.expanded = expanded
+  }
+
+  invalidate(): void {
+    this.cached.clear()
+  }
+
+  render(width: number): string[] {
+    const safeWidth = Math.max(1, Math.floor(width))
+    const previous = this.cached.get(safeWidth)
+    if (previous !== undefined) return previous
+
+    const shown = this.expanded ? this.files : this.files.slice(0, DeliveredFilesComponent.FOLDED_LIMIT)
+    const rows = [truncateToWidth(color.textDim(`Delivered files · ${this.files.length}`), safeWidth, '…')]
+    for (const file of shown) {
+      const path = relativizeToCwd(file.path, this.workspaceRoot).replace(/\r\n|\r|\n/g, ' ')
+      rows.push(truncateToWidth(color.textDim(`  ${path}`), safeWidth, '…'))
+      if (file.description === undefined || file.description === '') continue
+      const descriptionWidth = Math.max(1, safeWidth - 4)
+      for (const line of wrapTextWithAnsi(file.description, descriptionWidth)) {
+        rows.push(truncateToWidth(color.textDim(`    ${line}`), safeWidth, '…'))
+      }
+    }
+    if (!this.expanded && this.files.length > shown.length) {
+      rows.push(truncateToWidth(color.textDim(`  … +${this.files.length - shown.length}`), safeWidth, '…'))
+    }
+    this.cached.set(safeWidth, rows)
+    return rows
   }
 }
 
@@ -2933,7 +2981,7 @@ export class TuiApp {
    * lingering notify). */
   private exitConfirmTimer: NodeJS.Timeout | undefined
   /** Session workspace root for path relativization (Web relativizeToCwd). */
-  private readonly workspaceRoot: string | undefined
+  private workspaceRoot: string | undefined
   /** The tool presentation bridge, wired by the runner to the live registry. */
   private readonly present: ToolPresenter | undefined
   /**
@@ -8517,6 +8565,12 @@ export class TuiApp {
    * @param facts - directory, session id, model, version, and the optional agent preset to display.
    */
   setWelcomeCard(facts: { cwd: string; sessionId: string; model: string; version: string; preset?: string }): void {
+    if (this.workspaceRoot !== facts.cwd) {
+      this.workspaceRoot = facts.cwd
+      // Path-bearing message components capture the root at construction;
+      // discard them when a resumed/switched session changes its cwd.
+      this.disposeMessageComponents()
+    }
     this.welcomeCard.setFacts(facts)
     this.rebuildMessages()
     // Session identity mirrors into the extension snapshot (plan §7.2).
@@ -9734,6 +9788,12 @@ export class TuiApp {
     if (message.kind === 'thinking') {
       return this.effectiveThinkingExpanded(message)
     }
+    // Delivered files are an assistant turn-tail, but their capped/complete
+    // disclosure follows the existing recent-turn Ctrl+O boundary rather than
+    // introducing a second expansion state.
+    if (message.kind === 'assistant' && message.deliverables !== undefined) {
+      return message.turn >= boundary || this.expandedOverride.get(message) === true
+    }
     if ('turn' in message && this.isInsideExpandedFocus(message, boundary) && isFocusSecondaryDisclosure(message)) {
       if (this.fullscreen !== undefined) {
         // Fullscreen: explicit secondary disclosure only.
@@ -9958,7 +10018,7 @@ export class TuiApp {
       // override full-reveals), regular expanded roots full-reveal.
       component: hostBuilt
         ? this.renderMessage(message, state.expanded, state.expandHint, state.fullReveal, width)
-        : rendered.component,
+        : this.withDeliveredFiles(rendered.component, message, state.expanded),
       boundary,
       builtWidth: hostBuilt && this.bakesFoldedWidth(message, state.expanded) ? width : undefined,
       themeRev: this.themeRevision,
@@ -10231,6 +10291,19 @@ export class TuiApp {
    * renderer, so a throwing renderer is invoked exactly once per build
    * and the host fallback is single-path).
    */
+  private withDeliveredFiles(
+    body: Component,
+    message: TranscriptMessage,
+    expanded: boolean,
+  ): Component {
+    if (message.kind !== 'assistant' || message.deliverables === undefined || message.deliverables.length === 0) return body
+    const result = new Container()
+    result.addChild(body)
+    result.addChild(new Text('', 0, 0))
+    result.addChild(new DeliveredFilesComponent(message.deliverables, this.workspaceRoot, expanded))
+    return result
+  }
+
   private renderMessage(message: TranscriptMessage, expanded: boolean, expandHint: ExpandHint, fullReveal: boolean, width: number): Component {
     if (message.kind === 'user') {
       // dsh-web parity: the user's own input is a floating BUBBLE (its
@@ -10265,11 +10338,14 @@ export class TuiApp {
         : message.content !== undefined && message.content.some(block => block.type !== 'text')
           ? this.renderBlockSequence(message.content, makeAssistantText, message)
           : makeAssistantText(message.text)
-      if (!message.interrupted) return body
-      const interrupted = new Container()
-      interrupted.addChild(body)
-      interrupted.addChild(new Text(color.textDimItalic('  (interrupted)'), 0, 0))
-      return interrupted
+      let bodyWithStatus = body
+      if (message.interrupted) {
+        const interrupted = new Container()
+        interrupted.addChild(body)
+        interrupted.addChild(new Text(color.textDimItalic('  (interrupted)'), 0, 0))
+        bodyWithStatus = interrupted
+      }
+      return this.withDeliveredFiles(bodyWithStatus, message, expanded)
     }
     if (message.kind === 'thinking') {
       // The unified Thinking disclosure card (plan §4/§13): COMPACT is
