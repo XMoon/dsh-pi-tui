@@ -162,12 +162,20 @@ async function createHost() {
     input: { hint: '<objective>', attachments: true },
     handler: async () => ({ kind: 'success' }),
   })
-  // A scoped shadow proves that the Remote command view uses the exact live
-  // Agent scope rather than only the global command layer.
+  // A same-name scoped shadow proves that the Remote command view uses the
+  // exact live Agent scope and selects the scoped winner over the global one.
+  ctx.get('commands').register({
+    definitionId: CommandDefinitionId('fixture/shadow-global'),
+    name: 'fixture-shadow',
+    description: 'Global shadow fixture command',
+    input: { hint: '<global>' },
+    handler: async () => ({ kind: 'success' }),
+  })
   agentScope.ctx.get('commands').register({
-    definitionId: CommandDefinitionId('fixture/scoped-shadow'),
-    name: 'fixture-leading-shadow',
-    description: 'Scoped fixture command',
+    definitionId: CommandDefinitionId('fixture/shadow-scoped'),
+    name: 'fixture-shadow',
+    description: 'Scoped shadow fixture command',
+    input: { hint: '<scoped>', attachments: true },
     handler: async () => ({ kind: 'success' }),
   })
 
@@ -286,16 +294,22 @@ async function main() {
     assert.equal(remoteSnapshot?.commands.find(command => command.name === 'fixture-execute')?.definitionId, 'fixture/execute')
     assert.equal(remoteSnapshot?.commands.find(command => command.name === 'fixture-leading')?.input?.hint, '<objective>')
     assert.equal(remoteSnapshot?.commands.find(command => command.name === 'fixture-leading')?.input?.attachments, true)
-    assert.equal(remoteSnapshot?.commands.find(command => command.name === 'fixture-leading-shadow')?.definitionId, 'fixture/scoped-shadow')
+    const shadowCommands = remoteSnapshot?.commands.filter(command => command.name === 'fixture-shadow') ?? []
+    assert.equal(shadowCommands.length, 1, 'same-name shadow must expose one effective command')
+    assert.equal(shadowCommands[0]?.definitionId, 'fixture/shadow-scoped')
+    assert.equal(shadowCommands[0]?.description, 'Scoped shadow fixture command')
+    assert.equal(shadowCommands[0]?.input?.hint, '<scoped>')
+    assert.equal(shadowCommands[0]?.input?.attachments, true)
     assert.ok((remoteSnapshot?.skills.length ?? 0) >= 3, 'Remote human skill authority must be non-empty')
     assert.equal(remoteSnapshot?.skills.find(skill => skill.name === 'fixture-human-only')?.modelInvocable, false)
-     assert.equal(remoteSnapshot?.skills.find(skill => skill.name === 'fixture-scoped-human-only')?.modelInvocable, false)
+    assert.equal(remoteSnapshot?.skills.find(skill => skill.name === 'fixture-scoped-human-only')?.modelInvocable, false)
     assert.equal(remoteSnapshot?.skills.find(skill => skill.name === 'fixture-model-only'), undefined)
     assert.ok(remoteSnapshot?.skills.every(skill => !('path' in skill)), 'Host-local skill paths must stay out of the semantic snapshot')
 
     const directClaims = outcome.report.commandClaims.direct
     assert.deepEqual(directClaims.find(claim => claim.name === 'fixture-execute')?.claim, { bare: true, withArguments: false })
     assert.deepEqual(directClaims.find(claim => claim.name === 'fixture-leading')?.claim, { bare: true, withArguments: true })
+    assert.deepEqual(directClaims.find(claim => claim.name === 'fixture-shadow')?.claim, { bare: true, withArguments: true })
     assert.deepEqual(outcome.report.commandClaims.remote, directClaims)
 
     const addedCommandDispose = host.ctx.get('commands').register({

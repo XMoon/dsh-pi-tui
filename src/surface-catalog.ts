@@ -12,7 +12,6 @@
  * @module @xmoon76/dsh-pi-tui/surface-catalog
  */
 
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import { safeErrorMessage } from './error-boundary.ts'
 import {
   readHumanSkillCatalog,
@@ -20,6 +19,16 @@ import {
   type HumanSkillSummary,
   type SkillCatalogContext,
 } from './skill-catalog.ts'
+
+/** Minimal live-agent face consumed by the effective catalog readers. */
+export interface SurfaceCatalogAgent {
+  readonly ctx: object
+  readonly session: {
+    readonly header: {
+      readonly cwd?: string
+    }
+  }
+}
 
 /** Local structural command face, compatible with both npm and Source Mode DSH.
  * The optional identity is absent from the npm rc.1 descriptor but present in
@@ -74,7 +83,7 @@ export interface SurfaceCatalogSnapshot {
 
 /** The commands-service surface the collector reads. */
 export interface SurfaceCommandsService {
-  list(agent: Agent): readonly SurfaceCommandDescriptor[]
+  list(agent: SurfaceCatalogAgent): readonly SurfaceCommandDescriptor[]
 }
 
 /** The narrow context surface {@link readSurfaceCatalog} consumes. The
@@ -86,8 +95,8 @@ export interface SurfaceCatalogContext {
 }
 
 /**
- * The in-process global-layer command view. The public type requires an
- * `Agent`, but `commands.list(undefined)` resolves the global layer only
+ * The in-process global-layer command view. The upstream service requires an
+ * agent, but `commands.list(undefined)` resolves the global layer only
  * (ScopedLayers merges no overlays for an undefined key); the current TUI
  * already depends on this in-process behavior. The cast is isolated HERE so
  * the undefined key never reaches a remote RPC path, and the helper is the
@@ -96,7 +105,7 @@ export interface SurfaceCatalogContext {
  * @returns the global-layer descriptors (name-sorted by the registry).
  */
 export function listGlobalCommands(commands: SurfaceCommandsService): readonly SurfaceCommandDescriptor[] {
-  return commands.list(undefined as unknown as Agent)
+  return commands.list(undefined as unknown as SurfaceCatalogAgent)
 }
 
 /** Copy one descriptor into a fresh frozen summary (never borrowed). */
@@ -149,7 +158,7 @@ function sameCommand(left: SurfaceCommandDescriptor, right: SurfaceCommandDescri
  * @returns a frozen, detached snapshot.
  */
 export async function readSurfaceCatalog(
-  agent: Agent,
+  agent: SurfaceCatalogAgent,
   signal: AbortSignal,
   ctx: SurfaceCatalogContext,
 ): Promise<SurfaceCatalogSnapshot> {
