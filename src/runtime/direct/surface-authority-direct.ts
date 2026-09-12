@@ -46,6 +46,11 @@ export class DirectSurfaceAuthorityReader implements SurfaceAuthorityReader {
     this.agentFor = agentFor
   }
 
+  /** Cheap Direct-only eligibility check; never performs catalog discovery. */
+  isLive(sessionId: string): boolean {
+    return this.agentFor(sessionId) !== undefined
+  }
+
   async read(sessionId: string, signal?: AbortSignal): Promise<SurfaceAuthoritySnapshot | undefined> {
     signal?.throwIfAborted()
     const agent = this.agentFor(sessionId)
