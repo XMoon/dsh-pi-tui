@@ -11,7 +11,7 @@
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
-M2  IN PROGRESS   (D1.1 DONE: Remote Session read adapter + generation-fenced shadow; D1.2 DONE: pinned-master command/skill authority read shadow; writes remain unimplemented)
+M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; writes remain unimplemented)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -540,8 +540,64 @@ The shadow uses the official Connection and generated Remotes only:
 - `scripts/dsh-remote-surface-authority-parity-smoke.mjs` proves same-Host parity
   using a real Agent scope and the official generated Remote transport.
 
-D1.3 remains TODO for subagent and presentation read parity. Remote writes remain
-unimplemented.
+## D1.3 status — Task and presentation read parity
+
+D1.3 completes the D1 read-side discovery and proof milestone. Production remains
+Direct; the Remote path is an experimental, read-only shadow and introduces no
+write, lifecycle, child-control, custom-serve, or production-backend switch.
+
+- `DirectTaskReader` reads the live Direct child catalog and jobs registry. It
+  re-projects child activity from the live Agent registry at read time and maps
+  only status/detail/timestamp job facts into detached Task snapshots.
+- `RemoteTaskReader` consumes only the official `ClientSessions` list snapshot and
+  `refreshSubagents(parentSessionId)`. Catalog errors are errors rather than an
+  authoritative empty result; generation, operation, caller-cancellation, and
+  disposal fences discard stale work.
+- `RemoteTaskReadShadow` compares direct-child membership/order, kind, label, mode,
+  activity, diagnostics, parent availability, jobs, and the existing
+  `buildTaskRows` projection. It records the complete descendant tree as an
+  explicit upstream gap instead of inferring it from direct-child data.
+- `RemotePresentationReader` consumes only `SessionBinding.eventSource`, the
+  outward `SessionFace` snapshot, and `SessionFace.loadOlder()`. It preserves the
+  event-source order across durable events and transient assistant chunks,
+  deep-detaches/freeze-protects payloads, and synthesizes at most one assistant
+  start marker per live tuple. It never fabricates an assistant end marker.
+- `DirectPresentationReader` uses the existing Direct Session event snapshot and
+  assistant stream baseline; it does not introduce a second stream tracker or
+  history reducer. `RemotePresentationReadShadow` compares the matching durable
+  range and live inputs, then rebuilds fresh `TranscriptFolder`,
+  `TranscriptWindowController`, and Focus projections for semantic comparison.
+- `scripts/dsh-remote-task-read-parity-smoke.mjs` proves same-Host continuable
+  and one-shot child catalog parity, job parity, and a child/job status mutation.
+  `scripts/dsh-remote-presentation-parity-smoke.mjs` proves a real bounded
+  Client event window, `loadOlder()` paging with retained overlap, and semantic
+  transcript/window/Focus parity without an external provider.
+- `scripts/dsh-remote-d1-closure-smoke.mjs` aggregates the existing Session and
+  authority proof surfaces with the D1.3 Task and presentation proofs into one
+  bounded read-capability result.
+
+The D1 closure ledger is:
+
+| Read surface | Direct source | Official Client source | D1 result | Future owner |
+|---|---|---|---|---|
+| Session list | Direct SessionReader | `ClientSessions.list` | parity | — |
+| projections | DSH projections | Client projection store | parity | — |
+| search | sessionQuery | `ClientSessions.search` | parity | — |
+| commands | `ctx.commands` | commands Remote | parity | — |
+| skills | scoped skill registry | skills Remote | parity | — |
+| direct-child subagents | Host subagent runtime | `ClientSessions.refreshSubagents` / `subagentsByParent` | parity | — |
+| jobs | `ctx.jobs` | `ClientSessions.jobsBySession` | parity | — |
+| history window | Direct Session events | `SessionBinding.eventSource` | parity | — |
+| history paging | Direct full history | `SessionFace.loadOlder()` + eventSource | parity | — |
+| live Assistant presentation | Direct stream | transient event-source entries | parity | — |
+| full descendant tree | `listDescendants` | no exact official equivalent | skipped | D5/upstream |
+| `createdAt` | Direct query | no Client list field | skipped | later only if required |
+| Direct `live` bit | attached-store fact | different Client running semantic | skipped | reconsider on flip |
+| context pressure | token meter | no Client equivalent | skipped | later Host seam if retained |
+
+The only D1 skips are `session.createdAt`, `session.live`,
+`session.measureContext`, and `subagent.descendantTree`; each is explicit in the
+shadow report and closure smoke. No additional read gap is inferred or hidden.
 
 ## Known blockers
 
