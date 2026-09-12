@@ -299,10 +299,10 @@ jobs:
         run: node scripts/naming-gate.mjs
 
   # ---------------------------------------------------------------------------
-  # Build and run the Remote Session read gates against both the installed rc1
-  # family and an independent rc2 target. The verifier creates a fresh npm
-  # workspace per lane, so this never inherits the branch lockfile's mixed
-  # prerelease graph.
+  # Build and run the Remote Session read gates against the exact DSH version
+  # declared by package.json. The verifier creates a fresh npm workspace, so
+  # this never inherits the branch lockfile's mixed prerelease graph. A
+  # different release target is a local-only explicit compatibility probe.
   client-family-compat:
     name: DSH Client release-family compatibility
     needs: dsh-context
@@ -323,7 +323,7 @@ jobs:
           cache: true
           install: false
 
-      - name: Run exact rc1 and independent rc2 gates
+      - name: Run exact current-family gates
         run: pnpm compat:dsh:client-family
 
   # Build the ONE artifact that is tested and eventually published.

@@ -97,16 +97,20 @@ function copyRepository(destination) {
 }
 
 /**
- * Read DSH package names that have a released rc family in the tracked lock.
- * Legacy packages outside the 0.1.5 rc line deliberately stay out of this
- * set: they are a separate upstream compatibility line and are not part of the
- * rc1/rc2 family fence.
+ * Read DSH package names in the selected semver rc family from the tracked
+ * lock. Legacy packages outside that release line deliberately stay out of
+ * the set: they are a separate upstream compatibility line.
  */
-function releasedDshFamilyNames(workspace) {
+function releasedDshFamilyNames(workspace, version) {
+  const releaseBase = /^([0-9]+\.[0-9]+\.[0-9]+)-rc\.[0-9]+$/u.exec(version)?.[1]
+  const familyPattern = releaseBase === undefined
+    ? undefined
+    : new RegExp(`^\\s{2,}['"]?(@deepseek-ai\\/dsh-[a-z0-9-]+)@${releaseBase.replaceAll('.', '\\.')}-rc\\.[0-9]+(?:['"]|\\(|:)`, 'iu')
   const lockfile = readFileSync(join(workspace, 'pnpm-lock.yaml'), 'utf8')
   const names = new Set()
+  if (familyPattern === undefined) return names
   for (const line of lockfile.split('\n')) {
-    const match = /^\s{2,}['"]?(@deepseek-ai\/dsh-[a-z0-9-]+)@0\.1\.5-rc\.[12](?:['"]|\(|:)/iu.exec(line)
+    const match = familyPattern.exec(line)
     if (match !== null) names.add(match[1])
   }
   return names
@@ -116,7 +120,7 @@ function releasedDshFamilyNames(workspace) {
  * Pin every DSH development package in an ephemeral npm verification copy.
  * With exactFamily enabled, the temporary pnpm overrides fence every released
  * rc package in the resolved graph to one version instead of allowing a
- * prerelease range to drift to rc2.
+ * prerelease range to drift to another release in the same line.
  */
 export function pinNpmDshDependencies(workspace, version, { exactFamily = false } = {}) {
   const packagePath = join(workspace, 'package.json')
@@ -126,7 +130,7 @@ export function pinNpmDshDependencies(workspace, version, { exactFamily = false 
     if (name.startsWith('@deepseek-ai/dsh')) devDependencies[name] = version
   }
   if (exactFamily) {
-    const familyNames = releasedDshFamilyNames(workspace)
+    const familyNames = releasedDshFamilyNames(workspace, version)
     for (const name of Object.keys(devDependencies)) {
       if (name.startsWith('@deepseek-ai/dsh')) familyNames.add(name)
     }
@@ -147,8 +151,10 @@ function assertInstalledDshFamily(workspace, version) {
     .map(name => /^@deepseek-ai\+dsh-[^@]+@([^_]+)/iu.exec(name))
     .filter(match => match !== null)
     .map(match => match[1])
-  const released = installed.filter(installedVersion => /^0\.1\.5-rc\./u.test(installedVersion))
-  if (released.length === 0) fail(`exact DSH family install contained no 0.1.5 rc package for ${version}`)
+  const releaseBase = /^([0-9]+\.[0-9]+\.[0-9]+)-rc\.[0-9]+$/u.exec(version)?.[1]
+  const familyPrefix = releaseBase === undefined ? version : `${releaseBase}-rc.`
+  const released = installed.filter(installedVersion => installedVersion.startsWith(familyPrefix))
+  if (released.length === 0) fail(`exact DSH family install contained no ${familyPrefix} package for ${version}`)
   const mismatches = released.filter(installedVersion => installedVersion !== version)
   if (mismatches.length > 0) {
     fail(`exact DSH family install resolved ${[...new Set(mismatches)].join(', ')} alongside ${version}`)

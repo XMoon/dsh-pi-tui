@@ -15,6 +15,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import commandsRemote from '@deepseek-ai/dsh-commands/remote'
@@ -119,6 +120,7 @@ async function createHost() {
   await ctx.plugin(SessionProjectionRegistry)
   provideHostPeripheralServices(ctx)
   ctx.get('sessionProjections').register(titleProjectionDefinition)
+  ctx.get('sessionProjections').register(agentPresetProjectionDefinition)
   await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
     new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
   })
@@ -154,12 +156,14 @@ async function createHost() {
   return { ctx, session }
 }
 
-async function assertExpectedReaderState(reader, searchQuery, expectedTitle) {
+async function assertExpectedReaderState(reader, searchQuery, expectedTitle, expectedAgentPreset) {
   const rows = await reader.list('parity-session')
   assert.ok(rows !== undefined, 'parity reader list is unavailable')
   assert.ok(rows.some(row => String(row.id) === 'parity-session'), 'parity reader list omitted the fixture session')
   const projections = await reader.projectionBatch(rows)
-  assert.equal(projections.get('parity-session')?.title, expectedTitle, 'parity reader did not expose the expected title projection')
+  const projection = projections.get('parity-session')
+  assert.equal(projection?.title, expectedTitle, 'parity reader did not expose the expected title projection')
+  assert.equal(projection?.preset, expectedAgentPreset, 'parity reader did not expose the expected agentPreset projection')
   const search = await reader.search(searchQuery)
   assert.ok(search !== undefined, 'parity reader search is unavailable')
   assert.ok(search.items.some(item => item.sessionId === 'parity-session'), 'parity reader search did not hit the fixture session')
@@ -234,9 +238,10 @@ async function main() {
     assert.ok(outcome.report.skipped.some(field => field.field === 'live'))
     assert.ok(outcome.report.skipped.some(field => field.field === 'measureContext'))
     assert.equal(sessions.list.getSnapshot().ids.includes('parity-session'), true)
-    await assertExpectedReaderState(direct, 'parity needle', 'Same Host parity')
-    await assertExpectedReaderState(remote, 'parity needle', 'Same Host parity')
+    await assertExpectedReaderState(direct, 'parity needle', 'Same Host parity', 'fixture-preset')
+    await assertExpectedReaderState(remote, 'parity needle', 'Same Host parity', 'fixture-preset')
 
+    host.session.append('agent-preset/selected', { agentPreset: 'fixture-preset-updated' })
     const nextMessage = host.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'host update parity needle' }],
       source: { kind: 'user' },
@@ -251,10 +256,10 @@ async function main() {
     assert.equal(afterHostUpdate.status, 'compared')
     assert.equal(afterHostUpdate.report.comparable, true)
     assert.deepEqual(afterHostUpdate.report.mismatches, [])
-    await assertExpectedReaderState(direct, 'host update', 'Same Host parity updated')
-    await assertExpectedReaderState(remote, 'host update', 'Same Host parity updated')
+    await assertExpectedReaderState(direct, 'host update', 'Same Host parity updated', 'fixture-preset-updated')
+    await assertExpectedReaderState(remote, 'host update', 'Same Host parity updated', 'fixture-preset-updated')
 
-    console.log('dsh same-Host remote session parity smoke passed: list/projection/search matched expected data before and after Host update')
+    console.log('dsh same-Host remote session parity smoke passed: list/title/agentPreset projection/search matched expected data before and after Host update')
   } finally {
     if (client !== undefined) await client.fiber.dispose()
     if (host !== undefined) await host.ctx.fiber.dispose()

@@ -9,6 +9,7 @@ import {
   npmVerificationEnvironment,
   pinNpmDshDependencies,
 } from '../scripts/dsh-npm-verify.mjs'
+import { resolveDshVersion } from '../scripts/dsh-client-family-compat.mjs'
 
 test('npm verification pins the public registry and isolated user config', () => {
   const environment = npmVerificationEnvironment('/tmp/dsh-npm-verify-test.npmrc', {
@@ -58,22 +59,34 @@ test('exact-family pinning writes pnpm workspace overrides without changing pack
     },
   }))
   writeFileSync(join(workspace, 'pnpm-lock.yaml'), [
-    "  '@deepseek-ai/dsh-agent@0.1.5-rc.1':",
-    "  '@deepseek-ai/dsh-deque@0.1.5-rc.2':",
+    "  '@deepseek-ai/dsh-agent@0.1.6-rc.1':",
+    "  '@deepseek-ai/dsh-deque@0.1.6-rc.1':",
+    "  '@deepseek-ai/dsh-legacy@0.1.5-rc.2':",
     "  '@deepseek-ai/dsh-atomic-write@0.1.2-alpha.2':",
   ].join('\n'))
   writeFileSync(join(workspace, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n')
 
-  pinNpmDshDependencies(workspace, '0.1.5-rc.2', { exactFamily: true })
+  pinNpmDshDependencies(workspace, '0.1.6-rc.2', { exactFamily: true })
 
   const packageJson = JSON.parse(readFileSync(join(workspace, 'package.json'), 'utf8'))
-  assert.equal(packageJson.devDependencies['@deepseek-ai/dsh-agent'], '0.1.5-rc.2')
+  assert.equal(packageJson.devDependencies['@deepseek-ai/dsh-agent'], '0.1.6-rc.2')
   assert.equal(packageJson.pnpm, undefined)
   const workspaceConfig = readFileSync(join(workspace, 'pnpm-workspace.yaml'), 'utf8')
   assert.ok(workspaceConfig.includes('overrides:\n'))
-  assert.ok(workspaceConfig.includes("'@deepseek-ai/dsh-agent': '0.1.5-rc.2'"))
-  assert.ok(workspaceConfig.includes("'@deepseek-ai/dsh-deque': '0.1.5-rc.2'"))
+  assert.ok(workspaceConfig.includes("'@deepseek-ai/dsh-agent': '0.1.6-rc.2'"))
+  assert.ok(workspaceConfig.includes("'@deepseek-ai/dsh-deque': '0.1.6-rc.2'"))
+  assert.doesNotMatch(workspaceConfig, /dsh-legacy/u)
   assert.doesNotMatch(workspaceConfig, /dsh-atomic-write/u)
+})
+
+test('client-family compatibility follows package.json and accepts only explicit alternate targets', () => {
+  const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const declaredVersion = packageJson.devDependencies['@deepseek-ai/dsh-agent']
+  assert.equal(resolveDshVersion([]), declaredVersion)
+  assert.equal(resolveDshVersion(['--', '--dsh-version', '0.1.5-rc.2']), '0.1.5-rc.2')
+
+  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  assert.doesNotMatch(workflow, /0\.1\.5-rc\.[12]/u)
 })
 
 test('CI npm install branches pin the public registry and isolated config', () => {
