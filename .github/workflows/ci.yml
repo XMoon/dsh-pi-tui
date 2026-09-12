@@ -263,6 +263,18 @@ jobs:
         if: env.DSH_MODE == 'source'
         run: pnpm smoke:remote-surface-authority-parity
 
+      - name: Remote task read parity smoke
+        if: env.DSH_MODE == 'source'
+        run: pnpm smoke:remote-task-read-parity
+
+      - name: Remote presentation/history parity smoke
+        if: env.DSH_MODE == 'source'
+        run: pnpm smoke:remote-presentation-parity
+
+      - name: D1 closure gate
+        if: env.DSH_MODE == 'source'
+        run: pnpm smoke:remote-d1-closure
+
       # This was missing from the previous CI.
       - name: Test documentation
         run: pnpm test:docs
