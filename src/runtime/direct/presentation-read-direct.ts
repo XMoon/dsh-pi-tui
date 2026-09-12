@@ -12,7 +12,6 @@ import type {
 } from '../assistant-stream-port.ts'
 import type {
   PresentationDurableEvent,
-  PresentationReadInput,
   PresentationReader,
   PresentationReadSnapshot,
 } from '../presentation-read-port.ts'
@@ -54,17 +53,14 @@ function snapshotOf(
   const durableEvents = agent.session.snapshotEvents().map(event => detachedClone(event as PresentationDurableEvent))
   const baseline = source.assistantStreamBaselineFor(agent)
     .map(input => detachedClone(input))
-  // Direct's durable log and live baseline have no shared sequence face, so
-  // this local snapshot order is only a deterministic fallback. The parity
-  // shadow aligns Direct payloads to the Remote source order before folding.
-  const orderedInputs: PresentationReadInput[] = []
-  for (const event of durableEvents) orderedInputs.push(Object.freeze({ kind: 'durable', event }))
-  for (const input of baseline) orderedInputs.push(Object.freeze({ kind: 'live', input }))
+  // Direct exposes the same two existing faces as the production TUI: the
+  // durable log and the active live baseline. They intentionally remain
+  // separate because Direct has no shared cross-plane sequence; the shared
+  // semantic fold hydrates durable events before replaying live inputs.
   return Object.freeze({
     sessionId,
     durableEvents: Object.freeze(durableEvents),
     liveInputs: Object.freeze(baseline),
-    orderedInputs: Object.freeze(orderedInputs),
     revision: durableEvents.length,
     coverage: 'full',
     hasMore: false,

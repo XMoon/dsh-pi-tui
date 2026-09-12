@@ -107,26 +107,41 @@ export class RemoteTaskReader implements TaskReader {
     const capturedGeneration = this.generation.getSnapshot()
     if (capturedGeneration === undefined) return undefined
 
-    try {
-      await this.sessions.refreshSubagents(parentSessionId)
-    } catch (error) {
+    let settled: {
+      readonly snapshot: ReturnType<RemoteTaskSessionsSource['list']['getSnapshot']>
+      readonly catalog: RemoteSubagentCatalog
+      readonly parentAvailable: boolean
+    } | undefined
+    while (settled === undefined) {
       signal?.throwIfAborted()
       if (!generationMatches(this.generation, capturedGeneration)) return undefined
-      throw error
-    }
-    signal?.throwIfAborted()
-    if (!generationMatches(this.generation, capturedGeneration)) return undefined
+      try {
+        await this.sessions.refreshSubagents(parentSessionId)
+      } catch (error) {
+        signal?.throwIfAborted()
+        if (!generationMatches(this.generation, capturedGeneration)) return undefined
+        throw error
+      }
+      signal?.throwIfAborted()
+      if (!generationMatches(this.generation, capturedGeneration)) return undefined
 
-    const snapshot = this.sessions.list.getSnapshot()
-    const catalog = snapshot.subagentsByParent[parentSessionId]
-    if (catalog === undefined) return undefined
-    if (catalog.state === 'error') throw catalog.error
-    if (catalog.state !== 'ready') {
-      throw new Error(`subagent catalog for ${parentSessionId} did not settle`)
+      const snapshot = this.sessions.list.getSnapshot()
+      const catalog = snapshot.subagentsByParent[parentSessionId]
+      if (catalog === undefined) return undefined
+      if (catalog.state === 'error') throw catalog.error
+      // ClientSessions may have already armed its trailing refresh before the
+      // first promise resolves. Re-enter its official single-flight method
+      // until the catalog it owns is settled; never read a loading snapshot as
+      // an authoritative empty/result state.
+      if (catalog.state === 'loading') continue
+      const parentAvailable = catalog.parentAvailable
+      if (parentAvailable === undefined) {
+        throw new Error(`subagent catalog for ${parentSessionId} has no parent availability fact`)
+      }
+      settled = { snapshot, catalog, parentAvailable }
     }
-    if (catalog.parentAvailable === undefined) {
-      throw new Error(`subagent catalog for ${parentSessionId} has no parent availability fact`)
-    }
+
+    const { snapshot, catalog, parentAvailable } = settled
     if (!generationMatches(this.generation, capturedGeneration)) return undefined
 
     const children = Object.freeze(catalog.entries.map(detachChild))
@@ -134,7 +149,7 @@ export class RemoteTaskReader implements TaskReader {
     if (!generationMatches(this.generation, capturedGeneration)) return undefined
     return Object.freeze({
       parentSessionId,
-      parentAvailable: catalog.parentAvailable,
+      parentAvailable,
       children,
       jobs,
     })

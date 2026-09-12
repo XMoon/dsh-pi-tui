@@ -559,14 +559,15 @@ write, lifecycle, child-control, custom-serve, or production-backend switch.
   explicit upstream gap instead of inferring it from direct-child data.
 - `RemotePresentationReader` consumes only `SessionBinding.eventSource`, the
   outward `SessionFace` snapshot, and `SessionFace.loadOlder()`. It preserves the
-  event-source order across durable events and transient assistant chunks,
+  event-source order within the durable and transient planes,
   deep-detaches/freeze-protects payloads, and synthesizes at most one assistant
   start marker per live tuple. It never fabricates an assistant end marker.
 - `DirectPresentationReader` uses the existing Direct Session event snapshot and
   assistant stream baseline; it does not introduce a second stream tracker or
   history reducer. `RemotePresentationReadShadow` compares the matching durable
   range and live inputs, then rebuilds fresh `TranscriptFolder`,
-  `TranscriptWindowController`, and Focus projections for semantic comparison.
+  `TranscriptWindowController`, and Focus projections by hydrating durable
+  events first and replaying the current live baseline.
 - `scripts/dsh-remote-task-read-parity-smoke.mjs` proves same-Host continuable
   and one-shot child catalog parity, job parity, and a child/job status mutation.
   `scripts/dsh-remote-presentation-parity-smoke.mjs` proves a real bounded

@@ -65,15 +65,10 @@ function start(): AssistantLiveInput {
 }
 
 function directSnapshot(events: readonly PresentationDurableEvent[], liveInputs: readonly AssistantLiveInput[] = []): PresentationReadSnapshot {
-  const orderedInputs = [
-    ...events.map(eventValue => ({ kind: 'durable' as const, event: eventValue })),
-    ...liveInputs.map(input => ({ kind: 'live' as const, input })),
-  ]
   return {
     sessionId: 'session',
     durableEvents: events,
     liveInputs,
-    orderedInputs,
     revision: events.length,
     coverage: 'full',
     hasMore: false,
@@ -164,47 +159,77 @@ test('compares an official eventSource cut through Transcript, Window, and Focus
   shadow.dispose()
 })
 
-test('normalizes the Direct fallback order against an interleaved eventSource cut', async () => {
+test('fresh same-turn steer parity hydrates durable history before replaying the later live owner', async () => {
   const generations = generationHarness()
-  const events = settledEvents()
-  const liveInputs = [start(), textChunk('live')]
-  const directAgent = { session: { snapshotEvents: () => events } }
-  const direct = new DirectPresentationReader({
-    agentFor: id => id === 'session' ? directAgent : undefined,
-    assistantStreamBaselineFor: () => liveInputs,
-  })
-  const transient: RemotePresentationEventEntry = {
-    type: 'transient',
-    event: {
-      type: 'assistant/live-chunk',
-      time: liveInputs[1]!.kind === 'chunk' ? liveInputs[1]!.time : 0,
-      data: {
-        attemptId: 'attempt-a',
-        turn: 0,
-        step: 0,
-        chunk: { type: 'text-delta', index: 0, text: 'live' },
+  const events = [
+    event('turn/start', 0, { turn: 0 }),
+    event('step/start', 1, { turn: 0, step: 1 }),
+    event('user/message', 2, {
+      id: 'initial',
+      role: 'user',
+      content: [{ type: 'text', text: 'initial prompt' }],
+      source: { kind: 'user' },
+    }),
+    event('assistant/chunk', 3, {
+      turn: 0,
+      step: 1,
+      chunk: { type: 'text-delta', index: 0, text: 'assistant A' },
+    }),
+    event('assistant/message', 4, {
+      turn: 0,
+      step: 1,
+      message: {
+        id: 'assistant-a',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'assistant A' }],
+        source: { kind: 'model', provider: 'fixture', model: 'fixture' },
       },
-    },
-  }
-  const entries: RemotePresentationEventEntry[] = [
-    { type: 'event', event: events[0]! },
-    { type: 'event', event: events[1]! },
-    transient,
-    { type: 'event', event: events[2]! },
-    { type: 'event', event: events[3]! },
-    { type: 'event', event: events[4]! },
+    }),
+    event('step/end', 5, { turn: 0, step: 1 }),
+    event('step/start', 6, { turn: 0, step: 2 }),
+    event('user/message', 7, {
+      id: 'steer',
+      role: 'user',
+      content: [{ type: 'text', text: 'human steer' }],
+      source: { kind: 'user' },
+    }),
   ]
-  const binding = officialBinding(entries)
-  const remote = new RemotePresentationReader({ binding: id => id === 'session' ? binding : undefined }, generations.source)
-  const shadow = new RemotePresentationReadShadow(direct, remote, generations.source)
+  const liveInputs: AssistantLiveInput[] = [
+    { kind: 'start', sessionId: 'session', attemptId: 'attempt-b', turn: 0, step: 2 },
+    {
+      kind: 'chunk',
+      sessionId: 'session',
+      attemptId: 'attempt-b',
+      turn: 0,
+      step: 2,
+      time: 1_700_000_000_010,
+      chunk: { type: 'text-delta', index: 0, text: 'assistant B' },
+    },
+  ]
+  const direct = directSnapshot(events, liveInputs)
+  const remote = { ...directSnapshot(events, liveInputs), coverage: 'bounded' as const }
+  const shadow = new RemotePresentationReadShadow(reader(direct), reader(remote), generations.source)
 
   const report = reportOf(await shadow.compare({ sessionId: 'session', projection: { focusMode: true } }))
   assert.equal(report.comparable, true)
   assert.deepEqual(report.mismatches, [])
+
+  const projection = projectPresentationSnapshot(direct, { focusMode: true, windowTurns: 20 })
+  assert.deepEqual(
+    projection.messages.map(message => `${(message as { kind: string }).kind}:${(message as { text?: string }).text ?? ''}`),
+    ['user:initial prompt', 'assistant:assistant A', 'user:human steer', 'assistant:assistant B'],
+  )
+  assert.equal(
+    projection.messages.filter(message => (message as { kind: string; text?: string }).kind === 'assistant' && (message as { text?: string }).text === 'assistant A').length,
+    1,
+    'the pre-steer Assistant must occur exactly once',
+  )
+  const activity = projection.activities[0] as { message?: { text?: string } } | undefined
+  assert.equal(activity?.message?.text, 'assistant B', 'the later step owns the final Message slot')
   shadow.dispose()
 })
 
-test('reports durable payload, live order, and presentation semantic mismatches with bounded output', async () => {
+test('reports durable payload, live inputs, and presentation semantic mismatches with bounded output', async () => {
   const generations = generationHarness()
   const events = settledEvents()
   const direct = directSnapshot(events, [start(), textChunk('direct')])
