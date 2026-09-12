@@ -100,7 +100,7 @@ test('official Client Sessions and Connection faces satisfy the presentation ada
   assert.equal(typeof constructOfficialReader, 'function')
 })
 
-test('reconstructs one synthetic start per live tuple and keeps source entry order', async () => {
+test('reconstructs one synthetic start per live tuple and preserves each plane source order', async () => {
   const fixture = harness({
     entries: [
       durable(0),
@@ -115,7 +115,16 @@ test('reconstructs one synthetic start per live tuple and keeps source entry ord
   const snapshot = await reader.read('session')
   assert.deepEqual(snapshot?.durableEvents.map(event => event.seq), [0, 1])
   assert.deepEqual(snapshot?.liveInputs.map(input => input.kind), ['start', 'chunk', 'chunk', 'start', 'chunk'])
-  assert.deepEqual(snapshot?.orderedInputs.map(input => input.kind), ['durable', 'live', 'live', 'durable', 'live', 'live', 'live'])
+  assert.deepEqual(
+    snapshot?.liveInputs.map(input => input.kind === 'chunk' ? input.chunk : undefined),
+    [
+      undefined,
+      { type: 'text-delta', index: 0, text: 'one' },
+      { type: 'text-delta', index: 0, text: 'two' },
+      undefined,
+      { type: 'text-delta', index: 0, text: 'retry' },
+    ],
+  )
   assert.equal(snapshot?.liveInputs.filter(input => input.kind === 'start').length, 2)
   assert.equal(snapshot?.liveInputs.some(input => input.kind === 'end'), false)
 })
@@ -142,7 +151,7 @@ test('replace snapshots rebuild transient inputs and detach nested event data', 
   fixture.setEntries([durable(1, 'assistant/message', { turn: 0, step: 0, message: { content: [{ type: 'text', text: 'done' }] } })])
   const settled = await reader.read('session')
   assert.deepEqual(settled?.liveInputs, [])
-  assert.deepEqual(settled?.orderedInputs.map(input => input.kind), ['durable'])
+  assert.deepEqual(settled?.durableEvents.map(event => event.seq), [1])
 })
 
 test('pages history only through SessionFace.loadOlder and respects current flags', async () => {

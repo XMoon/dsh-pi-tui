@@ -101,6 +101,31 @@ test('reads the settled Client catalog and jobs without sorting or leaking extra
   assert.equal(Object.isFrozen(snapshot?.children[0]), true)
 })
 
+test('waits for a Client-owned trailing catalog refresh before reading jobs', async () => {
+  const generations = generationHarness()
+  let refreshCalls = 0
+  const trailing = catalog([child('after-trailing')])
+  const client: RemoteTaskSessionsSource = {
+    list: {
+      getSnapshot: () => ({
+        subagentsByParent: {
+          parent: refreshCalls < 2
+            ? { entries: [], parentAvailable: true, state: 'loading', error: undefined }
+            : trailing,
+        },
+        jobsBySession: { parent: [job('trailing-job')] },
+      }),
+    },
+    async refreshSubagents() {
+      refreshCalls += 1
+    },
+  }
+  const snapshot = await new RemoteTaskReader(client, generations.source).readDirectChildren('parent')
+  assert.equal(refreshCalls, 2)
+  assert.deepEqual(snapshot?.children, [child('after-trailing')])
+  assert.deepEqual(snapshot?.jobs, [job('trailing-job')])
+})
+
 test('Direct re-projects child activity from the live Agent registry and reads parent jobs', async () => {
   const parent: DirectTaskAgent = { status: 'running' }
   let childStatus = 'idle'

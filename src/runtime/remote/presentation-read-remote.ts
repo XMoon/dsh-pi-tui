@@ -3,15 +3,15 @@
  *
  * The Client owns reconnect, event-window continuity, paging, and transient
  * settlement. This adapter consumes only the binding's current snapshots and
- * reconstructs the transport-neutral inputs needed by the existing TUI fold;
- * it is not another history or assistant-stream state machine.
+ * reconstructs the separate durable history and live inputs needed by the
+ * existing TUI fold; it is not another history or assistant-stream state
+ * machine.
  * @module @xmoon76/dsh-pi-tui/runtime/remote/presentation-read-remote
  */
 
 import type { AssistantLiveChunk, AssistantLiveInput } from '../assistant-stream-port.ts'
 import type {
   PresentationDurableEvent,
-  PresentationReadInput,
   PresentationReader,
   PresentationReadSnapshot,
 } from '../presentation-read-port.ts'
@@ -104,24 +104,25 @@ function durableEventOf(value: unknown): PresentationDurableEvent {
   return detachedClone(value as PresentationDurableEvent)
 }
 
+/**
+ * Partition one eventSource window while retaining source order within each
+ * plane. Cross-plane chronology is deliberately not exported: the shared
+ * fresh projection hydrates its durable cut before replaying its live baseline.
+ */
 function liveInputsOf(
   sessionId: string,
   entries: readonly RemotePresentationEventEntry[],
 ): {
   readonly liveInputs: readonly AssistantLiveInput[]
-  readonly orderedInputs: readonly PresentationReadInput[]
   readonly durableEvents: readonly PresentationDurableEvent[]
 } {
   const liveInputs: AssistantLiveInput[] = []
-  const orderedInputs: PresentationReadInput[] = []
   const durableEvents: PresentationDurableEvent[] = []
   const started = new Set<string>()
 
   for (const entry of entries) {
     if (entry.type === 'event') {
-      const event = durableEventOf(entry.event)
-      durableEvents.push(event)
-      orderedInputs.push(Object.freeze({ kind: 'durable', event }))
+      durableEvents.push(durableEventOf(entry.event))
       continue
     }
 
@@ -137,7 +138,6 @@ function liveInputsOf(
         step,
       })
       liveInputs.push(start)
-      orderedInputs.push(Object.freeze({ kind: 'live', input: start }))
     }
     const liveChunk = Object.freeze({
       kind: 'chunk' as const,
@@ -149,12 +149,10 @@ function liveInputsOf(
       chunk: detachedClone(chunk as AssistantLiveChunk),
     })
     liveInputs.push(liveChunk)
-    orderedInputs.push(Object.freeze({ kind: 'live', input: liveChunk }))
   }
 
   return {
     liveInputs: Object.freeze(liveInputs),
-    orderedInputs: Object.freeze(orderedInputs),
     durableEvents: Object.freeze(durableEvents),
   }
 }
@@ -170,7 +168,6 @@ function snapshotOf(
     sessionId,
     durableEvents: inputs.durableEvents,
     liveInputs: inputs.liveInputs,
-    orderedInputs: inputs.orderedInputs,
     revision: window.revision,
     coverage: 'bounded',
     hasMore: window.hasMore,

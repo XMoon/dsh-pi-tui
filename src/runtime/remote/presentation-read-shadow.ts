@@ -14,7 +14,6 @@ import {
 } from '../../transcript.ts'
 import type {
   PresentationDurableEvent,
-  PresentationReadInput,
   PresentationReadSnapshot,
   PresentationReader,
 } from '../presentation-read-port.ts'
@@ -30,7 +29,6 @@ export type PresentationReadMismatchField =
   | 'durable.type'
   | 'durable.time'
   | 'durable.payload'
-  | 'inputs.order'
   | 'live.inputs'
   | 'openState'
   | 'hasMore'
@@ -248,64 +246,6 @@ function compareDurable(
   }
 }
 
-type LivePresentationInput = Extract<PresentationReadInput, { readonly kind: 'live' }>['input']
-
-function liveInputKey(input: LivePresentationInput): string {
-  return JSON.stringify([input.kind, input.sessionId, input.attemptId, input.turn, input.step])
-}
-
-/**
- * Direct exposes the durable log and live baseline through separate existing
- * faces, so it has no shared cross-plane sequence to preserve. For a semantic
- * comparison, use the Remote source order as the template while retaining the
- * Direct payloads. Durable and live values (including their within-plane order)
- * are still compared independently; the local durable-then-live concatenation
- * is not itself a parity fact.
- */
-function directInputsInRemoteOrder(
-  directEvents: readonly PresentationDurableEvent[],
-  directLiveInputs: readonly LivePresentationInput[],
-  remoteInputs: readonly PresentationReadInput[],
-): readonly PresentationReadInput[] {
-  const directBySeq = new Map(directEvents.map(event => [event.seq, event]))
-  const liveIndexesByKey = new Map<string, number[]>()
-  for (const [index, input] of directLiveInputs.entries()) {
-    const indexes = liveIndexesByKey.get(liveInputKey(input))
-    if (indexes === undefined) liveIndexesByKey.set(liveInputKey(input), [index])
-    else indexes.push(index)
-  }
-  const usedEventSeqs = new Set<number>()
-  const usedLiveIndexes = new Set<number>()
-  const ordered: PresentationReadInput[] = []
-
-  for (const remoteInput of remoteInputs) {
-    if (remoteInput.kind === 'durable') {
-      const event = directBySeq.get(remoteInput.event.seq)
-      if (event !== undefined) {
-        usedEventSeqs.add(event.seq)
-        ordered.push(Object.freeze({ kind: 'durable', event }))
-      }
-      continue
-    }
-    const indexes = liveIndexesByKey.get(liveInputKey(remoteInput.input))
-    const index = indexes?.shift()
-    if (index !== undefined) {
-      usedLiveIndexes.add(index)
-      ordered.push(Object.freeze({ kind: 'live', input: directLiveInputs[index]! }))
-    }
-  }
-
-  // Preserve unmatched Direct facts so a membership mismatch remains visible
-  // in the fresh fold instead of being hidden by normalization.
-  for (const event of directEvents) {
-    if (!usedEventSeqs.has(event.seq)) ordered.push(Object.freeze({ kind: 'durable', event }))
-  }
-  for (const [index, input] of directLiveInputs.entries()) {
-    if (!usedLiveIndexes.has(index)) ordered.push(Object.freeze({ kind: 'live', input }))
-  }
-  return Object.freeze(ordered)
-}
-
 function directCutForRemote(
   direct: PresentationReadSnapshot,
   remote: PresentationReadSnapshot,
@@ -317,7 +257,6 @@ function directCutForRemote(
   return {
     ...direct,
     durableEvents: comparison.directEvents,
-    orderedInputs: directInputsInRemoteOrder(comparison.directEvents, direct.liveInputs, remote.orderedInputs),
     coverage: 'bounded',
   }
 }
@@ -372,13 +311,12 @@ function normalizeFocusBlock(block: FocusProjectedBlock): unknown {
 function applyToFreshFolder(snapshot: PresentationReadSnapshot): TranscriptFolder {
   const folder = new TranscriptFolder()
   type FolderEvent = Parameters<TranscriptFolder['apply']>[0][number]
-  for (const input of snapshot.orderedInputs) {
-    if (input.kind === 'durable') {
-      folder.apply([input.event as unknown as FolderEvent])
-    } else {
-      folder.applyLiveInput(input.input)
-    }
-  }
+  // Direct and Remote expose independent durable/live faces. Reconstruct both
+  // with the existing TUI contract: hydrate the durable cut, then replay the
+  // current active live baseline. Never use one adapter's mixed chronology to
+  // rewrite the other's oracle.
+  folder.apply(snapshot.durableEvents.map(event => event as unknown as FolderEvent))
+  for (const input of snapshot.liveInputs) folder.applyLiveInput(input)
   return folder
 }
 
