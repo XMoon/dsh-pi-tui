@@ -247,6 +247,11 @@ jobs:
              } >> "$GITHUB_ENV"
           fi
 
+      # The Remote parity smokes import root TypeScript projections, whose
+      # private pi-tui package export requires its local dist to exist.
+      - name: Build vendored pi-tui before Source Mode smokes
+        run: pnpm build:fork
+
       - name: Typecheck vendored pi-tui
         run: pnpm typecheck:fork
 
@@ -287,9 +292,6 @@ jobs:
       # never depends on the developer git/CI environment.
       - name: Test development tooling
         run: pnpm test:tooling
-
-      - name: Build vendored pi-tui for compatibility contract
-        run: pnpm build:fork
 
       - name: Pi component compatibility contract
         run: pnpm gate:pi-surface-compat
