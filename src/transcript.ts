@@ -55,6 +55,12 @@ export type AssistantDisplayBlock =
   | { readonly kind: 'content'; readonly block: ContentBlock }
   | { readonly kind: 'open-opaque'; readonly blockType: string }
 
+/** A file declared by the durable `deliverables/presented` event. */
+export interface PresentedFilePresentation {
+  readonly path: string
+  readonly description?: string
+}
+
 /** One renderable message in the TUI transcript. */
 export type TranscriptMessage =
   /**
@@ -87,6 +93,8 @@ export type TranscriptMessage =
     displayBlocks?: readonly AssistantDisplayBlock[]
     /** Durable interruption evidence; presentation metadata, not body text. */
     interrupted?: true
+    /** Explicit files delivered before this closing assistant message. */
+    deliverables?: readonly PresentedFilePresentation[]
   }
   | { kind: 'thinking'; turn: number; text: string; /** Still streaming reasoning deltas for its step. */ running?: boolean }
   /**
@@ -523,6 +531,9 @@ export function transcriptSearchText(message: TranscriptMessage, depth = 0): str
       members.push(`${member.label} ${member.status}`)
     }
     return `workflow ${message.name} ${message.status} ${[...phases].join(' ')} ${members.join(' ')}`
+  }
+  if (message.kind === 'assistant' && message.deliverables !== undefined && message.deliverables.length > 0) {
+    return `${message.text} ${message.deliverables.map(file => [file.path, file.description ?? ''].join(' ')).join(' ')}`
   }
   return message.text ?? ''
 }
@@ -1096,6 +1107,7 @@ function assistantDisplayBlocksHaveInterruptionEvidence(blocks: readonly Assista
 
 /** Use the semantic or display-only projection for entry visibility. */
 export function assistantEntryVisibleNow(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
+  if (entry.deliverables !== undefined && entry.deliverables.length > 0) return true
   return entry.displayBlocks === undefined
     ? assistantBlocksVisibleNow(assistantEntryBlocks(entry))
     : assistantDisplayBlocksVisibleNow(entry.displayBlocks)
@@ -1273,6 +1285,11 @@ export class TranscriptFolder {
   private readonly claimedNextStepTurns = new Map<string, NextStepInboxIdentity>()
   /** The assistant message object per (turn, step); streaming text lands in place. */
   private readonly assistantEntries = new Map<string, Extract<TranscriptMessage, { kind: 'assistant' }>>()
+  /** Durable delivery declarations retained with their event sequence until
+   * the turn's closing assistant selects the valid prefix. */
+  private readonly deliverableDeclarationsByTurn = new Map<number, Array<PresentedFilePresentation & { readonly seq: number }>>()
+  /** Durable assistant/message sequence per step, used as the closing boundary. */
+  private readonly assistantSettlementSeqs = new Map<string, number>()
   /** In-flight live block state keyed by logical step. This is required for
    * authoritative block-end replacement: deltas may be partial, while a
    * completed block replaces the entire indexed state without duplication. */
@@ -3388,6 +3405,67 @@ export class TranscriptFolder {
     }
   }
 
+  /** Fold the structural durable payload emitted by the present tool. The
+   * event is the only source of delivery facts; tool-result text is never
+   * reverse-parsed. Invalid file entries are ignored at this event boundary,
+   * while valid entries retain their event sequence and source order. */
+  private applyPresentedEvent(event: SessionEvent): void {
+    const data = event.data as unknown
+    if (typeof data !== 'object' || data === null || Array.isArray(data)) return
+    const value = data as Record<string, unknown>
+    if (typeof value.turn !== 'number' || !Number.isSafeInteger(value.turn) || value.turn < 1) return
+    if (typeof value.callId !== 'string' || value.callId.length === 0 || !Array.isArray(value.files)) return
+    if (this.activityByTurn.get(value.turn)?.completed === true) return
+    const declarations = this.deliverableDeclarationsByTurn.get(value.turn) ?? []
+    const seq = Number(event.seq)
+    if (!Number.isSafeInteger(seq) || seq < 0) return
+    for (const file of value.files) {
+      if (typeof file !== 'object' || file === null || Array.isArray(file)) continue
+      const entry = file as Record<string, unknown>
+      if (typeof entry.path !== 'string' || entry.path.trim() === '') continue
+      if (entry.description !== undefined && typeof entry.description !== 'string') continue
+      declarations.push({
+        path: entry.path,
+        ...(entry.description === undefined ? {} : { description: entry.description }),
+        seq,
+      })
+    }
+    if (declarations.length > 0) this.deliverableDeclarationsByTurn.set(value.turn, declarations)
+  }
+
+  /** Attach declarations before the closing assistant's durable sequence,
+   * preserving first-seen path order while letting the latest valid
+   * declaration replace its description. */
+  private attachDeliverablesToClosingAssistant(turn: number): void {
+    const activity = this.activityByTurn.get(turn)
+    const step = activity?.lastAssistantStep
+    if (step === undefined) return
+    const key = stepKey(turn, step)
+    const assistant = this.assistantEntries.get(key)
+    const closingSeq = this.assistantSettlementSeqs.get(key)
+    if (assistant === undefined || closingSeq === undefined) return
+    const declarations = this.deliverableDeclarationsByTurn.get(turn)
+    if (declarations === undefined) return
+    const files = new Map<string, PresentedFilePresentation>()
+    for (const declaration of declarations) {
+      if (declaration.seq >= closingSeq) continue
+      files.set(declaration.path, {
+        path: declaration.path,
+        ...(declaration.description === undefined ? {} : { description: declaration.description }),
+      })
+    }
+    if (files.size === 0) return
+    const wasVisible = this.isVisible(assistant)
+    assistant.deliverables = [...files.values()]
+    bumpAssistantPresentationRevision(assistant)
+    this.markStreamingEntryDirty(`assistant:${key}`)
+    // Deliverables make an otherwise empty closing assistant a visible
+    // transcript surface without inventing a second message. Keep the Focus
+    // final-selection flag and grouped-turn index in sync with that transition.
+    this.syncAssistantVisibility(turn, step, assistant, wasVisible, false)
+    if (activity !== undefined) activity.lastAssistantVisible = true
+  }
+
   private applyEvent(event: SessionEvent): void {
     // The human transcript keeps append-origin history. Surface
     // replacements are model-only rewrites (tool-result pruning,
@@ -3408,6 +3486,10 @@ export class TranscriptFolder {
     // enters our type graph (the same pattern as the structural service
     // types). An unknown event type is otherwise skipped by the switch.
     const kind = event.type as string
+    if (kind === 'deliverables/presented') {
+      this.applyPresentedEvent(event)
+      return
+    }
     if (kind === 'agent/inbox/spliced') {
       const data = event.data as {
         target: 'next-turn' | 'next-step'
@@ -3631,6 +3713,7 @@ export class TranscriptFolder {
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
         const key = stepKey(event.data.turn, event.data.step)
+        this.assistantSettlementSeqs.set(key, Number(event.seq))
         const priorLast = activity.lastAssistantStep ?? -1
         const entry = this.assistantEntries.get(key)
         // A durable assistant/message is always a transcript surface fact.
@@ -4027,6 +4110,11 @@ export class TranscriptFolder {
         // when turn/end arrives with open steps — review finding), and
         // settles the token display.
         this.resolveMessageAtTurnEnd(activity)
+        this.attachDeliverablesToClosingAssistant(event.data.turn)
+        // All declarations for this completed turn have either been selected
+        // or rejected by the closing-sequence boundary; no later event can
+        // reuse them after the completed fence.
+        this.deliverableDeclarationsByTurn.delete(event.data.turn)
         this.usage.onTurnEnd(event.data.turn)
         this.syncUsage(activity)
         activity.revision += 1
