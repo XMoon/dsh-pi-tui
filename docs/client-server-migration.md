@@ -88,7 +88,7 @@ text-only by policy. Readable markdown export uses the richer projection.
 Queue/steer/dequeue behavior remains outside this finalized-only stage; only
 its rewind notification wording is generalized, and rewind does not re-stage
 content. No attachment bytes/paths are resolved; migration remains
-D1.1 is now in progress with Direct as the production backend.
+D1.1 is complete for the experimental read surface; Direct remains the production backend.
 
 ### Unified attachment intake (Stage C2 / pre-M2)
 
@@ -123,8 +123,8 @@ The first block-end remains authoritative and replaces the open
 presentation with the finalized ContentBlock. No synthetic ContentBlock is
 persisted or exposed through semantic text/search state.
 
-Stage C is complete after this change; D1.1 is now in progress and Direct
-remains the production backend.
+Stage C is complete after this change; D1.1 is complete for the experimental
+read surface, and Direct remains the production backend.
 
 ## Target
 
@@ -498,13 +498,17 @@ while the overall M2 remains in progress:
   Context (Session Store, live registry, projections, SQLite query provider,
   Session Controller, Gateway, Connection, and official forwarded events) and
   an independent Client Context over the official in-process carrier. It
-  compares Direct and Remote list/projection/search results before and after a
-  Host-side session update, with no synthetic ready frame or private envelope.
-- `compat:dsh:client-family` runs the fixture and same-Host parity gates in two
-  isolated installs: an exact `0.1.5-rc.1` installed family and an independent
-  `0.1.5-rc.2` target. The exact-family override fences released `0.1.5-rc.*`
-  packages while retaining older legacy dependencies where the official release
-  graph still requires them.
+  compares Direct and Remote list/title/agentPreset projection/search results
+  before and after Host-side title and preset-selection updates, with no
+  synthetic ready frame or private envelope.
+- `compat:dsh:client-family` runs the fixture and same-Host parity gates in an
+  isolated install using the exact DSH version declared by `package.json`.
+  CI uses this default path, so it follows the selected DSH target when the
+  dependency is upgraded. A different release is a local-only probe via
+  `pnpm compat:dsh:client-family -- --dsh-version <version>`; it is not an
+  additional CI lane. The exact-family override fences released packages in
+  the selected rc line while retaining older legacy dependencies where the
+  official release graph still requires them.
 
 Production remains Direct. No Remote Backend, Session writer, UI wiring, retry
 loop, raw persistence access, or duplicate event fold is introduced by D1.1.
