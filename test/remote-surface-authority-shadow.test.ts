@@ -57,8 +57,8 @@ function snapshot(
   })
 }
 
-function readerOf(read: SurfaceAuthorityReader['read']): SurfaceAuthorityReader {
-  return { read }
+function readerOf(read: SurfaceAuthorityReader['read'], isLive = (_sessionId: string) => true): SurfaceAuthorityReader & { isLive(sessionId: string): boolean } {
+  return { read, isLive }
 }
 
 function status(outcome: SurfaceAuthorityShadowOutcome): SurfaceAuthorityShadowOutcome['status'] {
@@ -82,6 +82,82 @@ test('reports an exact match as comparable with no mismatches', async () => {
     assert.equal(outcome.report.comparable, true)
     assert.deepEqual(outcome.report.mismatches, [])
   }
+  shadow.dispose()
+})
+
+test('fences reentrant generation reset during the live gate', async () => {
+  const clock = generations()
+  let remoteCalls = 0
+  const shadow = new RemoteSurfaceAuthorityShadow(
+    readerOf(async () => { assert.fail('stale gate must not start Direct discovery') }, () => {
+      clock.set({ id: 'g2' })
+      return false
+    }),
+    readerOf(async () => {
+      remoteCalls += 1
+      return snapshot()
+    }),
+    clock.source,
+  )
+
+  assert.deepEqual(await shadow.compare({ sessionId: 'session-a' }), {
+    status: 'discarded',
+    reason: 'stale-generation',
+  })
+  assert.equal(remoteCalls, 0)
+  shadow.dispose()
+})
+
+test('reports caller cancellation reentrant from the live gate', async () => {
+  const controller = new AbortController()
+  const shadow = new RemoteSurfaceAuthorityShadow(
+    readerOf(async () => { assert.fail('cancelled gate must not start Direct discovery') }, () => {
+      controller.abort()
+      return false
+    }),
+    readerOf(async () => {
+      assert.fail('cancelled gate must not start Remote discovery')
+    }),
+    generations().source,
+  )
+
+  assert.deepEqual(await shadow.compare({ sessionId: 'session-a', signal: controller.signal }), {
+    status: 'cancelled',
+  })
+  shadow.dispose()
+})
+
+test('starts both observations before deferred discovery and catalog mutation', async () => {
+  let catalog = snapshot([{ name: 'a', description: 'Catalog A' }])
+  const discovery = deferred<void>()
+  const started: string[] = []
+  let directSignal: AbortSignal | undefined
+  const shadow = new RemoteSurfaceAuthorityShadow(
+    readerOf(async (_sessionId, signal) => {
+      started.push('direct')
+      directSignal = signal
+      const captured = catalog
+      await discovery.promise
+      return captured
+    }),
+    readerOf(async (_sessionId, signal) => {
+      started.push('remote')
+      assert.equal(signal, directSignal)
+      const captured = catalog
+      await discovery.promise
+      return captured
+    }),
+    generations().source,
+  )
+  const pending = shadow.compare({ sessionId: 'session-a' })
+  // No Connection generation change: only the Host catalog changes while
+  // discovery is pending. Serial reads would observe A followed by B.
+  catalog = snapshot([{ name: 'b', description: 'Catalog B' }])
+  discovery.resolve()
+  const outcome = await pending
+  assert.deepEqual(started, ['direct', 'remote'])
+  assert.equal(outcome.status, 'compared')
+  if (outcome.status === 'compared') assert.equal(outcome.report.comparable, true)
   shadow.dispose()
 })
 
@@ -224,7 +300,10 @@ test('returns unavailable/error outcomes without turning failures into empty cat
 
   let remoteCallsWithoutDirect = 0
   const directUnavailable = new RemoteSurfaceAuthorityShadow(
-    readerOf(async () => undefined),
+    readerOf(async () => { assert.fail('ineligible Session must not discover Direct catalog') }, sessionId => {
+      assert.equal(sessionId, 'session-a')
+      return false
+    }),
     readerOf(async () => {
       remoteCallsWithoutDirect += 1
       return snapshot()

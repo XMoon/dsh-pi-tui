@@ -525,6 +525,11 @@ The shadow uses the official Connection and generated Remotes only:
 - It is live-Session-only and diagnostic-only; it never discovers a standing
   catalog, creates an Agent, installs TUI state, executes a command, loads a
   skill body, or performs a write.
+- A cheap Direct-side live-Agent predicate gates both reads; eligible Direct and
+  Remote observations start concurrently in one compare epoch, without waiting
+  for Direct skill discovery. This reduces observation skew, not a catalog
+  transaction: official reads expose no shared atomic authority revision, so a
+  mismatch during mutation is not by itself proof of adapter divergence.
 - Direct remains the production authority. Remote failures are unavailable/error
   outcomes, never authoritative empty catalogs, and every completion/failure is
   fenced by operation and Connection-generation identity.

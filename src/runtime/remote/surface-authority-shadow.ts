@@ -80,6 +80,11 @@ export interface SurfaceAuthorityShadowOptions {
   readonly signal?: AbortSignal
 }
 
+/** Direct-side shadow eligibility only; not a Remote/domain protocol. */
+interface LiveSurfaceAuthorityReader extends SurfaceAuthorityReader {
+  isLive(sessionId: string): boolean
+}
+
 interface CapturedOperation {
   readonly generation: RemoteConnectionGeneration
   readonly sessionId: string
@@ -303,7 +308,7 @@ function compareSnapshots(
  * an earlier operation; stale successes and failures are discarded.
  */
 export class RemoteSurfaceAuthorityShadow {
-  private readonly direct: SurfaceAuthorityReader
+  private readonly direct: LiveSurfaceAuthorityReader
   private readonly remote: SurfaceAuthorityReader
   private readonly generation: RemoteConnectionGenerationSource
   private operationEpoch = 0
@@ -312,7 +317,7 @@ export class RemoteSurfaceAuthorityShadow {
   private readonly unsubscribeGeneration: () => void
 
   constructor(
-    direct: SurfaceAuthorityReader,
+    direct: LiveSurfaceAuthorityReader,
     remote: SurfaceAuthorityReader,
     generation: RemoteConnectionGenerationSource,
   ) {
@@ -332,17 +337,20 @@ export class RemoteSurfaceAuthorityShadow {
 
     const operation = this.beginOperation(capturedGeneration, options)
     try {
-      // Direct is the production authority and the live-Agent gate. Do not
-      // probe the Remote catalog until Direct confirms that this Session has
-      // a live Agent; official Remote skills are cold-readable by design.
-      const direct = await this.direct.read(operation.sessionId, operation.signal)
+      operation.signal.throwIfAborted()
+      const live = this.direct.isLive(operation.sessionId)
+      if (!this.isCurrent(operation)) return this.discarded(operation)
+      operation.signal.throwIfAborted()
+      if (!live) return { status: 'unavailable', reason: 'direct-unavailable' }
+      // Start both observations in this epoch without waiting for Direct skill
+      // discovery. This narrows skew; official reads are not atomic snapshots.
+      const [direct, remote] = await Promise.all([
+        this.direct.read(operation.sessionId, operation.signal),
+        this.remote.read(operation.sessionId, operation.signal),
+      ])
       if (!this.isCurrent(operation)) return this.discarded(operation)
       operation.signal.throwIfAborted()
       if (direct === undefined) return { status: 'unavailable', reason: 'direct-unavailable' }
-
-      const remote = await this.remote.read(operation.sessionId, operation.signal)
-      if (!this.isCurrent(operation)) return this.discarded(operation)
-      operation.signal.throwIfAborted()
       if (remote === undefined) return { status: 'unavailable', reason: 'remote-unavailable' }
 
       const report = compareSnapshots(direct, remote, operation.generation)
