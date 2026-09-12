@@ -18,6 +18,7 @@ const KNOWN_SKIPS = Object.freeze([
   'session.live',
   'session.measureContext',
   'subagent.descendantTree',
+  'presentation.leadingTurnCompleteness',
 ])
 
 function runProof(name, script, parse) {

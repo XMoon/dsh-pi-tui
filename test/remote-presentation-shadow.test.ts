@@ -159,6 +159,93 @@ test('compares an official eventSource cut through Transcript, Window, and Focus
   shadow.dispose()
 })
 
+test('Delivered Files survive Direct/Remote Transcript, Window, and Focus parity', async () => {
+  const generations = generationHarness()
+  const events = [
+    event('turn/start', 0, { turn: 1 }),
+    event('user/message', 1, {
+      turn: 1,
+      id: 'user-1',
+      role: 'user',
+      content: [{ type: 'text', text: 'present these files' }],
+      source: { kind: 'user' },
+    }),
+    event('step/start', 2, { turn: 1, step: 0 }),
+    event('deliverables/presented', 3, {
+      turn: 1,
+      callId: 'present-1',
+      files: [{ path: 'a.md', description: 'draft A' }],
+    }),
+    event('deliverables/presented', 4, {
+      turn: 1,
+      callId: 'present-1',
+      files: [{ path: 'b.md', description: 'B' }],
+    }),
+    event('deliverables/presented', 5, {
+      turn: 1,
+      callId: 'present-1',
+      files: [{ path: 'a.md', description: 'final A' }],
+    }),
+    event('assistant/message', 6, {
+      turn: 1,
+      step: 0,
+      message: {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'final' }],
+        source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+      },
+    }),
+    event('deliverables/presented', 7, {
+      turn: 1,
+      callId: 'present-1',
+      files: [{ path: 'late.md', description: 'late' }],
+    }),
+    event('step/end', 8, { turn: 1, step: 0 }),
+    event('turn/end', 9, { turn: 1, reason: { kind: 'completed' } }),
+  ]
+  const directReader = new DirectPresentationReader({
+    agentFor: id => id === 'session' ? { session: { snapshotEvents: () => events } } : undefined,
+    assistantStreamBaselineFor: () => [],
+  })
+  const direct = await directReader.read('session')
+  assert.ok(direct !== undefined)
+  const remote = reader({ ...direct, coverage: 'bounded' })
+  const shadow = new RemotePresentationReadShadow(directReader, remote, generations.source)
+
+  const report = reportOf(await shadow.compare({
+    sessionId: 'session',
+    projection: { focusMode: true, windowTurns: 20 },
+  }))
+  assert.equal(report.comparable, true)
+  assert.deepEqual(report.mismatches, [])
+
+  const projection = projectPresentationSnapshot(directSnapshot(events), { focusMode: true, windowTurns: 20 })
+  const closing = projection.messages.find(message => (
+    (message as { kind?: string; text?: string }).kind === 'assistant'
+    && (message as { text?: string }).text === 'final'
+  )) as { deliverables?: unknown; kind?: string } | undefined
+  assert.deepEqual(closing?.deliverables, [
+    { path: 'a.md', description: 'final A' },
+    { path: 'b.md', description: 'B' },
+  ])
+  assert.equal(projection.messages.some(message => (message as { kind?: string }).kind === 'deliverables'), false)
+  assert.equal(projection.activities.some(activity => (
+    (activity as { turn?: number; toolCalls?: number }).turn === 1
+    && (activity as { toolCalls?: number }).toolCalls !== 0
+  )), false)
+  const focus = projection.focus as readonly {
+    kind: string
+    message?: { kind?: string; text?: string }
+  }[]
+  assert.equal(focus.filter(block => (
+    block.kind === 'message'
+    && block.message?.kind === 'assistant'
+    && block.message.text === 'final'
+  )).length, 1)
+  shadow.dispose()
+})
+
 test('fresh same-turn steer parity hydrates durable history before replaying the later live owner', async () => {
   const generations = generationHarness()
   const events = [

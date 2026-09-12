@@ -26,7 +26,10 @@ import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { DirectPresentationReader } from '../src/runtime/direct/presentation-read-direct.ts'
 import { RemotePresentationReader } from '../src/runtime/remote/presentation-read-remote.ts'
-import { RemotePresentationReadShadow } from '../src/runtime/remote/presentation-read-shadow.ts'
+import {
+  projectPresentationSnapshot,
+  RemotePresentationReadShadow,
+} from '../src/runtime/remote/presentation-read-shadow.ts'
 
 const PACKAGE_IDS = {
   connection: '@deepseek-ai/dsh-client-connection',
@@ -98,6 +101,10 @@ function provideHostPeripheralServices(ctx) {
   ctx.provide('webServer', { registerUpgrade: () => () => {} })
 }
 
+const BOUNDARY_TURN = 35
+const BOUNDARY_PATH = 'boundary-delivery.txt'
+const BOUNDARY_DESCRIPTION = 'pagination boundary sentinel'
+
 function appendTurn(session, turn, text, context = false) {
   session.append('turn/start', { turn })
   if (context) {
@@ -111,6 +118,23 @@ function appendTurn(session, turn, text, context = false) {
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
   session.append('step/start', { turn, step: 0 })
+  if (turn === BOUNDARY_TURN) {
+    session.append('deliverables/presented', {
+      turn,
+      callId: 'presentation-boundary',
+      files: [{ path: BOUNDARY_PATH, description: 'draft boundary description' }],
+    })
+    session.append('deliverables/presented', {
+      turn,
+      callId: 'presentation-boundary',
+      files: [{ path: 'second-boundary.txt', description: 'second boundary file' }],
+    })
+    session.append('deliverables/presented', {
+      turn,
+      callId: 'presentation-boundary',
+      files: [{ path: BOUNDARY_PATH, description: BOUNDARY_DESCRIPTION }],
+    })
+  }
   session.append('assistant/message', {
     turn,
     step: 0,
@@ -122,6 +146,13 @@ function appendTurn(session, turn, text, context = false) {
     },
     stream: [],
   }, { surfaceOp: 'append' })
+  if (turn === BOUNDARY_TURN) {
+    session.append('deliverables/presented', {
+      turn,
+      callId: 'presentation-boundary',
+      files: [{ path: 'late-boundary.txt', description: 'must be excluded' }],
+    })
+  }
   session.append('step/end', { turn, step: 0 })
   session.append('turn/end', { turn, reason: { kind: 'completed' } })
 }
@@ -150,7 +181,11 @@ async function createHost() {
   const session = ctx.get('sessions').create(SessionId('presentation-session'), {
     meta: { cwd: '/tmp/dsh-d1-3-presentation', createdAt: 4_000 },
   })
-  for (let turn = 0; turn < 60; turn += 1) appendTurn(session, turn, `prompt ${turn}`, turn === 0)
+  for (let turn = 0; turn < 60; turn += 1) {
+    // The extra counted surface message shifts the 50-message initial page so
+    // the boundary turn's assistant is the oldest included message.
+    appendTurn(session, turn, `prompt ${turn}`, turn === 0 || turn === 59)
+  }
 
   const agentFiber = ctx.plugin(() => {})
   const agent = {
@@ -257,11 +292,62 @@ async function main() {
     const remote = new RemotePresentationReader(sessions, connection.generation)
     shadow = new RemotePresentationReadShadow(direct, remote, connection.generation)
 
+    const directSnapshot = await direct.read('presentation-session')
+    assert.ok(directSnapshot !== undefined)
+    const boundaryDelivery = directSnapshot.durableEvents.find(event => {
+      const data = event.data
+      return event.type === 'deliverables/presented'
+        && typeof data === 'object'
+        && data !== null
+        && data.turn === BOUNDARY_TURN
+        && Array.isArray(data.files)
+        && data.files.some(file => typeof file === 'object' && file !== null && file.path === BOUNDARY_PATH)
+    })
+    const boundaryAssistant = directSnapshot.durableEvents.find(event => {
+      const data = event.data
+      return event.type === 'assistant/message'
+        && typeof data === 'object'
+        && data !== null
+        && data.turn === BOUNDARY_TURN
+    })
+    assert.ok(boundaryDelivery !== undefined, 'fixture did not retain the boundary delivery declaration')
+    assert.ok(boundaryAssistant !== undefined, 'fixture did not retain the boundary closing assistant')
+
+    const initialBinding = sessions.binding(SessionId('presentation-session'))
+    assert.ok(initialBinding !== undefined)
+    const rawInitialWindow = initialBinding.eventSource.getSnapshot()
+    const rawInitialDurableEvents = rawInitialWindow.entries.flatMap(entry => entry.type === 'event' ? [entry.event] : [])
+    const rawInitialFirstSeq = rawInitialDurableEvents[0]?.seq
+    const rawInitialLastSeq = rawInitialDurableEvents.at(-1)?.seq
+    assert.ok(rawInitialFirstSeq !== undefined, 'initial raw Remote page has no durable events')
+    assert.ok(rawInitialLastSeq !== undefined, 'initial raw Remote page has no durable tail')
+    assert.equal(rawInitialWindow.hasMore, true, 'fixture did not produce a paged Client tail')
+    const rawHasClosingAssistant = rawInitialDurableEvents.some(event => event.seq === boundaryAssistant.seq)
+    const rawHasPreClosingDelivery = rawInitialDurableEvents.some(event => event.seq === boundaryDelivery.seq)
+    assert.equal(rawHasClosingAssistant, true, 'raw initial page did not include the boundary assistant')
+    assert.equal(rawHasPreClosingDelivery, false, 'raw initial page unexpectedly included the preceding delivery')
+    const partialLeadingTurn = boundaryDelivery.seq < rawInitialFirstSeq
+      && rawInitialFirstSeq <= boundaryAssistant.seq
+      && rawHasClosingAssistant
+      && !rawHasPreClosingDelivery
+    assert.equal(partialLeadingTurn, true, 'fixture did not reproduce a leading partial turn')
+
     let remoteSnapshot = await remote.read('presentation-session')
     assert.ok(remoteSnapshot !== undefined)
     assert.equal(remoteSnapshot.liveInputs.length, 2, 'fixture did not retain the live transient baseline')
-    assert.equal(remoteSnapshot.hasMore, true, 'fixture did not produce a paged Client tail')
+    const remoteHasClosingAssistant = remoteSnapshot.durableEvents.some(event => event.seq === boundaryAssistant.seq)
+    const remoteHasPreClosingDelivery = remoteSnapshot.durableEvents.some(event => event.seq === boundaryDelivery.seq)
+    // This assertion intentionally records the current official contract gap:
+    // the adapter exposes the message-bounded page without guessing at turn
+    // completeness or prefetching unbounded history.
+    assert.equal(remoteHasClosingAssistant, true, 'Remote reader lost the boundary assistant')
+    assert.equal(remoteHasPreClosingDelivery, false, 'boundary fixture no longer reproduces the contract gap')
+    const readerInitialFirstSeq = remoteSnapshot.durableEvents[0]?.seq
+    const readerInitialLastSeq = remoteSnapshot.durableEvents.at(-1)?.seq
+    const presentationSkips = partialLeadingTurn ? ['presentation.leadingTurnCompleteness'] : []
+
     let comparisons = 0
+    let deliveredTail
     while (true) {
       const outcome = await shadow.compare({
         sessionId: 'presentation-session',
@@ -270,6 +356,12 @@ async function main() {
       assert.equal(outcome.status, 'compared')
       assert.equal(outcome.report.comparable, true)
       assert.deepEqual(outcome.report.mismatches, [])
+      const pageProjection = projectPresentationSnapshot(remoteSnapshot, { focusMode: true, windowTurns: 100 })
+      const pageClosing = pageProjection.messages.find(message => message.kind === 'assistant' && message.text === `answer ${BOUNDARY_TURN}`)
+      if (pageClosing?.deliverables !== undefined) {
+        if (deliveredTail !== undefined) assert.deepEqual(pageClosing.deliverables, deliveredTail)
+        deliveredTail = pageClosing.deliverables
+      }
       comparisons += 1
       if (!remoteSnapshot.hasMore) break
 
@@ -281,19 +373,45 @@ async function main() {
       assert.deepEqual(after.slice(-before.length), before, 'older paging changed the retained overlap')
     }
 
-    const directSnapshot = await direct.read('presentation-session')
-    assert.ok(directSnapshot !== undefined)
     assert.equal(remoteSnapshot.durableEvents.length, directSnapshot.durableEvents.length)
     assert.equal(remoteSnapshot.hasMore, false)
-    assert.ok(comparisons >= 2)
+    assert.ok(comparisons >= 2, `expected explicit loadOlder coverage; comparisons=${comparisons}`)
+    const finalProjection = projectPresentationSnapshot(remoteSnapshot, { focusMode: true, windowTurns: 100 })
+    const boundaryMessages = finalProjection.messages.filter(message => {
+      const value = message
+      return value.kind === 'assistant' && value.deliverables?.some(file => file.path === BOUNDARY_PATH)
+    })
+    assert.equal(boundaryMessages.length, 1, 'boundary delivery did not attach to exactly one closing assistant')
+    assert.deepEqual(boundaryMessages[0].deliverables, [
+      { path: BOUNDARY_PATH, description: BOUNDARY_DESCRIPTION },
+      { path: 'second-boundary.txt', description: 'second boundary file' },
+    ])
+    assert.equal(finalProjection.messages.some(message => message.kind === 'deliverables'), false)
     console.log(JSON.stringify({
       status: 'passed',
       comparable: true,
       mismatchCount: 0,
-      skipped: [],
-       liveInputs: liveInputs.length,
+      skipped: presentationSkips,
+      liveInputs: liveInputs.length,
       pagesCompared: comparisons,
       durableEvents: remoteSnapshot.durableEvents.length,
+      deliveryBoundaryChecked: true,
+      deliveryBoundaryComplete: remoteHasPreClosingDelivery,
+      fullHistoryDeliveryComplete: deliveredTail !== undefined,
+      targetTurn: BOUNDARY_TURN,
+      deliverySeq: boundaryDelivery.seq,
+      closingAssistantSeq: boundaryAssistant.seq,
+      remoteInitialFirstSeq: rawInitialFirstSeq,
+      remoteInitialLastSeq: rawInitialLastSeq,
+      remoteInitialHasMore: rawInitialWindow.hasMore,
+      remoteInitialEventTypes: rawInitialDurableEvents.map(event => event.type),
+      assistantPresentInInitialPage: rawHasClosingAssistant,
+      deliveryPresentInInitialPage: rawHasPreClosingDelivery,
+      readerInitialFirstSeq,
+      readerInitialLastSeq,
+      readerHasClosingAssistant: remoteHasClosingAssistant,
+      readerHasPreClosingDelivery: remoteHasPreClosingDelivery,
+      partialTurnReproduced: partialLeadingTurn,
     }))
   } finally {
     shadow?.dispose()

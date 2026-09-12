@@ -100,6 +100,97 @@ test('official Client Sessions and Connection faces satisfy the presentation ada
   assert.equal(typeof constructOfficialReader, 'function')
 })
 
+test('passes deliverables/presented through as a generic durable event', async () => {
+  const files = [{ path: 'out/report.md', description: 'Final report' }]
+  const fixture = harness({
+    entries: [
+      durable(1, 'turn/start', { turn: 1 }),
+      durable(2, 'deliverables/presented', { turn: 1, callId: 'present-1', files }),
+      durable(3, 'assistant/message', { turn: 1, step: 0, message: { content: [{ type: 'text', text: 'done' }] } }),
+      durable(4, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    ],
+  })
+  const reader = new RemotePresentationReader(fixture.source, generationHarness().source)
+
+  const snapshot = await reader.read('session')
+  assert.ok(snapshot !== undefined)
+  assert.equal(Object.hasOwn(snapshot, 'presentedFiles'), false)
+  assert.equal(Object.hasOwn(snapshot, 'deliverables'), false)
+  const delivery = snapshot.durableEvents.find(event => event.type === 'deliverables/presented')
+  assert.deepEqual(delivery, {
+    type: 'deliverables/presented',
+    seq: 2,
+    time: 1_700_000_000_002,
+    data: { turn: 1, callId: 'present-1', files },
+  })
+  assert.deepEqual(snapshot.durableEvents.map(event => event.type), [
+    'turn/start', 'deliverables/presented', 'assistant/message', 'turn/end',
+  ])
+})
+
+test('exposes a message-bounded leading partial turn without inventing completeness', async () => {
+  const fixture = harness({
+    entries: [
+      durable(3, 'assistant/message', { turn: 1, step: 0, message: { content: [{ type: 'text', text: 'done' }] } }),
+      durable(4, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    ],
+    hasMore: true,
+  })
+  const reader = new RemotePresentationReader(fixture.source, generationHarness().source)
+
+  const snapshot = await reader.read('session')
+  assert.ok(snapshot !== undefined)
+  assert.equal(fixture.loadCalls, 0)
+  assert.deepEqual(snapshot.durableEvents.map(event => event.seq), [3, 4])
+  assert.equal(snapshot.durableEvents.some(event => event.type === 'deliverables/presented'), false)
+  assert.equal(snapshot.hasMore, true)
+})
+
+test('does not treat arbitrary data.turn metadata as an official paging boundary', async () => {
+  const fixture = harness({
+    entries: [
+      durable(3, 'custom/event', { turn: 1 }),
+      durable(4, 'assistant/message', { turn: 1, step: 0 }),
+    ],
+    hasMore: true,
+  })
+  const reader = new RemotePresentationReader(fixture.source, generationHarness().source)
+
+  const snapshot = await reader.read('session')
+  assert.ok(snapshot !== undefined)
+  assert.equal(fixture.loadCalls, 0)
+  assert.deepEqual(snapshot.durableEvents.map(event => event.seq), [3, 4])
+})
+
+test('discards or cancels explicit paging after its read fence changes', async () => {
+  const generations = generationHarness()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const staleFixture = harness({
+    entries: [durable(1)],
+    hasMore: true,
+    loadOlder: () => gate,
+  })
+  const stale = new RemotePresentationReader(staleFixture.source, generations.source).loadOlder('session')
+  generations.set({ id: 2 })
+  release()
+  assert.equal(await stale, undefined)
+
+  let cancelRelease!: () => void
+  const cancelGate = new Promise<void>(resolve => { cancelRelease = resolve })
+  const cancelledFixture = harness({
+    entries: [durable(1)],
+    hasMore: true,
+    loadOlder: () => cancelGate,
+  })
+  const controller = new AbortController()
+  const cancelled = new RemotePresentationReader(cancelledFixture.source, generations.source)
+    .loadOlder('session', controller.signal)
+  controller.abort()
+  cancelRelease()
+  await assert.rejects(cancelled, { name: 'AbortError' })
+})
+
 test('reconstructs one synthetic start per live tuple and preserves each plane source order', async () => {
   const fixture = harness({
     entries: [

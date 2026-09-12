@@ -542,9 +542,10 @@ The shadow uses the official Connection and generated Remotes only:
 
 ## D1.3 status — Task and presentation read parity
 
-D1.3 completes the D1 read-side discovery and proof milestone. Production remains
-Direct; the Remote path is an experimental, read-only shadow and introduces no
-write, lifecycle, child-control, custom-serve, or production-backend switch.
+D1.3 completes the D1 read-side discovery and proof milestone for generic
+presentation transport and projection parity. Production remains Direct; the
+Remote path is an experimental, read-only shadow and introduces no write,
+lifecycle, child-control, custom-serve, or production-backend switch.
 
 - `DirectTaskReader` reads the live Direct child catalog and jobs registry. It
   re-projects child activity from the live Agent registry at read time and maps
@@ -562,6 +563,14 @@ write, lifecycle, child-control, custom-serve, or production-backend switch.
   event-source order within the durable and transient planes,
   deep-detaches/freeze-protects payloads, and synthesizes at most one assistant
   start marker per live tuple. It never fabricates an assistant end marker.
+  `deliverables/presented` remains a generic durable Session event; no
+  deliverables-specific Remote contract is added.
+- The official bounded Session history window is message-aligned, not
+  turn-aligned. It can expose a closing assistant while an earlier turn-local
+  durable fact is in the next older page. The Remote reader does not guess at
+  completeness or prefetch unbounded history; this known capability gap is
+  recorded as `presentation.leadingTurnCompleteness` until the official Session
+  history contract exposes a bounded completeness target.
 - `DirectPresentationReader` uses the existing Direct Session event snapshot and
   assistant stream baseline; it does not introduce a second stream tracker or
   history reducer. `RemotePresentationReadShadow` compares the matching durable
@@ -571,7 +580,8 @@ write, lifecycle, child-control, custom-serve, or production-backend switch.
 - `scripts/dsh-remote-task-read-parity-smoke.mjs` proves same-Host continuable
   and one-shot child catalog parity, job parity, and a child/job status mutation.
   `scripts/dsh-remote-presentation-parity-smoke.mjs` proves a real bounded
-  Client event window, `loadOlder()` paging with retained overlap, and semantic
+  Client event window, records the leading-turn capability gap, verifies
+  `loadOlder()` paging with retained overlap, and proves eventual semantic
   transcript/window/Focus parity without an external provider.
 - `scripts/dsh-remote-d1-closure-smoke.mjs` aggregates the existing Session and
   authority proof surfaces with the D1.3 Task and presentation proofs into one
@@ -589,16 +599,19 @@ The D1 closure ledger is:
 | direct-child subagents | Host subagent runtime | `ClientSessions.refreshSubagents` / `subagentsByParent` | parity | — |
 | jobs | `ctx.jobs` | `ClientSessions.jobsBySession` | parity | — |
 | history window | Direct Session events | `SessionBinding.eventSource` | parity | — |
-| history paging | Direct full history | `SessionFace.loadOlder()` + eventSource | parity | — |
+| history paging | Direct full history | `SessionFace.loadOlder()` + eventSource | eventual parity; bounded leading-turn completeness skipped | DSH Session history contract |
 | live Assistant presentation | Direct stream | transient event-source entries | parity | — |
 | full descendant tree | `listDescendants` | no exact official equivalent | skipped | D5/upstream |
 | `createdAt` | Direct query | no Client list field | skipped | later only if required |
 | Direct `live` bit | attached-store fact | different Client running semantic | skipped | reconsider on flip |
 | context pressure | token meter | no Client equivalent | skipped | later Host seam if retained |
 
-The only D1 skips are `session.createdAt`, `session.live`,
-`session.measureContext`, and `subagent.descendantTree`; each is explicit in the
-shadow report and closure smoke. No additional read gap is inferred or hidden.
+The D1 skips are `session.createdAt`, `session.live`,
+`session.measureContext`, `subagent.descendantTree`, and
+`presentation.leadingTurnCompleteness`; each is explicit in the shadow report
+and closure smoke. The last gap is an upstream Session history-window contract
+limitation: message-aligned pages do not expose a bounded target for the start
+of a leading turn, so the Remote reader does not guess or prefetch full history.
 
 ## Known blockers
 
@@ -612,6 +625,7 @@ shadow report and closure smoke. No additional read gap is inferred or hidden.
 | `@file` resolving on the Client filesystem | High | M1.10 sealed the locality boundary: all `@` discovery/canonicalization goes through `HostFilePort`; the M2 Remote adapter maps it to Host fileReferences |
 | Credentials exposure beyond loopback | Critical | Attach limited to localhost/SSH until real auth |
 | Dual-stack semantic drift | Medium | Shared backend contract test matrix |
+| Bounded Session history pages do not expose leading-turn completeness | Medium | Track `presentation.leadingTurnCompleteness` upstream; do not guess or prefetch full history in the Remote reader |
 | Upstream DSH contract changes | Medium | Public export audit + per-release compatibility matrix; no old/new runtime fallback |
 
 ## Startup constraint
