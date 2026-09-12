@@ -21,7 +21,7 @@ import {
 } from './skill-catalog.ts'
 
 /** Minimal live-agent face consumed by the effective catalog readers. */
-export interface SurfaceCatalogAgent {
+interface SurfaceCatalogAgent {
   readonly ctx: object
   readonly session: {
     readonly header: {
