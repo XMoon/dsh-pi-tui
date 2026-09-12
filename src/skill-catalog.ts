@@ -40,6 +40,8 @@ export interface HumanSkillSummary {
   readonly name: string
   readonly description: string
   readonly whenToUse?: string
+  /** Official model-invocation capability; Host-local paths are omitted. */
+  readonly modelInvocable?: boolean
 }
 
 /** The detached human skill catalog one observation produced. */
@@ -158,6 +160,9 @@ function toHumanSummary(skill: SkillSummaryLike): HumanSkillSummary | undefined 
     description: skill.description,
     ...typeof skill.whenToUse === 'string' && skill.whenToUse !== ''
       ? { whenToUse: skill.whenToUse }
+      : {},
+    ...typeof skill.invocation?.modelInvocable === 'boolean'
+      ? { modelInvocable: skill.invocation.modelInvocable }
       : {},
   })
 }

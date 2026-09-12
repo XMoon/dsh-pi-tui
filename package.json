@@ -215,6 +215,7 @@
     "smoke:official-presets": "node scripts/official-presets-smoke.mjs",
     "smoke:remote-session-read": "node --import tsx/esm scripts/dsh-remote-session-read-smoke.mjs",
     "smoke:remote-session-read-parity": "node --import tsx/esm scripts/dsh-remote-session-read-parity-smoke.mjs",
+    "smoke:remote-surface-authority-parity": "node --import tsx/esm scripts/dsh-remote-surface-authority-parity-smoke.mjs",
     "smoke:boundary": "node scripts/dsh-runtime-boundary-smoke.mjs",
     "dsh:source:pack": "node scripts/dsh-source-pack.mjs",
     "compat:dsh:source": "node scripts/dsh-source-verify.mjs",

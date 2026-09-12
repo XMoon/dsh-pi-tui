@@ -11,7 +11,7 @@
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
-M2  IN PROGRESS   (D1.1 DONE: Remote Session read adapter + generation-fenced shadow; same-Host parity and release-family gates verified; writes remain unimplemented)
+M2  IN PROGRESS   (D1.1 DONE: Remote Session read adapter + generation-fenced shadow; D1.2 DONE: pinned-master command/skill authority read shadow; writes remain unimplemented)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -488,7 +488,7 @@ while the overall M2 remains in progress:
   `createdAt`, the unresolved `live` badge, and `measureContext`. Every async
   completion and failure is fenced by both operation epoch and Connection
   generation identity; stale results are reported as `discarded`.
-- `scripts/dsh-remote-session-read-smoke.mjs` assembles the official rc1
+- `scripts/dsh-remote-session-read-smoke.mjs` assembles the pinned Source Mode
   Connection, API Gateway, generated Session Remotes, and Session Controller
   Client over the official fixture. It exercises list/projection/search,
   `SessionBinding` `loadThrough`/`loadOlder` history paging, Connection reconnect,
@@ -502,16 +502,41 @@ while the overall M2 remains in progress:
   before and after Host-side title and preset-selection updates, with no
   synthetic ready frame or private envelope.
 - `compat:dsh:client-family` runs the fixture and same-Host parity gates in an
-  isolated install using the exact DSH version declared by `package.json`.
-  CI uses this default path, so it follows the selected DSH target when the
-  dependency is upgraded. A different release is a local-only probe via
+  isolated npm install using the exact DSH version declared by `package.json`.
+  CI runs this release-family job only in npm mode; Source Mode runs the same
+  parity scripts against the pinned source distribution in the Source checks
+  lane. A different npm release is a local-only probe via
   `pnpm compat:dsh:client-family -- --dsh-version <version>`; it is not an
   additional CI lane. The exact-family override fences released packages in
   the selected rc line while retaining older legacy dependencies where the
   official release graph still requires them.
 
 Production remains Direct. No Remote Backend, Session writer, UI wiring, retry
-loop, raw persistence access, or duplicate event fold is introduced by D1.1.
+loop, raw persistence access, or duplicate event fold is introduced by D1.1/D1.2.
+
+## D1.2 status — pinned-master command/skill authority shadow
+
+D1.2 is complete for the experimental live-session authority read shadow. The
+`next` Source Mode pin is `c291e7961a515f6d7af9304e7fd1d257929aef26` (`0.1.5-rc.2`).
+The shadow uses the official Connection and generated Remotes only:
+
+- `commands/list(sessionId)` and `skills/list({ sessionId }, signal)` are mapped
+  into detached command/skill metadata.
+- It is live-Session-only and diagnostic-only; it never discovers a standing
+  catalog, creates an Agent, installs TUI state, executes a command, loads a
+  skill body, or performs a write.
+- Direct remains the production authority. Remote failures are unavailable/error
+  outcomes, never authoritative empty catalogs, and every completion/failure is
+  fenced by operation and Connection-generation identity.
+- `definitionId`, input hint/presence, and attachment declarations are retained;
+  `modelInvocable` is retained; Host-local skill `path` is deliberately omitted.
+  The report also derives bare/argument claim policy from input metadata without
+  invoking commands.
+- `scripts/dsh-remote-surface-authority-parity-smoke.mjs` proves same-Host parity
+  using a real Agent scope and the official generated Remote transport.
+
+D1.3 remains TODO for subagent and presentation read parity. Remote writes remain
+unimplemented.
 
 ## Known blockers
 

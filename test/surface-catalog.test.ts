@@ -9,13 +9,20 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { CommandDescriptor } from '@deepseek-ai/dsh-commands'
 import type { SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
 import {
+  commandSummaryOf,
   listGlobalCommands,
   readSurfaceCatalog,
   type SurfaceCatalogContext,
 } from '../src/surface-catalog.ts'
+
+type TestCommandDescriptor = {
+  readonly definitionId?: string
+  readonly name: string
+  readonly description: string
+  readonly input?: { readonly hint: string; readonly attachments?: boolean }
+}
 
 /** A minimal fake agent with a header cwd. */
 function fakeAgent(cwd = '/ws'): Agent {
@@ -23,7 +30,7 @@ function fakeAgent(cwd = '/ws'): Agent {
 }
 
 /** A scripted commands service. */
-function fakeCommands(list: (agent: Agent) => readonly CommandDescriptor[]): SurfaceCatalogContext['get'] extends never ? never : object {
+function fakeCommands(list: (agent: Agent) => readonly TestCommandDescriptor[]): SurfaceCatalogContext['get'] extends never ? never : object {
   return { list }
 }
 
@@ -34,7 +41,7 @@ function fakeSkills(list: (options: SkillViewOptions) => Promise<readonly SkillS
 
 /** Build a context surface from scripted services. */
 function contextOf(options: {
-  commands?: { list: (agent: Agent) => readonly CommandDescriptor[] }
+  commands?: { list: (agent: Agent) => readonly TestCommandDescriptor[] }
   skills?: {
     list?: (options: SkillViewOptions) => Promise<readonly SkillSummary[]>
     snapshot?: (options: SkillViewOptions) => Promise<{ skills: readonly SkillSummary[]; complete: boolean }>
@@ -55,8 +62,20 @@ function skill(name: string, invocation: { modelInvocable: boolean; userInvocabl
   return { name, description: `desc-${name}`, invocation, source: 'bundled', provider: 'test' }
 }
 
-function command(name: string, description = `desc-${name}`, input?: { hint: string }): CommandDescriptor {
-  return { name, description, ...input === undefined ? {} : { input } }
+function command(
+  name: string,
+  description = `desc-${name}`,
+  input?: { hint: string; attachments?: boolean },
+  definitionId?: string,
+): TestCommandDescriptor {
+  return {
+    ...(definitionId === undefined
+      ? {}
+      : { definitionId }),
+    name,
+    description,
+    ...input === undefined ? {} : { input },
+  }
 }
 
 test('the global-list helper reads the global layer only (isolated cast)', () => {
@@ -109,6 +128,25 @@ test('an identical scoped descriptor needs no override entry', async () => {
   assert.deepEqual(snapshot.commands.map(item => item.name), ['same'])
 })
 
+test('command summaries preserve definitionId as detached metadata', () => {
+  const summary = commandSummaryOf(command('plan', 'Plan', undefined, 'definition-plan'))
+  assert.equal(summary.definitionId, 'definition-plan')
+  assert.deepEqual(Object.keys(summary).sort(), ['definitionId', 'description', 'name'])
+})
+
+test('definitionId differences keep a scoped command override visible', async () => {
+  const ctx = contextOf({
+    commands: {
+      list: (agent) => agent === undefined
+        ? [command('same', 'd', undefined, 'definition-global')]
+        : [command('same', 'd', undefined, 'definition-scoped')],
+    },
+  })
+  const snapshot = await readSurfaceCatalog(fakeAgent(), new AbortController().signal, ctx)
+  assert.deepEqual(snapshot.scopedCommands.map(item => item.definitionId), ['definition-scoped'])
+  assert.equal(snapshot.commands[0]?.definitionId, 'definition-scoped')
+})
+
 test('a missing commands service is a successful empty result, not an issue', async () => {
   const ctx = contextOf({ skills: { list: async () => [] } })
   const snapshot = await readSurfaceCatalog(fakeAgent(), new AbortController().signal, ctx)
@@ -131,6 +169,7 @@ test('the human skill catalog applies the official user-invocation policy', asyn
   })
   const snapshot = await readSurfaceCatalog(fakeAgent(), new AbortController().signal, ctx)
   assert.deepEqual(snapshot.skills.map(item => item.name), ['both', 'user-only'])
+  assert.deepEqual(snapshot.skills.map(item => item.modelInvocable), [true, false])
   assert.deepEqual(snapshot.issues, [])
 })
 
@@ -267,8 +306,8 @@ test('the snapshot is fully detached and frozen: later source mutation cannot le
   assert.deepEqual(snapshot.skills.map(item => item.name), ['aaa', 'zzz'])
   assert.deepEqual(snapshot.commands.map(item => item.name), ['beta', 'gamma'])
   // The summaries carry no agent/service/provider references by construction:
-  // every entry is a fresh { name, description[, input] } object.
-  for (const item of snapshot.skills) assert.deepEqual(Object.keys(item).sort(), ['description', 'name'])
+  // every entry is a fresh { name, description[, input, modelInvocable] } object.
+  for (const item of snapshot.skills) assert.deepEqual(Object.keys(item).sort(), ['description', 'modelInvocable', 'name'])
   for (const item of snapshot.commands) assert.deepEqual(Object.keys(item).sort(), ['description', 'name'])
 })
 
