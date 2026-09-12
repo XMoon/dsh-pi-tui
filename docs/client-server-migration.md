@@ -608,10 +608,12 @@ The D1 closure ledger is:
 
 The D1 skips are `session.createdAt`, `session.live`,
 `session.measureContext`, `subagent.descendantTree`, and
-`presentation.leadingTurnCompleteness`; each is explicit in the shadow report
-and closure smoke. The last gap is an upstream Session history-window contract
-limitation: message-aligned pages do not expose a bounded target for the start
-of a leading turn, so the Remote reader does not guess or prefetch full history.
+`presentation.leadingTurnCompleteness`; each is explicit in the D1 closure
+ledger and smoke. `presentation.leadingTurnCompleteness` is proven by the real
+Host/Client pagination smoke rather than inferred by
+`RemotePresentationReadShadow`, because the current official Session history
+contract exposes no bounded leading-turn completeness marker. The Remote reader
+therefore does not guess or prefetch full history.
 
 ## Known blockers
 
