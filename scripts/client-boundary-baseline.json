@@ -111,8 +111,7 @@
     "import:dsh-session"
   ],
   "surface-catalog.ts": [
-    "commands",
-    "import:dsh-agent"
+    "commands"
   ],
   "transcript.ts": [
     "import:dsh-session"
