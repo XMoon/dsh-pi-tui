@@ -10,6 +10,7 @@
 
 import {
   readSurfaceCatalog,
+  type SurfaceCatalogAgent,
   type SurfaceCatalogContext,
 } from '../../surface-catalog.ts'
 import type {
@@ -22,13 +23,10 @@ export interface DirectSurfaceAuthorityContext {
   get(name: string): unknown
 }
 
-/** Structural live-Agent slice needed to select the skill read cwd. */
-export interface DirectSurfaceAuthorityAgent {
-  readonly session: {
-    readonly header: {
-      readonly cwd?: string
-    }
-  }
+/** Structural live-Agent slice needed by the surface collector. */
+export interface DirectSurfaceAuthorityAgent extends SurfaceCatalogAgent {
+  /** The agent-scoped context is required for preset-local skill resolution. */
+  readonly ctx: DirectSurfaceAuthorityContext
 }
 
 /** Read the Direct authority for an already-live Session. */
@@ -50,7 +48,7 @@ export class DirectSurfaceAuthorityReader implements SurfaceAuthorityReader {
     if (agent === undefined) return undefined
     const readSignal = signal ?? new AbortController().signal
     const catalog = await readSurfaceCatalog(
-      agent as Parameters<typeof readSurfaceCatalog>[0],
+      agent,
       readSignal,
       this.ctx as unknown as SurfaceCatalogContext,
     )

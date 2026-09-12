@@ -222,15 +222,20 @@ test('returns unavailable/error outcomes without turning failures into empty cat
   })
   disconnectedShadow.dispose()
 
+  let remoteCallsWithoutDirect = 0
   const directUnavailable = new RemoteSurfaceAuthorityShadow(
     readerOf(async () => undefined),
-    readerOf(async () => snapshot()),
+    readerOf(async () => {
+      remoteCallsWithoutDirect += 1
+      return snapshot()
+    }),
     generations().source,
   )
   assert.deepEqual(await directUnavailable.compare({ sessionId: 'session-a' }), {
     status: 'unavailable',
     reason: 'direct-unavailable',
   })
+  assert.equal(remoteCallsWithoutDirect, 0, 'Remote must not probe without a live Direct Agent')
   directUnavailable.dispose()
 
   const remoteFailure = new Error('Remote transport failed')
@@ -256,26 +261,23 @@ test('returns unavailable/error outcomes without turning failures into empty cat
   remoteUnavailable.dispose()
 })
 
-test('aborts a pending sibling read when the current provider fails', async () => {
-  const pendingDirect = deferred<SurfaceAuthoritySnapshot | undefined>()
-  let directSignal: AbortSignal | undefined
+test('aborts the owned operation when the current provider fails', async () => {
+  let remoteSignal: AbortSignal | undefined
   const remoteFailure = new Error('current Remote failure')
   const shadow = new RemoteSurfaceAuthorityShadow(
+    readerOf(async () => snapshot()),
     readerOf(async (_sessionId, signal) => {
-      directSignal = signal
-      return pendingDirect.promise
+      remoteSignal = signal
+      throw remoteFailure
     }),
-    readerOf(async () => { throw remoteFailure }),
     generations().source,
   )
 
   const outcome = await shadow.compare({ sessionId: 'session-a' })
   assert.equal(outcome.status, 'error')
   if (outcome.status === 'error') assert.equal(outcome.error, remoteFailure)
-  const observedSignal = directSignal
-  assert.ok(observedSignal)
-  assert.equal(observedSignal.aborted, true)
-  pendingDirect.resolve(snapshot())
+  assert.ok(remoteSignal)
+  assert.equal(remoteSignal.aborted, true)
   shadow.dispose()
 })
 
@@ -301,18 +303,21 @@ test('discards a stale success when a newer compare supersedes it', async () => 
   shadow.dispose()
 })
 
-test('discards stale failure after a Connection generation change', async () => {
-  const directRead = deferred<SurfaceAuthoritySnapshot | undefined>()
+test('discards stale Remote failure after a Connection generation change', async () => {
   const remoteRead = deferred<SurfaceAuthoritySnapshot | undefined>()
+  const remoteStarted = deferred<void>()
   const clock = generations()
   const shadow = new RemoteSurfaceAuthorityShadow(
-    readerOf(async () => directRead.promise),
-    readerOf(async () => remoteRead.promise),
+    readerOf(async () => snapshot()),
+    readerOf(async () => {
+      remoteStarted.resolve()
+      return remoteRead.promise
+    }),
     clock.source,
   )
   const compare = shadow.compare({ sessionId: 'session-a' })
+  await remoteStarted.promise
   clock.set({ id: 'g2' })
-  directRead.reject(new Error('stale direct failure'))
   remoteRead.reject(new Error('stale remote failure'))
 
   assert.deepEqual(await compare, { status: 'discarded', reason: 'stale-generation' })

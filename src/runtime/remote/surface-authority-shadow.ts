@@ -332,13 +332,17 @@ export class RemoteSurfaceAuthorityShadow {
 
     const operation = this.beginOperation(capturedGeneration, options)
     try {
-      const [direct, remote] = await Promise.all([
-        this.direct.read(operation.sessionId, operation.signal),
-        this.remote.read(operation.sessionId, operation.signal),
-      ])
+      // Direct is the production authority and the live-Agent gate. Do not
+      // probe the Remote catalog until Direct confirms that this Session has
+      // a live Agent; official Remote skills are cold-readable by design.
+      const direct = await this.direct.read(operation.sessionId, operation.signal)
       if (!this.isCurrent(operation)) return this.discarded(operation)
       operation.signal.throwIfAborted()
       if (direct === undefined) return { status: 'unavailable', reason: 'direct-unavailable' }
+
+      const remote = await this.remote.read(operation.sessionId, operation.signal)
+      if (!this.isCurrent(operation)) return this.discarded(operation)
+      operation.signal.throwIfAborted()
       if (remote === undefined) return { status: 'unavailable', reason: 'remote-unavailable' }
 
       const report = compareSnapshots(direct, remote, operation.generation)
