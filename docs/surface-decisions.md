@@ -148,7 +148,9 @@ the child's running state and `busyEnter` policy, then call the OFFICIAL
 mode: 'continuable', delivery, content }, signal)` control API
 (DSH 0.1.2-alpha.4) —
 user provenance, with queue or steer delivery; parent authority is validated by
-the Host itself. Decisions a future change must not silently reverse:
+the Host itself. An empty accelerated submit is the separate child-scoped
+`queued`-occurrence steer-all and never calls this prompt API. Decisions a
+future change must not silently reverse:
 
 - **The viewer editor is a PLAIN text editor.** Everything typed — including
   lines that start with `/` — is delivered to the child as text; slash
@@ -161,7 +163,7 @@ the Host itself. Decisions a future change must not silently reverse:
   keys preserve it), ↓ task browser, Ctrl+G external editor, Ctrl+V image
   intake) are consumed by the host BEFORE the ladder reaches the editor, so
   the viewer can never act on the parent session.
-- **The write path is exactly one**: the runner's `onSubagentSubmit` →
+- **Non-empty viewer prompt writes have exactly one path**: the runner's `onSubagentSubmit` →
   `submitSubagentPrompt` (src/subagent-viewer-submit.ts) → the official
   `ctx.subagents.prompt`. Never `ctx.subagents.sendMessage(...)` (that is
   the Agent-authored Steer path — a human prompt must queue as its own
@@ -173,6 +175,12 @@ the Host itself. Decisions a future change must not silently reverse:
   (`subagent/parent-unavailable`, `subagent/not-resumable`,
   `subagent/unauthorized`, `subagent/delivery-unavailable`,
   `gateway/cancelled`, …).
+- **Child queue occurrence access is separately fenced.** Reader and queue
+  mutation calls may use only the exact live Agent mounted by the current
+  interactive direct-child continuable viewer, with the pinned direct parent
+  and registry identity still matching. This queue-only resolver never grants
+  ordinary child prompt authority; non-empty prompts remain parent-authorized
+  through `SubagentPort`.
 - **Viewer submissions never enter the shared editor history.** An ↑ recall
   in the MAIN editor must not resend a child-scoped follow-up to the
   parent. The fork editor's own per-editor recall is untouched.

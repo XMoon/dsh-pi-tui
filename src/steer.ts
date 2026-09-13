@@ -198,7 +198,9 @@ export function steerHasPayload(
  * sweep the snapshot's `queued` occurrences. The queue phase follows the
  * dsh-web client: it addresses occurrences in FIFO order, never replays a
  * copied message, and makes no atomic/same-step claim. With `onlyDraft` the
- * queue is neither read nor mutated.
+ * queue is neither read nor mutated. A non-empty whitespace string explicitly
+ * marked `draftHasPayload: false` is never prompted, but is restored when no
+ * queue write commits.
  */
 export async function steerAll(deps: SteerDeps, text: string, options: SteerAllOptions = {}): Promise<SteerOutcome> {
   // The whole steer write runs inside the operation barrier: a transition
@@ -263,14 +265,17 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   const draftHasPayload = options.draftHasPayload ?? text.trim() !== ''
   const draftOnly = onlyDraft || draftHasPayload
   const agent = deps.currentAgent()
-  if (agent === undefined) return 'ok'
+  if (agent === undefined) {
+    if (text !== '') deps.restoreDraft(text)
+    return 'ok'
+  }
   const generation = deps.currentGeneration()
   const pending = deps.pendingInputReader.snapshot(agent.session.id)
   if (pending === undefined) {
     // The identity was live but its semantic read projection disappeared
     // before the write window. Do not guess an empty queue or fall back to
     // Direct collections; treat the gesture as stale.
-    const verbatim = draftHasPayload ? deps.restoreDraft(text) : true
+    const verbatim = draftHasPayload || text !== '' ? deps.restoreDraft(text) : true
     deps.notify(verbatim ? deps.staleNotice() : deps.mergedNotice(), 'error')
     return 'stale'
   }
@@ -278,9 +283,12 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   // With no draft payload, only `placement: 'queued'` occurrences participate;
   // `steering` and `context` are already outside the queue gesture.
   const snapshot = draftOnly ? [] : pending.items.filter(item => item.placement === 'queued')
-  // Gate B: when there is no draft payload and no queue, nothing to send is a
-  // clean no-op for both onlyDraft and full Ctrl+S.
-  if (!draftHasPayload && snapshot.length === 0) return 'ok'
+  // Gate B: when there is no draft payload and no queue, nothing is sent for
+  // either onlyDraft or full Ctrl+S; preserve any non-empty non-payload text.
+  if (!draftHasPayload && snapshot.length === 0) {
+    if (text !== '') deps.restoreDraft(text)
+    return 'ok'
+  }
   // Re-validate BEFORE delivery: agent identity and generation must still
   // match what was captured. Queue races are resolved per occurrence by the
   // writer below, so a changed queue does not invalidate the whole sweep.
@@ -305,7 +313,21 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   }
   let steeredCount = 0
   for (const message of snapshot) {
-    const outcome = await deliverQueued(deps, now, message.id)
+    // Queue steering is one async occurrence at a time. Re-check the exact
+    // viewer/session identity before every occurrence so closing, switching,
+    // or replacing a same-id Agent stops an old sweep before its next write.
+    const current = deps.currentAgent()
+    if (current === undefined || !sessionUnchanged({ agent, generation }, current, deps.currentGeneration())) {
+      deps.restoreDraft(text)
+      deps.notify(deps.staleNotice(), 'info')
+      return 'stale'
+    }
+    if (deps.fence?.() === true) {
+      deps.restoreDraft(text)
+      deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
+      return 'stale'
+    }
+    const outcome = await deliverQueued(deps, current, message.id)
     if (outcome.kind === 'committed') {
       steeredCount += 1
       continue
@@ -313,13 +335,19 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
     if (isConvergentQueueSteer(outcome)) {
       // Match dsh-web: the snapshot is no longer authoritative, so end this
       // sweep quietly rather than replaying the stale message or racing ahead.
+      if (text !== '') deps.restoreDraft(text)
       return 'ok'
     }
-    if (outcome.kind === 'cancelled') throw cancellationError('queue steer cancelled')
+    if (outcome.kind === 'cancelled') {
+      if (text !== '') deps.restoreDraft(text)
+      throw cancellationError('queue steer cancelled')
+    }
     if (outcome.kind === 'indeterminate') {
+      if (text !== '') deps.restoreDraft(text)
       deps.notify(`queue steering became indeterminate after ${steeredCount} message${steeredCount === 1 ? '' : 's'} — do not retry automatically`, 'error')
       return 'indeterminate'
     }
+    if (text !== '') deps.restoreDraft(text)
     deps.notify(`queue steering stopped after ${steeredCount} message${steeredCount === 1 ? '' : 's'}`, 'error')
     return 'stale'
   }

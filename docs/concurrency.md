@@ -47,8 +47,9 @@ distinct:
   late subagent-viewer attach, clears it at end/restart/disposal, and never
   writes that transient baseline to the durable Session. A continuable child
   viewer follows the current registered Agent lifecycle, so a same-session
-  cold-resume after disposal rebinds to the new Agent while delayed frames from
-  the retired Agent remain fenced.
+  cold-resume after disposal rebinds to the new Agent at `turn/start` (before
+  the first assistant frame) while delayed frames from the retired Agent remain
+  fenced.
 
 The session picker consumes the semantic list and zero-I/O projection-cache
 seams only. It never observes a cold Session merely to fill a label and never
@@ -177,7 +178,7 @@ without changing the ownership or ordering rules:
   Queue races settle per occurrence rather than aborting the whole sweep;
   missing/unavailable occurrences stop it quietly without replay, and a genuine
   or indeterminate failure never claims atomicity or retries.
-- Alt+Up removes pullable queued user occurrences one at a time in FIFO order;
+- Alt+Up removes `queued` occurrences one at a time in FIFO order;
   already-`steering` and `context` placements are not queue-gesture targets. A known
   partial refusal restores only confirmed removals; an indeterminate removal
   keeps every recalled representation for manual review and is never retried.
@@ -195,11 +196,20 @@ without changing the ownership or ordering rules:
 - Continuable viewer prompts carry the runner-resolved `queue` or `steer`
   delivery from the child running state and `busyEnter` policy. The prompt
   port forwards that delivery with human provenance; it does not force every
-  viewer prompt into a FIFO queue.
+  viewer prompt into a FIFO queue. An empty accelerated viewer submit is a
+  child-scoped queue steer-all: it snapshots only the live child’s `queued`
+  occurrences and never calls the child prompt API. If that no-payload sweep
+  cannot settle, the original child draft (including whitespace-only input) is
+  restored to the current editor or the stale child slot. Child queue occurrence
+  reads and mutations require the exact interactive continuable viewer Agent,
+  its live registry identity, and its pinned direct parent; ordinary child
+  prompts retain `SubagentPort` parent authority.
 
 Known-unwritten outcomes are never reported as committed. An indeterminate
-future wire result is not retried automatically or restored as if it were
-known-unwritten. Direct normally returns confirmed `committed` or explicit
+future wire result is not retried automatically or restored as if the queued
+occurrence were known-unwritten. A no-payload whitespace draft may still be
+restored as editor input; that does not restore or replay the occurrence. Direct
+normally returns confirmed `committed` or explicit
 refusal outcomes; its exceptional non-occurrence failures continue through the
 owned rejection path, while occurrence-level exceptions remain indeterminate
 because removal may already have happened.

@@ -1662,10 +1662,15 @@ export type ComposerSubmitGesture = 'enter' | 'accelerated'
  */
 export type ComposerSubmitRequest = ComposerSubmitGesture | 'explicit-queue'
 
-/** A semantic follow-up submit from the interactive subagent viewer: the
- * runner's write path is the official `ctx.subagents.prompt(…)` human
- * prompt, with the submit gesture preserved for delivery resolution, NEVER
- * `ctx.subagents.sendMessage` (the Agent-authored Steer path) and never
+/** Whether a viewer submit is the empty accelerated queue-steer gesture. */
+export function isEmptyAcceleratedViewerSubmit(text: string, gesture: ComposerSubmitRequest): boolean {
+  return gesture === 'accelerated' && text.trim() === ''
+}
+
+/** A semantic submit from the interactive subagent viewer: non-empty text
+ * uses the runner's write path, which is the official `ctx.subagents.prompt(…)` human prompt;
+ * an empty accelerated text is the child queue steer-all signal and must not
+ * become an empty prompt. Neither path uses `ctx.subagents.sendMessage` or
  * the main-session submit/steer/queue path. */
 export interface SubagentViewerSubmit {
   readonly parentSessionId: string
@@ -1778,10 +1783,11 @@ export interface TuiAppEventsBase {
    */
   onSteer?: (text: string) => void
   /**
-   * A follow-up submit from the INTERACTIVE subagent viewer (Enter or the accelerated steer gesture while
-   * viewing a `continuable` child): the runner resolves the gesture against child activity and delivers the text through
-   * the official `ctx.subagents.prompt(…)` human prompt — never
-   * `subagents.sendMessage` and never the main-session submit/steer/queue
+   * A submit from the INTERACTIVE subagent viewer (Enter or the accelerated gesture while
+   * viewing a `continuable` child): non-empty text resolves delivery against child activity and reaches
+   * the official `ctx.subagents.prompt(…)` human prompt; an empty accelerated submit is the child queue
+   * steer-all and never calls prompt. Neither path uses
+   * `ctx.subagents.sendMessage` and never the main-session submit/steer/queue
    * path. The draft has ALREADY been cleared by the app; the runner
    * restores it (merged) when the delivery is rejected, through the app's
    * viewer-draft API. Optional.
@@ -8524,7 +8530,9 @@ export class TuiApp {
     // Emptiness is judged on the SERIALIZED wire form: a bare `!` / `!!`
     // shell mode has an empty BODY but a non-empty wire form, and must
     // reach the child like the literal prefix did before the mode feature.
-    if (serialized.trim() === '') return
+    // An empty accelerated submit is meaningful: it is the child-scoped
+    // steer-all gesture, not an empty prompt. Enter remains a no-op.
+    if (serialized.trim() === '' && !isEmptyAcceleratedViewerSubmit(serialized, gesture)) return
     this.clearNotify()
     // Snapshot + clear the visible child draft. The per-child SLOT is
     // cleared EXPLICITLY — not via the onChange mirror — because a

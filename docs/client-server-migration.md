@@ -615,13 +615,19 @@ production backend change is part of this slice.
   `removeQueued`, semantic `cancel`, outcome-bearing `rename`, and explicit
   unsupported title refresh. `PendingInputReader` exposes the Host-owned queue
   projection (`queued` / `steering` / `context`) and running state; Direct maps
-  its inbox internally, while consumers never read `nextTurn` / `nextStep`.
+  its inbox internally, while consumers never read `nextTurn` / `nextStep` or
+  message `source`. The Direct mapping is `nextTurn → queued` and
+  `nextStep → steering` only for user-origin messages, otherwise `context`.
   Ctrl+S and Alt+Up are runner-level FIFO best-effort orchestration over those
   single-occurrence operations: payload-bearing Ctrl+S sends only the draft;
   empty-draft Ctrl+S and Alt+Up operate only on `queued` occurrences, stop on
-  the first genuine failure, and never claim cross-occurrence atomicity. Direct
-  resolves the live Agent by session id and reports only confirmed synchronous
-  calls as `committed`.
+  the first genuine failure, and never claim cross-occurrence atomicity. An
+  empty accelerated submit in an interactive continuable child viewer applies
+  the same queued-occurrence choreography to that child and never calls the
+  ordinary child prompt API. Direct resolves the live Agent by session id and
+  reports only confirmed synchronous calls as `committed`. Direct-only
+  notice/source presentation remains in the existing queue/task projection
+  rather than the semantic reader contract.
 - `HostCommandPort` owns execution of an already-authorized Host command only.
   The runner retains claim precedence and keeps TUI-local commands, extension
   commands, and skill-wrapper delivery out of this seam. Direct forwards the

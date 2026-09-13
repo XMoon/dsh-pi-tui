@@ -83,11 +83,20 @@ function serviceUnavailable<T>(service: string): WriteOutcome<T> {
  * live agents and the `ctx.sessionTitle` service. */
 export class DirectSessionWriter implements SessionWriter {
   private readonly ctx: HostContextLike
+  /** Ordinary session verbs stay on the caller-authorized resolver. */
   private readonly agentFor: (sessionId: string) => LiveAgentLike | undefined
+  /** Queue occurrence verbs may address the currently viewed continuable child
+   * through a separately fenced resolver; this never widens prompt authority. */
+  private readonly queueAgentFor: (sessionId: string) => LiveAgentLike | undefined
 
-  constructor(ctx: HostContextLike, agentFor: (sessionId: string) => LiveAgentLike | undefined) {
+  constructor(
+    ctx: HostContextLike,
+    agentFor: (sessionId: string) => LiveAgentLike | undefined,
+    queueAgentFor: (sessionId: string) => LiveAgentLike | undefined = agentFor,
+  ) {
     this.ctx = ctx
     this.agentFor = agentFor
+    this.queueAgentFor = queueAgentFor
   }
 
   async prompt(sessionId: string, message: unknown, mode: 'queue' | 'steer'): Promise<WriteOutcome> {
@@ -101,7 +110,7 @@ export class DirectSessionWriter implements SessionWriter {
   /** Steer one exact next-turn occurrence, matching the official
    * `updateQueue(id, { kind: 'steer' })` operation. */
   async steerQueued(sessionId: string, messageId: string): Promise<WriteOutcome> {
-    const agent = this.agentFor(sessionId)
+    const agent = this.queueAgentFor(sessionId)
     if (agent === undefined) return sessionNotFound(sessionId)
     const message = agent.inbox.nextTurn.find(item => item.id === messageId)
     if (message === undefined) return queueItemNotFound(messageId)
@@ -120,7 +129,7 @@ export class DirectSessionWriter implements SessionWriter {
   /** Remove one exact pending occurrence, including an already-steered
    * next-step user message, matching the official queue mutation operation. */
   async removeQueued(sessionId: string, messageId: string): Promise<WriteOutcome> {
-    const agent = this.agentFor(sessionId)
+    const agent = this.queueAgentFor(sessionId)
     if (agent === undefined) return sessionNotFound(sessionId)
     const pending = [...agent.inbox.nextTurn, ...agent.inbox.nextStep].some(item => item.id === messageId)
     if (!pending) return queueItemNotFound(messageId)
