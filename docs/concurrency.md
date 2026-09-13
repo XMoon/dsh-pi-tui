@@ -138,7 +138,7 @@ woken again by a prompt in `queue` or `steer` mode while the transition still aw
 the transition is about to retire. The transition gate therefore doubles
 as a WRITE FENCE: while a transition is in flight
 (`SessionTransitionGate.busy`), every agent-write entry point — plain
-submit, busy-Enter prompt, Ctrl+S queue removals plus steerBatch, the command fallback prompt,
+submit, busy-Enter prompt, Ctrl+S per-occurrence queue steering, the command fallback prompt,
 Host command execution through `HostCommandPort` (a command that landed
 across a transition could write an Agent a concurrent transition is
 about to retire), the `!` shell submit, and the
@@ -169,10 +169,20 @@ without changing the ownership or ordering rules:
 - Ordinary input uses `SessionWriter.prompt(sessionId, message, mode)`;
   `queue` and `steer` are explicit, and only a successful Direct call settles
   as `committed`.
-- Ctrl+S remains one operation-barrier turn. It revalidates the exact queue,
-  then passes the confirmed occurrence ids and ordered messages to one
-  `steerBatch` settlement; the barrier is not released between removal and
-  delivery. Direct batch delivery remains ordered and non-transactional.
+- Ctrl+S remains one operation-barrier turn. It snapshots `nextTurn`,
+  revalidates the agent identity and generation, then calls `steerQueued` once
+  per occurrence in FIFO order. Queue races settle per occurrence rather than
+  aborting the whole sweep. The draft is a separate final `prompt(...,
+  'steer')`; a missing/unavailable occurrence stops the sweep without replay,
+  and a genuine or indeterminate failure never claims atomicity or retries.
+- Alt+Up removes pullable user occurrences one at a time in FIFO order. A known
+  partial refusal restores only confirmed removals; an indeterminate removal
+  keeps every recalled representation for manual review and is never retried.
+  If a session transition queues while the writer is in flight, visible
+  reconciliation waits for its outcome: a committed transition discards the
+  staged references without injecting old content, while a failed transition
+  restores the appropriate confirmed or indeterminate representation in the
+  original editor.
 - Host command execution uses `HostCommandPort` after the runner has already
   decided that the line belongs to the Host. The port's settled command result
   is committed separately from the TUI's fallback prompt path.
@@ -182,11 +192,13 @@ without changing the ownership or ordering rules:
 
 Known-unwritten outcomes are never reported as committed. An indeterminate
 future wire result is not retried automatically or restored as if it were
-known-unwritten; Direct currently throws unexpected failures and normally
-returns confirmed `committed` or explicit refusal outcomes.
+known-unwritten. Direct normally returns confirmed `committed` or explicit
+refusal outcomes; its exceptional non-occurrence failures continue through the
+owned rejection path, while occurrence-level exceptions remain indeterminate
+because removal may already have happened.
 
 A single process-local submit FIFO covers ordinary prompts, explicit queue
-prompts, Ctrl+S steer batches, and command execution including its fallback
+prompts, Ctrl+S per-occurrence steer sweeps, and command execution including its fallback
 prompt. Each gesture takes its turn before async preparation and releases it
 only after the semantic command/write path settles, so delayed mention or
 attachment preparation cannot let a later gesture overtake an earlier one.

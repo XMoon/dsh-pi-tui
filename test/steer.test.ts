@@ -34,7 +34,7 @@ function fakeAgent(ids: string[], sessionId = 'session-steer'): FakeAgent {
         state.nextStep = state.nextStep.filter(m => m.id !== id)
       },
     },
-    status: 'idle',
+    status: 'running',
     steer: (message) => { steered.push(message as { id: string; text: string }) },
     followup: (message) => { followed.push(message as { id: string; text: string }) },
     state,
@@ -223,48 +223,57 @@ test('P0: empty QUEUE + non-empty draft still steers (the classic single-draft p
   assert.deepEqual(agent.steered.map(m => m.text), ['hello'])
 })
 
-test('P0: empty draft + NON-empty queue steers the queue exactly as before (queue-only Ctrl+S)', async () => {
+test('P0: empty draft + NON-empty queue steers only while the turn accepts steering', async () => {
   for (const status of ['idle', 'running'] as const) {
     const agent = fakeAgent(['A', 'B'])
     agent.status = status
     const outcome = await steerAll(makeDeps({ agent: () => agent }), '', { draftHasPayload: false })
     assert.equal(outcome, 'ok')
-    assert.deepEqual(agent.steered.map(m => m.id), ['A', 'B'], `${status}: both queued messages steered in order`)
+    assert.deepEqual(agent.steered.map(m => m.id), status === 'running' ? ['A', 'B'] : [], `${status}: dsh-web convergence never replays unavailable queue items`)
     assert.deepEqual(agent.followed, [], `${status}: a queue batch never follows up`)
-    assert.deepEqual(agent.state.nextTurn, [], `${status}: confirmed entries removed`)
+    assert.deepEqual(agent.state.nextTurn, status === 'running' ? [] : [{ id: 'A' }, { id: 'B' }], `${status}: unavailable queue items remain pending`)
   }
 })
 
-test('D2.1: Ctrl+S remove-and-deliver batch stays inside one operation-barrier turn', async () => {
+test('D2.1: Ctrl+S steers queued occurrences FIFO inside one operation-barrier turn', async () => {
   const agent = fakeAgent(['a', 'b'])
   const barrier = new SessionOperationBarrier()
   const events: string[] = []
-  let releaseBatch!: () => void
-  const batchGate = new Promise<void>(resolve => { releaseBatch = resolve })
+  let releaseFirst!: () => void
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
   const deps = makeDeps({ agent: () => agent, barrier })
   deps.writer = {
-    prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+    prompt: async () => {
+       events.push('draft')
+       return { kind: 'committed' as const, value: undefined }
+     },
     removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
-    steerBatch: async (_sessionId, messages, removeQueuedIds) => {
-      events.push(`batch:${removeQueuedIds?.join(',')}:${messages.map(message => (message as { id: string }).id).join(',')}:start`)
-      await batchGate
-      events.push('batch:end')
+    steerQueued: async (_sessionId, messageId) => {
+      events.push(`queued:${messageId}:start`)
+
+      await firstGate
+      agent.inbox.remove(messageId)
+       events.push(`queued:${messageId}:end`)
       return { kind: 'committed' as const, value: undefined }
     },
   }
 
   const steering = steerAll(deps, 'draft')
-  assert.equal(barrier.activeWriters, 1, 'the semantic batch enters the barrier before it settles')
+  assert.equal(barrier.activeWriters, 1, 'the whole FIFO sweep enters the barrier before it settles')
   let transitionRan = false
   const transition = barrier.runTransition(async () => { transitionRan = true; events.push('transition') })
   await Promise.resolve()
-  assert.equal(transitionRan, false, 'a transition waits for the complete remove-and-deliver operation')
-  releaseBatch()
+  assert.equal(transitionRan, false, 'a transition waits for the complete FIFO sweep')
+  releaseFirst()
   assert.equal(await steering, 'ok')
   await transition
   assert.deepEqual(events, [
-    'batch:a,b:a,b,draft:draft:start',
-    'batch:end',
+    'queued:a:start',
+     'queued:a:end',
+     'queued:b:start',
+     'queued:b:end',
+     'draft',
+
     'transition',
   ])
 })
@@ -573,7 +582,7 @@ test('the fence is a no-op when no transition is in flight', async () => {
   deps.fence = () => false
   const outcome = await steerAll(deps, 'draft')
   assert.equal(outcome, 'ok')
-  assert.deepEqual(writes, ['followup'], 'an idle agent takes the draft as a followup')
+  assert.deepEqual(writes, ['steer'], 'a running agent takes the draft as a steer')
 })
 
 test('refuseByTransitionFence restores the draft verbatim and notifies the retry hint', () => {
@@ -592,6 +601,85 @@ test('refuseByTransitionFence MERGES newer input below the unsent submission', (
   assert.deepEqual(notices, ['info: the draft changed while transitioning — review it before submitting again'])
 })
 
+test('dsh-web steer stops at a convergent missing occurrence and still sends the separate draft', async () => {
+  const agent = fakeAgent(['a', 'b'])
+  const calls: string[] = []
+  const restored: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored })
+  deps.writer = {
+    prompt: async (_sessionId, message, mode) => {
+      calls.push(`prompt:${mode}:${(message as { id: string }).id}`)
+      return { kind: 'committed' as const, value: undefined }
+    },
+    steerQueued: async (_sessionId, messageId) => {
+      calls.push(`queue:${messageId}`)
+      if (messageId === 'a') agent.inbox.remove(messageId)
+      return messageId === 'a'
+        ? { kind: 'committed' as const, value: undefined }
+        : { kind: 'rejected' as const, error: { code: 'session/queue-item-not-found', message: 'queued item is gone' } }
+    },
+    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  assert.equal(await steerAll(deps, 'draft'), 'ok')
+  assert.deepEqual(calls, ['queue:a', 'queue:b', 'prompt:steer:draft:draft'])
+  assert.deepEqual(restored, [], 'a convergent queue miss does not restore or replay the old occurrence')
+})
+
+test('steer does not include queue occurrences added after its initial snapshot', async () => {
+  const agent = fakeAgent(['a', 'b'])
+  const calls: string[] = []
+  const deps = makeDeps({ agent: () => agent })
+  deps.writer = {
+    prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+    steerQueued: async (_sessionId, messageId) => {
+      calls.push(messageId)
+      agent.inbox.remove(messageId)
+      if (messageId === 'a') agent.state.nextTurn.push({ id: 'c' })
+      return { kind: 'committed' as const, value: undefined }
+    },
+    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
+  assert.deepEqual(calls, ['a', 'b'])
+  assert.deepEqual(agent.state.nextTurn.map(message => message.id), ['c'])
+})
+
+test('a genuine per-occurrence steer refusal stops before the draft prompt', async () => {
+  const agent = fakeAgent(['a'])
+  const restored: string[] = []
+  const calls: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored })
+  deps.writer = {
+    prompt: async () => {
+      calls.push('prompt')
+      return { kind: 'committed' as const, value: undefined }
+    },
+    steerQueued: async () => ({ kind: 'rejected' as const, error: { code: 'transport/failure', message: 'write failed' } }),
+    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  assert.equal(await steerAll(deps, 'draft'), 'stale')
+  assert.deepEqual(calls, [])
+  assert.deepEqual(restored, ['draft'])
+})
+
+test('an indeterminate per-occurrence steer restores only the untried draft and never retries', async () => {
+  const agent = fakeAgent(['a'])
+  const restored: string[] = []
+  const calls: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored })
+  deps.writer = {
+    prompt: async () => {
+      calls.push('prompt')
+      return { kind: 'committed' as const, value: undefined }
+    },
+    steerQueued: async () => ({ kind: 'indeterminate' as const, error: { code: 'transport/unknown', message: 'unknown' } }),
+    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  assert.equal(await steerAll(deps, 'draft'), 'indeterminate')
+  assert.deepEqual(calls, [])
+  assert.deepEqual(restored, ['draft'])
+})
+
 test('P1: the empty-queue classic steer delivers through the SessionWriter, never a direct agent call', async () => {
   // The empty-queue path (queue == 0 + Ctrl+S + draft) previously called
   // now.steer/now.followup DIRECTLY, bypassing the semantic port. It must
@@ -607,8 +695,8 @@ test('P1: the empty-queue classic steer delivers through the SessionWriter, neve
         writerCalls.push(`${mode}:${sessionId}:${(message as { id: string }).id}`)
         return { kind: 'committed' as const, value: undefined }
       },
-      steerBatch: async () => {
-        writerCalls.push('steerBatch')
+      steerQueued: async () => {
+        writerCalls.push('steerQueued')
         return { kind: 'committed' as const, value: undefined }
       },
       removeQueued: async () => {
@@ -635,7 +723,7 @@ test('semantic steer rejection restores the draft and does not claim delivery', 
   const deps = makeDeps({ agent: () => agent, restored, notices })
   deps.writer = {
     prompt: async () => ({ kind: 'rejected' as const, error: { code: 'session/not-found', message: 'session is gone' } }),
-    steerBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+    steerQueued: async () => ({ kind: 'committed' as const, value: undefined }),
     removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
   }
   assert.equal(await steerAll(deps, 'draft'), 'stale')
@@ -656,7 +744,7 @@ test('semantic steer indeterminate outcome stays absent and never retries', asyn
       calls += 1
       return { kind: 'indeterminate' as const, error: { code: 'transport/unknown', message: 'unknown' } }
     },
-    steerBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+    steerQueued: async () => ({ kind: 'committed' as const, value: undefined }),
     removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
   }
   assert.equal(await steerAll(deps, 'draft'), 'indeterminate')

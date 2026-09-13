@@ -112,12 +112,36 @@ function makeLiveSession(id: string, header: LiveSession['header'], events: read
   }
 }
 
+type FakeQueuedContent =
+  | { type: 'text'; text: string }
+  | { type: 'image'; attachment: { attachmentId: string; mediaType: 'image/png'; bytes: number; width: number; height: number } }
+
+type FakeQueuedMessage = {
+  id: string
+  role: 'user'
+  content: readonly FakeQueuedContent[]
+  source: { kind: 'user' }
+}
+
 interface FakeAgentHost {
   status: 'idle' | 'running'
   /** When set, the next write REJECTS (the failure-path gate). */
   failFollowup: boolean
   /** When set, the write rejects with a CANCELLATION-shaped error. */
   failFollowupAbort: boolean
+  /** When set, steer calls after this count throw a body-write failure. */
+  failSteerAfter?: number
+  steerCalls: number
+  /** Mutable Host-owned queue rows used by Alt+Up integration coverage. */
+  nextTurn: FakeQueuedMessage[]
+  nextStep: FakeQueuedMessage[]
+  removeCalls: number
+  /** Throw an AbortError before removing calls after this count. */
+  abortRemoveAfter?: number
+  /** Throw an ordinary error after removing calls after this count. */
+  throwRemoveAfter?: number
+  /** Test-only queue mutation hook, invoked after a successful removal. */
+  afterRemove?: (id: string) => void
   followedUp: unknown[]
   steered: unknown[]
   /** The skill-body fallback injections (agent.inject), in call order. */
@@ -126,15 +150,35 @@ interface FakeAgentHost {
 
 function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent {
   const agentContext = new Context()
+  const nextTurn = host?.nextTurn ?? []
+  const nextStep = host?.nextStep ?? []
+  const remove = (id: string): void => {
+    if (host === undefined) return
+    host.removeCalls += 1
+    if (host.abortRemoveAfter !== undefined && host.removeCalls > host.abortRemoveAfter) {
+      const error = new Error('queue pull-back aborted')
+      error.name = 'AbortError'
+      ;(error as Error & { code?: string }).code = 'ABORT_ERR'
+      throw error
+    }
+    const queue = [nextTurn, nextStep].find(items => items.some(message => message.id === id))
+    const index = queue?.findIndex(message => message.id === id) ?? -1
+    if (queue === undefined || index < 0) return
+    queue.splice(index, 1)
+    host.afterRemove?.(id)
+    if (host.throwRemoveAfter !== undefined && host.removeCalls > host.throwRemoveAfter) {
+      throw new Error('queue pull-back write failed')
+    }
+  }
   return {
     session,
     ctx: agentContext,
     options: { provider: 'p', model: 'm' },
     // The live inbox surface (queue gates and the steer snapshot).
     inbox: {
-      nextTurn: [],
-      nextStep: [],
-      remove: (id: string) => { void id },
+      nextTurn,
+      nextStep,
+      remove,
     },
     get status() { return host?.status ?? ('idle' as const) },
     whenIdle: async () => {},
@@ -148,10 +192,34 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
       if (host?.failFollowup === true) throw new Error('deliver boom')
       host?.followedUp.push(message)
     },
-    steer: (message: unknown) => { host?.steered.push(message) },
+    steer: (message: unknown) => {
+      if (host !== undefined) {
+        host.steerCalls += 1
+        if (host.failSteerAfter !== undefined && host.steerCalls > host.failSteerAfter) {
+          throw new Error('skill body write failed')
+        }
+        host.steered.push(message)
+      }
+    },
     inject: (message: unknown) => { host?.injected.push(message) },
     cancel: (_reason: unknown, _options: { keepInbox: boolean }) => { /* the interrupt transport */ },
   } as unknown as Agent
+}
+
+function queuedText(id: string, text: string): FakeQueuedMessage {
+  return { id, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } }
+}
+
+function queuedImage(id: string, text: string): FakeQueuedMessage {
+  return {
+    id,
+    role: 'user',
+    content: [
+      { type: 'text', text },
+      { type: 'image', attachment: { attachmentId: 'durable-image', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+    ],
+    source: { kind: 'user' },
+  }
 }
 
 interface CountingPersistenceProxy {
@@ -213,7 +281,18 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
   armCreateGate(): void
   releaseCreateGate(): void
 } {
-  const host: FakeAgentHost = { status: 'idle', failFollowup: false, failFollowupAbort: false, followedUp: [], steered: [], injected: [] }
+  const host: FakeAgentHost = {
+    status: 'idle',
+    failFollowup: false,
+    failFollowupAbort: false,
+    steerCalls: 0,
+    nextTurn: [],
+    nextStep: [],
+    removeCalls: 0,
+    followedUp: [],
+    steered: [],
+    injected: [],
+  }
   const persisted = new Map<string, LiveSession>()
   const live = new Map<string, Agent>()
   let liveSession: LiveSession | undefined
@@ -336,7 +415,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
       if (def === undefined) return undefined
       if (attachments.length > 0 && def.input?.attachments !== true) {
         executed.push({ line, attachments: [...attachments], outcome: 'rejected' })
-        return { result: { kind: 'error', text: `/${name} does not accept attachments` } }
+        return { commandId: CommandId('cmd-test'), result: { kind: 'error', text: `/${name} does not accept attachments` } }
       }
       executed.push({ line, attachments: [...attachments], outcome: 'executed' })
       const rawInput = line.slice(line.indexOf(name) + name.length)
@@ -346,7 +425,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
         rawInput,
         signal: new AbortController().signal,
       })
-      return { result }
+      return { commandId: CommandId('cmd-test'), result }
     },
     handler: (name: string) => definitions.get(name)?.handler,
   }
@@ -1386,6 +1465,158 @@ test('a transition-fenced explicit /skill result does not restore the wrapper tw
   }
 })
 
+test('Alt+Up refuses during a session transition without recalling stale queue rows', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'idle' })
+  harness.host.nextTurn.push(queuedText('queued-a', 'queued a'))
+  const newHandler = (harness.commands as {
+    handler(name: string): ((...args: never[]) => unknown) | undefined
+  }).handler('new')
+  assert.ok(newHandler, 'the /new handler must be registered')
+  harness.armCreateGate()
+  const transition = (newHandler as () => Promise<unknown>)()
+  for (let index = 0; index < 4; index += 1) await Promise.resolve()
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(await drainUntil(() => /session transition is in progress/.test(mounted.app.notifyTextForTest()), 1_000), true,
+    'the known transition fence must be surfaced')
+  assert.equal(harness.host.nextTurn.length, 1, 'the fenced dequeue must leave the queue untouched')
+  assert.equal(mounted.app.getDraft(), '', 'the fenced dequeue must not inject a stale copy')
+  harness.releaseCreateGate()
+  await transition
+})
+
+test('Alt+Up does not carry a partial recalled image across a waiting transition', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'idle', attachments: true })
+  harness.host.nextTurn.push(queuedImage('queued-image', 'with image'), queuedText('queued-tail', 'tail'))
+  const newHandler = (harness.commands as {
+    handler(name: string): ((...args: never[]) => unknown) | undefined
+  }).handler('new')
+  assert.ok(newHandler, 'the /new handler must be registered')
+  let transition: Promise<unknown> | undefined
+  let transitionReachedCreate = false
+  harness.onCreateSession(() => { transitionReachedCreate = true })
+  // Keep the transition at create until the failed later removal has had a
+  // chance to reconcile. This makes the pre-barrier-release race deterministic.
+  harness.armCreateGate()
+  harness.host.afterRemove = (id) => {
+    if (id !== 'queued-image') return
+    harness.host.abortRemoveAfter = 1
+    transition = (newHandler as () => Promise<unknown>)()
+  }
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(await drainUntil(() => harness.host.removeCalls === 2 && transitionReachedCreate, 1_000), true,
+    'the transition and the cancellation-shaped later removal must overlap')
+  assert.ok(transition !== undefined)
+  harness.releaseCreateGate()
+  await transition
+  assert.equal(mounted.app.getDraft(), '', 'a partial old-session recall must not reach the new session editor')
+  assert.deepEqual(harness.host.nextTurn.map(message => message.id), ['queued-tail'],
+    'the untried later occurrence remains queued')
+})
+
+test('Alt+Up restores a committed prefix when the waiting transition rejects', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'idle', attachments: true })
+  harness.host.nextTurn.push(queuedImage('queued-image', 'with image'), queuedText('queued-tail', 'tail'))
+  const newHandler = (harness.commands as {
+    handler(name: string): ((...args: never[]) => unknown) | undefined
+  }).handler('new')
+  assert.ok(newHandler, 'the /new handler must be registered')
+  let transition: Promise<unknown> | undefined
+  let transitionReachedCreate = false
+  harness.onCreateSession(() => {
+    transitionReachedCreate = true
+    throw new Error('create refused for regression')
+  })
+  harness.host.afterRemove = (id) => {
+    if (id !== 'queued-image') return
+    harness.host.abortRemoveAfter = 1
+    transition = (newHandler as () => Promise<unknown>)()
+  }
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(await drainUntil(() => harness.host.removeCalls === 2 && transitionReachedCreate, 1_000), true,
+    'the transition create must reject after the later removal fails')
+  assert.ok(transition !== undefined)
+  await transition
+  assert.match(mounted.app.getDraft(), /\[image #1/, 'the committed prefix remains recoverable after transition failure')
+  assert.deepEqual(harness.host.nextTurn.map(message => message.id), ['queued-tail'],
+    'the untried later occurrence remains queued')
+})
+
+test('Alt+Up preserves the confirmed prefix after a known queue refusal', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'idle' })
+  harness.host.nextTurn.push(queuedText('queued-a', 'queued a'), queuedText('queued-b', 'queued b'))
+  harness.host.afterRemove = (id) => {
+    if (id === 'queued-a') harness.host.nextTurn.splice(0, 1)
+  }
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(await drainUntil(() => /queue pull-back stopped/.test(mounted.app.notifyTextForTest()), 1_000), true,
+    'the known queue refusal must settle the pull-back')
+  assert.deepEqual(harness.host.nextTurn, [], 'the test hook removed only the refused suffix occurrence')
+  assert.equal(mounted.app.getDraft(), 'queued a', 'only the committed prefix belongs in the draft')
+})
+
+test('Alt+Up preserves all recalled text for an indeterminate removal', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'idle' })
+  harness.host.nextTurn.push(queuedText('queued-a', 'queued a'), queuedText('queued-b', 'queued b'))
+  harness.host.throwRemoveAfter = 1
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(await drainUntil(() => /result is indeterminate/.test(mounted.app.notifyTextForTest()), 1_000), true,
+    'the uncertain removal must be reported')
+  assert.equal(mounted.app.getDraft(), 'queued a\n\nqueued b', 'uncertain queue state keeps every recalled representation')
+  const removeCalls = harness.host.removeCalls
+  for (let index = 0; index < 20; index += 1) await Promise.resolve()
+  assert.equal(harness.host.removeCalls, removeCalls, 'an indeterminate removal is never retried automatically')
+})
+
+test('Alt+Up restores the confirmed prefix after cancellation during a later removal', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'idle' })
+  harness.host.nextTurn.push(queuedText('queued-a', 'queued a'), queuedText('queued-b', 'queued b'))
+  harness.host.abortRemoveAfter = 1
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(await drainUntil(() => harness.host.removeCalls === 2, 1_000), true,
+    'the dequeue must reach the cancellation-shaped second removal')
+  for (let index = 0; index < 20; index += 1) await Promise.resolve()
+  assert.equal(mounted.app.getDraft(), 'queued a', 'the already-removed prefix must not be lost on cancellation')
+  assert.deepEqual(harness.host.nextTurn.map(message => message.id), ['queued-b'],
+    'the cancellation before the second removal leaves the untried row queued')
+})
+
+test('Alt+Up keeps a recalled image usable after an indeterminate removal', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    attachments: true,
+  })
+  harness.host.nextTurn.push(queuedImage('queued-image', 'with image'), queuedText('queued-tail', 'tail'))
+  harness.host.throwRemoveAfter = 1
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(await drainUntil(() => /result is indeterminate/.test(mounted.app.notifyTextForTest()), 1_000), true,
+    'the uncertain removal must settle before the manual resend')
+  const recalled = mounted.app.getDraft()
+  assert.match(recalled, /\[image #1 \(1×1\)\]/, 'the recalled durable image stays represented in the draft')
+  mounted.app.submitDraft()
+  await waitForDelivery(harness.host, 'manually resubmitted recalled image')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string; attachment?: unknown }[] }
+  assert.deepEqual(delivered.content, [
+    { type: 'text', text: 'with image' },
+    { type: 'image', attachment: { attachmentId: 'durable-image', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+    { type: 'text', text: '\n\ntail' },
+  ], 'the preserved draft expands back to the original durable image reference')
+})
+
 test('running + queue: /compact executes, never enters the ordinary queue (PR115-fix problem 1)', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running', hostCommands: ['compact'] })
   mounted.app.setDraft('/compact')
@@ -1536,12 +1767,12 @@ test('running + queue: /skill <name> keeps the steer path when the TUI must inje
   // claims next-step first), so the invocation keeps the steer path to
   // preserve the original-line-before-body order — the documented
   // exception to the queue preference.
-  assert.equal(harness.host.steered.length, 2, 'the fallback steers the line and body as one semantic batch')
+  assert.equal(harness.host.steered.length, 2, 'the fallback steers the line and body as two ordered prompts')
   const steeredLine = harness.host.steered[0] as { content: { type: string; text: string }[] }
   const steeredBody = harness.host.steered[1] as { content: { type: string; text: string }[] }
-  assert.equal(steeredLine.content[0]?.text, '/grilling args', 'the first batch item is the normalized /name args form')
-  assert.match(steeredBody.content[0]?.text ?? '', /<skill_content name="grilling">/, 'the second batch item is the rendered body')
-  assert.equal(harness.host.injected.length, 0, 'the fallback body uses the semantic batch, never a raw injection')
+  assert.equal(steeredLine.content[0]?.text, '/grilling args', 'the first prompt is the normalized /name args form')
+  assert.match(steeredBody.content[0]?.text ?? '', /<skill_content name="grilling">/, 'the second prompt is the rendered body')
+  assert.equal(harness.host.injected.length, 0, 'the fallback body uses an ordered prompt, never a raw injection')
   assert.equal(harness.host.followedUp.length, 0, 'no followup — the body order contract forbids it')
 })
 
@@ -1774,12 +2005,31 @@ test('running + steer: a skill invocation WITHOUT the host loader still injects 
   mounted.app.setDraft('/skill grilling args')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   await waitForDelivery(harness.host, 'no-loader skill steer')
-  assert.equal(harness.host.steered.length, 2, 'the invocation steers the line and body as one semantic batch')
+  assert.equal(harness.host.steered.length, 2, 'the invocation steers the line and body as two ordered prompts')
   const steeredLine = harness.host.steered[0] as { content: { type: string; text: string }[] }
   const steeredBody = harness.host.steered[1] as { content: { type: string; text: string }[] }
-  assert.equal(steeredLine.content[0]?.text, '/grilling args', 'the first batch item is the normalized /name args form')
-  assert.match(steeredBody.content[0]?.text ?? '', /<skill_content name="grilling">/, 'the second batch item is the official rendering')
-  assert.equal(harness.host.injected.length, 0, 'the TUI fallback body uses the semantic batch, never a raw injection')
+  assert.equal(steeredLine.content[0]?.text, '/grilling args', 'the first prompt is the normalized /name args form')
+  assert.match(steeredBody.content[0]?.text ?? '', /<skill_content name="grilling">/, 'the second prompt is the official rendering')
+  assert.equal(harness.host.injected.length, 0, 'the TUI fallback body uses an ordered prompt, never a raw injection')
+})
+
+test('a no-loader skill body failure does not restore an already-steered invocation', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    skills: true,
+  })
+  // The first prompt commits the original invocation; only the second body
+  // prompt fails. The committed line must stay consumed and must not be
+  // restored for a duplicate retry.
+  harness.host.failSteerAfter = 1
+  mounted.app.setDraft('/skill grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => harness.host.steerCalls === 2, 1_000), true,
+    'the fallback must attempt the body as a second prompt')
+  for (let index = 0; index < 20; index += 1) await Promise.resolve()
+  assert.equal(harness.host.steered.length, 1, 'only the original invocation committed')
+  assert.equal(mounted.app.getDraft(), '', 'a committed invocation is not restored after body failure')
 })
 
 test('running + steer: a no-loader per-skill wrapper also injects its body', async (t) => {
@@ -1794,12 +2044,12 @@ test('running + steer: a no-loader per-skill wrapper also injects its body', asy
   await waitForDelivery(harness.host, 'no-loader wrapper steer')
   assert.equal(harness.executed.length, 1, 'the wrapper executes through the command plane')
   assert.equal(harness.executed[0]?.line, '/grilling args', 'the wrapper receives its own slash line')
-  assert.equal(harness.host.steered.length, 2, 'the invocation steers the line and body as one semantic batch')
+  assert.equal(harness.host.steered.length, 2, 'the invocation steers the line and body as two ordered prompts')
   const steeredLine = harness.host.steered[0] as { content: { type: string; text: string }[] }
   const steeredBody = harness.host.steered[1] as { content: { type: string; text: string }[] }
-  assert.equal(steeredLine.content[0]?.text, '/grilling args', 'the first batch item is the wrapper line')
-  assert.match(steeredBody.content[0]?.text ?? '', /<skill_content name="grilling">/, 'the second batch item is the rendered body')
-  assert.equal(harness.host.injected.length, 0, 'the TUI fallback body uses the semantic batch, never a raw injection')
+  assert.equal(steeredLine.content[0]?.text, '/grilling args', 'the first prompt is the wrapper line')
+  assert.match(steeredBody.content[0]?.text ?? '', /<skill_content name="grilling">/, 'the second prompt is the rendered body')
+  assert.equal(harness.host.injected.length, 0, 'the TUI fallback body uses an ordered prompt, never a raw injection')
 })
 
 test('a live LOCAL command runs its bridge handler — never the model', async (t) => {

@@ -40,7 +40,7 @@ removed legacy). The TUI keeps only process-local surface coordination
 port calls.
 
 D2.1 converges the current write boundaries without adding a Remote side
-effect. Ordinary session prompts, Ctrl+S batch steering, exact queue removal,
+effect. Ordinary session prompts, dsh-web-style FIFO per-occurrence Ctrl+S steering, exact queue removal,
 cancel and title writes use the semantic `SessionWriter`; the runner places
 ordinary, explicit-queue, Ctrl+S, and command/fallback submissions on one FIFO
 before async preparation; already-authorized
@@ -607,11 +607,13 @@ production backend. No Remote write side effect, `BackendKind='remote'`, or
 production backend change is part of this slice.
 
 - `SessionWriter` now exposes one ordinary prompt with an explicit `queue` or
-  `steer` mode, an outcome-bearing Ctrl+S batch that can move exact queued
-  occurrences and deliver them together, exact `removeQueued`, an outcome-
-  bearing queued pull-back batch, semantic `cancel`, outcome-bearing `rename`,
-  and explicit unsupported title refresh. Direct resolves the live Agent by
-  session id and reports only confirmed synchronous calls as `committed`.
+  `steer` mode, one occurrence-level `steerQueued` operation, exact
+  `removeQueued`, semantic `cancel`, outcome-bearing `rename`, and explicit
+  unsupported title refresh. Ctrl+S and Alt+Up are runner-level FIFO
+  best-effort orchestration over those single-occurrence operations: they use
+  the initial queued snapshot, stop on the first genuine failure, and never
+  claim cross-occurrence atomicity. Direct resolves the live Agent by session
+  id and reports only confirmed synchronous calls as `committed`.
 - `HostCommandPort` owns execution of an already-authorized Host command only.
   The runner retains claim precedence and keeps TUI-local commands, extension
   commands, and skill-wrapper delivery out of this seam. Direct forwards the
@@ -628,9 +630,12 @@ production backend change is part of this slice.
   creation/open payload remains transitional: provider/model convergence is
   D2.3, and seed/fork metadata convergence is D2.4.
 
-Known future gaps are the Remote equivalent of the Ctrl+S multi-message batch
-and Remote title auto-regeneration. Until their official Client contracts are
-available, neither is represented as a Remote side effect.
+The future Remote writer must map `steerQueued` and `removeQueued` to the
+official per-occurrence `Session.updateQueue(itemId, { kind: 'steer' | 'remove' })`
+contract. Ctrl+S and Alt+Up remain client-side FIFO choreography over those
+calls, matching dsh-web; no TUI-specific batch RPC is needed. Remote title
+auto-regeneration remains unsupported until its official Client contract is
+available.
 
 The D1 closure ledger is:
 

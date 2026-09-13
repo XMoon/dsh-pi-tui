@@ -4,9 +4,10 @@
  * `sessionTitle` service. The adapter resolves the live agent from the
  * session id at call time; it never captures a stale Agent at construction.
  *
- * Steer orchestration (fence, barrier, queue snapshot and revalidation) stays
- * in the runner. This adapter owns only Direct delivery and the Direct-only
- * Agent knobs hidden by the semantic port.
+ * Queue steering is occurrence-level: the adapter finds the Host-owned queued
+ * message, removes that exact occurrence and hands the same message to the
+ * Agent's steer operation. Multi-message gestures are client orchestration over
+ * this single-operation contract, not SessionWriter batch verbs.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-writer-direct
@@ -23,10 +24,15 @@ export interface HostContextLike {
 /** The live-agent surface the Direct adapter drives (structural). */
 export interface LiveAgentLike {
   readonly session: { readonly id: string }
+  readonly status: string
   followup(message: unknown): void
   steer(message: unknown): void
   cancel(reason: { kind: 'user' }, options: { keepInbox: boolean }): void
-  readonly inbox: { remove(id: string): void }
+  readonly inbox: {
+    readonly nextTurn: readonly { readonly id: string }[]
+    readonly nextStep: readonly { readonly id: string }[]
+    remove(id: string): void
+  }
 }
 
 /** The structural `sessionTitle` service surface. */
@@ -39,6 +45,30 @@ function sessionNotFound<T>(sessionId: string): WriteOutcome<T> {
   return {
     kind: 'rejected',
     error: { code: 'session/not-found', message: `session "${sessionId}" is not available` },
+  }
+}
+
+function queueItemNotFound<T>(messageId: string): WriteOutcome<T> {
+  return {
+    kind: 'rejected',
+    error: { code: 'session/queue-item-not-found', message: `queued item "${messageId}" is no longer pending` },
+  }
+}
+
+function steerUnavailable<T>(messageId: string): WriteOutcome<T> {
+  return {
+    kind: 'rejected',
+    error: { code: 'session/steer-unavailable', message: `queued item "${messageId}" cannot be steered while the session is not running` },
+  }
+}
+
+function indeterminate(error: unknown): WriteOutcome {
+  return {
+    kind: 'indeterminate',
+    error: {
+      code: 'session/write-indeterminate',
+      message: error instanceof Error ? error.message : String(error),
+    },
   }
 }
 
@@ -68,33 +98,33 @@ export class DirectSessionWriter implements SessionWriter {
     return { kind: 'committed', value: undefined }
   }
 
-  async steerBatch(
-    sessionId: string,
-    messages: readonly unknown[],
-    removeQueuedIds: readonly string[] = [],
-  ): Promise<WriteOutcome> {
+  /** Steer one exact next-turn occurrence, matching the official
+   * `updateQueue(id, { kind: 'steer' })` operation. */
+  async steerQueued(sessionId: string, messageId: string): Promise<WriteOutcome> {
     const agent = this.agentFor(sessionId)
     if (agent === undefined) return sessionNotFound(sessionId)
-    // This synchronous Direct operation is the semantic remove-and-deliver
-    // batch used by Ctrl+S. The caller receives one settlement, so a wire
-    // adapter can implement the same move atomically rather than exposing
-    // partial queue-removal results.
-    for (const messageId of removeQueuedIds) agent.inbox.remove(messageId)
-    for (const message of messages) agent.steer(message)
+    const message = agent.inbox.nextTurn.find(item => item.id === messageId)
+    if (message === undefined) return queueItemNotFound(messageId)
+    if (agent.status !== 'running') return steerUnavailable(messageId)
+    try {
+      agent.inbox.remove(messageId)
+      agent.steer(message)
+    } catch (error) {
+      // Removal or steering may have happened before the exception; the
+      // caller must not restore and automatically replay this occurrence.
+      return indeterminate(error)
+    }
     return { kind: 'committed', value: undefined }
   }
 
+  /** Remove one exact pending occurrence, including an already-steered
+   * next-step user message, matching the official queue mutation operation. */
   async removeQueued(sessionId: string, messageId: string): Promise<WriteOutcome> {
     const agent = this.agentFor(sessionId)
     if (agent === undefined) return sessionNotFound(sessionId)
+    const pending = [...agent.inbox.nextTurn, ...agent.inbox.nextStep].some(item => item.id === messageId)
+    if (!pending) return queueItemNotFound(messageId)
     agent.inbox.remove(messageId)
-    return { kind: 'committed', value: undefined }
-  }
-
-  async removeQueuedBatch(sessionId: string, messageIds: readonly string[]): Promise<WriteOutcome> {
-    const agent = this.agentFor(sessionId)
-    if (agent === undefined) return sessionNotFound(sessionId)
-    for (const messageId of messageIds) agent.inbox.remove(messageId)
     return { kind: 'committed', value: undefined }
   }
 

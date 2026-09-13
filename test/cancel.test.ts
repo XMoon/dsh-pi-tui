@@ -40,9 +40,8 @@ afterEach(() => {
 function writerStub(): SessionWriter {
   return {
     prompt: async () => ({ kind: 'committed' as const, value: undefined }),
-    steerBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+    steerQueued: async () => ({ kind: 'committed' as const, value: undefined }),
     removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
-    removeQueuedBatch: async () => ({ kind: 'committed' as const, value: undefined }),
     cancel: async (sessionId) => {
       ;(stubAgents.get(sessionId) as { cancel(c: unknown, o: unknown): void }).cancel({ kind: 'user' }, { keepInbox: true })
       return { kind: 'committed' as const, value: undefined }

@@ -206,7 +206,6 @@ import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 import { directAgentOf, ownerHandleOf, type CreateSessionRequest, type OpenSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
 import type { HostCommandOutcome } from './runtime/host-command-port.ts'
-import type { WriteOutcome } from './runtime/session-writer-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
@@ -538,6 +537,23 @@ export function shouldConsumeAdvertisedMiss(
   return execution === undefined && wasAdvertised
 }
 
+/** Public settlement shape for the interrupt helper. Kept local so the
+ * entry-point declaration does not expose the internal runtime port module. */
+export type InterruptWriteOutcome =
+  | { readonly kind: 'committed'; readonly value: undefined }
+  | { readonly kind: 'rejected'; readonly error: {
+      readonly code: string
+      readonly message: string
+      readonly details?: Readonly<Record<string, unknown>>
+    } }
+  | { readonly kind: 'cancelled' }
+  | { readonly kind: 'indeterminate'; readonly error: {
+      readonly code: string
+      readonly message: string
+      readonly details?: Readonly<Record<string, unknown>>
+    } }
+  | { readonly kind: 'unsupported'; readonly reason: string }
+
 /** The live-agent surface {@link interruptAgent} needs (structural — the
  * TUI never imports the agent runtime for this call). */
 export interface InterruptAgentLike {
@@ -550,7 +566,7 @@ export interface InterruptAgentLike {
  * type so the public declaration never inlines internal runtime modules;
  * the runner's SessionWriter satisfies it). */
 export interface InterruptWriterLike {
-  cancel(sessionId: string): Promise<WriteOutcome>
+  cancel(sessionId: string): Promise<InterruptWriteOutcome>
 }
 
 /**
@@ -572,7 +588,7 @@ export interface InterruptWriterLike {
  * log, which the design explicitly rejects — the parked queue is the
  * agreed web-parity behavior until upstream lands the capability.
  */
-export function interruptAgent(agent: InterruptAgentLike | undefined, writer: InterruptWriterLike): Promise<WriteOutcome> {
+export function interruptAgent(agent: InterruptAgentLike | undefined, writer: InterruptWriterLike): Promise<InterruptWriteOutcome> {
   if (agent === undefined) return Promise.resolve({ kind: 'committed', value: undefined })
   return writer.cancel(agent.session.id)
 }
@@ -1791,6 +1807,21 @@ export function apply(ctx: Context, config: Config): void {
     // race the DSH agent-loop owner disposer.
     const transitionGate = new SessionTransitionGate()
     const operationBarrier = new SessionOperationBarrier()
+    // Alt+Up may finish a queue mutation while a transition is waiting on the
+    // same writer barrier. Keep its confirmed local representation until the
+    // transition outcome is known: commit drops it, failure restores it.
+    type PendingQueueRecall = {
+      commit(): void
+      abort(): void
+    }
+    const pendingQueueRecalls: PendingQueueRecall[] = []
+    const settlePendingQueueRecalls = (committed: boolean): void => {
+      const recalls = pendingQueueRecalls.splice(0)
+      for (const recall of recalls) {
+        if (committed) recall.commit()
+        else recall.abort()
+      }
+    }
     // The memoized Direct owned-session retirement: ONE teardown promise
     // shared by every teardown path (the interactive exit via the appExit
     // disposal, the fiber disposer / HMR unload, the pre-mount abort path
@@ -2193,6 +2224,7 @@ export function apply(ctx: Context, config: Config): void {
     // only backend today; remote/wire adapters join in later milestones
     // behind the SAME port interfaces. Constructed here (after compose) so
     // the Direct session lifecycle can resolve preset compositions.
+    const directSessionWriter = new DirectSessionWriter(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent as never : undefined)
     const backend = createDirectBackend(
       new DirectSubagentPort(ctx),
       new DirectSessionReader(ctx, {
@@ -2200,7 +2232,7 @@ export function apply(ctx: Context, config: Config): void {
         agentOf: id => agents.get(id),
         flushSession: async session => { await sessions.flush(session as never) },
       }),
-      new DirectSessionWriter(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent as never : undefined),
+      directSessionWriter,
       new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
       new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
       new DirectCatalogPort(
@@ -2580,6 +2612,7 @@ export function apply(ctx: Context, config: Config): void {
         openingSession = opening
       const oldHandle = liveHandle
       const oldAgent = liveAgent
+      let transitionCommitted = false
       return runTransitionTo<T>({
         quiesceOld: async () => {
           if (liveAgent === undefined) return
@@ -2599,6 +2632,8 @@ export function apply(ctx: Context, config: Config): void {
           await sessions.flush(liveAgent.session)
         },
         commit: (next) => {
+          transitionCommitted = true
+          settlePendingQueueRecalls(true)
           // A new session owns the surface: the OLD session's pending
           // submit ack must never leak into it, and its latency timeline
           // is meaningless now.
@@ -2727,6 +2762,7 @@ export function apply(ctx: Context, config: Config): void {
            if (openingSession === opening) openingSession = undefined
         },
       }, steps).finally(() => {
+         if (!transitionCommitted) settlePendingQueueRecalls(false)
          if (openingSession === opening) openingSession = undefined
        })
     }
@@ -2738,7 +2774,15 @@ export function apply(ctx: Context, config: Config): void {
      * session-transition gate, so it can never interleave with /new, /fork
      * or a rewind commit (the single-writer rule). */
     const switchSession = (sessionId: string): Promise<string | undefined> =>
-      transitionGate.run(() => operationBarrier.runTransition(() => switchSessionLocked(sessionId)))
+      transitionGate.run(() => operationBarrier.runTransition(async () => {
+        try {
+          return await switchSessionLocked(sessionId)
+        } finally {
+          // Preflight can fail before transitionTo is reached; settle any
+          // recall that was waiting on this transition in that case.
+          settlePendingQueueRecalls(false)
+        }
+      }))
 
     const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
       // A switch INTO the session we are already on is a no-op.
@@ -4605,6 +4649,11 @@ export function apply(ctx: Context, config: Config): void {
      *   skill handler accepts it instead of re-deriving it. */
     const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void, delivery: SubmitDelivery): void => {
       const submitTurn = takeSubmitTurn()
+      // Admission identity is captured synchronously, before this gesture
+      // waits behind an earlier submit. A later session must never inherit
+      // an old submission merely because the FIFO turn became available.
+      const submittedAgent = liveAgent
+      const submittedGeneration = sessionGeneration
       let submitTurnTransferred = false
       // Local submit acknowledgement (plan D): the row appears NOW —
       // before any session create / admission / command work — because
@@ -4717,12 +4766,22 @@ export function apply(ctx: Context, config: Config): void {
           // persists a row without a sessionId.
           await persistAfterSession(
             async () => {
+              if (submittedAgent !== undefined && !sessionUnchanged(
+                { agent: submittedAgent, generation: submittedGeneration },
+                liveAgent,
+                sessionGeneration,
+              )) return undefined
               await ensureSession()
               if (cleanedUp) return undefined
               return liveAgent?.session.id
             },
             (sessionId) => {
               if (cleanedUp) return
+              if (submittedAgent !== undefined && !sessionUnchanged(
+                { agent: submittedAgent, generation: submittedGeneration },
+                liveAgent,
+                sessionGeneration,
+              )) return
               persistHistory(sessionId)
             },
           )
@@ -4733,6 +4792,19 @@ export function apply(ctx: Context, config: Config): void {
             // creation): the wait ends here with NO write — the pending
             // row must not outlive the submission.
             settleLocalSubmitAck('submit resolved without an agent', { token: submitAckToken, terminal: true })
+            return
+          }
+          if (submittedAgent !== undefined && !sessionUnchanged(
+            { agent: submittedAgent, generation: submittedGeneration },
+            liveAgent,
+            sessionGeneration,
+          )) {
+            const merged = mergeDraft(app.getDraft(), text)
+            app.setEditorText(merged)
+            settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
+            app.notify(merged === text
+              ? 'the session changed while waiting for submission — try again'
+              : 'the draft changed while waiting for submission — review it before submitting again (the earlier text was preserved below)', 'error')
             return
           }
         // Capture THIS agent's session identity so the write below can
@@ -4773,6 +4845,8 @@ export function apply(ctx: Context, config: Config): void {
           // prunable for the whole command run. Acquire it HERE, transfer
           // it to the nested fallback, and release it on every other exit.
           const fallbackPin = pinDraftAttachments(text, draftImages, draftFiles)
+          const commandDraftDispositionReader = takeCommandDraftDisposition
+
           // Command handlers are agent-facing only when they carry staged
           // attachments. If the command fails before delivery, restore the
           // cleared editor text while the handoff pin still protects drafts.
@@ -4882,10 +4956,12 @@ export function apply(ctx: Context, config: Config): void {
                 // TUI-local commands and skill wrappers retain their existing
                 // in-process command service path; HostCommandPort is only for
                 // a line already selected as Host-owned.
-                return commands.execute(agent as Agent, toggled, submittedAttachments, signal).then(execution =>
-                  execution === undefined
+                return commands.execute(agent as Agent, toggled, submittedAttachments, signal).then(execution => {
+
+                   return execution === undefined
                     ? { kind: 'committed', matched: false } as const
-                    : { kind: 'committed', matched: true, execution } as const)
+                    : { kind: 'committed', matched: true, execution } as const
+                 })
               }
               return operationBarrier.runWriter(agent.session.id, () => backend.hostCommand.execute({
                 sessionId: agent.session.id,
@@ -4929,9 +5005,12 @@ export function apply(ctx: Context, config: Config): void {
                 return
               }
               const execution = outcome.matched
-                ? outcome.execution as { readonly result: CommandResult & { readonly draftRestored?: true; readonly draftRestoreSuppressed?: true } }
+                ? outcome.execution as { readonly commandId: string; readonly result: CommandResult }
                 : undefined
-              if (commandHealthRef !== undefined && execution !== undefined) {
+              const draftDisposition = execution === undefined
+                 ? undefined
+                 : commandDraftDispositionReader?.(execution.commandId)
+               if (commandHealthRef !== undefined && execution !== undefined) {
                 extensionService?._clearRegistryError(commandHealthRef)
               }
               // A command that RAN owns its own feedback (cards, working
@@ -5074,8 +5153,8 @@ export function apply(ctx: Context, config: Config): void {
                 // error result committed no agent-facing message: restore the
                 // staged draft before the handoff pin is released.
                 if (execution.result.kind === 'error'
-                  && execution.result.draftRestored !== true
-                  && execution.result.draftRestoreSuppressed !== true) {
+                  && draftDisposition !== 'restored'
+                  && draftDisposition !== 'suppressed') {
                   restoreSubmissionDraft(text)
                 } else if (execution.result.kind !== 'error') consumeDraftAttachments(text, draftImages, draftFiles)
                 // The command COMMITTED (no image fallback): release the
@@ -5102,7 +5181,10 @@ export function apply(ctx: Context, config: Config): void {
               submitTurn.release()
               if (cleanedUp) return
               const indeterminateSkill = isIndeterminateSkillWrite(error)
-              if (!indeterminateSkill) restoreSubmissionDraft(text)
+              const draftDisposition = commandDraftDispositionReader?.()
+              if (!indeterminateSkill && draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
+                restoreSubmissionDraft(text)
+              }
               settleLocalSubmitAck(
                 indeterminateSkill ? 'skill write result indeterminate' : 'command execution failed',
                 { token: submitAckToken, terminal: true },
@@ -5128,7 +5210,10 @@ export function apply(ctx: Context, config: Config): void {
               fallbackPin()
               submitTurn.release()
               if (cleanedUp) return
-              restoreSubmissionDraft(text)
+              const draftDisposition = commandDraftDispositionReader?.()
+              if (draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
+                restoreSubmissionDraft(text)
+              }
               settleLocalSubmitAck('command execution cancelled', { token: submitAckToken, terminal: true })
             },
           })
@@ -5300,10 +5385,10 @@ export function apply(ctx: Context, config: Config): void {
     }
     /**
      * Steer into the running turn with re-validation. Shared by
-     * Ctrl+S (the whole queue plus a non-empty draft) and the busy-Enter
+     * Ctrl+S's per-occurrence queue sweep and separate draft prompt, and the busy-Enter
      * preference — Enter while the agent is running with busyEnter=steer
      * steers the DRAFT ONLY (web busyEnter parity): explicitly queued
-     * messages stay queued until Ctrl+S or the /queue actions, because
+     * messages stay queued until Ctrl+S, because
      * already-steered input cannot be pulled back.
      * @param text - the submitted draft ('' allowed for Ctrl+S).
      * @param onlyDraft - busy-Enter mode: never read or remove the queue.
@@ -5328,14 +5413,12 @@ export function apply(ctx: Context, config: Config): void {
       // Same dismissal rule as submissions: settled local cards are a live
       // view, not a record (completed `!`/`!!` runs).
       app.clearSettledLocalMessages()
-      // Ctrl+S: send everything pending (kimi parity: the whole queue plus
-      // a non-empty draft rides along). With queued messages the entire
-      // queue is steered at once — the queue pane above the editor is the
-      // primary surface; without a queue it stays the classic single-draft
-      // steer. Nothing to send at all is a no-op BEFORE any session is
-      // created (deferred start). Every message goes through steer(): the
-      // next step boundary claims all next-step input together, so the
-      // batch arrives in one shot (an idle driver starts a turn with it).
+      // Ctrl+S: steer the initial pending next-turn queue snapshot in FIFO
+      // order, then send a non-empty draft as a separate prompt. Each queue
+      // occurrence is addressed by id through the semantic writer; a row that
+      // disappears or becomes unavailable converges without replay, and a row
+      // added after the snapshot is left for a later gesture. Nothing to send
+      // at all is a no-op BEFORE any session is created (deferred start).
       // The payload verdict is computed ONCE here on the SERIALIZED wire
       // form and passed to steerAll (steer.ts never guesses shell/image
       // semantics): `!` / `!!` shell modes make a bare prefix a payload,
@@ -5348,7 +5431,7 @@ export function apply(ctx: Context, config: Config): void {
       // the steerHasPayload pure function (headless-pinned).
       if (!steerHasPayload(draftHasPayload, {
         onlyDraft,
-        queuedCount: liveAgent === undefined ? 0 : liveAgent.inbox.nextTurn.length + liveAgent.inbox.nextStep.length,
+        queuedCount: liveAgent === undefined ? 0 : liveAgent.inbox.nextTurn.length,
         liveAgent: liveAgent !== undefined,
       })) return
       // Local submit acknowledgement (plan D): the row appears NOW, before
@@ -6505,9 +6588,11 @@ export function apply(ctx: Context, config: Config): void {
         // drafts are staged (a failure keeps the queue intact).
         let recalledText = ''
         const staged: { kind: 'image' | 'file'; id: number }[] = []
+        const recalledEntries: { text: string; staged: { kind: 'image' | 'file'; id: number }[] }[] = []
         try {
           const lines: string[] = []
           for (const message of queued) {
+            const messageStaged: { kind: 'image' | 'file'; id: number }[] = []
             const parts: string[] = []
             for (const block of message.content) {
               if (block.type === 'text') {
@@ -6523,6 +6608,7 @@ export function apply(ctx: Context, config: Config): void {
                   recalledRef: attachment,
                 })
                 staged.push({ kind: 'image', id: draft.id })
+                messageStaged.push({ kind: 'image', id: draft.id })
                 parts.push(draft.placeholder)
               } else if (block.type === 'file') {
                 const attachment = block.attachment as import('./attachment/file-admission.ts').FileAttachmentRefLike
@@ -6532,10 +6618,13 @@ export function apply(ctx: Context, config: Config): void {
                   source: { type: 'recalled', ref: attachment },
                 })
                 staged.push({ kind: 'file', id: draft.id })
+                messageStaged.push({ kind: 'file', id: draft.id })
                 parts.push(draft.placeholder)
               }
             }
-            lines.push(parts.join(''))
+            const messageText = parts.join('')
+            lines.push(messageText)
+            recalledEntries.push({ text: messageText, staged: messageStaged })
           }
           recalledText = lines.join('\n\n')
         } catch (error) {
@@ -6553,73 +6642,202 @@ export function apply(ctx: Context, config: Config): void {
         // lacks these placeholders until the semantic queue removal commits,
         // so an attach-time prune must not delete them in the meantime.
         const releaseRecalled = pinDraftAttachments(recalledText, draftImages, draftFiles)
-        // Remove exactly the pulled-back messages as one semantic batch,
-        // keeping any notices queued behind them. The draft is updated only
-        // after the batch reports committed.
+        let draftApplied = false
+        let settledRemovals = 0
+        let failureKind: 'transition' | 'stale' | 'indeterminate' | 'cancelled' | undefined
+        const discardStaged = (from = 0): void => {
+          for (const entry of recalledEntries.slice(from)) {
+            for (const attachment of entry.staged) {
+              if (attachment.kind === 'image') draftImages.remove(attachment.id)
+              else draftFiles.remove(attachment.id)
+            }
+          }
+        }
+        let deferredToTransition = false
+        const deferRecalledToTransition = (count: number): void => {
+          discardStaged(count)
+          const restoreText = recalledEntries.slice(0, count).map(entry => entry.text).join('\n\n')
+          pendingQueueRecalls.push({
+            commit: () => {
+              discardStaged()
+              releaseRecalled()
+            },
+            abort: () => {
+              if (cleanedUp || !sessionUnchanged(
+                { agent: queuedAgent, generation: queuedGeneration },
+                liveAgent,
+                sessionGeneration,
+              )) {
+                discardStaged()
+                releaseRecalled()
+                return
+              }
+              if (restoreText !== '') {
+                const current = app.getDraft()
+                app.setDraft(current === '' ? restoreText : `${restoreText}\n\n${current}`)
+              }
+              refreshQueue()
+              releaseRecalled()
+            },
+          })
+          deferredToTransition = true
+        }
+        // Remove each pulled-back occurrence through the official single-item queue mutation,
+        // FIFO admission keeps notices queued behind them; confirmed removals are reflected only
+        // after each settlement.
         runOwned('queue pull-back', () => operationBarrier.runWriter(queuedAgent.session.id, async () => {
-          if (cleanedUp) {
-            for (const entry of staged) {
-              if (entry.kind === 'image') draftImages.remove(entry.id)
-              else draftFiles.remove(entry.id)
+          try {
+            if (cleanedUp) {
+              for (const entry of staged) {
+                if (entry.kind === 'image') draftImages.remove(entry.id)
+                else draftFiles.remove(entry.id)
+              }
+              return
             }
-            return
-          }
-          if (!sessionUnchanged(
-            { agent: queuedAgent, generation: queuedGeneration },
-            liveAgent,
-            sessionGeneration,
-          )) {
-            for (const entry of staged) {
-              if (entry.kind === 'image') draftImages.remove(entry.id)
-              else draftFiles.remove(entry.id)
+            if (!sessionUnchanged(
+              { agent: queuedAgent, generation: queuedGeneration },
+              liveAgent,
+              sessionGeneration,
+            )) {
+              discardStaged()
+              app.notify('the session changed while pulling messages back — try again', 'info')
+              return
             }
-            app.notify('the session changed while pulling messages back — try again', 'info')
-            return
-          }
-          const outcome = await backend.sessionWriter.removeQueuedBatch(
-            queuedAgent.session.id,
-            queued.map(message => message.id),
-          )
-          // Final disposal may happen while the semantic removal is in
-          // flight. Leave recalled refs owned by this dead workflow rather
-          // than touching the disposed app; in particular, an indeterminate
-          // removal must never discard the only local representation.
-          if (cleanedUp) return
-          if (outcome.kind === 'committed') {
-            const current = app.getDraft()
-            app.setDraft(recalledText === '' ? current : current === '' ? recalledText : `${recalledText}\n\n${current}`)
+            const outcomes: InterruptWriteOutcome[] = []
+            for (const message of queued) {
+              const next = await backend.sessionWriter.removeQueued(queuedAgent.session.id, message.id)
+              outcomes.push(next)
+              if (next.kind !== 'committed') break
+              settledRemovals += 1
+            }
+            const outcome = outcomes[outcomes.length - 1]!
+            const confirmed = recalledEntries.slice(0, settledRemovals)
+            // Final disposal may happen while the semantic removal is in
+            // flight. Leave recalled refs owned by this dead workflow rather
+            // than touching the disposed app; in particular, an indeterminate
+            // removal must never discard the only local representation.
+            if (cleanedUp) return
+            if (transitionGate.pending || operationBarrier.inTransition) {
+              const preserveCount = outcome.kind === 'committed' || outcome.kind === 'indeterminate'
+                ? recalledEntries.length
+                : settledRemovals
+              deferRecalledToTransition(preserveCount)
+              return
+            }
+            if (outcome.kind === 'committed') {
+              const current = app.getDraft()
+              app.setDraft(recalledText === '' ? current : current === '' ? recalledText : `${recalledText}\n\n${current}`)
+              draftApplied = true
+              refreshQueue()
+              return
+            }
+            if (outcome.kind === 'indeterminate') {
+              // Keep the staged recalled refs visible for manual review. The
+              // queue state is unknown, so this must not silently discard the
+              // only local representation or trigger an automatic retry.
+              const current = app.getDraft()
+              app.setDraft(recalledText === '' ? current : current === '' ? recalledText : `${recalledText}\n\n${current}`)
+              draftApplied = true
+              app.notify('queue pull-back result is indeterminate — do not retry automatically', 'error')
+              return
+            }
+            // A known refusal means only the confirmed prefix was removed. Preserve
+            // that prefix in the draft and release staged refs for rows that
+            // remain in the queue; never pretend this was atomic.
+            discardStaged(confirmed.length)
+            const confirmedText = confirmed.map(entry => entry.text).join('\n\n')
+            if (confirmedText !== '') {
+              const current = app.getDraft()
+              app.setDraft(current === '' ? confirmedText : `${confirmedText}\n\n${current}`)
+            }
+            draftApplied = true
+            if (outcome.kind === 'cancelled') throw cancellationError('queue pull-back cancelled')
+            const failure = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
+            app.notify(`queue pull-back stopped after ${confirmed.length} message${confirmed.length === 1 ? '' : 's'}: ${failure}`, 'error')
             refreshQueue()
-            return
-          }
-          if (outcome.kind === 'indeterminate') {
-            // Keep the staged recalled refs visible for manual review. The
-            // queue state is unknown, so this must not silently discard the
-            // only local representation or trigger an automatic retry.
+          } catch (error) {
+            // Preserve or discard local representations before releasing the
+            // writer barrier. A waiting transition must not overtake this
+            // reconciliation and prune/cross-session the recalled draft.
+            if (cleanedUp) {
+              discardStaged()
+              throw error
+            }
+            if (transitionGate.pending || operationBarrier.inTransition) {
+              if (!draftApplied) {
+                deferRecalledToTransition(isCancellation(error) ? settledRemovals : recalledEntries.length)
+              }
+              failureKind = 'transition'
+              throw error
+            }
+            if (draftApplied) throw error
+            if (error instanceof TransitionInProgressError) {
+              discardStaged()
+              failureKind = 'transition'
+              throw error
+            }
+            if (!sessionUnchanged(
+              { agent: queuedAgent, generation: queuedGeneration },
+              liveAgent,
+              sessionGeneration,
+            )) {
+              discardStaged()
+              failureKind = 'stale'
+              throw error
+            }
+            if (isCancellation(error)) {
+              discardStaged(settledRemovals)
+              const confirmedText = recalledEntries.slice(0, settledRemovals).map(entry => entry.text).join('\n\n')
+              if (confirmedText !== '') {
+                const current = app.getDraft()
+                app.setDraft(current === '' ? confirmedText : `${confirmedText}\n\n${current}`)
+              }
+              draftApplied = true
+              failureKind = 'cancelled'
+              throw error
+            }
             const current = app.getDraft()
             app.setDraft(recalledText === '' ? current : current === '' ? recalledText : `${recalledText}\n\n${current}`)
-            app.notify('queue pull-back result is indeterminate — do not retry automatically', 'error')
-            return
+            draftApplied = true
+            failureKind = 'indeterminate'
+            throw error
+          } finally {
+            // Release the pin while the writer still owns the barrier. The
+            // outer finally is idempotent and only covers pre-entry refusal.
+            if (!deferredToTransition) releaseRecalled()
           }
-          if (outcome.kind === 'cancelled') throw cancellationError('queue pull-back cancelled')
-          const failure = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
-          throw new Error(failure)
-        }).finally(() => releaseRecalled()), {
+        }).catch(error => {
+          // A pre-entry fence refusal never enters the callback above, so its
+          // staged representation is reconciled by this outer catch only.
+          if (error instanceof TransitionInProgressError) {
+            discardStaged()
+            failureKind = 'transition'
+          }
+          throw error
+        }).finally(() => {
+          if (!deferredToTransition) releaseRecalled()
+        }), {
           diag,
           sessionId: () => liveAgent?.session.id,
-          onError: (error) => {
+          onError: (_error) => {
             if (cleanedUp) return
-            for (const entry of staged) {
-              if (entry.kind === 'image') draftImages.remove(entry.id)
-              else draftFiles.remove(entry.id)
+            if (failureKind === 'transition') {
+              app.notify('a session transition is in progress — try again in a moment', 'info')
+              return
             }
-            app.notify(safeErrorMessage(error), 'error')
+            if (failureKind === 'stale') {
+              app.notify('the session changed while pulling messages back — try again', 'info')
+              return
+            }
+            if (failureKind === 'indeterminate') {
+              app.notify('queue pull-back result is indeterminate — do not retry automatically', 'error')
+              return
+            }
+            if (draftApplied || failureKind === 'cancelled') return
+            app.notify('queue pull-back result is indeterminate — do not retry automatically', 'error')
           },
           onCancel: () => {
-            if (cleanedUp) return
-            for (const entry of staged) {
-              if (entry.kind === 'image') draftImages.remove(entry.id)
-              else draftFiles.remove(entry.id)
-            }
+            if (cleanedUp || draftApplied || failureKind !== undefined) return
           },
         })
       },
@@ -8293,6 +8511,10 @@ export function apply(ctx: Context, config: Config): void {
      * Before the command surface is wired nothing can consume a binding, so
      * the unwired default simply runs the launch. */
     let withCommandDelivery = <T>(_delivery: SubmitDelivery, run: () => T): T => run()
+    /** Consume TUI-local command draft dispositions after DSH normalizes the
+     * public CommandResult. A missing id is used only for a thrown command
+     * execution, which cannot return its generated id to this sink. */
+    let takeCommandDraftDisposition: ((commandId?: string) => 'restored' | 'suppressed' | undefined) | undefined
     /** The catalog refresh coordinator: the ONE post-mount refresh owner
      * (first session, switches, /preset, /reload). Built inside
      * registerCommands once the surface hooks exist. (Declared before
@@ -8434,10 +8656,16 @@ export function apply(ctx: Context, config: Config): void {
             // interleave, so a stale rewind is detected BEFORE the child is
             // created (never a published-and-disposed durable ghost), and
             // the commit can never be overwritten by a concurrent switch.
-            return transitionGate.run(() => operationBarrier.runTransition(() => commitRewind(commitHost, source, candidate, {
-              sessionId: sourceId,
-              generation: sourceGeneration,
-            }, sourceSelection)))
+            return transitionGate.run(() => operationBarrier.runTransition(async () => {
+              try {
+                return await commitRewind(commitHost, source, candidate, {
+                  sessionId: sourceId,
+                  generation: sourceGeneration,
+                }, sourceSelection)
+              } finally {
+                settlePendingQueueRecalls(false)
+              }
+            }))
           }, {
             diag,
             sessionId: () => sourceId,
@@ -8620,7 +8848,15 @@ export function apply(ctx: Context, config: Config): void {
       // exclusive section via this seam (rewind goes through
       // openRewindPicker's own gate wrapper).
       withSessionTransition: <T>(task: () => Promise<T> | T) =>
-        transitionGate.run(() => operationBarrier.runTransition(async () => task())),
+        transitionGate.run(() => operationBarrier.runTransition(async () => {
+          try {
+            return await task()
+          } finally {
+            // A command may fail during preflight before it calls
+            // transitionTo; do not leave a deferred recall unresolved.
+            settlePendingQueueRecalls(false)
+          }
+        })),
       withSessionWriter: <T>(sessionId: string, task: () => Promise<T> | T) =>
         operationBarrier.runWriter(sessionId, async () => task()),
       enterView,
@@ -8639,6 +8875,7 @@ export function apply(ctx: Context, config: Config): void {
         isSkillWrapperName = installed.isSkillWrapper
         refreshCommandCompletions = installed.refreshCommandCompletions
         withCommandDelivery = installed.withDelivery
+        takeCommandDraftDisposition = installed.takeCommandDraftDisposition
         // The coordinator's surface hooks point INTO the command surface;
         // the runner's refreshCatalog routes every post-mount refresh here.
         catalogCoordinator = new CatalogRefreshCoordinator({
