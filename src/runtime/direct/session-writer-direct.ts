@@ -111,7 +111,7 @@ export class DirectSessionWriter implements SessionWriter {
    * `updateQueue(id, { kind: 'steer' })` operation. */
   async steerQueued(sessionId: string, messageId: string): Promise<WriteOutcome> {
     const agent = this.queueAgentFor(sessionId)
-    if (agent === undefined) return sessionNotFound(sessionId)
+    if (agent === undefined) return queueItemNotFound(messageId)
     const message = agent.inbox.nextTurn.find(item => item.id === messageId)
     if (message === undefined) return queueItemNotFound(messageId)
     if (agent.status !== 'running') return steerUnavailable(messageId)
@@ -130,7 +130,7 @@ export class DirectSessionWriter implements SessionWriter {
    * next-step user message, matching the official queue mutation operation. */
   async removeQueued(sessionId: string, messageId: string): Promise<WriteOutcome> {
     const agent = this.queueAgentFor(sessionId)
-    if (agent === undefined) return sessionNotFound(sessionId)
+    if (agent === undefined) return queueItemNotFound(messageId)
     const pending = [...agent.inbox.nextTurn, ...agent.inbox.nextStep].some(item => item.id === messageId)
     if (!pending) return queueItemNotFound(messageId)
     agent.inbox.remove(messageId)

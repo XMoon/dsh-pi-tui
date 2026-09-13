@@ -150,11 +150,11 @@ test('known operations reject when the session is absent', async () => {
   })
   assert.deepEqual(await w.steerQueued('session-ghost', 'm1'), {
     kind: 'rejected',
-    error: { code: 'session/not-found', message: 'session "session-ghost" is not available' },
+    error: { code: 'session/queue-item-not-found', message: 'queued item "m1" is no longer pending' },
   })
   assert.deepEqual(await w.removeQueued('session-ghost', 'm1'), {
     kind: 'rejected',
-    error: { code: 'session/not-found', message: 'session "session-ghost" is not available' },
+    error: { code: 'session/queue-item-not-found', message: 'queued item "m1" is no longer pending' },
   })
   assert.deepEqual(await w.cancel('session-ghost'), {
     kind: 'rejected',

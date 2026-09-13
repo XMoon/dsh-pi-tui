@@ -625,9 +625,9 @@ production backend change is part of this slice.
   empty accelerated submit in an interactive continuable child viewer applies
   the same queued-occurrence choreography to that child and never calls the
   ordinary child prompt API. Direct resolves the live Agent by session id and
-  reports only confirmed synchronous calls as `committed`. Direct-only
-  notice/source presentation remains in the existing queue/task projection
-  rather than the semantic reader contract.
+  reports only confirmed synchronous calls as `committed`. Queue presentation
+  consumes only the semantic pending-input projection; source-specific notice
+  classification is not part of the D2.1 contract.
 - `HostCommandPort` owns execution of an already-authorized Host command only.
   The runner retains claim precedence and keeps TUI-local commands, extension
   commands, and skill-wrapper delivery out of this seam. Direct forwards the

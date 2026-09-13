@@ -1776,9 +1776,9 @@ export interface TuiAppEventsBase {
   onRewind?: () => void
   /**
    * Steer with the current draft, possibly empty (the steer action,
-   * default: Ctrl+S). The runner snapshots pending next-turn occurrences,
-   * steers them FIFO when it has
-   * messages, then sends a non-empty draft as a separate prompt.
+   * default: Ctrl+S). The runner gives a payload-bearing draft priority and
+   * sends it alone; with no payload it steers semantic `queued` occurrences
+   * FIFO. Already-`steering` and `context` placements are not swept.
    * Optional.
    */
   onSteer?: (text: string) => void
@@ -2253,7 +2253,7 @@ export interface StatusData {
   usage?: UsageStatus
 }
 
-/** One queued inbox row for the queue pane (mirrors the agent Inbox's lists). */
+/** One semantic queued pending-input row for the queue pane. */
 export interface QueueItem {
   /** The pending message id (agent inbox identity). */
   id: string
@@ -2261,9 +2261,6 @@ export interface QueueItem {
   text: string
   /** next-turn followup vs next-step steer. */
   mode: 'followup' | 'steer'
-  /** Plugin notice (e.g. a background-job completion): NOT steerable — it
-   * renders with its own marker and the hint drops the steer verbs. */
-  notice?: boolean
 }
 
 /** One queued prompt awaiting the user's y/n/esc decision. */
@@ -12260,7 +12257,7 @@ export class TuiApp {
    * Replace the pending inbox rows for the queue pane: a border rule, one
    * `❯ text` row per message, and a dim hint. An empty queue renders
    * nothing at all.
-   * @param items - pending followups/steers, in delivery order.
+   * @param items - semantic queued occurrences, in projection order.
    */
   setQueueItems(items: readonly QueueItem[]): void {
     this.queueItems = items
@@ -12269,9 +12266,6 @@ export class TuiApp {
     this.renderQueuePane()
     this.syncExtensionState()
   }
-
-  /** Notice rows shown in full before the `+N more` fold (user rows are never folded). */
-  private static readonly MAX_NOTICE_ROWS = 5
 
   /** Rebuild the queue pane text from the current inbox rows and width. */
   private rebuildQueuePane(width: number): void {
@@ -12287,46 +12281,17 @@ export class TuiApp {
     // Panel border rules indent one cell on each side so the boundary never
     // reads as the editor's full-width border.
     const lines = [color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)]
-    // User-origin rows are the user's OWN queued input: always fully
-    // visible, never folded. Notice rows (plugin notifications, subagent
-    // reports, injected instructions) are at-a-glance transport only:
-    // beyond MAX_NOTICE_ROWS they collapse into one `+N more` line, so a
-    // backlog of child settlements can never flood the pane — the task
-    // browser remains their browse surface, and each claimed notice drops
-    // the count (and eventually the group) automatically.
-    const userRows = items.filter(item => item.notice !== true)
-    const noticeRows = items.filter(item => item.notice === true)
-    const shownNotices = noticeRows.slice(0, TuiApp.MAX_NOTICE_ROWS)
-    for (const item of userRows) {
+    for (const item of items) {
       const text = item.text.replace(/\s+/g, ' ').trim()
       const truncated = truncateToWidth(text, Math.max(1, safeWidth - visibleWidth('❯ ')), '…')
-      // User-origin rows carry the SAME brand-blue ❯ as the transcript
-      // bubbles and the editor prompt — one marker for the user's own
-      // input everywhere (pending here, delivered up there).
+      // Every row is a semantic queued occurrence; the same ❯ marker and
+      // steer/edit hints apply regardless of its backend origin.
       lines.push(`${color.roleUser('❯')} ${truncated}`)
     }
-    for (const item of shownNotices) {
-      // Notices are NOT steerable: they carry their own waiting-state
-      // marker (the ⏳ under emoji, the ⧗ hourglass under symbols/minimal)
-      // so they never read as user input, and the hint below drops the
-      // steer/edit verbs when nothing else is queued.
-      const text = item.text.replace(/\s+/g, ' ').trim()
-      const lead = iconLead('queue-notice', this.iconStyle)
-      const truncated = truncateToWidth(text, Math.max(1, safeWidth - visibleWidth(lead)), '…')
-      lines.push(`${color.textDim(lead)}${color.textDim(truncated)}`)
-    }
-    const folded = noticeRows.length - shownNotices.length
-    if (folded > 0) {
-      lines.push(color.textDim(truncateToWidth(
-        `  +${folded} more notices pending · they deliver as the next turn runs`,
-        Math.max(1, safeWidth - 2),
-        '…',
-      )))
-    }
-    const hasSteerable = userRows.length > 0
-    const hint = hasSteerable
-      ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer all · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to edit all`
-      : 'notices deliver after the current task · /tasks to view'
+    const steerHint = `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer all`
+    const hint = this.viewerMode === undefined
+      ? `${steerHint} · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to edit all`
+      : steerHint
     lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, safeWidth - 2), '…')))
     this.queuePane.setText(lines.join('\n'))
   }

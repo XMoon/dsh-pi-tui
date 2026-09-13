@@ -4630,7 +4630,7 @@ test('assistant bullet, thinking and compaction follow the symbols palette', asy
   assert.ok(!view.includes('🌊') && !view.includes('🗜') && !view.includes('🐋  para'), `emoji glyphs leaked into symbols:\n${view}`)
 })
 
-test('minimal keeps the bullet and notice hourglass; thinking/compaction titles go bare', async (t) => {
+test('minimal keeps the bullet and semantic queue marker; thinking/compaction titles go bare', async (t) => {
   const vt = new VirtualTerminal(100, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'minimal' })
   t.after(() => app.stop())
@@ -4642,11 +4642,11 @@ test('minimal keeps the bullet and notice hourglass; thinking/compaction titles 
     { kind: 'thinking', turn: 0, text: 'reasoning preview line' },
     { kind: 'compaction', turn: 0, text: 'summary', items: 3, tokens: 2 },
   ])
-  app.setQueueItems([{ id: 'j-1', text: 'job done: exit 0', mode: 'steer', notice: true }])
+  app.setQueueItems([{ id: 'j-1', text: 'job done: exit 0', mode: 'steer' }])
   const view = await viewport(vt)
   const lines = view.split('\n').map(stripTerminalSequences)
   assert.ok(lines.some(line => line.startsWith('∙  para one')), `the bullet must survive minimal:\n${view}`)
   assert.ok(lines.some(line => line.startsWith('Thinking')), `thinking title must go bare (no leading space):\n${view}`)
   assert.ok(lines.some(line => line.startsWith('Context compacted')), `compaction title must go bare:\n${view}`)
-  assert.ok(view.includes('⧗ job done: exit 0'), `the queue-notice hourglass must survive minimal:\n${view}`)
+  assert.ok(view.includes('❯ job done: exit 0'), `the semantic queue marker must survive minimal:\n${view}`)
 })

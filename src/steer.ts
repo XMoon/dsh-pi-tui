@@ -279,6 +279,12 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
     deps.notify(verbatim ? deps.staleNotice() : deps.mergedNotice(), 'error')
     return 'stale'
   }
+  // An empty draft cannot steer a turn that is not running; do not issue an
+  // occurrence write merely to receive the expected unavailable settlement.
+  if (!draftHasPayload && !pending.running) {
+    if (text !== '') deps.restoreDraft(text)
+    return 'ok'
+  }
   // dsh-web gives a payload-bearing draft priority over the queued snapshot.
   // With no draft payload, only `placement: 'queued'` occurrences participate;
   // `steering` and `context` are already outside the queue gesture.
