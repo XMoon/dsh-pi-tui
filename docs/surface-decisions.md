@@ -51,30 +51,16 @@ busy-Enter steer gate, so `exit` never births a session and always quits
 regardless of the delivery preference. `/exit` remains the command form;
 any other prompt (including `exit!` or `Exit`) still goes to the model.
 
-## Background-subagent settlement notices never appear in the queue pane
+## The queue pane follows semantic pending-input placement
 
-The queue pane is the mirror of the agent's inbox and therefore a
-USER-INPUT surface (kimi's queue pane lists only queued prompts). dsh
-pushes two kinds of background-subagent notices into the parent's inbox:
-
-- continuable children: `source.kind === 'subagent-settled'` (the
-  continuation manager's settlement notice);
-- one-shot background subagent jobs: `tool-jobs` completion notices whose
-  summary starts with `subagent `.
-
-Both are the runtime's account of a child ending, not steerable input, so
-the queue mirror drops them (`isSubagentSettlementNotice`). The task
-browser is their surface: terminal job rows (one-shot), inactive child rows
-(continuable), `/subagents` for transcripts. A FAILED settlement
-additionally surfaces once as a transient error notify
-(`subagentNoticeIsFailure`, classified on the producers' deterministic
-wording — "finished and" is the only success phrasing for
-`subagent-settled`; `[status: failed|killed]` for tool-jobs). The dsh-side
-delivery is unchanged: the parent model still receives the notice; only the
-TUI's queue mirror filters it. Bash-job notices stay in the queue.
-
-Classification helpers: `src/index.ts` (`isSubagentSettlementNotice`,
-`subagentNoticeIsFailure`), pinned by `test/queue-notices.test.ts`.
+The queue pane consumes the same `PendingInputReader` projection as the shared
+runner. It renders every item with `placement === 'queued'`, in projection
+order, using only the occurrence id and content. `steering` and `context`
+placements remain outside queue gestures. Direct inbox collection names and
+message metadata are adapter-internal; the TUI has no source-specific notice
+filter, settlement classifier, or failure-notify side channel. If a future
+surface needs to hide a class of messages, that policy must be represented by
+a semantic projection available to every backend.
 
 ## /login and /logout resolve credential targets, not just DEEPSEEK_API_KEY
 

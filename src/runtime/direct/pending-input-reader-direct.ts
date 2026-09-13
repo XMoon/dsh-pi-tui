@@ -31,14 +31,6 @@ interface DirectPendingAgentLike {
   }
 }
 
-/** Direct-only source projection for the existing queue/task presentation.
- * This is deliberately not part of PendingInputReader: official Client queue
- * rows carry placement/content, not Direct message sources. */
-export interface DirectPendingInputPresentationItem {
-  readonly id: string
-  readonly source?: unknown
-}
-
 function isUserSource(source: unknown): boolean {
   return typeof source === 'object'
     && source !== null
@@ -60,17 +52,6 @@ export class DirectPendingInputReader implements PendingInputReader {
 
   constructor(agentFor: (sessionId: string) => DirectPendingAgentLike | undefined) {
     this.agentFor = agentFor
-  }
-
-  /** Return Direct source facts for presentation-only notice filtering. The
-   * semantic `snapshot()` remains the only cross-backend queue read. */
-  presentation(sessionId: string): readonly DirectPendingInputPresentationItem[] | undefined {
-    const agent = this.agentFor(sessionId)
-    if (agent === undefined) return undefined
-    return [...agent.inbox.nextTurn, ...agent.inbox.nextStep].map(message => ({
-      id: message.id,
-      source: message.source,
-    }))
   }
 
   snapshot(sessionId: string): PendingInputSnapshot | undefined {

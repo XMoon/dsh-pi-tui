@@ -844,32 +844,6 @@ export function subagentJobViewHint(status: string, detail: string | undefined):
   ].join('\n')
 }
 
-/** The message-source projection the queue filter reads (a structural subset
- * of dsh's message sources, so the helpers are testable without dsh types). */
-export interface QueueNoticeSource {
-  readonly form?: string
-  readonly kind?: string
-  readonly summary?: string
-  /** The reporting child's session id (subagent-report relays). */
-  readonly senderSessionId?: string
-}
-
-/**
- * Whether an inbox message is USER-ORIGIN input for queue-pane presentation:
- * user-origin rows render as `❯` rows. Everything else is injected context, not the user's own queued
- * input. Non-user sources include plugin notices (background-job
- * completions), `subagent-report` relays (a child's active report, e.g.
- * "Background subagent X reported:"), injected skill/agent instructions,
- * goal messages. The semantic placement projection makes the same source cut
- * for next-step rows; this predicate only controls the Direct notice marker
- * and steer hints. A sourceless row
- * (undefined) is treated as user input — plain rows never carry a source.
- * @param source - the message source projection, or undefined for a plain row.
- */
-export function isUserQueueInput(source: QueueNoticeSource | undefined): boolean {
-  return source === undefined || source.kind === 'user'
-}
-
 /**
  * Whether a plain submitted draft is the quit word: exactly `exit` (trimmed,
  * lowercase). The runner intercepts this BEFORE any session creation or
@@ -881,85 +855,26 @@ export function isPlainExitPrompt(text: string): boolean {
   return text.trim() === 'exit'
 }
 
-/**
- * Whether an inbox message is a BACKGROUND-SUBAGENT settlement notice — the
- * runtime's account of a child ending, not steerable user input. Two dsh
- * producers push these into the parent's inbox:
- *  - continuable children: `source.kind === 'subagent-settled'` (the
- *    continuation manager's settlement notice);
- *  - one-shot background subagent jobs: tool-jobs completion notices whose
- *    summary starts with the job kind (`subagent <label> [status: …]`).
- * The queue pane mirrors the inbox, but these belong to the task browser
- * (terminal job rows / inactive child rows), so the mirror drops them and
- * only failures surface as a transient error notify.
- * @param source - the message source projection, or undefined for a plain row.
- */
-export function isSubagentSettlementNotice(source: QueueNoticeSource | undefined): boolean {
-  if (source === undefined || source.form !== 'notice') return false
-  if (source.kind === 'subagent-settled') return true
-  return source.kind === 'plugin' && typeof source.summary === 'string' && source.summary.startsWith('subagent ')
-}
-
-/**
- * Whether a subagent settlement notice reports FAILURE, classified on the
- * producers' own deterministic wording:
- *  - `subagent-settled` summaries: "finished and will do no further work"
- *    is the only success wording; aborted / max-tokens / refusal / error /
- *    unknown endings all fail;
- *  - tool-jobs subagent summaries carry the terminal status line, whose
- *    failure statuses are `failed` and `killed` (dsh JobStatus).
- * A notice that cannot be classified is treated as success (silent).
- * @param source - the message source projection.
- */
-export function subagentNoticeIsFailure(source: QueueNoticeSource | undefined): boolean {
-  if (source === undefined || source.form !== 'notice') return false
-  if (source.kind === 'subagent-settled') {
-    return typeof source.summary === 'string' && !source.summary.includes('finished and')
-  }
-  if (source.kind === 'plugin' && typeof source.summary === 'string' && source.summary.startsWith('subagent ')) {
-    return /\[status: (failed|killed)[,\]]/.test(source.summary)
-  }
-  return false
-}
-
-/** One inbox message as the queue mirror sees it (a structural projection). */
+/** One semantic pending-input item as the queue mirror sees it. */
 export interface QueueInboxMessage {
   readonly id: string
   readonly content: readonly ContentBlock[]
-  readonly source?: QueueNoticeSource
 }
 
 /** Adapt one semantic pending-input item to the queue pane's presentation
- * projection. Placement is selected by the caller; this conversion never
- * exposes Direct inbox collection names to the consumer. */
-function queueInboxMessageOf(item: PendingInputItem, source?: unknown): QueueInboxMessage {
+ * projection without reintroducing backend-specific fields. */
+function queueInboxMessageOf(item: PendingInputItem): QueueInboxMessage {
   return {
     id: item.id,
     content: item.content as readonly ContentBlock[],
-    ...(source === undefined ? {} : { source: source as QueueNoticeSource }),
   }
 }
 
-/** The mirror result for one inbox batch: the rows to show plus the failed
- * settlement summaries the caller should notify (each once). */
+/** The queue-pane rows for one semantic pending-input batch. */
 export interface QueueFoldResult {
-  /** Queue rows (background-subagent settlement notices excluded). */
   readonly rows: QueueItem[]
-  /** Failed settlement summaries not yet notified (the caller notifies). */
-  readonly failures: readonly string[]
 }
 
-/**
- * Build the queue-pane rows for one inbox batch, dropping background-subagent
- * settlement notices (the task browser is their surface) and reporting which
- * FAILED settlements should notify. Pure and injectable so the filter +
- * once-notify semantics are testable without the agent.
- * @param messages - one inbox batch (next-turn or next-step), in order.
- * @param mode - the delivery mode for surviving rows.
- * @param notified - the notify-once guard; failed notices already in it are
- *   skipped, and a newly-reported id is ADDED here so a re-render can never
- *   double-notify.
- */
 /**
  * The queue-pane display text of one message's content (review finding 5):
  * text blocks verbatim, image blocks as a compact `🖼️ name` summary (the
@@ -978,36 +893,19 @@ function queueTextOf(content: readonly import('@deepseek-ai/dsh-llm').ContentBlo
   return parts.join(' ')
 }
 
+/** Build queue-pane rows from semantic pending-input occurrences, preserving
+ * their order and content without inspecting backend-specific metadata. */
 export function foldQueueRows(
   messages: readonly QueueInboxMessage[],
   mode: 'followup' | 'steer',
-  notified: Set<string>,
 ): QueueFoldResult {
-  const rows: QueueItem[] = []
-  const failures: string[] = []
-  for (const message of messages) {
-    const source = message.source
-    if (isSubagentSettlementNotice(source)) {
-      if (source?.summary !== undefined && subagentNoticeIsFailure(source) && !notified.has(message.id)) {
-        notified.add(message.id)
-        failures.push(source.summary)
-      }
-      continue
-    }
-    rows.push({
+  return {
+    rows: messages.map(message => ({
       id: message.id,
       text: queueTextOf(message.content),
       mode,
-      // Only user-origin (or sourceless plain) rows render as steerable user
-      // input. Everything else — plugin notices, subagent-report relays,
-      // injected instructions, goal messages — is a NOTICE: the queue pane
-      // marks it with the ⏳ prefix and drops the steer hints (see
-      // QueueItem.notice), so it can never read as the user's own queued
-      // input (web parity: only user-origin messages render as steering).
-      notice: !isUserQueueInput(source),
-    })
+    })),
   }
-  return { rows, failures }
 }
 
 /**
@@ -3924,6 +3822,37 @@ export function apply(ctx: Context, config: Config): void {
       }
       viewedQueueAgent = undefined
     }
+    // The queue pane consumes the same active semantic pending-input subject as
+    // Ctrl+S: the live main session on the main surface, or the exact
+    // interactive continuable child while its viewer is mounted. A child whose
+    // authority is unavailable yields an empty pane; it never falls back to the
+    // main session's queue. Non-interactive viewers expose no queue subject.
+    const activePendingSessionId = (): string | undefined => {
+      const viewer = viewing
+      if (viewer !== undefined) {
+        return viewer.mode === 'continuable' && viewer.access === 'interactive-direct-child'
+          ? viewer.id
+          : undefined
+      }
+      return liveAgent?.session.id
+    }
+    const refreshQueue = (): void => {
+      if (cleanedUp) return
+      const sessionId = activePendingSessionId()
+      if (sessionId === undefined) {
+        app.setQueueItems([])
+        return
+      }
+      const pending = backend.pendingInputReader.snapshot(sessionId)
+      if (pending === undefined) {
+        app.setQueueItems([])
+        return
+      }
+      const queued = pending.items
+        .filter(item => item.placement === 'queued')
+        .map(queueInboxMessageOf)
+      app.setQueueItems(foldQueueRows(queued, 'followup').rows)
+    }
     // The Direct stream adapter keeps active prefixes for Agents that were not
     // being displayed yet; enterView replays this exact-agent baseline before
     // mounting the child surface.
@@ -4299,6 +4228,9 @@ export function apply(ctx: Context, config: Config): void {
       // are elsewhere" signal. The FOOTER switches to the child's own
       // identity at the same time.
       app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity: childActivity, access })
+      // The queue pane follows the child only after the viewer and its exact
+      // queue authority are both published.
+      refreshQueue()
 
        } finally {
          if (openingViewer === opening) openingViewer = undefined
@@ -4336,6 +4268,7 @@ export function apply(ctx: Context, config: Config): void {
       // so the pop never loses an intentional history anchor.
       windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
       refreshStatusCheap()
+      refreshQueue()
       return true
     }
     /** Error sink for a failed session creation: restore the draft and
@@ -6633,13 +6566,11 @@ export function apply(ctx: Context, config: Config): void {
         next === 'danger-full-access' ? 'error' : 'info')
         refreshStatusCheap()
       },
-      // Alt+↑: pull every `queued` occurrence back into the editor draft
-      // (pi's dequeue). Placement is the transport-neutral queue contract;
-      // Direct source-specific notice presentation stays in the queue/task
-      // projection rather than crossing the pending-input port. The current
-      // draft rides along below the pulled-back queue.
+      // Alt+↑: on the main surface, pull every semantic `queued` occurrence
+      // back into the editor draft (pi's dequeue). The gesture is disabled in
+      // every viewer so it cannot mutate a hidden main or child queue.
       onDequeue: () => {
-        if (cleanedUp || liveAgent === undefined) return
+        if (cleanedUp || viewing !== undefined || liveAgent === undefined) return
         const queuedAgent = liveAgent
         const queuedGeneration = sessionGeneration
         const pending = backend.pendingInputReader.snapshot(queuedAgent.session.id)
@@ -8352,40 +8283,6 @@ export function apply(ctx: Context, config: Config): void {
         : ` — final output: ask the agent to run job_output in the conversation${detail === undefined ? '' : ` (${detail})`}`
       return `${status}${tail}`
     }
-    // The queue pane consumes the Host-owned pending-input projection. Only
-    // `placement: 'queued'` rows belong to this USER-INPUT surface; an already
-    // steering occurrence or injected context is not a queue gesture target.
-    // The projection is refreshed from the same session events that commit
-    // queue mutations, so no consumer reaches into Direct inbox collections.
-    // A background-subagent settlement notice (the runtime's account of a
-    // child ending) is dropped from the pane — the task browser is its surface
-    // — and a FAILED settlement additionally surfaces once as a transient
-    // error notify, without polluting the queue.
-    const notifiedSubagentNotices = new Set<string>()
-    const refreshQueue = (): void => {
-      if (cleanedUp) return
-      if (liveAgent === undefined) {
-        app.setQueueItems([])
-        return
-      }
-      const pending = backend.pendingInputReader.snapshot(liveAgent.session.id)
-      if (pending === undefined) {
-        app.setQueueItems([])
-        return
-      }
-      const queued = pending.items
-        .filter(item => item.placement === 'queued')
-        .map(queueInboxMessageOf)
-      const directPresentation = directPendingInputReader.presentation(liveAgent.session.id)
-      const sourceById = new Map(directPresentation?.map(item => [item.id, item.source] as const))
-      const presentedQueued = queued.map(item => ({
-        ...item,
-        ...(sourceById.get(item.id) === undefined ? {} : { source: sourceById.get(item.id) as QueueNoticeSource }),
-      }))
-      const result = foldQueueRows(presentedQueued, 'followup', notifiedSubagentNotices)
-      for (const summary of result.failures) app.notify(summary, 'error')
-      app.setQueueItems(result.rows)
-    }
     refreshQueue()
     // The TUI-owned slash commands are registered as soon as the runner
     // surface exists — the commands service's GLOBAL layer needs no agent,
@@ -8471,9 +8368,6 @@ export function apply(ctx: Context, config: Config): void {
       // Issue #8: a stale keyboard exit confirmation must not exit the NEW
       // session.
       app.clearExitConfirmation()
-      // The subagent-notice notify guard is per-session: a new session's
-      // settlements must notify again.
-      notifiedSubagentNotices.clear()
       repaint(app, folder, windowController, activeStreamingToolPreviews())
       // PR D2: the first usable frame paints with the cached measurement
       // (or none); the context measure is deferred one event-loop turn so
@@ -9190,6 +9084,7 @@ export function apply(ctx: Context, config: Config): void {
           // never on every streaming delta. A turn START also refreshes so
           // the activity flips to running the moment a cold resume begins.
           if (event.type === 'turn/start' || event.type === 'step/end' || event.type === 'turn/end') refreshViewerFooter()
+          if (event.type === 'turn/start' || event.type === 'agent/inbox/spliced') queueMicrotask(refreshQueue)
           if (event.type === 'turn/end') paintNow()
           return
         }
@@ -9368,12 +9263,14 @@ export function apply(ctx: Context, config: Config): void {
           if (agents.get(viewing.id) !== viewing.viewAgent) {
             viewing.viewAgent = subject
             setViewedQueueAgent(subject)
+            queueMicrotask(refreshQueue)
             return true
           }
           return false
         }
         viewing.viewAgent = subject
         setViewedQueueAgent(subject)
+        queueMicrotask(refreshQueue)
         return true
       },
       onInput: (input) => {

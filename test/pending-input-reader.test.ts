@@ -40,13 +40,6 @@ test('normalizes Direct next-turn and next-step occurrences into official placem
   })
   assert.ok(snapshot !== undefined)
   assert.ok(snapshot.items.every(item => !Object.hasOwn(item, 'source')))
-  assert.deepEqual(reader.presentation('session-queue')?.map(item => item.source), [
-    { kind: 'user' },
-    { kind: 'plugin' },
-    { kind: 'user' },
-    { kind: 'plugin' },
-    undefined,
-  ])
 })
 
 test('an unavailable Direct session has no fabricated empty snapshot', () => {

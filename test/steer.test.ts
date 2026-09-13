@@ -327,6 +327,23 @@ test('P0: empty draft + NON-empty queue steers only while the turn accepts steer
   }
 })
 
+test('idle empty-draft queue steering does not call the occurrence writer', async () => {
+  const agent = fakeAgent(['A'])
+  agent.status = 'idle'
+  let writes = 0
+  const deps = makeDeps({ agent: () => agent })
+  deps.writer = {
+    ...deps.writer,
+    steerQueued: async () => {
+      writes += 1
+      return { kind: 'committed' as const, value: undefined }
+    },
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
+  assert.equal(writes, 0, 'an idle empty-draft gesture stops before occurrence writes')
+  assert.deepEqual(agent.state.nextTurn, [{ id: 'A' }])
+})
+
 test('whitespace-only no-payload queue steering restores on a non-commit', async () => {
   const agent = fakeAgent(['A'])
   const restored: string[] = []

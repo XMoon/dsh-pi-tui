@@ -417,94 +417,57 @@ test('the queue pane renders pending rows and hides when empty', async () => {
   assert.equal((view.match(/❯/g) ?? []).length, 1, `cleared queue still rendered:\n${view}`)
 })
 
-test('job notices in the queue render with their own marker and drop the steer hints', async () => {
+test('queue pane renders every semantic queued row with the same steer affordances', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  // Only a job-completion notice queued: no steerable content at all.
-  app.setQueueItems([{ id: 'j-1', text: 'bash-2 pnpm build finished: exit 0', mode: 'steer', notice: true }])
-  await vt.waitForRender()
-  let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('⏳ bash-2 pnpm build finished'), `notice row missing its marker:\n${view}`)
-  // Only the editor prompt may carry a ❯ — a notice must never render as
-  // steerable input.
-  assert.equal((view.match(/❯/g) ?? []).length, 1, `a notice must not render as steerable input:\n${view}`)
-  assert.ok(!view.includes('ctrl+s to steer all'), `steer hints must not advertise for notices:\n${view}`)
-  assert.ok(view.includes('/tasks to view'), `jobs hint missing:\n${view}`)
-  // A notice alongside real user input keeps the steer verbs.
   app.setQueueItems([
-    { id: 'j-1', text: 'bash-2 pnpm build finished: exit 0', mode: 'steer', notice: true },
+    { id: 'j-1', text: 'bash-2 pnpm build finished: exit 0', mode: 'steer' },
     { id: 'm-1', text: 'please also fix the lint', mode: 'followup' },
   ])
   await vt.waitForRender()
-  view = vt.getViewport().join('\n')
-  assert.ok(view.includes('⏳ bash-2'), `notice row missing with mixed queue:\n${view}`)
-  assert.ok(view.includes('❯ please also fix the lint'), `user row missing:\n${view}`)
-  assert.ok(view.includes('ctrl+s to steer all'), `steer hint must survive a mixed queue:\n${view}`)
-  app.setQueueItems([])
-  await vt.waitForRender()
-  assert.ok(!vt.getViewport().join('\n').includes('⏳ bash-2'), `cleared notice survived:\n${view}`)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ bash-2 pnpm build finished'), `first semantic row missing:\n${view}`)
+  assert.ok(view.includes('❯ please also fix the lint'), `second semantic row missing:\n${view}`)
+  assert.equal((view.match(/❯/g) ?? []).length, 3, 'both queue rows and the editor prompt use the same marker')
+  assert.ok(view.includes('ctrl+s to steer all'), `steer hints missing:\n${view}`)
+  assert.ok(view.includes('alt+up to edit all'), `dequeue hint missing:\n${view}`)
 })
 
-test('notice rows beyond the fold collapse into a +N more line; user rows never fold', async () => {
+test('queue pane does not advertise the disabled dequeue gesture in a viewer', async () => {
   const { vt, app } = startApp()
+  app.setViewerMode({
+    parentSessionId: 'parent',
+    childSessionId: 'child',
+    label: 'child',
+    mode: 'continuable',
+    activity: 'running',
+    access: 'interactive-direct-child',
+  })
+  app.setQueueItems([{ id: 'child-q', text: 'child queue item', mode: 'followup' }])
   await vt.waitForRender()
-  // A backlog of notices (e.g. a batch of subagent settlements/reports):
-  // only the first MAX_NOTICE_ROWS render, the rest collapse into one line.
-  const notices = Array.from({ length: 8 }, (_, i) => ({
-    id: `n-${i}`, text: `notice ${i} text`, mode: 'steer' as const, notice: true,
-  }))
-  app.setQueueItems(notices)
-  await vt.waitForRender()
-  let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('⏳ notice 0 text'), `first notice visible:\n${view}`)
-  assert.ok(view.includes('⏳ notice 4 text'), `fifth notice visible:\n${view}`)
-  assert.ok(!view.includes('⏳ notice 5 text'), `sixth notice must fold:\n${view}`)
-  assert.ok(view.includes('+3 more notices pending'), `fold line missing:\n${view}`)
-  assert.ok(!view.includes('ctrl+s to steer all'), 'notices alone must not advertise steer verbs')
-  assert.ok(view.includes('notices deliver after the current task · /tasks to view'), `notices hint missing:\n${view}`)
-  // User rows mixed in: every user row shows, notices still fold.
-  app.setQueueItems([
-    ...notices,
-    { id: 'm-1', text: 'my first queued message', mode: 'followup' },
-    { id: 'm-2', text: 'my second queued message', mode: 'steer' },
-  ])
-  await vt.waitForRender()
-  view = vt.getViewport().join('\n')
-  assert.ok(view.includes('❯ my first queued message'), `user row 1 missing:\n${view}`)
-  assert.ok(view.includes('❯ my second queued message'), `user row 2 missing:\n${view}`)
-  assert.ok(view.includes('+3 more notices pending'), `fold line must survive mixed queue:\n${view}`)
-  assert.ok(view.includes('ctrl+s to steer all'), 'steer hint must survive mixed queue:\n${view}')
-  // Claims drain the backlog: two notices gone, the fold shrinks.
-  app.setQueueItems([...notices.slice(0, 6), { id: 'm-1', text: 'my first queued message', mode: 'followup' }])
-  await vt.waitForRender()
-  view = vt.getViewport().join('\n')
-  assert.ok(view.includes('+1 more notices pending'), `fold count must shrink after claims:\n${view}`)
-  // Full drain: the group disappears entirely.
-  app.setQueueItems([{ id: 'm-1', text: 'my first queued message', mode: 'followup' }])
-  await vt.waitForRender()
-  view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('more notices pending'), `fold line must vanish after drain:\n${view}`)
-  assert.ok(view.includes('❯ my first queued message'), `user row must survive the drain:\n${view}`)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('ctrl+s to steer all'), `viewer queue steer hint missing:\n${view}`)
+  assert.ok(!view.includes('alt+up to edit all'), `viewer must not advertise disabled dequeue:\n${view}`)
 })
 
 test('queue pane reflows from raw items across a narrow-to-wide resize', async () => {
   const { vt, app } = startApp()
-  const fullNotice = 'NOTICE-RESIZE ' + 'the original notice survives the narrow frame '.repeat(2)
-  app.setQueueItems([{ id: 'notice-1', text: fullNotice, mode: 'steer', notice: true }])
+  const fullText = 'QUEUE-RESIZE ' + 'the semantic row survives the narrow frame '.repeat(2)
+  app.setQueueItems([{ id: 'queue-1', text: fullText, mode: 'steer' }])
   await vt.waitForRender()
   vt.resize(40, 24)
   await vt.waitForRender()
   let lines = vt.getViewport()
-  const narrowNotice = lines.findIndex(line => line.includes('NOTICE-RESIZE'))
-  assert.ok(narrowNotice > 0, `notice must remain visible after narrowing:\n${lines.join('\n')}`)
+  const narrowRow = lines.findIndex(line => line.includes('QUEUE-RESIZE'))
+  assert.ok(narrowRow > 0, `queue row must remain visible after narrowing:\n${lines.join('\n')}`)
   let borderRows = 0
-  for (let index = narrowNotice - 1; index >= 0 && lines[index]!.includes('─'); index -= 1) borderRows += 1
+  for (let index = narrowRow - 1; index >= 0 && lines[index]!.includes('─'); index -= 1) borderRows += 1
   assert.equal(borderRows, 1, `a narrow queue must have one border row, not stale wrapped rows:\n${lines.join('\n')}`)
-  assert.equal(visibleWidth(lines[narrowNotice - 1]!), 40)
+  assert.equal(visibleWidth(lines[narrowRow - 1]!), 40)
   vt.resize(120, 24)
   await vt.waitForRender()
   lines = vt.getViewport()
-  assert.ok(lines.some(line => line.includes(fullNotice)), `the wide queue must recover the raw notice:\n${lines.join('\n')}`)
+  assert.ok(lines.some(line => line.includes(fullText)), `the wide queue must recover the raw semantic row:\n${lines.join('\n')}`)
 })
 
 test('todo panel rebuilds its border from the live width', async () => {

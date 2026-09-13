@@ -203,7 +203,9 @@ without changing the ownership or ordering rules:
   restored to the current editor or the stale child slot. Child queue occurrence
   reads and mutations require the exact interactive continuable viewer Agent,
   its live registry identity, and its pinned direct parent; ordinary child
-  prompts retain `SubagentPort` parent authority.
+  prompts retain `SubagentPort` parent authority. The queue pane reads that
+  same active child subject while the viewer is mounted; an unavailable child
+  clears the pane rather than falling back to the parent's queue.
 
 Known-unwritten outcomes are never reported as committed. An indeterminate
 future wire result is not retried automatically or restored as if the queued
