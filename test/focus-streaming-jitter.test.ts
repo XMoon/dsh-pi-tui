@@ -4,6 +4,11 @@ import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TuiApp, type StreamingToolPreview } from '../src/tui-app.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
+import {
+  removeStreamingToolPreview,
+  streamingToolPreviewSnapshot,
+  upsertStreamingToolPreview,
+} from '../src/streaming-tool-preparing.ts'
 import { RendererRegistry } from '../src/renderer-registry.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -108,6 +113,21 @@ test('expanded live Markdown keeps the high-water presentation height while foll
       [22, 21, 1, true],
       [22, 21, 1, true],
     ])
+    app.setToolOutputExpanded(app.isToolOutputExpanded())
+    await vt.waitForRender()
+    assert.deepEqual(frame(app), [22, 21, 1, true])
+
+    // A real one-line wheel-up must preserve the existing padding while
+    // leaving follow-end, so ScrollView cannot re-arm follow at the new max.
+    vt.sendInput('\x1b[<64;50;10M')
+    await vt.waitForRender()
+    assert.deepEqual(frame(app), [22, 21, 0, false])
+    folder.applyLiveInput(liveText(' '))
+    show(app, folder)
+    await vt.waitForRender()
+    assert.deepEqual(frame(app), [22, 21, 0, false])
+    app.scrollToBottom()
+    await vt.waitForRender()
 
     // Root disclosure is structural: it may release the previous expanded
     // floor rather than treating the collapse as passive live input.
@@ -117,8 +137,8 @@ test('expanded live Markdown keeps the high-water presentation height while foll
     await vt.waitForRender()
     assert.ok(height(app) < 22)
 
-    // Leaving the live tail releases the presentation epoch instead of
-    // carrying its old floor into historical browsing.
+    // Historical navigation keeps the current presentation geometry while
+    // disabling follow; explicit structural changes above already reset it.
     app.scrollToTop({ disableFollow: true })
     await vt.waitForRender()
     show(app, folder)
@@ -211,37 +231,65 @@ test('formal Preparing handoff does not add a second blank row', async () => {
       }, expanded ? 26 : 25),
     ])
     folder.applyLiveInput(liveStart())
+    folder.applyLiveInput({
+      kind: 'chunk', sessionId: 'jitter-test', attemptId: 'attempt-1', turn: 1, step: 1,
+      time: T0 + 26,
+      chunk: { type: 'block-start', index: 0, blockType: 'tool-call' },
+    })
     try {
       app.setFocusMode(true)
       app.setFullscreen(true)
+      app.setWorking(true)
       show(app, folder)
       await vt.waitForRender()
       if (expanded) {
         app.toggleFocusTurn(1)
         await vt.waitForRender()
       }
-      const preview = [{ callId: '', turn: 1, step: 1, index: 0, name: 'edit', argumentBytes: 900 }]
-      show(app, folder, preview)
+
+      const previews = new Map<string, StreamingToolPreview>()
+      const delta: AssistantLiveInput = {
+        kind: 'chunk', sessionId: 'jitter-test', attemptId: 'attempt-1', turn: 1, step: 1,
+        time: T0 + 27,
+        chunk: { type: 'tool-call-delta', index: 0, id: '', name: 'edit', argumentsDelta: 'x'.repeat(900) },
+      }
+      upsertStreamingToolPreview(previews, {
+        callId: '', turn: 1, step: 1, index: 0, name: 'edit', argumentsDelta: 'x'.repeat(900),
+      })
+      folder.applyLiveInput(delta)
+      show(app, folder, streamingToolPreviewSnapshot(previews))
       await vt.waitForRender()
       const created = height(app)
+
+      const blockEnd: AssistantLiveInput = {
+        kind: 'chunk', sessionId: 'jitter-test', attemptId: 'attempt-1', turn: 1, step: 1,
+        time: T0 + 28,
+        chunk: {
+          type: 'block-end', index: 0,
+          block: { type: 'tool-call', id: ToolCallId('formal-edit'), name: 'edit' },
+        },
+      }
+      upsertStreamingToolPreview(previews, {
+        callId: 'formal-edit', turn: 1, step: 1, index: 0, name: 'edit',
+      })
+      folder.applyLiveInput(blockEnd)
+      show(app, folder, streamingToolPreviewSnapshot(previews))
+      await vt.waitForRender()
+      assert.equal(height(app), created)
+
+      // The production handoff clears the migrated preview before the durable
+      // tool/call repaint; the formal card must replace it at the same height.
+      removeStreamingToolPreview(previews, 'formal-edit', 1, 1)
       folder.apply([eventAt('tool/call', {
         turn: 1,
         step: 1,
         callId: ToolCallId('formal-edit'),
         name: 'edit',
         arguments: '{}',
-      }, expanded ? 27 : 26)])
-      show(app, folder, [{ ...preview[0]!, callId: 'formal-edit' }])
+      }, 29)])
+      show(app, folder, streamingToolPreviewSnapshot(previews))
       await vt.waitForRender()
-      const handedOff = height(app)
-      show(app, folder)
-      await vt.waitForRender()
-      const cleared = height(app)
-      // This compact fixture adds the durable Tool card before removing the
-      // preview, so the formal representation may grow; it must not create a
-      // second transient blank row when the preview is then cleared.
-      assert.ok(handedOff >= created)
-      assert.equal(cleared, handedOff)
+      assert.equal(height(app), created)
     } finally {
       app.dispose()
       startedApps.delete(app)

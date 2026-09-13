@@ -1168,7 +1168,7 @@ export class TranscriptGutterComponent implements Component {
  * Layout-only rows that keep a running Focus turn's live height from
  * shrinking after a transient presentation reflow. It owns no semantic row;
  * its height is supplied by TuiApp's current render measurement and it is
- * hidden outside the fullscreen follow-end epoch.
+ * hidden outside the fullscreen Focus presentation epoch.
  */
 class FocusLivePaddingComponent implements Component {
   private readonly rows: () => number
@@ -2863,6 +2863,7 @@ export class TuiApp {
 
   /** Set the Ctrl+O expansion master switch and repaint. */
   setToolOutputExpanded(expanded: boolean): void {
+    if (this.toolOutputExpanded === expanded) return
     this.clearFocusLiveHeightState()
     this.toolOutputExpanded = expanded
     this.rebuildMessages()
@@ -3181,11 +3182,13 @@ export class TuiApp {
   private messageRows: ReadonlyArray<FullscreenRowEntry> = []
   /** High-water presentation heights for running Focus turns. This is
    * presentation-only state: it is never folded into TranscriptFolder or the
-   * session log, and it is discarded when the live-follow epoch ends. */
+   * session log; compatible floors remain frozen during historical browsing
+   * and release only at explicit lifecycle or structural boundaries. */
   private readonly focusLiveHeightStates = new Map<number, FocusLiveHeightState>()
   /** The currently measured inert padding after a Focus turn's boundary
-   * spacer. Padding components read this map at paint time so a user leaving
-   * history can hide it without changing transcript semantics. */
+   * spacer. Padding components read this map at paint time, retaining the
+   * compatible floor while historical and releasing it with the same explicit
+   * lifecycle or structural boundaries. */
   private readonly focusLivePaddingRows = new Map<number, number>()
   /** The terminal geometry of the LAST PAINTED frame (fullscreen only):
    * a zero-row probe rides the fullscreen layout root, and the fork
@@ -6676,14 +6679,13 @@ export class TuiApp {
     this.focusLivePaddingRows.clear()
   }
 
-  /** Whether the current render is inside the narrow live-follow epoch. A
-   * user leaving history releases the epoch; re-following starts a fresh
-   * baseline on the next rebuild. */
+  /** Whether the current render still owns a fullscreen Focus presentation
+   * epoch. Leaving history freezes the existing floor; explicit lifecycle and
+   * structural boundaries release it. */
   private focusLivePaddingEnabled(): boolean {
     const enabled = this.focusModeEnabled
       && this.fullscreen !== undefined
       && this.fullscreenScroll !== undefined
-      && this.fullscreenScroll.isFollowingEnd
     if (!enabled) this.clearFocusLiveHeightState()
     return enabled
   }
@@ -6698,7 +6700,9 @@ export class TuiApp {
     width: number,
   ): ReadonlyMap<number, number> {
     this.focusLivePaddingRows.clear()
-    if (!this.focusLivePaddingEnabled()) return this.focusLivePaddingRows
+    const scroll = this.fullscreenScroll
+    if (!this.focusLivePaddingEnabled() || scroll === undefined) return this.focusLivePaddingRows
+    const followingEnd = scroll.isFollowingEnd
 
     const heights = renderedBlocks.map((entry, index) => this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length))
     const groups = new Map<number, { activity?: TurnActivity; indices: number[] }>()
@@ -6727,14 +6731,24 @@ export class TuiApp {
       const normalHeight = group.indices.reduce((sum, index) => sum + heights[index]!, 0)
       const expanded = projectionExpanded.has(turn)
       const previous = this.focusLiveHeightStates.get(turn)
-      const state = previous === undefined
-        || previous.activity !== activity
-        || previous.expanded !== expanded
-        || previous.width !== width
-        ? { activity, expanded, width, height: normalHeight }
-        : previous
-      if (state !== previous) this.focusLiveHeightStates.set(turn, state)
-      else if (normalHeight > state.height) state.height = normalHeight
+      const incompatible = previous !== undefined
+        && (previous.activity !== activity || previous.expanded !== expanded || previous.width !== width)
+      if (incompatible) {
+        // A structural presentation change releases the old floor. It may
+        // establish a new baseline only while following live output.
+        this.focusLiveHeightStates.delete(turn)
+        if (!followingEnd) continue
+      }
+      let state = this.focusLiveHeightStates.get(turn)
+      if (state === undefined) {
+        // History navigation can inspect an existing floor, but it must never
+        // create one from a new turn that was not measured at the live tail.
+        if (!followingEnd) continue
+        state = { activity, expanded, width, height: normalHeight }
+        this.focusLiveHeightStates.set(turn, state)
+      } else if (followingEnd && normalHeight > state.height) {
+        state.height = normalHeight
+      }
       const padding = state.height - normalHeight
       if (padding <= 0) continue
       for (let index = group.indices.length - 1; index >= 0; index -= 1) {
