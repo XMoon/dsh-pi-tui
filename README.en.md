@@ -54,7 +54,7 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.4.5` (published `@latest`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable line; rc.1 minimum, rc.2 compatible |
+| `0.4.6` (published `@latest`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable line; rc.1 minimum, rc.2 compatible |
 | Current `next` npm line (this checkout; version `0.4.5`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current next line |
 
 Do not mix the stable and `next` lines. The current `next` checkout declares

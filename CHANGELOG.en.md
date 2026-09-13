@@ -7,9 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-09-13
+
+### Installation and version pairing
+
+This stable release keeps the same DSH compatibility range as 0.4.5: the minimum
+is `0.1.5-rc.1`, and `0.1.5-rc.2` is also compatible. We recommend rc.2; its
+native install scripts must be explicitly allowed:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.6
+dsh --profile pi-tui
+```
+
+Do not pair this release with the historical DSH `0.1.3-alpha.2` line. Users who
+must keep an older DSH should install the matching historical TUI: use
+`@xmoon76/dsh-pi-tui@0.4.1` for DSH `0.1.2-rc.1`,
+`@xmoon76/dsh-pi-tui@0.4.3-alpha.2` for DSH `0.1.3-alpha.2`, and
+`@xmoon76/dsh-pi-tui@0.3` for the older DSH `0.1.1-rc.1`/`rc.2` line.
+
 ### Added
 
 - **Explicit delivered-file presentation.** `present` tool cards now show a human-readable file list, while the final assistant answer summarizes the delivered paths and descriptions in a compact turn tail.
+
+### Fixed
+
+- **Focus live presentation stability.** Streaming Markdown in expanded Focus no longer jitters when content height grows or shrinks; historical updates, preparing-tool transitions, completion, and Focus/fullscreen changes release stale height baselines correctly while preserving explicit user scroll intent.
+
+> **Known limitation:** The production default backend remains Direct; remote attach is not supported.
 
 ## [0.4.5] - 2026-09-11
 
@@ -1081,7 +1107,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...v0.4.5
 [0.4.3-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...next-v0.4.3-alpha.2
 [0.4.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...v0.4.1
