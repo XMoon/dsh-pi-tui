@@ -179,7 +179,10 @@ without changing the ownership or ordering rules:
   an idle subject is left untouched. Queue races settle per occurrence rather
   than aborting the whole sweep; missing/unavailable occurrences stop it quietly
   without replay, and a genuine or indeterminate failure never claims
-  atomicity or retries.
+  atomicity or retries. Direct validates edit content before Agent lookup;
+  successful removals retire user `rpcId` upload bindings. A failure after
+  removal, including retirement failure, is `indeterminate`; cancellation
+  before confirmed removal remains `cancelled`.
 - Alt+Up is a TUI-only recall-all extension: it calls
   `updateQueue({ kind: 'remove' })` one occurrence at a time in FIFO order,
   then stages the removed content in the editor. It is not the official in-place
