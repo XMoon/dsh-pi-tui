@@ -6702,7 +6702,6 @@ export class TuiApp {
     this.focusLivePaddingRows.clear()
     const scroll = this.fullscreenScroll
     if (!this.focusLivePaddingEnabled() || scroll === undefined) return this.focusLivePaddingRows
-    const followingEnd = scroll.isFollowingEnd
 
     const heights = renderedBlocks.map((entry, index) => this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length))
     const groups = new Map<number, { activity?: TurnActivity; indices: number[] }>()
@@ -6734,16 +6733,15 @@ export class TuiApp {
       const incompatible = previous !== undefined
         && (previous.activity !== activity || previous.expanded !== expanded || previous.width !== width)
       if (incompatible) {
-        // A structural presentation change releases the old floor. It may
-        // establish a new baseline only while following live output.
+        // A structural presentation change releases the old floor; the
+        // current running geometry becomes the new epoch baseline.
         this.focusLiveHeightStates.delete(turn)
-        if (!followingEnd) continue
       }
       let state = this.focusLiveHeightStates.get(turn)
       if (state === undefined) {
-        // History navigation can inspect an existing floor, but it must never
-        // create one from a new turn that was not measured at the live tail.
-        if (!followingEnd) continue
+        // A running Focus turn always establishes a baseline in the active
+        // fullscreen presentation, including while the user browses history.
+        // The baseline adds no padding until later live growth is observed.
         state = { activity, expanded, width, height: normalHeight }
         this.focusLiveHeightStates.set(turn, state)
       } else if (normalHeight > state.height) {

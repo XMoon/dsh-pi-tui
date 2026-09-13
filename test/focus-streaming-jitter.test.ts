@@ -137,6 +137,11 @@ test('expanded live Markdown preserves wheel intent across historical growth and
       await vt.waitForRender()
     }
     assert.deepEqual(frame(app), [26, 21, 4, false])
+    // A historical structural reset must rebaseline the running epoch before
+    // the next passive shrink; it must not leave the turn unprotected.
+    app.setToolOutputExpanded(!app.isToolOutputExpanded())
+    await vt.waitForRender()
+    assert.deepEqual(frame(app), [26, 21, 4, false])
     show(app, folder)
     await vt.waitForRender()
     assert.deepEqual(frame(app), [26, 21, 4, false])
