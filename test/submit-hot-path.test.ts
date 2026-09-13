@@ -142,6 +142,8 @@ interface FakeAgentHost {
   throwRemoveAfter?: number
   /** Test-only queue mutation hook, invoked after a successful removal. */
   afterRemove?: (id: string) => void
+  /** Gate the next Agent's post-commit whenIdle in session-switch tests. */
+  whenIdleGate?: Promise<void>
   followedUp: unknown[]
   steered: unknown[]
   /** The skill-body fallback injections (agent.inject), in call order. */
@@ -152,8 +154,8 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
   const agentContext = new Context()
   const nextTurn = host?.nextTurn ?? []
   const nextStep = host?.nextStep ?? []
-  const remove = (id: string): void => {
-    if (host === undefined) return
+  const remove = (id: string): boolean => {
+    if (host === undefined) return false
     host.removeCalls += 1
     if (host.abortRemoveAfter !== undefined && host.removeCalls > host.abortRemoveAfter) {
       const error = new Error('queue pull-back aborted')
@@ -163,12 +165,13 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
     }
     const queue = [nextTurn, nextStep].find(items => items.some(message => message.id === id))
     const index = queue?.findIndex(message => message.id === id) ?? -1
-    if (queue === undefined || index < 0) return
+    if (queue === undefined || index < 0) return false
     queue.splice(index, 1)
     host.afterRemove?.(id)
     if (host.throwRemoveAfter !== undefined && host.removeCalls > host.throwRemoveAfter) {
       throw new Error('queue pull-back write failed')
     }
+    return true
   }
   return {
     session,
@@ -181,7 +184,7 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
       remove,
     },
     get status() { return host?.status ?? ('idle' as const) },
-    whenIdle: async () => {},
+    whenIdle: async () => { await host?.whenIdleGate },
     followup: (message: unknown) => {
       if (host?.failFollowupAbort === true) {
         const error = new Error('aborted')
@@ -955,6 +958,33 @@ test('a session switch settles the ack: old-session pending never leaks', async 
   await waitForRenderView(vt)
   const settled = vt.getViewport().join('\n')
   assert.ok(!settled.includes('Submitting…'), `old pending must clear on the switch:\n${settled}`)
+})
+
+test('a session commit clears old queue rows before new-session hydration settles', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'idle' })
+  mounted.app.setQueueItems([{ id: 'old-queue', text: 'old session queued input', mode: 'followup' }], false)
+
+  let releaseNewWhenIdle!: () => void
+  const newWhenIdle = new Promise<void>(resolve => { releaseNewWhenIdle = resolve })
+  harness.onCreateSession(() => {
+    // The new Agent has an empty queue in this fixture; the old row remains
+    // only in the TUI until the synchronous generation commit clears it.
+    harness.host.whenIdleGate = newWhenIdle
+  })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the runner must register the /new transition command')
+  let transition: Promise<void> | undefined
+  try {
+    transition = (newHandler as () => Promise<void>)()
+    const cleared = await drainUntil(() => {
+      const items = (mounted.app as unknown as { queueItems: readonly { id: string }[] }).queueItems
+      return items.every(item => item.id !== 'old-queue')
+    }, 1_000)
+    assert.equal(cleared, true, 'the queue pane must clear at the generation commit before new hydration settles')
+  } finally {
+    releaseNewWhenIdle()
+    if (transition !== undefined) await transition
+  }
 })
 
 test('a failed submit clears the pending row and surfaces the error', async (t) => {

@@ -20,6 +20,13 @@ export type PreparedMessage = unknown
 /** The caller-resolved delivery policy for one ordinary prompt. */
 export type SessionDeliveryMode = 'queue' | 'steer'
 
+/** One official queue occurrence mutation. Content remains structural so the
+ * semantic port does not expose a DSH package type. */
+export type QueueAction =
+  | { readonly kind: 'edit'; readonly content: readonly unknown[] }
+  | { readonly kind: 'remove' }
+  | { readonly kind: 'steer' }
+
 import type { WriteError, WriteOutcome } from './write-outcome.ts'
 export type { WriteError, WriteOutcome } from './write-outcome.ts'
 
@@ -32,18 +39,13 @@ export interface SessionWriter {
     mode: SessionDeliveryMode,
   ): Promise<WriteOutcome>
 
-  /** Steer one still-pending queued occurrence using its Host-owned message.
-   * This maps to the official occurrence-level queue steer operation; the
-   * caller must not remove the row and replay a copied message. */
-  steerQueued(
+  /** Apply one official occurrence-level queue mutation. The adapter preserves
+   * the occurrence's identity, placement, and provenance for `edit`; `steer`
+   * uses the Host-owned message rather than replaying a copied payload. */
+  updateQueue(
     sessionId: string,
-    messageId: string,
-  ): Promise<WriteOutcome>
-
-  /** Remove exactly one queued message occurrence. */
-  removeQueued(
-    sessionId: string,
-    messageId: string,
+    itemId: string,
+    action: QueueAction,
   ): Promise<WriteOutcome>
 
   /** Cancel the current user turn while preserving pending inbox work. The

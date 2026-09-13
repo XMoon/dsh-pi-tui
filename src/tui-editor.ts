@@ -247,7 +247,7 @@ export class TuiEditor extends Editor {
    * Replace the draft with a SERIALIZED user input line (`!!x` →
    * shell-local + `x`, `!x` → shell-context + `x`, anything else →
    * prompt + text). The single decode point for every host restore path
-   * (blocked submissions, history accepts, dequeues, viewer restores) —
+   * (blocked submissions, history accepts, recall-all actions, viewer restores) —
    * callers never re-implement prefix parsing.
    */
   setSerializedInput(text: string): void {

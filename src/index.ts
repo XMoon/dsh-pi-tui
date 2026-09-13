@@ -3851,7 +3851,7 @@ export function apply(ctx: Context, config: Config): void {
       const queued = pending.items
         .filter(item => item.placement === 'queued')
         .map(queueInboxMessageOf)
-      app.setQueueItems(foldQueueRows(queued, 'followup').rows)
+      app.setQueueItems(foldQueueRows(queued, 'followup').rows, pending.running)
     }
     // The Direct stream adapter keeps active prefixes for Agents that were not
     // being displayed yet; enterView replays this exact-agent baseline before
@@ -3966,6 +3966,9 @@ export function apply(ctx: Context, config: Config): void {
       app.setTasks([])
       app.setAgents([])
       taskBrowserRows = []
+      // The queue pane is session-scoped too: clear old semantic rows at the
+      // synchronous generation boundary before the new subject is published.
+      app.setQueueItems([])
       // A new session owns the surface: tear down the subagent viewer. The
       // old viewer's parent session is gone (the continuation contract
       // requires the EXACT live parent), so the child transcript, the
@@ -5578,7 +5581,7 @@ export function apply(ctx: Context, config: Config): void {
           pendingInputReader: backend.pendingInputReader,
           // The FINAL delivery goes through the session WRITE port: the
           // Direct fence/barrier orchestration above stays in the runner,
-          // the port only delivers (steer/followup/dequeue).
+          // the port delivers prompts and official queue mutations.
           writer: backend.sessionWriter,
         },
         text,
@@ -6566,9 +6569,10 @@ export function apply(ctx: Context, config: Config): void {
         next === 'danger-full-access' ? 'error' : 'info')
         refreshStatusCheap()
       },
-      // Alt+↑: on the main surface, pull every semantic `queued` occurrence
-      // back into the editor draft (pi's dequeue). The gesture is disabled in
-      // every viewer so it cannot mutate a hidden main or child queue.
+      // Alt+↑: on the main surface, run the TUI-only recall-all extension:
+      // remove every semantic `queued` occurrence and pull its content back
+      // into the editor draft. The gesture is disabled in every viewer so it
+      // cannot mutate a hidden main or child queue.
       onDequeue: () => {
         if (cleanedUp || viewing !== undefined || liveAgent === undefined) return
         const queuedAgent = liveAgent
@@ -6681,7 +6685,7 @@ export function apply(ctx: Context, config: Config): void {
           deferredToTransition = true
         }
         // Remove each pulled-back occurrence through the official single-item queue mutation,
-        // FIFO admission keeps notices queued behind them; confirmed removals are reflected only
+        // FIFO admission keeps pending input behind it; confirmed removals are reflected only
         // after each settlement.
         runOwned('queue pull-back', () => operationBarrier.runWriter(queuedAgent.session.id, async () => {
           try {
@@ -6703,7 +6707,11 @@ export function apply(ctx: Context, config: Config): void {
             }
             const outcomes: InterruptWriteOutcome[] = []
             for (const message of queued) {
-              const next = await backend.sessionWriter.removeQueued(queuedAgent.session.id, message.id)
+              const next = await backend.sessionWriter.updateQueue(
+                queuedAgent.session.id,
+                message.id,
+                { kind: 'remove' },
+              )
               outcomes.push(next)
               if (next.kind !== 'committed') break
               settledRemovals += 1
@@ -9304,8 +9312,14 @@ export function apply(ctx: Context, config: Config): void {
     // reachability caveat applies; the tool/call fallback above stays as
     // a redundant safety net. These are CATALOG events: membership/tree
     // may have changed, so they re-list.
-    ctx.on('subagent/start', () => refreshAgents())
-    ctx.on('subagent/end', () => refreshAgents())
+    ctx.on('subagent/start', () => {
+      refreshAgents()
+      queueMicrotask(refreshQueue)
+    })
+    ctx.on('subagent/end', () => {
+      refreshAgents()
+      queueMicrotask(refreshQueue)
+    })
     // `agent/status` is the LIVE runtime channel: a child's driver
     // transition (running ↔ idle) must repaint the task browser and the
     // badge WITHOUT a re-listing — membership changes come only from the
@@ -9313,21 +9327,25 @@ export function apply(ctx: Context, config: Config): void {
     // store-presence, never execution state (an idle continuable child
     // stays live in the session store and would otherwise read as
     // `running` forever). The membership gate keeps this cheap and safe:
-    // only flips of children in the CACHED catalog refresh the surface —
+    // only flips of children in the CACHED catalog refresh the task surface —
     // the MAIN agent's own per-turn flips (and any stale post-switch
-    // event) never repaint, and the coordinator re-projects every child
-    // from the Agent registry at commit time. The MAIN agent's
-    // transitions feed the completion-notification controller instead
+    // event) do not re-list it; the queue projection below refreshes from its
+    // pending snapshot.
+    // The coordinator re-projects every child from the Agent registry
+    // at commit time. The MAIN agent's
+    // transitions feed the completion-notification controller
     // (the authoritative settled boundary — running → idle on the SAME
     // live agent; children never notify).
     ctx.on('agent/status', ({ agent, status }) => {
       if (cleanedUp || liveAgent === undefined) return
       if (agent.id === liveAgent.id) {
         completionController.onAgentStatus(agent.id, status)
+        queueMicrotask(refreshQueue)
         return
       }
       if (taskRuntime?.has(agent.id) !== true) return
       refreshAgentRuntimeOnly()
+      if (viewing?.id === agent.id) queueMicrotask(refreshQueue)
     })
     // Provider-topology and credential events refresh the footer model row
     // and the welcome card: a /login /logout /add-provider (or an external

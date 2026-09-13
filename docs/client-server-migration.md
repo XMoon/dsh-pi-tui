@@ -611,17 +611,20 @@ production backend. No Remote write side effect, `BackendKind='remote'`, or
 production backend change is part of this slice.
 
 - `SessionWriter` now exposes one ordinary prompt with an explicit `queue` or
-  `steer` mode, one occurrence-level `steerQueued` operation, exact
-  `removeQueued`, semantic `cancel`, outcome-bearing `rename`, and explicit
-  unsupported title refresh. `PendingInputReader` exposes the Host-owned queue
-  projection (`queued` / `steering` / `context`) and running state; Direct maps
-  its inbox internally, while consumers never read `nextTurn` / `nextStep` or
-  message `source`. The Direct mapping is `nextTurn → queued` and
-  `nextStep → steering` only for user-origin messages, otherwise `context`.
-  Ctrl+S and Alt+Up are runner-level FIFO best-effort orchestration over those
-  single-occurrence operations: payload-bearing Ctrl+S sends only the draft;
-  empty-draft Ctrl+S and Alt+Up operate only on `queued` occurrences, stop on
-  the first genuine failure, and never claim cross-occurrence atomicity. An
+  `steer` mode, one official occurrence-level `updateQueue` operation with
+  `edit` / `remove` / `steer` actions, semantic `cancel`, outcome-bearing
+  `rename`, and explicit unsupported title refresh. `PendingInputReader`
+  exposes the Host-owned queue projection (`queued` / `steering` / `context`)
+  and running state; Direct maps its inbox internally, while consumers never
+  read `nextTurn` / `nextStep` or message `source`. The Direct mapping is
+  `nextTurn → queued` and `nextStep → steering` only for user-origin messages,
+  otherwise `context`.
+  Ctrl+S is runner-level FIFO best-effort orchestration over
+  `updateQueue({ kind: 'steer' })`: payload-bearing Ctrl+S sends only the
+  draft; an empty-draft gesture requires a running subject. The main-surface
+  Alt+Up gesture is a TUI-only recall-all extension over
+  `updateQueue({ kind: 'remove' })`, not an in-place `edit`; both gestures stop
+  on the first genuine failure and never claim cross-occurrence atomicity. An
   empty accelerated submit in an interactive continuable child viewer applies
   the same queued-occurrence choreography to that child and never calls the
   ordinary child prompt API. Direct resolves the live Agent by session id and
@@ -652,14 +655,16 @@ production backend change is part of this slice.
   payload; attachment admission and the official Remote `PromptContentPart[]`
   boundary remain later work. This payload is not described as Remote-ready.
 
-The future Remote writer must map `steerQueued` and `removeQueued` to the
-official per-occurrence `Session.updateQueue(itemId, { kind: 'steer' | 'remove' })`
-contract. Ctrl+S and Alt+Up remain client-side FIFO choreography over those
-calls, matching the dsh-web queued-placement gesture; no TUI-specific batch RPC
-is needed. A future Remote `PendingInputReader` should normalize the official
-`SessionSnapshot.queue` projection rather than expose transport fields. Remote title
-auto-regeneration remains unsupported until its official Client contract is
-available.
+The future Remote writer must map the semantic `updateQueue(sessionId, itemId,
+action)` directly to the official per-occurrence `Session.updateQueue(itemId,
+action)` contract. Ctrl+S remains client-side FIFO choreography over
+`{ kind: 'steer' }` calls, matching the dsh-web queued-placement gesture; no
+TUI-specific batch RPC is needed. The main-surface Alt+Up recall-all extension
+uses `{ kind: 'remove' }` calls and is not presented as Web edit parity. A future
+Remote `PendingInputReader` should normalize the official
+`SessionSnapshot.queue` projection rather than expose transport fields. Remote
+title auto-regeneration remains unsupported until its official Client contract
+is available.
 
 The D1 closure ledger is:
 
