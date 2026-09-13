@@ -161,22 +161,23 @@ function stubRunner(
       setApprovalPolicy: () => true,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      steerBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+      removeQueuedBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
       // The /title tests provide a fake sessionTitle service on the ctx;
       // the stub writer routes to it exactly like the Direct adapter
       // (identity-based: the sessionId resolves to the live session).
-      rename: (sessionId, name) => {
-        const titles = ctx.get('sessionTitle') as { rename(s: unknown, n: string): void } | undefined
-        if (titles === undefined) return false
-        titles.rename({ id: sessionId } as never, name)
-        return true
+      rename: async (sessionId, name) => {
+        const titles = ctx.get('sessionTitle') as { rename(s: unknown, n: string): unknown } | undefined
+        if (titles === undefined) return { kind: 'rejected' as const, error: { code: 'service/unavailable', message: 'session title service unavailable' } }
+        const snapshot = titles.rename({ id: sessionId } as never, name) as { title?: unknown } | undefined
+        return { kind: 'committed' as const, value: { title: typeof snapshot?.title === 'string' ? snapshot.title : name } }
       },
       refreshTitle: async (sessionId, signal) => {
         const titles = ctx.get('sessionTitle') as { refresh(s: unknown, signal: AbortSignal): Promise<{ title: string } | undefined> } | undefined
-        if (titles === undefined) return { kind: 'unavailable' as const }
+        if (titles === undefined) return { kind: 'unsupported' as const, reason: 'session title service unavailable' }
         const regenerated = await titles.refresh({ id: sessionId } as never, signal)
         return { kind: 'ok' as const, title: regenerated?.title }
       },

@@ -20,6 +20,7 @@ import {
 import { TransitionInProgressError, type SessionOperationBarrier } from '../src/session-operation-barrier.ts'
 
 interface FakeAgent extends ShellSubmitAgentLike {
+  followup(message: unknown): void
   followed: { id: string; text: string }[]
 }
 
@@ -35,6 +36,7 @@ function fakeAgent(id = 'session-shell'): FakeAgent {
 function makeDeps(options: {
   agent: () => ShellSubmitAgentLike | undefined
   generation?: () => number
+  writer?: ShellSubmitDeps['writer']
 }): {
   deps: ShellSubmitDeps
   notices: { message: string; kind: 'info' | 'error' }[]
@@ -43,11 +45,23 @@ function makeDeps(options: {
 } {
   const notices: { message: string; kind: 'info' | 'error' }[] = []
   const cleared = { count: 0 }
+  let firstAgent: FakeAgent | undefined
+  const currentAgent = (): ShellSubmitAgentLike | undefined => {
+    const current = options.agent()
+    if (firstAgent === undefined && current !== undefined) firstAgent = current as FakeAgent
+    return current
+  }
   const deps: ShellSubmitDeps = {
-    currentAgent: options.agent,
+    currentAgent,
     currentGeneration: options.generation ?? (() => 1),
     notify: (message, kind) => { notices.push({ message, kind }) },
     staleNotice: () => 'stale',
+    writer: options.writer ?? {
+      prompt: async (_sessionId, message) => {
+        firstAgent!.followup(message)
+        return { kind: 'committed' as const, value: undefined }
+      },
+    },
     createMessage: (text) => ({ id: `msg-${text.length}`, text }),
     onSubmitted: () => { cleared.count += 1 },
   }
@@ -114,13 +128,12 @@ test('submitShellResult: no agent is a no-op (no card to clear)', async () => {
 test('submitShellResult: a session switch mid-send aborts stale', async () => {
   const agentA = fakeAgent('session-a')
   const agentB = fakeAgent('session-b')
-  // The send reads the surface three times: the wrapper's sessionId probe
-  // and the core's capture (both see session-a), then the re-validation
-  // (session-b) — the deterministic model of a session switch in between.
-  // The identity check must refuse.
+  // The send captures the surface once before the barrier and the core
+  // re-validates it once (session-b) — the deterministic model of a session
+  // switch in between. The identity check must refuse.
   let reads = 0
   const { deps, notices, cleared } = makeDeps({
-    agent: () => (reads += 1) <= 2 ? agentA : agentB,
+    agent: () => (reads += 1) <= 1 ? agentA : agentB,
   })
   const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
   assert.equal(outcome, 'stale')
@@ -128,6 +141,31 @@ test('submitShellResult: a session switch mid-send aborts stale', async () => {
   assert.equal(agentB.followed.length, 0, 'nothing is written to the new session either')
   assert.equal(cleared.count, 0, 'the card stays: the output was not submitted')
   assert.equal(notices.some(n => n.message === 'stale'), true)
+})
+
+test('submitShellResult: cancelled semantic write is cancellation-shaped', async () => {
+  const agent = fakeAgent()
+  const { deps, cleared, notices } = makeDeps({
+    agent: () => agent,
+    writer: { prompt: async () => ({ kind: 'cancelled' as const }) },
+  })
+  await assert.rejects(
+    () => submitShellResult(deps, '$ ls\n[exit 0]'),
+    (error: unknown) => error instanceof Error && error.name === 'AbortError',
+  )
+  assert.equal(cleared.count, 0)
+  assert.deepEqual(notices, [])
+})
+
+test('submitShellResult: indeterminate semantic write is not retried or treated as committed', async () => {
+  const agent = fakeAgent()
+  const { deps, cleared, notices } = makeDeps({
+    agent: () => agent,
+    writer: { prompt: async () => ({ kind: 'indeterminate' as const, error: { code: 'transport/unknown', message: 'unknown' } }) },
+  })
+  assert.equal(await submitShellResult(deps, '$ ls\\n[exit 0]'), 'indeterminate')
+  assert.equal(cleared.count, 0)
+  assert.deepEqual(notices, [{ message: 'shell session write result is indeterminate — do not retry automatically', kind: 'error' }])
 })
 
 // --- localShellSandboxPreferenceOf ---

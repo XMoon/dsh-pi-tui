@@ -237,6 +237,17 @@ test('reset() drops the cached catalog and the committed rows', async () => {
   assert.deepEqual(h.runtime.rows(), [])
 })
 
+test('a disposed surface drops a delayed task catalog result', async () => {
+  const h = makeHarness()
+  const listing = h.runtime.refreshCatalog()
+  h.setKey(undefined)
+  h.settleListing(0, [child({ activity: 'running' })])
+  await listing
+  assert.equal(h.commits().length, 0, 'a late task result must not repaint after the surface key is gone')
+  assert.equal(h.badges().length, 0)
+  assert.equal(h.summaries().length, 0)
+})
+
 test('no live session: neither refresh lists nor commits', async () => {
   const h = makeHarness()
   h.setKey(undefined)
@@ -448,6 +459,7 @@ test('a session switch closes the open task browser, CLEARS the badge synchronou
   // SYNCHRONOUSLY.
   assert.ok(bump.includes('app.setAgents([])'), 'the session bump must clear the badge synchronously')
   assert.ok(bump.includes('taskBrowserRows = []'), 'the session bump must clear the row identity source')
+  assert.ok(bump.includes('activeTaskBrowserToken = undefined'), 'the session bump must invalidate delayed browser actions')
 })
 
 test('openTasksBrowser seeds the FIRST FRAME from the cached runtime and gates interrupt execution with the SAME predicate (PR review P3)', () => {
@@ -484,12 +496,16 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
   // real protection is binding the intent to the opening surface.
   assert.ok(handler.includes("sessionGeneration !== browserGeneration || liveAgent !== browserSession"),
     'the dispatch must compare the current generation/session against the OPEN-time capture')
+  assert.ok(handler.includes('activeTaskBrowserToken !== actionBrowserToken'),
+    'a delayed result must not notify after the browser surface has been replaced or closed')
   const openMarker = 'const openTasksBrowser = ('
   const openHead = indexSource.slice(indexSource.indexOf(openMarker), indexSource.indexOf(openMarker) + 1200)
   assert.ok(openHead.includes('const browserGeneration = sessionGeneration'),
     'the browser must capture the generation at open')
   assert.ok(openHead.includes('const browserSession = liveAgent'),
     'the browser must capture the live agent at open')
+  assert.ok(openHead.includes('const browserToken = {}'),
+    'the browser must capture a surface token for delayed action results')
   assert.ok(!handler.includes('actionGeneration'),
     'the dispatch must not re-capture the generation at dispatch time')
   // A subagent stop re-reads the LIVE driver before firing the interrupt.
@@ -500,6 +516,10 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
     'the dispatch must re-read the live job record before killing through the surface session')
   assert.ok(handler.includes('!isActiveJobStatus(current.status)'),
     'a settled job must not be killable at confirm time')
+   assert.ok(handler.includes('backend.subagent.interrupt'),
+     'a subagent stop must use the semantic SubagentPort seam')
+   assert.ok(!handler.includes('service.interrupt('),
+     'a subagent stop must not call ctx.subagents directly from the runner')
 })
 
 test('Esc from a promoted full view returns to Quick ONLY for the quick-opener stack (review round)', () => {
@@ -572,7 +592,7 @@ test('viewport exposure drives acknowledgement continuously, never whole-project
   const open = indexSource.slice(indexSource.indexOf(marker), indexSource.indexOf('// M3: attach the extension host'))
   // The runner wires the panel's first-time-viewport callback into the
   // coordinator's acknowledge — not a one-shot whole-projection read.
-  assert.ok(open.includes('onViewportExpose: ids => runtime?.acknowledge(ids)'),
+  assert.ok(open.includes('onViewportExpose: ids =>') && open.includes('runtime?.acknowledge(ids)'),
     'the panel viewport-expose signal must drive the coordinator acknowledge')
   assert.ok(!open.replace(/\/\/.*$/gm, '').includes('handle.viewportItems?.()'),
     'no one-shot viewport ack may remain (the callback covers the first frame too)')
@@ -720,9 +740,13 @@ test('PR2 review: every task-browser close path resets the dataset scope', () =>
   const selectBlock = open.slice(open.indexOf('(value) => {'), open.indexOf('},', open.indexOf('(value) => {')) + 3)
   assert.ok(selectBlock.includes('resetTaskBrowserScope()'),
     'the selection close path must reset the dataset scope')
+  assert.ok(selectBlock.includes('activeTaskBrowserToken = undefined'),
+    'the selection close path must invalidate delayed actions')
   const cancelBlock = open.slice(open.indexOf('() => {'), open.indexOf('},', open.indexOf('() => {')) + 3)
   assert.ok(cancelBlock.includes('resetTaskBrowserScope()'),
     'the Esc close path must reset the dataset scope')
+  assert.ok(cancelBlock.includes('activeTaskBrowserToken = undefined'),
+    'the Esc close path must invalidate delayed actions')
   // The Quick→Full transition must NOT reset the scope (it preserves it).
   const viewFullBlock = open.slice(open.indexOf('onViewFull:'), open.indexOf('onStop:'))
   assert.ok(!viewFullBlock.includes('resetTaskBrowserScope'),

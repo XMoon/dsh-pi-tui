@@ -16,7 +16,7 @@ Session writer ownership has exactly two layers on the master baseline:
 dsh sessions cannot be shared across processes. Two dsh processes (TUI +
 web, or two TUIs) holding one session each number events from their own
 in-memory log length, so both can mint the same `seq` and corrupt the log
-at the `session/end-seed` resume marker. DSH closes the OPEN path itself:
+at the `session/end-seed` marker. DSH closes the OPEN path itself:
 `agents.create` / `agents.resume` return a `SessionHandle` whose
 `dispose()` is the structured teardown of the persistence writer, and the
 kernel-flock `SessionWriteLease` (on `session.lock`) is the cross-process
@@ -60,9 +60,9 @@ resume opens the Session.
 Without the open-time refusal, the worst corruption shape unfolds
 silently:
 
-1. Process A resumes session S and is mid-turn (an open `step/start` is the
+1. Process A opens session S and is mid-turn (an open `step/start` is the
    last event, A's in-memory seq is `n+1`).
-2. Process B resumes S. dsh's persistence `prepare` sees the open turn and
+2. Process B opens S. dsh's persistence `prepare` sees the open turn and
    **synthesizes interrupted-turn closers into the shared log** (`step/end`,
    `turn/end interrupted`, then the constructor's `session/end-seed`), all
    appended to the file at seqs `n+1…n+3`.
@@ -80,7 +80,7 @@ starts: the second opener's `resume` is refused with
 
 The DSH lease protects the session FILE from cross-process writers. A
 separate hazard is IN-PROCESS interleaving between the TUI's own
-transition paths — `/new`, `/fork`, `/rewind`, `/sessions` switch/resume
+transition paths — `/new`, `/fork`, `/rewind`, `/sessions` switch/open
 and the first-session creation. Before the gate, two such workflows could
 overlap across their awaits:
 
@@ -98,7 +98,7 @@ overlap across their awaits:
 
 `src/transition-gate.ts` is a **process-local single-writer queue**: every
 transition path runs inside `SessionTransitionGate.run`, held from BEFORE
-the child create (for rewind) or the resume (for switches) until the
+the child create (for rewind) or the open (Direct `resume`) for switches until the
 transaction settles. Tasks are strictly FIFO; a rejected task fails its own
 caller and never blocks the queue; re-entering the gate from inside a task
 is refused loudly (AsyncLocalStorage detects it — re-entry would deadlock
@@ -115,7 +115,7 @@ is the whole point:
    ZERO child side effects.
 2. ALL TUI-owned preflight (preset/composition/stale checks — BEFORE the
    DSH boundary, so failures abort with ZERO side effects).
-3. create/resume the CHILD — may fail → abort; once it SUCCEEDS the child
+3. create/open the CHILD — may fail → abort; once it SUCCEEDS the child
    is published (`session/created` → persistence may already write its
    seed) and there is NO failure path after this point that may be
    interpreted as "the child never happened": `dispose()` stops an agent
@@ -129,19 +129,19 @@ is the whole point:
    top-level Agent retirement section); child surface/catalog work is
    best-effort and the committed child always stands.
 
-A rejected `create`/`resume` is handled WITHOUT any publication-phase
+A rejected `create`/`open` is handled WITHOUT any publication-phase
 inference: the old session simply stays current and the user may retry.
 
 `whenIdle()` is an INSTANT check, not a freeze: the old agent can be
-woken again by a followup/steer while the transition still awaits
+woken again by a prompt in `queue` or `steer` mode while the transition still awaits
 (flush, prepare, create). A write in that window would target a session
 the transition is about to retire. The transition gate therefore doubles
 as a WRITE FENCE: while a transition is in flight
 (`SessionTransitionGate.busy`), every agent-write entry point — plain
-submit, busy-Enter steer, Ctrl+S steer, the command fallback followup,
-DIRECT slash-command execution (a bare `commands.execute` that landed
-across a transition could write an agent a concurrent transition is
-about to retire — review round 27), the `!` shell submit, and the
+submit, busy-Enter prompt, Ctrl+S queue removals plus steerBatch, the command fallback prompt,
+Host command execution through `HostCommandPort` (a command that landed
+across a transition could write an Agent a concurrent transition is
+about to retire), the `!` shell submit, and the
 per-skill slash invocations — refuses the write, restores/keeps the draft
 or the invocation line (or keeps the shell card) and notifies "a session
 transition is in progress". The live `/preset` swap (recompose +
@@ -161,10 +161,40 @@ transition waits for in-flight writers to drain before it quiesces the old
 agent, and writers that start while a transition holds the barrier are
 refused (`TransitionInProgressError`).
 
+### D2.1 write settlement
+
+D2.1 makes the current Direct writes asynchronous at the semantic boundary
+without changing the ownership or ordering rules:
+
+- Ordinary input uses `SessionWriter.prompt(sessionId, message, mode)`;
+  `queue` and `steer` are explicit, and only a successful Direct call settles
+  as `committed`.
+- Ctrl+S remains one operation-barrier turn. It revalidates the exact queue,
+  then passes the confirmed occurrence ids and ordered messages to one
+  `steerBatch` settlement; the barrier is not released between removal and
+  delivery. Direct batch delivery remains ordered and non-transactional.
+- Host command execution uses `HostCommandPort` after the runner has already
+  decided that the line belongs to the Host. The port's settled command result
+  is committed separately from the TUI's fallback prompt path.
+- Task Center child interruption uses `SubagentPort` with the durable direct
+  parent and child identities. The semantic writer hides Direct cancellation
+  knobs such as the user reason and inbox-preservation option.
+
+Known-unwritten outcomes are never reported as committed. An indeterminate
+future wire result is not retried automatically or restored as if it were
+known-unwritten; Direct currently throws unexpected failures and normally
+returns confirmed `committed` or explicit refusal outcomes.
+
+A single process-local submit FIFO covers ordinary prompts, explicit queue
+prompts, Ctrl+S steer batches, and command execution including its fallback
+prompt. Each gesture takes its turn before async preparation and releases it
+only after the semantic command/write path settles, so delayed mention or
+attachment preparation cannot let a later gesture overtake an earlier one.
+
 ### Generation/stale fences
 
 - The runner keeps a **monotonic session generation**, bumped on EVERY
-  session swap (switch, `/new`, `/fork`, rewind, resume). Late async work
+  session swap (switch, `/new`, `/fork`, rewind, open). Late async work
   from the old session captures the generation it started under and
   refuses to commit state once a newer generation owns the surface.
 - The submission re-validation checks the live agent object AND the session
@@ -231,7 +261,7 @@ The process-local transition gate / operation barrier coordinate only the
 TUI's Client writers; they do not take over Host ownership. The retirement
 serializes against an in-flight transition through the same gate + barrier
 (a FIFO no-op task waits for a running transition to settle — the lifecycle
-abort already cancelled its create/resume), then retires the CURRENT owner.
+abort already cancelled its create/open), then retires the CURRENT owner.
 
 ## The submit path is guard-free (the decision)
 

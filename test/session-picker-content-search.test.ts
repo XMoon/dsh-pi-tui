@@ -141,11 +141,12 @@ function harness(options: {
     agents: {} as never,
     sessionReader,
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      steerBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+      removeQueuedBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     interaction: {

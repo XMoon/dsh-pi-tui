@@ -11,10 +11,11 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
+import { isIndeterminateSkillWrite, registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
 import { shouldConsumeAdvertisedMiss } from '../src/index.ts'
 import type { SurfaceCatalogSnapshot } from '../src/surface-catalog.ts'
+import type { WriteOutcome } from '../src/runtime/session-writer-port.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -68,9 +69,13 @@ function fakeAgent(sessionId: string, delivered: { kind: 'steer' | 'followup' | 
 function stubRunner(
   ctx: Context,
   app: TuiApp,
-  state: { agent: Agent | undefined },
+  state: {
+    agent: Agent | undefined
+    writerOutcome?: WriteOutcome
+    writerCalls?: { kind: 'prompt' | 'steerBatch'; mode?: 'queue' | 'steer'; messages?: readonly unknown[] }[]
+  },
   diag: ReturnType<typeof createDiag> = createDiag({ filePath: undefined, stderrLevel: 'off' }),
-  options: { transitionPending?: boolean; busyEnter?: string } = {},
+  options: { transitionPending?: boolean; busyEnter?: string; generation?: () => number } = {},
 ): TuiCommandRunner {
   return {
     ctx,
@@ -108,11 +113,27 @@ function stubRunner(
       setApprovalPolicy: () => true,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async (_sessionId: string, message: unknown, mode: 'queue' | 'steer') => {
+        const outcome = state.writerOutcome
+        if (outcome !== undefined && outcome.kind !== 'committed') return outcome
+        state.writerCalls?.push({ kind: 'prompt', mode })
+        const target = state.agent as Agent & { followup(message: unknown): void; steer(message: unknown): void }
+        if (mode === 'queue') target.followup(message)
+        else target.steer(message)
+        return outcome ?? { kind: 'committed' as const, value: undefined }
+      },
+      steerBatch: async (_sessionId: string, messages: readonly unknown[]) => {
+        const outcome = state.writerOutcome
+        if (outcome !== undefined && outcome.kind !== 'committed') return outcome
+        state.writerCalls?.push({ kind: 'steerBatch', messages })
+        const target = state.agent as Agent & { steer(message: unknown): void }
+        for (const message of messages) target.steer(message)
+        return outcome ?? { kind: 'committed' as const, value: undefined }
+      },
+      removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+      removeQueuedBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     cwd: '/ws',
@@ -123,7 +144,7 @@ function stubRunner(
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 1 },
+    get sessionGeneration() { return options.generation?.() ?? 1 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -331,8 +352,42 @@ test('the revalidating transition keeps skill names as revalidating handlers and
   assert.equal(delivered.length, 2, 'the transition executes through loadSkill on the current agent')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line is steered (waking an idle driver)')
   assert.equal(delivered[0]?.text, '/glab', 'the original user line is forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'inject', 'the body rides the same next-step batch as an injection')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the same semantic steer batch')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the loaded body uses the official skill_content rendering')
+  app.stop()
+})
+
+test('loadSkill refuses a session switch while resolving the skill body', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const first = fakeAgent('session-a', delivered)
+  const replacement = fakeAgent('session-a', delivered)
+  const state: { agent: Agent | undefined } = { agent: first }
+  let generation = 1
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => {
+      state.agent = replacement
+      generation = 2
+      return { name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }
+    },
+  } as never)
+  const { defs } = services
+  registerTuiCommands(stubRunner(ctx, app, state, undefined, { generation: () => generation }), { snapshot: snapshotOf({
+    skills: [{ name: 'glab', description: 'GitLab CLI' }],
+  }) })
+  const wrapper = defs.findLast(def => def.name === 'glab')
+  assert.ok(wrapper?.handler !== undefined)
+  const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: '' })
+  assert.equal(result.kind, 'error')
+  assert.match(result.text ?? '', /session changed while loading/u)
+  assert.deepEqual(delivered, [], 'the stale skill must not write either Agent')
   app.stop()
 })
 
@@ -361,7 +416,7 @@ test('loadSkill steers a RUNNING agent at the next step boundary instead of park
   assert.equal(delivered.length, 2, 'a bare /name delivers the original line AND the injected body')
   assert.equal(delivered[0]?.kind, 'steer', 'a running agent receives the original line as a steer')
   assert.equal(delivered[0]?.text, '/glab', 'the original user line is forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'inject', 'the body rides the same next-step batch as an injection')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the same semantic steer batch')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the loaded body uses the official skill_content rendering')
   app.stop()
 })
@@ -391,7 +446,7 @@ test('the explicit /skill <name> path steers the original line and injects the b
   assert.equal(delivered.length, 2, 'the explicit /skill path delivers the original line AND the loaded body')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line is steered (waking an idle driver)')
   assert.equal(delivered[0]?.text, '/glab', 'the original user line is forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'inject', 'the body rides the same next-step batch as an injection')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the same semantic steer batch')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the loaded body uses the official skill_content rendering')
   app.stop()
 })
@@ -421,7 +476,7 @@ test('a missing agent status still delivers via steer+inject (no status branch)'
   assert.equal(result.kind, 'success')
   assert.equal(delivered.length, 2, 'the load still delivers')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line is always steered, regardless of status')
-  assert.equal(delivered[1]?.kind, 'inject', 'the body rides the same next-step batch')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the same semantic steer batch')
   app.stop()
 })
 
@@ -704,7 +759,7 @@ test('the /skill command with args on a RUNNING agent steers the pair into the r
   assert.equal(delivered.length, 2, 'the running /skill path delivers the original line AND the body')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line steers into the running turn')
   assert.equal(delivered[0]?.text, '/glab fix bug', 'the arguments are forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'inject', 'the body rides the same next-step batch')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the same semantic steer batch')
   app.stop()
 })
 
@@ -735,7 +790,7 @@ test('the wrappers tolerate an undefined invocation (defensive rawInput fallback
   app.stop()
 })
 
-test('the fallback injection carries the official source fields and a provider default', async () => {
+test('the fallback semantic batch carries the official source fields and a provider default', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -743,20 +798,18 @@ test('the fallback injection carries the official source fields and a provider d
   startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
-  // The fake agent records the FULL message, not just the text, so the
-  // source can be asserted.
-  const injected: { source: { kind?: string; name?: string; form?: string }; text: string }[] = []
+  // The fake agent records the FULL messages, not just their text, so the
+  // source can be asserted. A raw inject would fail this contract test.
+  const steered: { content: { text: string }[]; source: { kind?: string; name?: string; form?: string } }[] = []
   const agent = {
     session: { id: 'session-a', header: { cwd: '/ws' }, events: [] },
     options: { provider: 'p', model: 'm' },
     status: 'idle',
   } as unknown as Agent
   Object.assign(agent, {
-    steer: () => {},
+    steer: (message: { content: { text: string }[]; source: { kind?: string; name?: string; form?: string } }) => steered.push(message),
     followup: () => {},
-    inject: (message: { content: { text: string }[]; source: unknown }) => {
-      injected.push({ ...message, text: message.content[0]?.text ?? '' } as never)
-    },
+    inject: () => { throw new Error('raw inject is not part of the semantic skill fallback') },
   })
   // No provider field on the loaded skill: the fallback must default it.
   ctx.provide('skills', {
@@ -764,19 +817,23 @@ test('the fallback injection carries the official source fields and a provider d
     get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled' }),
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  const writerCalls: { kind: 'prompt' | 'steerBatch'; mode?: 'queue' | 'steer'; messages?: readonly unknown[] }[] = []
+  registerTuiCommands(stubRunner(ctx, app, { agent, writerCalls }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
   assert.ok(wrapper?.handler !== undefined)
   const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
   assert.equal(result.kind, 'success')
-  assert.equal(injected.length, 1, 'the fallback injected exactly one body message')
-  assert.equal(injected[0]?.source.kind, 'skill-invocation', 'the fallback uses the official skill-invocation source kind')
-  assert.equal(injected[0]?.source.name, 'glab', 'the source names the invoked skill')
-  assert.equal(injected[0]?.source.form, 'instructions', 'the source marks the injection as instructions-form context')
-  assert.match(injected[0]?.text ?? '', /provider "tui"/, 'a missing provider defaults to "tui" in the rendering')
-  assert.match(injected[0]?.text ?? '', /<skill_content name="glab">/, 'the body uses the official skill_content rendering')
+  assert.deepEqual(writerCalls.map(call => call.kind), ['steerBatch'], 'the fallback uses exactly one semantic batch')
+  assert.equal(writerCalls[0]?.messages?.length, 2, 'the batch preserves line-before-body ordering')
+  assert.equal(steered.length, 2, 'the semantic batch steers the line and body')
+  const body = steered[1]
+  assert.equal(body?.source.kind, 'skill-invocation', 'the fallback uses the official skill-invocation source kind')
+  assert.equal(body?.source.name, 'glab', 'the source names the invoked skill')
+  assert.equal(body?.source.form, 'instructions', 'the source marks the body as instructions-form context')
+  assert.match(body?.content[0]?.text ?? '', /provider "tui"/, 'a missing provider defaults to "tui" in the rendering')
+  assert.match(body?.content[0]?.text ?? '', /<skill_content name="glab">/, 'the body uses the official skill_content rendering')
   app.stop()
 })
 
@@ -836,6 +893,80 @@ test('a tool merely NAMED skill without a loader shape is treated as no host loa
   assert.equal(result.kind, 'success')
   assert.equal(delivered.length, 2, 'the shadow tool does not suppress the fallback injection')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the body is injected by the TUI fallback')
+  app.stop()
+})
+
+test('a cancelled semantic skill write propagates cancellation instead of a command error', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const agent = fakeAgent('session-a')
+  const runner = stubRunner(ctx, app, { agent, writerOutcome: { kind: 'cancelled' } })
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
+  } as never)
+  registerTuiCommands(runner, { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) })
+  const wrapper = services.defs.findLast(def => def.name === 'glab')
+  assert.ok(wrapper?.handler !== undefined)
+  await assert.rejects(
+    () => (wrapper!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' }),
+    (error: unknown) => error instanceof Error && error.name === 'AbortError',
+  )
+  app.stop()
+})
+
+test('an indeterminate semantic skill write is explicit and does not auto-retry', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const agent = fakeAgent('session-a')
+  const runner = stubRunner(ctx, app, { agent, writerOutcome: { kind: 'indeterminate', error: { code: 'transport/unknown', message: 'delivery state unknown' } } })
+  ctx.provide('skills', {
+    list: async () => [],
+    get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
+  } as never)
+  registerTuiCommands(runner, { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) })
+  const wrapper = services.defs.findLast(def => def.name === 'glab')
+  assert.ok(wrapper?.handler !== undefined)
+  await assert.rejects(
+    () => (wrapper!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' }),
+    (error: unknown) => isIndeterminateSkillWrite(error),
+  )
+  app.stop()
+})
+
+test('an indeterminate title write suppresses outer draft restoration', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const agent = fakeAgent('session-a')
+  const runner = stubRunner(ctx, app, { agent })
+  runner.sessionWriter.rename = async () => ({
+    kind: 'indeterminate' as const,
+    error: { code: 'transport/unknown', message: 'title result unknown' },
+  })
+  registerTuiCommands(runner)
+  const title = services.defs.find(def => def.name === 'title')
+  assert.ok(title?.handler !== undefined)
+  const result = await (title.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: 'new title' })
+  assert.deepEqual(result, {
+    kind: 'error',
+    text: 'session title result is indeterminate — do not retry automatically',
+    draftRestoreSuppressed: true,
+  })
   app.stop()
 })
 
