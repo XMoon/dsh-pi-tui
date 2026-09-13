@@ -43,6 +43,10 @@ export interface SessionTitleServiceLike {
   refresh(session: unknown, signal: AbortSignal): Promise<{ readonly title: string } | undefined>
 }
 
+interface FileUploadsLike {
+  retirePrompt(agent: LiveAgentLike, requestId: string): void
+}
+
 function sessionNotFound<T>(sessionId: string): WriteOutcome<T> {
   return {
     kind: 'rejected',
@@ -65,7 +69,6 @@ function steerUnavailable<T>(itemId: string): WriteOutcome<T> {
 }
 
 function indeterminate(error: unknown): WriteOutcome {
-  if (isCancellation(error)) return { kind: 'cancelled' }
   return {
     kind: 'indeterminate',
     error: {
@@ -73,6 +76,10 @@ function indeterminate(error: unknown): WriteOutcome {
       message: error instanceof Error ? error.message : String(error),
     },
   }
+}
+
+function mutationFailure(error: unknown): WriteOutcome {
+  return isCancellation(error) ? { kind: 'cancelled' } : indeterminate(error)
 }
 
 function serviceUnavailable<T>(service: string): WriteOutcome<T> {
@@ -111,45 +118,98 @@ export class DirectSessionWriter implements SessionWriter {
   }
 
   /** Apply one official queue mutation to an exact pending occurrence. A
-   * boolean miss is a typed not-found; mutation exceptions are indeterminate. */
+   * boolean miss is a typed not-found; non-cancellation mutation exceptions
+   * are indeterminate. */
   async updateQueue(sessionId: string, itemId: string, action: QueueAction): Promise<WriteOutcome> {
+    // Match the official Host boundary: edit validation happens before Agent
+    // resolution and does not alter the caller's content bytes.
+    if (action.kind === 'edit') {
+      const nonText = action.content.some(block => {
+        if (typeof block !== 'object' || block === null || !('type' in block)) return true
+        return block.type !== 'text'
+      })
+      if (nonText) {
+        return {
+          kind: 'rejected',
+          error: {
+            code: 'session/attachment-invalid',
+            message: 'queue edits accept text content only',
+            details: { reason: 'QUEUE_EDIT_NON_TEXT' },
+          },
+        }
+      }
+      const hasText = action.content.some(block => {
+        if (typeof block !== 'object' || block === null || !('type' in block) || block.type !== 'text') return false
+        return 'text' in block && typeof block.text === 'string' && block.text.trim().length > 0
+      })
+      if (!hasText) {
+        return {
+          kind: 'rejected',
+          error: { code: 'gateway/bad-request', message: 'queue edit content must include non-whitespace text' },
+        }
+      }
+    }
+
     const agent = this.queueAgentFor(sessionId)
     if (agent === undefined) return queueItemNotFound(itemId)
 
-    // Steering only addresses next-turn work. Edit and remove also accept a
-    // next-step occurrence, which may already have been steered once.
-    const message = action.kind === 'steer'
-      ? agent.inbox.nextTurn.find(item => item.id === itemId)
-      : [...agent.inbox.nextTurn, ...agent.inbox.nextStep].find(item => item.id === itemId)
-    if (message === undefined) return queueItemNotFound(itemId)
+    const nextTurn = agent.inbox.nextTurn.find(item => item.id === itemId)
+    const nextStep = agent.inbox.nextStep.find(item => item.id === itemId)
+    const located = nextTurn === undefined
+      ? nextStep === undefined ? undefined : { target: 'next-step' as const, message: nextStep }
+      : { target: 'next-turn' as const, message: nextTurn }
+    if (located === undefined) return queueItemNotFound(itemId)
+    const { target, message } = located
+    if (action.kind === 'steer' && (target !== 'next-turn' || agent.status !== 'running')) {
+      return steerUnavailable(itemId)
+    }
 
     if (action.kind === 'edit') {
       try {
         const replaced = agent.inbox.replace(itemId, { ...message, content: [...action.content] })
         return replaced ? { kind: 'committed', value: undefined } : queueItemNotFound(itemId)
       } catch (error) {
-        return indeterminate(error)
+        return mutationFailure(error)
       }
     }
 
     if (action.kind === 'remove') {
+      let removed: boolean
       try {
-        const removed = agent.inbox.remove(itemId)
-        return removed ? { kind: 'committed', value: undefined } : queueItemNotFound(itemId)
+        removed = agent.inbox.remove(itemId)
       } catch (error) {
+        return mutationFailure(error)
+      }
+      if (!removed) return queueItemNotFound(itemId)
+      try {
+        const source = message.source
+        if (typeof source === 'object' && source !== null
+          && 'kind' in source && source.kind === 'user'
+          && 'rpcId' in source && typeof source.rpcId === 'string') {
+          const fileUploads = this.ctx.get('fileUploads') as FileUploadsLike | undefined
+          if (fileUploads === undefined) {
+            return indeterminate(new Error('file upload service unavailable while retiring queue prompt'))
+          }
+          fileUploads.retirePrompt(agent, source.rpcId)
+        }
+      } catch (error) {
+        // The queue occurrence was removed; an upload-retirement failure is
+        // therefore indeterminate even when the failure is cancellation-shaped.
         return indeterminate(error)
       }
+      return { kind: 'committed', value: undefined }
     }
 
-    if (agent.status !== 'running') return steerUnavailable(itemId)
+    let removed = false
     try {
-      const removed = agent.inbox.remove(itemId)
-      if (!removed) return queueItemNotFound(itemId)
+      const didRemove = agent.inbox.remove(itemId)
+      if (!didRemove) return queueItemNotFound(itemId)
+      removed = true
       agent.steer(message)
     } catch (error) {
       // Removal may have happened before either the exception or steering;
       // the caller must not restore and automatically replay this occurrence.
-      return indeterminate(error)
+      return removed ? indeterminate(error) : mutationFailure(error)
     }
     return { kind: 'committed', value: undefined }
   }

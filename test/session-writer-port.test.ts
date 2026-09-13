@@ -53,6 +53,41 @@ test('prompt delivers one prepared message with the caller-selected mode', async
   ])
 })
 
+test('updateQueue validates edit content before resolving an Agent', async () => {
+  let resolved = 0
+  let replaced = 0
+  const target = agent('session-a', {
+    inbox: {
+      nextTurn: [{ id: 'message-1' }],
+      nextStep: [],
+      replace: () => { replaced += 1; return true },
+      remove: () => true,
+    },
+  })
+  const w = new DirectSessionWriter(
+    host({}),
+    () => { resolved += 1; return target },
+  )
+  for (const content of [[{ type: 'image' }], [null]] as readonly unknown[][]) {
+    assert.deepEqual(await w.updateQueue('missing', 'message-1', { kind: 'edit', content }), {
+      kind: 'rejected',
+      error: {
+        code: 'session/attachment-invalid',
+        message: 'queue edits accept text content only',
+        details: { reason: 'QUEUE_EDIT_NON_TEXT' },
+      },
+    })
+  }
+  for (const content of [[], [{ type: 'text', text: ' \t\n' }]]) {
+    assert.deepEqual(await w.updateQueue('missing', 'message-1', { kind: 'edit', content }), {
+      kind: 'rejected',
+      error: { code: 'gateway/bad-request', message: 'queue edit content must include non-whitespace text' },
+    })
+  }
+  assert.equal(resolved, 0)
+  assert.equal(replaced, 0)
+})
+
 test('updateQueue steers one exact next-turn occurrence', async () => {
   const delivered: unknown[] = []
   const removed: string[] = []
@@ -139,6 +174,109 @@ test('updateQueue remove handles next-turn and next-step occurrences', async () 
   assert.deepEqual(removed, ['message-1', 'message-3'])
 })
 
+test('updateQueue remove retires a user RPC upload binding after removal', async () => {
+  const order: string[] = []
+  const message = {
+    id: 'message-rpc',
+    content: [{ type: 'text', text: 'upload-backed prompt' }],
+    source: { kind: 'user', rpcId: 'rpc-1' },
+  }
+  const target = agent('session-a', {
+    inbox: {
+      nextTurn: [message],
+      nextStep: [],
+      replace: () => true,
+      remove: (id) => { order.push(`remove:${id}`); return true },
+    },
+  })
+  let retiredAgent: LiveAgentLike | undefined
+  let retiredRequestId: string | undefined
+  const w = writer(new Map([['session-a', target]]), {
+    fileUploads: {
+      retirePrompt: (received: LiveAgentLike, requestId: string) => {
+        order.push(`retire:${requestId}`)
+        retiredAgent = received
+        retiredRequestId = requestId
+      },
+    },
+  })
+  assert.deepEqual(await w.updateQueue('session-a', 'message-rpc', { kind: 'remove' }), {
+    kind: 'committed',
+    value: undefined,
+  })
+  assert.deepEqual(order, ['remove:message-rpc', 'retire:rpc-1'])
+  assert.equal(retiredAgent, target)
+  assert.equal(retiredRequestId, 'rpc-1')
+})
+
+test('updateQueue remove is indeterminate when RPC upload retirement is unavailable or fails', async () => {
+  const makeMessage = () => ({
+    id: 'message-rpc',
+    content: [{ type: 'text', text: 'upload-backed prompt' }],
+    source: { kind: 'user', rpcId: 'rpc-1' },
+  })
+  const missingServiceTarget = agent('session-a', {
+    inbox: {
+      nextTurn: [makeMessage()],
+      nextStep: [],
+      replace: () => true,
+      remove: () => true,
+    },
+  })
+  assert.deepEqual(await writer(new Map([['session-a', missingServiceTarget]])).updateQueue(
+    'session-a', 'message-rpc', { kind: 'remove' },
+  ), {
+    kind: 'indeterminate',
+    error: {
+      code: 'session/write-indeterminate',
+      message: 'file upload service unavailable while retiring queue prompt',
+    },
+  })
+
+  for (const failure of [new Error('retire failed'), (() => {
+    const error = new Error('retire cancelled')
+    error.name = 'AbortError'
+    ;(error as Error & { code?: string }).code = 'ABORT_ERR'
+    return error
+  })()]) {
+    const target = agent('session-a', {
+      inbox: {
+        nextTurn: [makeMessage()],
+        nextStep: [],
+        replace: () => true,
+        remove: () => true,
+      },
+    })
+    assert.deepEqual(await writer(new Map([['session-a', target]]), {
+      fileUploads: { retirePrompt: () => { throw failure } },
+    }).updateQueue('session-a', 'message-rpc', { kind: 'remove' }), {
+      kind: 'indeterminate',
+      error: { code: 'session/write-indeterminate', message: failure.message },
+    })
+  }
+})
+
+test('updateQueue steer rejects a next-step occurrence as unavailable', async () => {
+  let removed = 0
+  let steered = 0
+  const agents = new Map([['session-a', agent('session-a', {
+    status: 'running',
+    inbox: {
+      nextTurn: [],
+      nextStep: [{ id: 'message-1' }],
+      replace: () => true,
+      remove: () => { removed += 1; return true },
+    },
+    steer: () => { steered += 1 },
+  })]])
+  assert.deepEqual(await writer(agents).updateQueue('session-a', 'message-1', { kind: 'steer' }), {
+    kind: 'rejected',
+    error: { code: 'session/steer-unavailable', message: 'queued item "message-1" cannot be steered while the session is not running' },
+  })
+  assert.equal(removed, 0)
+  assert.equal(steered, 0)
+})
+
 test('updateQueue reports queue-item-not-found when an atomic edit or remove misses', async () => {
   const message = { id: 'message-1' }
   const agents = new Map([['session-a', agent('session-a', {
@@ -150,7 +288,7 @@ test('updateQueue reports queue-item-not-found when an atomic edit or remove mis
     },
   })]])
   const w = writer(agents)
-  assert.deepEqual(await w.updateQueue('session-a', 'message-1', { kind: 'edit', content: [] }), {
+  assert.deepEqual(await w.updateQueue('session-a', 'message-1', { kind: 'edit', content: [{ type: 'text', text: 'replacement' }] }), {
     kind: 'rejected',
     error: { code: 'session/queue-item-not-found', message: 'queued item "message-1" is no longer pending' },
   })
@@ -170,7 +308,7 @@ test('updateQueue edit settles indeterminate when Inbox.replace throws', async (
       remove: () => true,
     },
   })]])
-  assert.deepEqual(await writer(agents).updateQueue('session-a', 'message-1', { kind: 'edit', content: [] }), {
+  assert.deepEqual(await writer(agents).updateQueue('session-a', 'message-1', { kind: 'edit', content: [{ type: 'text', text: 'replacement' }] }), {
     kind: 'indeterminate',
     error: { code: 'session/write-indeterminate', message: 'replace failed' },
   })
