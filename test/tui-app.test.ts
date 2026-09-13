@@ -410,7 +410,7 @@ test('the queue pane renders pending rows and hides when empty', async () => {
   assert.ok(view.includes('❯ follow up on the audit'), `followup row missing:\n${view}`)
   assert.ok(view.includes('❯ steer a correction'), `steer row missing:\n${view}`)
   assert.ok(view.includes('ctrl+s to steer all'), `steer-all hint missing:\n${view}`)
-  assert.ok(view.includes('alt+up to edit all'), `hint row missing:\n${view}`)
+  assert.ok(view.includes('alt+up to recall all'), `recall-all hint missing:\n${view}`)
   app.setQueueItems([])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
@@ -430,10 +430,10 @@ test('queue pane renders every semantic queued row with the same steer affordanc
   assert.ok(view.includes('❯ please also fix the lint'), `second semantic row missing:\n${view}`)
   assert.equal((view.match(/❯/g) ?? []).length, 3, 'both queue rows and the editor prompt use the same marker')
   assert.ok(view.includes('ctrl+s to steer all'), `steer hints missing:\n${view}`)
-  assert.ok(view.includes('alt+up to edit all'), `dequeue hint missing:\n${view}`)
+  assert.ok(view.includes('alt+up to recall all'), `recall-all hint missing:\n${view}`)
 })
 
-test('queue pane does not advertise the disabled dequeue gesture in a viewer', async () => {
+test('queue pane does not advertise the disabled recall-all gesture in a viewer', async () => {
   const { vt, app } = startApp()
   app.setViewerMode({
     parentSessionId: 'parent',
@@ -447,7 +447,22 @@ test('queue pane does not advertise the disabled dequeue gesture in a viewer', a
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('ctrl+s to steer all'), `viewer queue steer hint missing:\n${view}`)
-  assert.ok(!view.includes('alt+up to edit all'), `viewer must not advertise disabled dequeue:\n${view}`)
+  assert.ok(!view.includes('alt+up to recall all'), `viewer must not advertise disabled recall-all:\n${view}`)
+})
+
+test('queue pane suppresses steer-all affordance while the active subject is idle', async () => {
+  const { vt, app } = startApp()
+  app.setQueueItems([{ id: 'idle-q', text: 'wait for the next turn', mode: 'followup' }], false)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ wait for the next turn'), `idle queue row missing:\n${view}`)
+  assert.ok(view.includes('queued until the current task resumes'), `idle queue state missing:\n${view}`)
+  assert.ok(!view.includes('ctrl+s to steer all'), `idle queue must not advertise a no-op steer:\n${view}`)
+
+  app.setQueueItems([{ id: 'idle-q', text: 'wait for the next turn', mode: 'followup' }], true)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('ctrl+s to steer all'), `running queue must restore the steer affordance:\n${view}`)
 })
 
 test('queue pane reflows from raw items across a narrow-to-wide resize', async () => {

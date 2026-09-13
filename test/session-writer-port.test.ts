@@ -21,7 +21,7 @@ function agent(id: string, overrides: Partial<LiveAgentLike> = {}): LiveAgentLik
     steer: () => {},
     cancel: () => {},
     status: 'running',
-     inbox: { nextTurn: [], nextStep: [], remove: () => {} },
+    inbox: { nextTurn: [], nextStep: [], replace: () => true, remove: () => true },
     ...overrides,
   }
 }
@@ -53,29 +53,35 @@ test('prompt delivers one prepared message with the caller-selected mode', async
   ])
 })
 
-test('steerQueued steers one exact next-turn occurrence', async () => {
+test('updateQueue steers one exact next-turn occurrence', async () => {
   const delivered: unknown[] = []
-  // occurrence-steer fixture
   const removed: string[] = []
+  const one = { id: 'one', role: 'user' as const, content: [{ type: 'text', text: 'one' }], source: { kind: 'user' } }
   const agents = new Map([['session-a', agent('session-a', {
-    inbox: { nextTurn: [{ id: 'one' }, { id: 'two' }, { id: 'message-1' }, { id: 'message-2' }], nextStep: [], remove: (id) => removed.push(id) },
+    inbox: {
+      nextTurn: [one, { id: 'two' }, { id: 'message-1' }, { id: 'message-2' }],
+      nextStep: [],
+      replace: () => true,
+      remove: (id) => { removed.push(id); return true },
+    },
     steer: (message) => delivered.push(message),
   })]])
-  const outcome = await writer(agents).steerQueued('session-a', 'one')
+  const outcome = await writer(agents).updateQueue('session-a', 'one', { kind: 'steer' })
   assert.deepEqual(outcome, { kind: 'committed', value: undefined })
   assert.deepEqual(removed, ['one'])
-  assert.deepEqual(delivered, [{ id: 'one' }])
+  assert.deepEqual(delivered, [one])
 })
 
-test('steerQueued rejects an idle turn without removing or replaying the occurrence', async () => {
+test('updateQueue steer rejects an idle turn without removing or replaying the occurrence', async () => {
   const removed: string[] = []
   const delivered: unknown[] = []
+  const message = { id: 'message-1' }
   const agents = new Map([['session-a', agent('session-a', {
     status: 'idle',
-    inbox: { nextTurn: [{ id: 'message-1' }], nextStep: [], remove: (id) => removed.push(id) },
-    steer: (message) => delivered.push(message),
+    inbox: { nextTurn: [message], nextStep: [], replace: () => true, remove: (id) => { removed.push(id); return true } },
+    steer: (value) => delivered.push(value),
   })]])
-  assert.deepEqual(await writer(agents).steerQueued('session-a', 'message-1'), {
+  assert.deepEqual(await writer(agents).updateQueue('session-a', 'message-1', { kind: 'steer' }), {
     kind: 'rejected',
     error: { code: 'session/steer-unavailable', message: 'queued item "message-1" cannot be steered while the session is not running' },
   })
@@ -83,26 +89,139 @@ test('steerQueued rejects an idle turn without removing or replaying the occurre
   assert.deepEqual(delivered, [])
 })
 
-test('steerQueued rejects a missing occurrence without inventing a message', async () => {
+test('updateQueue rejects a missing occurrence without inventing a message', async () => {
   const agents = new Map([['session-a', agent('session-a')]])
-  assert.deepEqual(await writer(agents).steerQueued('session-a', 'missing'), {
+  assert.deepEqual(await writer(agents).updateQueue('session-a', 'missing', { kind: 'remove' }), {
     kind: 'rejected',
     error: { code: 'session/queue-item-not-found', message: 'queued item "missing" is no longer pending' },
   })
 })
 
-test('removeQueued removes exactly one pulled-back message id', async () => {
-  const removed: string[] = []
-  const agents = new Map([['session-a', agent('session-a', { inbox: { nextTurn: [{ id: 'message-1' }, { id: 'message-2' }], nextStep: [], remove: (id) => removed.push(id) } })]])
-  assert.deepEqual(await writer(agents).removeQueued('session-a', 'message-1'), { kind: 'committed', value: undefined })
-  assert.deepEqual(removed, ['message-1'])
+test('updateQueue edit preserves occurrence metadata while replacing content in place', async () => {
+  const original = {
+    id: 'message-1',
+    role: 'user' as const,
+    content: [{ type: 'text', text: 'old' }],
+    source: { kind: 'plugin', plugin: 'reviewer' },
+  }
+  let replacement: unknown
+  const agents = new Map([['session-a', agent('session-a', {
+    inbox: {
+      nextTurn: [original, { id: 'message-2' }],
+      nextStep: [],
+      replace: (_id, message) => { replacement = message; return true },
+      remove: () => true,
+    },
+  })]])
+  assert.deepEqual(await writer(agents).updateQueue('session-a', 'message-1', {
+    kind: 'edit',
+    content: [{ type: 'text', text: 'new' }],
+  }), { kind: 'committed', value: undefined })
+  assert.deepEqual(replacement, {
+    ...original,
+    content: [{ type: 'text', text: 'new' }],
+  })
 })
 
-test('removeQueued removes one exact pending occurrence', async () => {
+test('updateQueue remove handles next-turn and next-step occurrences', async () => {
   const removed: string[] = []
-  const agents = new Map([['session-a', agent('session-a', { inbox: { nextTurn: [{ id: 'message-1' }, { id: 'message-2' }], nextStep: [], remove: (id) => removed.push(id) } })]])
-  assert.deepEqual(await writer(agents).removeQueued('session-a', 'message-2'), { kind: 'committed', value: undefined })
-  assert.deepEqual(removed, ['message-2'])
+  const agents = new Map([['session-a', agent('session-a', {
+    inbox: {
+      nextTurn: [{ id: 'message-1' }, { id: 'message-2' }],
+      nextStep: [{ id: 'message-3' }],
+      replace: () => true,
+      remove: (id) => { removed.push(id); return true },
+    },
+  })]])
+  const w = writer(agents)
+  assert.deepEqual(await w.updateQueue('session-a', 'message-1', { kind: 'remove' }), { kind: 'committed', value: undefined })
+  assert.deepEqual(await w.updateQueue('session-a', 'message-3', { kind: 'remove' }), { kind: 'committed', value: undefined })
+  assert.deepEqual(removed, ['message-1', 'message-3'])
+})
+
+test('updateQueue reports queue-item-not-found when an atomic edit or remove misses', async () => {
+  const message = { id: 'message-1' }
+  const agents = new Map([['session-a', agent('session-a', {
+    inbox: {
+      nextTurn: [message],
+      nextStep: [],
+      replace: () => false,
+      remove: () => false,
+    },
+  })]])
+  const w = writer(agents)
+  assert.deepEqual(await w.updateQueue('session-a', 'message-1', { kind: 'edit', content: [] }), {
+    kind: 'rejected',
+    error: { code: 'session/queue-item-not-found', message: 'queued item "message-1" is no longer pending' },
+  })
+  assert.deepEqual(await w.updateQueue('session-a', 'message-1', { kind: 'remove' }), {
+    kind: 'rejected',
+    error: { code: 'session/queue-item-not-found', message: 'queued item "message-1" is no longer pending' },
+  })
+})
+
+test('updateQueue edit settles indeterminate when Inbox.replace throws', async () => {
+  const failure = new Error('replace failed')
+  const agents = new Map([['session-a', agent('session-a', {
+    inbox: {
+      nextTurn: [{ id: 'message-1' }],
+      nextStep: [],
+      replace: () => { throw failure },
+      remove: () => true,
+    },
+  })]])
+  assert.deepEqual(await writer(agents).updateQueue('session-a', 'message-1', { kind: 'edit', content: [] }), {
+    kind: 'indeterminate',
+    error: { code: 'session/write-indeterminate', message: 'replace failed' },
+  })
+})
+
+test('updateQueue remove settles indeterminate when Inbox.remove throws', async () => {
+  const failure = new Error('remove failed')
+  const agents = new Map([['session-a', agent('session-a', {
+    inbox: {
+      nextTurn: [{ id: 'message-1' }],
+      nextStep: [],
+      replace: () => true,
+      remove: () => { throw failure },
+    },
+  })]])
+  assert.deepEqual(await writer(agents).updateQueue('session-a', 'message-1', { kind: 'remove' }), {
+    kind: 'indeterminate',
+    error: { code: 'session/write-indeterminate', message: 'remove failed' },
+  })
+})
+
+test('updateQueue steer settles indeterminate when Inbox.remove throws before steering', async () => {
+  let steered = 0
+  const failure = new Error('remove failed')
+  const agents = new Map([['session-a', agent('session-a', {
+    inbox: {
+      nextTurn: [{ id: 'message-1' }],
+      nextStep: [],
+      replace: () => true,
+      remove: () => { throw failure },
+    },
+    steer: () => { steered += 1 },
+  })]])
+  assert.deepEqual(await writer(agents).updateQueue('session-a', 'message-1', { kind: 'steer' }), {
+    kind: 'indeterminate',
+    error: { code: 'session/write-indeterminate', message: 'remove failed' },
+  })
+  assert.equal(steered, 0)
+})
+
+test('updateQueue steer never calls Agent.steer when atomic removal misses', async () => {
+  let steered = 0
+  const agents = new Map([['session-a', agent('session-a', {
+    inbox: { nextTurn: [{ id: 'message-1' }], nextStep: [], replace: () => true, remove: () => false },
+    steer: () => { steered += 1 },
+  })]])
+  assert.deepEqual(await writer(agents).updateQueue('session-a', 'message-1', { kind: 'steer' }), {
+    kind: 'rejected',
+    error: { code: 'session/queue-item-not-found', message: 'queued item "message-1" is no longer pending' },
+  })
+  assert.equal(steered, 0)
 })
 
 test('cancel hides Direct reason and keepInbox knobs while preserving their behavior', async () => {
@@ -123,11 +242,16 @@ test('operations address the agent resolved by session id at call time', async (
   assert.deepEqual(delivered, [{ text: 'one' }, { text: 'two' }])
 })
 
-test('queue occurrence verbs use their child resolver without widening ordinary prompt authority', async () => {
+test('updateQueue uses its child resolver without widening ordinary prompt authority', async () => {
   const delivered: unknown[] = []
   const removed: string[] = []
   const child = agent('child', {
-    inbox: { nextTurn: [{ id: 'child-queued' }, { id: 'child-remove' }], nextStep: [], remove: id => removed.push(id) },
+    inbox: {
+      nextTurn: [{ id: 'child-queued' }, { id: 'child-remove' }],
+      nextStep: [],
+      replace: () => true,
+      remove: id => { removed.push(id); return true },
+    },
     steer: message => delivered.push(message),
   })
   const w = writer(new Map(), {}, new Map([['child', child]]))
@@ -136,8 +260,8 @@ test('queue occurrence verbs use their child resolver without widening ordinary 
     kind: 'rejected',
     error: { code: 'session/not-found', message: 'session "child" is not available' },
   })
-  assert.deepEqual(await w.steerQueued('child', 'child-queued'), { kind: 'committed', value: undefined })
-  assert.deepEqual(await w.removeQueued('child', 'child-remove'), { kind: 'committed', value: undefined })
+  assert.deepEqual(await w.updateQueue('child', 'child-queued', { kind: 'steer' }), { kind: 'committed', value: undefined })
+  assert.deepEqual(await w.updateQueue('child', 'child-remove', { kind: 'remove' }), { kind: 'committed', value: undefined })
   assert.deepEqual(removed, ['child-queued', 'child-remove'])
   assert.deepEqual(delivered, [{ id: 'child-queued' }])
 })
@@ -148,11 +272,11 @@ test('known operations reject when the session is absent', async () => {
     kind: 'rejected',
     error: { code: 'session/not-found', message: 'session "session-ghost" is not available' },
   })
-  assert.deepEqual(await w.steerQueued('session-ghost', 'm1'), {
+  assert.deepEqual(await w.updateQueue('session-ghost', 'm1', { kind: 'steer' }), {
     kind: 'rejected',
     error: { code: 'session/queue-item-not-found', message: 'queued item "m1" is no longer pending' },
   })
-  assert.deepEqual(await w.removeQueued('session-ghost', 'm1'), {
+  assert.deepEqual(await w.updateQueue('session-ghost', 'm1', { kind: 'remove' }), {
     kind: 'rejected',
     error: { code: 'session/queue-item-not-found', message: 'queued item "m1" is no longer pending' },
   })
@@ -211,16 +335,17 @@ test('unexpected Direct write exceptions reject instead of claiming committed', 
   await assert.rejects(w.prompt('session-a', { text: 'x' }, 'queue'), failure)
 })
 
-test('steerQueued returns indeterminate when removal or steering throws', async () => {
+test('updateQueue steer returns indeterminate when steering throws after removal', async () => {
   const failure = new Error('steer invariant failure')
   const removed: string[] = []
   const agents = new Map([['session-a', agent('session-a', {
-    inbox: { nextTurn: [{ id: 'message-1' }], nextStep: [], remove: (id) => {
+    inbox: { nextTurn: [{ id: 'message-1' }], nextStep: [], replace: () => true, remove: (id) => {
       removed.push(id)
+      return true
     } },
     steer: () => { throw failure },
   })]])
-  assert.deepEqual(await writer(agents).steerQueued('session-a', 'message-1'), {
+  assert.deepEqual(await writer(agents).updateQueue('session-a', 'message-1', { kind: 'steer' }), {
     kind: 'indeterminate',
     error: { code: 'session/write-indeterminate', message: 'steer invariant failure' },
   })

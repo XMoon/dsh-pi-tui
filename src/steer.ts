@@ -65,8 +65,8 @@ export interface SteerDeps {
    * state are read here; the runner never reads Direct inbox collections. */
   pendingInputReader: PendingInputReader
   /** The session WRITE delivery seam. Ordinary prompts and occurrence-level
-   * queue steering always go through the semantic SessionWriter. */
-  writer: Pick<SessionWriter, 'prompt' | 'steerQueued' | 'removeQueued'>
+   * queue mutations always go through the semantic SessionWriter. */
+  writer: Pick<SessionWriter, 'prompt' | 'updateQueue'>
   /**
    * The session operation barrier (convergence plan phase 3): the whole
    * steer write runs inside `runWriter`, so a transition started while
@@ -231,13 +231,13 @@ const deliverPrompt = async (
   mode: 'queue' | 'steer',
 ): Promise<WriteOutcome> => deps.writer.prompt(agent.session.id, message, mode)
 
-/** Deliver one exact queued occurrence, matching the official updateQueue
+/** Deliver one exact queued occurrence through the official updateQueue
  * steer operation. */
 const deliverQueued = async (
   deps: SteerDeps,
   agent: SteerAgentLike,
   messageId: string,
-): Promise<WriteOutcome> => deps.writer.steerQueued(agent.session.id, messageId)
+): Promise<WriteOutcome> => deps.writer.updateQueue(agent.session.id, messageId, { kind: 'steer' })
 
 /** Apply a writer settlement for the one-message draft prompt. Known
  * non-commits restore the draft; an indeterminate result may have delivered

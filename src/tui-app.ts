@@ -1850,9 +1850,10 @@ export interface TuiAppEventsBase {
    */
   onOpenTasks?: () => void
   /**
-   * The dequeue action (default: Alt+↑): pull every queued message back
-   * into the editor draft (pi's dequeue). The host clears the inbox and
-   * the draft lands via {@link TuiApp.setDraft}. Optional.
+   * The TUI-only recall-all action (default: Alt+↑): remove every queued
+   * message occurrence and pull its content into the editor draft. The host
+   * clears the inbox and the draft lands via {@link TuiApp.setDraft}. This is
+   * not the official in-place queue edit operation. Optional.
    */
   onDequeue?: () => void
   /**
@@ -2773,8 +2774,10 @@ export class TuiApp {
    * the queue is empty.
    */
   private readonly queuePane: Text
-  /** The pending inbox messages (next-turn followups and next-step steers). */
+  /** The semantic queued pending-input occurrences for the active subject. */
   private queueItems: readonly QueueItem[] = []
+  /** Activity of the same pending-input subject shown in queueItems. */
+  private queueRunning = true
 
   /** Whether any background task is running/stopping. */
   private tasksActive = false
@@ -4310,7 +4313,7 @@ export class TuiApp {
     // - continuable: the editor is LIVE (typing falls through to it), but
     //   Enter submits to the SUBAGENT (never the parent) and every
     //   parent-owned lifecycle key is consumed here, BEFORE the host
-    //   ladder, so the viewer can never steer/queue/dequeue the parent
+    //   ladder, so the viewer can never steer/queue/recall-all the parent
     //   session or exit the TUI from inside the child view.
     if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries) {
       // A viewer owns this input stage; no parent keyboard exit request can
@@ -4890,7 +4893,7 @@ export class TuiApp {
         return true
       },
       dequeueDraft: () => {
-        // The dequeue action: pull queued input back into the editor.
+        // The TUI-only recall-all action: pull queued input back into the editor.
         this.events.onDequeue?.()
         return true
       },
@@ -12258,9 +12261,12 @@ export class TuiApp {
    * `❯ text` row per message, and a dim hint. An empty queue renders
    * nothing at all.
    * @param items - semantic queued occurrences, in projection order.
+   * @param running - activity of the same pending-input subject; omitted for
+   * legacy callers and keeps the historical steer hint.
    */
-  setQueueItems(items: readonly QueueItem[]): void {
+  setQueueItems(items: readonly QueueItem[], running?: boolean): void {
     this.queueItems = items
+    this.queueRunning = running ?? true
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.renderQueuePane()
@@ -12285,12 +12291,14 @@ export class TuiApp {
       const text = item.text.replace(/\s+/g, ' ').trim()
       const truncated = truncateToWidth(text, Math.max(1, safeWidth - visibleWidth('❯ ')), '…')
       // Every row is a semantic queued occurrence; the same ❯ marker and
-      // steer/edit hints apply regardless of its backend origin.
+      // steer/recall hints apply regardless of its backend origin.
       lines.push(`${color.roleUser('❯')} ${truncated}`)
     }
-    const steerHint = `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer all`
+    const steerHint = this.queueRunning
+      ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer all`
+      : 'queued until the current task resumes'
     const hint = this.viewerMode === undefined
-      ? `${steerHint} · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to edit all`
+      ? `${steerHint} · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to recall all`
       : steerHint
     lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, safeWidth - 2), '…')))
     this.queuePane.setText(lines.join('\n'))
@@ -12303,8 +12311,8 @@ export class TuiApp {
   }
 
   /**
-   * Replace the editor draft wholesale (the Alt+↑ dequeue path pulls every
-   * queued message back into the editor for editing). The text is a
+   * Replace the editor draft wholesale (the TUI-only Alt+↑ recall-all path
+   * pulls every queued message back into the editor for editing). The text is a
    * SERIALIZED user input (queued messages keep their `!` / `!!` wire
    * form), so the host editor decodes it into mode + body. While a
    * CONTINUABLE subagent viewer covers the editor, the write goes to the
@@ -12335,7 +12343,7 @@ export class TuiApp {
   /** The editor's current draft in its WIRE form (mode + body serialized
    * — the symmetric counterpart of {@link setDraft}, which decodes).
    * Callers that read, merge and restore drafts (the runner's restore
-   * paths, the Alt+↑ dequeue, the steer action) therefore never lose the
+   * paths, the Alt+↑ recall-all action, the steer action) therefore never lose the
    * shell mode: a shell-mode draft reads back as `!pwd` and restores as
    * shell mode. In a continuable viewer the VISIBLE editor is the
    * authority — it is exactly what the user sees and submits: a

@@ -83,7 +83,10 @@ function writerFor(getAgent: () => SteerAgentLike | undefined): SteerDeps['write
       else agent.followed.push(recorded)
       return { kind: 'committed' as const, value: undefined }
     },
-    steerQueued: async (sessionId, messageId) => {
+    updateQueue: async (sessionId, messageId, action) => {
+      if (action.kind !== 'steer') {
+        return { kind: 'rejected' as const, error: { code: 'test/unexpected-queue-action', message: 'steerAll must use the steer action' } }
+      }
       const agent = getAgent() as FakeAgent | undefined
       if (agent === undefined || agent.session.id !== sessionId) {
         return { kind: 'rejected' as const, error: { code: 'session/not-found', message: 'session is gone' } }
@@ -99,7 +102,6 @@ function writerFor(getAgent: () => SteerAgentLike | undefined): SteerDeps['write
       agent.steered.push(message as { id: string; text: string })
       return { kind: 'committed' as const, value: undefined }
     },
-    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
   }
 }
 
@@ -334,7 +336,7 @@ test('idle empty-draft queue steering does not call the occurrence writer', asyn
   const deps = makeDeps({ agent: () => agent })
   deps.writer = {
     ...deps.writer,
-    steerQueued: async () => {
+    updateQueue: async () => {
       writes += 1
       return { kind: 'committed' as const, value: undefined }
     },
@@ -350,7 +352,7 @@ test('whitespace-only no-payload queue steering restores on a non-commit', async
   const deps = makeDeps({ agent: () => agent, restored })
   deps.writer = {
     ...deps.writer,
-    steerQueued: async () => ({
+    updateQueue: async () => ({
       kind: 'rejected' as const,
       error: { code: 'session/write-failed', message: 'write failed' },
     }),
@@ -383,16 +385,15 @@ test('D2.1: Ctrl+S steers queued occurrences FIFO inside one operation-barrier t
   const deps = makeDeps({ agent: () => agent, barrier })
   deps.writer = {
     prompt: async () => {
-       events.push('draft')
-       return { kind: 'committed' as const, value: undefined }
-     },
-    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
-    steerQueued: async (_sessionId, messageId) => {
+      events.push('draft')
+      return { kind: 'committed' as const, value: undefined }
+    },
+    updateQueue: async (_sessionId, messageId) => {
       events.push(`queued:${messageId}:start`)
 
       await firstGate
       agent.inbox.remove(messageId)
-       events.push(`queued:${messageId}:end`)
+      events.push(`queued:${messageId}:end`)
       return { kind: 'committed' as const, value: undefined }
     },
   }
@@ -408,9 +409,9 @@ test('D2.1: Ctrl+S steers queued occurrences FIFO inside one operation-barrier t
   await transition
   assert.deepEqual(events, [
     'queued:a:start',
-     'queued:a:end',
-     'queued:b:start',
-     'queued:b:end',
+    'queued:a:end',
+    'queued:b:start',
+    'queued:b:end',
     'transition',
   ])
 })
@@ -423,8 +424,8 @@ test('a child queue sweep stops before the next occurrence after a same-id Agent
   const baseWriter = writerFor(() => current)
   deps.writer = {
     ...baseWriter,
-    steerQueued: async (sessionId, messageId) => {
-      const outcome = await baseWriter.steerQueued(sessionId, messageId)
+    updateQueue: async (sessionId, messageId) => {
+      const outcome = await baseWriter.updateQueue(sessionId, messageId, { kind: 'steer' })
       current = replacement
       return outcome
     },
@@ -443,8 +444,8 @@ test('a child queue sweep stops before the next occurrence after viewer exit', a
   const fixedWriter = writerFor(() => child)
   deps.writer = {
     ...fixedWriter,
-    steerQueued: async (sessionId, messageId) => {
-      const outcome = await fixedWriter.steerQueued(sessionId, messageId)
+    updateQueue: async (sessionId, messageId) => {
+      const outcome = await fixedWriter.updateQueue(sessionId, messageId, { kind: 'steer' })
       current = undefined
       return outcome
     },
@@ -797,14 +798,13 @@ test('dsh-web steer stops at a convergent missing occurrence without a draft pro
       calls.push(`prompt:${mode}:${(message as { id: string }).id}`)
       return { kind: 'committed' as const, value: undefined }
     },
-    steerQueued: async (_sessionId, messageId) => {
+    updateQueue: async (_sessionId, messageId) => {
       calls.push(`queue:${messageId}`)
       if (messageId === 'a') agent.inbox.remove(messageId)
       return messageId === 'a'
         ? { kind: 'committed' as const, value: undefined }
         : { kind: 'rejected' as const, error: { code: 'session/steer-unavailable', message: 'steering closed' } }
     },
-    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
   }
   assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
   assert.deepEqual(calls, ['queue:a', 'queue:b'], 'a queue-only gesture stops without an extra prompt')
@@ -818,13 +818,12 @@ test('steer does not include queue occurrences added after its initial snapshot'
   const deps = makeDeps({ agent: () => agent })
   deps.writer = {
     prompt: async () => ({ kind: 'committed' as const, value: undefined }),
-    steerQueued: async (_sessionId, messageId) => {
+    updateQueue: async (_sessionId, messageId) => {
       calls.push(messageId)
       agent.inbox.remove(messageId)
       if (messageId === 'a') agent.state.nextTurn.push({ id: 'c' })
       return { kind: 'committed' as const, value: undefined }
     },
-    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
   }
   assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
   assert.deepEqual(calls, ['a', 'b'])
@@ -841,8 +840,7 @@ test('a genuine per-occurrence steer refusal stops the empty-draft queue sweep',
       calls.push('prompt')
       return { kind: 'committed' as const, value: undefined }
     },
-    steerQueued: async () => ({ kind: 'rejected' as const, error: { code: 'transport/failure', message: 'write failed' } }),
-    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+    updateQueue: async () => ({ kind: 'rejected' as const, error: { code: 'transport/failure', message: 'write failed' } }),
   }
   assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'stale')
   assert.deepEqual(calls, [], 'a queue-only gesture has no separate draft prompt')
@@ -859,8 +857,7 @@ test('an indeterminate per-occurrence steer stops without retrying or prompting'
       calls.push('prompt')
       return { kind: 'committed' as const, value: undefined }
     },
-    steerQueued: async () => ({ kind: 'indeterminate' as const, error: { code: 'transport/unknown', message: 'unknown' } }),
-    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+    updateQueue: async () => ({ kind: 'indeterminate' as const, error: { code: 'transport/unknown', message: 'unknown' } }),
   }
   assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'indeterminate')
   assert.deepEqual(calls, [], 'an indeterminate queue-only gesture has no draft prompt')
@@ -882,12 +879,8 @@ test('P1: the empty-queue classic steer delivers through the SessionWriter, neve
         writerCalls.push(`${mode}:${sessionId}:${(message as { id: string }).id}`)
         return { kind: 'committed' as const, value: undefined }
       },
-      steerQueued: async () => {
-        writerCalls.push('steerQueued')
-        return { kind: 'committed' as const, value: undefined }
-      },
-      removeQueued: async () => {
-        writerCalls.push('removeQueued')
+      updateQueue: async () => {
+        writerCalls.push('updateQueue')
         return { kind: 'committed' as const, value: undefined }
       },
     }
@@ -910,8 +903,7 @@ test('semantic steer rejection restores the draft and does not claim delivery', 
   const deps = makeDeps({ agent: () => agent, restored, notices })
   deps.writer = {
     prompt: async () => ({ kind: 'rejected' as const, error: { code: 'session/not-found', message: 'session is gone' } }),
-    steerQueued: async () => ({ kind: 'committed' as const, value: undefined }),
-    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+    updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
   }
   assert.equal(await steerAll(deps, 'draft'), 'stale')
   assert.deepEqual(restored, ['draft'])
@@ -931,8 +923,7 @@ test('semantic steer indeterminate outcome stays absent and never retries', asyn
       calls += 1
       return { kind: 'indeterminate' as const, error: { code: 'transport/unknown', message: 'unknown' } }
     },
-    steerQueued: async () => ({ kind: 'committed' as const, value: undefined }),
-    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+    updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
   }
   assert.equal(await steerAll(deps, 'draft'), 'indeterminate')
   assert.equal(calls, 1)

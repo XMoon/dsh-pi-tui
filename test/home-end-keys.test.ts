@@ -618,8 +618,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
-      steerQueued: async () => ({ kind: 'committed' as const, value: undefined }),
-      removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
       cancel: async () => ({ kind: 'committed' as const, value: undefined }),
       rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),

@@ -174,14 +174,20 @@ without changing the ownership or ordering rules:
   priority and is sent alone through `prompt(..., 'steer')`; it never sweeps
   the queue. With an empty draft, it reads the `PendingInputReader` snapshot,
   selects only `placement: 'queued'`, revalidates the agent identity and
-  generation, then calls `steerQueued` once per occurrence in FIFO order.
-  Queue races settle per occurrence rather than aborting the whole sweep;
-  missing/unavailable occurrences stop it quietly without replay, and a genuine
-  or indeterminate failure never claims atomicity or retries.
-- Alt+Up removes `queued` occurrences one at a time in FIFO order;
-  already-`steering` and `context` placements are not queue-gesture targets. A known
-  partial refusal restores only confirmed removals; an indeterminate removal
-  keeps every recalled representation for manual review and is never retried.
+  generation, then calls `updateQueue({ kind: 'steer' })` once per occurrence in
+  FIFO order. An empty-draft gesture is gated on `PendingInputSnapshot.running`;
+  an idle subject is left untouched. Queue races settle per occurrence rather
+  than aborting the whole sweep; missing/unavailable occurrences stop it quietly
+  without replay, and a genuine or indeterminate failure never claims
+  atomicity or retries.
+- Alt+Up is a TUI-only recall-all extension: it calls
+  `updateQueue({ kind: 'remove' })` one occurrence at a time in FIFO order,
+  then stages the removed content in the editor. It is not the official in-place
+  `updateQueue({ kind: 'edit' })` operation, so the recalled draft is a new
+  human submission if the user sends it. Already-`steering` and `context`
+  placements are not recall targets. A known partial refusal restores only
+  confirmed removals; an indeterminate removal keeps every recalled
+  representation for manual review and is never retried.
   If a session transition queues while the writer is in flight, visible
   reconciliation waits for its outcome: a committed transition discards the
   staged references without injecting old content, while a failed transition

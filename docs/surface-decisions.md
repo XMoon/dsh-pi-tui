@@ -1,4 +1,4 @@
-# Surface decisions: plain-exit, queue notices, credential targets
+# Surface decisions: plain-exit, semantic pending-input queue pane, credential targets
 
 Small user-visible behaviors that each needed a decision; kept in one doc
 so a contributor can find the rationale without reading every file.
@@ -56,11 +56,16 @@ any other prompt (including `exit!` or `Exit`) still goes to the model.
 The queue pane consumes the same `PendingInputReader` projection as the shared
 runner. It renders every item with `placement === 'queued'`, in projection
 order, using only the occurrence id and content. `steering` and `context`
-placements remain outside queue gestures. Direct inbox collection names and
-message metadata are adapter-internal; the TUI has no source-specific notice
-filter, settlement classifier, or failure-notify side channel. If a future
-surface needs to hide a class of messages, that policy must be represented by
-a semantic projection available to every backend.
+placements remain outside queue gestures. The steer-all hint is shown only
+while the active subject reports `running`; idle rows remain visible and say
+that they are waiting for the current task to resume. On the main surface,
+Alt+Up is a TUI-only recall-all extension: it removes queued occurrences through
+`SessionWriter.updateQueue({ kind: 'remove' })` and stages their content in the
+editor, rather than performing the official in-place `edit` operation. Direct
+inbox collection names and message metadata are adapter-internal; the TUI has
+no source-specific notice filter, settlement classifier, or failure-notify side
+channel. If a future surface needs to hide a class of messages, that policy
+must be represented by a semantic projection available to every backend.
 
 ## /login and /logout resolve credential targets, not just DEEPSEEK_API_KEY
 
@@ -143,7 +148,7 @@ future change must not silently reverse:
   commands are NOT executed against the parent, and the child gets no
   command-execution wire. The accelerated Ctrl+S gesture is intercepted and
   submitted to the child; parent-only actions (Ctrl+Enter explicit queue,
-  Alt+↑ dequeue, Shift+Tab permission, Ctrl+F/Ctrl+Shift+F main
+  Alt+↑ recall-all, Shift+Tab permission, Ctrl+F/Ctrl+Shift+F main
   search, keyboard exit bindings (same-key confirmation; Ctrl+C clears the
   draft first, default Ctrl+D is editor-owned when content is present, custom
   keys preserve it), ↓ task browser, Ctrl+G external editor, Ctrl+V image
@@ -166,7 +171,9 @@ future change must not silently reverse:
   interactive direct-child continuable viewer, with the pinned direct parent
   and registry identity still matching. This queue-only resolver never grants
   ordinary child prompt authority; non-empty prompts remain parent-authorized
-  through `SubagentPort`.
+  through `SubagentPort`. The current TUI viewer exposes the child queue rows
+  and Ctrl+S steer-all subset; selectable edit/remove controls remain a later
+  UI slice, and Alt+Up recall-all stays disabled in viewers.
 - **Viewer submissions never enter the shared editor history.** An ↑ recall
   in the MAIN editor must not resend a child-scoped follow-up to the
   parent. The fork editor's own per-editor recall is untouched.
