@@ -68,7 +68,20 @@ test('updateQueue validates edit content before resolving an Agent', async () =>
     host({}),
     () => { resolved += 1; return target },
   )
-  for (const content of [[{ type: 'image' }], [null]] as readonly unknown[][]) {
+  for (const content of [
+    [{ type: 'image' }],
+    [null],
+    [undefined],
+    [42],
+    ['text'],
+    [{}],
+    [{ type: 'text' }],
+    [{ type: 'text', text: null }],
+    [{ type: 'text', text: 42 }],
+    [{ type: 'text', text: {} }],
+    [[{ type: 'text', text: 'nested' }]],
+    [{ type: 'text', text: 'valid' }, { type: 'text' }],
+  ] as readonly unknown[][]) {
     assert.deepEqual(await w.updateQueue('missing', 'message-1', { kind: 'edit', content }), {
       kind: 'rejected',
       error: {
