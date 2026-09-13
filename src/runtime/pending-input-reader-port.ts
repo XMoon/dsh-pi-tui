@@ -15,13 +15,12 @@
 /** The official queue placement vocabulary. */
 export type PendingInputPlacement = 'queued' | 'steering' | 'context'
 
-/** One immutable pending-input occurrence. `content` and `source` remain
- * structural so the semantic port does not expose a DSH package type. */
+/** One immutable pending-input occurrence. `content` remains structural so
+ * the semantic port does not expose a DSH package type. */
 export interface PendingInputItem {
   readonly id: string
   readonly placement: PendingInputPlacement
   readonly content: readonly unknown[]
-  readonly source?: unknown
 }
 
 /** One coherent read of pending input and session activity. */

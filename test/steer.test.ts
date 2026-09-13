@@ -327,6 +327,36 @@ test('P0: empty draft + NON-empty queue steers only while the turn accepts steer
   }
 })
 
+test('whitespace-only no-payload queue steering restores on a non-commit', async () => {
+  const agent = fakeAgent(['A'])
+  const restored: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored })
+  deps.writer = {
+    ...deps.writer,
+    steerQueued: async () => ({
+      kind: 'rejected' as const,
+      error: { code: 'session/write-failed', message: 'write failed' },
+    }),
+  }
+
+  const outcome = await steerAll(deps, '   ', { draftHasPayload: false })
+  assert.equal(outcome, 'stale')
+  assert.deepEqual(restored, ['   '], 'a non-payload whitespace draft is still restored after a failed queue write')
+  assert.deepEqual(agent.steered, [], 'a rejected queue write never claims delivery')
+  assert.deepEqual(agent.followed, [], 'the whitespace gesture never falls through to a child prompt')
+})
+
+test('whitespace-only no-payload steering restores when the child authority is unavailable', async () => {
+  const restored: string[] = []
+  const outcome = await steerAll(
+    makeDeps({ agent: () => undefined, restored }),
+    '   ',
+    { draftHasPayload: false },
+  )
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(restored, ['   '], 'a missing child cannot swallow the cleared whitespace draft')
+})
+
 test('D2.1: Ctrl+S steers queued occurrences FIFO inside one operation-barrier turn', async () => {
   const agent = fakeAgent(['a', 'b'])
   const barrier = new SessionOperationBarrier()
@@ -366,6 +396,46 @@ test('D2.1: Ctrl+S steers queued occurrences FIFO inside one operation-barrier t
      'queued:b:end',
     'transition',
   ])
+})
+
+test('a child queue sweep stops before the next occurrence after a same-id Agent rollover', async () => {
+  const oldAgent = fakeAgent(['a', 'b'])
+  const replacement = fakeAgent(['b'], oldAgent.session.id)
+  let current: FakeAgent = oldAgent
+  const deps = makeDeps({ agent: () => current })
+  const baseWriter = writerFor(() => current)
+  deps.writer = {
+    ...baseWriter,
+    steerQueued: async (sessionId, messageId) => {
+      const outcome = await baseWriter.steerQueued(sessionId, messageId)
+      current = replacement
+      return outcome
+    },
+  }
+
+  const outcome = await steerAll(deps, '', { draftHasPayload: false })
+  assert.equal(outcome, 'stale')
+  assert.deepEqual(oldAgent.steered.map(message => message.id), ['a'], 'the old child receives only the first occurrence')
+  assert.deepEqual(replacement.steered, [], 'the replacement child is never written by the old sweep')
+})
+
+test('a child queue sweep stops before the next occurrence after viewer exit', async () => {
+  const child = fakeAgent(['a', 'b'])
+  let current: FakeAgent | undefined = child
+  const deps = makeDeps({ agent: () => current })
+  const fixedWriter = writerFor(() => child)
+  deps.writer = {
+    ...fixedWriter,
+    steerQueued: async (sessionId, messageId) => {
+      const outcome = await fixedWriter.steerQueued(sessionId, messageId)
+      current = undefined
+      return outcome
+    },
+  }
+
+  const outcome = await steerAll(deps, '', { draftHasPayload: false })
+  assert.equal(outcome, 'stale')
+  assert.deepEqual(child.steered.map(message => message.id), ['a'], 'closing the viewer fences the next child write')
 })
 
 test('P0: non-empty draft takes priority over queue [A,B] and steers only draft C', async () => {

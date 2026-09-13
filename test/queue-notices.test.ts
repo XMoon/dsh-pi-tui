@@ -167,19 +167,21 @@ test('foldQueueRows returns an empty pane once the agent claims the inbox (accep
   assert.deepEqual(after.failures, [], 'no failures on an empty batch')
 })
 
-test('Alt+Up dequeue pulls back only user-origin rows (relay/instructions/goal stay)', () => {
-  // The runner's onDequeue filters the inbox with isUserQueueInput — the
-  // SAME predicate as the pane classification. This pins the round-1 review
-  // repro: an injected relay/instruction/goal message must never land in
-  // the editor draft as editable user text.
+test('Alt+Up dequeue pulls back every queued placement, regardless of source', () => {
+  // The runner's onDequeue filters the semantic snapshot by placement. Source
+  // remains a Direct-only presentation concern, so queued relay/instruction/
+  // goal rows are still occurrence targets while steering/context placements
+  // stay outside this gesture.
   const inbox = [
-    msg('u1', { kind: 'user' }, 'my queued message'),
-    msg('r1', { kind: 'subagent-report', form: 'relay', senderSessionId: 'child-1' }),
-    msg('i1', { kind: 'agent-instructions', form: 'instructions' }),
-    msg('g1', { kind: 'goal' }),
+    { ...msg('u1', { kind: 'user' }, 'my queued message'), placement: 'queued' as const },
+    { ...msg('r1', { kind: 'subagent-report', form: 'relay', senderSessionId: 'child-1' }), placement: 'queued' as const },
+    { ...msg('i1', { kind: 'agent-instructions', form: 'instructions' }), placement: 'queued' as const },
+    { ...msg('g1', { kind: 'goal' }), placement: 'queued' as const },
+    { ...msg('s1', { kind: 'user' }), placement: 'steering' as const },
+    { ...msg('c1', { kind: 'goal' }), placement: 'context' as const },
   ]
-  const pulled = inbox.filter(message => isUserQueueInput(message.source))
-  assert.deepEqual(pulled.map(message => message.id), ['u1'], 'only the user row is pulled back')
+  const pulled = inbox.filter(message => message.placement === 'queued')
+  assert.deepEqual(pulled.map(message => message.id), ['u1', 'r1', 'i1', 'g1'], 'placement, not source, selects rows for dequeue')
 })
 
 test('isPlainExitPrompt matches only the exact trimmed lowercase word', () => {

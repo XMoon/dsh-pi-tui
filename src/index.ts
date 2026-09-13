@@ -123,7 +123,7 @@ import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type Foot
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
-import { startProcessTui, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TuiApp } from './tui-app.ts'
+import { isEmptyAcceleratedViewerSubmit, startProcessTui, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TuiApp } from './tui-app.ts'
 import {
   clearStreamingToolPreviewsForStep,
   clearStreamingToolPreviewsForTurn,
@@ -855,14 +855,14 @@ export interface QueueNoticeSource {
 }
 
 /**
- * Whether an inbox message is USER-ORIGIN input — the queue pane's steerable
- * `❯` rows. Everything else is injected context, not the user's own queued
- * input, and must never read as one: plugin notices (background-job
+ * Whether an inbox message is USER-ORIGIN input for queue-pane presentation:
+ * user-origin rows render as `❯` rows. Everything else is injected context, not the user's own queued
+ * input. Non-user sources include plugin notices (background-job
  * completions), `subagent-report` relays (a child's active report, e.g.
  * "Background subagent X reported:"), injected skill/agent instructions,
- * goal messages. The web makes the same cut (`placement: source.kind ===
- * 'user' ? 'steering' : 'context'`), and this deployment's queue pane has
- * the same rule: only user-origin rows are steerable. A sourceless row
+ * goal messages. The semantic placement projection makes the same source cut
+ * for next-step rows; this predicate only controls the Direct notice marker
+ * and steer hints. A sourceless row
  * (undefined) is treated as user input — plain rows never carry a source.
  * @param source - the message source projection, or undefined for a plain row.
  */
@@ -932,11 +932,11 @@ export interface QueueInboxMessage {
 /** Adapt one semantic pending-input item to the queue pane's presentation
  * projection. Placement is selected by the caller; this conversion never
  * exposes Direct inbox collection names to the consumer. */
-function queueInboxMessageOf(item: PendingInputItem): QueueInboxMessage {
+function queueInboxMessageOf(item: PendingInputItem, source?: unknown): QueueInboxMessage {
   return {
     id: item.id,
     content: item.content as readonly ContentBlock[],
-    source: item.source as QueueNoticeSource | undefined,
+    ...(source === undefined ? {} : { source: source as QueueNoticeSource }),
   }
 }
 
@@ -998,7 +998,7 @@ export function foldQueueRows(
       id: message.id,
       text: queueTextOf(message.content),
       mode,
-      // Only user-origin (or sourceless plain) rows are steerable user
+      // Only user-origin (or sourceless plain) rows render as steerable user
       // input. Everything else — plugin notices, subagent-report relays,
       // injected instructions, goal messages — is a NOTICE: the queue pane
       // marks it with the ⏳ prefix and drops the steer hints (see
@@ -2239,7 +2239,28 @@ export function apply(ctx: Context, config: Config): void {
     // the Direct session lifecycle can resolve preset compositions.
     const directAgentFor = (sessionId: string): Agent | undefined =>
       liveAgent?.session.id === sessionId ? liveAgent : undefined
-    const directSessionWriter = new DirectSessionWriter(ctx, directAgentFor)
+    // Queue occurrence operations have a narrower, separate child authority:
+    // only the exact live Agent currently mounted by an interactive
+    // continuable viewer may be addressed. Ordinary prompt/cancel/title verbs
+    // continue using directAgentFor, so resolving a child here cannot bypass
+    // SubagentPort's parent-authorized prompt path.
+    let viewedQueueAgent: {
+      readonly parentSessionId: string
+      readonly childSessionId: string
+      readonly agent: Agent
+    } | undefined
+    const directQueueAgentFor = (sessionId: string): Agent | undefined => {
+      if (liveAgent?.session.id === sessionId) return liveAgent
+      const viewed = viewedQueueAgent
+      if (viewed === undefined || viewed.childSessionId !== sessionId) return undefined
+      if (liveAgent?.session.id !== viewed.parentSessionId) return undefined
+      const agent = agents.get(SessionId(sessionId))
+      if (agent === undefined || agent !== viewed.agent || agent.session.id !== sessionId) return undefined
+      if (agent.session.header.parentSession !== viewed.parentSessionId) return undefined
+      return agent
+    }
+    const directSessionWriter = new DirectSessionWriter(ctx, directAgentFor, directQueueAgentFor)
+    const directPendingInputReader = new DirectPendingInputReader(directQueueAgentFor)
     const backend = createDirectBackend(
       new DirectSubagentPort(ctx),
       new DirectSessionReader(ctx, {
@@ -2247,7 +2268,7 @@ export function apply(ctx: Context, config: Config): void {
         agentOf: id => agents.get(id),
         flushSession: async session => { await sessions.flush(session as never) },
       }),
-      new DirectPendingInputReader(directAgentFor),
+      directPendingInputReader,
       directSessionWriter,
       new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
       new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
@@ -3889,6 +3910,20 @@ export function apply(ctx: Context, config: Config): void {
        * can never reach the viewer after a replacement. */
       viewAgent?: Agent
     } | undefined
+    const setViewedQueueAgent = (agent: Agent | undefined): void => {
+      const current = viewing
+      if (agent !== undefined
+        && current !== undefined
+        && current.mode === 'continuable'
+        && current.access === 'interactive-direct-child'
+        && current.parentSessionId === liveAgent?.session.id
+        && agent.session.id === current.id
+        && agent.session.header.parentSession === current.parentSessionId) {
+        viewedQueueAgent = { parentSessionId: current.parentSessionId, childSessionId: current.id, agent }
+        return
+      }
+      viewedQueueAgent = undefined
+    }
     // The Direct stream adapter keeps active prefixes for Agents that were not
     // being displayed yet; enterView replays this exact-agent baseline before
     // mounting the child surface.
@@ -4014,6 +4049,7 @@ export function apply(ctx: Context, config: Config): void {
       teardownViewerForSessionSwap(viewerOpen, viewing !== undefined, () => {
         openingViewer = undefined
         viewing = undefined
+        viewedQueueAgent = undefined
         viewerSessionAbort?.abort()
         viewerSessionAbort = undefined
         app.clearLocalMessages()
@@ -4254,6 +4290,7 @@ export function apply(ctx: Context, config: Config): void {
       }
       // The child's turn numbers are its OWN namespace: the parent's Focus
       // disclosures must not leak into the child transcript (plan §26).
+      setViewedQueueAgent(childAgent)
       app.enterFocusViewerScope()
       repaint(app, childFolder, childWindow, activeStreamingToolPreviews())
       // The viewer bar covers the editor (a read-only placeholder for
@@ -4280,6 +4317,7 @@ export function apply(ctx: Context, config: Config): void {
       const previousViewing = viewing
       previousViewing.previews.clear()
       viewing = undefined
+      viewedQueueAgent = undefined
       viewerSessionAbort?.abort() // cancel an in-flight, not-yet-accepted follow-up
       viewerSessionAbort = undefined
       app.clearLocalMessages()
@@ -6595,13 +6633,11 @@ export function apply(ctx: Context, config: Config): void {
         next === 'danger-full-access' ? 'error' : 'info')
         refreshStatusCheap()
       },
-      // Alt+↑: pull every QUEUED USER message back into the editor draft
-      // (pi's dequeue). Only user-origin rows are the user's own input —
-      // notices, subagent-report relays, injected instructions and goal
-      // messages stay in the inbox: pulling one back and resubmitting it as
-      // plain text would drop its provenance and turn a background
-      // notification into an editable user message. The current draft rides
-      // along below the pulled-back queue.
+      // Alt+↑: pull every `queued` occurrence back into the editor draft
+      // (pi's dequeue). Placement is the transport-neutral queue contract;
+      // Direct source-specific notice presentation stays in the queue/task
+      // projection rather than crossing the pending-input port. The current
+      // draft rides along below the pulled-back queue.
       onDequeue: () => {
         if (cleanedUp || liveAgent === undefined) return
         const queuedAgent = liveAgent
@@ -6610,7 +6646,6 @@ export function apply(ctx: Context, config: Config): void {
         if (pending === undefined) return
         const queued = pending.items
           .filter(item => item.placement === 'queued')
-          .filter(item => isUserQueueInput(item.source as QueueNoticeSource | undefined))
           .map(queueInboxMessageOf)
         if (queued.length === 0) return
         // Multimodal queued messages (durable ImageBlocks) ARE pullable:
@@ -6921,6 +6956,67 @@ export function apply(ctx: Context, config: Config): void {
             submit.gesture,
             tuiSettings?.get().busyEnter,
           )
+        // Empty accelerated input is the child-scoped Ctrl+S steer-all
+        // gesture. It must operate on the live child inbox, never call the
+        // ordinary human prompt API, and never manufacture an empty prompt.
+        const viewerTarget = viewing
+        if (isEmptyAcceleratedViewerSubmit(submit.text, submit.gesture)) {
+          if (viewerTarget === undefined
+            || viewerTarget.id !== submit.childSessionId
+            || viewerTarget.parentSessionId !== submit.parentSessionId
+            || viewerTarget.mode !== 'continuable'
+            || viewerTarget.access !== 'interactive-direct-child') return
+          const childViewerGeneration = viewerGeneration
+          let childDraftRestored = false
+          const restoreChildDraft = (text: string): boolean => {
+            if (text === '' || childDraftRestored) return true
+            childDraftRestored = true
+            const current = viewing
+            if (!cleanedUp
+              && app.getViewerGeneration() === childViewerGeneration
+              && current?.id === submit.childSessionId
+              && current.parentSessionId === submit.parentSessionId
+              && current.mode === 'continuable'
+              && current.access === 'interactive-direct-child'
+              && liveAgent?.session.id === submit.parentSessionId) {
+              const merged = mergeDraft(app.getDraft(), text)
+              app.setEditorText(merged)
+              return merged === text
+            }
+            if (!cleanedUp) app.restoreSubagentDraft(submit.childSessionId, text)
+            return false
+          }
+          runOwned('subagent queue steer', () => steerAll({
+            currentAgent: () => {
+              const current = directQueueAgentFor(submit.childSessionId)
+              return current === undefined ? undefined : current as unknown as SteerAgentLike
+            },
+            currentGeneration: () => app.getViewerGeneration(),
+            notify: (message, kind) => {
+              if (cleanedUp || app.getViewerGeneration() !== childViewerGeneration) return
+              if (viewing?.id !== submit.childSessionId || viewing.parentSessionId !== submit.parentSessionId) return
+              app.notify(message, kind)
+            },
+            restoreDraft: restoreChildDraft,
+            createDraft: () => ({}),
+            staleNotice: () => 'the child viewer changed while steering — try again',
+            mergedNotice: () => 'the child viewer changed while steering — try again',
+            fence: () => cleanedUp || app.getViewerGeneration() !== childViewerGeneration,
+            fenceNotice: () => 'the child viewer changed while steering — try again',
+            pendingInputReader: backend.pendingInputReader,
+            writer: backend.sessionWriter,
+            barrier: operationBarrier,
+          }, submit.text, { draftHasPayload: false }), {
+            diag,
+            sessionId: () => directQueueAgentFor(submit.childSessionId)?.session.id,
+            onError: (error) => {
+              restoreChildDraft(submit.text)
+              if (cleanedUp || app.getViewerGeneration() !== childViewerGeneration) return
+              app.notify(safeErrorMessage(error), 'error')
+            },
+          })
+          return
+        }
         const request: SubagentViewerSubmitRequest = {
           parentSessionId: submit.parentSessionId,
           childSessionId: submit.childSessionId,
@@ -8280,7 +8376,13 @@ export function apply(ctx: Context, config: Config): void {
       const queued = pending.items
         .filter(item => item.placement === 'queued')
         .map(queueInboxMessageOf)
-      const result = foldQueueRows(queued, 'followup', notifiedSubagentNotices)
+      const directPresentation = directPendingInputReader.presentation(liveAgent.session.id)
+      const sourceById = new Map(directPresentation?.map(item => [item.id, item.source] as const))
+      const presentedQueued = queued.map(item => ({
+        ...item,
+        ...(sourceById.get(item.id) === undefined ? {} : { source: sourceById.get(item.id) as QueueNoticeSource }),
+      }))
+      const result = foldQueueRows(presentedQueued, 'followup', notifiedSubagentNotices)
       for (const summary of result.failures) app.notify(summary, 'error')
       app.setQueueItems(result.rows)
     }
@@ -9074,8 +9176,14 @@ export function apply(ctx: Context, config: Config): void {
           // (cold resume), a turn ending parks it. The footer's activity
           // field follows, so an inactive child that cold-resumes shows
           // running while it streams.
-          if (event.type === 'turn/start') viewing.activity = 'running'
-          else if (event.type === 'turn/end') viewing.activity = 'inactive'
+          if (event.type === 'turn/start') {
+            viewing.activity = 'running'
+            // A cold child or same-session rollover becomes queue-authorized
+            // at its lifecycle boundary, before the first assistant frame.
+            const current = agents.get(viewing.id)
+            viewing.viewAgent = current
+            setViewedQueueAgent(current)
+          } else if (event.type === 'turn/end') viewing.activity = 'inactive'
           schedulePaint()
           // The child's turn/step/stats counters move at step boundaries
           // (the stats fold counts at step/end) — the footer follows then,
@@ -9259,11 +9367,13 @@ export function apply(ctx: Context, config: Config): void {
           if (viewing.viewAgent === subject) return true
           if (agents.get(viewing.id) !== viewing.viewAgent) {
             viewing.viewAgent = subject
+            setViewedQueueAgent(subject)
             return true
           }
           return false
         }
         viewing.viewAgent = subject
+        setViewedQueueAgent(subject)
         return true
       },
       onInput: (input) => {

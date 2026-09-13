@@ -26,10 +26,15 @@ function agent(id: string, overrides: Partial<LiveAgentLike> = {}): LiveAgentLik
   }
 }
 
-function writer(agents: Map<string, LiveAgentLike>, services: Record<string, unknown> = {}) {
+function writer(
+  agents: Map<string, LiveAgentLike>,
+  services: Record<string, unknown> = {},
+  queueAgents: Map<string, LiveAgentLike> = agents,
+) {
   return new DirectSessionWriter(
     host(services),
     (sessionId) => agents.get(sessionId),
+    (sessionId) => queueAgents.get(sessionId),
   )
 }
 
@@ -116,6 +121,25 @@ test('operations address the agent resolved by session id at call time', async (
   agents.set('session-a', next)
   await w.prompt('session-a', { text: 'two' }, 'queue')
   assert.deepEqual(delivered, [{ text: 'one' }, { text: 'two' }])
+})
+
+test('queue occurrence verbs use their child resolver without widening ordinary prompt authority', async () => {
+  const delivered: unknown[] = []
+  const removed: string[] = []
+  const child = agent('child', {
+    inbox: { nextTurn: [{ id: 'child-queued' }, { id: 'child-remove' }], nextStep: [], remove: id => removed.push(id) },
+    steer: message => delivered.push(message),
+  })
+  const w = writer(new Map(), {}, new Map([['child', child]]))
+
+  assert.deepEqual(await w.prompt('child', { text: 'must remain parent-authorized' }, 'queue'), {
+    kind: 'rejected',
+    error: { code: 'session/not-found', message: 'session "child" is not available' },
+  })
+  assert.deepEqual(await w.steerQueued('child', 'child-queued'), { kind: 'committed', value: undefined })
+  assert.deepEqual(await w.removeQueued('child', 'child-remove'), { kind: 'committed', value: undefined })
+  assert.deepEqual(removed, ['child-queued', 'child-remove'])
+  assert.deepEqual(delivered, [{ id: 'child-queued' }])
 })
 
 test('known operations reject when the session is absent', async () => {

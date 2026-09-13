@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
+import { isEmptyAcceleratedViewerSubmit, TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
 import { mergeDraft } from '../src/steer.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -44,6 +44,14 @@ const oneShot = (overrides: Partial<SubagentViewerTarget> = {}): SubagentViewerT
   mode: 'one-shot',
   activity: 'running',
   ...overrides,
+})
+
+test('viewer submit classification routes whitespace accelerated input to steer-all', () => {
+  assert.equal(isEmptyAcceleratedViewerSubmit('', 'accelerated'), true)
+  assert.equal(isEmptyAcceleratedViewerSubmit('   ', 'accelerated'), true)
+  assert.equal(isEmptyAcceleratedViewerSubmit('!', 'accelerated'), false)
+  assert.equal(isEmptyAcceleratedViewerSubmit('   ', 'enter'), false)
+  assert.equal(isEmptyAcceleratedViewerSubmit('   ', 'explicit-queue'), false)
 })
 
 /** A bare app whose events are the CALLER's (a fresh object per test —
@@ -188,6 +196,43 @@ test('the accelerated steer gesture targets the interactive child, not the paren
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(singleEscapes.length, 1, 'Esc must exit the viewer')
+  app.stop()
+})
+
+test('an empty accelerated submit reaches the child steer-all boundary without an empty prompt', async () => {
+  const childSubmits: unknown[] = []
+  const { vt, app } = await startApp({
+    onSubagentSubmit: (request) => childSubmits.push(request),
+  })
+  app.setViewerMode(continuable({ activity: 'running' }))
+  await vt.waitForRender()
+  vt.sendInput('\x13') // ctrl+s with an empty child draft
+  await vt.waitForRender()
+  assert.deepEqual(childSubmits, [{
+    parentSessionId: 'session-main',
+    childSessionId: 'child-1',
+    text: '',
+    gesture: 'accelerated',
+  }], 'empty Ctrl+S must reach the child queue-steer boundary')
+  app.stop()
+})
+
+test('a whitespace-only accelerated child draft still reaches the steer-all boundary', async () => {
+  const childSubmits: unknown[] = []
+  const { vt, app } = await startApp({
+    onSubagentSubmit: (request) => childSubmits.push(request),
+  })
+  app.setViewerMode(continuable({ activity: 'running' }))
+  app.setDraft('   ')
+  await vt.waitForRender()
+  vt.sendInput('\x13') // ctrl+s with whitespace-only child draft
+  await vt.waitForRender()
+  assert.deepEqual(childSubmits, [{
+    parentSessionId: 'session-main',
+    childSessionId: 'child-1',
+    text: '   ',
+    gesture: 'accelerated',
+  }], 'whitespace-only Ctrl+S must not become an empty prompt')
   app.stop()
 })
 
