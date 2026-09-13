@@ -74,7 +74,7 @@ function frame(app: TuiApp): [number, number, number, boolean] {
 
 const TABLE_PREFIX = '| one | two | three |\n| --- | --- | --- |\n| alpha | beta | gamma |\n| delta | eps'
 
-test('expanded live Markdown keeps the high-water presentation height while following end', async () => {
+test('expanded live Markdown preserves wheel intent across historical growth and shrink', async () => {
   const { vt, app } = startApp(22, 29)
   const folder = new TranscriptFolder()
   folder.apply([
@@ -126,6 +126,24 @@ test('expanded live Markdown keeps the high-water presentation height while foll
     show(app, folder)
     await vt.waitForRender()
     assert.deepEqual(frame(app), [22, 21, 0, false])
+    const growthPreviews = [0, 1, 2, 3, 4].map(index => ({
+      callId: `growth-${index}`, turn: 1, step: 1, index, name: 'edit', argumentBytes: 900,
+    }))
+    show(app, folder, growthPreviews)
+    await vt.waitForRender()
+    assert.deepEqual(frame(app), [26, 21, 0, false])
+    for (let i = 0; i < 4; i += 1) {
+      vt.sendInput('\x1b[<65;50;10M')
+      await vt.waitForRender()
+    }
+    assert.deepEqual(frame(app), [26, 21, 4, false])
+    show(app, folder)
+    await vt.waitForRender()
+    assert.deepEqual(frame(app), [26, 21, 4, false])
+    folder.applyLiveInput(liveText(' '))
+    show(app, folder)
+    await vt.waitForRender()
+    assert.deepEqual(frame(app), [26, 21, 4, false])
     app.scrollToBottom()
     await vt.waitForRender()
 

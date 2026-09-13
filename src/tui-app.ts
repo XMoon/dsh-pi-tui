@@ -3182,7 +3182,7 @@ export class TuiApp {
   private messageRows: ReadonlyArray<FullscreenRowEntry> = []
   /** High-water presentation heights for running Focus turns. This is
    * presentation-only state: it is never folded into TranscriptFolder or the
-   * session log; compatible floors remain frozen during historical browsing
+   * session log; compatible floors remain active during historical browsing
    * and release only at explicit lifecycle or structural boundaries. */
   private readonly focusLiveHeightStates = new Map<number, FocusLiveHeightState>()
   /** The currently measured inert padding after a Focus turn's boundary
@@ -6680,8 +6680,8 @@ export class TuiApp {
   }
 
   /** Whether the current render still owns a fullscreen Focus presentation
-   * epoch. Leaving history freezes the existing floor; explicit lifecycle and
-   * structural boundaries release it. */
+   * epoch. Leaving history keeps the existing floor active; explicit lifecycle
+   * and structural boundaries release it. */
   private focusLivePaddingEnabled(): boolean {
     const enabled = this.focusModeEnabled
       && this.fullscreen !== undefined
@@ -6746,7 +6746,7 @@ export class TuiApp {
         if (!followingEnd) continue
         state = { activity, expanded, width, height: normalHeight }
         this.focusLiveHeightStates.set(turn, state)
-      } else if (followingEnd && normalHeight > state.height) {
+      } else if (normalHeight > state.height) {
         state.height = normalHeight
       }
       const padding = state.height - normalHeight
