@@ -5440,6 +5440,9 @@ export function apply(ctx: Context, config: Config): void {
       // a silent editor clear. The TOKEN arms every terminal exit of THIS
       // workflow.
       const steerAckToken = acceptLocalSubmitAck()
+      // steerAll owns restoration for queue-level cancellation; keep the
+      // enclosing submit flow from restoring that same draft a second time.
+      let steerRestored = false
       // Capture the session identity before the first awaited preparation or
       // deferred-start operation. A later session must never receive this
       // gesture's prepared input or history row.
@@ -5566,6 +5569,7 @@ export function apply(ctx: Context, config: Config): void {
             if (cleanedUp) return false
             const merged = mergeDraft(app.getDraft(), draft)
             app.setEditorText(merged)
+            steerRestored = true
             return merged === draft
           },
           // The session-transition write fence: while a transition is in
@@ -5605,7 +5609,9 @@ export function apply(ctx: Context, config: Config): void {
         // not linger (a retry re-accepts).
         if (outcome !== 'ok') settleLocalSubmitAck(`steer ${outcome}`, { token: steerAckToken, terminal: true })
         },
-        restore: (t) => restoreSubmissionDraft(t),
+        restore: (t) => {
+          if (!steerRestored) restoreSubmissionDraft(t)
+        },
       }, text), {
         diag,
         sessionId: () => liveAgent?.session.id,

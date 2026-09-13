@@ -1446,6 +1446,22 @@ test('a cancelled Host command restores a plain submitted line', async (t) => {
     'a cancelled Host command must restore the complete plain line')
 })
 
+test('a cancelled whitespace-only queued Ctrl+S restores its draft exactly once', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running' })
+  harness.host.nextTurn.push(queuedText('queued-cancel', 'queued text'))
+  harness.host.abortRemoveAfter = 0
+  mounted.app.setDraft('   ')
+  const dispatched = (mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  assert.equal(dispatched, true, 'the whitespace-only queue gesture must be dispatched')
+  assert.equal(await drainUntil(() => harness.host.removeCalls === 1 && mounted.app.getDraft() !== '', 1_000), true,
+    'the cancellation-shaped queue write must settle')
+  assert.equal(mounted.app.getDraft(), '   ', 'a cancelled whitespace draft is restored exactly once')
+  assert.deepEqual(harness.host.nextTurn.map(message => message.id), ['queued-cancel'],
+    'cancellation before confirmed removal leaves the queued occurrence pending')
+})
+
 test('a transition-fenced explicit /skill result does not restore the wrapper twice', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'queue',
