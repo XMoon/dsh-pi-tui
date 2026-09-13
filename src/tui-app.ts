@@ -1165,6 +1165,29 @@ export class TranscriptGutterComponent implements Component {
 }
 
 /**
+ * Layout-only rows that keep a running Focus turn's live height from
+ * shrinking after a transient presentation reflow. It owns no semantic row;
+ * its height is supplied by TuiApp's current render measurement and it is
+ * hidden outside the fullscreen follow-end epoch.
+ */
+class FocusLivePaddingComponent implements Component {
+  private readonly rows: () => number
+  private readonly enabled: () => boolean
+
+  constructor(rows: () => number, enabled: () => boolean) {
+    this.rows = rows
+    this.enabled = enabled
+  }
+
+  invalidate(): void {}
+
+  render(_width: number): string[] {
+    if (!this.enabled()) return []
+    return Array.from({ length: Math.max(0, Math.floor(this.rows())) }, () => '')
+  }
+}
+
+/**
  * Bullet + continuation-indent wrapper that keeps its child LIVE, so a
  * terminal resize re-renders the child at the new width instead of
  * re-wrapping a frozen render (the 5a76526 regression: assistant/user
@@ -2608,6 +2631,30 @@ type FullscreenRowEntry = {
   hasTrailingSpacer: boolean
 }
 
+/** One transcript block rendered once for the current Focus projection. The
+ * shared result keeps the painted component tree and the fullscreen hit map
+ * on the same measured rows without a second live render. */
+type RenderedTranscriptBlock = {
+  block: TranscriptRenderBlock
+  component: Component
+  rendered: string[]
+  truncatedMarker: boolean
+  attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+  collapseFocusOwnerOnClick?: number
+  subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
+  workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
+}
+
+/** Presentation-only high-water for one running Focus turn. The activity
+ * object and render identity delimit the lifecycle; no durable/session state
+ * is involved. */
+type FocusLiveHeightState = {
+  activity: TurnActivity
+  expanded: boolean
+  width: number
+  height: number
+}
+
 export class TuiApp {
   private readonly terminal: Terminal
   /** The extension surface host (M2), when the runner attached one. */
@@ -2816,6 +2863,7 @@ export class TuiApp {
 
   /** Set the Ctrl+O expansion master switch and repaint. */
   setToolOutputExpanded(expanded: boolean): void {
+    this.clearFocusLiveHeightState()
     this.toolOutputExpanded = expanded
     this.rebuildMessages()
   }
@@ -3131,6 +3179,14 @@ export class TuiApp {
    * rows carry the activity (the whole collapsed Thought block — and the
    * expanded header — is the toggle hit area, plan §17.1). */
   private messageRows: ReadonlyArray<FullscreenRowEntry> = []
+  /** High-water presentation heights for running Focus turns. This is
+   * presentation-only state: it is never folded into TranscriptFolder or the
+   * session log, and it is discarded when the live-follow epoch ends. */
+  private readonly focusLiveHeightStates = new Map<number, FocusLiveHeightState>()
+  /** The currently measured inert padding after a Focus turn's boundary
+   * spacer. Padding components read this map at paint time so a user leaving
+   * history can hide it without changing transcript semantics. */
+  private readonly focusLivePaddingRows = new Map<number, number>()
   /** The terminal geometry of the LAST PAINTED frame (fullscreen only):
    * a zero-row probe rides the fullscreen layout root, and the fork
    * renders every layout child on EVERY frame, so these fields record
@@ -3859,6 +3915,7 @@ export class TuiApp {
     this.cancelSaveLocationPrompt()
     for (const dispose of this.schemeDisposers) dispose()
     this.schemeDisposers = []
+    this.clearFocusLiveHeightState()
     this.tui.stop()
     this.fullscreen?.stop()
     this.fullscreen = undefined
@@ -5307,6 +5364,7 @@ export class TuiApp {
    */
   pushLocalMessage(message: TranscriptMessage): TranscriptMessage {
     this.localMessages.push(message)
+    this.clearFocusLiveHeightState()
     this.rebuildMessages()
     return message
   }
@@ -5338,6 +5396,7 @@ export class TuiApp {
     const token = this.identityTokens.get(message)
     if (token !== undefined) this.identityTokens.set(next, token)
     this.localMessages[index] = next
+    this.clearFocusLiveHeightState()
     this.rebuildMessages()
     return next
   }
@@ -5351,6 +5410,7 @@ export class TuiApp {
     const token = this.identityTokens.get(this.localMessages[index]!)
     if (token !== undefined) this.identityTokens.set(message, token)
     this.localMessages[index] = message
+    this.clearFocusLiveHeightState()
     this.rebuildMessages()
   }
 
@@ -5358,6 +5418,7 @@ export class TuiApp {
   clearLocalMessages(): void {
     if (this.localMessages.length === 0) return
     this.localMessages.length = 0
+    this.clearFocusLiveHeightState()
     this.rebuildMessages()
   }
 
@@ -5373,6 +5434,7 @@ export class TuiApp {
     if (running.length === this.localMessages.length) return
     this.localMessages.length = 0
     this.localMessages.push(...running)
+    this.clearFocusLiveHeightState()
     this.rebuildMessages()
   }
 
@@ -5427,6 +5489,7 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     const active = this.fullscreen !== undefined
     if (enabled === active) return
+    this.clearFocusLiveHeightState()
     const pending = this.activeApproval
     const history = this.historyPanel
     pending?.handle?.hide()
@@ -5818,14 +5881,25 @@ export class TuiApp {
     window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
     streamingToolPreviews?: readonly StreamingToolPreview[],
   ): void {
+    const previousWindow = this.transcriptWindow
+    const windowChanged = previousWindow?.mode !== window?.mode
+      || previousWindow?.endTurn !== window?.endTurn
+    // Passive legacy callers may omit activities while retaining the host's
+    // current map; only an explicit map replacement or window-value change
+    // is a structural transcript signal here.
+    if ((activities !== undefined && activities !== this.turnActivities) || windowChanged) {
+      this.clearFocusLiveHeightState()
+    }
     this.messages = messages
     if (activities !== undefined) this.turnActivities = activities
     this.streamingToolPreviews = [...(streamingToolPreviews ?? [])]
     this.transcriptWindow = window
     this.refreshTranscriptWindowHint()
     // The Workflow disclosure transitions fold BEFORE the rebuild: the
-    // renderer reads the advanced state (PR2 plan §7.5–§7.7).
-    this.updateWorkflowDisclosure(messages)
+    // renderer reads the advanced state (PR2 plan §7.5–§7.7). A changed
+    // workflow snapshot is a structural presentation epoch even when the
+    // automatic fold did not mutate a user override.
+    if (this.updateWorkflowDisclosure(messages)) this.clearFocusLiveHeightState()
     // Repaints do NOT clear the transient notify line: an active session
     // repaints every frame (streaming chunks, tool cards), and clearing on
     // each repaint would make every notice — including error blocks like
@@ -5840,6 +5914,7 @@ export class TuiApp {
    * prefers the combined {@link setTranscript} snapshot — this setter is
    * for callers that repaint messages separately. */
   setTurnActivities(activities: ReadonlyMap<number, TurnActivity>): void {
+    this.clearFocusLiveHeightState()
     this.turnActivities = activities
     this.rebuildMessages()
   }
@@ -5855,6 +5930,7 @@ export class TuiApp {
    * immediately; the expansion set is kept but not consulted (plan §16.4). */
   setFocusMode(enabled: boolean): void {
     if (this.focusModeEnabled === enabled) return
+    this.clearFocusLiveHeightState()
     this.focusModeEnabled = enabled
     // Focus is a transcript PROJECTION, never a Thinking preference
     // owner: switching Focus ON/OFF leaves the shared thinkingExpanded
@@ -5874,6 +5950,7 @@ export class TuiApp {
    * value) — same policy as theme/focus. */
   setIconStyle(style: IconStyle): void {
     if (this.iconStyle === style) return
+    this.clearFocusLiveHeightState()
     this.iconStyle = style
     // Default working frames follow the style; an explicit custom frame
     // set (extension/advanced indicator) is never overwritten.
@@ -5942,6 +6019,7 @@ export class TuiApp {
       this.setFocusTurnExpanded(turn, true)
     }
     if (isFocusSecondaryDisclosure(message)) {
+      if (this.expandedOverride.get(message) !== true) this.clearFocusLiveHeightState()
       this.expandedOverride.set(message, true)
     }
     this.rebuildMessages()
@@ -6231,6 +6309,7 @@ export class TuiApp {
    * (pushing the live set itself would hand the stack the object this
    * method then empties). */
   enterFocusViewerScope(): void {
+    this.clearFocusLiveHeightState()
     this.focusExpansionsStack.push(new Set(this.focusExpandedTurns))
     this.focusExpandedTurns.clear()
     this.rebuildMessages()
@@ -6240,6 +6319,7 @@ export class TuiApp {
   exitFocusViewerScope(): void {
     const restored = this.focusExpansionsStack.pop()
     if (restored === undefined) return
+    this.clearFocusLiveHeightState()
     this.focusExpandedTurns.clear()
     for (const turn of restored) this.focusExpandedTurns.add(turn)
     this.rebuildMessages()
@@ -6253,6 +6333,7 @@ export class TuiApp {
    * teardown's intent explicit and stays correct even if that ordering
    * ever changes. */
   discardFocusViewerScope(): void {
+    this.clearFocusLiveHeightState()
     this.focusExpansionsStack.pop()
   }
 
@@ -6508,38 +6589,14 @@ export class TuiApp {
     return transcriptContentWidth(this.terminal.columns)
   }
 
-  /** Rebuild the message component tree from the current transcript state. */
-  private rebuildMessages(): void {
-    // Every rebuild path (transcript updates AND local-card push/replace/
-    // clear) prunes the cache to the live set first. The derived
-    // projection set is computed ONCE per rebuild and shared by the
-    // pruning pass, the projection and every activity-component
-    // construction (review findings).
-    const projectionExpanded = this.focusProjectionExpandedTurns()
-    this.pruneMessageComponents(projectionExpanded)
-    this.messagesView.clear()
-    this.messagesView.addChild(this.welcomeCard)
+  /** Render every projected transcript block once for this rebuild. The same
+   * metadata feeds the mounted component tree and the fullscreen row map. */
+  private renderTranscriptBlocks(
+    projectionExpanded: ReadonlySet<number>,
+    width: number,
+  ): RenderedTranscriptBlock[] {
     const boundary = this.expandBoundary()
-    // Row heights for mouse hit-testing: components render (and cache) at
-    // the transcript CONTENT width — the same width the gutter wrapper
-    // feeds the frame pass — so the heights match the screen exactly.
-    const width = this.transcriptRenderWidth()
-    const rows: Array<{
-      message?: TranscriptMessage
-      activity?: TurnActivity
-      height: number
-      attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
-      collapseFocusOwnerOnClick?: number
-      subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
-      workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
-      hasTrailingSpacer: boolean
-    }> = []
-    // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
-    // a session never reads as one undifferentiated wall of text. The spacer
-    // row is charged to the preceding block's height, keeping the fullscreen
-    // click hit-testing aligned with the rendered layout.
-    const blocks = this.transcriptBlocks(projectionExpanded)
-    blocks.forEach((block, index) => {
+    return this.transcriptBlocks(projectionExpanded).map(block => {
       let component: Component
       let rendered: string[]
       let truncatedMarker = false
@@ -6560,15 +6617,13 @@ export class TuiApp {
         )
         rendered = component.render(width)
       } else if (block.kind === 'streaming-tool-previews') {
-        // Live-only preview block
+        // Live-only preview block.
         component = this.streamingToolPreviewComponent(block.previews, width)
         rendered = component.render(width)
       } else {
         // Persistent per-message components (stage J): unchanged messages
         // reuse their component, so the fork's text-identity render caches
-        // actually hit — markdown is not re-parsed and heights are not
-        // recomputed for content that did not change. Only streaming/changed
-        // messages rebuild.
+        // actually hit — markdown is not re-parsed for unchanged content.
         component = this.componentForMessage(block.message, boundary, width)
         rendered = component.render(width)
         truncatedMarker = block.truncated === true
@@ -6582,57 +6637,185 @@ export class TuiApp {
           ? undefined
           : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
       }
-      if (rendered.length === 0 && !truncatedMarker) {
-        // A zero-row block must not occupy a spacer row: the image
-        // pipeline's non-text-block retention keeps reasoning-only
-        // assistant messages (no text, no image) as empty entries, and an
-        // invisible block's Spacer would read as an extra blank line
-        // between the surrounding cards. Skip the component, the spacer
-        // and the row height — the click map stays aligned (height 0
-        // never hits, see handleFullscreenClick).
-        rows.push({
-          ...(block.kind === 'message'
-            ? { message: block.message }
-            : block.kind === 'activity' ? { activity: block.activity } : {}),
-          ...(collapseFocusOwnerOnClick !== undefined
-            ? { collapseFocusOwnerOnClick }
-            : {}),
-          height: 0,
-          attachments: [],
-          hasTrailingSpacer: false,
-        })
-        return
-      }
-      // The host-owned transcript gutter applies at THIS boundary: every
-      // block — host card or plugin-rendered component — renders inside
-      // the transcript content width, so no renderer needs to know the
-      // terminal gutter exists (the transcript right-gutter contract).
-      this.messagesView.addChild(new TranscriptGutterComponent(component))
-      // The max-tokens truncated marker rides under the final assistant
-      // (plan §13.8): one muted row, charged to the message's hit region.
-      // It is TRUNCATED to the content width at build time and wrapped in
-      // the gutter boundary, so it is exactly ONE row on any terminal —
-      // a wrap here would add invisible rows the hit-map does not count
-      // and shift every click below it (review finding).
-      if (truncatedMarker) {
-        const marker = truncateToWidth(color.textMuted('  (output may be truncated)'), width, '…')
-        this.messagesView.addChild(new TranscriptGutterComponent(new Text(marker, 0, 0)))
-      }
-      const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
-      rows.push({
-        ...(block.kind === 'message'
-          ? { message: block.message }
-          : block.kind === 'activity' ? { activity: block.activity } : {}),
-        ...(collapseFocusOwnerOnClick !== undefined
-          ? { collapseFocusOwnerOnClick }
-          : {}),
-        height,
+      return {
+        block,
+        component,
+        rendered,
+        truncatedMarker,
         attachments,
+        ...(collapseFocusOwnerOnClick === undefined ? {} : { collapseFocusOwnerOnClick }),
         ...(subCallHits === undefined ? {} : { subCallHits }),
         ...(workflowHits === undefined ? {} : { workflowHits }),
-        hasTrailingSpacer: index < blocks.length - 1,
-      })
-      if (index < blocks.length - 1) this.messagesView.addChild(new Spacer())
+      }
+    })
+  }
+
+  /** The semantic turn owner of a rendered block. Do not use the Focus
+   * collapse owner here: that marker is an interaction target, not turn
+   * membership, and final assistant rows deliberately have no marker. */
+  private focusLiveTurnOf(block: TranscriptRenderBlock): number | undefined {
+    if (block.kind === 'activity') return block.activity.turn
+    if (block.kind === 'streaming-tool-previews') return block.turn
+    return 'turn' in block.message ? block.message.turn : undefined
+  }
+
+  /** The normal physical height charged to one rendered block, preserving the
+   * existing zero-row and original-index Spacer rules exactly. */
+  private normalTranscriptBlockHeight(
+    entry: RenderedTranscriptBlock,
+    index: number,
+    total: number,
+  ): number {
+    if (entry.rendered.length === 0 && !entry.truncatedMarker) return 0
+    return entry.rendered.length + (entry.truncatedMarker ? 1 : 0) + (index < total - 1 ? 1 : 0)
+  }
+
+  /** Drop presentation floors and their measured padding. */
+  private clearFocusLiveHeightState(): void {
+    this.focusLiveHeightStates.clear()
+    this.focusLivePaddingRows.clear()
+  }
+
+  /** Whether the current render is inside the narrow live-follow epoch. A
+   * user leaving history releases the epoch; re-following starts a fresh
+   * baseline on the next rebuild. */
+  private focusLivePaddingEnabled(): boolean {
+    const enabled = this.focusModeEnabled
+      && this.fullscreen !== undefined
+      && this.fullscreenScroll !== undefined
+      && this.fullscreenScroll.isFollowingEnd
+    if (!enabled) this.clearFocusLiveHeightState()
+    return enabled
+  }
+
+  /** Measure the current normal turn spans and update their running high-water
+   * floors. Padding is kept in separate inert row entries after the existing
+   * turn-boundary Spacer, so semantic block heights and click ownership stay
+   * unchanged. */
+  private focusLivePaddingFor(
+    renderedBlocks: readonly RenderedTranscriptBlock[],
+    projectionExpanded: ReadonlySet<number>,
+    width: number,
+  ): ReadonlyMap<number, number> {
+    this.focusLivePaddingRows.clear()
+    if (!this.focusLivePaddingEnabled()) return this.focusLivePaddingRows
+
+    const heights = renderedBlocks.map((entry, index) => this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length))
+    const groups = new Map<number, { activity?: TurnActivity; indices: number[] }>()
+    for (let index = 0; index < renderedBlocks.length; index += 1) {
+      const turn = this.focusLiveTurnOf(renderedBlocks[index]!.block)
+      if (turn === undefined) continue
+      let group = groups.get(turn)
+      if (group === undefined) {
+        group = { indices: [] }
+        groups.set(turn, group)
+      }
+      group.indices.push(index)
+      const block = renderedBlocks[index]!.block
+      if (block.kind === 'activity') group.activity = block.activity
+    }
+
+    for (const turn of this.focusLiveHeightStates.keys()) {
+      if (!groups.has(turn)) this.focusLiveHeightStates.delete(turn)
+    }
+    for (const [turn, group] of groups) {
+      const activity = group.activity
+      if (activity === undefined || activity.completed) {
+        this.focusLiveHeightStates.delete(turn)
+        continue
+      }
+      const normalHeight = group.indices.reduce((sum, index) => sum + heights[index]!, 0)
+      const expanded = projectionExpanded.has(turn)
+      const previous = this.focusLiveHeightStates.get(turn)
+      const state = previous === undefined
+        || previous.activity !== activity
+        || previous.expanded !== expanded
+        || previous.width !== width
+        ? { activity, expanded, width, height: normalHeight }
+        : previous
+      if (state !== previous) this.focusLiveHeightStates.set(turn, state)
+      else if (normalHeight > state.height) state.height = normalHeight
+      const padding = state.height - normalHeight
+      if (padding <= 0) continue
+      for (let index = group.indices.length - 1; index >= 0; index -= 1) {
+        const blockIndex = group.indices[index]!
+        if (heights[blockIndex]! > 0) {
+          this.focusLivePaddingRows.set(blockIndex, padding)
+          break
+        }
+      }
+    }
+    return this.focusLivePaddingRows
+  }
+
+  /** Build one row-map entry from the shared rendered metadata. */
+  private fullscreenRowEntry(
+    entry: RenderedTranscriptBlock,
+    height: number,
+    hasTrailingSpacer: boolean,
+  ): FullscreenRowEntry {
+    const block = entry.block
+    return {
+      ...(block.kind === 'message' ? { message: block.message } : block.kind === 'activity' ? { activity: block.activity } : {}),
+      ...(entry.collapseFocusOwnerOnClick === undefined ? {} : { collapseFocusOwnerOnClick: entry.collapseFocusOwnerOnClick }),
+      height,
+      attachments: entry.attachments,
+      ...(entry.subCallHits === undefined ? {} : { subCallHits: entry.subCallHits }),
+      ...(entry.workflowHits === undefined ? {} : { workflowHits: entry.workflowHits }),
+      hasTrailingSpacer,
+    }
+  }
+
+  /** Rebuild the message component tree from the current transcript state. */
+  private rebuildMessages(): void {
+    // Every rebuild path (transcript updates AND local-card push/replace/
+    // clear) prunes the cache to the live set first. The derived
+    // projection set is computed ONCE per rebuild and shared by the
+    // pruning pass, the projection and every activity-component
+    // construction (review findings).
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    this.pruneMessageComponents(projectionExpanded)
+    this.messagesView.clear()
+    this.messagesView.addChild(this.welcomeCard)
+    // Row heights for mouse hit-testing: components render (and cache) at
+    // the transcript CONTENT width — the same width the gutter wrapper feeds
+    // the frame pass — so the heights match the screen exactly.
+    const width = this.transcriptRenderWidth()
+    const renderedBlocks = this.renderTranscriptBlocks(projectionExpanded, width)
+    const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
+    const rows: FullscreenRowEntry[] = []
+    // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
+    // a session never reads as one undifferentiated wall of text. The spacer
+    // remains charged to the preceding semantic block. Stabilizer rows are
+    // separate inert entries after that existing boundary spacer.
+    renderedBlocks.forEach((entry, index) => {
+      const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
+      if (height === 0) {
+        rows.push(this.fullscreenRowEntry(entry, 0, false))
+      } else {
+        // The host-owned transcript gutter applies at THIS boundary: every
+        // block — host card or plugin-rendered component — renders inside
+        // the transcript content width, so no renderer needs to know the
+        // terminal gutter exists (the transcript right-gutter contract).
+        this.messagesView.addChild(new TranscriptGutterComponent(entry.component))
+        // The max-tokens truncated marker rides under the final assistant
+        // (plan §13.8): one muted row, charged to the message's hit region.
+        if (entry.truncatedMarker) {
+          const marker = truncateToWidth(color.textMuted('  (output may be truncated)'), width, '…')
+          this.messagesView.addChild(new TranscriptGutterComponent(new Text(marker, 0, 0)))
+        }
+        const hasTrailingSpacer = index < renderedBlocks.length - 1
+        rows.push(this.fullscreenRowEntry(entry, height, hasTrailingSpacer))
+        if (hasTrailingSpacer) this.messagesView.addChild(new Spacer())
+      }
+      const padding = paddingRows.get(index) ?? 0
+      if (padding > 0) {
+        this.messagesView.addChild(new FocusLivePaddingComponent(
+          () => this.focusLivePaddingRows.get(index) ?? 0,
+          () => this.focusLivePaddingEnabled(),
+        ))
+        rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
+      }
     })
     if (this.transcriptWindowHint !== '') {
       // This is a presentation hint, not a transcript message: it is rebuilt
@@ -6742,87 +6925,20 @@ export class TuiApp {
    * (the gutter contract), or the hit map drifts from the layout. */
   private refreshMessageRows(): void {
     const width = this.transcriptRenderWidth()
-    const boundary = this.expandBoundary()
     // The derived projection set is computed ONCE per refresh (never per
-    // activity block — review finding).
+    // activity block — review finding), and the same rendered metadata drives
+    // both the high-water measurement and the hit map.
     const projectionExpanded = this.focusProjectionExpandedTurns()
-    const blocks = this.transcriptBlocks(projectionExpanded)
-    const rows: Array<{
-      message?: TranscriptMessage
-      activity?: TurnActivity
-      height: number
-      attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
-      collapseFocusOwnerOnClick?: number
-      subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
-      workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
-      hasTrailingSpacer: boolean
-    }> = []
-    blocks.forEach((block, index) => {
-      let component: Component
-      let rendered: string[]
-      let truncatedMarker = false
-      let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
-      let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
-      let workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined
-      const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
-      if (block.kind === 'activity') {
-        component = this.focusActivityComponentFor(
-          block.activity,
-          projectionExpanded.has(block.activity.turn),
-          this.focusToolDisplayFor(block.activity),
-          this.focusModeEnabled && !projectionExpanded.has(block.activity.turn)
-            ? focusPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
-            : undefined,
-        )
-        rendered = component.render(width)
-      } else if (block.kind === 'streaming-tool-previews') {
-        component = this.streamingToolPreviewComponent(block.previews, width)
-        rendered = component.render(width)
-      } else {
-        component = this.componentForMessage(block.message, boundary, width)
-        rendered = component.render(width)
-        truncatedMarker = block.truncated === true
-        attachments = this.attachmentRangesOf(component, width)
-        const subCallInfo = this.subCallHitsByMessage.get(block.message)
-        subCallHits = subCallInfo === undefined
-          ? undefined
-          : subCallInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - subCallInfo.total }))
-        const workflowInfo = this.workflowHitsByMessage.get(block.message)
-        workflowHits = workflowInfo === undefined
-          ? undefined
-          : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
-      }
-      if (rendered.length === 0 && !truncatedMarker) {
-        // Same zero-row rule as rebuildMessages: no spacer row, no height —
-        // the click map must mirror the rendered layout exactly.
-        rows.push({
-          ...(block.kind === 'message'
-            ? { message: block.message }
-            : block.kind === 'activity' ? { activity: block.activity } : {}),
-          ...(collapseFocusOwnerOnClick !== undefined
-            ? { collapseFocusOwnerOnClick }
-            : {}),
-          height: 0,
-          attachments: [],
-          hasTrailingSpacer: false,
-        })
-        return
-      }
-      const height = rendered.length + (truncatedMarker ? 1 : 0) + (index < blocks.length - 1 ? 1 : 0)
-      rows.push({
-        ...(block.kind === 'message'
-          ? { message: block.message }
-          : block.kind === 'activity' ? { activity: block.activity } : {}),
-        ...(collapseFocusOwnerOnClick !== undefined
-          ? { collapseFocusOwnerOnClick }
-          : {}),
-        height,
-        attachments,
-        ...(subCallHits === undefined ? {} : { subCallHits }),
-        ...(workflowHits === undefined ? {} : { workflowHits }),
-        hasTrailingSpacer: index < blocks.length - 1,
-      })
-    })
+    const renderedBlocks = this.renderTranscriptBlocks(projectionExpanded, width)
+    const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
+    const rows: FullscreenRowEntry[] = []
+    for (let index = 0; index < renderedBlocks.length; index += 1) {
+      const entry = renderedBlocks[index]!
+      const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
+      rows.push(this.fullscreenRowEntry(entry, height, height > 0 && index < renderedBlocks.length - 1))
+      const padding = paddingRows.get(index) ?? 0
+      if (padding > 0) rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
+    }
     this.messageRows = rows
   }
 
@@ -6844,6 +6960,7 @@ export class TuiApp {
     }
     if (indices.has(imageIndex)) indices.delete(imageIndex)
     else indices.add(imageIndex)
+    this.clearFocusLiveHeightState()
     // Rebuild so the row map reflects the new heights immediately (the
     // thumbnail's render cache key carries the collapse bit, so the cached
     // message component re-renders in place).
@@ -7791,6 +7908,7 @@ export class TuiApp {
     } else {
       this.expandedOverride.set(message, true)
     }
+    this.clearFocusLiveHeightState()
     this.rebuildMessages()
   }
 
@@ -7826,6 +7944,7 @@ export class TuiApp {
     if (message === undefined) return
     state.userOpen = !(state.userOpen ?? this.workflowRunOpen(message))
     this.workflowDisclosureRevision += 1
+    this.clearFocusLiveHeightState()
     this.rebuildMessages()
   }
 
@@ -7841,6 +7960,7 @@ export class TuiApp {
     if (phase === undefined) return
     state.userOpen = !(state.userOpen ?? this.workflowPhaseOpen(runId, phaseKey, phase))
     this.workflowDisclosureRevision += 1
+    this.clearFocusLiveHeightState()
     this.rebuildMessages()
   }
 
@@ -7958,14 +8078,17 @@ export class TuiApp {
    * snapshot (called from {@link setTranscript}): each run's content
    * snapshot is compared against the last-seen one, and only a real
    * change (members array reference or run status) advances the state. */
-  private updateWorkflowDisclosure(messages: readonly TranscriptMessage[]): void {
+  private updateWorkflowDisclosure(messages: readonly TranscriptMessage[]): boolean {
+    let snapshotChanged = false
     for (const message of messages) {
       if (message.kind !== 'workflow') continue
       const previous = this.workflowSeen.get(message.runId)
       if (previous !== undefined && previous.members === message.members && previous.status === message.status) continue
+      snapshotChanged = true
       this.workflowSeen.set(message.runId, { members: message.members, status: message.status })
       this.advanceWorkflowDisclosure(message)
     }
+    return snapshotChanged
   }
 
   /** Dispatch one Workflow card hit (PR2 plan §12.4/§12.5): run/phase
@@ -8033,6 +8156,7 @@ export class TuiApp {
   /** Drop all per-message expansion overrides (session-scoped state: a
    * session switch must not leak the old session's click toggles). */
   clearSessionOverrides(): void {
+    this.clearFocusLiveHeightState()
     this.expandedOverride.clear()
     // A session switch is a pointer-gesture boundary too: the new session
     // can reuse the same turn numbers AND the same todo dock/panel
@@ -10778,6 +10902,7 @@ export class TuiApp {
     if (this.subCallExpanded.has(subCallId)) this.subCallExpanded.delete(subCallId)
     else this.subCallExpanded.add(subCallId)
     this.subCallExpandedRevision += 1
+    this.clearFocusLiveHeightState()
     this.rebuildMessages()
   }
 
@@ -11556,6 +11681,7 @@ export class TuiApp {
       const revision = this.renderers.revisionOf()
       if (revision !== this.lastRendererRevision) {
         this.lastRendererRevision = revision
+        this.clearFocusLiveHeightState()
         this.rebuildMessages()
       }
     }
@@ -11881,6 +12007,7 @@ export class TuiApp {
   setThinkingExpanded(expanded: boolean): void {
     const hadOverrides = this.clearThinkingExpansionOverrides()
     if (this.thinkingExpanded === expanded && !hadOverrides) return
+    this.clearFocusLiveHeightState()
     this.thinkingExpanded = expanded
     this.rebuildMessages()
   }
@@ -11913,6 +12040,7 @@ export class TuiApp {
    * ALL Thinking compact (plan §9). */
   toggleThinkingExpanded(): boolean {
     this.clearThinkingExpansionOverrides()
+    this.clearFocusLiveHeightState()
     this.thinkingExpanded = !this.thinkingExpanded
     this.rebuildMessages()
     return this.thinkingExpanded
