@@ -122,11 +122,13 @@ export class DirectSessionWriter implements SessionWriter {
    * are indeterminate. */
   async updateQueue(sessionId: string, itemId: string, action: QueueAction): Promise<WriteOutcome> {
     // Match the official Host boundary: edit validation happens before Agent
-    // resolution and does not alter the caller's content bytes.
+    // resolution and does not alter the caller's content bytes. Because this
+    // semantic port is structural, malformed text blocks are non-text here.
     if (action.kind === 'edit') {
       const nonText = action.content.some(block => {
-        if (typeof block !== 'object' || block === null || !('type' in block)) return true
-        return block.type !== 'text'
+        if (typeof block !== 'object' || block === null || Array.isArray(block)
+          || !('type' in block) || block.type !== 'text') return true
+        return !('text' in block) || typeof block.text !== 'string'
       })
       if (nonText) {
         return {
