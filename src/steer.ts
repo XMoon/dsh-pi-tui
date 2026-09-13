@@ -5,14 +5,13 @@
  *
  * - The queue snapshot and the agent/generation identity are captured
  *   BEFORE the awaited write window.
- * - Before the delivery, everything is re-validated: same agent object,
- *   same session generation, same queue (same ids, same order). Anything
- *   changed aborts the send (`stale`) — the user retries against the new
- *   state, so a message spliced in while the send was in flight is never
- *   lost.
- * - The confirmed queue occurrences and the steer delivery settle through
- *   one semantic batch operation, so a partial remove cannot strand a
- *   message before delivery.
+ * - Before the delivery, the agent object and session generation are
+ *   re-validated. Queue changes are handled per occurrence by the writer:
+ *   missing or unavailable rows converge without replay, while a newly added
+ *   row is not included because it was outside the initial snapshot.
+ * - The confirmed queue occurrences are steered one at a time through the
+ *   official occurrence-level writer operation, matching the dsh-web client;
+ *   the gesture is FIFO best-effort, not an atomic batch.
  * @module @xmoon76/dsh-pi-tui/steer
  */
 
@@ -66,14 +65,14 @@ export interface SteerDeps {
   /** The fence refusal notice (defaults to {@link staleNotice}). */
   fenceNotice?: () => string
   /**
-   * The session WRITE delivery seam (optional): when provided, the final
-   * delivery and exact queue removal go through the semantic SessionWriter.
-   * Absent keeps the historical direct-agent delivery (the runner always
-   * provides the writer).
+   * The session WRITE delivery seam (optional): when provided, ordinary
+   * prompts and occurrence-level queue steering go through SessionWriter.
+   * Absent keeps the Direct-shaped headless fallback (the runner provides
+   * the writer in production).
    */
-  writer?: Pick<SessionWriter, 'prompt' | 'steerBatch' | 'removeQueued'>
+  writer?: Pick<SessionWriter, 'prompt' | 'steerQueued' | 'removeQueued'>
   /**
-   * The session operation barrier (convergence plan phase 3): the WHOLE
+   * The session operation barrier (convergence plan phase 3): the whole
    * steer write runs inside `runWriter`, so a transition started while
    * this steer awaits drains it first — the `fence` quick-refusal alone
    * cannot stop a writer that started BEFORE the transition.
@@ -157,7 +156,7 @@ export interface SteerAllOptions {
   /**
    * Steer the DRAFT ONLY, leaving the queue untouched (the busy-Enter
    * preference, web busyEnter parity): messages the user queued explicitly
-   * stay queued until Ctrl+S or the /queue actions — already-steered input
+   * stay queued until Ctrl+S — already-steered input
    * cannot be pulled back, so Enter must never sweep the queue along.
    */
   onlyDraft?: boolean
@@ -167,7 +166,7 @@ export interface SteerAllOptions {
    * image-bearing draft is payload, whitespace-only is not). The RUNNER
    * decides (it owns the shell-mode / image semantics); `steer.ts` never
    * guesses. `undefined` keeps the historical behavior: any text is
-   * treated as payload (the runner's empty-payload gate covers it).
+   * treated as a payload (the runner's empty-payload gate covers it).
    */
   draftHasPayload?: boolean
 }
@@ -198,20 +197,16 @@ export function steerHasPayload(
 }
 
 /**
- * Run one Ctrl+S send end to end: snapshot → re-validate → confirm-and-send.
- * The semantic writer moves the confirmed queue occurrences and steers them
- * with the draft as one batch operation. Any state change — agent switch,
- * generation bump, queue change — aborts with `stale` and a retry notice;
- * nothing is written and nothing is lost. With `onlyDraft` the queue is
- * neither read nor removed: the draft alone is steered (or followed up when
- * the agent is idle).
+ * Run one Ctrl+S send end to end: snapshot → re-validate → per-occurrence
+ * queue steering → optional draft prompt. The queue phase follows the
+ * dsh-web client: it addresses the snapshot's `nextTurn` occurrences in FIFO
+ * order, never replays a copied message, and makes no atomic/same-step claim.
+ * With `onlyDraft` the queue is neither read nor mutated.
  */
 export async function steerAll(deps: SteerDeps, text: string, options: SteerAllOptions = {}): Promise<SteerOutcome> {
-  // The WHOLE steer write runs inside the operation barrier (convergence
-  // plan phase 3): a transition that starts while this steer awaits
-  // (identity checks) drains it before quiescing the old agent —
-  // the `fence` quick-refusal below only covers writers that START during
-  // a transition, not writers already in flight.
+  // The whole steer write runs inside the operation barrier: a transition
+  // that starts while this steer awaits drains it first. The fence quick
+  // refusal below only covers writers that START during a transition.
   const barrier = deps.barrier
   const sessionId = deps.currentAgent()?.session.id
   if (barrier !== undefined && sessionId !== undefined) {
@@ -229,10 +224,7 @@ export async function steerAll(deps: SteerDeps, text: string, options: SteerAllO
   return steerAllCore(deps, text, options)
 }
 
-
-/** Deliver one message through the writer seam when present, else directly
- * on the captured agent (the historical Direct delivery). The caller already
- * revalidated the identity before entering these helpers. */
+/** Deliver one ordinary message through the writer seam when present. */
 const deliverPrompt = async (
   deps: SteerDeps,
   agent: SteerAgentLike,
@@ -245,24 +237,42 @@ const deliverPrompt = async (
   return { kind: 'committed', value: undefined }
 }
 
-const deliverSteerBatch = async (
+/** Deliver one exact queued occurrence, matching the official updateQueue
+ * steer operation when the semantic writer is installed. */
+const deliverQueued = async (
   deps: SteerDeps,
   agent: SteerAgentLike,
-  messages: readonly unknown[],
+  messageId: string,
 ): Promise<WriteOutcome> => {
-  if (deps.writer !== undefined) return deps.writer.steerBatch(agent.session.id, messages)
-  for (const message of messages) agent.steer(message)
+  if (deps.writer !== undefined) return deps.writer.steerQueued(agent.session.id, messageId)
+  const message = agent.inbox.nextTurn.find(item => item.id === messageId)
+  if (message === undefined) {
+    return { kind: 'rejected', error: { code: 'session/queue-item-not-found', message: 'queued item is no longer pending' } }
+  }
+  if (agent.status !== 'running') {
+    return { kind: 'rejected', error: { code: 'session/steer-unavailable', message: 'steering is unavailable while the session is not running' } }
+  }
+  try {
+    agent.inbox.remove(messageId)
+    agent.steer(message)
+  } catch (error) {
+    return {
+      kind: 'indeterminate',
+      error: {
+        code: 'session/write-indeterminate',
+        message: error instanceof Error ? error.message : String(error),
+      },
+    }
+  }
   return { kind: 'committed', value: undefined }
 }
 
-/** Apply a writer settlement without claiming an uncommitted write succeeded.
- * Known non-commits restore the user's input; an indeterminate result may have
- * delivered it, so it stays absent and is reported without an automatic retry. */
+/** Apply a writer settlement for the one-message draft prompt. Known
+ * non-commits restore the draft; an indeterminate result may have delivered
+ * it, so it stays absent and is reported without an automatic retry. */
 const handleWriteOutcome = (deps: SteerDeps, text: string, outcome: WriteOutcome): SteerOutcome => {
   if (outcome.kind === 'committed') return 'ok'
-  if (outcome.kind === 'cancelled') {
-    throw cancellationError('session write cancelled')
-  }
+  if (outcome.kind === 'cancelled') throw cancellationError('session write cancelled')
   if (outcome.kind === 'indeterminate') {
     deps.notify('the session write outcome is indeterminate — do not retry automatically', 'error')
     return 'indeterminate'
@@ -272,97 +282,98 @@ const handleWriteOutcome = (deps: SteerDeps, text: string, outcome: WriteOutcome
   return 'stale'
 }
 
+/** Whether an occurrence-level steer refusal is the expected dsh-web
+ * convergence case for a stale snapshot or a turn that has closed. */
+const isConvergentQueueSteer = (outcome: WriteOutcome): boolean =>
+  outcome.kind === 'rejected'
+  && (outcome.error.code === 'session/steer-unavailable' || outcome.error.code === 'session/queue-item-not-found')
+
 async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOptions = {}): Promise<SteerOutcome> {
   const onlyDraft = options.onlyDraft === true
   const agent = deps.currentAgent()
   if (agent === undefined) return 'ok'
   const generation = deps.currentGeneration()
-  const snapshot = onlyDraft ? [] : [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
-   // Gate B (empty-payload no-op): when the caller told us the draft
-   // carries NO payload, nothing to send is a clean no-op — for BOTH the
-   // onlyDraft branch (busy-Enter steer of an empty draft) and the full
-   // Ctrl+S branch (empty draft + empty queue). The queue is checked
-   // BEFORE any identity work so no session-side work is ever wasted and
-   // no empty followup/steer can be produced. `draftHasPayload: undefined`
-   // keeps the historical semantics (the text is a payload).
+  // dsh-web's `placement: 'queued'` is Direct's nextTurn. nextStep already
+  // represents steering/context and must not be re-steered by this gesture.
+  const snapshot = onlyDraft ? [] : [...agent.inbox.nextTurn]
+  // Gate B: when the caller told us the draft carries NO payload, nothing to
+  // send is a clean no-op for both onlyDraft and full Ctrl+S.
   if (options.draftHasPayload === false && snapshot.length === 0) return 'ok'
-  // Re-validate BEFORE the delivery: the agent object, the session
-  // generation and the queue must all still be exactly what was
-  // snapshotted. A stale send restores the draft — the editor already
-  // cleared it before onSteer fired, so the user must not lose their text.
+  // Re-validate BEFORE delivery: agent identity and generation must still
+  // match what was captured. Queue races are resolved per occurrence by the
+  // writer below, so a changed queue does not invalidate the whole sweep.
   const now = deps.currentAgent()
   if (now === undefined || !sessionUnchanged({ agent, generation }, now, deps.currentGeneration())) {
     const verbatim = deps.restoreDraft(text)
     deps.notify(verbatim ? deps.staleNotice() : deps.mergedNotice(), 'error')
     return 'stale'
   }
-  // The session-transition write fence: while a transition is in flight
-  // (quiesce → commit) the old agent may be woken again by a followup or
-  // steer — writing would target a session whose lock is about to be
-  // released (the two-writers race). Refuse with a retry notice; the
-  // draft is restored, nothing is lost.
+  // The transition fence refuses new writes during quiesce → commit.
   if (deps.fence?.() === true) {
     deps.restoreDraft(text)
     deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
     return 'stale'
   }
   if (onlyDraft) {
-    // Busy-Enter steer: the DRAFT only — the queue (explicitly queued via
-    // `queue-draft` / a queue-mode submission, or notices) is never swept
-    // along; steered input cannot be pulled back, so a queued message must
-    // not be dragged into the turn behind the user's back.
+    // Busy-Enter steers the draft only; explicitly queued messages stay queued.
     const message = deps.createDraft(text)
     const outcome = await deliverPrompt(deps, now, message, now.status === 'running' ? 'steer' : 'queue')
     return handleWriteOutcome(deps, text, outcome)
   }
-  const current = [...now.inbox.nextTurn, ...now.inbox.nextStep]
-  const unchanged = current.length === snapshot.length
-    && current.every((message, index) => message.id === snapshot[index]!.id)
-  if (!unchanged) {
-    const verbatim = deps.restoreDraft(text)
-    deps.notify(verbatim ? deps.staleNotice() : deps.mergedNotice(), 'error')
+  if (snapshot.length === 0) {
+    // Classic single-draft path: the writer decides how an idle/active
+    // session treats the caller-selected steer mode.
+    const message = deps.createDraft(text)
+    const outcome = await deliverPrompt(deps, now, message, now.status === 'running' ? 'steer' : 'queue')
+    return handleWriteOutcome(deps, text, outcome)
+  }
+  const includeDraft = options.draftHasPayload ?? text.trim() !== ''
+  let steeredCount = 0
+  let converged = false
+  for (const message of snapshot) {
+    const outcome = await deliverQueued(deps, now, message.id)
+    if (outcome.kind === 'committed') {
+      steeredCount += 1
+      continue
+    }
+    if (isConvergentQueueSteer(outcome)) {
+      // Match dsh-web: the snapshot is no longer authoritative, so end this
+      // sweep quietly rather than replaying the stale message or racing ahead.
+      converged = true
+      break
+    }
+    if (outcome.kind === 'cancelled') throw cancellationError('queue steer cancelled')
+    if (outcome.kind === 'indeterminate') {
+      if (includeDraft) deps.restoreDraft(text) // the draft has not been tried
+      deps.notify(`queue steering became indeterminate after ${steeredCount} message${steeredCount === 1 ? '' : 's'} — do not retry automatically`, 'error')
+      return 'indeterminate'
+    }
+    // A known refusal did not attempt the draft. Restore only a draft that was
+    // actually part of this gesture; queue progress remains visible in Host.
+    if (includeDraft) {
+      const verbatim = deps.restoreDraft(text)
+      deps.notify(verbatim
+        ? `queue steering stopped after ${steeredCount} message${steeredCount === 1 ? '' : 's'}: ${deps.staleNotice()}`
+        : deps.mergedNotice(), 'error')
+    } else {
+      deps.notify(`queue steering stopped after ${steeredCount} message${steeredCount === 1 ? '' : 's'}`, 'error')
+    }
     return 'stale'
   }
-  if (current.length === 0) {
-    // Classic single-draft steer: a running turn takes it now; an idle
-    // agent starts a regular turn with it. The delivery goes through the
-    // writer seam (SessionWriter) like every other path — never a direct
-    // agent call that would bypass the semantic port.
+  // The draft is a separate official prompt, sent only after the queue phase
+  // has reached a normal/convergent stop. It is never replayed from a queue
+  // copy and it may be delivered even when the queue snapshot raced closed.
+  if (includeDraft) {
     const message = deps.createDraft(text)
-    const outcome = await deliverPrompt(deps, now, message, now.status === 'running' ? 'steer' : 'queue')
-    return handleWriteOutcome(deps, text, outcome)
+    const outcome = await deliverPrompt(deps, now, message, 'steer')
+    const settlement = handleWriteOutcome(deps, text, outcome)
+    if (settlement !== 'ok') return settlement
+    steeredCount += 1
   }
-  // Whether the draft rides along: the caller's explicit payload verdict
-  // is AUTHORITATIVE (the runner — the only owner of shell/image
-  // semantics — computed it on the wire form before calling steerAll);
-  // `undefined` keeps the historical text-based behavior for callers
-  // that never adopted the new contract (e.g. extension callers).
-  const includeDraft = options.draftHasPayload ?? text.trim() !== ''
-  const messages = [
-    ...current,
-    // The draft message is built from the ORIGINAL text (never the trim):
-    // the runner prepares one message whose content matches the payload it
-    // vetted before calling steerAll. The flag only
-    // decides whether the draft rides along.
-    ...(includeDraft ? [deps.createDraft(text)] : []),
-  ]
-  // The semantic writer owns the exact remove-and-deliver as ONE batch
-  // settlement. A wire adapter can therefore refuse or report indeterminate
-  // without exposing a caller-visible partial removal. The legacy direct
-  // fallback retains the synchronous ordering for injected test agents.
-  let delivery: WriteOutcome
-  if (deps.writer !== undefined) {
-    delivery = await deps.writer.steerBatch(
-      now.session.id,
-      messages,
-      current.map(message => message.id),
-    )
-  } else {
-    for (const message of current) now.inbox.remove(message.id)
-    delivery = await deliverSteerBatch(deps, now, messages)
+  if (steeredCount > 0 && !converged) {
+    deps.notify(`steering ${steeredCount} message${steeredCount === 1 ? '' : 's'}`, 'info')
+  } else if (steeredCount > 0 && includeDraft) {
+    deps.notify(`steering ${steeredCount} message${steeredCount === 1 ? '' : 's'} (queue changed during sweep)`, 'info')
   }
-  const settlement = handleWriteOutcome(deps, text, delivery)
-  if (settlement !== 'ok') return settlement
-  deps.notify(messages.length === 1 ? 'steering 1 message' : `steering ${messages.length} messages`, 'info')
   return 'ok'
 }

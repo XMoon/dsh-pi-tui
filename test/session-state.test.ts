@@ -162,9 +162,8 @@ function stubRunner(
     },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
-      steerBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      steerQueued: async () => ({ kind: 'committed' as const, value: undefined }),
       removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
-      removeQueuedBatch: async () => ({ kind: 'committed' as const, value: undefined }),
       cancel: async () => ({ kind: 'committed' as const, value: undefined }),
       // The /title tests provide a fake sessionTitle service on the ctx;
       // the stub writer routes to it exactly like the Direct adapter

@@ -1768,9 +1768,10 @@ export interface TuiAppEventsBase {
   onRewind?: () => void
   /**
    * Steer with the current draft, possibly empty (the steer action,
-   * default: Ctrl+S). The runner sends the whole queue when it has
-   * messages, with the draft riding along, and falls back to the draft
-   * alone otherwise. Optional.
+   * default: Ctrl+S). The runner snapshots pending next-turn occurrences,
+   * steers them FIFO when it has
+   * messages, then sends a non-empty draft as a separate prompt.
+   * Optional.
    */
   onSteer?: (text: string) => void
   /**

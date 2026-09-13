@@ -415,6 +415,10 @@ export function isIndeterminateSkillWrite(error: unknown): boolean {
   return error instanceof IndeterminateSkillWriteError
 }
 
+/** TUI-local disposition for a command submission's cleared draft. This is
+ * correlated by the DSH command execution id outside the normalized result. */
+type CommandDraftDisposition = 'restored' | 'suppressed'
+
 /** Everything the TUI-owned commands read from the runner. */
 export interface TuiCommandRunner {
   ctx: Context
@@ -481,8 +485,9 @@ export interface TuiCommandRunner {
    * the title batches, the context measurement and the export read go
    * through the port, never ctx directly. */
   readonly sessionReader: SessionReader
-  /** The session WRITE port (D2.1): ordinary prompts, Ctrl+S batch
-   * delivery, exact queue removal, cancel and title ops go through the port. */
+  /** The session WRITE port (D2.1): ordinary prompts, occurrence-level queue
+   * steering/removal, cancel and title ops go through the port. Multi-message
+   * gestures use runner-level FIFO orchestration; no batch verb crosses it. */
   readonly sessionWriter: SessionWriter
   /** The interaction port (migration M1.6): approval/question authority. */
   readonly interaction: InteractionPort
@@ -1266,6 +1271,10 @@ export function registerTuiCommands(
   isSkillWrapper(name: string): boolean
   /** One synchronous catalog commit (the coordinator's install hook). */
   installSnapshot(snapshot: SurfaceCatalogSnapshot): void
+  /** Consume a TUI-local draft disposition correlated by DSH command id.
+   * When the command handler throws, no execution result returns the id; in
+   * that serialized path the oldest pending disposition is consumed instead. */
+  takeCommandDraftDisposition(commandId?: string): CommandDraftDisposition | undefined
   /** Re-synthesize the slash completions from the CURRENT host catalog plus
    * the live client contributions (the extension-invalidate hook: a late
    * contribution joins the menu without waiting for a session refresh). */
@@ -1286,6 +1295,15 @@ export function registerTuiCommands(
   // The commands service is part of the base layer; its absence means the
   // TUI commands cannot be registered at all — the caller surfaces this.
   if (commands === undefined) throw new Error('commands service unavailable')
+
+  // `commands.execute()` normalizes handler results to the official
+  // CommandResult shape. Draft restoration therefore travels through this
+  // TUI-local side channel, correlated by the execution's command id, rather
+  // than through private fields that the Host normalizer discards.
+  const commandDraftDispositions = new Map<string, CommandDraftDisposition>()
+  const recordCommandDraftDisposition = (commandId: string | undefined, disposition: CommandDraftDisposition): void => {
+    if (commandId !== undefined) commandDraftDispositions.set(commandId, disposition)
+  }
 
   // ── submit-resolved delivery binding ────────────────────────────────────
   /**
@@ -3163,7 +3181,8 @@ export function registerTuiCommands(
     args = '',
     signal: AbortSignal = runner.signal,
     delivery: SubmitDelivery | undefined,
-  ): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string; draftRestored?: true }> => {
+    commandId?: string,
+  ): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
     const skillSignal = signal === runner.signal ? runner.signal : AbortSignal.any([runner.signal, signal])
     const generation = runner.sessionGeneration
     skillSignal.throwIfAborted()
@@ -3199,10 +3218,10 @@ export function registerTuiCommands(
     const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
     // The host's pre-step listener (dsh-tool-skill) injects the rendered
     // body only when its tool registration is visible to this agent. Probe
-    // that semantic catalog fact before choosing the delivery batch.
+    // that semantic catalog fact before choosing the delivery path.
     const hostLoadsSkillBody = runner.catalog.skills.hostLoadsSkillBody(agent.session.id)
     // When the Host skill pre-step is absent, deliver the original invocation
-    // and its rendered body as ONE next-step batch. This preserves the
+    // and its rendered body as two ordered single prompts. This preserves the
     // original-line-before-body ordering without bypassing the semantic writer.
     const fallbackBody = !hostLoadsSkillBody
       ? (() => {
@@ -3235,12 +3254,13 @@ export function registerTuiCommands(
       if (runner.sessionTransitionPending()) {
         const merged = mergeDraft(app.getDraft(), line)
         app.setEditorText(merged)
+        recordCommandDraftDisposition(commandId, 'restored')
         return { kind: 'error', text: merged === line
           ? 'a session transition is in progress — try again in a moment'
-          : 'the draft changed while transitioning — review it before submitting again', draftRestored: true }
+          : 'the draft changed while transitioning — review it before submitting again' }
       }
       // The invocation's complete write runs inside the operation barrier;
-      // the fallback body is part of the same semantic batch.
+      // the fallback body is a second ordered prompt, not an atomic batch.
       try {
         const outcome = await runner.withSessionWriter(agent.session.id, async () => {
           skillSignal.throwIfAborted()
@@ -3252,23 +3272,37 @@ export function registerTuiCommands(
           // re-deriving it here from the persisted preference would lose the
           // accelerated chord's opposite mode, which exists only in the
           // dispatch that resolved it.
-          // The queue delivery is only safe when the HOST injects the skill
-          // body: the fallback body injection below rides next-step, so a
-          // followup would let the body arrive before the user's words (the
-          // driver claims next-step FIRST). Without the host loader the
-          // invocation keeps the steer path to preserve the
-          // original-line-before-body order — the documented exception.
+          // The no-loader fallback follows the dsh-web style: the original line
+          // and the rendered body are two ordered steer prompts. This is
+          // intentionally best-effort rather than a same-step batch; if the
+          // first prompt does not commit, the body is never sent.
           if (delivery !== 'steer' && hostLoadsSkillBody) {
             return runner.sessionWriter.prompt(agent.session.id, userMessage, 'queue')
           }
           if (fallbackBody !== undefined) {
-            return runner.sessionWriter.steerBatch(agent.session.id, [userMessage, fallbackBody])
+            const first = await runner.sessionWriter.prompt(agent.session.id, userMessage, 'steer')
+            if (first.kind !== 'committed') return first
+            // The original invocation is durable once the first prompt
+            // commits. Consume its attachments before the body prompt so a
+            // later body failure cannot make a retry duplicate the line or
+            // re-admit its images.
+            try {
+              consumeDraftAttachments(line, runner.imageStore, runner.fileStore)
+              const body = await runner.sessionWriter.prompt(agent.session.id, fallbackBody, 'steer')
+              if (body.kind !== 'committed') recordCommandDraftDisposition(commandId, 'suppressed')
+              return body
+            } catch (error) {
+              // The first prompt already committed; the outer command sink
+              // must not restore/replay its invocation after a body failure.
+              recordCommandDraftDisposition(commandId, 'suppressed')
+              throw error
+            }
           }
           return runner.sessionWriter.prompt(agent.session.id, userMessage, 'steer')
         })
         if (outcome === undefined) return { kind: 'error', text: 'the session changed while loading the skill — try again' }
         if (outcome.kind !== 'committed') {
-          if (outcome.kind === 'indeterminate') throw new IndeterminateSkillWriteError()
+          if (outcome.kind === 'indeterminate') { throw new IndeterminateSkillWriteError() }
           if (outcome.kind === 'cancelled') throw cancellationError('skill write cancelled')
           const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
           return { kind: 'error', text: message }
@@ -3277,9 +3311,10 @@ export function registerTuiCommands(
         if (error instanceof TransitionInProgressError) {
           const merged = mergeDraft(app.getDraft(), line)
           app.setEditorText(merged)
+          recordCommandDraftDisposition(commandId, 'restored')
           return { kind: 'error', text: merged === line
             ? 'a session transition is in progress — try again in a moment'
-            : 'the draft changed while transitioning — review it before submitting again', draftRestored: true }
+            : 'the draft changed while transitioning — review it before submitting again' }
         }
         throw error
       }
@@ -3348,7 +3383,7 @@ export function registerTuiCommands(
             // withDelivery). Everything below may await.
             const delivery = takeDelivery()
             const agent = await requireAgent()
-            return loadSkill(agent, skill.name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery)
+            return loadSkill(agent, skill.name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery, invocation?.commandId)
           },
         })
         skillDisposers.set(skill.name, dispose)
@@ -3410,7 +3445,7 @@ export function registerTuiCommands(
               // Captured before any await, exactly like the direct wrapper.
               const delivery = takeDelivery()
               const agent = await requireAgent()
-              return loadSkill(agent, name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery)
+              return loadSkill(agent, name, invocation?.rawInput ?? '', invocation?.signal ?? runner.signal, delivery, invocation?.commandId)
             },
           })
           skillDisposers.set(name, dispose)
@@ -3459,7 +3494,7 @@ export function registerTuiCommands(
       // invocation line is normalized to `/name args` so the host's pre-step
       // gesture (dsh-tool-skill) also recognizes it when visible.
       const [name, ...args] = splitSkillLine(invocation.rawInput)
-      if (name !== '') return loadSkill(liveAgent, name, args.join(' '), invocation.signal ?? runner.signal, delivery)
+      if (name !== '') return loadSkill(liveAgent, name, args.join(' '), invocation.signal ?? runner.signal, delivery, invocation.commandId)
       // No argument: pick from the catalog — the same validated, policy-
       // filtered, sorted view the collector builds (the catalog port's
       // live read), so hostile or model-only entries never reach the
@@ -4048,7 +4083,7 @@ export function registerTuiCommands(
   // refresh — the deliberate unpin: regeneration OVERWRITES the current
   // title, including one the user pinned earlier. A blank session (no user
   // message yet) leaves the title untouched and informs the user.
-  const titleHandler = async (invocation: CommandInvocation): Promise<CommandResult & { readonly draftRestoreSuppressed?: true }> => {
+  const titleHandler = async (invocation: CommandInvocation): Promise<CommandResult> => {
     const liveAgent = await requireAgent()
     const generation = runner.sessionGeneration
     const current = (): boolean => !runner.signal.aborted && sessionUnchanged(
@@ -4073,10 +4108,10 @@ export function registerTuiCommands(
         if (outcome.kind !== 'committed') {
           if (outcome.kind === 'cancelled') throw cancellationError('session title write cancelled')
           if (outcome.kind === 'indeterminate') {
+            recordCommandDraftDisposition(invocation.commandId, 'suppressed')
             return {
               kind: 'error',
               text: 'session title result is indeterminate — do not retry automatically',
-              draftRestoreSuppressed: true,
             }
           }
           const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
@@ -4787,5 +4822,16 @@ export function registerTuiCommands(
     /** The revalidating transition (the coordinator's target-change hook). */
     enterTransition: (): void => enterCatalogTransition(),
     withDelivery,
+    takeCommandDraftDisposition: (commandId?: string): CommandDraftDisposition | undefined => {
+      if (commandId !== undefined) {
+        const disposition = commandDraftDispositions.get(commandId)
+        commandDraftDispositions.delete(commandId)
+        return disposition
+      }
+      const pending = commandDraftDispositions.entries().next()
+      if (pending.done) return undefined
+      commandDraftDispositions.delete(pending.value[0])
+      return pending.value[1]
+    },
   }
 }

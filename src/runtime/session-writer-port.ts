@@ -32,28 +32,18 @@ export interface SessionWriter {
     mode: SessionDeliveryMode,
   ): Promise<WriteOutcome>
 
-  /** Deliver the Direct Ctrl+S batch. When `removeQueuedIds` is supplied,
-   * the adapter removes exactly those queued occurrences and delivers the
-   * batch as one semantic operation; callers must not split that move into
-   * separately settled removals and delivery. */
-  steerBatch(
+  /** Steer one still-pending queued occurrence using its Host-owned message.
+   * This maps to the official occurrence-level queue steer operation; the
+   * caller must not remove the row and replay a copied message. */
+  steerQueued(
     sessionId: string,
-    messages: readonly PreparedMessage[],
-    removeQueuedIds?: readonly string[],
+    messageId: string,
   ): Promise<WriteOutcome>
 
   /** Remove exactly one queued message occurrence. */
   removeQueued(
     sessionId: string,
     messageId: string,
-  ): Promise<WriteOutcome>
-
-  /** Remove a set of exact queued message occurrences as one semantic
-   * operation. Used by Alt+Up so a partial per-message settlement cannot lose
-   * already staged user input. */
-  removeQueuedBatch(
-    sessionId: string,
-    messageIds: readonly string[],
   ): Promise<WriteOutcome>
 
   /** Cancel the current user turn while preserving pending inbox work. The

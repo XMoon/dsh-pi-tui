@@ -72,7 +72,7 @@ function stubRunner(
   state: {
     agent: Agent | undefined
     writerOutcome?: WriteOutcome
-    writerCalls?: { kind: 'prompt' | 'steerBatch'; mode?: 'queue' | 'steer'; messages?: readonly unknown[] }[]
+    writerCalls?: { kind: 'prompt'; mode?: 'queue' | 'steer'; messages?: readonly unknown[] }[]
   },
   diag: ReturnType<typeof createDiag> = createDiag({ filePath: undefined, stderrLevel: 'off' }),
   options: { transitionPending?: boolean; busyEnter?: string; generation?: () => number } = {},
@@ -116,22 +116,18 @@ function stubRunner(
       prompt: async (_sessionId: string, message: unknown, mode: 'queue' | 'steer') => {
         const outcome = state.writerOutcome
         if (outcome !== undefined && outcome.kind !== 'committed') return outcome
-        state.writerCalls?.push({ kind: 'prompt', mode })
+        state.writerCalls?.push({ kind: 'prompt', mode, messages: [message] })
         const target = state.agent as Agent & { followup(message: unknown): void; steer(message: unknown): void }
         if (mode === 'queue') target.followup(message)
         else target.steer(message)
         return outcome ?? { kind: 'committed' as const, value: undefined }
       },
-      steerBatch: async (_sessionId: string, messages: readonly unknown[]) => {
+      steerQueued: async (_sessionId: string, _messageId: string) => {
         const outcome = state.writerOutcome
         if (outcome !== undefined && outcome.kind !== 'committed') return outcome
-        state.writerCalls?.push({ kind: 'steerBatch', messages })
-        const target = state.agent as Agent & { steer(message: unknown): void }
-        for (const message of messages) target.steer(message)
         return outcome ?? { kind: 'committed' as const, value: undefined }
       },
       removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
-      removeQueuedBatch: async () => ({ kind: 'committed' as const, value: undefined }),
       cancel: async () => ({ kind: 'committed' as const, value: undefined }),
       rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
@@ -345,14 +341,14 @@ test('the revalidating transition keeps skill names as revalidating handlers and
     'the transition wrapper stays advertised: submitting /glab resolves through the revalidating handler')
   // The transition handler still executes against the CURRENT agent with a
   // fresh get + policy recheck (the same execution boundary). The original
-  // line is steered (which wakes an idle driver) and the body rides the
-  // same next-step batch as an injection — turns that wake the driver.
+  // line is steered (which wakes an idle driver) and the body follows as a
+  // second ordered steer prompt — turns that wake the driver.
   const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
   assert.equal(result.kind, 'success')
   assert.equal(delivered.length, 2, 'the transition executes through loadSkill on the current agent')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line is steered (waking an idle driver)')
   assert.equal(delivered[0]?.text, '/glab', 'the original user line is forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the same semantic steer batch')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the loaded body uses the official skill_content rendering')
   app.stop()
 })
@@ -416,7 +412,7 @@ test('loadSkill steers a RUNNING agent at the next step boundary instead of park
   assert.equal(delivered.length, 2, 'a bare /name delivers the original line AND the injected body')
   assert.equal(delivered[0]?.kind, 'steer', 'a running agent receives the original line as a steer')
   assert.equal(delivered[0]?.text, '/glab', 'the original user line is forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the same semantic steer batch')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the loaded body uses the official skill_content rendering')
   app.stop()
 })
@@ -446,7 +442,7 @@ test('the explicit /skill <name> path steers the original line and injects the b
   assert.equal(delivered.length, 2, 'the explicit /skill path delivers the original line AND the loaded body')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line is steered (waking an idle driver)')
   assert.equal(delivered[0]?.text, '/glab', 'the original user line is forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the same semantic steer batch')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   assert.match(delivered[1]?.text ?? '', /<skill_content name="glab">/, 'the loaded body uses the official skill_content rendering')
   app.stop()
 })
@@ -476,7 +472,7 @@ test('a missing agent status still delivers via steer+inject (no status branch)'
   assert.equal(result.kind, 'success')
   assert.equal(delivered.length, 2, 'the load still delivers')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line is always steered, regardless of status')
-  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the same semantic steer batch')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   app.stop()
 })
 
@@ -759,7 +755,7 @@ test('the /skill command with args on a RUNNING agent steers the pair into the r
   assert.equal(delivered.length, 2, 'the running /skill path delivers the original line AND the body')
   assert.equal(delivered[0]?.kind, 'steer', 'the original line steers into the running turn')
   assert.equal(delivered[0]?.text, '/glab fix bug', 'the arguments are forwarded verbatim')
-  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the same semantic steer batch')
+  assert.equal(delivered[1]?.kind, 'steer', 'the body rides the second ordered steer prompt')
   app.stop()
 })
 
@@ -790,7 +786,7 @@ test('the wrappers tolerate an undefined invocation (defensive rawInput fallback
   app.stop()
 })
 
-test('the fallback semantic batch carries the official source fields and a provider default', async () => {
+test('the ordered prompt fallback carries the official source fields and a provider default', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -817,7 +813,7 @@ test('the fallback semantic batch carries the official source fields and a provi
     get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled' }),
   } as never)
   const { defs } = services
-  const writerCalls: { kind: 'prompt' | 'steerBatch'; mode?: 'queue' | 'steer'; messages?: readonly unknown[] }[] = []
+  const writerCalls: { kind: 'prompt'; mode?: 'queue' | 'steer'; messages?: readonly unknown[] }[] = []
   registerTuiCommands(stubRunner(ctx, app, { agent, writerCalls }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
@@ -825,9 +821,12 @@ test('the fallback semantic batch carries the official source fields and a provi
   assert.ok(wrapper?.handler !== undefined)
   const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
   assert.equal(result.kind, 'success')
-  assert.deepEqual(writerCalls.map(call => call.kind), ['steerBatch'], 'the fallback uses exactly one semantic batch')
-  assert.equal(writerCalls[0]?.messages?.length, 2, 'the batch preserves line-before-body ordering')
-  assert.equal(steered.length, 2, 'the semantic batch steers the line and body')
+  assert.deepEqual(writerCalls.map(call => call.kind), ['prompt', 'prompt'], 'the fallback uses two official prompt operations')
+  assert.deepEqual(writerCalls.map(call => call.mode), ['steer', 'steer'], 'both fallback messages use steer mode')
+  assert.equal(writerCalls[0]?.messages?.[0], steered[0], 'the line is sent first')
+  assert.equal(writerCalls[1]?.messages?.[0], steered[1], 'the skill body is sent second')
+
+  assert.equal(steered.length, 2, 'the fallback steers the line and body')
   const body = steered[1]
   assert.equal(body?.source.kind, 'skill-invocation', 'the fallback uses the official skill-invocation source kind')
   assert.equal(body?.source.name, 'glab', 'the source names the invoked skill')
@@ -958,15 +957,18 @@ test('an indeterminate title write suppresses outer draft restoration', async ()
     kind: 'indeterminate' as const,
     error: { code: 'transport/unknown', message: 'title result unknown' },
   })
-  registerTuiCommands(runner)
+  const registered = registerTuiCommands(runner)
   const title = services.defs.find(def => def.name === 'title')
   assert.ok(title?.handler !== undefined)
-  const result = await (title.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: 'new title' })
+
+  const result = await (title.handler as (invocation: { rawInput: string; commandId: string }) => Promise<unknown>)({ rawInput: 'new title', commandId: 'cmd-title' })
   assert.deepEqual(result, {
     kind: 'error',
     text: 'session title result is indeterminate — do not retry automatically',
-    draftRestoreSuppressed: true,
   })
+  assert.equal(registered.takeCommandDraftDisposition('cmd-title'), 'suppressed')
+  assert.equal(registered.takeCommandDraftDisposition('cmd-title'), undefined)
+  // The normalized public result carries no private draft marker.
   app.stop()
 })
 
@@ -1018,17 +1020,18 @@ test('the transition fence refuses a skill invocation mid-transition (zero write
     list: async () => [],
     get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
-  registerTuiCommands(
+  const registered = registerTuiCommands(
     stubRunner(ctx, app, { agent }, createDiag({ filePath: undefined, stderrLevel: 'off' }), { transitionPending: true }),
     { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) },
   )
   const wrapper = services.defs.findLast(def => def.name === 'glab')
   assert.ok(wrapper?.handler !== undefined, 'the skill wrapper must be registered')
-  const result = await (wrapper!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'fix the pipeline' })
+  const result = await (wrapper!.handler as (invocation: { rawInput: string; commandId: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'fix the pipeline', commandId: 'cmd-transition' })
   assert.equal(result.kind, 'error')
   assert.match(result.text ?? '', /transition is in progress/, 'the refusal explains the retry')
   assert.equal(delivered.length, 0, 'the skill must never write the old agent during a transition')
   assert.ok(app.getDraft().includes('/glab fix'), 'the invocation line is restored to the editor')
+  assert.equal(registered.takeCommandDraftDisposition('cmd-transition'), 'restored')
   app.stop()
 })
 
