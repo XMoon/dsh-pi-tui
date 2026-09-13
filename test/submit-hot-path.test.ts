@@ -22,6 +22,7 @@ import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, type Config } from '../src/index.ts'
+import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -564,6 +565,59 @@ test('Ctrl+S: a steer delivers without sessionPersistence work', async (t) => {
   assert.equal(harness.host.followedUp.length, 1, 'an idle agent takes the draft as a followup')
 })
 
+test('ordinary submit and Ctrl+S share FIFO admission before canonicalization', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-fifo-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const originalCanonicalize = DirectHostFilePort.prototype.canonicalizeMentions
+  life.defer(() => { DirectHostFilePort.prototype.canonicalizeMentions = originalCanonicalize })
+  let releaseFirst!: () => void
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+  const canonicalized: string[] = []
+  DirectHostFilePort.prototype.canonicalizeMentions = async function (_scope, text) {
+    if (text === 'A') {
+      canonicalized.push('A')
+      await firstGate
+    } else if (text === 'B') {
+      canonicalized.push('B')
+    }
+    return text
+  }
+
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-fifo', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-fifo' })
+
+  mounted.app.setDraft('A')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => canonicalized.includes('A'), 1_000), true, 'the first submit must enter canonicalization')
+
+  harness.host.status = 'running'
+  mounted.app.setDraft('B')
+  const dispatched = (mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  assert.equal(dispatched, true, 'the second gesture must be admitted as a steer')
+  for (let index = 0; index < 12; index += 1) await Promise.resolve()
+  assert.deepEqual(canonicalized, ['A'], 'the later steer must not canonicalize before the earlier ordinary submit')
+  assert.equal(harness.host.followedUp.length, 0, 'the earlier write is still fenced by canonicalization')
+  assert.equal(harness.host.steered.length, 0, 'the later steer cannot overtake the earlier write')
+
+  releaseFirst()
+  assert.equal(await drainUntil(() => harness.host.followedUp.length === 1 && harness.host.steered.length === 1, 1_000), true,
+    'both writes must eventually deliver')
+  const firstMessage = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
+  const secondMessage = harness.host.steered[0] as { content: readonly { type: string; text?: string }[] }
+  assert.equal(firstMessage.content[0]?.text, 'A')
+  assert.equal(secondMessage.content[0]?.text, 'B')
+})
+
 test('submit work does not scale with session history length', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-submit-hot-')
@@ -854,6 +908,38 @@ test('a failed submit clears the pending row and surfaces the error', async (t) 
   assert.ok(settled.includes('submission failed'), `the failure must be surfaced:\n${settled}`)
 })
 
+test('a shell close and throttled tail flush after disposal are inert', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-submit-hot-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'submit-session-shell-dispose', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'submit-session-shell-dispose' })
+  const originalUpdate = mounted.app.updateLocalMessage.bind(mounted.app)
+  let updatesAfterDispose = 0
+  mounted.app.updateLocalMessage = ((message, next) => {
+    if (mounted.app.isDisposed()) updatesAfterDispose += 1
+    return originalUpdate(message, next)
+  }) as TuiApp['updateLocalMessage']
+
+  mounted.app.setDraft('!printf first; sleep 0.2')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await disposeContext(context)
+  for (let round = 0; round < 40; round += 1) await new Promise<void>(resolve => setImmediate(resolve))
+
+  assert.equal(mounted.app.isDisposed(), true)
+  assert.equal(updatesAfterDispose, 0, 'shell close/tail callbacks must not repaint a disposed surface')
+})
+
 test('the review repro: an older `!` run dying late NEVER clears the newer pending', async (t) => {
   // A = `!sleep 0.4` (slow run, ack armed under token A); B = `!echo done`
   // — starting B aborts A's controller, so A's killed child settles LATE
@@ -981,6 +1067,8 @@ async function bootCommandHarness(
      * descriptor, so a `leadingInput` command (`/goal <objective>`) can claim
      * its argued line. */
     hostCommands?: readonly (string | { name: string; input: { hint: string; attachments?: boolean } })[]
+    /** Make the fake Host command reject or cancel after admission. */
+    hostCommandFailure?: 'rejected' | 'cancelled'
     /** Provide a skills registry (resolveSkill succeeds) and/or a tools
      * service shaped like the dsh-tool-skill loader (hostLoadsSkillBody). */
     skills?: boolean
@@ -1087,7 +1175,16 @@ async function bootCommandHarness(
       register(def: { name: string; handler: () => unknown; input?: { hint: string; attachments?: boolean } }): () => void
     }).register({
       name: command.name,
-      handler: () => ({ kind: 'success' }),
+      handler: () => {
+        if (options.hostCommandFailure === 'cancelled') {
+          const error = new Error('host command cancelled')
+          error.name = 'AbortError'
+          ;(error as Error & { code?: string }).code = 'ABORT_ERR'
+          throw error
+        }
+        if (options.hostCommandFailure === 'rejected') throw new Error('host command rejected')
+        return { kind: 'success' }
+      },
       ...(command.input === undefined ? {} : { input: command.input }),
     })
     hostCommandDisposers.set(command.name, dispose)
@@ -1210,6 +1307,83 @@ test('idle /compact executes as a Host command: no followup, no queue, no prompt
   assert.equal(harness.executed[0]?.line, '/compact', 'the exact command line must reach the command plane')
   assert.equal(harness.host.followedUp.length, 0, 'no ordinary followup')
   assert.equal(harness.host.steered.length, 0, 'no steer')
+})
+
+test('a rejected Host command restores a plain submitted line', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    hostCommands: ['compact'],
+    hostCommandFailure: 'rejected',
+  })
+  mounted.app.setDraft('/compact')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(await drainUntil(() => mounted.app.getDraft() === '/compact', 1_000), true,
+    'a rejected Host command must restore the complete plain line')
+})
+
+test('a cancelled Host command restores a plain submitted line', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    hostCommands: ['compact'],
+    hostCommandFailure: 'cancelled',
+  })
+  mounted.app.setDraft('/compact')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(await drainUntil(() => mounted.app.getDraft() === '/compact', 1_000), true,
+    'a cancelled Host command must restore the complete plain line')
+})
+
+test('a transition-fenced explicit /skill result does not restore the wrapper twice', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    skills: true,
+  })
+  const newHandler = (harness.commands as {
+    handler(name: string): ((...args: never[]) => unknown) | undefined
+  }).handler('new')
+  assert.ok(newHandler, 'the /new handler must be registered')
+  harness.armCreateGate()
+  let transition: Promise<unknown> | undefined
+  let resolveExecuteSettled!: () => void
+  const executeSettled = new Promise<void>(resolve => { resolveExecuteSettled = resolve })
+  const commandService = harness.commands as unknown as {
+    execute(agent: unknown, line: string, attachments?: readonly unknown[]): Promise<unknown>
+  }
+  const originalExecute = commandService.execute
+  commandService.execute = async (agent, line, attachments = []) => {
+    // Start an independent transition after dispatch passed its initial
+    // fence, but before the real /skill handler resolves its agent. This is
+    // the exact window where loadSkill owns the normalized draft restore.
+    if (line.startsWith('/skill grilling fix')) {
+      transition = (newHandler as () => Promise<unknown>)()
+    }
+    try {
+      return await originalExecute(agent, line, attachments)
+    } finally {
+      resolveExecuteSettled()
+    }
+  }
+  try {
+    mounted.app.setDraft('/skill grilling fix')
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    await executeSettled
+    // Let the outer command-result sink run after the inner loadSkill handler
+    // has restored `/grilling fix` while the transition remains pending.
+    for (let round = 0; round < 20; round += 1) await Promise.resolve()
+    assert.equal(mounted.app.getDraft(), '/grilling fix',
+      'the outer command result must not merge the original /skill wrapper a second time')
+  } finally {
+    // The transition is deliberately gated until the assertion observes the
+    // skill result; always release and settle it so teardown cannot hang if an
+    // assertion fails.
+    harness.releaseCreateGate()
+    if (transition !== undefined) await transition
+  }
 })
 
 test('running + queue: /compact executes, never enters the ordinary queue (PR115-fix problem 1)', async (t) => {
@@ -1362,10 +1536,12 @@ test('running + queue: /skill <name> keeps the steer path when the TUI must inje
   // claims next-step first), so the invocation keeps the steer path to
   // preserve the original-line-before-body order — the documented
   // exception to the queue preference.
-  assert.equal(harness.host.steered.length, 1, 'the fallback keeps the order-preserving steer')
-  const steered = harness.host.steered[0] as { content: { type: string; text: string }[] }
-  assert.equal(steered.content[0]?.text, '/grilling args', 'the steered line is the normalized /name args form')
-  assert.equal(harness.host.injected.length, 1, 'the TUI fallback injects the skill body')
+  assert.equal(harness.host.steered.length, 2, 'the fallback steers the line and body as one semantic batch')
+  const steeredLine = harness.host.steered[0] as { content: { type: string; text: string }[] }
+  const steeredBody = harness.host.steered[1] as { content: { type: string; text: string }[] }
+  assert.equal(steeredLine.content[0]?.text, '/grilling args', 'the first batch item is the normalized /name args form')
+  assert.match(steeredBody.content[0]?.text ?? '', /<skill_content name="grilling">/, 'the second batch item is the rendered body')
+  assert.equal(harness.host.injected.length, 0, 'the fallback body uses the semantic batch, never a raw injection')
   assert.equal(harness.host.followedUp.length, 0, 'no followup — the body order contract forbids it')
 })
 
@@ -1598,12 +1774,12 @@ test('running + steer: a skill invocation WITHOUT the host loader still injects 
   mounted.app.setDraft('/skill grilling args')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   await waitForDelivery(harness.host, 'no-loader skill steer')
-  assert.equal(harness.host.steered.length, 1, 'the invocation steers into the running turn')
-  const steered = harness.host.steered[0] as { content: { type: string; text: string }[] }
-  assert.equal(steered.content[0]?.text, '/grilling args', 'the steered line is the normalized /name args form')
-  assert.equal(harness.host.injected.length, 1, 'the TUI fallback injects the skill body exactly once')
-  const injected = harness.host.injected[0] as { content: { type: string; text: string }[] }
-  assert.match(injected.content[0]?.text ?? '', /<skill_content name="grilling">/, 'the injected body is the official rendering')
+  assert.equal(harness.host.steered.length, 2, 'the invocation steers the line and body as one semantic batch')
+  const steeredLine = harness.host.steered[0] as { content: { type: string; text: string }[] }
+  const steeredBody = harness.host.steered[1] as { content: { type: string; text: string }[] }
+  assert.equal(steeredLine.content[0]?.text, '/grilling args', 'the first batch item is the normalized /name args form')
+  assert.match(steeredBody.content[0]?.text ?? '', /<skill_content name="grilling">/, 'the second batch item is the official rendering')
+  assert.equal(harness.host.injected.length, 0, 'the TUI fallback body uses the semantic batch, never a raw injection')
 })
 
 test('running + steer: a no-loader per-skill wrapper also injects its body', async (t) => {
@@ -1618,8 +1794,12 @@ test('running + steer: a no-loader per-skill wrapper also injects its body', asy
   await waitForDelivery(harness.host, 'no-loader wrapper steer')
   assert.equal(harness.executed.length, 1, 'the wrapper executes through the command plane')
   assert.equal(harness.executed[0]?.line, '/grilling args', 'the wrapper receives its own slash line')
-  assert.equal(harness.host.steered.length, 1, 'the invocation steers into the running turn')
-  assert.equal(harness.host.injected.length, 1, 'the TUI fallback injects the skill body exactly once')
+  assert.equal(harness.host.steered.length, 2, 'the invocation steers the line and body as one semantic batch')
+  const steeredLine = harness.host.steered[0] as { content: { type: string; text: string }[] }
+  const steeredBody = harness.host.steered[1] as { content: { type: string; text: string }[] }
+  assert.equal(steeredLine.content[0]?.text, '/grilling args', 'the first batch item is the wrapper line')
+  assert.match(steeredBody.content[0]?.text ?? '', /<skill_content name="grilling">/, 'the second batch item is the rendered body')
+  assert.equal(harness.host.injected.length, 0, 'the TUI fallback body uses the semantic batch, never a raw injection')
 })
 
 test('a live LOCAL command runs its bridge handler — never the model', async (t) => {

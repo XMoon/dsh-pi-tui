@@ -169,7 +169,7 @@ function stubRunner(options: {
     applyFooterSettings: () => {},
     agents: options.agents ?? {
       create: async () => ({}) as never,
-      resume: async () => ({}) as never,
+      open: async () => ({}) as never,
     },
     sessionReader: {
       list: async () => [],
@@ -188,11 +188,12 @@ function stubRunner(options: {
       setApprovalPolicy: () => true,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      steerBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+      removeQueuedBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     cwd: '/ws',
@@ -442,7 +443,7 @@ test('/new resolves an absent legacy code default as canonical ptc', async () =>
         created.push({ agentPreset: options.agentPreset })
         return {} as never
       },
-      resume: async () => ({}) as never,
+      open: async () => ({}) as never,
     },
   })
   const result = await t.runCommand('new') as { kind: string; text?: string }
@@ -486,7 +487,7 @@ test('/new honors the launch-time effective preset', async () => {
         created.push({ agentPreset: options.agentPreset })
         return {} as never
       },
-      resume: async () => ({}) as never,
+      open: async () => ({}) as never,
     },
   })
   const result = await t.runCommand('new') as { kind: string; text?: string }

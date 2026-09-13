@@ -24,7 +24,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { rewindSeed, type RewindCandidate } from './rewind.ts'
-import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
+import type { CreateSessionRequest, OpenSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 
 /** The narrow host surface child creation needs (plan §23) — the runner
@@ -34,12 +34,12 @@ export interface ForkAgentHost {
   sessionCwd(): string
   /** Read a session's current preset through the DSH projection seam. */
   sessionPreset?(session: Agent['session']): string | undefined
-  /** The session lifecycle port `/new` and `/fork` create sessions
-   * through: semantic requests only (no callbacks — the Direct adapter
-   * resolves the preset composition internally). */
+  /** The session lifecycle port `/new`, `/fork` and open/switch paths use:
+   * semantic requests only (no callbacks — the Direct adapter resolves the
+   * preset composition internally). */
   agents: {
     create(options: CreateSessionRequest): Promise<SessionHandle>
-    resume(options: ResumeSessionRequest): Promise<SessionHandle>
+    open(options: OpenSessionRequest): Promise<SessionHandle>
   }
 }
 

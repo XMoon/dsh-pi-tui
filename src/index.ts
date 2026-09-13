@@ -52,7 +52,7 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 // The commands service merge: ctx.commands typing for execute()/register().
 import { parseCommand } from '@deepseek-ai/dsh-commands'
-import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
+import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-commands'
 // The skill registry merge for the /skill command.
 import type {} from '@deepseek-ai/dsh-skill'
@@ -144,10 +144,10 @@ import {
 import type { TaskBrowserViewState, TaskPanelItem } from './task-panel.ts'
 import { TaskBrowserRuntime, type TaskBrowserDatasetScope } from './task-browser-runtime.ts'
 import type { ComposerSubmitGesture, ComposerSubmitRequest, TaskBrowserHandle, WorkflowAction } from './tui-app.ts'
-import { resolveComposerDelivery, registerTuiCommands, type DefaultIntentRecord, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
+import { isIndeterminateSkillWrite, resolveComposerDelivery, registerTuiCommands, type DefaultIntentRecord, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
-import { runDetached, runOwned, isCancellation, type OwnedTaskOptions } from './detached.ts'
+import { runDetached, runOwned, isCancellation, cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile, loadHistoryRecords, recallHistoryForSession } from './history.ts'
 import { terminalTitleOf } from './terminal-title.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from './history-persist.ts'
@@ -199,11 +199,14 @@ import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
 import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from './runtime/direct/config-direct.ts'
 import { DirectSessionArchive } from './runtime/direct/session-archive-direct.ts'
+import { DirectHostCommandPort } from './runtime/direct/host-command-direct.ts'
 import { serializeTuiSettingsMutation } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
 import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-direct.ts'
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
-import { directAgentOf, ownerHandleOf, type CreateSessionRequest, type ResumeSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
+import { directAgentOf, ownerHandleOf, type CreateSessionRequest, type OpenSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
+import type { HostCommandOutcome } from './runtime/host-command-port.ts'
+import type { WriteOutcome } from './runtime/session-writer-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
@@ -547,7 +550,7 @@ export interface InterruptAgentLike {
  * type so the public declaration never inlines internal runtime modules;
  * the runner's SessionWriter satisfies it). */
 export interface InterruptWriterLike {
-  cancel(sessionId: string, reason: { kind: 'user' }, options: { keepInbox: boolean }): void
+  cancel(sessionId: string): Promise<WriteOutcome>
 }
 
 /**
@@ -569,9 +572,9 @@ export interface InterruptWriterLike {
  * log, which the design explicitly rejects — the parked queue is the
  * agreed web-parity behavior until upstream lands the capability.
  */
-export function interruptAgent(agent: InterruptAgentLike | undefined, writer: InterruptWriterLike): void {
-  if (agent === undefined) return
-  writer.cancel(agent.session.id, { kind: 'user' }, { keepInbox: true })
+export function interruptAgent(agent: InterruptAgentLike | undefined, writer: InterruptWriterLike): Promise<WriteOutcome> {
+  if (agent === undefined) return Promise.resolve({ kind: 'committed', value: undefined })
+  return writer.cancel(agent.session.id)
 }
 
 /** One unsettled subagent delegation, in tool/call order. */
@@ -2185,7 +2188,7 @@ export function apply(ctx: Context, config: Config): void {
     const withPresetMeta = (composition: AgentComposition): { agentPreset?: string } =>
       composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }
 
-    // The semantic backend (server/client migration M1): the TUI consumes
+    // The semantic backend (server/client migration): the TUI consumes
     // Host domains through narrow ports, never ctx.* directly. Direct is the
     // only backend today; remote/wire adapters join in later milestones
     // behind the SAME port interfaces. Constructed here (after compose) so
@@ -2209,6 +2212,7 @@ export function apply(ctx: Context, config: Config): void {
       new DirectConfigPort(ctx, tuiSettings as unknown as import('./runtime/config-port.ts').TuiSettingsConfig | undefined, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
       new DirectHostFilePort((sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
       new DirectSessionArchive(ctx),
+      new DirectHostCommandPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
     )
 
     // Whole-document settings writes must not copy a project-layer
@@ -2317,7 +2321,7 @@ export function apply(ctx: Context, config: Config): void {
           diag.dispose()
           return
         }
-        handle = await backend.sessionLifecycle.resume({
+        handle = await backend.sessionLifecycle.open({
           resumeSessionId: SessionId(sessionId),
           provider: fallback.provider,
           model: fallback.model,
@@ -2598,14 +2602,17 @@ export function apply(ctx: Context, config: Config): void {
           // A new session owns the surface: the OLD session's pending
           // submit ack must never leak into it, and its latency timeline
           // is meaningless now.
-          settleLocalSubmitAck('session switched')
-          submitLatencyTracker.reset()
+          // A Direct create may resolve after lifecycle abort; preserve the child in
+          // the owner slots below for retirement, but do not touch the dead surface.
+          if (!cleanedUp) settleLocalSubmitAck('session switched')
+          if (!cleanedUp) submitLatencyTracker.reset()
           // A new session owns the surface: bump the generation so late
           // async work from the old session cannot commit, and clear
           // old-session state.
-          bumpSessionGeneration()
+          if (!cleanedUp) bumpSessionGeneration()
           liveHandle = ownerHandleOf(next) as AgentHandle | undefined
           liveAgent = directAgentOf(next) as Agent
+          if (cleanedUp) return
           // Session switch: the notification controller resets with the
           // new live identity — a late idle from the OLD agent is fenced
           // out and the new agent must be observed running before it can
@@ -2762,7 +2769,7 @@ export function apply(ctx: Context, config: Config): void {
         // copy the old Session's selected ref into the target.
         const fallback = defaultModel.currentSelection()
         if (lifecycleController.signal.aborted) return undefined
-        const resumeOptions = {
+        const openOptions = {
           resumeSessionId: SessionId(sessionId),
           provider: fallback.provider,
           model: fallback.model,
@@ -2774,7 +2781,7 @@ export function apply(ctx: Context, config: Config): void {
           // A rejected resume (e.g. SessionAlreadyOwnedError) leaves the
           // target untouched: no pin, no retry — the CURRENT session stays
           // live and the user can retry the switch.
-          create: () => backend.sessionLifecycle.resume(resumeOptions),
+          create: () => backend.sessionLifecycle.open(openOptions),
         })
         if (!result.ok) {
           // The resume failed: the CURRENT session is still live.
@@ -2918,6 +2925,9 @@ export function apply(ctx: Context, config: Config): void {
     const contextMeasurement = new ContextMeasurementCoordinator()
     const markContextDirty = (): void => { contextMeasurement.markDirty() }
 
+    // Surface lifetime fence: every callback below can outlive the TUI
+    // surface, so the guard is initialized before any refresh callback exists.
+    let cleanedUp = false
     // PR D2: the cheap status refresh NEVER measures context. UI-only
     // events (theme, keybinding, permission, focus, resize, search,
     // credential/llm surface changes, …) read the CACHED measurement; the
@@ -2926,6 +2936,7 @@ export function apply(ctx: Context, config: Config): void {
     // port (never a direct ctx.get('tokenMeter') read — the Direct adapter
     // owns that coupling).
     const refreshStatusCheap = (): void => {
+      if (cleanedUp) return
       const stats = statsFolder.snapshot()
       // The CACHED context pressure of the live session (the only measured
       // subject — never a fresh measurement here). While the subagent
@@ -3187,10 +3198,43 @@ export function apply(ctx: Context, config: Config): void {
     // bridge so no child-creation path can bypass the runner lifetime.
     const lifecycleAgents: TuiCommandRunner['agents'] = {
       create: (options) => backend.sessionLifecycle.create({ ...options, signal }),
-      resume: (options) => backend.sessionLifecycle.resume({ ...options, signal }),
+      open: (options) => backend.sessionLifecycle.open({ ...options, signal }),
     }
     // Abort handle for the currently running `!` shell command.
     let localShellController: AbortController | undefined
+    /** Stop the captured live Agent through the SessionWriter seam. The
+     * operation barrier keeps the async outcome inside the same session
+     * ownership window as other TUI writes. */
+    const interruptLiveAgent = (): void => {
+      if (cleanedUp) return
+      localShellController?.abort()
+      const agent = liveAgent
+      if (agent === undefined) return
+      const generation = sessionGeneration
+      runOwned('agent interrupt', () => operationBarrier.runWriter(
+        agent.session.id,
+        () => interruptAgent(agent, backend.sessionWriter),
+      ), {
+        diag,
+        sessionId: () => liveAgent?.session.id,
+        onResult: (outcome) => {
+          if (cleanedUp || !sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) return
+          if (outcome.kind === 'committed' || outcome.kind === 'cancelled') return
+          const message = outcome.kind === 'rejected'
+            ? outcome.error.message
+            : outcome.kind === 'unsupported'
+              ? outcome.reason
+              : outcome.kind === 'indeterminate'
+                ? 'session cancellation result is indeterminate — do not retry automatically'
+                : 'session cancellation was cancelled'
+          app.notify(message, 'error')
+        },
+        onError: (error) => {
+          if (cleanedUp || !sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) return
+          app.notify(safeErrorMessage(error), 'error')
+        },
+      })
+    }
     // 0600 temp files holding FULL local-shell output (for truncated runs);
     // removed at TUI exit (default), never on their own.
     const shellTempFiles = new Set<string>()
@@ -3207,6 +3251,10 @@ export function apply(ctx: Context, config: Config): void {
     // mid-startup HMR unload must never reference it while it is still in
     // the temporal dead zone; it is assigned during command registration.
     let catalogCoordinator: CatalogRefreshCoordinator | undefined
+    // Hoisted before final teardown so disposal can invalidate the task-browser
+    // surface and its delayed action token before the app is disposed.
+    let activeTaskBrowser: TaskBrowserHandle | undefined
+    let activeTaskBrowserToken: object | undefined
     // M5: the footer command lifecycle slots. Hoisted here for TWO TDZ
     // guards: cleanup releases them, and — unlike the two slots above —
     // `onTerminalResize` (captured by startProcessTui below) READS
@@ -3228,7 +3276,6 @@ export function apply(ctx: Context, config: Config): void {
     // path. The Direct owned-session retirement is a SEPARATE step
     // (retireOwnedSession below) that runs after the surface stops — diag
     // stays open until the retirement diagnostics are recorded.
-    let cleanedUp = false
     const disposeSurface = (): void => {
       if (cleanedUp) return
       cleanedUp = true
@@ -3286,6 +3333,12 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       shellTempFiles.clear()
+      // TuiApp.dispose() hides overlays without invoking their user cancel
+      // callbacks. Invalidate the browser handle and token first so an action
+      // already waiting on Direct/Host work cannot notify or repaint the dead
+      // surface after this teardown.
+      activeTaskBrowser = undefined
+      activeTaskBrowserToken = undefined
       app?.dispose()
       // M2: unsubscribe the plugin keybinding sync (the registry outlives
       // the surface — a stale listener must not resync into a dead app).
@@ -3376,6 +3429,7 @@ export function apply(ctx: Context, config: Config): void {
      * only record (pi's excluded-from-context escape hatch).
      */
     const runLocalShell = (text: string, ackToken: number | undefined): void => {
+      if (cleanedUp) return
       const includeInContext = shellModeOf(text) === 'context'
       const command = shellCommandOf(text)
       if (command === '') return
@@ -3421,6 +3475,7 @@ export function apply(ctx: Context, config: Config): void {
        * never a bare void.
        */
       const submitResult = (result: string): void => {
+        if (cleanedUp) return
         // A session switch while the command ran: the output must not be
         // posted into a session the user has left (the switch already
         // cleared the card; the notify explains what happened). A session
@@ -3440,19 +3495,24 @@ export function apply(ctx: Context, config: Config): void {
         runOwned('shell submit', () => submitShellResult({
           currentAgent: () => liveAgent as unknown as ShellSubmitAgentLike | undefined,
           currentGeneration: () => sessionGeneration,
-          notify: (message, kind) => app.notify(message, kind),
+          notify: (message, kind) => {
+            if (cleanedUp) return
+            app.notify(message, kind)
+          },
           staleNotice: () => 'the session changed while the submission was being checked — the output was not submitted',
           // The session-transition write fence (review round 4): while a
           // transition is in flight the followup would target a session
           // that is about to be retired.
-          fence: () => transitionGate.busy,
+          fence: () => transitionGate.busy || cleanedUp,
           barrier: operationBarrier,
           fenceNotice: () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles',
+           writer: backend.sessionWriter,
           createMessage: (text) => createUserMessage({
             content: [{ type: 'text', text }],
             source: { kind: 'user' },
           }),
           onSubmitted: () => {
+            if (cleanedUp) return
             app.clearSettledLocalMessages()
             // The write was accepted. The ACK ROW STAYS until the first
             // authoritative event (the inbox insert) settles it — never
@@ -3466,6 +3526,7 @@ export function apply(ctx: Context, config: Config): void {
           // no agent) wrote nothing: terminal — the pending row must not
           // outlive the submission (plan D exit enumeration).
           onResult: (outcome) => {
+            if (cleanedUp) return
             if (outcome !== 'ok') shellTerminalAck(`shell submit ${outcome}`)
             else if (liveAgent === undefined) shellTerminalAck('shell submit without an agent')
           },
@@ -3474,9 +3535,11 @@ export function apply(ctx: Context, config: Config): void {
           // onResult/onError, so the ack row armed at the gesture must
           // end terminally (the caller's card keeps the output).
           onCancel: () => {
+            if (cleanedUp) return
             shellTerminalAck('shell submit cancelled')
           },
           onError: (error) => {
+            if (cleanedUp) return
             // The submission failed before the write ran: keep the card
             // (the output is not lost) and surface the reason.
             shellTerminalAck('shell submit failure')
@@ -3489,7 +3552,7 @@ export function apply(ctx: Context, config: Config): void {
       // EXACTLY once — the first event wins.
       let settled = false
       const settle = (result: string, status: 'ok' | 'error'): void => {
-        if (settled) return
+        if (cleanedUp || settled) return
         settled = true
         app.updateLocalMessage(card, {
           kind: 'tool',
@@ -3635,9 +3698,10 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       const scheduleTailFlush = (): void => {
-        if (tailTimer !== undefined) return
+        if (cleanedUp || tailTimer !== undefined) return
         tailTimer = setTimeout(() => {
           tailTimer = undefined
+          if (cleanedUp) return
           card = app.updateLocalMessage(card, {
             kind: 'tool',
             turn: Number.POSITIVE_INFINITY,
@@ -3649,6 +3713,7 @@ export function apply(ctx: Context, config: Config): void {
         }, LOCAL_SHELL_TAIL_FLUSH_MS)
       }
       const onData = (decoder: StringDecoder, chunk: Buffer): void => {
+        if (cleanedUp) return
         // The wire byte count rides along: an incomplete multi-byte
         // sequence buffered by the decoder produces no text yet, but its
         // bytes are real and must count toward the totals.
@@ -3665,11 +3730,17 @@ export function apply(ctx: Context, config: Config): void {
         // A spawn failure leaves nothing worth keeping: drop the capture.
         full.dispose()
         shellTempFiles.delete(fullPath)
+        if (cleanedUp) return
         settle(`failed: ${error.message}`, 'error')
       })
       child.on('close', (code, childSignal) => {
         releaseController()
         clearTailTimer()
+        if (cleanedUp) {
+          full.dispose()
+          shellTempFiles.delete(fullPath)
+          return
+        }
         // Flush each decoder's remaining partial sequence. An incomplete
         // trailing multi-byte character surfaces as U+FFFD from end() — it
         // is shown as-is (the bytes were real); its wire bytes were already
@@ -3835,6 +3906,7 @@ export function apply(ctx: Context, config: Config): void {
     // need no explicit teardown here.
     let sessionGeneration = 0
     const bumpSessionGeneration = (): number => {
+      if (cleanedUp) return sessionGeneration
       sessionGeneration += 1
       callArgs.clear()
       mainStreamingToolPreviews.clear()
@@ -3861,6 +3933,7 @@ export function apply(ctx: Context, config: Config): void {
       // initLiveSession → refreshAgents.
       activeTaskBrowser?.close()
       activeTaskBrowser = undefined
+      activeTaskBrowserToken = undefined
       taskRuntime?.reset()
       // The dataset scope is session-scoped too: a switched-in session
       // must never inherit a Workflow-scoped browser (PR2 plan §10.8).
@@ -3978,7 +4051,7 @@ export function apply(ctx: Context, config: Config): void {
      * M1: the unified status store follows the same display subject — the
      * view/workspace/usage sections switch to the child's facts. */
     const refreshViewerFooter = (): void => {
-      if (viewing === undefined) return
+      if (cleanedUp || viewing === undefined) return
       const stats = viewing.stats.snapshot()
       // setViewerFooter projects the display-subject sections (view/
       // workspace/usage) BEFORE its paint — the first frame after
@@ -4003,6 +4076,7 @@ export function apply(ctx: Context, config: Config): void {
       activity: 'running' | 'inactive',
       depth = 1,
     ): Promise<void> => {
+      if (cleanedUp) return
       // Surface authority (plan §6.10): mode is the durable semantic, the
       // access is what THIS surface may do — only a direct (depth 1)
       // continuable child is interactive from the root.
@@ -4094,7 +4168,7 @@ export function apply(ctx: Context, config: Config): void {
       // of those invalidates the viewerOpen token. A stale request must not
       // commit its child over the current surface (no viewing write, no
       // repaint, no viewer mount, no auto-pop match).
-      if (!viewerOpen.isCurrent(request)) {
+      if (cleanedUp || !viewerOpen.isCurrent(request)) {
         if (openingViewer === opening) openingViewer = undefined
         return
       }
@@ -4317,6 +4391,7 @@ export function apply(ctx: Context, config: Config): void {
      * events; the next real submission arms a fresh T0.
      */
     const settleLocalSubmitAck = (reason: string, options: { token?: number; terminal?: boolean } = {}): void => {
+      if (cleanedUp) return
       if (options.token !== undefined && options.token !== localSubmitAck.epoch) {
         diag.debug('submit ack terminal settle superseded', { reason, token: options.token, current: localSubmitAck.epoch })
         return
@@ -4446,22 +4521,28 @@ export function apply(ctx: Context, config: Config): void {
         }
         throw error
       }
+      if (cleanedUp) return { kind: 'cancelled' }
       if (result.kind === 'cancelled') return { kind: 'cancelled' }
       const target = join(result.directory, filename)
       if (name === 'export') {
         const opened = await backend.sessionArchive.open(sessionId, signal)
+        if (cleanedUp) return { kind: 'cancelled' }
         if (opened.kind === 'unavailable') throw new ArtifactSaveFailure('Session archive export is unavailable.')
         if (opened.kind === 'none') throw new ArtifactSaveFailure('Session was not found.')
         const path = await streamToFile(target, opened.artifact.stream, signal, result.overwrite)
+        if (cleanedUp) return { kind: 'cancelled' }
         return { kind: 'saved', path }
       }
       // /transcript: render from the CAPTURED originating Session after the
       // command lifecycle settled — never `liveAgent` at delayed settle time.
+      if (cleanedUp) return { kind: 'cancelled' }
       const markdown = renderTranscriptMarkdown(agent.session)
       const path = await writeTextAtomically(target, markdown, signal, result.overwrite)
+      if (cleanedUp) return { kind: 'cancelled' }
       return { kind: 'saved', path }
     }
     const startArtifactSave = (name: 'export' | 'transcript', agent: Agent): void => {
+      if (cleanedUp) return
       const sessionId = agent.session.id
       const key = `${name}:${sessionId}`
       // A narrow Client-local in-flight key: two simultaneous writes for the
@@ -4478,9 +4559,11 @@ export function apply(ctx: Context, config: Config): void {
         sessionId: () => sessionId,
         isCancellation: () => signal.aborted,
         onResult: (outcome) => {
+          if (cleanedUp) return
           if (outcome.kind === 'saved') app.notify(`saved to ${outcome.path}`, 'info')
         },
         onError: (error) => {
+          if (cleanedUp) return
           // The detailed diagnostic (including any Host path inside an
           // upstream exception) stays in the runOwned diag path; the user
           // sees a stable artifact-level message.
@@ -4495,6 +4578,25 @@ export function apply(ctx: Context, config: Config): void {
         },
       })
     }
+    // Every accepted user submission takes one FIFO turn before async
+    // preparation. The turn is released only after its semantic write settles,
+    // so a later gesture cannot overtake an earlier canonicalization.
+    let submitSerialTail: Promise<void> = Promise.resolve()
+    const takeSubmitTurn = (): { wait: Promise<void>; release: () => void } => {
+      const wait = submitSerialTail
+      let releaseTail!: () => void
+      const turn = new Promise<void>(resolve => { releaseTail = resolve })
+      submitSerialTail = turn
+      let released = false
+      return {
+        wait,
+        release: () => {
+          if (released) return
+          released = true
+          releaseTail()
+        },
+      }
+    }
     /** The session-backed dispatch: create the session lazily (the first
      * user input is the deferred trigger), then execute a registered slash
      * command or follow up.
@@ -4502,6 +4604,8 @@ export function apply(ctx: Context, config: Config): void {
      *   this submission; bound for the command execution so a TUI-owned
      *   skill handler accepts it instead of re-deriving it. */
     const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void, delivery: SubmitDelivery): void => {
+      const submitTurn = takeSubmitTurn()
+      let submitTurnTransferred = false
       // Local submit acknowledgement (plan D): the row appears NOW —
       // before any session create / admission / command work — because
       // this gesture owns no user-visible feedback until the first
@@ -4558,9 +4662,6 @@ export function apply(ctx: Context, config: Config): void {
         // no disappearance can turn into an invocation.
         return submitView?.claimed !== false
       }
-      const extensionCommandId = parsedAtSubmit === undefined
-        ? undefined
-        : extensionService?.commands.idFor(parsedAtSubmit.name)
       // Assigned inside the runOwned factory (invocation-time capture).
       let commandHealthRef: { slot: string; id: string; owner: string } | undefined
       // The health ref is NOT captured here: the submit-time identity can
@@ -4587,8 +4688,24 @@ export function apply(ctx: Context, config: Config): void {
       // run → failure-restore-before-release → release), shared with the
       // integration tests — never hand-rolled per path.
       runOwned('submit', () => runReservedSubmit({
-        reserve: (t) => pinDraftAttachments(t, draftImages, draftFiles),
+        reserve: (t) => {
+          try {
+            const releasePin = pinDraftAttachments(t, draftImages, draftFiles)
+            return () => {
+              try {
+                releasePin()
+              } finally {
+                if (!submitTurnTransferred) submitTurn.release()
+              }
+            }
+          } catch (error) {
+            submitTurn.release()
+            throw error
+          }
+        },
         run: async () => {
+          await submitTurn.wait
+          if (cleanedUp) return
           // The deferred-start gate (history-persist.ts): the history row
           // is written AFTER the session exists, with the FINAL session
           // id — the first prompt of a deferred start creates the session
@@ -4601,10 +4718,15 @@ export function apply(ctx: Context, config: Config): void {
           await persistAfterSession(
             async () => {
               await ensureSession()
+              if (cleanedUp) return undefined
               return liveAgent?.session.id
             },
-            persistHistory,
+            (sessionId) => {
+              if (cleanedUp) return
+              persistHistory(sessionId)
+            },
           )
+          if (cleanedUp) return
           const agent = liveAgent
           if (agent === undefined) {
             // Nothing can be written (degraded resolve after a successful
@@ -4705,6 +4827,7 @@ export function apply(ctx: Context, config: Config): void {
             settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
             return
           }
+          submitTurnTransferred = true
           runOwned('command execution', () => {
             // RE-CAPTURE at invocation time: the runOwned factory runs
             // SYNCHRONOUSLY right before execute(), so there is no race
@@ -4749,13 +4872,65 @@ export function apply(ctx: Context, config: Config): void {
             // SAME resolution.
             const commandPlaneLine = commandPlaneOwnsLine()
             planeAdvertised = commandPlaneLine && wasAdvertisedAtSubmit
-            return withCommandDelivery(delivery, () => commandPlaneLine
-              ? commands.execute(agent as Agent, toggled, submittedAttachments, signal)
-              : Promise.resolve(undefined))
+            const tuiOwnedCommand = parsedAtSubmit !== undefined
+              && (LOCAL_COMMANDS.has(parsedAtSubmit.name) || isSkillWrapperName?.(parsedAtSubmit.name) === true)
+            return withCommandDelivery(delivery, () => {
+              if (!commandPlaneLine || parsedAtSubmit === undefined) {
+                return Promise.resolve({ kind: 'committed', matched: false } as HostCommandOutcome)
+              }
+              if (tuiOwnedCommand) {
+                // TUI-local commands and skill wrappers retain their existing
+                // in-process command service path; HostCommandPort is only for
+                // a line already selected as Host-owned.
+                return commands.execute(agent as Agent, toggled, submittedAttachments, signal).then(execution =>
+                  execution === undefined
+                    ? { kind: 'committed', matched: false } as const
+                    : { kind: 'committed', matched: true, execution } as const)
+              }
+              return operationBarrier.runWriter(agent.session.id, () => backend.hostCommand.execute({
+                sessionId: agent.session.id,
+                line: toggled,
+                attachments: submittedAttachments,
+                signal,
+              }))
+            })
           }, {
             diag,
             sessionId: () => agent.session.id,
-            onResult: (execution) => {
+            onResult: (outcome) => {
+              if (cleanedUp) {
+                fallbackPin()
+                submitTurn.release()
+                return
+              }
+              if (outcome.kind !== 'committed') {
+                // A known refusal did not settle a command, so restore the
+                // complete submitted line while the handoff pin is held. An
+                // indeterminate result is different: the command may have
+                // committed, so never restore or automatically retry it. A
+                // cancellation is a normal aborted gesture, not a confirmed
+                // command failure.
+                if (outcome.kind !== 'indeterminate') restoreSubmissionDraft(text)
+                fallbackPin()
+                submitTurn.release()
+                if (outcome.kind === 'cancelled') {
+                  settleLocalSubmitAck('command execution cancelled', { token: submitAckToken, terminal: true })
+                  return
+                }
+                settleLocalSubmitAck(
+                  outcome.kind === 'indeterminate' ? 'command result indeterminate' : 'command execution refused',
+                  { token: submitAckToken, terminal: true },
+                )
+                if (outcome.kind === 'indeterminate') {
+                  app.notify('command result is indeterminate — do not retry automatically', 'error')
+                  return
+                }
+                app.notify(outcome.error.message, 'error')
+                return
+              }
+              const execution = outcome.matched
+                ? outcome.execution as { readonly result: CommandResult & { readonly draftRestored?: true; readonly draftRestoreSuppressed?: true } }
+                : undefined
               if (commandHealthRef !== undefined && execution !== undefined) {
                 extensionService?._clearRegistryError(commandHealthRef)
               }
@@ -4777,6 +4952,7 @@ export function apply(ctx: Context, config: Config): void {
                 app.notify(`/${parsedAtSubmit?.name ?? '?'} is not available in the created session`, 'error')
                 settleLocalSubmitAck('submit consumed by an unadvertised command', { token: submitAckToken, terminal: true })
                 fallbackPin()
+                submitTurn.release()
                 return
               }
               // The fallback follow-up still targets the CAPTURED agent; if
@@ -4810,6 +4986,7 @@ export function apply(ctx: Context, config: Config): void {
                       try {
                         await operationBarrier.runWriter(agent.session.id, async () => {
                           const message = await prepareUserMessage(text, draftImages, submitDeps)
+                          if (cleanedUp) return
                           // Re-check the captured session identity AFTER the
                           // async admission (the guard-window rule, AGENTS.md).
                           if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
@@ -4823,12 +5000,30 @@ export function apply(ctx: Context, config: Config): void {
                           }
                           // T1 BEFORE the write (see the direct path above).
                           submitLatencyTracker.mark(agent.session.id, 'dispatch')
-                          backend.sessionWriter.followup(agent.session.id, message)
+                          const outcome = await backend.sessionWriter.prompt(agent.session.id, message, 'queue')
+                          if (cleanedUp) return
+                          if (outcome.kind !== 'committed') {
+                            if (outcome.kind === 'indeterminate') {
+                              if (cleanedUp) return
+                              settleLocalSubmitAck('session write result indeterminate', { token: submitAckToken, terminal: true })
+                              app.notify('session write result is indeterminate — do not retry automatically', 'error')
+                              return
+                            }
+                            if (outcome.kind === 'cancelled') throw cancellationError('session write cancelled')
+                            const failure = outcome.kind === 'rejected'
+                              ? outcome.error.message
+                              : outcome.reason
+                            throw new Error(failure)
+                          }
                           // Consume ONLY the referenced drafts — a concurrent
                           // intake's newer image survives (round-5 finding 1).
                           consumeDraftAttachments(text, draftImages, draftFiles)
                         })
                       } catch (error) {
+                        if (cleanedUp) {
+                          fallbackPin()
+                          return
+                        }
                         if (error instanceof TransitionInProgressError) {
                           fallbackPin()
                           refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
@@ -4842,9 +5037,13 @@ export function apply(ctx: Context, config: Config): void {
                   }, text), {
                     diag,
                     sessionId: () => agent.session.id,
+                    onResult: () => {
+                      submitTurn.release()
+                    },
                     // The flow restored the editor; this sink settles the
                     // gesture's ack (token-scoped) and only notifies.
                     onError: (error) => {
+                      submitTurn.release()
                       settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
                       notifySubmissionFailure(error)
                     },
@@ -4853,11 +5052,13 @@ export function apply(ctx: Context, config: Config): void {
                     // ack row the gesture armed (plan D exit enumeration;
                     // the flow already restored the draft).
                     onCancel: () => {
+                      submitTurn.release()
                       settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
                     },
                   })
                 } else {
                   fallbackPin()
+                  submitTurn.release()
                   const merged = mergeDraft(app.getDraft(), text)
                   app.setEditorText(merged)
                   settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
@@ -4872,11 +5073,15 @@ export function apply(ctx: Context, config: Config): void {
                 // command never silently drops the user's attachment). An
                 // error result committed no agent-facing message: restore the
                 // staged draft before the handoff pin is released.
-                if (execution.result.kind === 'error') restoreCommandAttachmentDraft()
-                else consumeDraftAttachments(text, draftImages, draftFiles)
+                if (execution.result.kind === 'error'
+                  && execution.result.draftRestored !== true
+                  && execution.result.draftRestoreSuppressed !== true) {
+                  restoreSubmissionDraft(text)
+                } else if (execution.result.kind !== 'error') consumeDraftAttachments(text, draftImages, draftFiles)
                 // The command COMMITTED (no image fallback): release the
                 // handoff pin.
                 fallbackPin()
+                submitTurn.release()
                 // Pre-Stage-D export convergence: a SUCCESSFUL /export or
                 // /transcript starts the Client-local save workflow ONLY
                 // after the command lifecycle settled (command/done
@@ -4893,9 +5098,19 @@ export function apply(ctx: Context, config: Config): void {
               }
             },
             onError: (error) => {
-              restoreCommandAttachmentDraft()
               fallbackPin()
-              settleLocalSubmitAck('command execution failed', { token: submitAckToken, terminal: true })
+              submitTurn.release()
+              if (cleanedUp) return
+              const indeterminateSkill = isIndeterminateSkillWrite(error)
+              if (!indeterminateSkill) restoreSubmissionDraft(text)
+              settleLocalSubmitAck(
+                indeterminateSkill ? 'skill write result indeterminate' : 'command execution failed',
+                { token: submitAckToken, terminal: true },
+              )
+              if (indeterminateSkill) {
+                app.notify('skill write result is indeterminate — do not retry automatically', 'error')
+                return
+              }
               if (commandHealthRef !== undefined) extensionService?._recordRegistryError(commandHealthRef, error)
               const message = safeErrorMessage(error)
               try {
@@ -4911,6 +5126,9 @@ export function apply(ctx: Context, config: Config): void {
             // would leak (plan D exit enumeration).
             onCancel: () => {
               fallbackPin()
+              submitTurn.release()
+              if (cleanedUp) return
+              restoreSubmissionDraft(text)
               settleLocalSubmitAck('command execution cancelled', { token: submitAckToken, terminal: true })
             },
           })
@@ -4926,6 +5144,7 @@ export function apply(ctx: Context, config: Config): void {
         try {
           await operationBarrier.runWriter(agent.session.id, async () => {
             const message = await prepareUserMessage(text, draftImages, submitDeps)
+            if (cleanedUp) return
             // Re-check the captured session identity AFTER the async
             // admission (the guard-window rule, AGENTS.md).
             if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
@@ -4940,12 +5159,27 @@ export function apply(ctx: Context, config: Config): void {
             // T1 BEFORE the write call: a synchronously-emitted inbox/turn
             // event (Direct in-process) must never log ahead of dispatch.
             submitLatencyTracker.mark(agent.session.id, 'dispatch')
-            backend.sessionWriter.followup(agent.session.id, message)
+            const outcome = await backend.sessionWriter.prompt(agent.session.id, message, 'queue')
+            if (cleanedUp) return
+            if (outcome.kind !== 'committed') {
+              if (outcome.kind === 'indeterminate') {
+                if (cleanedUp) return
+                settleLocalSubmitAck('session write result indeterminate', { token: submitAckToken, terminal: true })
+                app.notify('session write result is indeterminate — do not retry automatically', 'error')
+                return
+              }
+              if (outcome.kind === 'cancelled') throw cancellationError('session write cancelled')
+              const failure = outcome.kind === 'rejected'
+                ? outcome.error.message
+                : outcome.reason
+              throw new Error(failure)
+            }
             // Consume ONLY the referenced drafts — a concurrent intake's
             // newer image survives (round-5 finding 1).
             consumeDraftAttachments(text, draftImages, draftFiles)
           })
         } catch (error) {
+          if (cleanedUp) return
           if (error instanceof TransitionInProgressError) {
             settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
             refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
@@ -5043,6 +5277,7 @@ export function apply(ctx: Context, config: Config): void {
         diag,
         sessionId: () => liveAgent?.session.id,
         onResult: (result) => {
+          if (cleanedUp) return
           if (result !== undefined && result.kind === 'error') {
             if (bridgeCommandRef !== undefined) extensionService?._recordRegistryError(bridgeCommandRef, new Error(result.text))
             app.notify(result.text)
@@ -5051,6 +5286,7 @@ export function apply(ctx: Context, config: Config): void {
           }
         },
         onError: (error) => {
+          if (cleanedUp) return
           if (bridgeCommandRef !== undefined) extensionService?._recordRegistryError(bridgeCommandRef, error)
           const message = safeErrorMessage(error)
           try {
@@ -5078,6 +5314,9 @@ export function apply(ctx: Context, config: Config): void {
      * before creation would carry no sessionId and vanish from the Ctrl+R
      * `Current session` scope. Absent, the steer persists nothing.
      */
+    // Preparation is asynchronous (mention canonicalization can await), so
+    // admission must take the shared FIFO turn rather than letting a later
+    // gesture deliver first.
     const steerNow = (text: string, onlyDraft = false, persistHistory?: (sessionId: string | undefined) => void): void => {
       // The subagent viewer is read-only: steering would send to the
       // PARENT session. Refuse with a notice and restore the draft.
@@ -5117,6 +5356,12 @@ export function apply(ctx: Context, config: Config): void {
       // a silent editor clear. The TOKEN arms every terminal exit of THIS
       // workflow.
       const steerAckToken = acceptLocalSubmitAck()
+      // Capture the session identity before the first awaited preparation or
+      // deferred-start operation. A later session must never receive this
+      // gesture's prepared input or history row.
+      const submittedAgent = liveAgent
+      const submittedGeneration = sessionGeneration
+      const submitTurn = takeSubmitTurn()
       // An owned workflow: the send's outcome drives the draft restore and
       // the notices — runOwned (AGENTS.md), never a bare void. Reserve the
       // referenced drafts SYNCHRONOUSLY (same call stack that left the
@@ -5125,8 +5370,24 @@ export function apply(ctx: Context, config: Config): void {
       // The submit-flow core owns the ordering contract (shared with the
       // integration tests).
       runOwned('steer', () => runReservedSubmit({
-        reserve: (t) => pinDraftAttachments(t, draftImages, draftFiles),
+        reserve: (t) => {
+          try {
+            const releasePin = pinDraftAttachments(t, draftImages, draftFiles)
+            return () => {
+              try {
+                releasePin()
+              } finally {
+                submitTurn.release()
+              }
+            }
+          } catch (error) {
+            submitTurn.release()
+            throw error
+          }
+        },
         run: async () => {
+          await submitTurn.wait
+          if (cleanedUp) return
         // The deferred-start gate (history-persist.ts): the steered
         // draft's history row is written AFTER the session exists, with
         // the FINAL session id — Ctrl+S on a deferred start creates the
@@ -5137,34 +5398,88 @@ export function apply(ctx: Context, config: Config): void {
         await persistAfterSession(
           async () => {
             await ensureSession()
+            if (cleanedUp) return undefined
+            if (submittedAgent !== undefined && !sessionUnchanged(
+              { agent: submittedAgent, generation: submittedGeneration },
+              liveAgent,
+              sessionGeneration,
+            )) return undefined
             return liveAgent?.session.id
           },
-          (sessionId) => persistHistory?.(sessionId),
+          (sessionId) => {
+            if (cleanedUp) return
+            if (submittedAgent !== undefined && !sessionUnchanged(
+              { agent: submittedAgent, generation: submittedGeneration },
+              liveAgent,
+              sessionGeneration,
+            )) return
+            persistHistory?.(sessionId)
+          },
         )
+        if (cleanedUp) return
+        if (submittedAgent !== undefined && !sessionUnchanged(
+          { agent: submittedAgent, generation: submittedGeneration },
+          liveAgent,
+          sessionGeneration,
+        )) {
+          const merged = mergeDraft(app.getDraft(), text)
+          app.setEditorText(merged)
+          settleLocalSubmitAck('steer stale', { token: steerAckToken, terminal: true })
+          app.notify(merged === text
+            ? 'the session changed while sending — try again'
+            : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+          return
+        }
         if (liveAgent === undefined) {
           // Nothing can be sent (degraded resolve after a successful
           // creation): the ack row must not outlive the submission.
           settleLocalSubmitAck('steer resolved without an agent', { token: steerAckToken, terminal: true })
           return
         }
+        // For an existing session this is the identity captured before the
+        // first await; for deferred start it is captured immediately after
+        // creation and before message admission.
+        const agentForSteer = submittedAgent ?? liveAgent
+        const generationForSteer = submittedAgent === undefined ? sessionGeneration : submittedGeneration
         // The draft message is prepared BEFORE the send: admission is
         // async I/O, and the prepared message is exactly what the send
         // delivers (§13).
         const prepared = await prepareUserMessage(text, draftImages, submitDeps)
+        if (cleanedUp) return
+        // Re-check the identity after async admission, before entering the
+        // writer barrier. A session switch during preparation must restore
+        // the original draft instead of retargeting the new session.
+        if (!sessionUnchanged(
+          { agent: agentForSteer, generation: generationForSteer },
+          liveAgent,
+          sessionGeneration,
+        )) {
+          const merged = mergeDraft(app.getDraft(), text)
+          app.setEditorText(merged)
+          settleLocalSubmitAck('steer stale', { token: steerAckToken, terminal: true })
+          app.notify(merged === text
+            ? 'the session changed while sending — try again'
+            : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+          return
+        }
         // T1 BEFORE the dispatch: the steer is being invoked, and any
         // synchronously-emitted event from the delivery must never log
         // ahead of it. The ACK ROW keeps waiting for the authoritative
         // event (plan D).
-        submitLatencyTracker.mark(liveAgent.session.id, 'dispatch')
+        submitLatencyTracker.mark(agentForSteer.session.id, 'dispatch')
         // The whole send (snapshot → re-validate → confirm-and-send) lives
         // in steer.ts so the races are testable: a queue splice or session
         // switch while the delivery is in flight aborts with a retry notice
         // instead of losing messages.
         const outcome = await steerAll({
-          currentAgent: () => liveAgent as unknown as SteerAgentLike,
-          currentGeneration: () => sessionGeneration,
-          notify: (message, kind) => app.notify(message, kind),
+          currentAgent: () => cleanedUp ? undefined : agentForSteer as unknown as SteerAgentLike,
+          currentGeneration: () => generationForSteer,
+          notify: (message, kind) => {
+            if (cleanedUp) return
+            app.notify(message, kind)
+          },
           restoreDraft: (draft) => {
+            if (cleanedUp) return false
             const merged = mergeDraft(app.getDraft(), draft)
             app.setEditorText(merged)
             return merged === draft
@@ -5173,7 +5488,7 @@ export function apply(ctx: Context, config: Config): void {
           // flight (quiesce → commit) the old agent may be woken again —
           // a steer in that window would target a session that is about
           // to be retired (the two-writers race, review round 4).
-          fence: () => transitionGate.busy,
+          fence: () => transitionGate.busy || cleanedUp,
           barrier: operationBarrier,
           fenceNotice: () => 'a session transition is in progress — try again in a moment',
           createDraft: () => prepared,
@@ -5187,6 +5502,7 @@ export function apply(ctx: Context, config: Config): void {
         text,
         onlyDraft ? { onlyDraft: true, draftHasPayload } : { draftHasPayload },
       )
+        if (cleanedUp) return
         // Only a successful send consumes the drafts: on block/stale the
         // draft was restored and the images are still referenced — removing
         // would orphan the placeholders (§14). The consumption is
@@ -5211,6 +5527,7 @@ export function apply(ctx: Context, config: Config): void {
         // The flow restored the editor; this sink settles the gesture's
         // ack (token-scoped) and only notifies.
         onError: (error) => {
+          if (cleanedUp) return
           settleLocalSubmitAck('failure', { token: steerAckToken, terminal: true })
           notifySubmissionFailure(error)
         },
@@ -5220,6 +5537,7 @@ export function apply(ctx: Context, config: Config): void {
         // terminated HERE (the flow already restored the draft — plan D
         // exit enumeration).
         onCancel: () => {
+          if (cleanedUp) return
           settleLocalSubmitAck('steer cancelled', { token: steerAckToken, terminal: true })
         },
       })
@@ -5264,7 +5582,10 @@ export function apply(ctx: Context, config: Config): void {
           if (written) lastHistoryContent = trimmed
         }, {
           diag,
-          notify: (message) => app.notify(message, 'error'),
+          notify: (message) => {
+              if (cleanedUp) return
+              app.notify(message, 'error')
+            },
           recoverable: () => true,
         })
       }
@@ -5374,7 +5695,10 @@ export function apply(ctx: Context, config: Config): void {
           if (written) lastHistoryContent = trimmed
         }, {
           diag,
-          notify: (message) => app.notify(message, 'error'),
+          notify: (message) => {
+              if (cleanedUp) return
+              app.notify(message, 'error')
+            },
           recoverable: () => true,
         })
       }
@@ -5427,6 +5751,7 @@ export function apply(ctx: Context, config: Config): void {
               failSubmission(text)(error)
             },
             onCancel: () => {
+              if (cleanedUp) return
               // NOT wrapped in runReservedSubmit: nothing restores the
               // draft here, so a cancelled ensureSession would silently
               // lose the submitted text — merge it back first (no error
@@ -5571,7 +5896,7 @@ export function apply(ctx: Context, config: Config): void {
           reserve: (draft) => pinDraftAttachments(draft, draftImages, draftFiles),
           run: async () => {
             await ensureSession()
-            if (liveAgent === undefined) return
+            if (cleanedUp || liveAgent === undefined) return
             // AUTHORITY RE-CHECK after the session exists: the deferred start
             // commits a session whose scoped catalog the standing view could
             // not see, and the skill catalog may load with it. A live HOST
@@ -5604,6 +5929,7 @@ export function apply(ctx: Context, config: Config): void {
           diag,
           sessionId: () => liveAgent?.session.id,
           onError: (error) => {
+            if (cleanedUp) return
             // The flow restored the editor BEFORE the reservation released;
             // this sink only notifies (never a second restore).
             app.notify(safeErrorMessage(error), 'error')
@@ -5741,7 +6067,7 @@ export function apply(ctx: Context, config: Config): void {
         // (round-5 finding 2).
         const pasteGeneration = sessionGeneration
         runOwned('clipboard paste', () => readClipboardImage(runClipboardCommand, clipboardEnv).then((result) => {
-          if (sessionGeneration !== pasteGeneration) return
+          if (cleanedUp || sessionGeneration !== pasteGeneration) return
           if (result.kind === 'image') {
             // Attach-time prune (review finding 2): placeholders deleted or
             // Ctrl+C-cleared since the last attach must not hold their
@@ -5770,7 +6096,10 @@ export function apply(ctx: Context, config: Config): void {
         }), {
           diag,
           sessionId: () => liveAgent?.session.id,
-          onError: (error) => app.notify(safeErrorMessage(error), 'error'),
+          onError: (error) => {
+            if (cleanedUp) return
+            app.notify(safeErrorMessage(error), 'error')
+          },
         })
       },
       // The owned-task entry for UI-layer one-shot flows (the external
@@ -5790,8 +6119,7 @@ export function apply(ctx: Context, config: Config): void {
         // live agent (busy: one Esc fires this directly; idle: double-Esc).
         // interruptAgent PRESERVES the pending queue (web Stop parity) — an
         // interrupt stops the current thinking, never the queued input.
-        localShellController?.abort()
-        interruptAgent(liveAgent, backend.sessionWriter)
+        interruptLiveAgent()
       },
       // Conversation rewind: the TuiApp fires this only when IDLE with an
       // EMPTY editor and a fast second Esc (busy stays a cancel; overlays,
@@ -5802,6 +6130,7 @@ export function apply(ctx: Context, config: Config): void {
       // host's own paths (plan §2.2 — the host never lets a plugin bypass
       // submission/session safety).
       onExtensionAction: (action) => {
+        if (cleanedUp) return
         // VIEWER CAPABILITY GATE: while a subagent viewer is open (either
         // mode), semantic actions with PARENT-session side effects are
         // blocked — the viewer's input must never interrupt/steer/queue/
@@ -5842,8 +6171,7 @@ export function apply(ctx: Context, config: Config): void {
             break
           }
           case 'cancel-activity': {
-            localShellController?.abort()
-            interruptAgent(liveAgent, backend.sessionWriter)
+            interruptLiveAgent()
             break
           }
           case 'open-search': {
@@ -5897,7 +6225,10 @@ export function apply(ctx: Context, config: Config): void {
       // session/title events — the app fires it for EVERY setSessionTitle):
       // the terminal window title policy follows, so a rename/regenerate
       // refreshes the OSC title immediately.
-      onTitleChanged: () => refreshTerminalTitle(),
+      onTitleChanged: () => {
+        if (cleanedUp) return
+        refreshTerminalTitle()
+      },
       // Terminal focus reports (CSI ? 1004): the completion-notification
       // focus tracker observes them. The report is consumed host-side in
       // regular mode and passes through in fullscreen (the viewport
@@ -6046,7 +6377,10 @@ export function apply(ctx: Context, config: Config): void {
              () => settings.replace({ ...settings.get(), footerCustomItems: userFooterCustomItemsForSave(), fullscreen: fullscreen ? 'on' : 'off' }),
            ), {
             diag,
-            notify: (message) => app.notify(message, 'error'),
+            notify: (message) => {
+              if (cleanedUp) return
+              app.notify(message, 'error')
+            },
             recoverable: () => true,
           })
         }
@@ -6158,8 +6492,10 @@ export function apply(ctx: Context, config: Config): void {
       // notification into an editable user message. The current draft rides
       // along below the pulled-back queue.
       onDequeue: () => {
-        if (liveAgent === undefined) return
-        const queued = [...liveAgent.inbox.nextTurn, ...liveAgent.inbox.nextStep]
+        if (cleanedUp || liveAgent === undefined) return
+        const queuedAgent = liveAgent
+        const queuedGeneration = sessionGeneration
+        const queued = [...queuedAgent.inbox.nextTurn, ...queuedAgent.inbox.nextStep]
           .filter(message => isUserQueueInput(message.source as QueueNoticeSource | undefined))
         if (queued.length === 0) return
         // Multimodal queued messages (durable ImageBlocks) ARE pullable:
@@ -6213,12 +6549,79 @@ export function apply(ctx: Context, config: Config): void {
           app.notify(safeErrorMessage(error), 'error')
           return
         }
-        // Remove exactly the pulled-back messages (durable splice), keeping
-        // any notices queued behind them.
-        for (const message of queued) backend.sessionWriter.dequeue(liveAgent.session.id, message.id)
-        const current = app.getDraft()
-        app.setDraft([recalledText, current].filter(part => part.trim() !== '').join('\n\n'))
-        refreshQueue()
+        // Pin recalled refs before the first async boundary. The editor still
+        // lacks these placeholders until the semantic queue removal commits,
+        // so an attach-time prune must not delete them in the meantime.
+        const releaseRecalled = pinDraftAttachments(recalledText, draftImages, draftFiles)
+        // Remove exactly the pulled-back messages as one semantic batch,
+        // keeping any notices queued behind them. The draft is updated only
+        // after the batch reports committed.
+        runOwned('queue pull-back', () => operationBarrier.runWriter(queuedAgent.session.id, async () => {
+          if (cleanedUp) {
+            for (const entry of staged) {
+              if (entry.kind === 'image') draftImages.remove(entry.id)
+              else draftFiles.remove(entry.id)
+            }
+            return
+          }
+          if (!sessionUnchanged(
+            { agent: queuedAgent, generation: queuedGeneration },
+            liveAgent,
+            sessionGeneration,
+          )) {
+            for (const entry of staged) {
+              if (entry.kind === 'image') draftImages.remove(entry.id)
+              else draftFiles.remove(entry.id)
+            }
+            app.notify('the session changed while pulling messages back — try again', 'info')
+            return
+          }
+          const outcome = await backend.sessionWriter.removeQueuedBatch(
+            queuedAgent.session.id,
+            queued.map(message => message.id),
+          )
+          // Final disposal may happen while the semantic removal is in
+          // flight. Leave recalled refs owned by this dead workflow rather
+          // than touching the disposed app; in particular, an indeterminate
+          // removal must never discard the only local representation.
+          if (cleanedUp) return
+          if (outcome.kind === 'committed') {
+            const current = app.getDraft()
+            app.setDraft(recalledText === '' ? current : current === '' ? recalledText : `${recalledText}\n\n${current}`)
+            refreshQueue()
+            return
+          }
+          if (outcome.kind === 'indeterminate') {
+            // Keep the staged recalled refs visible for manual review. The
+            // queue state is unknown, so this must not silently discard the
+            // only local representation or trigger an automatic retry.
+            const current = app.getDraft()
+            app.setDraft(recalledText === '' ? current : current === '' ? recalledText : `${recalledText}\n\n${current}`)
+            app.notify('queue pull-back result is indeterminate — do not retry automatically', 'error')
+            return
+          }
+          if (outcome.kind === 'cancelled') throw cancellationError('queue pull-back cancelled')
+          const failure = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
+          throw new Error(failure)
+        }).finally(() => releaseRecalled()), {
+          diag,
+          sessionId: () => liveAgent?.session.id,
+          onError: (error) => {
+            if (cleanedUp) return
+            for (const entry of staged) {
+              if (entry.kind === 'image') draftImages.remove(entry.id)
+              else draftFiles.remove(entry.id)
+            }
+            app.notify(safeErrorMessage(error), 'error')
+          },
+          onCancel: () => {
+            if (cleanedUp) return
+            for (const entry of staged) {
+              if (entry.kind === 'image') draftImages.remove(entry.id)
+              else draftFiles.remove(entry.id)
+            }
+          },
+        })
       },
       // ↓ with an empty editor: the Quick Tasks browser over BOTH
       // background surfaces. Job rows (bash + background one-shot subagent
@@ -6251,6 +6654,7 @@ export function apply(ctx: Context, config: Config): void {
       // submit/steer/queue path. The app already cleared the child draft;
       // a rejection restores it (merged) into the child's own draft slot.
       onSubagentSubmit: (submit) => {
+        if (cleanedUp) return
         const viewerGeneration = app.getViewerGeneration()
         // The viewer editor's text becomes the prompt's content parts at
         // the client boundary (text today; image parts join with the
@@ -6260,6 +6664,8 @@ export function apply(ctx: Context, config: Config): void {
           childSessionId: submit.childSessionId,
           content: [{ type: 'text', text: submit.text }],
         }
+        const promptViewerAbort = viewerSessionAbort
+        const promptViewerCwd = viewing?.cwd
         runOwned('subagent prompt', () => backend.subagent.prompt(request, {
           // The caller signal owns lookup/materialization/admission only
           // until inbox acceptance (the official prompt contract): a TUI
@@ -6268,9 +6674,9 @@ export function apply(ctx: Context, config: Config): void {
           // that has NOT been accepted yet; once accepted the child owns
           // the message and no restore happens. Never a dropped controller
           // whose signal can never fire.
-          makeSignal: () => viewerSessionAbort === undefined
+          makeSignal: () => promptViewerAbort === undefined
             ? lifecycleController.signal
-            : AbortSignal.any([lifecycleController.signal, viewerSessionAbort.signal]),
+            : AbortSignal.any([lifecycleController.signal, promptViewerAbort.signal]),
           // Same `@`-file mention canonicalization as the main session's
           // submissions (the editor keeps `@src/foo.ts`, the child model
           // receives the absolute path). The scope is the VIEWED CHILD's
@@ -6279,7 +6685,7 @@ export function apply(ctx: Context, config: Config): void {
           // cwd would rewrite the child's mentions to the wrong tree);
           // an unknown cold-child cwd falls back to the live parent.
           canonicalizeText: (text) => backend.hostFile.canonicalizeMentions(
-            viewerCanonicalizeScope(viewing?.cwd, liveAgent?.session.id),
+            viewerCanonicalizeScope(promptViewerCwd, request.parentSessionId),
             text,
           ),
         }), {
@@ -6459,6 +6865,7 @@ export function apply(ctx: Context, config: Config): void {
       outcome: SubagentPromptOutcome,
       viewerGeneration: number,
     ): void => {
+      if (cleanedUp) return
       // The viewer target is CURRENT only while the SAME child is still
       // being viewed AND the viewer generation is unchanged (a viewer
       // open/close/switch bumps it — a close → reopen of the SAME child
@@ -6538,7 +6945,7 @@ export function apply(ctx: Context, config: Config): void {
       scope?: TaskBrowserDatasetScope,
       header?: string,
     ): void => {
-      if (liveAgent === undefined) return
+      if (cleanedUp || liveAgent === undefined) return
       // PR2 plan §10.5/§10.8: an EXPLICIT scope (a Workflow phase/run
       // dataset) becomes the browser's dataset scope; a transition
       // (Quick→Full / Full→Quick) without one keeps the current scope; a
@@ -6553,6 +6960,8 @@ export function apply(ctx: Context, config: Config): void {
       // bound to the browser that hosted the confirmation (PR review P1).
       const browserGeneration = sessionGeneration
       const browserSession = liveAgent
+      const browserToken = {}
+      activeTaskBrowserToken = browserToken
       let jobSnapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
       if (jobs !== undefined) {
         try {
@@ -6586,6 +6995,7 @@ export function apply(ctx: Context, config: Config): void {
         taskBrowserRows = buildTaskRows(jobSnapshots, [])
       }
       const selectRow = (value: string): void => {
+        if (cleanedUp) return
         const row = taskBrowserRows.find(candidate => candidate.value === value)
         if (row === undefined) return
         if (row.kind === 'subagent') {
@@ -6606,18 +7016,24 @@ export function apply(ctx: Context, config: Config): void {
           ), {
             diag,
             sessionId: () => liveAgent?.session.id,
-            onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
+            onError: (error) => {
+              if (cleanedUp) return
+              app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
+            },
           })
           return
         }
         openJobView(row.jobId)
       }
       const actionRow = (value: string, action: 'stop' | 'interrupt'): void => {
+        if (cleanedUp) return
         // `interrupt` is accepted only for pre-refactor embedders. The
         // production panel emits `stop` after its confirmation dialog.
         if (action !== 'stop' && action !== 'interrupt') return
         const row = taskBrowserRows.find(candidate => candidate.value === value)
         if (row === undefined) return
+        const actionBrowserToken = activeTaskBrowserToken
+        if (actionBrowserToken !== browserToken) return
         // The SURFACE fence: the user's destructive intent is bound to the
         // session that owned this browser when it opened. A session that
         // switched after the browser opened (or while a confirmation was
@@ -6630,20 +7046,37 @@ export function apply(ctx: Context, config: Config): void {
           // Re-read the live driver at confirmation time; the panel row is
           // only a snapshot and may have become idle since it was rendered.
           if (agents?.get(row.childId as SessionId)?.status !== 'running') return
-          const service = ctx.get('subagents')
-          if (service === undefined) {
-            app.notify('subagent service unavailable', 'error')
-            return
-          }
           // The interrupt authority names the child's DURABLE DIRECT parent;
           // deep descendants must not be addressed through the main root.
           const interruptParent = subagentInterruptParent(row, browserSession.session.id) as SessionId
-          try {
-            service.interrupt(row.childId as SessionId, { kind: 'user', parentSessionId: interruptParent })
-            app.notify(`stopping ${row.label}`, 'info')
-          } catch (error) {
-            app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
-          }
+          runOwned('subagent interrupt', () => operationBarrier.runWriter(
+            browserSession.session.id,
+            () => backend.subagent.interrupt({
+              parentSessionId: interruptParent,
+              childSessionId: row.childId as SessionId,
+              mode: 'continuable',
+            }),
+          ), {
+            diag,
+            sessionId: () => browserSession.session.id,
+            onResult: (outcome) => {
+              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || sessionGeneration !== browserGeneration || liveAgent !== browserSession) return
+              if (outcome.kind === 'committed') {
+                app.notify(`stopping ${row.label}`, 'info')
+                return
+              }
+              const reason = outcome.reason.kind === 'error'
+                ? outcome.reason.message
+                : outcome.reason.message ?? (outcome.reason.kind === 'unauthorized'
+                  ? 'subagent interrupt unauthorized'
+                  : 'subagent service unavailable')
+              app.notify(`could not stop ${row.label}: ${reason}`, 'error')
+            },
+            onError: (error) => {
+              if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || sessionGeneration !== browserGeneration || liveAgent !== browserSession) return
+              app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+            },
+          })
           return
         }
         // Job stop is capability-gated to an actually active current record.
@@ -6672,10 +7105,18 @@ export function apply(ctx: Context, config: Config): void {
         // refresh cannot repaint a closed browser. The dataset scope resets
         // with the close (PR2 plan §10.8 — the next ordinary Task Center
         // must see the global dataset).
-        (value) => { activeTaskBrowser = undefined; resetTaskBrowserScope(); selectRow(value) },
+        (value) => {
+          if (cleanedUp) return
+          activeTaskBrowser = undefined
+          activeTaskBrowserToken = undefined
+          resetTaskBrowserScope()
+          selectRow(value)
+        },
         () => {
+          if (cleanedUp) return
           const current = activeTaskBrowser?.getViewState?.()
           activeTaskBrowser = undefined
+          activeTaskBrowserToken = undefined
           resetTaskBrowserScope()
           if (viewMode === 'full' && restoreState !== undefined) {
             // Esc from a promoted full view returns to Quick with the latest
@@ -6701,6 +7142,7 @@ export function apply(ctx: Context, config: Config): void {
           loading: runtime !== undefined && taskBrowserRows.length === 0,
           groupLabels: true,
           onRefresh: () => {
+            if (cleanedUp) return
             if (runtime === undefined) {
               refreshTasks()
               return
@@ -6717,12 +7159,14 @@ export function apply(ctx: Context, config: Config): void {
             })
           },
           onViewFull: state => {
+            if (cleanedUp) return
             activeTaskBrowser = undefined
+            activeTaskBrowserToken = undefined
             quickTaskState = state
             openTasksBrowser('full', state)
           },
           onStop: value => actionRow(value, 'stop'),
-          onViewportExpose: ids => runtime?.acknowledge(ids),
+          onViewportExpose: ids => { if (!cleanedUp) runtime?.acknowledge(ids) },
         },
       )
       activeTaskBrowser = handle
@@ -6792,7 +7236,10 @@ export function apply(ctx: Context, config: Config): void {
           ), {
             diag,
             sessionId: () => liveAgent?.session.id,
-            onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
+            onError: (error) => {
+              if (cleanedUp) return
+              app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
+            },
           })
           return
         }
@@ -7263,7 +7710,10 @@ export function apply(ctx: Context, config: Config): void {
             })
           }, {
             diag,
-            notify: (message) => app.notify(message, 'error'),
+            notify: (message) => {
+              if (cleanedUp) return
+              app.notify(message, 'error')
+            },
             recoverable: () => true,
           })
         }
@@ -7308,7 +7758,6 @@ export function apply(ctx: Context, config: Config): void {
     // source the open browser's select/action paths read. Tracked at
     // runner scope so the runtime refresh repaints the OPEN panel and a
     // session switch closes it (see bumpSessionGeneration).
-    let activeTaskBrowser: TaskBrowserHandle | undefined
     let taskBrowserRows: TaskBrowserRow[] = []
     let taskRuntime: TaskBrowserRuntime | undefined
     /** The dataset scope of the OPEN task browser (PR2 plan §10.5): `all`
@@ -7321,6 +7770,7 @@ export function apply(ctx: Context, config: Config): void {
     const jobs = ctx.get('jobs')
     if (jobs !== undefined) {
       refreshTasks = (): void => {
+        if (cleanedUp) return
         let tasks: { id: string; label: string; status: string; kind?: string; startedAt?: number; finishedAt?: number }[] = []
         try {
           // Keep terminal records in the catalog. Active/total separation is
@@ -7370,7 +7820,7 @@ export function apply(ctx: Context, config: Config): void {
       taskRuntime = new TaskBrowserRuntime({
         // The session fence key: generation + session id, captured when a
         // refresh starts and re-checked after the async listing.
-        currentKey: () => liveAgent === undefined ? undefined : `${sessionGeneration}:${liveAgent.session.id}`,
+        currentKey: () => cleanedUp || liveAgent === undefined ? undefined : `${sessionGeneration}:${liveAgent.session.id}`,
         listDescendants: () => {
           const sessionId = liveAgent?.session.id
           return sessionId === undefined ? Promise.resolve([]) : subagents.listDescendants(sessionId)
@@ -7390,6 +7840,7 @@ export function apply(ctx: Context, config: Config): void {
         // never the catalog's store-presence activity.
         agentStatusOf: (childId) => agents?.get(childId as SessionId)?.status,
         commitRows: (rows, preferred) => {
+          if (cleanedUp) return
           // The row-identity source for the open browser's select path
           // always reflects the latest commit (a runtime refresh that
           // repainted the panel is never contradicted by a stale local
@@ -7397,19 +7848,29 @@ export function apply(ctx: Context, config: Config): void {
           taskBrowserRows = [...rows]
           activeTaskBrowser?.setItems(taskPanelItems(rows), preferred)
         },
-        commitBadge: (running) => app.setAgents(running.map(entry => ({
-          id: entry.id,
-          label: entry.label,
-          activity: 'running',
-        }))),
-        commitSummary: (summary) => app.setTaskSummary(summary),
-        commitRefreshState: (state, error) => activeTaskBrowser?.setRefreshState?.(state, error),
+        commitBadge: (running) => {
+          if (cleanedUp) return
+          app.setAgents(running.map(entry => ({
+            id: entry.id,
+            label: entry.label,
+            activity: 'running',
+          })))
+        },
+        commitSummary: (summary) => {
+          if (cleanedUp) return
+          app.setTaskSummary(summary)
+        },
+        commitRefreshState: (state, error) => {
+          if (cleanedUp) return
+          activeTaskBrowser?.setRefreshState?.(state, error)
+        },
       })
       // Seed the summary synchronously from jobs before the durable catalog
       // listing lands; this prevents a terminal/jobs-only first frame from
       // claiming every record is still running.
       taskRuntime.refreshRuntime()
       refreshAgents = (): void => {
+        if (cleanedUp) return
         if (liveAgent === undefined) {
           app.setAgents([])
           return
@@ -7420,6 +7881,7 @@ export function apply(ctx: Context, config: Config): void {
         })
       }
       refreshAgentRuntimeOnly = (): void => {
+        if (cleanedUp) return
         if (liveAgent === undefined) {
           app.setAgents([])
           return
@@ -7461,7 +7923,10 @@ export function apply(ctx: Context, config: Config): void {
           ), {
             diag,
             sessionId: () => owner.session.id,
-            onError: (error) => app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error'),
+            onError: (error) => {
+              if (cleanedUp) return
+              app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
+            },
           })
           return
         }
@@ -7537,6 +8002,7 @@ export function apply(ctx: Context, config: Config): void {
     // error notify, so the failure is announced without polluting the queue.
     const notifiedSubagentNotices = new Set<string>()
     const refreshQueue = (): void => {
+      if (cleanedUp) return
       if (liveAgent === undefined) {
         app.setQueueItems([])
         return
@@ -7562,6 +8028,7 @@ export function apply(ctx: Context, config: Config): void {
      * plus every switch await the coordinator refresh themselves.
      */
     const initLiveSession = async (agent: Agent): Promise<void> => {
+      if (cleanedUp) return
       // Session transitions invalidate transient keyboard confirmation before
       // any asynchronous hydration or bootstrap work begins.
       app.clearExitConfirmation()
@@ -8056,8 +8523,8 @@ export function apply(ctx: Context, config: Config): void {
       // against the coordinator's cache, no stale footer after an explicit
       // status (round-8 finding).
       forceContextMeasurement,
-      // The session WRITE port (migration M1.4): follow-up delivery, steer,
-      // queue pull-back, cancel and title ops go through the port.
+      // The session WRITE port (D2.1): ordinary prompts, Ctrl+S batch
+      // delivery, exact queue removal, cancel and title ops go through the port.
       sessionWriter: backend.sessionWriter,
       // The interaction port (migration M1.6): approval/question authority.
       interaction: backend.interaction,
@@ -8241,6 +8708,7 @@ export function apply(ctx: Context, config: Config): void {
       resumeFailure = undefined
     }
     ctx.on('session/event', (session, event) => {
+      if (cleanedUp) return
       const attachedSession = sessions.get(session.id)
       if (attachedSession !== undefined && attachedSession !== session) return
       // Opening journals fence presentation only. Runtime bookkeeping must
@@ -8555,7 +9023,7 @@ export function apply(ctx: Context, config: Config): void {
     // (the authoritative settled boundary — running → idle on the SAME
     // live agent; children never notify).
     ctx.on('agent/status', ({ agent, status }) => {
-      if (liveAgent === undefined) return
+      if (cleanedUp || liveAgent === undefined) return
       if (agent.id === liveAgent.id) {
         completionController.onAgentStatus(agent.id, status)
         return
@@ -8573,14 +9041,23 @@ export function apply(ctx: Context, config: Config): void {
     // The credential update surface has reference and durable-record events;
     // both change the same footer/welcome state, so they share one refresh
     // callback.
-    ctx.on('llm/adapters-updated', () => { refreshStatusCheap(); updateWelcomeCard() })
+    ctx.on('llm/adapters-updated', () => {
+      if (cleanedUp) return
+      refreshStatusCheap()
+      updateWelcomeCard()
+    })
     ctx.on('settings/document-updated', (ns) => {
+      if (cleanedUp) return
       if (ns === 'llm-pi-ai' || ns === 'llm-deepseek') {
         refreshStatusCheap()
         updateWelcomeCard()
       }
     })
-    const refreshCredentialSurface = (): void => { refreshStatusCheap(); updateWelcomeCard() }
+    const refreshCredentialSurface = (): void => {
+      if (cleanedUp) return
+      refreshStatusCheap()
+      updateWelcomeCard()
+    }
     // The credential event wiring is the config port's (migration M1.9):
     // reference- and record-updated both change the same surface. The
     // subscription is DISPOSED on teardown — a remount/HMR must never

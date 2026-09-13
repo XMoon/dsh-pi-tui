@@ -72,11 +72,12 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       measureContext: () => undefined,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      steerBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+      removeQueuedBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     interaction: {
@@ -922,8 +923,9 @@ test('a second artifact save while one prompt is active is refused with a notice
   })
   const sessionA = { id: 'session-a', header: { id: 'session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION } }
   const harness = makeHarness(home, { sessions: { 'session-a': sessionA } })
-  // Both commands stay in flight until released: two concurrent command
-  // successes can race the Save prompt (the dispatch is not serialized).
+  // Both command executions are gated so the shared submit FIFO can be
+  // observed: the second command must not enter the Host plane until the
+  // first command has settled.
   const executeGates: Array<() => void> = []
   const originalExecute = harness.commands.execute
   harness.commands.execute = async () => {
@@ -947,10 +949,15 @@ test('a second artifact save while one prompt is active is refused with a notice
   submitText(app, '/export')
   submitText(app, '/transcript')
   await settle()
-  // Release both commands: both settle successfully, then the save
-  // workflows race the prompt — the first opens the REAL prompt, the
-  // second is refused by the duplicate guard.
-  for (const release of executeGates) release()
+  // Release each command in turn. The first successful command opens the
+  // real Save Location prompt; after its submit turn is released, the second
+  // command runs and its save is refused by the duplicate guard.
+  for (let index = 0; index < 2; index += 1) {
+    for (let round = 0; round < 40 && executeGates.length <= index; round += 1) await settle()
+    assert.ok(executeGates[index], `command ${index + 1} must reach the gated Host plane`)
+    executeGates[index]!()
+    await settle()
+  }
   await settle()
   await new Promise<void>(resolve => setTimeout(resolve, 50))
   await settle()

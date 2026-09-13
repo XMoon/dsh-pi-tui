@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DraftImageStore } from '../src/image/draft-store.ts'
-import { pruneUnreferencedDrafts } from '../src/image/submit.ts'
+import { pinDraftAttachments, pruneUnreferencedDrafts } from '../src/image/submit.ts'
 import { ImageTooLargeError } from '../src/image/errors.ts'
 import { expandImagePlaceholders, formatImagePlaceholder, type DraftSegment } from '../src/image/placeholder.ts'
 import type { DraftImage, DraftImageInput } from '../src/image/types.ts'
@@ -284,6 +284,36 @@ test('clearUnpinned keeps in-flight pinned drafts; clear drops everything (revie
   // Full teardown still drops everything, pins included.
   store.clear()
   assert.equal(store.get(pinned.id), undefined)
+})
+
+test('recalled refs stay pinned while delayed queue removal is in flight', async () => {
+  const store = new DraftImageStore()
+  const recalled = store.add({
+    bytes: new Uint8Array([9]),
+    mediaType: 'image/png',
+    width: 640,
+    height: 480,
+    source: { type: 'recalled' },
+    recalledRef: { attachmentId: 'durable-image', mediaType: 'image/png', bytes: 1, width: 640, height: 480 },
+  })
+  const release = pinDraftAttachments(recalled.placeholder, store)
+  let releaseRemoval!: () => void
+  const removal = new Promise<void>(resolve => { releaseRemoval = resolve })
+  const pendingRemoval = removal.then(() => ({ kind: 'committed' as const }))
+
+  await Promise.resolve()
+  pruneUnreferencedDrafts('', store)
+  assert.equal(store.get(recalled.id), recalled, 'pruning must not delete a staged recalled ref before removal settles')
+  releaseRemoval()
+  assert.deepEqual(await pendingRemoval, { kind: 'committed' })
+
+  // The committed dequeue installs the placeholder before releasing its pin;
+  // a later prune still sees a live editor reference.
+  pruneUnreferencedDrafts(recalled.placeholder, store)
+  assert.equal(store.get(recalled.id), recalled, 'the committed recalled draft remains owned by the restored editor')
+  release()
+  pruneUnreferencedDrafts('', store)
+  assert.equal(store.get(recalled.id), undefined, 'once the restored editor drops the ref, pruning may collect it')
 })
 
 test('a submission pinned BEFORE its async phase survives concurrent pruning (deferred-start window)', () => {

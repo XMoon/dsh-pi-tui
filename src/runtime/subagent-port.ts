@@ -1,15 +1,11 @@
 /**
- * The subagent domain port (M1.2) — the semantic contract between the TUI
- * and the subagent domain, implemented by `src/runtime/direct/` (Direct)
- * today and by a Remote adapter in a later milestone. The port is narrow:
- * it owns the human prompt delivery path (the interactive viewer's
- * submit); list/interrupt/history join the port in later cuts.
+ * The subagent domain port (D2.1 extension) — the semantic contract
+ * between the TUI and subagent control. Direct implements it over the dsh
+ * official service today; a Remote adapter is a later milestone.
  *
- * The pure delivery core stays in `src/subagent-viewer-submit.ts`
- * (validation, the official `ctx.subagents.prompt(...)` call, error
- * classification); the port formalizes the seam so the runner depends on
- * the interface, and the Direct adapter owns the `ctx` access and the
- * requestId minting.
+ * The port owns human prompt delivery and continuable-child interruption.
+ * Parent/child authority is explicit for both operations; no UI row or root
+ * inference crosses this boundary.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/subagent-port
@@ -21,9 +17,8 @@ import type {
 } from '../subagent-viewer-submit.ts'
 
 /** The caller-owned per-call context for a prompt delivery (cancellation,
- * text canonicalization). The runner provides these; the port never
- * reaches into the session itself — parent/child authority is validated
- * by the official Host call. */
+ * text canonicalization). The runner provides these; the port never reaches
+ * into the session itself. */
 export interface SubagentPromptContext {
   /** A fresh per-call cancellation source (the caller owns aborting it). */
   makeSignal(): AbortSignal
@@ -33,13 +28,36 @@ export interface SubagentPromptContext {
   canonicalizeText?(text: string): string | Promise<string>
 }
 
+/** The explicit semantic target for stopping a continuable child. */
+export interface SubagentInterruptRequest {
+  readonly parentSessionId: string
+  readonly childSessionId: string
+  readonly mode: 'continuable'
+}
+
+/** Expected interruption refusal categories. Unknown Direct exceptions still
+ * throw through the existing owned-task failure sink. */
+export type SubagentInterruptReject =
+  | { readonly kind: 'unavailable'; readonly message?: string }
+  | { readonly kind: 'unauthorized'; readonly message?: string }
+  | { readonly kind: 'error'; readonly message: string }
+
+/** Settlement of the semantic interruption request. */
+export type SubagentInterruptOutcome =
+  | { readonly kind: 'committed' }
+  | { readonly kind: 'rejected'; readonly reason: SubagentInterruptReject }
+
 /** The subagent domain port. */
 export interface SubagentPort {
   /** Deliver one viewer HUMAN PROMPT to a continuable child through the
    * official subagent control API, or classify why it could not be
-   * delivered. Never throws for a classified rejection. */
+   * delivered. */
   prompt(
     request: SubagentViewerSubmitRequest,
     context: SubagentPromptContext,
   ): Promise<SubagentPromptOutcome>
+
+  /** Interrupt one explicit continuable child on behalf of its direct parent.
+   * A completed/idle child remains an official service no-op. */
+  interrupt(request: SubagentInterruptRequest): Promise<SubagentInterruptOutcome>
 }

@@ -25,6 +25,7 @@ export const CAPABILITIES = [
   'config',
   'host-file',
   'session-archive',
+  'host-command',
 ] as const
 
 export type Capability = (typeof CAPABILITIES)[number]
@@ -44,4 +45,5 @@ export const DIRECT_IMPLEMENTED_CAPABILITIES: readonly Capability[] = [
   'config',
   'host-file',
   'session-archive',
+  'host-command',
 ]
