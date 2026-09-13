@@ -15,16 +15,17 @@
  * @module @xmoon76/dsh-pi-tui/shell-context
  */
 
+import { cancellationError } from './detached.ts'
 import { sessionUnchanged } from './steer.ts'
+import type { SessionWriter } from './runtime/session-writer-port.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
 
 /** The minimal agent surface the shell submit needs (the runner's live agent). */
 export interface ShellSubmitAgentLike {
   session: { id: string }
-  followup(message: unknown): void
 }
 
-export type ShellSubmitOutcome = 'ok' | 'stale'
+export type ShellSubmitOutcome = 'ok' | 'stale' | 'indeterminate'
 
 /** Injectable dependencies of {@link submitShellResult}. */
 export interface ShellSubmitDeps {
@@ -51,6 +52,8 @@ export interface ShellSubmitDeps {
    * shell result awaits drains it first.
    */
   barrier?: SessionOperationBarrier
+  /** Deliver the shell result through the semantic session writer. */
+  writer: Pick<SessionWriter, 'prompt'>
   /** Build the user message (runner-side creation, keeps this module dsh-free). */
   createMessage(text: string): unknown
   /** Called once the message was accepted by the agent (followup sent). */
@@ -64,16 +67,16 @@ export interface ShellSubmitDeps {
  * caller's card keeps the output visible either way).
  */
 export async function submitShellResult(deps: ShellSubmitDeps, text: string): Promise<ShellSubmitOutcome> {
-  // The WHOLE shell write runs inside the operation barrier (convergence
-  // plan phase 3), mirroring steerAll: a transition that starts while this
-  // write awaits drains it first — the `fence` quick-refusal below only
-  // covers writers that START during a transition, not writers already in
-  // flight.
+  // Capture before entering the barrier: a delayed shell result belongs to
+  // the session that was current when this submit began, never whichever
+  // Agent happens to be live after a transition drains.
+  const agent = deps.currentAgent()
+  if (agent === undefined) return 'ok'
+  const generation = deps.currentGeneration()
   const barrier = deps.barrier
-  const sessionId = deps.currentAgent()?.session.id
-  if (barrier !== undefined && sessionId !== undefined) {
+  if (barrier !== undefined) {
     try {
-      return await barrier.runWriter(sessionId, async () => submitShellResultCore(deps, text))
+      return await barrier.runWriter(agent.session.id, async () => submitShellResultCore(deps, text, agent, generation))
     } catch (error) {
       if (error instanceof TransitionInProgressError) {
         deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
@@ -82,13 +85,15 @@ export async function submitShellResult(deps: ShellSubmitDeps, text: string): Pr
       throw error
     }
   }
-  return submitShellResultCore(deps, text)
+  return submitShellResultCore(deps, text, agent, generation)
 }
 
-function submitShellResultCore(deps: ShellSubmitDeps, text: string): ShellSubmitOutcome {
-  const agent = deps.currentAgent()
-  if (agent === undefined) return 'ok'
-  const generation = deps.currentGeneration()
+async function submitShellResultCore(
+  deps: ShellSubmitDeps,
+  text: string,
+  agent: ShellSubmitAgentLike,
+  generation: number,
+): Promise<ShellSubmitOutcome> {
   // TOCTOU re-validation: the session must still be the exact one the
   // identity was captured from, or the submission is aborted for a retry
   // against the new session.
@@ -105,9 +110,18 @@ function submitShellResultCore(deps: ShellSubmitDeps, text: string): ShellSubmit
     deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
     return 'stale'
   }
-  agent.followup(deps.createMessage(text))
-  deps.onSubmitted()
-  return 'ok'
+  const outcome = await deps.writer.prompt(agent.session.id, deps.createMessage(text), 'queue')
+  if (outcome.kind === 'committed') {
+    deps.onSubmitted()
+    return 'ok'
+  }
+  if (outcome.kind === 'cancelled') throw cancellationError('shell session write cancelled')
+  if (outcome.kind === 'indeterminate') {
+    deps.notify('shell session write result is indeterminate — do not retry automatically', 'error')
+    return 'indeterminate'
+  }
+  deps.notify(outcome.kind === 'rejected' ? outcome.error.message : outcome.reason, 'error')
+  return 'stale'
 }
 
 /**

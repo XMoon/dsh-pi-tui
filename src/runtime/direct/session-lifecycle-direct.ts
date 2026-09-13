@@ -1,16 +1,13 @@
 /**
- * The Direct session lifecycle (M1.5, contract-reviewed) — the in-process
+ * The Direct session lifecycle (D2.1 contract convergence) — the in-process
  * implementation of `SessionLifecycle` over the dsh `agents` service. The
- * adapter is the ONLY module in the session create/resume path that
- * touches `ctx` and the preset composition; the semantic request (preset
- * id, provider/model) is converted HERE into the Direct shapes (`setup`
- * callback, `SessionId`, seed), and a Remote adapter will implement the
- * same interface over the wire. The DSH AgentHandle / SessionHandle owns
- * the persistence writer lifetime (its `dispose()` is the structured
- * teardown; the kernel-flock SessionWriteLease is the only cross-process
- * writer authority). The TUI runner owns only surface transition
- * coordination (the transition gate, the operation barrier,
- * generation/stale fences) around the port calls.
+ * semantic `open()` operation still calls the Direct `agents.resume()` API;
+ * this Host implementation detail is intentionally hidden at the port.
+ *
+ * The adapter is the only module in the session create/open path that touches
+ * `ctx` and the preset composition. It converts the transitional lifecycle
+ * request into Direct shapes (`setup` callback, `SessionId`, seed) and keeps
+ * the real AgentHandle ownership escape required by the current runner.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-lifecycle-direct
@@ -20,7 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle, SessionLifecycle } from '../session-lifecycle-port.ts'
+import type { CreateSessionRequest, OpenSessionRequest, SessionHandle, SessionLifecycle } from '../session-lifecycle-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -43,9 +40,7 @@ export interface AgentsServiceLike {
     agentOptions: { provider?: string; model?: string }
     setup: (agentCtx: Context, agent: Agent) => Promise<void> | void
     seed?: readonly SessionEvent[]
-    /** Exact fork-inherited prefix length when `meta.isSeeded` is set
-     * (the seeded-session contract — the old header `seedLength`
-     * field is rejected now). */
+    /** Exact fork-inherited prefix length when `meta.isSeeded` is set. */
     inheritedEventCount?: ReturnType<typeof SessionLogOffset>
     signal?: AbortSignal
   }): Promise<AgentHandle>
@@ -59,7 +54,7 @@ export interface AgentsServiceLike {
 
 /** The Direct backend's session lifecycle: the `ctx.agents` service behind
  * the semantic `SessionLifecycle` interface. The preset composition (and
- * with it the agent-setup callback) is resolved HERE from the request's
+ * with it the agent-setup callback) is resolved here from the request's
  * preset id — it never crosses the port contract. */
 export class DirectSessionLifecycle implements SessionLifecycle {
   private readonly ctx: HostContextLike
@@ -85,18 +80,17 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       ...request.inheritedEventCount === undefined ? {} : { inheritedEventCount: SessionLogOffset(request.inheritedEventCount) },
       signal: request.signal,
     })
-    // The ownership escape preserves BOTH the live agent and the real
-    // AgentHandle: `dispose()` is the ownership capability the runner
-    // needs at retirement (a lost handle previously pinned old leases —
-    // removed legacy, the P1 regression class). The semantic `session`
-    // identity stays transport-neutral.
+    // Preserve both the live Agent and the real AgentHandle. The latter is
+    // the ownership capability the runner disposes at retirement.
     return { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } }
   }
 
-  async resume(request: ResumeSessionRequest): Promise<SessionHandle> {
+  async open(request: OpenSessionRequest): Promise<SessionHandle> {
     const agents = this.ctx.get('agents') as AgentsServiceLike | undefined
     if (agents === undefined) throw new Error('agents service unavailable')
     const composition = await this.compose(request.agentPreset)
+    // `resume` is deliberately the Direct service call; `open` is the
+    // transport-neutral semantic exposed to the runner and future clients.
     const handle = await agents.resume({
       resumeSessionId: SessionId(request.resumeSessionId),
       agentOptions: { provider: request.provider, model: request.model },

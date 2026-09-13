@@ -361,7 +361,7 @@ function makeRig(options: {
         options.createHook?.(record)
         return { session: { id: record.sessionId }, direct: { agent: { session: { id: record.sessionId } }, ownerHandle: { dispose: async () => {} } } }
       },
-      resume: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
+      open: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
     },
     liveIdentity: () => ({ sessionId: state.sessionId, generation: state.generation }),
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; inheritSelection?: ModelSelection; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
@@ -439,7 +439,7 @@ test('review P2: the cwd is captured BEFORE the create await (no parent=A cwd=B 
         created.push({ sessionId: String(call.sessionId), meta: call.meta, ...call.inheritedEventCount === undefined ? {} : { inheritedEventCount: call.inheritedEventCount }, provider: call.provider, model: call.model, agentPreset: call.agentPreset, seed: call.seed })
         return { session: { id: String(call.sessionId) }, direct: { agent: { session: { id: String(call.sessionId) } }, ownerHandle: { dispose: async () => {} } } }
       },
-      resume: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
+      open: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
     },
   }
   // The source header has NO cwd: the fallback is the live cwd captured at
@@ -789,11 +789,12 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
       setApprovalPolicy: () => true,
     },
     sessionWriter: {
-      followup: () => {},
-      steer: () => {},
-      dequeue: () => {},
-      cancel: () => {},
-      rename: () => true,
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      steerBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+      removeQueuedBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     cwd: '/ws',

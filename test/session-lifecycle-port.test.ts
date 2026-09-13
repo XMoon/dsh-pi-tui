@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectSessionLifecycle, type HostContextLike } from '../src/runtime/direct/session-lifecycle-direct.ts'
-import { ownerHandleOf, type CreateSessionRequest, type ResumeSessionRequest } from '../src/runtime/session-lifecycle-port.ts'
+import { ownerHandleOf, type CreateSessionRequest, type OpenSessionRequest } from '../src/runtime/session-lifecycle-port.ts'
 
 function host(agents: unknown): HostContextLike {
   return { get: (name) => (name === 'agents' ? agents : undefined) }
@@ -31,7 +31,7 @@ const createRequest: CreateSessionRequest = {
   agentPreset: 'preset-a',
 }
 
-const resumeRequest: ResumeSessionRequest = {
+const openRequest: OpenSessionRequest = {
   resumeSessionId: 'session-old',
   provider: 'p',
   model: 'm',
@@ -58,7 +58,7 @@ test('create resolves the preset composition internally and delegates with the D
   assert.equal(typeof calls[0].setup, 'function', 'the setup callback is built INSIDE the adapter')
 })
 
-test('resume resolves the preset composition internally and delegates with the Direct shapes', async () => {
+test('open resolves the preset composition internally and delegates with the Direct shapes', async () => {
   const calls: Array<{ resumeSessionId: unknown; agentOptions: unknown; setup: unknown }> = []
   const lifecycle = new DirectSessionLifecycle(host({
     create: async () => ({ agent: { session: { id: 'x' } } }),
@@ -67,7 +67,7 @@ test('resume resolves the preset composition internally and delegates with the D
       return { agent: { session: { id: 'session-old' } }, dispose: async () => {} }
     },
   }), compose('preset-a'))
-  const handle = await lifecycle.resume(resumeRequest)
+  const handle = await lifecycle.open(openRequest)
   assert.equal(handle.session.id, 'session-old')
   assert.equal(handle.direct !== undefined, true)
   assert.equal(calls.length, 1)
@@ -76,7 +76,7 @@ test('resume resolves the preset composition internally and delegates with the D
   assert.equal(typeof calls[0].setup, 'function')
 })
 
-test('create and resume forward the caller-owned signal unchanged and do not invent one', async () => {
+test('create and open forward the caller-owned signal unchanged and do not invent one', async () => {
   const createSignals: (AbortSignal | undefined)[] = []
   const resumeSignals: (AbortSignal | undefined)[] = []
   const lifecycle = new DirectSessionLifecycle(host({
@@ -93,9 +93,9 @@ test('create and resume forward the caller-owned signal unchanged and do not inv
   const resumeSignal = new AbortController().signal
 
   await lifecycle.create({ ...createRequest, signal: createSignal })
-  await lifecycle.resume({ ...resumeRequest, signal: resumeSignal })
+  await lifecycle.open({ ...openRequest, signal: resumeSignal })
   await lifecycle.create(createRequest)
-  await lifecycle.resume(resumeRequest)
+  await lifecycle.open(openRequest)
 
   assert.equal(createSignals[0], createSignal)
   assert.equal(resumeSignals[0], resumeSignal)
@@ -103,10 +103,10 @@ test('create and resume forward the caller-owned signal unchanged and do not inv
   assert.equal(resumeSignals[1], undefined)
 })
 
-test('create and resume fail loudly when the agents service is absent', async () => {
+test('create and open fail loudly when the agents service is absent', async () => {
   const lifecycle = new DirectSessionLifecycle(host(undefined), compose('preset-a'))
   await assert.rejects(() => lifecycle.create(createRequest), /agents service unavailable/)
-  await assert.rejects(() => lifecycle.resume(resumeRequest), /agents service unavailable/)
+  await assert.rejects(() => lifecycle.open(openRequest), /agents service unavailable/)
 })
 
 test('P1 regression: the ownership escape preserves the real AgentHandle so the runner can dispose it on retirement', async () => {

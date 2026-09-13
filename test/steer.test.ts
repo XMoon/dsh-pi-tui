@@ -1,18 +1,15 @@
 /**
  * Headless tests for the steer-all orchestration (Ctrl+S). The send core
- * is SYNCHRONOUS one-pass (snapshot → re-validate → deliver, no await in
- * between) since the divergence-guard removal, so the only reachable
- * stale triggers are the identity re-validation (modeled here with
- * deps whose second read returns a switched surface) and the transition
- * fence. The delivery gates (empty payload, onlyDraft, writer seam) and
- * the draft-restore merge semantics are pinned here too.
+ * snapshots and re-validates before entering its async writer window. The
+ * delivery gates (empty payload, onlyDraft, writer seam), barrier coverage
+ * and draft-restore merge semantics are pinned here too.
  * @module @xmoon76/dsh-pi-tui/steer.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mergeDraft, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerAgentLike, type SteerDeps } from '../src/steer.ts'
-import { TransitionInProgressError, type SessionOperationBarrier } from '../src/session-operation-barrier.ts'
+import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
 
 interface FakeAgent extends SteerAgentLike {
   status: 'idle' | 'running'
@@ -84,10 +81,12 @@ function makeDeps(options: {
   generation?: () => number
   notices?: string[]
   restored?: string[]
+  barrier?: SessionOperationBarrier
 }): SteerDeps {
   return {
     currentAgent: options.agent,
     currentGeneration: options.generation ?? (() => 1),
+    barrier: options.barrier,
     notify: (message, kind) => options.notices?.push(`${kind}: ${message}`),
     restoreDraft: (text) => { options.restored?.push(text); return true },
     createDraft: (text) => ({ id: `draft:${text}`, text }),
@@ -234,6 +233,40 @@ test('P0: empty draft + NON-empty queue steers the queue exactly as before (queu
     assert.deepEqual(agent.followed, [], `${status}: a queue batch never follows up`)
     assert.deepEqual(agent.state.nextTurn, [], `${status}: confirmed entries removed`)
   }
+})
+
+test('D2.1: Ctrl+S remove-and-deliver batch stays inside one operation-barrier turn', async () => {
+  const agent = fakeAgent(['a', 'b'])
+  const barrier = new SessionOperationBarrier()
+  const events: string[] = []
+  let releaseBatch!: () => void
+  const batchGate = new Promise<void>(resolve => { releaseBatch = resolve })
+  const deps = makeDeps({ agent: () => agent, barrier })
+  deps.writer = {
+    prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+    steerBatch: async (_sessionId, messages, removeQueuedIds) => {
+      events.push(`batch:${removeQueuedIds?.join(',')}:${messages.map(message => (message as { id: string }).id).join(',')}:start`)
+      await batchGate
+      events.push('batch:end')
+      return { kind: 'committed' as const, value: undefined }
+    },
+  }
+
+  const steering = steerAll(deps, 'draft')
+  assert.equal(barrier.activeWriters, 1, 'the semantic batch enters the barrier before it settles')
+  let transitionRan = false
+  const transition = barrier.runTransition(async () => { transitionRan = true; events.push('transition') })
+  await Promise.resolve()
+  assert.equal(transitionRan, false, 'a transition waits for the complete remove-and-deliver operation')
+  releaseBatch()
+  assert.equal(await steering, 'ok')
+  await transition
+  assert.deepEqual(events, [
+    'batch:a,b:a,b,draft:draft:start',
+    'batch:end',
+    'transition',
+  ])
 })
 
 test('P0: empty draft + queue [A,B] + draft C keeps A,B,C order (queue + draft)', async () => {
@@ -562,7 +595,7 @@ test('refuseByTransitionFence MERGES newer input below the unsent submission', (
 test('P1: the empty-queue classic steer delivers through the SessionWriter, never a direct agent call', async () => {
   // The empty-queue path (queue == 0 + Ctrl+S + draft) previously called
   // now.steer/now.followup DIRECTLY, bypassing the semantic port. It must
-  // go through the writer seam: writer.steer/writer.followup exactly once,
+  // go through the writer seam: writer.prompt with an explicit mode exactly once,
   // and the agent's own steer/followup NEVER called.
   for (const status of ['running', 'idle'] as const) {
     const agent = fakeAgent([])
@@ -570,18 +603,64 @@ test('P1: the empty-queue classic steer delivers through the SessionWriter, neve
     const writerCalls: string[] = []
     const deps = makeDeps({ agent: () => agent })
     deps.writer = {
-      steer: (sessionId, messages) => { writerCalls.push(`steer:${sessionId}:${(messages[0] as { id: string }).id}`) },
-      followup: (sessionId, message) => { writerCalls.push(`followup:${sessionId}:${(message as { id: string }).id}`) },
-      dequeue: () => { writerCalls.push('dequeue') },
+      prompt: async (sessionId, message, mode) => {
+        writerCalls.push(`${mode}:${sessionId}:${(message as { id: string }).id}`)
+        return { kind: 'committed' as const, value: undefined }
+      },
+      steerBatch: async () => {
+        writerCalls.push('steerBatch')
+        return { kind: 'committed' as const, value: undefined }
+      },
+      removeQueued: async () => {
+        writerCalls.push('removeQueued')
+        return { kind: 'committed' as const, value: undefined }
+      },
     }
     const outcome = await steerAll(deps, 'hello')
     assert.equal(outcome, 'ok')
     assert.equal(agent.steered.length, 0, `${status}: the agent's own steer is NEVER called directly`)
     assert.equal(agent.followed.length, 0, `${status}: the agent's own followup is NEVER called directly`)
     if (status === 'running') {
-      assert.deepEqual(writerCalls, ['steer:session-steer:draft:hello'], 'running → writer.steer exactly once')
+      assert.deepEqual(writerCalls, ['steer:session-steer:draft:hello'], 'running → writer.prompt(steer) exactly once')
     } else {
-      assert.deepEqual(writerCalls, ['followup:session-steer:draft:hello'], 'idle → writer.followup exactly once')
+      assert.deepEqual(writerCalls, ['queue:session-steer:draft:hello'], 'idle → writer.prompt(queue) exactly once')
     }
   }
+})
+
+test('semantic steer rejection restores the draft and does not claim delivery', async () => {
+  const agent = fakeAgent([])
+  const restored: string[] = []
+  const notices: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored, notices })
+  deps.writer = {
+    prompt: async () => ({ kind: 'rejected' as const, error: { code: 'session/not-found', message: 'session is gone' } }),
+    steerBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  assert.equal(await steerAll(deps, 'draft'), 'stale')
+  assert.deepEqual(restored, ['draft'])
+  assert.deepEqual(agent.steered, [])
+  assert.deepEqual(agent.followed, [])
+  assert.deepEqual(notices, ['error: changed while sending'])
+})
+
+test('semantic steer indeterminate outcome stays absent and never retries', async () => {
+  const agent = fakeAgent([])
+  const restored: string[] = []
+  const notices: string[] = []
+  const deps = makeDeps({ agent: () => agent, restored, notices })
+  let calls = 0
+  deps.writer = {
+    prompt: async () => {
+      calls += 1
+      return { kind: 'indeterminate' as const, error: { code: 'transport/unknown', message: 'unknown' } }
+    },
+    steerBatch: async () => ({ kind: 'committed' as const, value: undefined }),
+    removeQueued: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  assert.equal(await steerAll(deps, 'draft'), 'indeterminate')
+  assert.equal(calls, 1)
+  assert.deepEqual(restored, [])
+  assert.deepEqual(notices, ['error: the session write outcome is indeterminate — do not retry automatically'])
 })

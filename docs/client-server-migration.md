@@ -11,7 +11,7 @@
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
-M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; writes remain unimplemented)
+M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence; Remote writes remain unimplemented)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -38,6 +38,16 @@ persistence lock (the owner.lock / lease / cooling / PINNED stack is
 removed legacy). The TUI keeps only process-local surface coordination
 (transition gate, operation barrier, generation/stale fences) around the
 port calls.
+
+D2.1 converges the current write boundaries without adding a Remote side
+effect. Ordinary session prompts, Ctrl+S batch steering, exact queue removal,
+cancel and title writes use the semantic `SessionWriter`; the runner places
+ordinary, explicit-queue, Ctrl+S, and command/fallback submissions on one FIFO
+before async preparation; already-authorized
+Host command execution uses `HostCommandPort`; and Task Center child
+interruption uses `SubagentPort`. These are Direct adapters today, so Direct
+behavior remains the production behavior and `Remote writes: none` remains
+a hard boundary.
 
 ### Model-selection ownership
 
@@ -68,13 +78,15 @@ semantic, and Direct remains the production backend.
 
 ### Lifecycle creation cancellation (Stage B / pre-M2)
 
-`CreateSessionRequest` and `ResumeSessionRequest` may carry a client-local,
-creation-only `AbortSignal`. In Direct mode the session lifecycle adapter maps
-that signal to `ctx.agents.create` / `ctx.agents.resume`; the signal is valid
-only through persistence load, unpublished setup, and publication, and is
-never serialized. A future Remote adapter must map it to official
-connection/client operation cancellation rather than sending the `AbortSignal`
-over the wire. Stage B completes this contract and is not Remote backend work.
+`CreateSessionRequest` and `OpenSessionRequest` may carry a client-local,
+creation/open-only `AbortSignal`. In Direct mode the session lifecycle adapter
+maps that signal to `ctx.agents.create` / `ctx.agents.resume`; the semantic
+`open` operation still uses the Direct `resume` implementation detail. The
+signal is valid only through persistence load, unpublished setup, and
+publication, and is never serialized. A future Remote adapter must map it to
+official DSH client operation cancellation rather than sending the
+`AbortSignal` over the wire. Stage B completes this contract and is not Remote
+backend work.
 
 ### Finalized content presentation (Stage C1 / pre-M2)
 
@@ -85,7 +97,7 @@ metadata only; and unknown finalized blocks use an explicit bounded JSON
 fallback. The shared visibility rule covers transcript search and rewind
 candidate eligibility/warnings; rewind preview/editor restoration remain
 text-only by policy. Readable markdown export uses the richer projection.
-Queue/steer/dequeue behavior remains outside this finalized-only stage; only
+Queue/steer/removal behavior remains outside this finalized-only stage; only
 its rewind notification wording is generalized, and rewind does not re-stage
 content. No attachment bytes/paths are resolved; migration remains
 D1.1 is complete for the experimental read surface; Direct remains the production backend.
@@ -511,8 +523,9 @@ while the overall M2 remains in progress:
   the selected rc line while retaining older legacy dependencies where the
   official release graph still requires them.
 
-Production remains Direct. No Remote Backend, Session writer, UI wiring, retry
-loop, raw persistence access, or duplicate event fold is introduced by D1.1/D1.2.
+Production remains Direct. No Remote Backend, Remote Session writer, UI
+wiring, retry loop, raw persistence access, or duplicate event fold is
+introduced by D1.1/D1.2.
 
 ## D1.2 status — pinned-master command/skill authority shadow
 
@@ -586,6 +599,38 @@ lifecycle, child-control, custom-serve, or production-backend switch.
 - `scripts/dsh-remote-d1-closure-smoke.mjs` aggregates the existing Session and
   authority proof surfaces with the D1.3 Task and presentation proofs into one
   bounded read-capability result.
+
+## D2.1 status — Direct-only write-contract convergence
+
+D2.1 converges the semantic write boundaries while keeping Direct as the only
+production backend. No Remote write side effect, `BackendKind='remote'`, or
+production backend change is part of this slice.
+
+- `SessionWriter` now exposes one ordinary prompt with an explicit `queue` or
+  `steer` mode, an outcome-bearing Ctrl+S batch that can move exact queued
+  occurrences and deliver them together, exact `removeQueued`, an outcome-
+  bearing queued pull-back batch, semantic `cancel`, outcome-bearing `rename`,
+  and explicit unsupported title refresh. Direct resolves the live Agent by
+  session id and reports only confirmed synchronous calls as `committed`.
+- `HostCommandPort` owns execution of an already-authorized Host command only.
+  The runner retains claim precedence and keeps TUI-local commands, extension
+  commands, and skill-wrapper delivery out of this seam. Direct forwards the
+  full selected line, submitted attachments, live Agent identity and caller-
+  owned signal; the settled command result remains available to the existing
+  result sink. `host-command` is now part of the capability vocabulary and
+  Direct's implemented set.
+- `SubagentPort.interrupt()` owns Task Center child interruption with explicit
+  direct-parent, child and continuable-mode identity. Direct maps it to the
+  official user-authority call; unknown failures still surface through the
+  owned-task failure path.
+- `SessionLifecycle.open()` is the semantic name for opening an existing
+  Session. The Direct adapter still calls `agents.resume()` internally. Its
+  creation/open payload remains transitional: provider/model convergence is
+  D2.3, and seed/fork metadata convergence is D2.4.
+
+Known future gaps are the Remote equivalent of the Ctrl+S multi-message batch
+and Remote title auto-regeneration. Until their official Client contracts are
+available, neither is represented as a Remote side effect.
 
 The D1 closure ledger is:
 

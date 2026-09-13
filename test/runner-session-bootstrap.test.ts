@@ -2588,14 +2588,33 @@ test('fiber unload retires the Direct owned session: cancel → idle → drain �
     header: { id: 'retire-hmr-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents('resumed answer'),
   })
-  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, (events: string[]) => ({
+    drainContinuableDescendants: async () => {
+      events.push(`drain:${resumed.id}`)
+      // Direct retirement can emit one final session event after the surface
+      // has been disposed but before the Cordis listener is detached. The
+      // runner must ignore it rather than applying it to dead folders/app.
+      context!.emit('session/event', resumed as never, event('turn/start', { turn: 99 }, 99))
+      context!.emit('llm/adapters-updated')
+      context!.emit('settings/document-updated', 'llm-pi-ai' as never, 99 as never)
+    },
+  }))
   context = new Context()
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
+  const transcriptAppliesBeforeRetirement = probe.transcriptApplyCount
+  const statsAppliesBeforeRetirement = probe.statsApplyCount
+  const welcomeCardsBeforeRetirement = probe.capturedWelcomeModels.length
   // HMR unload: dispose the runner fiber directly (no interactive exit).
   await fiber.dispose()
   fiber = undefined
+  assert.equal(probe.transcriptApplyCount, transcriptAppliesBeforeRetirement,
+    'a retirement-time session event must not apply to the disposed transcript')
+  assert.equal(probe.statsApplyCount, statsAppliesBeforeRetirement,
+    'a retirement-time session event must not apply to the disposed stats folder')
+  assert.equal(probe.capturedWelcomeModels.length, welcomeCardsBeforeRetirement,
+    'retirement-time provider/settings events must not repaint the disposed welcome card')
   // The retirement order is the fixed Direct order; the drain of the
   // continuable descendants happens BEFORE the parent handle dispose.
   const events = harness.retirementEvents
@@ -2788,6 +2807,77 @@ test('exit during an in-flight transition does not deadlock and retires the curr
   const oldDispose = events.filter(event => event === 'dispose:retire-during-switch-old')
   assert.equal(oldDispose.length, 1, 'the still-current old owner must be retired exactly once')
   assert.equal(harness.createdSessions.length, 0, 'the aborted create must not publish a child')
+})
+
+test('a late non-cooperative child create skips disposed-surface commit work and is retired', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-late-commit-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-late-commit-old',
+    header: { id: 'retire-late-commit-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  let releaseCreate!: () => void
+  const createRelease = new Promise<void>(resolve => { releaseCreate = resolve })
+  let createStarted!: () => void
+  const createStartedPromise = new Promise<void>(resolve => { createStarted = resolve })
+  const harness = makeHarness(
+    home,
+    resumed,
+    { provider: 'p', model: 'm' },
+    undefined,
+    async () => {
+      createStarted()
+      await createRelease
+    },
+    retirementSubagents,
+  )
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const welcomeCardsBeforeDispose = probe.capturedWelcomeModels.length
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await createStartedPromise
+
+  // The fake Direct create deliberately ignores lifecycle cancellation. The
+  // fiber disposer still runs surface cleanup first, then waits behind the
+  // transition gate for the child owner to settle.
+  const disposal = fiber.dispose()
+  try {
+    await settle()
+    assert.equal(app.isDisposed(), true, 'surface disposal must finish before the late child resolves')
+    releaseCreate()
+    await transition
+    await disposal
+    fiber = undefined
+  } finally {
+    releaseCreate()
+  }
+
+  assert.equal(probe.capturedWelcomeModels.length, welcomeCardsBeforeDispose,
+    'a late transition commit must not repaint the disposed welcome card')
+  const child = harness.createdSessions.at(-1)
+  assert.ok(child, 'the non-cooperative create still produces a child owner')
+  const events = harness.retirementEvents
+  assert.equal(events.filter(event => event === 'dispose:retire-late-commit-old').length, 1,
+    'the old owner must be retired exactly once')
+  assert.equal(events.filter(event => event === `dispose:${child.id}`).length, 1,
+    'the late committed child owner must be retired exactly once')
 })
 
 test('an interactive exit retires the owned session through the appExit disposal', async (t) => {

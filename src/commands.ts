@@ -31,7 +31,7 @@ import { TransitionInProgressError } from './session-operation-barrier.ts'
 import { createForkedAgent } from './session-fork.ts'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture } from './tui-app.ts'
-import { mergeDraft } from './steer.ts'
+import { mergeDraft, sessionUnchanged } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from './wheel-scroll.ts'
@@ -56,7 +56,7 @@ import { FooterConfiguratorModel, sameFooterCustomItem } from './footer/configur
 import type { TuiApp } from './tui-app.ts'
 import type { PickerCategory, PickerItem } from './tui-app.ts'
 import type { Diag } from './diag.ts'
-import { runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
+import { cancellationError, isCancellation, runDetached, runOwned, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import {
   consumeDraftAttachments,
@@ -95,7 +95,7 @@ import {
 import type { SessionReader, SessionSummary } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
-import type { CreateSessionRequest, ResumeSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
+import type { CreateSessionRequest, OpenSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
 import type { Catalog } from './runtime/catalog-port.ts'
 import type { ConfigPort, CredentialProviderOption } from './runtime/config-port.ts'
 import type { HostFilePort } from './runtime/host-file-port.ts'
@@ -402,6 +402,19 @@ export function resolveComposerDelivery(
   return preferred === 'queue' ? 'steer' : 'queue'
 }
 
+/** A skill write reached the command boundary without a known settlement. */
+class IndeterminateSkillWriteError extends Error {
+  constructor() {
+    super('skill write result is indeterminate — do not retry automatically')
+    this.name = 'IndeterminateSkillWriteError'
+  }
+}
+
+/** Recognize the internal skill uncertainty marker after commands.execute(). */
+export function isIndeterminateSkillWrite(error: unknown): boolean {
+  return error instanceof IndeterminateSkillWriteError
+}
+
 /** Everything the TUI-owned commands read from the runner. */
 export interface TuiCommandRunner {
   ctx: Context
@@ -448,12 +461,12 @@ export interface TuiCommandRunner {
   settleIntent(id: number, outcome: 'committed' | 'failed'): void
   /** The TUI settings document, when the settings service is present. */
   readonly tuiSettings: TuiSettingsLike | undefined
-  /** The session lifecycle port (migration M1.5): /new and /fork create
-   * sessions through semantic requests (the Direct adapter resolves the
-   * preset composition internally). */
+  /** The session lifecycle port (D2.1): /new and /fork create/open sessions
+   * through semantic requests (the Direct adapter resolves the preset
+   * composition internally). */
   readonly agents: {
     create(options: CreateSessionRequest): Promise<SessionHandle>
-    resume(options: ResumeSessionRequest): Promise<SessionHandle>
+    open(options: OpenSessionRequest): Promise<SessionHandle>
   }
   /** M2/PR C: apply the persisted footer mode and layout to the app (shared
    * by /settings, /reload and startup; fail-soft on invalid configs). The
@@ -468,8 +481,8 @@ export interface TuiCommandRunner {
    * the title batches, the context measurement and the export read go
    * through the port, never ctx directly. */
   readonly sessionReader: SessionReader
-  /** The session WRITE port (migration M1.4): follow-up delivery, steer,
-   * queue pull-back, cancel and title ops go through the port. */
+  /** The session WRITE port (D2.1): ordinary prompts, Ctrl+S batch
+   * delivery, exact queue removal, cancel and title ops go through the port. */
   readonly sessionWriter: SessionWriter
   /** The interaction port (migration M1.6): approval/question authority. */
   readonly interaction: InteractionPort
@@ -3150,14 +3163,18 @@ export function registerTuiCommands(
     args = '',
     signal: AbortSignal = runner.signal,
     delivery: SubmitDelivery | undefined,
-  ): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
+  ): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string; draftRestored?: true }> => {
     const skillSignal = signal === runner.signal ? runner.signal : AbortSignal.any([runner.signal, signal])
+    const generation = runner.sessionGeneration
     skillSignal.throwIfAborted()
     // The skill read goes through the catalog port (migration M1.8): the
     // Direct adapter resolves the session's live skill target internally —
     // the loaded definition is a detached DTO, never the registry object.
     const resolved = await runner.catalog.skills.resolveSkill(agent.session.id, name)
     skillSignal.throwIfAborted()
+    if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) {
+      return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+    }
     if (resolved.kind === 'unavailable') return { kind: 'error', text: 'skill service unavailable' }
     if (resolved.kind === 'unknown') return { kind: 'error', text: 'unknown skill "' + name + '"' }
     if (resolved.kind === 'malformed') return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
@@ -3181,15 +3198,34 @@ export function registerTuiCommands(
     // delete images this invocation is still admitting (review finding 1).
     const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
     // The host's pre-step listener (dsh-tool-skill) injects the rendered
-    // body only when ITS tool registration is visible to this agent — the
-    // same visibility test the listener itself uses. Probed BEFORE the
-    // delivery: the queue path below depends on it, and the fallback body
-    // injection after the write needs it too.
+    // body only when its tool registration is visible to this agent. Probe
+    // that semantic catalog fact before choosing the delivery batch.
     const hostLoadsSkillBody = runner.catalog.skills.hostLoadsSkillBody(agent.session.id)
+    // When the Host skill pre-step is absent, deliver the original invocation
+    // and its rendered body as ONE next-step batch. This preserves the
+    // original-line-before-body ordering without bypassing the semantic writer.
+    const fallbackBody = !hostLoadsSkillBody
+      ? (() => {
+        const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
+        const resourceBase = readResourceBase(skill.resourceBase)
+        return createUserMessage({
+          content: [{ type: 'text', text: renderSkillContent({
+            name: skill.name,
+            provider: typeof skill.provider === 'string' && skill.provider !== '' ? skill.provider : 'tui',
+            ...resourceBase === undefined ? {} : { resourceBase },
+            content: body,
+          }) }],
+          source: { kind: 'skill-invocation', name: skill.name, form: 'instructions' },
+        })
+      })()
+      : undefined
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
     try {
       userMessage = await runner.prepareDraftMessage(line)
       skillSignal.throwIfAborted()
+      if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) {
+        return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+      }
       // The session-transition write fence (review round 5): while a
       // transition is in flight the old agent may be woken again — a steer
       // in that window would target a session whose lock is about to be
@@ -3201,16 +3237,14 @@ export function registerTuiCommands(
         app.setEditorText(merged)
         return { kind: 'error', text: merged === line
           ? 'a session transition is in progress — try again in a moment'
-          : 'the draft changed while transitioning — review it before submitting again' }
+          : 'the draft changed while transitioning — review it before submitting again', draftRestored: true }
       }
-      // The invocation's own write runs inside the operation barrier
-      // (convergence plan phase 3): a transition started while the draft
-      // prepared drains it first; a transition already running refuses the
-      // write with the standard fence UX (the check above is the quick
-      // path, this is the authoritative one).
+      // The invocation's complete write runs inside the operation barrier;
+      // the fallback body is part of the same semantic batch.
       try {
-        await runner.withSessionWriter(agent.session.id, async () => {
+        const outcome = await runner.withSessionWriter(agent.session.id, async () => {
           skillSignal.throwIfAborted()
+          if (!sessionUnchanged({ agent, generation }, runner.liveAgent, runner.sessionGeneration)) return undefined
           // Web parity (busyEnter): a skill invocation is an agent-facing
           // prompt — under the queue mode it QUEUES like a plain prompt
           // (web: session.prompt with the policy-resolved mode). The mode
@@ -3225,18 +3259,27 @@ export function registerTuiCommands(
           // invocation keeps the steer path to preserve the
           // original-line-before-body order — the documented exception.
           if (delivery !== 'steer' && hostLoadsSkillBody) {
-            agent.followup(userMessage)
-          } else {
-            agent.steer(userMessage)
+            return runner.sessionWriter.prompt(agent.session.id, userMessage, 'queue')
           }
+          if (fallbackBody !== undefined) {
+            return runner.sessionWriter.steerBatch(agent.session.id, [userMessage, fallbackBody])
+          }
+          return runner.sessionWriter.prompt(agent.session.id, userMessage, 'steer')
         })
+        if (outcome === undefined) return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+        if (outcome.kind !== 'committed') {
+          if (outcome.kind === 'indeterminate') throw new IndeterminateSkillWriteError()
+          if (outcome.kind === 'cancelled') throw cancellationError('skill write cancelled')
+          const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
+          return { kind: 'error', text: message }
+        }
       } catch (error) {
         if (error instanceof TransitionInProgressError) {
           const merged = mergeDraft(app.getDraft(), line)
           app.setEditorText(merged)
           return { kind: 'error', text: merged === line
             ? 'a session transition is in progress — try again in a moment'
-            : 'the draft changed while transitioning — review it before submitting again' }
+            : 'the draft changed while transitioning — review it before submitting again', draftRestored: true }
         }
         throw error
       }
@@ -3249,62 +3292,6 @@ export function registerTuiCommands(
       // throw (review finding: a leaked pin would block pruning and eat
       // draft capacity forever).
       releasePin()
-    }
-    // The host's pre-step listener (dsh-tool-skill) injects the rendered
-    // body only when ITS tool registration is visible to this agent — the
-    // same visibility test the listener itself uses. A composition without
-    // the loader (e.g. a stripped-down custom preset) never recognizes the
-    // gesture, so the TUI falls back to injecting the body itself with the
-    // OFFICIAL rendering and the OFFICIAL durable source, so transcript
-    // consumers present it exactly like a host injection (context.ts already
-    // projects skill-invocation rows). With the host present, the body is
-    // left to it: double injection would duplicate the skill body.
-    // The check is an existence probe shaped like the loader: the tool must
-    // be named `skill` and carry an execute function (the dsh-tool-skill
-    // definition always does). A scoped shadow merely named `skill` without
-    // a loader shape is treated as absent — the host's gesture listener
-    // would not inject for it either, so the TUI's fallback must cover it.
-    // The probe is a SEMANTIC catalog operation now (migration M1.8) — the
-    // raw tools service never crosses into the command surface.
-    // Deliver the batch through the steer path (and unlike
-    // agent.inject alone, which queues for the next pre-step WITHOUT waking
-    // the driver): the ORIGINAL line is steered — a running turn takes it
-    // at the next step boundary, an idle agent's steer wakes the driver and
-    // opens the next turn with it (web parity, where the `/name` prompt is
-    // a plain session.prompt). The fallback body injection rides the SAME
-    // next-step batch via inject (no wake): a RUNNING agent's next step
-    // claim takes all next-step messages at once in insertion order, so the
-    // original line precedes the body in one step; an IDLE agent's steer
-    // wake claims the original line synchronously inside steer(), so the
-    // body lands as step 2 of the same turn (the loop only ends when
-    // next-step drains). Either way the original line reaches the model
-    // before the body, exactly like the web's message order.
-    // The queue delivery (chosen above when the HOST injects the body) is
-    // the web-parity busyEnter path: followup parks the line in next-turn
-    // and the host's pre-step listener injects the body at the next model
-    // request — the same order the web's queued session.prompt produces.
-    // The fallback body injection below is INCOMPATIBLE with followup:
-    // the body would sit in next-step while the line waits in next-turn,
-    // and the driver's first step boundary claims next-step FIRST — the
-    // body would arrive BEFORE the user's words, inverting the web's
-    // message order. (A second follow-up would not help either: a turn
-    // boundary claims ONE next-turn message, so the pair would split
-    // across two turns.) That is why the queue path requires
-    // hostLoadsSkillBody.
-    if (!hostLoadsSkillBody) {
-      const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
-      // Forward the resource base too, so the fallback rendering matches
-      // what the host would render (directory/url/opaque hints).
-      const resourceBase = readResourceBase(skill.resourceBase)
-      agent.inject(createUserMessage({
-        content: [{ type: 'text', text: renderSkillContent({
-          name: skill.name,
-          provider: typeof skill.provider === 'string' && skill.provider !== '' ? skill.provider : 'tui',
-          ...resourceBase === undefined ? {} : { resourceBase },
-          content: body,
-        }) }],
-        source: { kind: 'skill-invocation', name: skill.name, form: 'instructions' },
-      }))
     }
     return { kind: 'success', text: 'skill ' + name + ' loaded' }
   }
@@ -4061,25 +4048,55 @@ export function registerTuiCommands(
   // refresh — the deliberate unpin: regeneration OVERWRITES the current
   // title, including one the user pinned earlier. A blank session (no user
   // message yet) leaves the title untouched and informs the user.
-  const titleHandler = async (invocation: CommandInvocation): Promise<CommandResult> => {
+  const titleHandler = async (invocation: CommandInvocation): Promise<CommandResult & { readonly draftRestoreSuppressed?: true }> => {
     const liveAgent = await requireAgent()
+    const generation = runner.sessionGeneration
+    const current = (): boolean => !runner.signal.aborted && sessionUnchanged(
+      { agent: liveAgent, generation },
+      runner.liveAgent,
+      runner.sessionGeneration,
+    )
+    const stale = (): CommandResult => ({ kind: 'error', text: 'the session changed while updating the title — try again' })
     const name = invocation.rawInput.trim()
+    let acceptedTitle = name
     if (name !== '') {
-      // The session WRITE port (migration M1.4): the title service access
-      // lives in the Direct adapter, never here.
+      // The complete title write runs through the session barrier and the
+      // semantic writer. Both checks fence a delayed command result from a
+      // session that has already been replaced.
       try {
-        if (!runner.sessionWriter.rename(liveAgent.session.id, name)) {
-          return { kind: 'error', text: 'session title service unavailable' }
+        const outcome = await runner.withSessionWriter(liveAgent.session.id, async () => {
+          if (!current()) return undefined
+          return runner.sessionWriter.rename(liveAgent.session.id, name)
+        })
+        if (!current() || outcome === undefined) return stale()
+        if (outcome.kind === 'committed') acceptedTitle = outcome.value.title
+        if (outcome.kind !== 'committed') {
+          if (outcome.kind === 'cancelled') throw cancellationError('session title write cancelled')
+          if (outcome.kind === 'indeterminate') {
+            return {
+              kind: 'error',
+              text: 'session title result is indeterminate — do not retry automatically',
+              draftRestoreSuppressed: true,
+            }
+          }
+          const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
+          return { kind: 'error', text: message }
         }
       } catch (error) {
+        if (error instanceof TransitionInProgressError) return stale()
+        if (isCancellation(error)) throw error
         return { kind: 'error', text: safeErrorMessage(error) }
       }
-      return { kind: 'success', text: `title set: ${name}` }
+      return { kind: 'success', text: `title set: ${acceptedTitle}` }
     }
     try {
-      const outcome = await runner.sessionWriter.refreshTitle(liveAgent.session.id, invocation.signal)
-      if (outcome.kind === 'unavailable') {
-        return { kind: 'error', text: 'session title service unavailable' }
+      const outcome = await runner.withSessionWriter(liveAgent.session.id, async () => {
+        if (!current()) return undefined
+        return runner.sessionWriter.refreshTitle(liveAgent.session.id, invocation.signal)
+      })
+      if (!current() || outcome === undefined) return stale()
+      if (outcome.kind === 'unsupported') {
+        return { kind: 'error', text: outcome.reason }
       }
       if (outcome.title === undefined) {
         app.notify('no conversation yet — title left as-is', 'info')
@@ -4088,6 +4105,8 @@ export function registerTuiCommands(
       app.notify(`title regenerated: ${outcome.title}`, 'info')
       return { kind: 'success' }
     } catch (error) {
+      if (error instanceof TransitionInProgressError) return stale()
+      if (isCancellation(error)) throw error
       return { kind: 'error', text: safeErrorMessage(error) }
     }
   }
