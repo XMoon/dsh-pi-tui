@@ -194,6 +194,7 @@ import { createDirectBackend } from './runtime/backend.ts'
 import { DirectSubagentPort } from './runtime/direct/subagent-direct.ts'
 import { DirectSessionReader, type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import { DirectSessionWriter } from './runtime/direct/session-writer-direct.ts'
+import { DirectPendingInputReader } from './runtime/direct/pending-input-reader-direct.ts'
 import { DirectSessionLifecycle } from './runtime/direct/session-lifecycle-direct.ts'
 import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
 import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
@@ -206,6 +207,7 @@ import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 import { directAgentOf, ownerHandleOf, type CreateSessionRequest, type OpenSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
 import type { HostCommandOutcome } from './runtime/host-command-port.ts'
+import type { PendingInputItem } from './runtime/pending-input-reader-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
 import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_CAP_BYTES, SHELL_OUTPUT_CAP_LINES, SHELL_OUTPUT_DISK_CAP_BYTES } from './bounded-output.ts'
 import { parseShellWords } from './shell-words.ts'
@@ -925,6 +927,17 @@ export interface QueueInboxMessage {
   readonly id: string
   readonly content: readonly ContentBlock[]
   readonly source?: QueueNoticeSource
+}
+
+/** Adapt one semantic pending-input item to the queue pane's presentation
+ * projection. Placement is selected by the caller; this conversion never
+ * exposes Direct inbox collection names to the consumer. */
+function queueInboxMessageOf(item: PendingInputItem): QueueInboxMessage {
+  return {
+    id: item.id,
+    content: item.content as readonly ContentBlock[],
+    source: item.source as QueueNoticeSource | undefined,
+  }
 }
 
 /** The mirror result for one inbox batch: the rows to show plus the failed
@@ -2224,7 +2237,9 @@ export function apply(ctx: Context, config: Config): void {
     // only backend today; remote/wire adapters join in later milestones
     // behind the SAME port interfaces. Constructed here (after compose) so
     // the Direct session lifecycle can resolve preset compositions.
-    const directSessionWriter = new DirectSessionWriter(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent as never : undefined)
+    const directAgentFor = (sessionId: string): Agent | undefined =>
+      liveAgent?.session.id === sessionId ? liveAgent : undefined
+    const directSessionWriter = new DirectSessionWriter(ctx, directAgentFor)
     const backend = createDirectBackend(
       new DirectSubagentPort(ctx),
       new DirectSessionReader(ctx, {
@@ -2232,6 +2247,7 @@ export function apply(ctx: Context, config: Config): void {
         agentOf: id => agents.get(id),
         flushSession: async session => { await sessions.flush(session as never) },
       }),
+      new DirectPendingInputReader(directAgentFor),
       directSessionWriter,
       new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
       new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
@@ -3550,7 +3566,7 @@ export function apply(ctx: Context, config: Config): void {
           fence: () => transitionGate.busy || cleanedUp,
           barrier: operationBarrier,
           fenceNotice: () => 'a session transition is in progress — the output stays on the card; re-run ! after it settles',
-           writer: backend.sessionWriter,
+          writer: backend.sessionWriter,
           createMessage: (text) => createUserMessage({
             content: [{ type: 'text', text }],
             source: { kind: 'user' },
@@ -5385,10 +5401,10 @@ export function apply(ctx: Context, config: Config): void {
     }
     /**
      * Steer into the running turn with re-validation. Shared by
-     * Ctrl+S's per-occurrence queue sweep and separate draft prompt, and the busy-Enter
-     * preference — Enter while the agent is running with busyEnter=steer
-     * steers the DRAFT ONLY (web busyEnter parity): explicitly queued
-     * messages stay queued until Ctrl+S, because
+     * Ctrl+S's empty-draft queue sweep and the separate draft prompt, and the
+     * busy-Enter preference — Enter while the agent is running with
+     * busyEnter=steer steers the DRAFT ONLY (web busyEnter parity): explicitly
+     * queued messages stay queued until an empty-draft Ctrl+S sweep, because
      * already-steered input cannot be pulled back.
      * @param text - the submitted draft ('' allowed for Ctrl+S).
      * @param onlyDraft - busy-Enter mode: never read or remove the queue.
@@ -5413,12 +5429,13 @@ export function apply(ctx: Context, config: Config): void {
       // Same dismissal rule as submissions: settled local cards are a live
       // view, not a record (completed `!`/`!!` runs).
       app.clearSettledLocalMessages()
-      // Ctrl+S: steer the initial pending next-turn queue snapshot in FIFO
-      // order, then send a non-empty draft as a separate prompt. Each queue
-      // occurrence is addressed by id through the semantic writer; a row that
-      // disappears or becomes unavailable converges without replay, and a row
-      // added after the snapshot is left for a later gesture. Nothing to send
-      // at all is a no-op BEFORE any session is created (deferred start).
+      // Ctrl+S gives a payload-bearing draft priority over the queue. With an
+      // empty draft it steers the initial pending next-turn snapshot in FIFO
+      // order. Each queue occurrence is addressed by id through the semantic
+      // writer; a row that disappears or becomes unavailable converges without
+      // replay, and a row added after the snapshot is left for a later gesture.
+      // Nothing to send at all is a no-op BEFORE any session is created
+      // (deferred start).
       // The payload verdict is computed ONCE here on the SERIALIZED wire
       // form and passed to steerAll (steer.ts never guesses shell/image
       // semantics): `!` / `!!` shell modes make a bare prefix a payload,
@@ -5429,11 +5446,21 @@ export function apply(ctx: Context, config: Config): void {
       // any runOwned / ensureSession work — the deferred-start contract
       // (an empty Ctrl+S must never create the session). The decision is
       // the steerHasPayload pure function (headless-pinned).
-      if (!steerHasPayload(draftHasPayload, {
-        onlyDraft,
-        queuedCount: liveAgent === undefined ? 0 : liveAgent.inbox.nextTurn.length,
-        liveAgent: liveAgent !== undefined,
-      })) return
+      const pendingForGate = liveAgent === undefined
+        ? undefined
+        : backend.pendingInputReader.snapshot(liveAgent.session.id)
+      // An unavailable projection is not an empty queue. Let steerAll report
+      // that stale read unless this is the draft-only policy, which never
+      // depends on queue state.
+      if (pendingForGate !== undefined || liveAgent === undefined || onlyDraft) {
+        if (!steerHasPayload(draftHasPayload, {
+          onlyDraft,
+          queuedCount: pendingForGate === undefined
+            ? 0
+            : pendingForGate.items.filter(item => item.placement === 'queued').length,
+          liveAgent: liveAgent !== undefined,
+        })) return
+      }
       // Local submit acknowledgement (plan D): the row appears NOW, before
       // the awaited prepare/admission work, so an accepted Ctrl+S is never
       // a silent editor clear. The TOKEN arms every terminal exit of THIS
@@ -5577,6 +5604,7 @@ export function apply(ctx: Context, config: Config): void {
           createDraft: () => prepared,
           staleNotice: () => 'the queue or session changed while sending — try again',
           mergedNotice: () => 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)',
+          pendingInputReader: backend.pendingInputReader,
           // The FINAL delivery goes through the session WRITE port: the
           // Direct fence/barrier orchestration above stays in the runner,
           // the port only delivers (steer/followup/dequeue).
@@ -6578,8 +6606,12 @@ export function apply(ctx: Context, config: Config): void {
         if (cleanedUp || liveAgent === undefined) return
         const queuedAgent = liveAgent
         const queuedGeneration = sessionGeneration
-        const queued = [...queuedAgent.inbox.nextTurn, ...queuedAgent.inbox.nextStep]
-          .filter(message => isUserQueueInput(message.source as QueueNoticeSource | undefined))
+        const pending = backend.pendingInputReader.snapshot(queuedAgent.session.id)
+        if (pending === undefined) return
+        const queued = pending.items
+          .filter(item => item.placement === 'queued')
+          .filter(item => isUserQueueInput(item.source as QueueNoticeSource | undefined))
+          .map(queueInboxMessageOf)
         if (queued.length === 0) return
         // Multimodal queued messages (durable ImageBlocks) ARE pullable:
         // each image block becomes a RECALLED draft — a placeholder that
@@ -6862,8 +6894,9 @@ export function apply(ctx: Context, config: Config): void {
       // row-level `S` = confirmed Stop on capable rows (kimi's stop-on-row
       // pattern; the old /subagents SettingsList-submenu panel is gone).
       onOpenTasks: () => openTasksBrowser('quick'),
-      // Enter in an INTERACTIVE (continuable) subagent viewer: deliver the
-      // human prompt through the OFFICIAL ctx.subagents.prompt control
+      // A submit gesture in an INTERACTIVE (continuable) subagent viewer:
+      // resolve queue/steer delivery, then deliver the human prompt through
+      // the OFFICIAL ctx.subagents.prompt control
       // API — the child inbox (a distinct FIFO turn: enqueue while
       // running, wake while waiting, cold resume when absent), with Host
       // authority over the exact live parent and official user
@@ -6876,10 +6909,22 @@ export function apply(ctx: Context, config: Config): void {
         const viewerGeneration = app.getViewerGeneration()
         // The viewer editor's text becomes the prompt's content parts at
         // the client boundary (text today; image parts join with the
-        // viewer's image intake).
+        // viewer's image intake). Resolve the Web composer policy against
+        // the CHILD's activity; the parent status is irrelevant while
+        // viewing.
+        const delivery = submit.gesture === 'explicit-queue'
+          ? 'queue'
+          : resolveComposerDelivery(
+            viewing?.id === submit.childSessionId
+              && viewing.parentSessionId === submit.parentSessionId
+              && viewing.activity === 'running',
+            submit.gesture,
+            tuiSettings?.get().busyEnter,
+          )
         const request: SubagentViewerSubmitRequest = {
           parentSessionId: submit.parentSessionId,
           childSessionId: submit.childSessionId,
+          delivery,
           content: [{ type: 'text', text: submit.text }],
         }
         const promptViewerAbort = viewerSessionAbort
@@ -7100,7 +7145,9 @@ export function apply(ctx: Context, config: Config): void {
       })
       if (outcome.kind === 'ok') {
         if (settleTarget.kind === 'current') {
-          app.notify(`sent to ${settleTarget.label} — queued for the next turn`, 'info')
+          app.notify(request.delivery === 'steer'
+            ? `sent to ${settleTarget.label} — steered into the current turn`
+            : `sent to ${settleTarget.label} — queued for the next turn`, 'info')
         }
         return
       }
@@ -8209,15 +8256,15 @@ export function apply(ctx: Context, config: Config): void {
         : ` — final output: ask the agent to run job_output in the conversation${detail === undefined ? '' : ` (${detail})`}`
       return `${status}${tail}`
     }
-    // The queue pane mirrors the agent's durable inbox: next-turn followups
-    // first, then next-step steers, in delivery order. The inbox is public on
-    // the agent, and every mutation commits an agent/inbox/spliced session
-    // event, so the pane refreshes event-driven with no polling. The mirror
-    // is a USER-INPUT surface: a background-subagent settlement notice (the
-    // runtime's account of a child ending) is dropped from it — the task
-    // browser (job rows / inactive child rows /subagents) is its surface —
-    // and a FAILED settlement additionally surfaces once as a transient
-    // error notify, so the failure is announced without polluting the queue.
+    // The queue pane consumes the Host-owned pending-input projection. Only
+    // `placement: 'queued'` rows belong to this USER-INPUT surface; an already
+    // steering occurrence or injected context is not a queue gesture target.
+    // The projection is refreshed from the same session events that commit
+    // queue mutations, so no consumer reaches into Direct inbox collections.
+    // A background-subagent settlement notice (the runtime's account of a
+    // child ending) is dropped from the pane — the task browser is its surface
+    // — and a FAILED settlement additionally surfaces once as a transient
+    // error notify, without polluting the queue.
     const notifiedSubagentNotices = new Set<string>()
     const refreshQueue = (): void => {
       if (cleanedUp) return
@@ -8225,10 +8272,17 @@ export function apply(ctx: Context, config: Config): void {
         app.setQueueItems([])
         return
       }
-      const turn = foldQueueRows(liveAgent.inbox.nextTurn as unknown as QueueInboxMessage[], 'followup', notifiedSubagentNotices)
-      const step = foldQueueRows(liveAgent.inbox.nextStep as unknown as QueueInboxMessage[], 'steer', notifiedSubagentNotices)
-      for (const summary of [...turn.failures, ...step.failures]) app.notify(summary, 'error')
-      app.setQueueItems([...turn.rows, ...step.rows])
+      const pending = backend.pendingInputReader.snapshot(liveAgent.session.id)
+      if (pending === undefined) {
+        app.setQueueItems([])
+        return
+      }
+      const queued = pending.items
+        .filter(item => item.placement === 'queued')
+        .map(queueInboxMessageOf)
+      const result = foldQueueRows(queued, 'followup', notifiedSubagentNotices)
+      for (const summary of result.failures) app.notify(summary, 'error')
+      app.setQueueItems(result.rows)
     }
     refreshQueue()
     // The TUI-owned slash commands are registered as soon as the runner

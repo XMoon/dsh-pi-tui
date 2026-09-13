@@ -18,6 +18,7 @@ import type { SubagentPromptContext } from '../src/runtime/subagent-port.ts'
 const request = {
   parentSessionId: 'session-parent',
   childSessionId: 'session-child',
+  delivery: 'queue' as const,
   content: [{ type: 'text' as const, text: 'continue the plan' }],
 }
 
@@ -33,6 +34,7 @@ interface RecordedCall {
   parentSessionId: string
   childSessionId: string
   mode: string
+  delivery: string
   content: readonly SubagentPromptContentPart[]
 }
 
@@ -44,6 +46,7 @@ function service(calls: RecordedCall[]): SubagentPromptService {
         parentSessionId: payload.parentSessionId,
         childSessionId: payload.childSessionId,
         mode: payload.mode,
+        delivery: payload.delivery,
         content: payload.content,
       })
       return { messageId: `inbox-${payload.childSessionId}-1` }
@@ -72,9 +75,18 @@ test('delivers through ctx.subagents.prompt with the official request shape and 
   assert.equal(calls[0].parentSessionId, 'session-parent')
   assert.equal(calls[0].childSessionId, 'session-child')
   assert.equal(calls[0].mode, 'continuable')
+  assert.equal(calls[0].delivery, 'queue')
   assert.deepEqual(calls[0].content, request.content)
   assert.match(calls[0].requestId, /^[0-9a-f-]{36}$/u, 'the adapter mints a UUID identity before the call')
   assert.deepEqual(gets, ['subagents'], 'the adapter reads the ctx.subagents service')
+})
+
+test('forwards the resolved steer delivery to the official service', async () => {
+  const calls: RecordedCall[] = []
+  const port = new DirectSubagentPort(host(service(calls)))
+  const outcome = await port.prompt({ ...request, delivery: 'steer' }, context())
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(calls[0]!.delivery, 'steer')
 })
 
 test('applies the caller canonicalization before delivery', async () => {

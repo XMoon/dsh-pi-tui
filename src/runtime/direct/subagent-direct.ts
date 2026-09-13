@@ -68,7 +68,12 @@ export class DirectSubagentPort implements SubagentPort {
   }
 
   prompt(
-    request: { readonly parentSessionId: string; readonly childSessionId: string; readonly content: readonly unknown[] },
+    request: {
+      readonly parentSessionId: string
+      readonly childSessionId: string
+      readonly delivery: 'queue' | 'steer'
+      readonly content: readonly unknown[]
+    },
     context: SubagentPromptContext,
   ): Promise<SubagentPromptOutcome> {
     const key = `${request.parentSessionId}\u0000${request.childSessionId}`

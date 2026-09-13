@@ -13,6 +13,7 @@
 import { DIRECT_IMPLEMENTED_CAPABILITIES, type CapabilitySet } from './capability.ts'
 import type { SubagentPort } from './subagent-port.ts'
 import type { SessionReader } from './session-reader-port.ts'
+import type { PendingInputReader } from './pending-input-reader-port.ts'
 import type { SessionWriter } from './session-writer-port.ts'
 import type { SessionLifecycle } from './session-lifecycle-port.ts'
 import type { InteractionPort } from './interaction-port.ts'
@@ -35,6 +36,8 @@ export interface Backend {
   readonly subagent: SubagentPort
   /** The session READ domain port (M1.3). */
   readonly sessionReader: SessionReader
+  /** The semantic pending-input projection (D2.1). */
+  readonly pendingInputReader: PendingInputReader
   /** The session WRITE domain port (D2.1 contract convergence). */
   readonly sessionWriter: SessionWriter
   /** The session LIFECYCLE domain port (D2.1 semantic open). */
@@ -62,6 +65,7 @@ export interface Backend {
 export function createDirectBackend(
   subagent: SubagentPort,
   sessionReader: SessionReader,
+  pendingInputReader: PendingInputReader,
   sessionWriter: SessionWriter,
   sessionLifecycle: SessionLifecycle,
   interaction: InteractionPort,
@@ -76,6 +80,7 @@ export function createDirectBackend(
     capabilities: new Set(DIRECT_IMPLEMENTED_CAPABILITIES),
     subagent,
     sessionReader,
+    pendingInputReader,
     sessionWriter,
     sessionLifecycle,
     interaction,
