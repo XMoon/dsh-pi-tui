@@ -142,17 +142,20 @@ The child viewer's interactivity is keyed SOLELY to the catalog mode carried
 through the whole chain (`SubagentListEntry.mode` → `TaskBrowserRow.mode` →
 `SubagentViewerTarget.mode`), never guessed from running/inactive state, and
 never re-derived inside the viewer. A `continuable` viewer's editor is LIVE:
-Enter delivers the text as the child's NEXT distinct FIFO turn through the
-OFFICIAL `ctx.subagents.prompt({ requestId, parentSessionId, childSessionId,
-mode: 'continuable', content }, signal)` control API (DSH 0.1.2-alpha.4) —
-user provenance, no interrupt, no steer; parent authority is validated by
+Enter and the accelerated steer gesture resolve queue/steer delivery against
+the child's running state and `busyEnter` policy, then call the OFFICIAL
+`ctx.subagents.prompt({ requestId, parentSessionId, childSessionId,
+mode: 'continuable', delivery, content }, signal)` control API
+(DSH 0.1.2-alpha.4) —
+user provenance, with queue or steer delivery; parent authority is validated by
 the Host itself. Decisions a future change must not silently reverse:
 
 - **The viewer editor is a PLAIN text editor.** Everything typed — including
   lines that start with `/` — is delivered to the child as text; slash
   commands are NOT executed against the parent, and the child gets no
-  command-execution wire. Parent-only actions (Ctrl+S steer, Ctrl+Enter
-  queue, Alt+↑ dequeue, Shift+Tab permission, Ctrl+F/Ctrl+Shift+F main
+  command-execution wire. The accelerated Ctrl+S gesture is intercepted and
+  submitted to the child; parent-only actions (Ctrl+Enter explicit queue,
+  Alt+↑ dequeue, Shift+Tab permission, Ctrl+F/Ctrl+Shift+F main
   search, keyboard exit bindings (same-key confirmation; Ctrl+C clears the
   draft first, default Ctrl+D is editor-owned when content is present, custom
   keys preserve it), ↓ task browser, Ctrl+G external editor, Ctrl+V image

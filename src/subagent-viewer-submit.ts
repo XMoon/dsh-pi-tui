@@ -9,17 +9,18 @@
  * The write path is DELIBERATELY narrow:
  *
  * ```text
- * TuiApp (Enter in a continuable viewer)
- *   ↓ onSubagentSubmit({ parentSessionId, childSessionId, text })
+ * TuiApp (Enter / accelerated / explicit queue in a continuable viewer)
+ *   ↓ onSubagentSubmit({ parentSessionId, childSessionId, text, gesture })
  * submitSubagentPrompt(...)
  *   ↓ canonicalize the TUI @-mention grammar (client-owned, Host-neutral)
  *   ↓ ctx.subagents.prompt({ requestId, parentSessionId, childSessionId,
- *                           mode: 'continuable', delivery: 'queue', content }, signal)
- *   ↓ child Agent inbox (the ONLY queue — a distinct FIFO turn)
+ *                           mode: 'continuable', delivery, content }, signal)
+ *   ↓ child Agent inbox (queue or steer, according to the resolved delivery)
  * ```
  *
- * This is a HUMAN prompt (user provenance, next distinct turn), which is
- * why the official seam is `subagents.prompt()` — never
+ * This is a HUMAN prompt (user provenance, with queue/steer delivery chosen
+ * by the caller's composer policy), which is why the official seam is
+ * `subagents.prompt()` — never
  * `subagents.sendMessage()` (that is the Agent-authored Steer path) and
  * never the parent session's submit/steer/queue path. Parent authority is
  * the Host's: the official call rejects a parent that is not the exact
@@ -45,11 +46,13 @@ export type SubagentPromptContentPart =
   }
 
 /** The semantic prompt request from the viewer (mirrors
- * SubagentViewerSubmit without importing TuiApp). The `requestId` and
- * `mode: 'continuable'` are added at the Host adapter boundary. */
+ * SubagentViewerSubmit without importing TuiApp). The runner resolves the
+ * composer gesture to `delivery`; the `requestId` and `mode: 'continuable'`
+ * are added at the Host adapter boundary. */
 export interface SubagentViewerSubmitRequest {
   readonly parentSessionId: string
   readonly childSessionId: string
+  readonly delivery: 'queue' | 'steer'
   readonly content: readonly SubagentPromptContentPart[]
 }
 
@@ -57,8 +60,8 @@ export interface SubagentViewerSubmitRequest {
  * a package dependency; the service resolves from the dsh installation).
  * The request shape is the official `SubagentPromptRequest` vocabulary:
  * caller-minted `requestId`, durable parent/child address, the required
- * `continuable` discriminator, explicit FIFO `queue` delivery, prompt parts,
- * and the optional browser zone. */
+ * `continuable` discriminator, explicit `queue` or `steer` delivery, prompt
+ * parts, and the optional browser zone. */
 export interface SubagentPromptService {
   prompt(
     request: {
@@ -66,7 +69,7 @@ export interface SubagentPromptService {
       readonly parentSessionId: string
       readonly childSessionId: string
       readonly mode: 'continuable'
-      readonly delivery: 'queue'
+      readonly delivery: 'queue' | 'steer'
       readonly content: readonly SubagentPromptContentPart[]
       readonly clientTimeZone?: string
     },
@@ -216,8 +219,8 @@ export async function submitSubagentPrompt(
     if (signal.aborted) return { kind: 'rejected', reason: { kind: 'cancelled' } }
     // 3. The ONE correct write path: the official browser prompt contract.
     //    A HUMAN-authored message to a continuable direct child — the
-    //    child inbox queues it as its own distinct FIFO turn (enqueue
-    //    while running, wake while waiting, cold resume when absent), and
+    //    resolved queue/steer delivery is passed unchanged to the child;
+    //    the child owns the selected placement;
     //    the requestId (minted fresh for THIS submit, before the call) is
     //    persisted on the accepted message.
     const receipt = await subagents.prompt(
@@ -226,7 +229,7 @@ export async function submitSubagentPrompt(
         parentSessionId: request.parentSessionId,
         childSessionId: request.childSessionId,
         mode: 'continuable',
-        delivery: 'queue',
+        delivery: request.delivery,
         content: canonical,
       },
       signal,

@@ -12,6 +12,7 @@ import test from 'node:test'
 import { CAPABILITIES, DIRECT_IMPLEMENTED_CAPABILITIES } from '../src/runtime/capability.ts'
 import { createDirectBackend } from '../src/runtime/backend.ts'
 import type { SubagentPort } from '../src/runtime/subagent-port.ts'
+import type { PendingInputReader } from '../src/runtime/pending-input-reader-port.ts'
 
 test('the capability vocabulary covers the migration domains', () => {
   assert.deepEqual(CAPABILITIES, [
@@ -38,6 +39,9 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     measureContext: () => undefined,
+  }
+  const pendingInputReader: PendingInputReader = {
+    snapshot: () => ({ running: false, items: [] }),
   }
   const sessionWriter = {
     prompt: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -149,10 +153,11 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   const hostCommand = {
     execute: async () => ({ kind: 'committed' as const, matched: false as const }),
   }
-  const backend = createDirectBackend(subagent, sessionReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand)
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
+  assert.equal(backend.pendingInputReader, pendingInputReader)
   assert.equal(backend.sessionWriter, sessionWriter)
   assert.equal(backend.sessionLifecycle, sessionLifecycle)
   assert.equal(backend.interaction, interaction)

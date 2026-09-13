@@ -169,13 +169,16 @@ without changing the ownership or ordering rules:
 - Ordinary input uses `SessionWriter.prompt(sessionId, message, mode)`;
   `queue` and `steer` are explicit, and only a successful Direct call settles
   as `committed`.
-- Ctrl+S remains one operation-barrier turn. It snapshots `nextTurn`,
-  revalidates the agent identity and generation, then calls `steerQueued` once
-  per occurrence in FIFO order. Queue races settle per occurrence rather than
-  aborting the whole sweep. The draft is a separate final `prompt(...,
-  'steer')`; a missing/unavailable occurrence stops the sweep without replay,
-  and a genuine or indeterminate failure never claims atomicity or retries.
-- Alt+Up removes pullable user occurrences one at a time in FIFO order. A known
+- Ctrl+S remains one operation-barrier turn. A payload-bearing draft takes
+  priority and is sent alone through `prompt(..., 'steer')`; it never sweeps
+  the queue. With an empty draft, it reads the `PendingInputReader` snapshot,
+  selects only `placement: 'queued'`, revalidates the agent identity and
+  generation, then calls `steerQueued` once per occurrence in FIFO order.
+  Queue races settle per occurrence rather than aborting the whole sweep;
+  missing/unavailable occurrences stop it quietly without replay, and a genuine
+  or indeterminate failure never claims atomicity or retries.
+- Alt+Up removes pullable queued user occurrences one at a time in FIFO order;
+  already-`steering` and `context` placements are not queue-gesture targets. A known
   partial refusal restores only confirmed removals; an indeterminate removal
   keeps every recalled representation for manual review and is never retried.
   If a session transition queues while the writer is in flight, visible
@@ -189,6 +192,10 @@ without changing the ownership or ordering rules:
 - Task Center child interruption uses `SubagentPort` with the durable direct
   parent and child identities. The semantic writer hides Direct cancellation
   knobs such as the user reason and inbox-preservation option.
+- Continuable viewer prompts carry the runner-resolved `queue` or `steer`
+  delivery from the child running state and `busyEnter` policy. The prompt
+  port forwards that delivery with human provenance; it does not force every
+  viewer prompt into a FIFO queue.
 
 Known-unwritten outcomes are never reported as committed. An indeterminate
 future wire result is not retried automatically or restored as if it were

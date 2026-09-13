@@ -1664,13 +1664,16 @@ export type ComposerSubmitRequest = ComposerSubmitGesture | 'explicit-queue'
 
 /** A semantic follow-up submit from the interactive subagent viewer: the
  * runner's write path is the official `ctx.subagents.prompt(…)` human
- * prompt (a distinct FIFO turn in the child's inbox), NEVER
+ * prompt, with the submit gesture preserved for delivery resolution, NEVER
  * `ctx.subagents.sendMessage` (the Agent-authored Steer path) and never
  * the main-session submit/steer/queue path. */
 export interface SubagentViewerSubmit {
   readonly parentSessionId: string
   readonly childSessionId: string
   readonly text: string
+  /** The raw submit gesture; the runner resolves it against child activity
+   * and the busy-Enter preference before crossing the subagent port. */
+  readonly gesture: ComposerSubmitRequest
 }
 
 /** One semantic Workflow card action (PR2 plan §12.5/§14.2): the TUI emits
@@ -1775,8 +1778,8 @@ export interface TuiAppEventsBase {
    */
   onSteer?: (text: string) => void
   /**
-   * A follow-up submit from the INTERACTIVE subagent viewer (Enter while
-   * viewing a `continuable` child): the runner delivers the text through
+   * A follow-up submit from the INTERACTIVE subagent viewer (Enter or the accelerated steer gesture while
+   * viewing a `continuable` child): the runner resolves the gesture against child activity and delivers the text through
    * the official `ctx.subagents.prompt(…)` human prompt — never
    * `subagents.sendMessage` and never the main-session submit/steer/queue
    * path. The draft has ALREADY been cleared by the app; the runner
@@ -3431,6 +3434,7 @@ export class TuiApp {
     })
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
+      const gesture: ComposerSubmitGesture = 'enter'
       // Enter is a fresh submit attempt, including an empty no-op attempt.
       this.clearExitConfirmation()
       // The shell-editor-mode boundary: the editor buffer holds the bare
@@ -3477,6 +3481,7 @@ export class TuiApp {
           parentSessionId: target.parentSessionId,
           childSessionId: target.childSessionId,
           text: serialized,
+        gesture,
         })
         return
       }
@@ -4353,7 +4358,12 @@ export class TuiApp {
           return { consume: true }
         }
         if (this.isSubmitKey(data)) {
-          this.submitSubagentDraft()
+          this.submitSubagentDraft('enter')
+          return { consume: true }
+        } else if (this.keybindings.matches(data, 'app.input.steer')) {
+          // The accelerated steer gesture is parent-owned in the main
+          // surface, but targets the child draft while this viewer is open.
+          this.submitSubagentDraft('accelerated')
           return { consume: true }
         } else if (this.viewerParentLockedKey(data)) {
           return { consume: true }
@@ -8495,12 +8505,12 @@ export class TuiApp {
     this.subagentDrafts.set(childSessionId, current === '' ? text : `${current}\n\n${text}`)
   }
 
-  /** Enter in a continuable viewer: snapshot the child draft, clear the
+  /** A composer submit gesture in a continuable viewer: snapshot the child draft, clear the
    * visible editor, and hand the follow-up to the runner through
    * {@link TuiAppEvents.onSubagentSubmit}. The draft is cleared BEFORE
    * the async delivery; a rejection restores it (merged) — the user's
    * input never silently disappears. */
-  private submitSubagentDraft(): void {
+  private submitSubagentDraft(gesture: ComposerSubmitGesture): void {
     if (this.disposed) return
     const target = this.viewerMode
     if (target === undefined || target.mode !== 'continuable') return
@@ -8530,6 +8540,7 @@ export class TuiApp {
       parentSessionId: target.parentSessionId,
       childSessionId: target.childSessionId,
       text: serialized,
+      gesture,
     })
   }
 
@@ -8538,8 +8549,10 @@ export class TuiApp {
    * editor, and inside the viewer they must be inert (the child is the
    * only input target). ACTION-based (plan §1.2/M1): the key resolves
    * through the effective keymap, so a user remap of a parent action
-   * stays blocked automatically — the guard never maintains a physical
-   * key list. Esc/Ctrl+O/Enter are deliberately NOT listed — they fall
+   * stays blocked automatically — except `app.input.steer`, which is
+   * explicitly retargeted to the child as the accelerated submit gesture.
+   * The guard never maintains a physical key list. Esc/Ctrl+O/Enter are
+   * deliberately NOT listed — they fall
    * through to the host's exit/fold/submit paths. */
   private viewerParentLockedKey(data: string): boolean {
     const action = this.keybindings.actionFor(data, this.keybindingContext())
@@ -12379,6 +12392,7 @@ export class TuiApp {
    *   {@link ComposerSubmitRequest}); the RUNNER resolves its delivery mode.
    */
   submitDraft(request: ComposerSubmitRequest = 'enter'): void {
+    const gesture = request
     // Submission is an explicit intervening action even when the draft is
     // empty or a viewer guard rejects it.
     this.clearExitConfirmation()
@@ -12402,8 +12416,8 @@ export class TuiApp {
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       // A plugin action inside an interactive viewer submits to the
       // SUBAGENT (the semantic target of the visible editor), never the
-      // parent — and the queue verb is meaningless for the child (its
-      // inbox is the only queue). The draft restore on rejection is the
+      // parent — the runner resolves queue or steer delivery from the raw
+      // gesture. The draft restore on rejection is the
       // runner's job (onSubagentSubmit), exactly like the Enter path.
       // Viewer submissions never enter the shared editor history (an ↑
       // recall in the MAIN editor must not resend child-scoped text to
@@ -12418,6 +12432,7 @@ export class TuiApp {
         parentSessionId: target.parentSessionId,
         childSessionId: target.childSessionId,
         text: serialized,
+        gesture,
       })
       return
     }

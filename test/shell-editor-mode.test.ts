@@ -68,7 +68,7 @@ function startApp(
   options: {
     onSubmit?: (text: string) => void
     onAcceleratedSubmit?: (text: string) => void
-    onSubagentSubmit?: (request: { parentSessionId: string; childSessionId: string; text: string }) => void
+    onSubagentSubmit?: (request: { parentSessionId: string; childSessionId: string; text: string; gesture: 'enter' | 'accelerated' | 'explicit-queue' }) => void
     commands?: { name: string; description: string }[]
     /** The Host-file seam (migration M1.10): `@`-mention completion is
      * port-backed — tests that exercise it wire the Direct adapter

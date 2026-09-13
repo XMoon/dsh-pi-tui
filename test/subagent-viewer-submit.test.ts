@@ -24,6 +24,7 @@ import {
 const request: SubagentViewerSubmitRequest = {
   parentSessionId: 'session-parent',
   childSessionId: 'session-child',
+  delivery: 'queue',
   content: [{ type: 'text', text: 'focus on cancellation races' }],
 }
 
@@ -85,6 +86,15 @@ test('delivers through the official prompt call with the official request vocabu
   assert.equal(calls[0]!.signal, signal, 'the caller-owned signal is forwarded to the official call')
 })
 
+test('forwards a resolved steer delivery without changing human provenance', async () => {
+  const calls: RecordedCall[] = []
+  const outcome = await submitSubagentPrompt({ ...request, delivery: 'steer' }, deps({
+    subagents: () => service(calls),
+  }))
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(calls[0]!.delivery, 'steer', 'the resolved delivery must reach the official prompt unchanged')
+})
+
 test('every submit mints a FRESH requestId (a retry is a new human prompt)', async () => {
   const calls: RecordedCall[] = []
   let minted = 0
@@ -106,6 +116,7 @@ test('the prompt text runs through the SAME canonicalization as the main session
     {
       parentSessionId: request.parentSessionId,
       childSessionId: request.childSessionId,
+      delivery: 'queue',
       content: [{ type: 'text', text: 'review @src/foo.ts' }],
     },
     deps({
@@ -287,6 +298,7 @@ test('image parts are forwarded VERBATIM (the Host admits them; the TUI never re
     {
       parentSessionId: request.parentSessionId,
       childSessionId: request.childSessionId,
+      delivery: 'queue',
       content: [
         { type: 'text', text: 'review @src/foo.ts' },
         { type: 'image', mediaType: 'image/png', data: 'aGVsbG8=', name: 'shot.png' },

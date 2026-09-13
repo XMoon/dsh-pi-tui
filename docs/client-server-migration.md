@@ -45,9 +45,10 @@ cancel and title writes use the semantic `SessionWriter`; the runner places
 ordinary, explicit-queue, Ctrl+S, and command/fallback submissions on one FIFO
 before async preparation; already-authorized
 Host command execution uses `HostCommandPort`; and Task Center child
-interruption uses `SubagentPort`. These are Direct adapters today, so Direct
-behavior remains the production behavior and `Remote writes: none` remains
-a hard boundary.
+interruption uses `SubagentPort`. Pending input is read through the semantic
+`PendingInputReader` projection, so consumers do not depend on Direct inbox
+collection names. These are Direct adapters today, so Direct behavior remains
+the production behavior and `Remote writes: none` remains a hard boundary.
 
 ### Model-selection ownership
 
@@ -374,14 +375,17 @@ official client session contract; nothing in the TUI may regress to a live
 ### Subagent human prompt (alpha.4)
 
 The interactive viewer's human prompt maps 1:1 onto the official
-`subagent.prompt` remote:
+`subagent.prompt` remote. The runner resolves the viewer's Enter or accelerated
+composer gesture against the CHILD's running state and `busyEnter` preference;
+the port receives only the resulting `queue` or `steer` delivery:
 
 ```text
-viewer Enter
+viewer Enter / accelerated
+  ↓ runner resolves delivery (child running + busyEnter)
   ↓ SubagentPort.prompt (client-semantic DTO)
   ↓ Direct: ctx.subagents.prompt({ requestId, parentSessionId,
-      childSessionId, mode: 'continuable', content, clientTimeZone? })
-  ↓ child inbox — a distinct FIFO turn, user provenance
+      childSessionId, mode: 'continuable', delivery, content, clientTimeZone? })
+  ↓ child inbox — queue or steer, user provenance
 ```
 
 `requestId` is caller-minted (one UUID per human submit, before the call);
@@ -609,11 +613,15 @@ production backend change is part of this slice.
 - `SessionWriter` now exposes one ordinary prompt with an explicit `queue` or
   `steer` mode, one occurrence-level `steerQueued` operation, exact
   `removeQueued`, semantic `cancel`, outcome-bearing `rename`, and explicit
-  unsupported title refresh. Ctrl+S and Alt+Up are runner-level FIFO
-  best-effort orchestration over those single-occurrence operations: they use
-  the initial queued snapshot, stop on the first genuine failure, and never
-  claim cross-occurrence atomicity. Direct resolves the live Agent by session
-  id and reports only confirmed synchronous calls as `committed`.
+  unsupported title refresh. `PendingInputReader` exposes the Host-owned queue
+  projection (`queued` / `steering` / `context`) and running state; Direct maps
+  its inbox internally, while consumers never read `nextTurn` / `nextStep`.
+  Ctrl+S and Alt+Up are runner-level FIFO best-effort orchestration over those
+  single-occurrence operations: payload-bearing Ctrl+S sends only the draft;
+  empty-draft Ctrl+S and Alt+Up operate only on `queued` occurrences, stop on
+  the first genuine failure, and never claim cross-occurrence atomicity. Direct
+  resolves the live Agent by session id and reports only confirmed synchronous
+  calls as `committed`.
 - `HostCommandPort` owns execution of an already-authorized Host command only.
   The runner retains claim precedence and keeps TUI-local commands, extension
   commands, and skill-wrapper delivery out of this seam. Direct forwards the
@@ -625,15 +633,25 @@ production backend change is part of this slice.
   direct-parent, child and continuable-mode identity. Direct maps it to the
   official user-authority call; unknown failures still surface through the
   owned-task failure path.
+- `SubagentPort.prompt()` carries the resolved `queue` or `steer` delivery for
+  a continuable viewer prompt. The runner applies the child running state and
+  `busyEnter` policy; Direct forwards the official human prompt unchanged
+  through `ctx.subagents.prompt`.
 - `SessionLifecycle.open()` is the semantic name for opening an existing
   Session. The Direct adapter still calls `agents.resume()` internally. Its
   creation/open payload remains transitional: provider/model convergence is
   D2.3, and seed/fork metadata convergence is D2.4.
+- D2.1 converges prompt verbs, delivery modes and settlement outcomes only.
+  `SessionWriter.prompt()` still receives the Direct-prepared `UserMessage`
+  payload; attachment admission and the official Remote `PromptContentPart[]`
+  boundary remain later work. This payload is not described as Remote-ready.
 
 The future Remote writer must map `steerQueued` and `removeQueued` to the
 official per-occurrence `Session.updateQueue(itemId, { kind: 'steer' | 'remove' })`
 contract. Ctrl+S and Alt+Up remain client-side FIFO choreography over those
-calls, matching dsh-web; no TUI-specific batch RPC is needed. Remote title
+calls, matching the dsh-web queued-placement gesture; no TUI-specific batch RPC
+is needed. A future Remote `PendingInputReader` should normalize the official
+`SessionSnapshot.queue` projection rather than expose transport fields. Remote title
 auto-regeneration remains unsupported until its official Client contract is
 available.
 
