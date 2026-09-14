@@ -120,6 +120,14 @@ test('a carrier failure after dispatch is indeterminate, never an automatic re-e
   assert.equal(h.calls.length, 1)
 })
 
+test('an assembly throw from the generated Remote propagates, never indeterminate', async () => {
+  const h = harness()
+  h.setThrows(new Error('assembly fault'))
+  // The generated Remote resolves carrier failures into RemoteResult, so a
+  // rejection is a local defect and must not be reported as an ambiguous command.
+  await assert.rejects(() => h.port.execute(request()), /assembly fault/)
+})
+
 test('an unsupported attachment payload is rejected before a text-only execution', async () => {
   const h = harness()
   // The official contract refuses an attachment the command does not declare;

@@ -261,6 +261,14 @@ test('a pre-dispatch canonicalization failure is rejected, never indeterminate',
   assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'error', message: 'mention expansion failed' } })
 })
 
+test('a pre-dispatch request-identity mint failure is rejected, never indeterminate', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service([]),
+    mintRequestId: () => { throw new Error('mint failed') },
+  }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'error', message: 'mint failed' } })
+})
+
 function makeError(code: string): Error {
   return Object.assign(new Error(`remote error: ${code}`), { code })
 }
