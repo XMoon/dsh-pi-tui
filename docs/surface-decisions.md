@@ -105,18 +105,25 @@ accepted but has no authoritative representation yet:
   placement and the written prompt, so an agent status flip while the gesture
   waits on the submit FIFO can never make the pending surface disagree with the
   actual delivery.
-- **Own pending input is forced visible** — a NEW pending-lane semantic identity
-  (`rpcId ?? id`) takes the fullscreen viewport to the tail even when the reader
-  had scrolled away, matching the official Web's appended user/steering/
-  submission echo. The authoritative rpc-correlated replacement of an existing
-  identity does NOT jump a second time; unrelated background pending/context
-  changes never steal the viewport. In regular mode the terminal tail follows
-  naturally.
+- **Own pending input is forced visible (runner-owned)** — only a client-LOCAL
+  submission echo bound for the transcript lane (steering/transcript) is own
+  input. When a NEW such identity appears, the runner returns the subject's
+  VIRTUAL transcript window to latest (a reader may have paged into history)
+  and scrolls to the tail, so the local echo — and later its durable
+  replacement — are actually in the projection and on screen. An authoritative
+  steering occurrence produced by another client/background producer is NOT
+  own input and never steals the viewport; the authoritative rpc-correlated
+  replacement of an existing local echo does not jump a second time (the
+  ownership key set is derived from the local ledger, per subject). Keys are
+  tracked per subject, so entering/leaving the child viewer neither re-fires
+  nor forgets the parent's own input. `TuiApp.setPendingInputPresentation`
+  itself is a pure presentation update and never moves the viewport.
 - **Local-only queue rows carry no bulk hint** — the steer-all/recall-all
   gestures address only authoritative queued occurrences, so a queue pane
   holding only client-local `sending…` rows hides the hint rather than
-  advertising a no-op action; a mixed pane keeps it (the actions do apply to its
-  authoritative rows). The `sending…` suffix already communicates the state.
+  advertising a no-op action; a MIXED pane scopes the hint to the accepted rows
+  (`… to steer accepted`) so `sending…` rows are never implied to participate.
+  The `sending…` suffix already communicates the state.
 
 Per-occurrence QueueDock controls (Edit / Remove / Steer) remain a separate,
 deliberately deferred interaction design.

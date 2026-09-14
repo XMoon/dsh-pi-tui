@@ -3851,6 +3851,16 @@ export function apply(ctx: Context, config: Config): void {
       return parts.join(' ')
     }
     /**
+     * Own pending input must become VISIBLE even when the reader deliberately
+     * browsed away from the live tail (official Web: an appended user node /
+     * steering node / submission echo forces `toBottom`). Ownership is
+     * EXPLICIT here — only a client-LOCAL submission echo is own input, so a
+     * background/other-client authoritative steering occurrence never steals
+     * the viewport. Keys are tracked per SUBJECT, so entering/leaving the child
+     * viewer neither re-fires nor forgets the parent's own input.
+     */
+    const pendingOwnInputBySubject = new Map<string, ReadonlySet<string>>()
+    /**
      * Read one coherent pending-input projection and publish it to the app in
      * a SINGLE atomic presentation update: authoritative `queued` rows plus
      * local queued echoes (queue pane), and authoritative `steering` rows plus
@@ -3887,8 +3897,9 @@ export function apply(ctx: Context, config: Config): void {
       for (const row of [...queued, ...steering]) {
         if (row.rpcId !== undefined) authoritativeRpcIds.add(row.rpcId)
       }
-      for (const echo of pendingSubmissionsNotReplaced(pendingSubmissions.snapshot(), authoritativeRpcIds)) {
-        if (echo.sessionId !== sessionId) continue
+      const subjectEchoes = pendingSubmissions.snapshot().filter(echo => echo.sessionId === sessionId)
+      const visibleEchoes = pendingSubmissionsNotReplaced(subjectEchoes, authoritativeRpcIds)
+      for (const echo of visibleEchoes) {
         if (echo.placement === 'queued') {
           queued.push({ id: echo.requestId, rpcId: echo.requestId, text: echo.text, mode: 'followup', local: true })
         } else {
@@ -3900,6 +3911,36 @@ export function apply(ctx: Context, config: Config): void {
             status: echo.placement === 'transcript' ? 'sending' : 'steering',
           })
         }
+      }
+      // Ownership: only a local echo bound for the TRANSCRIPT lane
+      // (steering/transcript) is own input that may take the viewport. A local
+      // QUEUED echo lives in the queue pane (chrome), not the transcript. The
+      // key set is derived from the LEDGER (not the visible rows), so an
+      // authoritative rpc-correlated replacement — or the Host claim that
+      // re-presents the echo before the durable message — never counts as a
+      // second new own input.
+      const subjectKey = sessionId ?? ''
+      const ownLaneKeys = new Set(
+        subjectEchoes.filter(echo => echo.placement !== 'queued').map(echo => echo.requestId),
+      )
+      const previousOwnKeys = pendingOwnInputBySubject.get(subjectKey)
+      const hasNewOwnInput = previousOwnKeys === undefined
+        ? ownLaneKeys.size > 0
+        : [...ownLaneKeys].some(key => !previousOwnKeys.has(key))
+      pendingOwnInputBySubject.set(subjectKey, ownLaneKeys)
+      if (hasNewOwnInput) {
+        // The live tail may be outside the current virtual window (the reader
+        // paged into history): move the subject's window back to latest BEFORE
+        // presenting, so the local echo — and later its durable replacement —
+        // are actually in the projection the viewport scrolls to.
+        const controller = activeWindow()
+        if (!controller.isLatest()) {
+          controller.latest()
+          repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
+        }
+        app.setPendingInputPresentation({ queued, steering, running })
+        app.scrollToBottom()
+        return
       }
       app.setPendingInputPresentation({ queued, steering, running })
     }

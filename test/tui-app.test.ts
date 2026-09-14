@@ -595,11 +595,15 @@ test('a local-only queue pane does not advertise the bulk steer/recall actions',
   })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('to steer all'),
-    `an authoritative row must restore the actionable hint:\n${view}`)
+  assert.ok(view.includes('to steer accepted'),
+    `a mixed pane must scope the hint to the accepted rows:\n${view}`)
+  assert.ok(view.includes('to recall accepted'),
+    `a mixed pane must scope the recall hint too:\n${view}`)
+  assert.ok(!view.includes('to steer all'),
+    `a mixed pane must not claim the sending row participates:\n${view}`)
 })
 
-test('own pending input takes a scrolled-away fullscreen viewport to the tail; its authoritative replacement does not jump again', async () => {
+test('the pending presentation never steals the fullscreen viewport (force-tail ownership is the runner\'s)', async () => {
   const { vt, app } = startApp()
   app.setTranscript(Array.from({ length: 40 }, (_, index) => ({
     kind: 'assistant' as const,
@@ -610,34 +614,32 @@ test('own pending input takes a scrolled-away fullscreen viewport to the tail; i
   await vt.waitForRender()
   app.scrollToTop({ disableFollow: true })
   await vt.waitForRender()
-  const browsing = app.fullscreenScrollForTest()
-  assert.ok(browsing !== undefined && browsing.isFollowingEnd === false,
-    'the reader must be browsing history before the steer')
+  assert.equal(app.fullscreenScrollForTest()?.isFollowingEnd, false,
+    'the reader must be browsing history before the update')
 
+  // A local echo and an authoritative steering occurrence alike are pure
+  // presentation updates here: the RUNNER decides whether own input takes the
+  // viewport (it also owns the virtual transcript window).
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'req-scroll', rpcId: 'req-scroll', text: 'SCROLL-MARKER', local: true }],
+    steering: [{ id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true }],
     running: true,
   })
   await vt.waitForRender()
-  const followed = app.fullscreenScrollForTest()
-  assert.ok(followed !== undefined && followed.isFollowingEnd === true,
-    'own pending input must take the fullscreen viewport to the tail')
-  assert.ok(vt.getViewport().join('\n').includes('SCROLL-MARKER'),
-    `the pending steer must be visible:\n${vt.getViewport().join('\n')}`)
+  assert.equal(app.fullscreenScrollForTest()?.isFollowingEnd, false,
+    'TuiApp must not force the viewport for a local echo on its own')
 
-  // The authoritative replacement carries the SAME semantic identity
-  // (rpcId), so it must not cause a second visible jump.
-  const settledTop = followed.scrollTop
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'auth-steer-1', rpcId: 'req-scroll', text: 'SCROLL-MARKER', status: 'steering' }],
+    steering: [
+      { id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true },
+      { id: 'remote-occ', rpcId: 'remote-rpc', text: 'REMOTE-MARKER', status: 'steering' },
+    ],
     running: true,
   })
   await vt.waitForRender()
-  const afterReplacement = app.fullscreenScrollForTest()
-  assert.equal(afterReplacement?.scrollTop, settledTop,
-    'the authoritative replacement of the same request id must not jump again')
+  assert.equal(app.fullscreenScrollForTest()?.isFollowingEnd, false,
+    'a background authoritative steering row must never steal the viewport')
 })
 
 test('clearing the pending-input presentation removes the lane and the queue pane', async () => {
