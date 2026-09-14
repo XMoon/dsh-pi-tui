@@ -190,6 +190,48 @@ describe("viewport layout", () => {
 		assert.strictEqual(scrollView.isFollowingEnd, true);
 	});
 
+	it("(X055) a viewport growth does not re-arm follow-end after the user left the tail", () => {
+		const scrollView = new ScrollView(new Text("x", 0, 0), { follow: "end", primary: true });
+		// 10 content rows in a 3-row viewport: maxScrollTop 7, following the end.
+		scrollView.updateLayout(10, 3, () => {});
+		assert.strictEqual(scrollView.scrollTop, 7);
+		assert.strictEqual(scrollView.isFollowingEnd, true);
+
+		// The user scrolls up one row and leaves the tail.
+		scrollView.scrollBy(-1);
+		assert.strictEqual(scrollView.scrollTop, 6);
+		assert.strictEqual(scrollView.isFollowingEnd, false);
+
+		// Pinned chrome disappears: the viewport GROWS, maxScrollTop shrinks to
+		// 5, and the clamped scroll lands exactly on the new maximum. The
+		// content never changed, so follow-end must not re-arm.
+		scrollView.updateLayout(10, 5, () => {});
+		assert.strictEqual(scrollView.scrollTop, 5);
+		assert.strictEqual(scrollView.isFollowingEnd, false);
+
+		// A later passive repaint at the SAME geometry (no content growth) must
+		// not re-arm either: the suppression is sticky until the user scrolls.
+		scrollView.updateLayout(10, 5, () => {});
+		assert.strictEqual(scrollView.scrollTop, 5);
+		assert.strictEqual(scrollView.isFollowingEnd, false);
+
+		// An explicit scroll-to-end clears the suppression and re-arms.
+		scrollView.scrollToEnd();
+		assert.strictEqual(scrollView.isFollowingEnd, true);
+	});
+
+	it("(X055) a content shrink still re-arms follow-end", () => {
+		const scrollView = new ScrollView(new Text("x", 0, 0), { follow: "end", primary: true });
+		scrollView.updateLayout(10, 5, () => {});
+		scrollView.scrollBy(-1);
+		assert.strictEqual(scrollView.isFollowingEnd, false);
+
+		// The CONTENT shrinks (a fold) with the viewport unchanged: the clamped
+		// position reaches the new maximum and follow-end re-arms.
+		scrollView.updateLayout(4, 5, () => {});
+		assert.strictEqual(scrollView.isFollowingEnd, true);
+	});
+
 	it("renders a proportional glyph scrollbar with an expanded active thumb", async () => {
 		const sourceLines = ["abcd界", "abcde2", "abcde3", "abcde4", "abcde5", "abcde6", "abcde7", "abcde8"];
 		const contentBackground = "\x1b[42m";

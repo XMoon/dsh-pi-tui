@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { TuiApp, type StreamingToolPreview } from '../src/tui-app.ts'
+import { TuiApp, type QueueItem, type StreamingToolPreview } from '../src/tui-app.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import {
   removeStreamingToolPreview,
@@ -489,6 +489,238 @@ test('local-card removal releases the preceding running turn floor', async () =>
     app.clearSettledLocalMessages()
     await vt.waitForRender()
     assert.equal(height(app), baseline)
+  } finally {
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+const QUEUE_STEER_ITEM: QueueItem = { id: 'queue-1', text: 'queued occurrence', mode: 'steer' }
+
+/** One running, expanded fullscreen Focus turn with a scrollable transcript
+ * and an established live high-water floor. */
+async function runningFullscreenFocus(columns: number, rows: number): Promise<{
+  vt: VirtualTerminal
+  app: TuiApp
+  folder: TranscriptFolder
+}> {
+  const { vt, app } = startApp(columns, rows)
+  const folder = new TranscriptFolder()
+  const body = Array.from({ length: 40 }, (_, index) => `QUEUE-LINE-${index}`).join('\n')
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, 90),
+    eventAt('user/message', {
+      id: MessageId('queue-viewport-user'),
+      role: 'user',
+      content: [{ type: 'text', text: body }],
+      source: { kind: 'user' },
+    }, 91),
+  ])
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  app.setWorking(true)
+  show(app, folder)
+  await vt.waitForRender()
+  folder.applyLiveInput(liveStart())
+  show(app, folder)
+  await vt.waitForRender()
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  // Establish a live high-water floor: grow with streaming previews, then
+  // shrink; the Focus padding holds the taller geometry.
+  show(app, folder, [0, 1, 2, 3, 4].map(index => ({
+    callId: `queue-growth-${index}`, turn: 1, step: 1, index, name: 'edit', argumentBytes: 900,
+  })))
+  await vt.waitForRender()
+  const floor = height(app)
+  show(app, folder)
+  await vt.waitForRender()
+  assert.equal(height(app), floor, 'live high-water floor should hold after the shrink')
+  return { vt, app, folder }
+}
+
+test('semantic queue pane removal preserves historical wheel intent across fullscreen viewport growth', async () => {
+  const { vt, app, folder } = await runningFullscreenFocus(40, 18)
+  try {
+    const base = frame(app)
+    assert.equal(base[3], true, `setup should follow the end (frame ${JSON.stringify(base)})`)
+    assert.ok(base[0] - base[1] >= 1, `setup needs a scrollable transcript (frame ${JSON.stringify(base)})`)
+
+    // A queued occurrence appears: the pinned queue pane takes three rows
+    // (border + item + hint) out of the fullscreen transcript viewport.
+    app.setQueueItems([QUEUE_STEER_ITEM], true)
+    await vt.waitForRender()
+    const withQueue = frame(app)
+    assert.equal(withQueue[3], true, `a queue pane while following must stay at the tail (frame ${JSON.stringify(withQueue)})`)
+    assert.equal(withQueue[1], base[1] - 3, `queue pane should shrink viewportHeight by three rows (frames ${JSON.stringify(base)} -> ${JSON.stringify(withQueue)})`)
+
+    // Wheel-up one row leaves follow-end exactly one row above the maximum.
+    vt.sendInput('\x1b[<64;50;10M')
+    await vt.waitForRender()
+    const scrolled = frame(app)
+    assert.equal(scrolled[3], false, `wheel-up must leave follow-end (frame ${JSON.stringify(scrolled)})`)
+    assert.equal(scrolled[2], scrolled[0] - scrolled[1] - 1, `wheel-up should sit one row above max (frame ${JSON.stringify(scrolled)})`)
+
+    // The queued occurrence is consumed: the queue pane disappears and the
+    // transcript viewport GROWS, so maxScrollTop shrinks. This is the second
+    // geometry path (viewport growth) that PR130's content high-water cannot
+    // absorb: the user never returned to the tail and must not be re-armed.
+    app.setQueueItems([])
+    await vt.waitForRender()
+    const removed = frame(app)
+    assert.equal(removed[1], base[1], `emptied queue pane should restore viewportHeight (frame ${JSON.stringify(removed)})`)
+    assert.equal(removed[3], false, `queue pane removal must not re-arm follow-end (frame ${JSON.stringify(removed)})`)
+
+    // A passive repaint at the SAME geometry with NO content change (a queue
+    // hint / footer / working repaint) must not re-arm follow either.
+    show(app, folder)
+    await vt.waitForRender()
+    assert.equal(frame(app)[3], false, `passive same-geometry repaint must keep the historical view (frame ${JSON.stringify(frame(app))})`)
+
+    // A later passive live delta must not pull the historical view back either.
+    folder.applyLiveInput(liveText(' '))
+    show(app, folder)
+    await vt.waitForRender()
+    assert.equal(frame(app)[3], false, `passive live delta after queue removal must keep the historical view (frame ${JSON.stringify(frame(app))})`)
+  } finally {
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('queue running-hint update keeps the fullscreen viewport and Focus floor unchanged', async () => {
+  const { vt, app } = await runningFullscreenFocus(40, 18)
+  try {
+    app.setQueueItems([QUEUE_STEER_ITEM], true)
+    await vt.waitForRender()
+    const running = frame(app)
+
+    // Only the running hint text changes: the physical queue rows, the
+    // viewport, the Focus floor and the scroll position must all stay put.
+    app.setQueueItems([QUEUE_STEER_ITEM], false)
+    await vt.waitForRender()
+    assert.deepEqual(frame(app), running)
+  } finally {
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('queue pane removal keeps a same-frame wheel-up off the tail', async () => {
+  const { vt, app, folder } = await runningFullscreenFocus(40, 18)
+  try {
+    app.setQueueItems([QUEUE_STEER_ITEM], true)
+    await vt.waitForRender()
+    const withQueue = frame(app)
+    assert.equal(withQueue[3], true, `a queue pane while following stays at the tail (frame ${JSON.stringify(withQueue)})`)
+
+    // The queued occurrence is consumed while the user is STILL following, and
+    // the user wheel-up's away from the tail in the SAME frame, before the
+    // repaint. The queue removal then grows the viewport and re-arms follow:
+    // the wheel-up intent must still win.
+    app.setQueueItems([])
+    vt.sendInput('\x1b[<64;50;10M')
+    await vt.waitForRender()
+    const race = frame(app)
+    assert.equal(race[1], withQueue[1] + 3, `emptied queue pane should restore viewportHeight (frame ${JSON.stringify(race)})`)
+    assert.equal(race[3], false, `same-frame wheel-up must not be re-armed by queue pane removal (frame ${JSON.stringify(race)})`)
+
+    folder.applyLiveInput(liveText(' '))
+    show(app, folder)
+    await vt.waitForRender()
+    assert.equal(frame(app)[3], false, `passive live delta must keep the historical view (frame ${JSON.stringify(frame(app))})`)
+  } finally {
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('queue pane removal does not undo an explicit same-frame follow-end request', async () => {
+  const { vt, app } = await runningFullscreenFocus(40, 18)
+  try {
+    app.setQueueItems([QUEUE_STEER_ITEM], true)
+    await vt.waitForRender()
+    vt.sendInput('\x1b[<64;50;10M')
+    await vt.waitForRender()
+    const historical = frame(app)
+    assert.equal(historical[3], false, `wheel-up should be historical (frame ${JSON.stringify(historical)})`)
+
+    // The queued occurrence is consumed and the user explicitly jumps to the
+    // tail in the SAME frame: the viewport clamp must not undo that request.
+    app.setQueueItems([])
+    app.scrollToBottom()
+    await vt.waitForRender()
+    const followed = frame(app)
+    assert.equal(followed[1], historical[1] + 3, `emptied queue pane should restore viewportHeight (frame ${JSON.stringify(followed)})`)
+    assert.equal(followed[3], true, `explicit scrollToBottom must keep follow-end (frame ${JSON.stringify(followed)})`)
+    assert.equal(followed[2], followed[0] - followed[1], `explicit scrollToBottom must land at the tail (frame ${JSON.stringify(followed)})`)
+  } finally {
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('a wheel-up on a non-scrolling transcript does not arm the clamp correction', async () => {
+  const { vt, app } = startApp(40, 40)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, 95),
+    eventAt('user/message', {
+      id: MessageId('short-queue-user'),
+      role: 'user',
+      content: [{ type: 'text', text: 'SHORT' }],
+      source: { kind: 'user' },
+    }, 96),
+  ])
+  try {
+    app.setFocusMode(true)
+    app.setFullscreen(true)
+    app.setWorking(true)
+    folder.applyLiveInput(liveStart())
+    show(app, folder)
+    await vt.waitForRender()
+    app.toggleFocusTurn(1)
+    await vt.waitForRender()
+    const short = frame(app)
+    assert.ok(short[0] <= short[1], `setup needs a non-scrolling transcript (frame ${JSON.stringify(short)})`)
+    assert.equal(short[3], true, `a short transcript stays at the end (frame ${JSON.stringify(short)})`)
+
+    // The wheel cannot scroll anything, so it never left follow-end; the queue
+    // pane's later removal must not disable follow on a short transcript.
+    app.setQueueItems([QUEUE_STEER_ITEM], true)
+    await vt.waitForRender()
+    vt.sendInput('\x1b[<64;50;10M')
+    app.setQueueItems([])
+    await vt.waitForRender()
+    assert.equal(frame(app)[3], true, `a no-op wheel on short content must not disable follow (frame ${JSON.stringify(frame(app))})`)
+  } finally {
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('fullscreen re-entry after stop/start ignores an unconsumed historical intent', async () => {
+  const { vt, app, folder } = await runningFullscreenFocus(40, 18)
+  try {
+    app.setQueueItems([QUEUE_STEER_ITEM], true)
+    await vt.waitForRender()
+    // Arm a historical frame WITHOUT any intervening paint: the wheel and the
+    // queue mutation are never consumed by a paint, so the torn-down surface
+    // leaves an unconsumed historical intent AND a stale paint snapshot. The
+    // fresh fullscreen epoch must ignore both (the entry path drops the
+    // snapshot, and the correction only ever pairs a frame with its
+    // predecessor).
+    vt.sendInput('\x1b[<64;50;10M')
+    app.setQueueItems([])
+    app.stop()
+    app.start()
+    app.setFocusMode(true)
+    app.setFullscreen(true)
+    show(app, folder)
+    await vt.waitForRender()
+    const fresh = frame(app)
+    assert.equal(fresh[3], true, `a fresh fullscreen surface must follow the end (frame ${JSON.stringify(fresh)})`)
+    assert.equal(fresh[2], fresh[0] - fresh[1], `a fresh fullscreen surface must start at the tail (frame ${JSON.stringify(fresh)})`)
   } finally {
     app.dispose()
     startedApps.delete(app)

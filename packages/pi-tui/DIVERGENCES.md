@@ -80,8 +80,8 @@
 
 ## Summary
 
-- Records: 55
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 44, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
+- Records: 56
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 45, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -140,6 +140,7 @@
 | X052 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 | X053 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
 | X054 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
+| X055 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM, LOCAL_UX | NO |
 
 ## Divergences
 
@@ -4498,3 +4499,81 @@ A host that resolves a same-cell click against the frame the user actually SAW n
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Confirmed the host has no public entry point after the layout pass (a render probe runs during the measurement pass); the fork exposes the narrow frame-completion boundary + painted-box query.
+
+### X055 — Viewport growth must not re-arm follow-end
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`, `LOCAL_UX`
+- Risk: `MEDIUM`
+- Files: `src/components/scroll-view.ts`
+- Last audited: `2026-09-14`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+ScrollView re-arms follow-end whenever a layout clamp lands the scroll on the new maximum, interpreting that as 'the user's position caught up to the bottom'. That holds when the CONTENT shrank (a fold/collapse). It is wrong when the VIEWPORT grew (pinned chrome rows appearing/disappearing, terminal resize): maxScrollTop shrinks without any content change, so a user who had deliberately scrolled away from the tail is silently pulled back to it. The pinned fullscreen queue pane is a concrete trigger: a queued occurrence's create/remove changes the transcript viewport height. The host cannot compensate reliably (the alt screen owns the wheel/keyboard/scrollbar gestures after the host router sees them, and an overlay may consume the wheel), so the rule belongs in the viewport layer.
+
+#### Changed surface
+
+- ScrollView.updateLayout only re-arms follow-end when the viewport did NOT grow since the previous layout
+
+#### Dependency map
+
+**Vendor internal**
+- ScrollView.updateLayout owns followingEnd/followSuppressedAtEnd; the guard only skips the re-arm branch and never changes the clamp itself.
+- Audit note: The first layout (previous viewport 0) is treated as 'not a growth' so the initial follow-end state is preserved.
+
+**Inheritance / structural**
+- ScrollView extends Container; no class-hierarchy change.
+- Audit note: None.
+
+**Host**
+- TuiApp fullscreen transcript: pinned chrome (semantic queue pane, todo, goal, dock, working) changes the ScrollView viewport height; the Focus live-height stabilization cannot absorb a viewport-driven clamp because contentHeight is unchanged.
+- Audit note: The host no longer infers scroll intent; the viewport layer owns the rule.
+
+**Public / extension**
+- ScrollView is a public built-in component; scrollBy/scrollTo/scrollToEnd and the isFollowingEnd read keep their existing semantics, except that a viewport growth no longer re-arms follow-end.
+- Audit note: Additive correctness fix; no API shape change.
+
+**Behavioral coupling**
+- A content shrink (fold) still re-arms follow-end when the clamped position reaches the new maximum.
+- A viewport growth while not following leaves followingEnd false and keeps the clamped historical position.
+- A viewport growth while following keeps following (followingEnd was already true before the layout).
+- Audit note: Regression tests cover the growth and the shrink.
+
+#### Guarding tests
+
+- packages/pi-tui/test/layout.test.ts: (X055) a viewport growth does not re-arm follow-end after the user left the tail
+- packages/pi-tui/test/layout.test.ts: (X055) a content shrink still re-arms follow-end
+- test/focus-streaming-jitter.test.ts: semantic queue pane removal preserves historical wheel intent across fullscreen viewport growth
+- test/focus-streaming-jitter.test.ts: queue pane removal keeps a same-frame wheel-up off the tail
+- test/focus-streaming-jitter.test.ts: queue pane removal does not undo an explicit same-frame follow-end request
+- test/focus-streaming-jitter.test.ts: a wheel-up on a non-scrolling transcript does not arm the clamp correction
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/components/scroll-view.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: The pinned baseline's updateLayout re-arms follow-end on any clamp that reaches the maximum; the fork additionally requires that the viewport did not grow.
+
+#### Retirement conditions
+
+- Retire when upstream distinguishes a content-height clamp from a viewport-growth clamp (or stops re-arming follow-end on a clamp), then re-run the viewport-growth and content-shrink regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Checked upstream v0.85.1 updateLayout (identical re-arm clause), the ScrollView follow/scroll field graph, and the host fullscreen consumer; the guard only suppresses the re-arm branch on viewport growth.
