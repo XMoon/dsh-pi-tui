@@ -551,17 +551,15 @@ async function drainUntil(ready: () => boolean, timeoutMs: number): Promise<bool
 }
 
 /** Poll until the submission's terminal write lands on the fake agent.
- * Drains deterministic flushes (microtask batches + setImmediate — the
- * child_process events need the loop's poll phase; AGENTS.md trap: race
- * tests never poll fixed wall-clock delays). */
+ * Reuses the load-tolerant {@link drainUntil}: the attachment intake (FILE
+ * admission streams real bytes) depends on fs/stream scheduling, so a fixed
+ * iteration budget is not enough under the full suite's parallel load. */
 async function waitForDelivery(host: FakeAgentHost, label: string): Promise<void> {
-  for (let round = 0; round < 40; round += 1) {
-    if (host.followedUp.length > 0 || host.steered.length > 0) return
-    for (let index = 0; index < 50; index += 1) await Promise.resolve()
-    await new Promise<void>(resolve => process.nextTick(resolve))
-    await new Promise<void>(resolve => setImmediate(resolve))
-  }
-  assert.ok(host.followedUp.length > 0 || host.steered.length > 0,
+  const delivered = await drainUntil(
+    () => host.followedUp.length > 0 || host.steered.length > 0,
+    15_000,
+  )
+  assert.ok(delivered && (host.followedUp.length > 0 || host.steered.length > 0),
     `${label}: the submission must reach the agent's inbox`)
 }
 
