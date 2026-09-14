@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   classifySubagentPromptError,
+  classifySubagentPromptSettlement,
   resolveSubagentSettleTarget,
   subagentPromptDisposition,
   submitSubagentPrompt,
@@ -161,8 +162,11 @@ test('classifies the official RemoteError vocabulary into the stable reason set'
   const cases: Array<[string, string]> = [
     ['subagent/parent-unavailable', 'parent-unavailable'],
     ['subagent/not-resumable', 'stale-child'],
+    ['subagent/not-found', 'stale-child'],
+    ['subagent/catalog-diagnostic', 'stale-child'],
     ['subagent/unauthorized', 'unauthorized'],
     ['subagent/delivery-unavailable', 'unavailable'],
+    ['subagent/projections-unavailable', 'unavailable'],
     ['gateway/cancelled', 'cancelled'],
     ['subagent/invalid-time-zone', 'error'],
     ['subagent/attachment-invalid', 'error'],
@@ -226,6 +230,35 @@ test('subagentPromptDisposition never restores an indeterminate delivery', () =>
     subagentPromptDisposition({ kind: 'rejected', reason: { kind: 'parent-unavailable' } }),
     { kind: 'rejected', reason: { kind: 'parent-unavailable' } },
   )
+})
+
+test('a structured admission refusal settles rejected, never indeterminate', () => {
+  const cases: Array<[string, string]> = [
+    ['subagent/not-found', 'stale-child'],
+    ['subagent/catalog-diagnostic', 'stale-child'],
+    ['subagent/projections-unavailable', 'unavailable'],
+    ['subagent/attachment-invalid', 'error'],
+    ['subagent/invalid-time-zone', 'error'],
+    ['gateway/bad-request', 'error'],
+  ]
+  for (const [code, kind] of cases) {
+    const settlement = classifySubagentPromptSettlement(makeError(code))
+    assert.equal(settlement.kind, 'rejected', `code ${code} must be a proven refusal`)
+    if (settlement.kind === 'rejected') assert.equal(settlement.reason.kind, kind, `code ${code}`)
+  }
+})
+
+test('only gateway/internal or a code-less throw settles indeterminate', () => {
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/internal')).kind, 'indeterminate')
+  assert.equal(classifySubagentPromptSettlement(new Error('boom')).kind, 'indeterminate')
+})
+
+test('a pre-dispatch canonicalization failure is rejected, never indeterminate', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service([]),
+    canonicalizeText: () => { throw new Error('mention expansion failed') },
+  }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'error', message: 'mention expansion failed' } })
 })
 
 function makeError(code: string): Error {

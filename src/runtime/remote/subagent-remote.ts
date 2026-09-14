@@ -138,9 +138,13 @@ export class RemoteSubagentPort implements SubagentPort {
     },
     context: SubagentPromptContext,
   ): Promise<SubagentPromptOutcome> {
-    const signal = context.makeSignal()
+    // Pre-dispatch preparation. Any failure here happens BEFORE prompt() is
+    // called, so it is a KNOWN non-dispatch (never indeterminate).
+    let signal: AbortSignal
+    let canonical: SubagentPromptContentPart[]
     try {
-      const canonical: SubagentPromptContentPart[] = []
+      signal = context.makeSignal()
+      canonical = []
       for (const part of request.content) {
         if (part.type === 'text') {
           canonical.push({ type: 'text', text: await context.canonicalizeText?.(part.text) ?? part.text })
@@ -149,6 +153,11 @@ export class RemoteSubagentPort implements SubagentPort {
         }
       }
       if (signal.aborted) return { kind: 'rejected', reason: { kind: 'cancelled' } }
+    } catch (error) {
+      return { kind: 'rejected', reason: { kind: 'error', message: remoteFailureMessage(error) } }
+    }
+    // Dispatch: only a failure of prompt() itself can be ambiguous.
+    try {
       const result = await this.subagents.prompt(
         {
           // The identity is minted BEFORE the call and persisted on the

@@ -51,6 +51,8 @@ function errorCode(error: unknown): string | undefined {
  */
 function classifyInterruptFailure(error: unknown): SubagentInterruptOutcome {
   switch (errorCode(error)) {
+    case 'subagent/not-found':
+    case 'subagent/catalog-diagnostic':
     case 'subagent/parent-unavailable':
     case 'subagent/delivery-unavailable':
       return { kind: 'rejected', reason: { kind: 'unavailable', message: safeErrorMessage(error) } }
