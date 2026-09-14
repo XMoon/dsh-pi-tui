@@ -628,7 +628,12 @@ production backend change is part of this slice.
   empty accelerated submit in an interactive continuable child viewer applies
   the same queued-occurrence choreography to that child and never calls the
   ordinary child prompt API. Direct resolves the live Agent by session id and
-  reports only confirmed synchronous calls as `committed`. Edit validation
+  reports only confirmed synchronous calls as `committed`. Prompt admission
+  exceptions settle as the official `session/agent-busy` rejection; Host command
+  cancellation-shaped exceptions settle as `cancelled`, while other command
+  execution exceptions settle as `indeterminate`. Rename maps title validation
+  to `session/title-invalid` and other failures to `gateway/internal`, with
+  Agent resolution taking precedence over service lookup. Edit validation
   follows the official text-only, non-whitespace rules before Agent lookup;
   malformed blocks from the structural Direct input are treated as non-text.
   Successful `remove` also retires a user `rpcId` file-upload binding.

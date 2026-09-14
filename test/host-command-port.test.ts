@@ -83,13 +83,32 @@ test('does not rewrite an already-aborted signal before official execution', asy
   assert.equal(receivedSignal, controller.signal)
 })
 
-test('unexpected command exceptions reject instead of claiming committed', async () => {
-  const failure = new Error('command invariant failure')
+test('maps non-cancellation command exceptions to indeterminate', async () => {
+  for (const [failure, message] of [
+    [new Error('command invariant failure'), 'command invariant failure'],
+    ['non-error command failure', 'non-error command failure'],
+  ] as const) {
+    const live = new Map([['session-a', { session: { id: 'session-a' } }]])
+    const port = new DirectHostCommandPort(host({
+      execute: async () => { throw failure },
+    }, live), sessionId => live.get(sessionId))
+    assert.deepEqual(await port.execute({ sessionId: 'session-a', line: '/x', attachments: [], signal: new AbortController().signal }), {
+      kind: 'indeterminate',
+      error: { code: 'session/write-indeterminate', message },
+    })
+  }
+})
+
+test('maps cancellation-shaped command exceptions to cancelled', async () => {
+  const failure = new Error('command cancelled')
+  failure.name = 'AbortError'
   const live = new Map([['session-a', { session: { id: 'session-a' } }]])
   const port = new DirectHostCommandPort(host({
     execute: async () => { throw failure },
   }, live), sessionId => live.get(sessionId))
-  await assert.rejects(port.execute({ sessionId: 'session-a', line: '/x', attachments: [], signal: new AbortController().signal }), failure)
+  assert.deepEqual(await port.execute({ sessionId: 'session-a', line: '/x', attachments: [], signal: new AbortController().signal }), {
+    kind: 'cancelled',
+  })
 })
 
 test('rejects when the command service or live session is unavailable', async () => {

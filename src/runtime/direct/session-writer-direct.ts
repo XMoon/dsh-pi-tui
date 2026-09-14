@@ -82,13 +82,6 @@ function mutationFailure(error: unknown): WriteOutcome {
   return isCancellation(error) ? { kind: 'cancelled' } : indeterminate(error)
 }
 
-function serviceUnavailable<T>(service: string): WriteOutcome<T> {
-  return {
-    kind: 'rejected',
-    error: { code: 'service/unavailable', message: `${service} service unavailable` },
-  }
-}
-
 /** The Direct backend's session writer: identity-based operations over the
  * live agents and the `ctx.sessionTitle` service. */
 export class DirectSessionWriter implements SessionWriter {
@@ -112,8 +105,19 @@ export class DirectSessionWriter implements SessionWriter {
   async prompt(sessionId: string, message: unknown, mode: 'queue' | 'steer'): Promise<WriteOutcome> {
     const agent = this.agentFor(sessionId)
     if (agent === undefined) return sessionNotFound(sessionId)
-    if (mode === 'queue') agent.followup(message)
-    else agent.steer(message)
+    try {
+      if (mode === 'queue') agent.followup(message)
+      else agent.steer(message)
+    } catch (error) {
+      return {
+        kind: 'rejected',
+        error: {
+          code: 'session/agent-busy',
+          message: 'prompt rejected',
+          details: { reason: String(error) },
+        },
+      }
+    }
     return { kind: 'committed', value: undefined }
   }
 
@@ -226,12 +230,38 @@ export class DirectSessionWriter implements SessionWriter {
   }
 
   async rename(sessionId: string, title: string): Promise<WriteOutcome<{ readonly title: string }>> {
-    const titles = this.ctx.get('sessionTitle') as SessionTitleServiceLike | undefined
-    if (titles === undefined) return serviceUnavailable('session title')
     const agent = this.agentFor(sessionId)
     if (agent === undefined) return sessionNotFound(sessionId)
-    const snapshot = titles.rename(agent.session, title)
-    return { kind: 'committed', value: { title: snapshot.title } }
+    const titles = this.ctx.get('sessionTitle') as SessionTitleServiceLike | undefined
+    if (titles === undefined) {
+      return {
+        kind: 'rejected',
+        error: {
+          code: 'gateway/internal',
+          message: 'renaming is unavailable: this deployment mounts no session-title service',
+          details: {},
+        },
+      }
+    }
+    try {
+      const snapshot = titles.rename(agent.session, title)
+      return { kind: 'committed', value: { title: snapshot.title } }
+    } catch (error) {
+      if (error instanceof Error && error.name === 'SessionTitleInvalidError') {
+        return {
+          kind: 'rejected',
+          error: { code: 'session/title-invalid', message: error.message, details: { sessionId } },
+        }
+      }
+      return {
+        kind: 'rejected',
+        error: {
+          code: 'gateway/internal',
+          message: `failed to rename session "${sessionId}": ${String(error)}`,
+          details: {},
+        },
+      }
+    }
   }
 
   async refreshTitle(sessionId: string, signal: AbortSignal): Promise<

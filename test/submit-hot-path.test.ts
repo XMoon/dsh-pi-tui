@@ -1100,7 +1100,7 @@ test('the review repro: an older `!` run dying late NEVER clears the newer pendi
   assert.ok(!settled.includes('Submitting…'), `the row must clear on B's event:\n${settled}`)
 })
 
-test('a CANCELLED submit ends the ack through the onCancel sink (never stuck, no error notice)', async (t) => {
+test('a cancellation-shaped prompt admission failure maps to agent-busy rejection', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-submit-hot-')
   const previousHome = process.env.DSH_HOME
@@ -1128,8 +1128,11 @@ test('a CANCELLED submit ends the ack through the onCancel sink (never stuck, no
   const settled = vt.getViewport().join('\n')
   assert.ok(!settled.includes('Submitting…'),
     `the cancelled submit must clear the ack row (never stuck pending):\n${settled}`)
-  assert.ok(!settled.includes('submission failed'),
-    'a CANCELLATION must not surface as a failure notice (runOwned routes it to onCancel only)')
+  assert.ok(settled.includes('submission failed'),
+    'a Direct prompt admission failure must surface as a rejection')
+  assert.ok(settled.includes('prompt rejected'),
+    'the official agent-busy rejection message must be surfaced')
+  assert.equal(mounted.app.getDraft(), 'hello cancel', 'a rejected prompt admission restores the submitted draft')
   assert.equal(harness.host.followedUp.length, 0, 'nothing was written')
 })
 // ── Host-command arbitration (PR115-fix problem 1) ─────────────────────────
@@ -1176,8 +1179,8 @@ async function bootCommandHarness(
      * descriptor, so a `leadingInput` command (`/goal <objective>`) can claim
      * its argued line. */
     hostCommands?: readonly (string | { name: string; input: { hint: string; attachments?: boolean } })[]
-    /** Make the fake Host command reject or cancel after admission. */
-    hostCommandFailure?: 'rejected' | 'cancelled'
+    /** Make the fake Host command become indeterminate or cancel after admission. */
+    hostCommandFailure?: 'indeterminate' | 'cancelled'
     /** Provide a skills registry (resolveSkill succeeds) and/or a tools
      * service shaped like the dsh-tool-skill loader (hostLoadsSkillBody). */
     skills?: boolean
@@ -1291,7 +1294,7 @@ async function bootCommandHarness(
           ;(error as Error & { code?: string }).code = 'ABORT_ERR'
           throw error
         }
-        if (options.hostCommandFailure === 'rejected') throw new Error('host command rejected')
+        if (options.hostCommandFailure === 'indeterminate') throw new Error('host command result unknown')
         return { kind: 'success' }
       },
       ...(command.input === undefined ? {} : { input: command.input }),
@@ -1418,18 +1421,20 @@ test('idle /compact executes as a Host command: no followup, no queue, no prompt
   assert.equal(harness.host.steered.length, 0, 'no steer')
 })
 
-test('a rejected Host command restores a plain submitted line', async (t) => {
+test('an indeterminate Host command does not restore a plain submitted line', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'queue',
     status: 'idle',
     hostCommands: ['compact'],
-    hostCommandFailure: 'rejected',
+    hostCommandFailure: 'indeterminate',
   })
   mounted.app.setDraft('/compact')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   await waitForCommand(harness)
-  assert.equal(await drainUntil(() => mounted.app.getDraft() === '/compact', 1_000), true,
-    'a rejected Host command must restore the complete plain line')
+  assert.equal(await drainUntil(() => mounted.app.notifyTextForTest().includes('command result is indeterminate'), 1_000), true,
+    'an indeterminate Host command must surface its no-retry outcome')
+  assert.equal(mounted.app.getDraft(), '', 'an indeterminate Host command must not restore a retryable draft')
+  assert.equal(harness.executed.length, 1, 'the command is attempted exactly once')
 })
 
 test('a cancelled Host command restores a plain submitted line', async (t) => {
