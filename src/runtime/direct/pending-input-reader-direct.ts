@@ -37,14 +37,26 @@ function isUserSource(source: unknown): boolean {
     && (source as { readonly kind?: unknown }).kind === 'user'
 }
 
+/** The plain correlation identity of a user-origin message. Only a string
+ * `rpcId` crosses the port; the `source` object itself never does. */
+function userRpcIdOf(source: unknown): string | undefined {
+  if (!isUserSource(source)) return undefined
+  const rpcId = (source as { readonly rpcId?: unknown }).rpcId
+  return typeof rpcId === 'string' ? rpcId : undefined
+}
+
 const itemOf = (
   message: DirectPendingMessageLike,
   placement: PendingInputItem['placement'],
-): PendingInputItem => ({
-  id: message.id,
-  placement,
-  content: message.content,
-})
+): PendingInputItem => {
+  const rpcId = userRpcIdOf(message.source)
+  return {
+    id: message.id,
+    placement,
+    content: message.content,
+    ...(rpcId === undefined ? {} : { rpcId }),
+  }
+}
 
 /** Normalize one live Direct Agent into the semantic pending-input snapshot. */
 export class DirectPendingInputReader implements PendingInputReader {

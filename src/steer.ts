@@ -165,6 +165,15 @@ export interface SteerAllOptions {
    * callers; production passes the runner's explicit shell/image verdict.
    */
   draftHasPayload?: boolean
+  /**
+   * The delivery mode RESOLVED AT THE GESTURE for the draft prompt. The
+   * runner captures it with the local submission echo (official
+   * `beginSubmission` placement), so the written mode and the pending
+   * presentation can never disagree when the agent's running state flips
+   * while this gesture waits on the submit FIFO. `undefined` falls back to
+   * the live snapshot's running state (direct/unit callers).
+   */
+  draftDelivery?: 'queue' | 'steer'
 }
 
 /**
@@ -312,9 +321,13 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   }
   if (draftOnly) {
     // A payload-bearing draft, including an attachment-only draft, is the
-    // whole gesture; explicitly queued messages stay queued.
+    // whole gesture; explicitly queued messages stay queued. The delivery
+    // mode is the one resolved at the gesture (the local echo's placement);
+    // it is never re-derived from a status that may have flipped while this
+    // gesture waited on the submit FIFO.
     const message = deps.createDraft(text)
-    const outcome = await deliverPrompt(deps, now, message, pending.running ? 'steer' : 'queue')
+    const mode = options.draftDelivery ?? (pending.running ? 'steer' : 'queue')
+    const outcome = await deliverPrompt(deps, now, message, mode)
     return handleWriteOutcome(deps, text, outcome)
   }
   let steeredCount = 0

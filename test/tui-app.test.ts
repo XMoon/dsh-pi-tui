@@ -485,6 +485,125 @@ test('queue pane reflows from raw items across a narrow-to-wide resize', async (
   assert.ok(lines.some(line => line.includes(fullText)), `the wide queue must recover the raw semantic row:\n${lines.join('\n')}`)
 })
 
+test('a client-local queued echo renders its content marked sending in the queue pane', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setPendingInputPresentation({
+    queued: [{ id: 'req-1', rpcId: 'req-1', text: 'queued locally', mode: 'followup', local: true }],
+    steering: [],
+    running: true,
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ queued locally'), `local queued content missing:\n${view}`)
+  assert.ok(view.includes('sending…'), `local queued row must be marked sending:\n${view}`)
+})
+
+test('the ephemeral pending-steering lane renders user content at the conversation tail', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const before = (vt.getViewport().join('\n').match(/❯/g) ?? []).length
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'req-2', rpcId: 'req-2', text: 'steer this now', local: true }],
+    running: true,
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ steer this now'), `pending steering content missing:\n${view}`)
+  assert.ok(view.includes('steering…'), `pending steering status missing:\n${view}`)
+  // The lane is a user-style row outside the queue pane: only the editor
+  // prompt plus the lane bullet carry the ❯ marker.
+  assert.equal((view.match(/❯/g) ?? []).length, before + 1, `the lane must add exactly one user marker:\n${view}`)
+})
+
+test('a narrow queue pane keeps a local sending suffix on the same row', async () => {
+  const { vt, app } = startApp()
+  vt.resize(24, 24)
+  await vt.waitForRender()
+  app.setPendingInputPresentation({
+    queued: [{
+      id: 'req-narrow',
+      rpcId: 'req-narrow',
+      text: 'a long queued local submission that cannot fit',
+      mode: 'followup',
+      local: true,
+    }],
+    steering: [],
+    running: true,
+  })
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const row = lines.findIndex(line => line.includes('❯') && line.includes('a long queue'))
+  assert.ok(row >= 0, `the local queue row must render:\n${lines.join('\n')}`)
+  assert.ok(lines[row]!.includes('sending…'),
+    `the sending suffix must stay on the row, not wrap:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.trim() === 'sending…'),
+    `the suffix must never detach onto its own line:\n${lines.join('\n')}`)
+  assert.ok(visibleWidth(lines[row]!) <= 24, `the row must fit the pane width:\n${lines.join('\n')}`)
+})
+
+test('an ultra-narrow queue pane never wraps the local status onto a detached row', async () => {
+  const { vt, app } = startApp()
+  vt.resize(10, 24)
+  await vt.waitForRender()
+  app.setPendingInputPresentation({
+    queued: [{
+      id: 'req-ultra',
+      rpcId: 'req-ultra',
+      text: 'a long queued local submission',
+      mode: 'followup',
+      local: true,
+    }],
+    steering: [],
+    running: true,
+  })
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  assert.ok(!lines.some(line => line.trim() === 'sending…'),
+    `the status must not detach onto its own row:\n${lines.join('\n')}`)
+  const row = lines.findIndex(line => line.includes('❯'))
+  assert.ok(row >= 0, `the local queue row must render:\n${lines.join('\n')}`)
+  assert.ok(visibleWidth(lines[row]!) <= 10, `the row must fit the pane width:\n${lines.join('\n')}`)
+})
+
+test('clearing the pending-input presentation removes the lane and the queue pane', async () => {
+  const { vt, app } = startApp()
+  app.setPendingInputPresentation({
+    queued: [{ id: 'q', text: 'queued row', mode: 'followup', local: true }],
+    steering: [{ id: 's', text: 'steering row', local: true }],
+    running: true,
+  })
+  await vt.waitForRender()
+  app.setPendingInputPresentation({ queued: [], steering: [], running: false })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('steering row'), `stale steering row survived:\n${view}`)
+  assert.ok(!view.includes('queued row'), `stale queue row survived:\n${view}`)
+  assert.equal((view.match(/❯/g) ?? []).length, 1, `only the editor prompt remains:\n${view}`)
+})
+
+test('the viewer clears the main pending-steering lane on entry', async () => {
+  const { vt, app } = startApp()
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 's', text: 'main steering must not leak', local: true }],
+    running: true,
+  })
+  await vt.waitForRender()
+  app.setViewerMode({
+    parentSessionId: 'parent',
+    childSessionId: 'child',
+    label: 'child',
+    mode: 'continuable',
+    activity: 'running',
+    access: 'interactive-direct-child',
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('main steering must not leak'), `main lane leaked into the viewer:\n${view}`)
+})
+
 test('todo panel rebuilds its border from the live width', async () => {
   const { vt, app } = startApp()
   vt.resize(120, 24)
