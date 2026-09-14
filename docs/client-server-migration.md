@@ -651,8 +651,10 @@ production backend change is part of this slice.
   Direct's implemented set.
 - `SubagentPort.interrupt()` owns Task Center child interruption with explicit
   direct-parent, child and continuable-mode identity. Direct maps it to the
-  official user-authority call; unknown failures still surface through the
-  owned-task failure path.
+  official user-authority call. D2.2 extends this to a settlement: a known
+  authority/business refusal is `rejected`, while an unidentified failure
+  settles `indeterminate` (the child may already be stopped) instead of
+  throwing through the owned-task failure path.
 - `SubagentPort.prompt()` carries the resolved `queue` or `steer` delivery for
   a continuable viewer prompt. The runner applies the child running state and
   `busyEnter` policy; Direct forwards the official human prompt unchanged

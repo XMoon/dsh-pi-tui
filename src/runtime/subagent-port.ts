@@ -35,8 +35,9 @@ export interface SubagentInterruptRequest {
   readonly mode: 'continuable'
 }
 
-/** Expected interruption refusal categories. Unknown Direct exceptions still
- * throw through the existing owned-task failure sink. */
+/** Expected interruption refusal categories. A caller cancellation is not a
+ * rejection here; an unidentified failure that leaves the stopped state
+ * unproven settles `indeterminate` instead of throwing. */
 export type SubagentInterruptReject =
   | { readonly kind: 'unavailable'; readonly message?: string }
   | { readonly kind: 'unauthorized'; readonly message?: string }
