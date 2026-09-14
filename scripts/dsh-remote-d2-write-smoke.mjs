@@ -261,12 +261,13 @@ async function waitFor(description, predicate, timeoutMs = 5_000) {
   }
 }
 
-/** A serializer for the smoke's plain `{ text }` prepared value. */
+/** Two-phase serializer for the smoke's plain `{ text }` prepared value:
+ * cheap preflight before the official echo, content serialization after. */
 const promptSerializer = {
+  preflight: prepared => ({ kind: 'ok', echo: { text: prepared.text, attachments: [] } }),
   serialize: async prepared => ({
     kind: 'ok',
     content: [{ type: 'text', text: prepared.text }],
-    echo: { text: prepared.text, attachments: [] },
   }),
 }
 

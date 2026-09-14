@@ -253,6 +253,56 @@ test('a rendered SESSION switch clears the previous session Remote presentation'
   assert.ok(!view.includes('SESSION-A-STEER'), `previous session's steering row survived:\n${view}`)
 })
 
+test('a Remote image-only local queued echo renders a non-empty attachment marker', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = generationHarness()
+  const host = officialSession({
+    queue: [],
+    running: true,
+    pendingSubmissions: [
+      {
+        requestId: 'req-img',
+        placement: 'queued',
+        time: 1,
+        text: '',
+        attachments: [{ type: 'image', value: { previewUrl: 'blob:x', name: 'shot.png' } }],
+      },
+    ],
+  })
+  presentOnce(app, host.sessions, generation.source)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[Image: shot.png]'), `an image-only echo must not render blank:\n${view}`)
+  assert.ok(view.includes('sending…'), `the image-only queued echo must be marked sending:\n${view}`)
+})
+
+test('a Remote image-only local steering echo renders in the lane, never the queue', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = generationHarness()
+  const host = officialSession({
+    queue: [],
+    running: true,
+    pendingSubmissions: [
+      {
+        requestId: 'req-img-steer',
+        placement: 'steering',
+        time: 1,
+        text: '',
+        attachments: [{ type: 'image', value: { previewUrl: 'blob:y', name: 'diagram.png' } }],
+      },
+    ],
+  })
+  presentOnce(app, host.sessions, generation.source)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('[Image: diagram.png]'), `the image-only steering echo must render:\n${view}`)
+  assert.ok(view.includes('steering…'), `the image-only steering echo must read steering:\n${view}`)
+  assert.ok(!view.includes('to steer all') && !view.includes('to recall all'),
+    `an image-only steering echo must never appear as a queue row:\n${view}`)
+})
+
 test('the same authoritative occurrence is presented once even for two same-text Remote echoes', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()

@@ -139,15 +139,25 @@ function writerHarness(): WriterHarness {
   }
 }
 
-function okSerializer(overrides: Partial<{ text: string; unsupported: string }> = {}): RemotePromptSerializer {
+function okSerializer(overrides: {
+  text?: string
+  preflightUnsupported?: string
+  serializeUnsupported?: string
+  serializeThrows?: unknown
+  onSerialize?: () => void
+} = {}): RemotePromptSerializer {
   return {
-    serialize: async () => overrides.unsupported !== undefined
-      ? { kind: 'unsupported', reason: overrides.unsupported }
-      : {
-        kind: 'ok',
-        content: [{ type: 'text' as const, text: overrides.text ?? 'hello' }],
-        echo: { text: overrides.text ?? 'hello', attachments: [] },
-      },
+    preflight: () => overrides.preflightUnsupported !== undefined
+      ? { kind: 'unsupported', reason: overrides.preflightUnsupported }
+      : { kind: 'ok', echo: { text: overrides.text ?? 'hello', attachments: [] } },
+    serialize: async () => {
+      overrides.onSerialize?.()
+      if (overrides.serializeThrows !== undefined) throw overrides.serializeThrows
+      if (overrides.serializeUnsupported !== undefined) {
+        return { kind: 'unsupported', reason: overrides.serializeUnsupported }
+      }
+      return { kind: 'ok', content: [{ type: 'text' as const, text: overrides.text ?? 'hello' }] }
+    },
   }
 }
 
@@ -189,22 +199,74 @@ test('steer prompt preserves the official steer mode', async () => {
   assert.equal(harness.calls.promptCalls[0]?.mode, 'steer')
 })
 
-test('an unsupported serialization is refused before any official echo or Host mutation', async () => {
+test('an unsupported preflight is refused before any official echo or Host mutation', async () => {
   const harness = writerHarness()
-  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer({ unsupported: 'file upload requires D4' }))
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer({ preflightUnsupported: 'file upload requires D4' }))
   const outcome = await writer.prompt('session-a', {}, 'queue')
   assert.deepEqual(outcome, { kind: 'unsupported', reason: 'file upload requires D4' })
   assert.equal(harness.calls.beginInputs.length, 0)
   assert.equal(harness.calls.promptCalls.length, 0)
 })
 
-test('a post-begin prompt throw abandons the official echo rather than stranding it', async () => {
+test('the official echo is registered after preflight and before serialization', async () => {
+  const harness = writerHarness()
+  const order: string[] = []
+  const serializer: RemotePromptSerializer = {
+    preflight: () => {
+      order.push('preflight')
+      return { kind: 'ok', echo: { text: 'ordered', attachments: [] } }
+    },
+    serialize: async () => {
+      order.push('serialize')
+      return { kind: 'ok', content: [{ type: 'text', text: 'ordered' }] }
+    },
+  }
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer)
+  assert.equal((await writer.prompt('session-a', {}, 'queue')).kind, 'committed')
+  order.push('prompt')
+  assert.deepEqual(order, ['preflight', 'serialize', 'prompt'])
+  assert.equal(harness.calls.beginInputs.length, 1)
+})
+
+test('a post-begin serialization failure abandons the official echo and is a known local refusal', async () => {
+  const harness = writerHarness()
+  const writer = new RemoteSessionWriter(
+    harness.source,
+    harness.generation.source,
+    okSerializer({ serializeThrows: new Error('encode failed') }),
+  )
+  const outcome = await writer.prompt('session-a', {}, 'queue')
+  assert.equal(outcome.kind, 'rejected')
+  assert.equal(outcome.kind === 'rejected' ? outcome.error.code : undefined, 'session/prompt-serialize-failed')
+  assert.equal(harness.calls.beginInputs.length, 1)
+  assert.equal(harness.calls.abandonCalls, 1)
+  assert.equal(harness.calls.promptCalls.length, 0)
+})
+
+test('a serialization that declares unsupported after begin abandons the echo without prompting', async () => {
+  const harness = writerHarness()
+  const writer = new RemoteSessionWriter(
+    harness.source,
+    harness.generation.source,
+    okSerializer({ serializeUnsupported: 'image conversion unavailable' }),
+  )
+  const outcome = await writer.prompt('session-a', {}, 'queue')
+  assert.deepEqual(outcome, { kind: 'unsupported', reason: 'image conversion unavailable' })
+  assert.equal(harness.calls.beginInputs.length, 1)
+  assert.equal(harness.calls.abandonCalls, 1)
+  assert.equal(harness.calls.promptCalls.length, 0)
+})
+
+test('a prompt throw after dispatch is indeterminate and NEVER abandons the official echo', async () => {
   const harness = writerHarness()
   harness.setPromptThrows(new Error('assembly fault'))
   const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer())
   const outcome = await writer.prompt('session-a', {}, 'queue')
   assert.equal(outcome.kind, 'indeterminate')
-  assert.equal(harness.calls.abandonCalls, 1)
+  // prompt() was already invoked, so the Host may have committed; deleting the
+  // official echo here would hide an accepted submission.
+  assert.equal(harness.calls.promptCalls.length, 1)
+  assert.equal(harness.calls.abandonCalls, 0)
 })
 
 test('a plain wire failure object keeps its human message, not [object Object]', async () => {
@@ -264,16 +326,30 @@ test('an absent binding is a session-not-found rejection and never opens a sessi
   assert.equal(harness.calls.openCalls, 0)
 })
 
-test('a replaced generation before dispatch cancels without prompting', async () => {
+test('a generation replaced during serialization abandons the echo without prompting', async () => {
+  const harness = writerHarness()
+  const writer = new RemoteSessionWriter(
+    harness.source,
+    harness.generation.source,
+    okSerializer({ onSerialize: () => harness.generation.set({ id: 2 }) }),
+  )
+  assert.deepEqual(await writer.prompt('session-a', {}, 'queue'), { kind: 'cancelled' })
+  assert.equal(harness.calls.beginInputs.length, 1)
+  assert.equal(harness.calls.abandonCalls, 1)
+  assert.equal(harness.calls.promptCalls.length, 0)
+})
+
+test('a generation replaced by preflight cancels before any official echo', async () => {
   const harness = writerHarness()
   const serializer: RemotePromptSerializer = {
-    serialize: async () => {
+    preflight: () => {
       harness.generation.set({ id: 2 })
-      return { kind: 'ok', content: [{ type: 'text', text: 'late' }], echo: { text: 'late', attachments: [] } }
+      return { kind: 'ok', echo: { text: 'late', attachments: [] } }
     },
+    serialize: async () => ({ kind: 'ok', content: [{ type: 'text', text: 'late' }] }),
   }
-  const lateWriter = new RemoteSessionWriter(harness.source, harness.generation.source, serializer)
-  assert.deepEqual(await lateWriter.prompt('session-a', {}, 'queue'), { kind: 'cancelled' })
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer)
+  assert.deepEqual(await writer.prompt('session-a', {}, 'queue'), { kind: 'cancelled' })
   assert.equal(harness.calls.beginInputs.length, 0)
   assert.equal(harness.calls.promptCalls.length, 0)
 })

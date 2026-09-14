@@ -81,7 +81,7 @@ export class DirectSubmissionPresentation implements SubmissionPresentationSourc
 
 /** One official local-submission echo attachment (the subset displayed here). */
 export type RemotePresentationAttachment =
-  | { readonly type: 'image'; readonly value: { readonly name?: string } }
+  | { readonly type: 'image'; readonly value: { readonly previewUrl?: string; readonly name?: string } }
   | { readonly type: 'file'; readonly value: { readonly name: string } }
 
 /** One official local pending submission retained by the Session snapshot. */

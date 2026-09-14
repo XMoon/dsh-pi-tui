@@ -753,13 +753,18 @@ correct presentation.
   `ClientSessions.binding(id)` identity face — never `sessions.open()`, which
   would move the Client's current selection. Ordinary prompts use the official
   `beginSubmission` → identified `prompt` lifecycle: exactly one optimistic
-  identity (the official `requestId`) owns one human submit, the serialized
-  payload is refused as `unsupported` before any echo/Host mutation, and a
-  post-begin pre-prompt failure abandons the echo. `updateQueue` maps the
-  occurrence-level `edit`/`remove`/`steer` official `QueueAction`; `cancel`
-  preserves queued work; `rename` returns the official normalized title;
-  `refreshTitle` is explicitly `unsupported` (no official Client verb — this
-  remains a D5/upstream gap).
+  identity (the official `requestId`) owns one human submit. The serializer seam
+  is two-phase, mirroring the official contract: a cheap `preflight` decides
+  D2.2 support and extracts the echo BEFORE any Host mutation (an unsupported
+  payload never creates an echo), then the echo is registered, then the
+  potentially expensive `serialize` runs, and only a genuine pre-prompt
+  serialize/preflight failure abandons the echo. A failure of the identified
+  `prompt` call itself NEVER abandons the echo — the Host may already have
+  committed, and the official Client retires an identified failure itself.
+  `updateQueue` maps the occurrence-level `edit`/`remove`/`steer` official
+  `QueueAction`; `cancel` preserves queued work; `rename` returns the official
+  normalized title; `refreshTitle` is explicitly `unsupported` (no official
+  Client verb — this remains a D5/upstream gap).
 - Settlement classification preserves the official code discriminator: a domain
   or `gateway/bad-request` failure is `rejected`, `gateway/cancelled` is
   `cancelled`, and a carrier failure such as `gateway/internal` is
@@ -781,9 +786,10 @@ correct presentation.
   Remote path never runs a second optimistic identity beside the official echo.
   D2.2 has no production Remote backend, so the runner intentionally has no
   source-injection point yet — the complete Remote backend assembly (M3) is what
-  injects the Remote source in place of the Direct ledger. The authoritative
-  queue row suppresses a matching local echo by request/rpc identity only —
-  never by text.
+  injects the Remote source in place of the Direct ledger. The presentation join
+  (`src/pending-presentation.ts`) correlates by request/rpc identity only —
+  never by text — and renders an official echo's structured attachments as
+  stable markers, so an image-only echo is never a blank row.
 - `RemoteHostCommandPort` uses the official generated
   `commands.execute(agentId, line, attachments, signal)` Remote (the
   attachment-preserving path, never `SessionFace.command(line)`), forwarding
@@ -793,8 +799,12 @@ correct presentation.
 - `RemoteSubagentPort` uses the official generated `subagents.prompt` and
   `subagents.interruptByParent` Remotes with the exact durable parent/child
   address and `continuable` mode. A continuation prompt mints one request
-  identity before the call; a committed interrupt admission is never presented
-  as a durably stopped child (the authoritative task/read state decides).
+  identity before the call. Prompt and interrupt both settle `indeterminate`
+  when a carrier/unidentified failure leaves the child's ownership unproven
+  (a domain refusal stays `rejected`); the runner then never restores the draft
+  as an unsent submission and never reports a false "not stopped" — the child's
+  authoritative state decides, with no automatic replay. A committed interrupt
+  admission is likewise never presented as a durably stopped child.
 - Ctrl+S already converges on official per-occurrence `updateQueue({kind:'steer'})`
   choreography from D2.1 (`src/steer.ts`): FIFO best-effort, partial progress is
   real, no fake rollback, and the authoritative snapshot reconciles the

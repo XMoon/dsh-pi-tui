@@ -113,11 +113,11 @@ interface RemoteResolvedWrite {
   readonly captured: unknown
 }
 
-/** Result of mapping one prepared TUI submission onto official prompt content. */
-export type RemoteSerializeResult =
+/** Cheap preflight of one prepared submission, BEFORE any Host mutation:
+ * decides D2.2 support and extracts the official local-echo presentation. */
+export type RemotePreflightResult =
   | {
     readonly kind: 'ok'
-    readonly content: readonly RemotePromptContentPart[]
     /** Display facts for the official local submission echo. */
     readonly echo: {
       readonly text: string
@@ -126,18 +126,40 @@ export type RemoteSerializeResult =
   }
   | { readonly kind: 'unsupported'; readonly reason: string }
 
+/** Expensive prompt serialization, run AFTER the official echo is registered. */
+export type RemoteSerializeResult =
+  | { readonly kind: 'ok'; readonly content: readonly RemotePromptContentPart[] }
+  | { readonly kind: 'unsupported'; readonly reason: string }
+
 /**
  * The migration-local seam that maps the TUI's prepared submission onto
  * official `PromptContentPart[]`. It must not inspect Direct Agent message
  * implementation fields: a message kind without an official representation is
- * reported `unsupported` before any Host mutation.
+ * reported `unsupported`.
+ *
+ * The seam is deliberately two-phase, mirroring the official Client contract:
+ * `preflight()` is cheap and runs BEFORE `beginSubmission()` (so an unsupported
+ * payload never creates an echo), while `serialize()` may be expensive (image
+ * encoding) and runs AFTER the echo is registered, so the local submission is
+ * visible immediately and only a genuine pre-prompt serialization failure
+ * abandons it.
  */
 export interface RemotePromptSerializer {
+  preflight(prepared: unknown): RemotePreflightResult
   serialize(prepared: unknown, signal?: AbortSignal): Promise<RemoteSerializeResult>
 }
 
 function generationChanged(generation: RemoteConnectionGenerationSource, captured: unknown): boolean {
   return !Object.is(captured, generation.getSnapshot())
+}
+
+/** A local preflight/serialization failure. The Host was never dispatched, so
+ * the caller may safely restore its draft (unlike an indeterminate write). */
+function serializeFailed(error: unknown): WriteOutcome {
+  return {
+    kind: 'rejected',
+    error: { code: 'session/prompt-serialize-failed', message: safeErrorMessage(error) },
+  }
 }
 
 /** The experimental Remote session writer. */
@@ -176,29 +198,30 @@ export class RemoteSessionWriter implements SessionWriter {
     if ('kind' in resolved) return resolved
     const { binding, captured } = resolved
 
-    let serialized: RemoteSerializeResult
+    // 1. Cheap preflight BEFORE any Host mutation: decide D2.2 support and
+    //    extract the echo presentation. An unsupported payload never creates an
+    //    official echo.
+    let preflight: RemotePreflightResult
     try {
-      serialized = await this.serializer.serialize(message)
+      preflight = this.serializer.preflight(message)
     } catch (error) {
-      return classifyRemoteWriteFailure(error)
+      // No dispatch happened, so this is a known local refusal.
+      return serializeFailed(error)
     }
-    // A payload without an official representation is refused BEFORE any Host
-    // mutation or local echo; the caller restores/preserves its own draft.
-    if (serialized.kind === 'unsupported') {
-      return { kind: 'unsupported', reason: serialized.reason }
+    if (preflight.kind === 'unsupported') {
+      return { kind: 'unsupported', reason: preflight.reason }
     }
-    // A generation replaced while serializing must not dispatch into the
-    // replacement Client's UI state.
-    if (generationChanged(this.generation, captured)) {
-      return remoteNotDispatched()
-    }
+    if (generationChanged(this.generation, captured)) return remoteNotDispatched()
 
+    // 2. Register the official echo synchronously, BEFORE the potentially
+    //    expensive serialization, so the submission is visible immediately
+    //    (the official Client contract: beginSubmission precedes serialization).
     let handle: RemoteSubmissionHandle
     try {
       handle = binding.session.beginSubmission({
         mode,
-        text: serialized.echo.text,
-        attachments: serialized.echo.attachments,
+        text: preflight.echo.text,
+        attachments: preflight.echo.attachments,
       })
     } catch (error) {
       // Registration is a local synchronous step; an assembly fault here is not
@@ -206,13 +229,35 @@ export class RemoteSessionWriter implements SessionWriter {
       // than escaping the port as a throw.
       return classifyRemoteWriteFailure(error)
     }
+
+    // 3. Serialize. This runs AFTER the echo exists, so a failure here is a
+    //    genuine pre-prompt failure: abandon the official echo and restore the
+    //    caller's draft.
+    let serialized: RemoteSerializeResult
+    try {
+      serialized = await this.serializer.serialize(message)
+    } catch (error) {
+      handle.abandon()
+      return serializeFailed(error)
+    }
+    if (serialized.kind === 'unsupported') {
+      handle.abandon()
+      return { kind: 'unsupported', reason: serialized.reason }
+    }
+    // A generation replaced while serializing must not dispatch into the
+    // replacement Client's UI state.
+    if (generationChanged(this.generation, captured)) {
+      handle.abandon()
+      return remoteNotDispatched()
+    }
+
+    // 4. Dispatch. From here the prompt has been invoked: a failure must NEVER
+    //    abandon the echo (the official Client retires it on an identified
+    //    prompt failure), because the Host may already have committed.
     let result: RemoteResultLike<{ readonly accepted: true }>
     try {
       result = await binding.session.prompt(serialized.content, mode, undefined, handle.requestId)
     } catch (error) {
-      // prompt() was never reached: retire the official echo as failed rather
-      // than leaving a stranded local submission.
-      handle.abandon()
       return classifyRemoteWriteFailure(error)
     }
     if (result.ok) return { kind: 'committed', value: undefined }

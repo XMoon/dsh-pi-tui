@@ -12,6 +12,7 @@ import test from 'node:test'
 import {
   classifySubagentPromptError,
   resolveSubagentSettleTarget,
+  subagentPromptDisposition,
   submitSubagentPrompt,
   viewerCanonicalizeScope,
   type SubagentPromptContentPart,
@@ -198,17 +199,33 @@ test('a prompt that REJECTS surfaces the classified reason (never a throw)', asy
   assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'stale-child' } })
 })
 
-test('an unexpected throw surfaces as a safe error reason with a message', async () => {
+test('an unexpected throw after dispatch is indeterminate, never a false "not sent"', async () => {
   const outcome = await submitSubagentPrompt(request, deps({
     subagents: () => ({
       prompt: async () => { throw new Error('boom') },
     }),
   }))
-  assert.equal(outcome.kind, 'rejected')
-  if (outcome.kind === 'rejected') {
-    assert.equal(outcome.reason.kind, 'error')
-    if (outcome.reason.kind === 'error') assert.equal(outcome.reason.message, 'boom')
-  }
+  assert.deepEqual(outcome, { kind: 'indeterminate', message: 'boom' })
+})
+
+test('a gateway/internal carrier failure after dispatch is indeterminate, not rejected', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => ({
+      prompt: async () => { throw makeError('gateway/internal') },
+    }),
+  }))
+  assert.equal(outcome.kind, 'indeterminate')
+  assert.equal(outcome.kind === 'indeterminate' ? outcome.message : undefined, 'remote error: gateway/internal')
+})
+
+test('subagentPromptDisposition never restores an indeterminate delivery', () => {
+  assert.deepEqual(subagentPromptDisposition({ kind: 'ok', messageId: 'm' }), { kind: 'sent' })
+  assert.deepEqual(subagentPromptDisposition({ kind: 'indeterminate', message: 'carrier reset' }), { kind: 'uncertain' })
+  assert.deepEqual(subagentPromptDisposition({ kind: 'rejected', reason: { kind: 'cancelled' } }), { kind: 'cancelled' })
+  assert.deepEqual(
+    subagentPromptDisposition({ kind: 'rejected', reason: { kind: 'parent-unavailable' } }),
+    { kind: 'rejected', reason: { kind: 'parent-unavailable' } },
+  )
 })
 
 function makeError(code: string): Error {
