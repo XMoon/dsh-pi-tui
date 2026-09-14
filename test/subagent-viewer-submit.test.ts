@@ -248,7 +248,7 @@ test('a structured admission refusal settles rejected, never indeterminate', () 
   }
 })
 
-test('only gateway/internal or a code-less throw settles indeterminate', () => {
+test('gateway/internal, a code-less throw, and unknown codes settle indeterminate', () => {
   assert.equal(classifySubagentPromptSettlement(makeError('gateway/internal')).kind, 'indeterminate')
   assert.equal(classifySubagentPromptSettlement(new Error('boom')).kind, 'indeterminate')
 })
