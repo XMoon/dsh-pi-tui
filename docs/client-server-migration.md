@@ -808,7 +808,12 @@ correct presentation.
   attachment-preserving path, never `SessionFace.command(line)`), forwarding
   the full line, the opaque attachment payload and the caller-owned signal
   unchanged. Claim classification stays in the runner, and a slow/failed
-  execution never falls back to a model prompt.
+  execution never falls back to a model prompt. Host-command settlement is
+  operation-specific: a signal already aborted BEFORE dispatch is `cancelled`
+  (the command never ran), but a cancellation-shaped failure AFTER dispatch is
+  `indeterminate` — the pinned executor appends `command/run` before the handler
+  and `command/done` after it, so an aborted handler may already have run (and
+  side-effected). The Direct adapter follows the same rule.
 - `RemoteSubagentPort` uses the official generated `subagents.prompt` and
   `subagents.interruptByParent` Remotes with the exact durable parent/child
   address and `continuable` mode. The continuation request identity is minted in

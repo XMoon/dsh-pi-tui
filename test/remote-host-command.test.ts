@@ -106,10 +106,25 @@ test('a business RemoteFailure is rejected with its stable code', async () => {
   assert.equal(outcome.kind === 'rejected' ? outcome.error.code : undefined, 'gateway/bad-request')
 })
 
-test('a caller/backend cancellation is cancelled', async () => {
+test('a gateway cancellation AFTER dispatch is indeterminate, never a known cancellation', async () => {
   const h = harness()
+  // The pinned executor appends command/run before the handler, so an aborted
+  // handler may already have run: the outcome cannot claim "not executed".
   h.setResult({ ok: false, error: new RemoteError('gateway/cancelled', 'cancelled', {}) })
-  assert.deepEqual(await h.port.execute(request()), { kind: 'cancelled' })
+  const outcome = await h.port.execute(request())
+  assert.equal(outcome.kind, 'indeterminate')
+  assert.equal(outcome.kind === 'indeterminate' ? outcome.error.code : undefined, 'gateway/cancelled')
+})
+
+test('a signal aborted BEFORE dispatch is a known cancelled with no execute call', async () => {
+  const h = harness()
+  const controller = new AbortController()
+  controller.abort()
+  assert.deepEqual(
+    await h.port.execute(request({ signal: controller.signal })),
+    { kind: 'cancelled' },
+  )
+  assert.equal(h.calls.length, 0, 'an already-aborted signal must not dispatch the command')
 })
 
 test('a carrier failure after dispatch is indeterminate, never an automatic re-execution', async () => {

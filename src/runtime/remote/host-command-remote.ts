@@ -22,7 +22,7 @@ import type {
   HostCommandPort,
   HostCommandRequest,
 } from '../host-command-port.ts'
-import { classifyRemoteWriteFailure } from './write-failure.ts'
+import { classifyRemoteWriteFailure, remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
 
 /** Structural official `RemoteResult`. */
 export type RemoteCommandResult =
@@ -52,6 +52,8 @@ export class RemoteHostCommandPort implements HostCommandPort {
   }
 
   async execute(request: HostCommandRequest): Promise<HostCommandOutcome> {
+    // A signal already aborted BEFORE dispatch proves the command never ran.
+    if (request.signal.aborted) return { kind: 'cancelled' }
     // The generated Remote resolves to `RemoteResult`; carrier failures are in
     // the error branch, so a rejection is an assembly/programming defect and
     // propagates rather than becoming an ambiguous command result.
@@ -64,9 +66,25 @@ export class RemoteHostCommandPort implements HostCommandPort {
       // the lifecycle pairing id the runner needs.
       return { kind: 'committed', matched: true, execution: result.value as HostCommandExecution }
     }
+    // Once dispatched, a cancellation-shaped failure is NOT proof that nothing
+    // happened: the pinned executor appends `command/run` before the handler, so
+    // an aborted handler may already have run (and side-effected). Such a
+    // failure is indeterminate, never a known `cancelled`.
+    const code = remoteFailureCode(result.error)
+    if (code === 'gateway/cancelled') {
+      return {
+        kind: 'indeterminate',
+        error: { code, message: remoteFailureMessage(result.error) },
+      }
+    }
     const failure = classifyRemoteWriteFailure(result.error)
-    if (failure.kind === 'cancelled') return { kind: 'cancelled' }
     if (failure.kind === 'rejected') return { kind: 'rejected', error: failure.error }
-    return { kind: 'indeterminate', error: failure.error }
+    return {
+      kind: 'indeterminate',
+      error: {
+        code: code ?? 'session/write-indeterminate',
+        message: remoteFailureMessage(result.error),
+      },
+    }
   }
 }

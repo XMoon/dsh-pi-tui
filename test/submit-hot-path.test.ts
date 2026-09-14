@@ -1435,7 +1435,7 @@ test('an indeterminate Host command does not restore a plain submitted line', as
   assert.equal(harness.executed.length, 1, 'the command is attempted exactly once')
 })
 
-test('a cancelled Host command restores a plain submitted line', async (t) => {
+test('a cancellation-shaped Host command failure after dispatch is indeterminate, not a retryable restore', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'queue',
     status: 'idle',
@@ -1445,8 +1445,13 @@ test('a cancelled Host command restores a plain submitted line', async (t) => {
   mounted.app.setDraft('/compact')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   await waitForCommand(harness)
-  assert.equal(await drainUntil(() => mounted.app.getDraft() === '/compact', 1_000), true,
-    'a cancelled Host command must restore the complete plain line')
+  // The pinned executor appends command/run before the handler, so an aborted
+  // handler may already have run: the TUI must not restore a duplicate-prone
+  // draft and must surface the uncertain outcome instead.
+  assert.equal(await drainUntil(() => mounted.app.notifyTextForTest().includes('command result is indeterminate'), 1_000), true,
+    'a post-dispatch cancellation must surface its no-retry outcome')
+  assert.equal(mounted.app.getDraft(), '', 'a post-dispatch cancellation must not restore a retryable draft')
+  assert.equal(harness.executed.length, 1, 'the command is attempted exactly once')
 })
 
 test('a cancelled whitespace-only queued Ctrl+S restores its draft exactly once', async (t) => {
