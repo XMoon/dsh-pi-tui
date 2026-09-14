@@ -227,9 +227,10 @@ export function viewerCanonicalizeScope(
 /**
  * Deliver one viewer prompt to a continuable child through the official
  * subagent control API, or settle why it could not be delivered. Never throws:
- * a proven refusal is `{ kind: 'rejected' }`, while a carrier or unidentified
- * failure that may already have been accepted settles `{ kind: 'indeterminate' }`
- * (see {@link classifySubagentPromptSettlement}).
+ * a pre-dispatch preparation failure is `{ kind: 'rejected' }` (a restorable
+ * draft), a proven dispatch-phase refusal is `{ kind: 'rejected' }`, and only
+ * an unidentified failure OF the `prompt()` dispatch itself settles
+ * `{ kind: 'indeterminate' }` (see {@link classifySubagentPromptSettlement}).
  */
 export async function submitSubagentPrompt(
   request: SubagentViewerSubmitRequest,
