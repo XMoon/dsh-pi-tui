@@ -1761,6 +1761,36 @@ test('running + steer: an ordinary prompt still steers (PR115-fix problem 1)', a
   assert.equal(harness.executed.length, 0, 'a plain prompt is not a command')
 })
 
+test('running + busyEnter=steer: an ordinary Enter presents a steering echo and writes a steer', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'steer', status: 'running' })
+  mounted.app.setDraft('enter steer')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  // The human-prompt local echo placement must match the resolved delivery
+  // (steer), not the pre-policy `queue`.
+  const pending = mounted.app.pendingInputForTest()
+  assert.ok(pending.steering.some(row => row.local === true && row.text === 'enter steer'),
+    `the Enter steer must present in the steering lane: ${JSON.stringify(pending)}`)
+  assert.ok(!pending.queued.some(row => row.local === true),
+    `the Enter steer must not present as a queued row: ${JSON.stringify(pending.queued)}`)
+  await waitForDelivery(harness.host, 'enter steer')
+  assert.equal(harness.host.steered.length, 1, 'the resolved steer delivery must reach the agent as a steer')
+  assert.equal(harness.host.followedUp.length, 0, 'never a queued followup')
+})
+
+test('running + busyEnter=queue: the accelerated chord presents a steering echo and writes a steer', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running' })
+  mounted.app.setDraft('accelerated steer')
+  ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
+  const pending = mounted.app.pendingInputForTest()
+  assert.ok(pending.steering.some(row => row.local === true && row.text === 'accelerated steer'),
+    `the accelerated steer must present in the steering lane: ${JSON.stringify(pending)}`)
+  assert.ok(!pending.queued.some(row => row.local === true),
+    `the accelerated steer must not present as a queued row: ${JSON.stringify(pending.queued)}`)
+  await waitForDelivery(harness.host, 'accelerated steer')
+  assert.equal(harness.host.steered.length, 1, 'the accelerated chord resolves to steer')
+  assert.equal(harness.host.followedUp.length, 0, 'never a queued followup')
+})
+
 test('a running steer during a long tool wait stays visible and hands off by rpc identity', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-steer-lane-')
