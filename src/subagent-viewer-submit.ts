@@ -31,6 +31,8 @@
  * @module @xmoon76/dsh-pi-tui/subagent-viewer-submit
  */
 
+import { isRemoteBusinessRefusalCode } from './runtime/write-outcome.ts'
+
 /** One human-authored content part for a viewer prompt. The DTO mirrors
  * the official `PromptContentPart` vocabulary from the DSH subagent API;
  * `prompt()` admits image parts through the Host attachment store, so the
@@ -130,21 +132,20 @@ export type SubagentPromptSettlement =
   | { readonly kind: 'indeterminate'; readonly message: string }
 
 /**
- * Settle a failed viewer prompt. A caller cancellation and EVERY structured
- * Host failure code (a domain `subagent/*` admission refusal or
- * `gateway/bad-request`) are proven refusals; only the unclassified carrier
- * failure (`gateway/internal`) or a code-less throw may already have been
- * accepted by the child, so only those settle `indeterminate`.
+ * Settle a failed viewer prompt. A caller cancellation and every PROVEN refusal
+ * code are rejected (a domain `subagent/*` admission refusal, `gateway/bad-request`,
+ * or a pre-invocation Gateway infrastructure code); only a carrier/internal/
+ * post-invocation failure (`gateway/internal`, `gateway/result-invalid`, an
+ * unknown `gateway/*` code) or a code-less throw settles `indeterminate`.
  */
 export function classifySubagentPromptSettlement(error: unknown): SubagentPromptSettlement {
   const reason = classifySubagentPromptError(error)
   if (reason.kind !== 'error') return { kind: 'rejected', reason }
-  const code = remoteErrorCode(error)
   // `error` is the catch-all reason kind: it covers both proven refusals with
   // no dedicated category (invalid attachment/zone, bad request, a legacy
-  // code) and genuinely unidentified failures. A structured code is still a
-  // proven Host refusal; only an unclassified/absent code is ambiguous.
-  if (code !== undefined && code !== 'gateway/internal') return { kind: 'rejected', reason }
+  // code) and genuinely unidentified failures. Only a code that proves refusal
+  // is rejected; an unclassified/absent code stays ambiguous.
+  if (isRemoteBusinessRefusalCode(remoteErrorCode(error))) return { kind: 'rejected', reason }
   return { kind: 'indeterminate', message: reason.message }
 }
 

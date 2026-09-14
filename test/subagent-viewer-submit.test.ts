@@ -253,6 +253,16 @@ test('only gateway/internal or a code-less throw settles indeterminate', () => {
   assert.equal(classifySubagentPromptSettlement(new Error('boom')).kind, 'indeterminate')
 })
 
+test('gateway pre-invocation refusals are rejected, post-invocation stays indeterminate', () => {
+  // Pinned Gateway raises these strictly before the business method runs.
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/invocation-unavailable')).kind, 'rejected')
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/service-unavailable')).kind, 'rejected')
+  // `gateway/result-invalid` is raised after the method returned, and an
+  // unknown future gateway code is never assumed to be a refusal.
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/result-invalid')).kind, 'indeterminate')
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/unknown-future-code')).kind, 'indeterminate')
+})
+
 test('a pre-dispatch canonicalization failure is rejected, never indeterminate', async () => {
   const outcome = await submitSubagentPrompt(request, deps({
     subagents: () => service([]),

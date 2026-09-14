@@ -768,20 +768,25 @@ correct presentation.
   normalized title; `refreshTitle` is explicitly `unsupported` (no official
   Client verb — this remains a D5/upstream gap).
 - Settlement classification preserves the official code discriminator: a domain
-  or `gateway/bad-request` failure is `rejected`, `gateway/cancelled` is
-  `cancelled`, and a carrier failure such as `gateway/internal` is
-  `indeterminate` — never a proven rejection. No write is auto-retried. On the
-  Remote path `cancelled` means a cancellation proven by the official call
-  contract OR an operation a captured Connection generation proved was not
-  dispatched; D2.2 does not claim caller-originated in-flight prompt abort
-  (the semantic `prompt` port has no `AbortSignal` today, and the port is not
-  widened for a caller that does not exist). The Remote adapters consume the
-  generated Remote's `RemoteResult` error branch as the settlement source:
-  carrier failures arrive there, so a rejection of the generated call itself is
-  an assembly/programming defect and PROPAGATES rather than being disguised as
-  `indeterminate`; only the explicit local pre-dispatch steps (preflight,
-  echo registration, serialization, mention canonicalization, identity minting)
-  are caught and mapped to a known refusal.
+  code, `gateway/bad-request`, or one of the pinned Gateway's PRE-invocation
+  infrastructure codes (`gateway/invocation-unavailable`,
+  `gateway/service-unavailable`, `gateway/arguments-invalid`,
+  `gateway/context-*`, `gateway/lookup-*`, ... — all raised while the Gateway
+  resolves the descriptor/arguments/receiver before the business method runs) is
+  a proven `rejected`; `gateway/cancelled` is `cancelled`; `gateway/internal`,
+  `gateway/result-invalid` (raised AFTER the method returned), an unknown
+  `gateway/*` code, or a code-less failure is `indeterminate` — never a proven
+  rejection. No write is auto-retried. On the Remote path `cancelled` means a
+  cancellation proven by the official call contract OR an operation a captured
+  Connection generation proved was not dispatched; D2.2 does not claim
+  caller-originated in-flight prompt abort (the semantic `prompt` port has no
+  `AbortSignal` today, and the port is not widened for a caller that does not
+  exist). The Remote adapters consume the generated Remote's `RemoteResult`
+  error branch as the settlement source: carrier failures arrive there, so a
+  rejection of the generated call itself is an assembly/programming defect and
+  PROPAGATES rather than being disguised as `indeterminate`; only the explicit
+  local pre-dispatch steps (preflight, echo registration, serialization, mention
+  canonicalization, identity minting) are caught and mapped to a known refusal.
 - `RemotePendingInputReader` maps the official `SessionSnapshot.queue`
   (`queued`/`steering`/`context`, occurrence id, optional plain `rpcId`) with
   the official order preserved, detached/frozen content, and a Connection
@@ -812,12 +817,14 @@ correct presentation.
   preparation failure is a known pre-dispatch refusal (`rejected`), never
   indeterminate, and the generated call is not wrapped in a defensive catch (a
   rejection is an assembly defect and propagates). The settlement is
-  code-based: every structured Host code (a `subagent/*` admission refusal such
+  code-based: every PROVEN refusal code (a `subagent/*` admission refusal such
   as `parent-unavailable`, `not-resumable`, `not-found`, `catalog-diagnostic`,
   `unauthorized`, `delivery-unavailable`, `projections-unavailable`,
-  `attachment-invalid`, `invalid-time-zone`, or `gateway/bad-request`) is a
-  proven `rejected`; only `gateway/internal` or a code-less throw settles
-  `indeterminate`. The runner then never restores an indeterminate viewer draft
+  `attachment-invalid`, `invalid-time-zone`, `gateway/bad-request`, or a
+  pre-invocation Gateway infrastructure code) is `rejected`; only
+  `gateway/internal`, `gateway/result-invalid`, an unknown `gateway/*` code, or
+  a code-less throw settles `indeterminate`. The runner then never restores an
+  indeterminate viewer draft
   as unsent and never reports a false "not stopped" — the child's authoritative
   state decides, with no automatic replay. A committed interrupt admission is
   likewise never presented as a durably stopped child.

@@ -233,6 +233,20 @@ test('a carrier failure on interrupt is indeterminate and never a false stop', a
   assert.deepEqual(outcome, { kind: 'indeterminate', message: 'carrier reset' })
 })
 
+test('interrupt separates a pre-invocation gateway refusal from a post-invocation result failure', async () => {
+  const h = harness()
+  h.setInterruptResult({ ok: false, error: { code: 'gateway/invocation-unavailable', message: 'no active method' } })
+  assert.deepEqual(
+    await h.port.interrupt({ parentSessionId: 'p', childSessionId: 'c', mode: 'continuable' }),
+    { kind: 'rejected', reason: { kind: 'error', message: 'no active method' } },
+  )
+  h.setInterruptResult({ ok: false, error: { code: 'gateway/result-invalid', message: 'bad result' } })
+  assert.deepEqual(
+    await h.port.interrupt({ parentSessionId: 'p', childSessionId: 'c', mode: 'continuable' }),
+    { kind: 'indeterminate', message: 'bad result' },
+  )
+})
+
 test('an unexpected prompt rejection keeps a proven domain refusal as rejected', async () => {
   const h = harness()
   h.setPromptResult({ ok: false, error: { code: 'subagent/delivery-unavailable', message: 'busy child' } })
