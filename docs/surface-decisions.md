@@ -125,8 +125,28 @@ accepted but has no authoritative representation yet:
   (`… to steer accepted`) so `sending…` rows are never implied to participate.
   The `sending…` suffix already communicates the state.
 
-Per-occurrence QueueDock controls (Edit / Remove / Steer) remain a separate,
-deliberately deferred interaction design.
+Per-occurrence QueueDock controls: the TUI intentionally does NOT expose a
+per-occurrence queue action UI. `Alt+Up` is recall-all over authoritative
+occurrences and `Ctrl+S` is FIFO steer-all; there is no row selection,
+single-row edit/remove/steer, row action button/keybinding, per-row busy state,
+edit overlay, selection clamp, or edit-target-disappearance lifecycle. D2.2
+still keeps the queue-action SEMANTIC (`SessionWriter.updateQueue` `edit` /
+`remove` / `steer`) fully aligned for both Direct and Remote adapters with
+adapter tests and same-Host proof. The migration preserves DSH capabilities and
+expresses them with a TUI-native surface; it is not a React/Web affordance
+clone, so adapter-level `edit` without an edit UI is expected, not a gap.
+
+### Remote presentation keeps exactly one optimistic identity
+
+D2.2 makes the client-local optimistic-echo source a seam
+(`src/submission-presentation.ts`): production Direct reads the existing
+`PendingSubmissions` ledger; the experimental Remote path reads the official
+`SessionSnapshot.pendingSubmissions`. The single join
+(`src/pending-presentation.ts`) correlates authoritative occurrences with local
+echoes by request/rpc identity only and routes `queued` to the queue pane and
+`steering`/`transcript` to the conversation-tail lane; `context` has no pending
+user surface. The Remote path therefore never runs a second optimistic ledger
+beside the official one, and a steer echo can never render as a queued row.
 
 ## /login and /logout resolve credential targets, not just DEEPSEEK_API_KEY
 

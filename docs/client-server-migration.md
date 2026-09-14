@@ -11,7 +11,7 @@
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
-M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; Remote writes remain unimplemented)
+M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 IN REVIEW: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -21,8 +21,8 @@ M8  NOT STARTED   (Direct ownership retirement — only after concurrency proof)
 
 Current production backend: direct
 Experimental backend:      none (no complete Backend(kind=remote))
-Experimental Remote:        read-shadow only (diagnostic/test opt-in)
-Remote writes:              none
+Experimental Remote:        reads + selected ordinary writes (adapters proven in tests/smoke)
+Remote writes:              experimental/test only (no production wiring)
 Remote attach:              unsupported
 Direct rollback:           available
 ```
@@ -728,9 +728,137 @@ without putting `steering`/`context` back into the queue pane and without Direct
   gains authoritative steering presentation, scoped to the exact child, and
   never leaks parent rows.
 
-Per-occurrence QueueDock controls (Edit/Remove/Steer) remain a deliberate
-follow-up with its own terminal interaction design; the data/presentation model
-is compatible with it but does not invent it.
+Per-occurrence QueueDock controls (Edit/Remove/Steer) are deliberately NOT part
+of the TUI product surface. D2.2 keeps the queue-action semantic fully aligned
+for both adapters while exposing only the bulk gestures; see the D2.2
+queue-action surface decision below.
+
+## D2.2 status — experimental Remote ordinary writes
+
+D2.2 adds the first Remote write adapters against the official DSH Client /
+generated Remote contracts. They are consumed by tests and a same-Host smoke
+only: production remains Direct, `BackendKind='remote'` does not exist, and no
+environment/CLI switch turns a complete Remote backend on.
+
+Planning hierarchy (durable guidance): this stage's scope is decided by the D2.2
+plan; business semantics and the user-visible state lifecycle come from the
+official DSH Web/Client outward contract; the dsh-pi-tui semantic ports express
+those semantics transport-neutrally; the Direct adapter maps them back to
+today's in-process implementation; and the TUI presentation expresses the same
+lifecycle with terminal-native UI/UX. "Direct used to do X" is not a reason to
+make X a cross-backend semantic, and an RPC success is not by itself proof of
+correct presentation.
+
+- `RemoteSessionWriter` resolves an addressed Session through the official
+  `ClientSessions.binding(id)` identity face — never `sessions.open()`, which
+  would move the Client's current selection. Ordinary prompts use the official
+  `beginSubmission` → identified `prompt` lifecycle: exactly one optimistic
+  identity (the official `requestId`) owns one human submit, the serialized
+  payload is refused as `unsupported` before any echo/Host mutation, and a
+  post-begin pre-prompt failure abandons the echo. `updateQueue` maps the
+  occurrence-level `edit`/`remove`/`steer` official `QueueAction`; `cancel`
+  preserves queued work; `rename` returns the official normalized title;
+  `refreshTitle` is explicitly `unsupported` (no official Client verb — this
+  remains a D5/upstream gap).
+- Settlement classification preserves the official code discriminator: a domain
+  or `gateway/bad-request` failure is `rejected`, `gateway/cancelled` is
+  `cancelled`, and a carrier failure such as `gateway/internal` is
+  `indeterminate` — never a proven rejection. No write is auto-retried. On the
+  Remote path `cancelled` means a cancellation proven by the official call
+  contract OR an operation a captured Connection generation proved was not
+  dispatched; D2.2 does not claim caller-originated in-flight prompt abort
+  (the semantic `prompt` port has no `AbortSignal` today, and the port is not
+  widened for a caller that does not exist).
+- `RemotePendingInputReader` maps the official `SessionSnapshot.queue`
+  (`queued`/`steering`/`context`, occurrence id, optional plain `rpcId`) with
+  the official order preserved, detached/frozen content, and a Connection
+  generation fence. It never reads Direct `nextTurn`/`nextStep` names and never
+  derives placement from `running`.
+- `RemoteSubmissionPresentation` is the Remote half of the client-local
+  submission-presentation seam (`src/submission-presentation.ts`): production
+  Direct wires the existing ledger, and the experimental Remote assembly
+  (tests/smoke) reads the official `SessionSnapshot.pendingSubmissions`, so the
+  Remote path never runs a second optimistic identity beside the official echo.
+  D2.2 has no production Remote backend, so the runner intentionally has no
+  source-injection point yet — the complete Remote backend assembly (M3) is what
+  injects the Remote source in place of the Direct ledger. The authoritative
+  queue row suppresses a matching local echo by request/rpc identity only —
+  never by text.
+- `RemoteHostCommandPort` uses the official generated
+  `commands.execute(agentId, line, attachments, signal)` Remote (the
+  attachment-preserving path, never `SessionFace.command(line)`), forwarding
+  the full line, the opaque attachment payload and the caller-owned signal
+  unchanged. Claim classification stays in the runner, and a slow/failed
+  execution never falls back to a model prompt.
+- `RemoteSubagentPort` uses the official generated `subagents.prompt` and
+  `subagents.interruptByParent` Remotes with the exact durable parent/child
+  address and `continuable` mode. A continuation prompt mints one request
+  identity before the call; a committed interrupt admission is never presented
+  as a durably stopped child (the authoritative task/read state decides).
+- Ctrl+S already converges on official per-occurrence `updateQueue({kind:'steer'})`
+  choreography from D2.1 (`src/steer.ts`): FIFO best-effort, partial progress is
+  real, no fake rollback, and the authoritative snapshot reconciles the
+  remaining rows. The Remote adapter plugs into that same orchestration.
+
+Validation for this stage: per-adapter unit contract tests, the
+submission-presentation and pending-input mapping tests, and the same-Host
+`smoke:remote-d2-write` integration smoke. D1 closure and the boundary gate stay
+green. `packages/pi-tui/**` and the DSH source pin are unchanged.
+
+### D2.2 serialization / D4 boundary matrix
+
+`PreparedMessage = unknown` and the current Direct `UserMessage` payload are a
+migration input, never a future Remote protocol. The serializer seam extracts
+only official semantic content and refuses anything that would require a new
+Host-locality transaction:
+
+| Current prepared content | D2.2 Remote | Owner |
+|---|---|---|
+| Plain text | supported | `RemotePromptSerializer` |
+| Image input already representable as official prompt image data | supported (no new Host-locality/upload transaction) | `RemotePromptSerializer` |
+| Already-durable reference the current pipeline already possesses without D4 work | supported | existing preparation |
+| Client-local generic file/path needing `uploadFile` + receipt | **`unsupported` before `beginSubmission()` / Host mutation; draft preserved** | D4 |
+| Direct private object shape with no official semantic | not a wire contract; the serializer maps only official content | migration seam |
+
+### D2.2 queue-action surface — intentional product decision
+
+QueueAction parity is a BACKEND semantic requirement: `SessionWriter.updateQueue`
+exposes `edit` / `remove` / `steer`, both the Direct and Remote adapters map them
+1:1 to the official occurrence mutation, and the adapter unit tests plus the
+same-Host smoke cover all three (exact item id, exact content, committed /
+business-reject / indeterminate, generation-before-dispatch vs
+generation-after-dispatch).
+
+The TUI intentionally does NOT expose a per-occurrence queue action UI. Its
+product surface is:
+
+```text
+Alt+Up = recall all  -> per-occurrence remove + draft recall
+Ctrl+S = steer all   -> per-occurrence FIFO steer
+```
+
+There is deliberately no row selection, single-row edit/remove/steer, row action
+button/keybinding, per-row busy state, edit overlay, selection clamp, or
+edit-target-disappearance lifecycle. The migration preserves DSH semantic
+capabilities and expresses them with a TUI-native interaction surface; it is not
+a React/Web affordance clone. Adapter-level `edit` support without an edit UI is
+therefore expected and is not a D2.2 gap, and there is no follow-up that lands
+later — this is the product decision.
+
+### D2.2 Host command resource admission
+
+Host-command unsupported resource admission is owned by submission preparation,
+not `HostCommandPort` settlement. `HostCommandPort` receives an already-prepared
+opaque official attachment representation and is a pure forwarder; it does not
+decide whether a payload is a local file or a Remote receipt. The runner's
+attachment preparation (`attachmentRefusal`) fails closed before dispatch — a
+declared Host command refuses a file attachment with no receipt seam, so the
+port is never invoked and the draft is preserved
+(`test/submit-hot-path.test.ts`, "still refuses a FILE (no receipt seam)").
+`HostCommandOutcome` is therefore deliberately not widened with an
+`unsupported` branch.
+
+
 
 The D1 closure ledger is:
 

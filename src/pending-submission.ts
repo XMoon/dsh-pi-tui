@@ -66,10 +66,10 @@ export interface PendingSubmissionBegin {
  * text, and it re-appears the moment its counterpart leaves the inbox before
  * the durable message lands.
  */
-export function pendingSubmissionsNotReplaced(
-  echoes: readonly PendingSubmissionEcho[],
+export function pendingSubmissionsNotReplaced<T extends { readonly requestId: string }>(
+  echoes: readonly T[],
   authoritativeRpcIds: ReadonlySet<string>,
-): readonly PendingSubmissionEcho[] {
+): readonly T[] {
   return echoes.filter(echo => !authoritativeRpcIds.has(echo.requestId))
 }
 
