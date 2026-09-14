@@ -205,8 +205,10 @@ export class ScrollView extends Container {
 		// bottom" — true when the CONTENT shrank (a fold/collapse). A VIEWPORT
 		// growth (pinned chrome rows appearing/disappearing, terminal resize)
 		// shrinks maxScrollTop without changing the content, so re-arming would
-		// steal a historical scroll position the user never left. The first
-		// layout (previousViewportHeight 0) is not a growth.
+		// steal a historical scroll position the user never left. When BOTH
+		// happen in one pass the viewport growth wins: a structural
+		// screen-capacity change must never be read as "the user caught up to
+		// the tail". The first layout (previousViewportHeight 0) is not a growth.
 		const viewportGrew = previousViewportHeight > 0 && this.currentViewportHeight > previousViewportHeight;
 		if (this.followEnd && this.currentScrollTop === maxScrollTop && !this.followSuppressedAtEnd) {
 			// A viewport growth that clamps a NON-following scroll onto the new

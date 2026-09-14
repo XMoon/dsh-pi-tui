@@ -4511,11 +4511,12 @@ A host that resolves a same-cell click against the frame the user actually SAW n
 
 #### Why it exists
 
-ScrollView re-arms follow-end whenever a layout clamp lands the scroll on the new maximum, interpreting that as 'the user's position caught up to the bottom'. That holds when the CONTENT shrank (a fold/collapse). It is wrong when the VIEWPORT grew (pinned chrome rows appearing/disappearing, terminal resize): maxScrollTop shrinks without any content change, so a user who had deliberately scrolled away from the tail is silently pulled back to it. The pinned fullscreen queue pane is a concrete trigger: a queued occurrence's create/remove changes the transcript viewport height. The host cannot compensate reliably (the alt screen owns the wheel/keyboard/scrollbar gestures after the host router sees them, and an overlay may consume the wheel), so the rule belongs in the viewport layer.
+ScrollView re-arms follow-end whenever a layout clamp lands the scroll on the new maximum, interpreting that as 'the user's position caught up to the bottom'. That holds when the CONTENT shrank (a fold/collapse). It is wrong when the VIEWPORT grew (pinned chrome rows appearing/disappearing, terminal resize): maxScrollTop shrinks without any content change, so a user who had deliberately scrolled away from the tail is silently pulled back to it. The pinned fullscreen queue pane is a concrete trigger: a queued occurrence's create/remove changes the transcript viewport height. The host cannot compensate reliably (the alt screen owns the wheel/keyboard/scrollbar gestures after the host router sees them, and an overlay may consume the wheel), so the rule belongs in the viewport layer. When a content shrink and a viewport growth coincide in one layout pass, the viewport growth wins — the structural screen-capacity change dominates the clamp inference.
 
 #### Changed surface
 
 - ScrollView.updateLayout only re-arms follow-end when the viewport did NOT grow since the previous layout
+- when a content shrink and a viewport growth coincide in the SAME layout pass, the viewport growth wins and the historical intent is preserved (a structural screen-capacity change is never read as 'the user caught up to the tail')
 
 #### Dependency map
 
@@ -4539,12 +4540,14 @@ ScrollView re-arms follow-end whenever a layout clamp lands the scroll on the ne
 - A content shrink (fold) still re-arms follow-end when the clamped position reaches the new maximum.
 - A viewport growth while not following leaves followingEnd false and keeps the clamped historical position.
 - A viewport growth while following keeps following (followingEnd was already true before the layout).
+- When a content shrink and a viewport growth coincide in one layout pass, the viewport growth wins: followingEnd stays false and the historical intent is preserved.
 - Audit note: Regression tests cover the growth and the shrink.
 
 #### Guarding tests
 
 - packages/pi-tui/test/layout.test.ts: (X055) a viewport growth does not re-arm follow-end after the user left the tail
 - packages/pi-tui/test/layout.test.ts: (X055) a content shrink still re-arms follow-end
+- packages/pi-tui/test/layout.test.ts: (X055) a simultaneous content shrink and viewport growth preserves the historical intent
 - test/focus-streaming-jitter.test.ts: semantic queue pane removal preserves historical wheel intent across fullscreen viewport growth
 - test/focus-streaming-jitter.test.ts: queue pane removal keeps a same-frame wheel-up off the tail
 - test/focus-streaming-jitter.test.ts: queue pane removal does not undo an explicit same-frame follow-end request

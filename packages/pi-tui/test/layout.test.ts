@@ -232,6 +232,25 @@ describe("viewport layout", () => {
 		assert.strictEqual(scrollView.isFollowingEnd, true);
 	});
 
+	it("(X055) a simultaneous content shrink and viewport growth preserves the historical intent", () => {
+		const scrollView = new ScrollView(new Text("x", 0, 0), { follow: "end", primary: true });
+		scrollView.updateLayout(100, 20, () => {});
+		scrollView.scrollBy(-1);
+		assert.strictEqual(scrollView.isFollowingEnd, false);
+
+		// Both happen in ONE layout pass: the content shrinks AND the viewport
+		// grows. The viewport growth wins — a structural screen-capacity change
+		// must not be read as "the user caught up to the tail" — so follow-end
+		// must NOT re-arm and the historical intent is preserved.
+		scrollView.updateLayout(50, 40, () => {});
+		assert.strictEqual(scrollView.scrollTop, 10);
+		assert.strictEqual(scrollView.isFollowingEnd, false);
+
+		// A passive repaint at the same geometry stays historical too.
+		scrollView.updateLayout(50, 40, () => {});
+		assert.strictEqual(scrollView.isFollowingEnd, false);
+	});
+
 	it("renders a proportional glyph scrollbar with an expanded active thumb", async () => {
 		const sourceLines = ["abcd界", "abcde2", "abcde3", "abcde4", "abcde5", "abcde6", "abcde7", "abcde8"];
 		const contentBackground = "\x1b[42m";
