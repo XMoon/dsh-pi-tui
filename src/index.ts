@@ -4061,6 +4061,7 @@ export function apply(ctx: Context, config: Config): void {
       // semantic rows AND local submission echoes at the synchronous
       // generation boundary before the new subject is published.
       pendingSubmissions.clear()
+      pendingOwnInputBySubject.clear()
       app.setPendingInputPresentation({ queued: [], steering: [], running: false })
       // A new session owns the surface: tear down the subagent viewer. The
       // old viewer's parent session is gone (the continuation contract
