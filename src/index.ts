@@ -3927,7 +3927,13 @@ export function apply(ctx: Context, config: Config): void {
       const hasNewOwnInput = previousOwnKeys === undefined
         ? ownLaneKeys.size > 0
         : [...ownLaneKeys].some(key => !previousOwnKeys.has(key))
-      pendingOwnInputBySubject.set(subjectKey, ownLaneKeys)
+      // Keep only NON-EMPTY subject entries: an interactive child subject has
+      // no local echo (echoes are main-session-only), so retaining an empty Set
+      // per visited child would grow this map for the life of the parent
+      // session. A non-empty parent entry must survive viewer round trips so
+      // its existing own input does not re-fire as "new".
+      if (ownLaneKeys.size === 0) pendingOwnInputBySubject.delete(subjectKey)
+      else pendingOwnInputBySubject.set(subjectKey, ownLaneKeys)
       if (hasNewOwnInput) {
         // The live tail may be outside the current virtual window (the reader
         // paged into history): move the subject's window back to latest BEFORE
