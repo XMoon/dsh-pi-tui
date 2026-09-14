@@ -118,6 +118,47 @@ export type SubagentPromptReject =
 export type SubagentPromptOutcome =
   | { readonly kind: 'ok'; readonly messageId: unknown }
   | { readonly kind: 'rejected'; readonly reason: SubagentPromptReject }
+  /** The delivery was dispatched but no settlement could be proven (a carrier
+   * failure or an unidentified internal error): the child may already own the
+   * message. Never a proven "not sent", and never an automatic replay. */
+  | { readonly kind: 'indeterminate'; readonly message: string }
+
+/** A failed viewer prompt: a PROVEN refusal vs an ambiguous post-dispatch
+ * outcome that may already have committed. */
+export type SubagentPromptSettlement =
+  | { readonly kind: 'rejected'; readonly reason: SubagentPromptReject }
+  | { readonly kind: 'indeterminate'; readonly message: string }
+
+/**
+ * Settle a failed viewer prompt. Known business codes (and a caller
+ * cancellation) are proven refusals; anything else — a `gateway/internal`
+ * carrier failure or an unidentified throw — may already have been accepted by
+ * the child, so it is `indeterminate` rather than a false "not sent".
+ */
+export function classifySubagentPromptSettlement(error: unknown): SubagentPromptSettlement {
+  const reason = classifySubagentPromptError(error)
+  if (reason.kind !== 'error') return { kind: 'rejected', reason }
+  return { kind: 'indeterminate', message: reason.message }
+}
+
+/**
+ * What the caller must DO after a settled viewer prompt. `uncertain` is the
+ * load-bearing case: an indeterminate delivery may already own the child, so
+ * the caller must neither restore the draft as unsent nor claim it was not
+ * delivered — the child's authoritative state decides.
+ */
+export type SubagentPromptDisposition =
+  | { readonly kind: 'sent' }
+  | { readonly kind: 'uncertain' }
+  | { readonly kind: 'cancelled' }
+  | { readonly kind: 'rejected'; readonly reason: SubagentPromptReject }
+
+export function subagentPromptDisposition(outcome: SubagentPromptOutcome): SubagentPromptDisposition {
+  if (outcome.kind === 'ok') return { kind: 'sent' }
+  if (outcome.kind === 'indeterminate') return { kind: 'uncertain' }
+  if (outcome.reason.kind === 'cancelled') return { kind: 'cancelled' }
+  return { kind: 'rejected', reason: outcome.reason }
+}
 
 /** Whether a settled prompt may still touch the CURRENT surface: the
  * viewer session that started the send must be unchanged — the SAME
@@ -236,7 +277,10 @@ export async function submitSubagentPrompt(
     )
     return { kind: 'ok', messageId: receipt.messageId }
   } catch (error) {
-    return { kind: 'rejected', reason: classifySubagentPromptError(error) }
+    const settlement = classifySubagentPromptSettlement(error)
+    return settlement.kind === 'rejected'
+      ? { kind: 'rejected', reason: settlement.reason }
+      : settlement
   }
 }
 

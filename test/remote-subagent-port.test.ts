@@ -28,6 +28,7 @@ interface Harness {
   readonly interruptCalls: { child: string; parent: string; mode: string }[]
   setPromptResult(result: { ok: true; value: { messageId: unknown } } | { ok: false; error: unknown }): void
   setInterruptResult(result: { ok: true; value: { accepted: true } } | { ok: false; error: unknown }): void
+  setPromptThrows(error: unknown): void
 }
 
 function harness(): Harness {
@@ -37,6 +38,7 @@ function harness(): Harness {
     ok: true,
     value: { messageId: 'msg-1' },
   }
+  let promptThrows: unknown
   let interruptResult: { ok: true; value: { accepted: true } } | { ok: false; error: unknown } = {
     ok: true,
     value: { accepted: true },
@@ -44,6 +46,7 @@ function harness(): Harness {
   const source: RemoteSubagentSource = {
     prompt: async (request, signal) => {
       promptCalls.push({ request, signal })
+      if (promptThrows !== undefined) throw promptThrows
       return promptResult
     },
     interruptByParent: async (child, parent, mode) => {
@@ -57,6 +60,7 @@ function harness(): Harness {
     interruptCalls,
     setPromptResult: value => { promptResult = value },
     setInterruptResult: value => { interruptResult = value },
+    setPromptThrows: value => { promptThrows = value },
   }
 }
 
@@ -177,12 +181,40 @@ test('a plain wire interrupt failure keeps its human message, not [object Object
   })
 })
 
-test('a plain wire prompt failure keeps its human message, not [object Object]', async () => {
+test('a plain wire prompt carrier failure is indeterminate with its human message preserved', async () => {
   const h = harness()
   h.setPromptResult({ ok: false, error: { code: 'gateway/internal', message: 'carrier reset' } })
   const outcome = await h.port.prompt(
     { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: 'x' }] },
     context(),
   )
-  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'error', message: 'carrier reset' } })
+  // The child may already own the message; never a proven "not sent".
+  assert.deepEqual(outcome, { kind: 'indeterminate', message: 'carrier reset' })
+})
+
+test('a prompt throw after dispatch is indeterminate, not a false rejection', async () => {
+  const h = harness()
+  h.setPromptThrows(new Error('assembly fault'))
+  const outcome = await h.port.prompt(
+    { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: 'x' }] },
+    context(),
+  )
+  assert.deepEqual(outcome, { kind: 'indeterminate', message: 'assembly fault' })
+})
+
+test('a carrier failure on interrupt is indeterminate and never a false stop', async () => {
+  const h = harness()
+  h.setInterruptResult({ ok: false, error: { code: 'gateway/internal', message: 'carrier reset' } })
+  const outcome = await h.port.interrupt({ parentSessionId: 'p', childSessionId: 'c', mode: 'continuable' })
+  assert.deepEqual(outcome, { kind: 'indeterminate', message: 'carrier reset' })
+})
+
+test('an unexpected prompt rejection keeps a proven domain refusal as rejected', async () => {
+  const h = harness()
+  h.setPromptResult({ ok: false, error: { code: 'subagent/delivery-unavailable', message: 'busy child' } })
+  const outcome = await h.port.prompt(
+    { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: 'x' }] },
+    context(),
+  )
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'unavailable' } })
 })

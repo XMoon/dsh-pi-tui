@@ -78,11 +78,12 @@ export function buildPendingPresentation(input: PendingPresentationInput): Pendi
     if (row.rpcId !== undefined) authoritativeRpcIds.add(row.rpcId)
   }
   for (const echo of pendingSubmissionsNotReplaced(input.submissions, authoritativeRpcIds)) {
+    const text = echoText(echo)
     if (echo.placement === 'queued') {
       queued.push({
         id: echo.requestId,
         rpcId: echo.requestId,
-        text: echo.text,
+        text,
         mode: 'followup',
         local: true,
       })
@@ -90,11 +91,24 @@ export function buildPendingPresentation(input: PendingPresentationInput): Pendi
       steering.push({
         id: echo.requestId,
         rpcId: echo.requestId,
-        text: echo.text,
+        text,
         local: true,
         status: echo.placement === 'transcript' ? 'sending' : 'steering',
       })
     }
   }
   return { queued, steering, running }
+}
+
+/**
+ * Render one local echo's display text. The Direct ledger carries attachment
+ * markers inside `text`; the official Remote pending submission does not, so
+ * its structured attachments are appended here — an image-only echo must never
+ * render as an empty row.
+ */
+function echoText(echo: SubmissionPresentationItem): string {
+  if (echo.attachments.length === 0) return echo.text
+  const markers = echo.attachments.map(attachment =>
+    attachment.kind === 'image' ? `[Image: ${attachment.label}]` : `[File: ${attachment.label}]`)
+  return [echo.text, ...markers].filter(part => part !== '').join(' ')
 }

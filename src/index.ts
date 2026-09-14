@@ -186,6 +186,7 @@ import { retireDirectOwnedSession, type RetirementReport } from './runtime/direc
 import { mergeDraft, refuseByTransitionFence, steerAll, steerHasPayload, sessionUnchanged, type SteerAgentLike } from './steer.ts'
 import {
   resolveSubagentSettleTarget,
+  subagentPromptDisposition,
   viewerCanonicalizeScope,
   type SubagentPromptOutcome,
   type SubagentPromptReject,
@@ -7458,7 +7459,8 @@ export function apply(ctx: Context, config: Config): void {
         viewerGenerationNow: app.getViewerGeneration(),
         liveParentSessionId: liveAgent?.session.id,
       })
-      if (outcome.kind === 'ok') {
+      const disposition = subagentPromptDisposition(outcome)
+      if (disposition.kind === 'sent') {
         if (settleTarget.kind === 'current') {
           app.notify(request.delivery === 'steer'
             ? `sent to ${settleTarget.label} — steered into the current turn`
@@ -7466,8 +7468,16 @@ export function apply(ctx: Context, config: Config): void {
         }
         return
       }
-      const reason = outcome.reason
-      if (reason.kind === 'cancelled') {
+      if (disposition.kind === 'uncertain') {
+        // The message may already own the child. Never restore it as an
+        // unsent draft or claim it was not delivered; the child's
+        // authoritative state decides. No automatic replay.
+        if (settleTarget.kind === 'current') {
+          app.notify(`send to ${settleTarget.label} is unconfirmed — do not retry automatically`, 'error')
+        }
+        return
+      }
+      if (disposition.kind === 'cancelled') {
         // Aborted before inbox acceptance: the message never entered the
         // child's inbox — restore. Current viewer session: visible merge;
         // stale viewer (closed/switched/reopened): map-only (never the
@@ -7484,7 +7494,7 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       app.setEditorText(mergeDraft(app.getDraft(), text))
-      app.notify(subagentPromptNotice(reason, settleTarget.label), 'error')
+      app.notify(subagentPromptNotice(disposition.reason, settleTarget.label), 'error')
     }
 
     /** The user-facing reason for a rejected follow-up (plan §18). */
@@ -7643,6 +7653,13 @@ export function apply(ctx: Context, config: Config): void {
               if (cleanedUp || activeTaskBrowserToken !== actionBrowserToken || sessionGeneration !== browserGeneration || liveAgent !== browserSession) return
               if (outcome.kind === 'committed') {
                 app.notify(`stopping ${row.label}`, 'info')
+                return
+              }
+              if (outcome.kind === 'indeterminate') {
+                // A dispatched interrupt whose settlement is unknown must not
+                // be reported as "not stopped"; the authoritative task/read
+                // state decides and no automatic replay happens.
+                app.notify(`could not confirm stopping ${row.label} — the session state will decide`, 'error')
                 return
               }
               const reason = outcome.reason.kind === 'error'

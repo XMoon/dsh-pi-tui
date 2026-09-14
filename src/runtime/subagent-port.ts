@@ -46,6 +46,9 @@ export type SubagentInterruptReject =
 export type SubagentInterruptOutcome =
   | { readonly kind: 'committed' }
   | { readonly kind: 'rejected'; readonly reason: SubagentInterruptReject }
+  /** The interrupt was dispatched but no settlement could be proven: the child
+   * may already have been stopped. Never a proven no-op and never a replay. */
+  | { readonly kind: 'indeterminate'; readonly message: string }
 
 /** The subagent domain port. */
 export interface SubagentPort {

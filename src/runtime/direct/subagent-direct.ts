@@ -43,7 +43,13 @@ function errorCode(error: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined
 }
 
-function classifyInterruptFailure(error: unknown): SubagentInterruptOutcome | undefined {
+/**
+ * Classify an interrupt failure. Known authority/business codes are proven
+ * refusals; an unidentified throw leaves the child's stopped state unproven, so
+ * it settles `indeterminate` rather than throwing the caller into a false
+ * "not stopped" (or a blind retry).
+ */
+function classifyInterruptFailure(error: unknown): SubagentInterruptOutcome {
   switch (errorCode(error)) {
     case 'subagent/parent-unavailable':
     case 'subagent/delivery-unavailable':
@@ -52,7 +58,7 @@ function classifyInterruptFailure(error: unknown): SubagentInterruptOutcome | un
     case 'UNAUTHORIZED':
       return { kind: 'rejected', reason: { kind: 'unauthorized', message: safeErrorMessage(error) } }
     default:
-      return undefined
+      return { kind: 'indeterminate', message: safeErrorMessage(error) }
   }
 }
 
@@ -111,9 +117,7 @@ export class DirectSubagentPort implements SubagentPort {
         parentSessionId: request.parentSessionId,
       })
     } catch (error: unknown) {
-      const classified = classifyInterruptFailure(error)
-      if (classified !== undefined) return classified
-      throw error
+      return classifyInterruptFailure(error)
     }
     return { kind: 'committed' }
   }

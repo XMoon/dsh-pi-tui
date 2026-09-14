@@ -222,3 +222,14 @@ test('interrupt classifies an absent service and a known authority refusal', asy
   assert.equal(refused.kind, 'rejected')
   if (refused.kind === 'rejected') assert.equal(refused.reason.kind, 'unauthorized')
 })
+
+test('interrupt settles an unidentified failure as indeterminate, never a false stop', async () => {
+  const failing = {
+    ...service([]),
+    interrupt: () => { throw new Error('carrier lost') },
+  }
+  const outcome = await new DirectSubagentPort(host(failing)).interrupt({
+    parentSessionId: 'session-parent', childSessionId: 'session-child', mode: 'continuable',
+  })
+  assert.deepEqual(outcome, { kind: 'indeterminate', message: 'carrier lost' })
+})

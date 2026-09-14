@@ -17,13 +17,12 @@
 
 import { randomUUID } from 'node:crypto'
 import {
-  classifySubagentPromptError,
+  classifySubagentPromptSettlement,
   type SubagentPromptContentPart,
 } from '../../subagent-viewer-submit.ts'
 import type { SubagentPromptOutcome } from '../../subagent-viewer-submit.ts'
 import type {
   SubagentInterruptOutcome,
-  SubagentInterruptReject,
   SubagentInterruptRequest,
   SubagentPromptContext,
   SubagentPort,
@@ -65,19 +64,33 @@ function errorCode(error: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined
 }
 
-function classifyInterruptFailure(error: unknown): SubagentInterruptReject {
+function classifyInterruptFailure(error: unknown): SubagentInterruptOutcome {
+  const message = remoteFailureMessage(error)
   switch (errorCode(error)) {
     case 'subagent/not-found':
     case 'subagent/catalog-diagnostic':
     case 'subagent/parent-unavailable':
     case 'subagent/delivery-unavailable':
-      return { kind: 'unavailable', message: remoteFailureMessage(error) }
+      return { kind: 'rejected', reason: { kind: 'unavailable', message } }
     case 'subagent/unauthorized':
     case 'UNAUTHORIZED':
-      return { kind: 'unauthorized', message: remoteFailureMessage(error) }
+      return { kind: 'rejected', reason: { kind: 'unauthorized', message } }
+    case 'gateway/bad-request':
+      return { kind: 'rejected', reason: { kind: 'error', message } }
     default:
-      return { kind: 'error', message: remoteFailureMessage(error) }
+      // A carrier/internal failure after dispatch may already have stopped the
+      // child; never a proven no-op and never a blind retry.
+      return { kind: 'indeterminate', message }
   }
+}
+
+/** Map a failed viewer prompt onto the port outcome: a proven refusal keeps
+ * its reason; an ambiguous post-dispatch failure is `indeterminate`. */
+function promptOutcomeOf(error: unknown): SubagentPromptOutcome {
+  const settlement = classifySubagentPromptSettlement(error)
+  return settlement.kind === 'rejected'
+    ? { kind: 'rejected', reason: settlement.reason }
+    : settlement
 }
 
 /** The experimental Remote subagent port. */
@@ -150,9 +163,9 @@ export class RemoteSubagentPort implements SubagentPort {
         signal,
       )
       if (result.ok) return { kind: 'ok', messageId: result.value.messageId }
-      return { kind: 'rejected', reason: classifySubagentPromptError(result.error) }
+      return promptOutcomeOf(result.error)
     } catch (error) {
-      return { kind: 'rejected', reason: classifySubagentPromptError(error) }
+      return promptOutcomeOf(error)
     }
   }
 
@@ -164,9 +177,9 @@ export class RemoteSubagentPort implements SubagentPort {
         'continuable',
       )
       if (result.ok) return { kind: 'committed' }
-      return { kind: 'rejected', reason: classifyInterruptFailure(result.error) }
+      return classifyInterruptFailure(result.error)
     } catch (error) {
-      return { kind: 'rejected', reason: classifyInterruptFailure(error) }
+      return classifyInterruptFailure(error)
     }
   }
 }
