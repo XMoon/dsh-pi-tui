@@ -192,6 +192,7 @@ export class ScrollView extends Container {
 	}
 
 	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+		const previousViewportHeight = this.currentViewportHeight;
 		this.contentHeight = Math.max(0, Math.floor(contentHeight));
 		this.currentViewportHeight = Math.max(0, Math.floor(viewportHeight));
 		this.requestRenderCallback = requestRender;
@@ -199,8 +200,21 @@ export class ScrollView extends Container {
 		if (this.followingEnd) this.currentScrollTop = maxScrollTop;
 		else this.currentScrollTop = Math.max(0, Math.min(this.currentScrollTop, maxScrollTop));
 		if (this.currentScrollTop < maxScrollTop) this.followSuppressedAtEnd = false;
+		// (dsh-pi-tui divergence X055.) Re-arming follow-end when the clamped
+		// scroll reaches the maximum means "the user's position caught up to the
+		// bottom" — true when the CONTENT shrank (a fold/collapse). A VIEWPORT
+		// growth (pinned chrome rows appearing/disappearing, terminal resize)
+		// shrinks maxScrollTop without changing the content, so re-arming would
+		// steal a historical scroll position the user never left. The first
+		// layout (previousViewportHeight 0) is not a growth.
+		const viewportGrew = previousViewportHeight > 0 && this.currentViewportHeight > previousViewportHeight;
 		if (this.followEnd && this.currentScrollTop === maxScrollTop && !this.followSuppressedAtEnd) {
-			this.followingEnd = true;
+			// A viewport growth that clamps a NON-following scroll onto the new
+			// maximum must not re-arm follow-end — not even on a later passive
+			// repaint at the same geometry. Suppress the re-arm until the user
+			// scrolls again (scrollBy/scrollToEnd clear the suppression).
+			if (viewportGrew && !this.followingEnd) this.followSuppressedAtEnd = true;
+			else this.followingEnd = true;
 		}
 		if (this.contentHeight <= this.currentViewportHeight) this.hideTransientScrollbar();
 	}
