@@ -179,24 +179,24 @@ function containsExactGuidance(content, command) {
 // family while the peer floor stayed at the previous alpha. The 0.4.0 and
 // 0.4.1 stable releases continue to use the published rc.1 family because the
 // 0.1.2 stable family is not published yet. The 0.4.3-alpha.2 prerelease
-// targets the published npm `0.1.3-alpha.2` family, while the current 0.4.5
-// release recommends the published `0.1.5-rc.2` family (the peer floor remains
-// `0.1.5-rc.1`). Released changelog sections are immutable, so the requirement
-// follows the version being released.
+// targets the published npm `0.1.3-alpha.2` family, while the 0.4.5 and 0.4.6
+// stable releases recommend the published `0.1.5-rc.2` family (the peer floor
+// remains `0.1.5-rc.1`). Released changelog sections are immutable, so the
+// requirement follows the version being released.
 const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3'
   : version === '0.4.3-alpha.2' ? '0.1.3-alpha.2'
   : version === '0.4.3-alpha.3' ? '0.1.5-rc.1'
   : '0.1.2-alpha.5'
 const dshStablePin = version === '0.4.0' || version === '0.4.1'
   ? '0.1.2-rc.1'
-  : version === '0.4.5' ? '0.1.5-rc.2'
+  : version === '0.4.5' || version === '0.4.6' ? '0.1.5-rc.2'
   : '0.1.2'
 if (version.startsWith('0.4.')) {
   // Release bodies must remain reproducible after a later stable/preview
   // publish moves the npm dist-tags. README keeps the moving channel tags for
   // ordinary installs; changelog/release-note guidance pins this release.
   const tuiPin = `@xmoon76/dsh-pi-tui@${version}`
-  const dshGuidance = version === '0.4.5'
+  const dshGuidance = version === '0.4.5' || version === '0.4.6'
     ? 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2'
     : `@deepseek-ai/dsh@${channel === 'next' ? dshAlphaPin : dshStablePin}`
   const requiredGuidance = [

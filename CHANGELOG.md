@@ -7,9 +7,34 @@
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-09-13
+
+### 安装与版本对应
+
+本稳定版与 0.4.5 使用相同的 DSH 兼容范围：最低兼容 DSH `0.1.5-rc.1`，同时兼容
+`0.1.5-rc.2`。推荐安装 rc.2；安装 DSH 时需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.6
+dsh --profile pi-tui
+```
+
+不要把本版本与历史 DSH `0.1.3-alpha.2` 线混用。仍需保留旧版 DSH 的用户，
+请安装对应的历史 TUI 线：DSH `0.1.2-rc.1` 使用
+`@xmoon76/dsh-pi-tui@0.4.1`，DSH `0.1.3-alpha.2` 使用
+`@xmoon76/dsh-pi-tui@0.4.3-alpha.2`，更旧的 DSH `0.1.1-rc.1`/`rc.2`
+使用 `@xmoon76/dsh-pi-tui@0.3`。
+
 ### 新增
 
 - **显式交付文件呈现。** `present` 工具卡现在以人类可读的文件列表显示，最终回答尾部会汇总实际交付的路径与描述，并在折叠视图中保持紧凑。
+
+### 修复
+
+- **Focus 实时呈现高度与滚动稳定性。** 流式 Markdown 内容在展开 Focus 中增高或收缩时，不再因临时高度变化造成视口抖动；历史内容更新、工具准备/完成以及 Focus/fullscreen 切换会正确释放旧的高度基线，并保留用户主动滚动位置。
+
+> **已知限制：** 当前生产默认后端仍为 Direct；remote attach 暂不支持。
 
 ## [0.4.5] - 2026-09-11
 
@@ -858,7 +883,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...v0.4.5
 [0.4.3-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...next-v0.4.3-alpha.2
 [0.4.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.0...v0.4.1

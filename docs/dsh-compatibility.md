@@ -17,7 +17,7 @@ fallback was checked against the peer manifest at its corresponding TUI tag.
 | `0.4.0-alpha.2` | `dsh-v0.1.2-alpha.4`, `dsh-v0.1.2-alpha.5` | Previous 0.4 prerelease |
 | `0.4.1` (published) | `dsh-v0.1.2-rc.1` | Historical stable |
 | `0.4.3-alpha.2` (historical next npm line) | `dsh-v0.1.3-alpha.2` | Last official runtime tag for this TUI line |
-| `0.4.5` (published stable) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable; validated against the published npm rc.1 family |
+| `0.4.6` (published stable) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable; validated against the published npm rc.1 family |
 | `next` Source Mode line (current checkout) | exact `deepseek-harness` master `c291e7961a515f6d7af9304e7fd1d257929aef26` (`0.1.5-rc.2`) | Unpublished forward-integration target; not a package-install promise |
 | No historical fallback | `dsh-v0.1.0-rc.7`, `dsh-v0.1.2-alpha.1`, `dsh-v0.1.3-alpha.1`, `dsh-v0.1.5-alpha.1`, `dsh-v0.1.5-alpha.2` | Upgrade DSH to a supported release |
 
@@ -25,11 +25,12 @@ The table is keyed to the official release tags above. Do not widen a pairing
 from a package peer lower bound alone: npm/node-semver excludes a prerelease
 whose major/minor/patch tuple differs from the comparator's prerelease tuple.
 For example, `>=0.1.2-rc.1` does not include `0.1.3-alpha.1`, and
-`^0.1.1-rc.1` does not include `0.1.2-alpha.1`. The 0.4.5 release raises the
-floor to the published npm `0.1.5-rc.1` release; the open peer range also
-accepts the compatible `0.1.5-rc.2` family. Its startup notice is best-effort
-because Loader rows mount concurrently. The floor is a registry release, so
-the notice suggests the exact npm upgrade target.
+`^0.1.1-rc.1` does not include `0.1.2-alpha.1`. The 0.4.5 release raised the
+floor to the published npm `0.1.5-rc.1` release, and 0.4.6 keeps that same
+floor; the open peer range also accepts the compatible `0.1.5-rc.2` family.
+Its startup notice is best-effort because Loader rows mount concurrently. The
+floor is a registry release, so the notice suggests the exact npm upgrade
+target.
 
 For the current stable 0.4 line, install the recommended DSH family and the
 stable TUI. DSH `0.1.5-rc.1` is the minimum; `0.1.5-rc.2` is also compatible.
