@@ -3318,3 +3318,117 @@ test('a retirement descendant-drain failure warns with the failing phases (not t
   assert.ok(!stderrWrites.some(write => write.includes('the latest events may not be persisted')),
     'a non-flush failure must not claim a durability loss')
 })
+
+test('the interactive child viewer projects its own authoritative steering and never leaks the parent subject', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-child-steering-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent = fakeSession({
+    id: 'parent-child-steering',
+    header: { id: 'parent-child-steering', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child = fakeSession({
+    id: 'child-child-steering',
+    header: {
+      id: 'child-child-steering',
+      cwd: home,
+      createdAt: 1_700_000_000_001,
+      version: SESSION_FORMAT_VERSION,
+      parentSession: 'parent-child-steering',
+    },
+    events: sessionEvents('child answer'),
+  })
+  const subagents = {
+    listDescendants: async () => [{
+      kind: 'child',
+      id: child.id,
+      label: 'child steer',
+      mode: 'continuable',
+      activity: 'running',
+      hasChildren: false,
+      parentId: parent.id,
+      depth: 1,
+    }],
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => childHandle.dispose())
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+
+  // Both subjects hold an authoritative user steering occurrence in their inbox.
+  const parentAgent = liveAgentOf(harness, parent.id) as unknown as { inbox: { nextStep: unknown[] } }
+  const childAgent = liveAgentOf(harness, child.id) as unknown as { status: string; inbox: { nextStep: unknown[] } }
+  parentAgent.inbox.nextStep.push({
+    id: 'parent-step-1',
+    role: 'user',
+    content: [{ type: 'text', text: 'PARENT-STEER' }],
+    source: { kind: 'user', rpcId: 'parent-rpc' },
+  })
+  childAgent.status = 'running'
+  childAgent.inbox.nextStep.push({
+    id: 'child-step-1',
+    role: 'user',
+    content: [{ type: 'text', text: 'CHILD-STEER' }],
+    source: { kind: 'user', rpcId: 'child-rpc' },
+  })
+  context.emit('session/event', parent as never, event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [] }, 40))
+  await settle()
+  await vt.waitForRender()
+  assert.ok(app.pendingInputForTest().steering.some(row => row.text === 'PARENT-STEER'),
+    'the main subject shows its authoritative steering before the viewer opens')
+
+  // Enter the interactive continuable child viewer.
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must be mounted')
+
+  context.emit('session/event', child as never, event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [] }, 41))
+  await settle()
+  await vt.waitForRender()
+  const viewed = app.pendingInputForTest()
+  assert.ok(viewed.steering.some(row => row.text === 'CHILD-STEER' && row.rpcId === 'child-rpc'),
+    `the child authoritative steering must be visible: ${JSON.stringify(viewed.steering)}`)
+  assert.ok(!viewed.steering.some(row => row.text === 'PARENT-STEER'),
+    'the parent pending row must not leak into the child viewer')
+
+  // Leaving the viewer re-projects the MAIN subject: the child row must not leak.
+  const mountedGeneration = app.getViewerGeneration()
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  assert.ok(app.getViewerGeneration() > mountedGeneration, 'Esc must close the viewer')
+  const restored = app.pendingInputForTest()
+  assert.ok(!restored.steering.some(row => row.text === 'CHILD-STEER'),
+    'the closed child pending row must not leak to the parent surface')
+  assert.ok(restored.steering.some(row => row.text === 'PARENT-STEER'),
+    'the parent subject is re-projected after the viewer closes')
+})
