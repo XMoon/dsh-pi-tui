@@ -7,7 +7,7 @@ const CI_WORKFLOW = new URL('../.github/workflows/ci.yml', import.meta.url)
 
 test('migration status records the completed D1 read parity gates', () => {
   const document = readFileSync(MIGRATION_DOC, 'utf8')
-  assert.match(document, /M2\s+IN PROGRESS\s+\(D1 COMPLETE:[^\n]*D1\.3[^\n]*D2\.1 DONE:[^\n]*Remote writes remain unimplemented/u)
+  assert.match(document, /M2\s+IN PROGRESS\s+\(D1 COMPLETE:[^\n]*D1\.3[^\n]*D2\.1 DONE:[^\n]*D2\.2 IN REVIEW:[^\n]*\)/u)
   assert.match(document, /D1\.1 is the first M2 slice\. It is complete for the experimental read surface/u)
   assert.match(document, /D1\.2 is complete for the experimental live-session authority read shadow/u)
   assert.match(document, /## D1\.3 status — Task and presentation read parity/u)
@@ -43,6 +43,7 @@ test('D1.3 task, presentation, and closure smokes are Source Mode gates', () => 
     ['Remote task read parity smoke', 'smoke:remote-task-read-parity'],
     ['Remote presentation/history parity smoke', 'smoke:remote-presentation-parity'],
     ['D1 closure gate', 'smoke:remote-d1-closure'],
+    ['Remote D2.2 ordinary-write same-Host smoke', 'smoke:remote-d2-write'],
   ]) {
     assert.match(
       workflow,

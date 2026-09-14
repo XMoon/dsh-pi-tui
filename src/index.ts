@@ -123,7 +123,7 @@ import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type Foot
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
-import { isEmptyAcceleratedViewerSubmit, startProcessTui, type CompactionPhase, type PendingUserRow, type QueueItem, type StreamingToolPreview, type TuiApp } from './tui-app.ts'
+import { isEmptyAcceleratedViewerSubmit, startProcessTui, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TuiApp } from './tui-app.ts'
 import {
   clearStreamingToolPreviewsForStep,
   clearStreamingToolPreviewsForTurn,
@@ -233,7 +233,9 @@ import {
 } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
 import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from './submit-ack.ts'
-import { PendingSubmissions, pendingSubmissionsNotReplaced, type PendingSubmissionPlacement } from './pending-submission.ts'
+import { PendingSubmissions, type PendingSubmissionPlacement } from './pending-submission.ts'
+import { buildPendingPresentation } from './pending-presentation.ts'
+import { DirectSubmissionPresentation, type SubmissionPresentationSource } from './submission-presentation.ts'
 import { SubmitLatencyTracker } from './submit-latency.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
 import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
@@ -3871,47 +3873,19 @@ export function apply(ctx: Context, config: Config): void {
     const refreshPendingInput = (): void => {
       if (cleanedUp) return
       const sessionId = activePendingSessionId()
-      let running = false
-      const queued: QueueItem[] = []
-      const steering: PendingUserRow[] = []
-      if (sessionId !== undefined) {
-        const pending = backend.pendingInputReader.snapshot(sessionId)
-        if (pending !== undefined) {
-          running = pending.running
-          for (const item of pending.items) {
-            if (item.placement === 'queued') {
-              queued.push({ id: item.id, rpcId: item.rpcId, text: queueTextOf(item.content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]), mode: 'followup' })
-            } else if (item.placement === 'steering') {
-              steering.push({ id: item.id, rpcId: item.rpcId, text: queueTextOf(item.content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]), status: 'steering' })
-            }
-          }
-        }
-      }
-      // Suppress a local echo only while an authoritative occurrence with the
-      // same rpc id is VISIBLE in this projection. An echo is NOT deleted here:
-      // the Host claims a pending occurrence (removing it from the inbox)
-      // before its durable `user/message` lands, so re-presenting the echo in
-      // that window keeps the accepted content continuously visible. Identity
-      // only — never text.
-      const authoritativeRpcIds = new Set<string>()
-      for (const row of [...queued, ...steering]) {
-        if (row.rpcId !== undefined) authoritativeRpcIds.add(row.rpcId)
-      }
-      const subjectEchoes = pendingSubmissions.snapshot().filter(echo => echo.sessionId === sessionId)
-      const visibleEchoes = pendingSubmissionsNotReplaced(subjectEchoes, authoritativeRpcIds)
-      for (const echo of visibleEchoes) {
-        if (echo.placement === 'queued') {
-          queued.push({ id: echo.requestId, rpcId: echo.requestId, text: echo.text, mode: 'followup', local: true })
-        } else {
-          steering.push({
-            id: echo.requestId,
-            rpcId: echo.requestId,
-            text: echo.text,
-            local: true,
-            status: echo.placement === 'transcript' ? 'sending' : 'steering',
-          })
-        }
-      }
+      const pending = sessionId === undefined
+        ? undefined
+        : backend.pendingInputReader.snapshot(sessionId)
+      // The client-local echoes are read from the submission-presentation seam
+      // (Direct ledger today; the official pendingSubmissions source on the
+      // experimental Remote path) so the two optimistic identities never run
+      // together. The join below is the single authoritative rule.
+      const subjectEchoes = submissionPresentation.snapshot(sessionId) ?? []
+      const { queued, steering, running } = buildPendingPresentation({
+        pending,
+        submissions: subjectEchoes,
+        textOf: content => queueTextOf(content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]),
+      })
       // Ownership: only a local echo bound for the TRANSCRIPT lane
       // (steering/transcript) is own input that may take the viewport. A local
       // QUEUED echo lives in the queue pane (chrome), not the transcript. The
@@ -4498,6 +4472,16 @@ export function apply(ctx: Context, config: Config): void {
      * `rpcId`, so the handoff correlates by identity — never by text.
      */
     const pendingSubmissions = new PendingSubmissions()
+    /**
+     * The client-local presentation source the queue/transcript handoff reads.
+     * Production Direct wires the ledger above. D2.2 has NO production Remote
+     * backend, so this runner intentionally has no substitution point; the
+     * experimental Remote assembly (tests/smoke) composes
+     * `RemoteSubmissionPresentation` directly. A complete Remote backend (M3)
+     * is what would inject the official `SessionSnapshot.pendingSubmissions`
+     * source here instead of running two optimistic identities (D2.2 §21/§22).
+     */
+    const submissionPresentation: SubmissionPresentationSource = new DirectSubmissionPresentation(pendingSubmissions)
     /** The official `beginSubmission` placement for one local echo. */
     const submissionPlacement = (mode: 'queue' | 'steer', running: boolean): PendingSubmissionPlacement =>
       running ? (mode === 'steer' ? 'steering' : 'queued') : 'transcript'

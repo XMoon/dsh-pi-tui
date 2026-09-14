@@ -274,6 +274,13 @@ function safeErrorMessage(error: unknown): string {
     const message = error.message
     return message === '' ? error.name : message
   }
+  // The official Client carrier rebuilds a failure as a plain
+  // `{code, message, details}` object across the wire, not necessarily an
+  // `Error`; prefer its structural message over `String(object)`.
+  if (typeof error === 'object') {
+    const message = (error as { readonly message?: unknown }).message
+    if (typeof message === 'string' && message !== '') return message
+  }
   try {
     return String(error)
   } catch {
