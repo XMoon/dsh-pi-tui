@@ -1363,6 +1363,25 @@ export class UserBubbleComponent implements Component {
   }
 }
 
+/**
+ * The ephemeral pending user-input row: the SAME floating user bubble as a
+ * durable human message, plus one dim pending-status line so it reads as
+ * accepted-but-not-yet-materialized rather than as durable transcript content.
+ * `pendingUserComponent` is presentation-only and is never inserted into the
+ * transcript folder.
+ */
+function pendingUserComponent(row: PendingUserRow): Component {
+  const container = new Container()
+  container.addChild(new UserBubbleComponent(
+    new Text(row.text, 0, 0),
+    `${color.roleUser('❯')} `,
+    color.roleUserBg,
+  ))
+  const status = row.status === 'sending' ? 'sending…' : 'steering…'
+  container.addChild(new Text(color.textDim(`  ${status}`), 0, 0))
+  return container
+}
+
 /** Host-owned tail for explicit files delivered by the present tool. Paths
  * are always shown first; the folded view caps entries while an expanded
  * transcript view re-renders the complete declaration list. */
@@ -2279,12 +2298,45 @@ export interface StatusData {
 
 /** One semantic queued pending-input row for the queue pane. */
 export interface QueueItem {
-  /** The pending message id (agent inbox identity). */
+  /** The pending message id (agent inbox identity), or a local request id. */
   id: string
   /** The message text, single-line display form. */
   text: string
   /** next-turn followup vs next-step steer. */
   mode: 'followup' | 'steer'
+  /** The correlation identity (authoritative rpc id or local request id). */
+  rpcId?: string
+  /** A client-local echo not yet backed by an authoritative occurrence. */
+  local?: boolean
+}
+
+/** One pending user-input row for the ephemeral conversation-tail lane: an
+ * authoritative `steering` occurrence or a client-local submission echo. It is
+ * never durable transcript content. */
+export interface PendingUserRow {
+  /** The occurrence id (Host) or request id (local echo). */
+  id: string
+  /** Display text (attachment markers included). */
+  text: string
+  /** The correlation identity (authoritative rpc id or local request id). */
+  rpcId?: string
+  /** A client-local echo not yet backed by an authoritative occurrence. */
+  local?: boolean
+  /** The pending status line: an accepted steer reads `steering…`, an idle
+   * prompt awaiting its durable message reads `sending…`. */
+  status?: 'steering' | 'sending'
+}
+
+/** The single atomic pending-input presentation update. Queue rows, the
+ * ephemeral steering/transcript lane, and the subject's activity move
+ * together so a handoff never paints an intermediate blank/duplicate frame. */
+export interface PendingInputPresentation {
+  /** Authoritative `queued` occurrences plus client-local queued echoes. */
+  queued: readonly QueueItem[]
+  /** Authoritative `steering` occurrences plus local user echoes. */
+  steering: readonly PendingUserRow[]
+  /** Activity of the same pending-input subject (drives the queue steer hint). */
+  running: boolean
 }
 
 /** One queued prompt awaiting the user's y/n/esc decision. */
@@ -2518,6 +2570,9 @@ type TranscriptRenderBlock = FocusProjectedBlock | {
   previews: readonly StreamingToolPreview[]
   turn?: number
   collapseFocusOwnerOnClick?: number
+} | {
+  kind: 'pending-user'
+  row: PendingUserRow
 }
 
 /** One cached component for a transcript message (stage J render cache). */
@@ -2823,6 +2878,9 @@ export class TuiApp {
   private readonly queuePane: Text
   /** The semantic queued pending-input occurrences for the active subject. */
   private queueItems: readonly QueueItem[] = []
+  /** The ephemeral pending user-input lane (authoritative steering + local
+   * submission echoes) rendered after the live transcript tail. */
+  private pendingUserRows: readonly PendingUserRow[] = []
   /** Activity of the same pending-input subject shown in queueItems. */
   private queueRunning = true
 
@@ -4033,6 +4091,7 @@ export class TuiApp {
     this.expandedOverride.clear()
     this.disposeMessageComponents()
     this.localMessages.length = 0
+    this.pendingUserRows = []
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
     this.searchOverlay = undefined
@@ -6464,6 +6523,7 @@ export class TuiApp {
         continue
       }
       if (block.kind === 'streaming-tool-previews') continue
+      if (block.kind === 'pending-user') continue
       if (!('turn' in block.message) || block.message.turn !== turn) continue
       lastTurnIndex = index
       if (block.collapseFocusOwnerOnClick === turn) lastProcessIndex = index
@@ -6507,6 +6567,12 @@ export class TuiApp {
       }
     }
     blocks.push(...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock))
+    // The ephemeral pending user-input lane sits at the LIVE conversation
+    // tail, after durable content and local cards. It is never projected into
+    // Focus, the search corpus, or the durable transcript.
+    for (const row of this.pendingUserRows) {
+      blocks.push({ kind: 'pending-user', row })
+    }
     return blocks
   }
 
@@ -6640,6 +6706,12 @@ export class TuiApp {
         // Live-only preview block.
         component = this.streamingToolPreviewComponent(block.previews, width)
         rendered = component.render(width)
+      } else if (block.kind === 'pending-user') {
+        // The ephemeral pending user lane: user-bubble visual language plus a
+        // dim pending status. Never cached with durable messages (it leaves
+        // the presentation once its authoritative/durable counterpart lands).
+        component = pendingUserComponent(block.row)
+        rendered = component.render(width)
       } else {
         // Persistent per-message components (stage J): unchanged messages
         // reuse their component, so the fork's text-identity render caches
@@ -6676,6 +6748,7 @@ export class TuiApp {
   private focusLiveTurnOf(block: TranscriptRenderBlock): number | undefined {
     if (block.kind === 'activity') return block.activity.turn
     if (block.kind === 'streaming-tool-previews') return block.turn
+    if (block.kind === 'pending-user') return undefined
     return 'turn' in block.message ? block.message.turn : undefined
   }
 
@@ -7225,6 +7298,11 @@ export class TuiApp {
   /** Headless-test hook: the CURRENT transient notice text ('' = none). */
   notifyTextForTest(): string {
     return this.notifyText
+  }
+
+  /** Headless-test hook: the current pending-input presentation rows. */
+  pendingInputForTest(): { queued: readonly QueueItem[]; steering: readonly PendingUserRow[] } {
+    return { queued: this.queueItems, steering: this.pendingUserRows }
   }
 
   fullscreenScrollForTest(): { scrollTop: number; isFollowingEnd: boolean; viewportHeight: number; contentHeight: number; maxScrollTop: number } | undefined {
@@ -8478,10 +8556,11 @@ export class TuiApp {
       // shell-mode draft round-trips through the viewer with its mode.
       this.mainDraftBeforeViewer = this.expandedSeatWireDraft()
       // The viewer renders ONLY the child transcript: the main session's
-      // local cards (`!` shell runs) must never leak into it. The runner
-      // repaints the child folder right after, so the cleared list is
-      // rebuilt from the child content.
+      // local cards (`!` shell runs) and its ephemeral pending user lane must
+      // never leak into it. The runner repaints the child folder right after,
+      // so the cleared lists are rebuilt from the child content.
       this.localMessages.length = 0
+      this.pendingUserRows = []
       this.rebuildMessages()
     } else if (isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access))) {
       // Switching child: park the outgoing child's draft first.
@@ -12405,11 +12484,34 @@ export class TuiApp {
    * legacy callers and keeps the historical steer hint.
    */
   setQueueItems(items: readonly QueueItem[], running?: boolean): void {
-    this.queueItems = items
-    this.queueRunning = running ?? true
+    this.setPendingInputPresentation({
+      queued: items,
+      steering: this.pendingUserRows,
+      running: running ?? true,
+    })
+  }
+
+  /**
+   * Apply one coherent pending-input presentation: the authoritative queued
+   * occurrences plus client-local queued echoes (queue pane), and the
+   * authoritative `steering` occurrences plus local submission echoes (the
+   * ephemeral conversation-tail lane). A single call keeps the queue and the
+   * lane in the same frame — a separate setter per surface would paint the
+   * exact transient blank/duplicate frame this handoff exists to remove.
+   *
+   * `context` occurrences are deliberately absent: this presentation owns
+   * pending USER input only.
+   */
+  setPendingInputPresentation(presentation: PendingInputPresentation): void {
+    this.queueItems = presentation.queued
+    this.pendingUserRows = presentation.steering
+    this.queueRunning = presentation.running
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.renderQueuePane()
+    // The lane lives in the transcript tail: rebuild it in the SAME call so
+    // the queue and the lane never diverge across frames.
+    this.rebuildMessages()
     this.syncExtensionState()
   }
 
@@ -12429,10 +12531,21 @@ export class TuiApp {
     const lines = [color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)]
     for (const item of items) {
       const text = item.text.replace(/\s+/g, ' ').trim()
-      const truncated = truncateToWidth(text, Math.max(1, safeWidth - visibleWidth('❯ ')), '…')
+      // A client-local echo has no authoritative queue item yet: advertise
+      // that it is still being admitted, never a plain authoritative row.
+      // The suffix is part of the row's width budget, so a narrow pane
+      // truncates the TEXT and keeps the status on the same line — never a
+      // detached wrapped row. On an ultra-narrow pane that cannot hold the
+      // marker + one text cell + the status, the status is dropped rather
+      // than wrapped.
+      const prefixWidth = visibleWidth('❯ ')
+      const fullSuffix = item.local === true ? ' sending…' : ''
+      const suffix = prefixWidth + visibleWidth(fullSuffix) + 1 <= safeWidth ? fullSuffix : ''
+      const available = Math.max(1, safeWidth - prefixWidth - visibleWidth(suffix))
+      const truncated = truncateToWidth(text, available, '…')
       // Every row is a semantic queued occurrence; the same ❯ marker and
       // steer/recall hints apply regardless of its backend origin.
-      lines.push(`${color.roleUser('❯')} ${truncated}`)
+      lines.push(`${color.roleUser('❯')} ${truncated}${color.textDim(suffix)}`)
     }
     const steerHint = this.queueRunning
       ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer all`

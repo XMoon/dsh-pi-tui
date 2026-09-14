@@ -123,7 +123,7 @@ import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type Foot
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
-import { isEmptyAcceleratedViewerSubmit, startProcessTui, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TuiApp } from './tui-app.ts'
+import { isEmptyAcceleratedViewerSubmit, startProcessTui, type CompactionPhase, type PendingUserRow, type QueueItem, type StreamingToolPreview, type TuiApp } from './tui-app.ts'
 import {
   clearStreamingToolPreviewsForStep,
   clearStreamingToolPreviewsForTurn,
@@ -177,6 +177,7 @@ import {
   type PrepareInputDeps,
 } from './image/submit.ts'
 import { expandImagePlaceholders } from './image/placeholder.ts'
+import { expandAttachmentPlaceholders } from './attachment/placeholder.ts'
 import { draftHasFiles } from './attachment/placeholder.ts'
 import { runReservedSubmit } from './image/submit-flow.ts'
 import { dshVersion } from './dsh-version.ts'
@@ -232,6 +233,7 @@ import {
 } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
 import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from './submit-ack.ts'
+import { PendingSubmissions, pendingSubmissionsNotReplaced, type PendingSubmissionPlacement } from './pending-submission.ts'
 import { SubmitLatencyTracker } from './submit-latency.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
 import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
@@ -3836,22 +3838,70 @@ export function apply(ctx: Context, config: Config): void {
       }
       return liveAgent?.session.id
     }
-    const refreshQueue = (): void => {
+    /** The display text of one client-local submission echo: the draft text
+     * with its attachment placeholders expanded to compact markers, so an
+     * attachment-only submission is never an empty pending row. */
+    const localEchoText = (text: string): string => {
+      const parts: string[] = []
+      for (const segment of expandAttachmentPlaceholders(text, draftImages, draftFiles)) {
+        if (segment.type === 'text') parts.push(segment.text)
+        else if (segment.type === 'image') parts.push(`🖼️ ${segment.image.name ?? 'image'}`)
+        else parts.push(`📄 ${segment.file.name} · ${formatBytes(segment.file.byteLength)}`)
+      }
+      return parts.join(' ')
+    }
+    /**
+     * Read one coherent pending-input projection and publish it to the app in
+     * a SINGLE atomic presentation update: authoritative `queued` rows plus
+     * local queued echoes (queue pane), and authoritative `steering` rows plus
+     * local user echoes (the ephemeral conversation-tail lane). `context` is
+     * deliberately excluded from the pending USER surface. Correlation is by
+     * request/rpc identity — never text.
+     */
+    const refreshPendingInput = (): void => {
       if (cleanedUp) return
       const sessionId = activePendingSessionId()
-      if (sessionId === undefined) {
-        app.setQueueItems([])
-        return
+      let running = false
+      const queued: QueueItem[] = []
+      const steering: PendingUserRow[] = []
+      if (sessionId !== undefined) {
+        const pending = backend.pendingInputReader.snapshot(sessionId)
+        if (pending !== undefined) {
+          running = pending.running
+          for (const item of pending.items) {
+            if (item.placement === 'queued') {
+              queued.push({ id: item.id, rpcId: item.rpcId, text: queueTextOf(item.content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]), mode: 'followup' })
+            } else if (item.placement === 'steering') {
+              steering.push({ id: item.id, rpcId: item.rpcId, text: queueTextOf(item.content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]), status: 'steering' })
+            }
+          }
+        }
       }
-      const pending = backend.pendingInputReader.snapshot(sessionId)
-      if (pending === undefined) {
-        app.setQueueItems([])
-        return
+      // Suppress a local echo only while an authoritative occurrence with the
+      // same rpc id is VISIBLE in this projection. An echo is NOT deleted here:
+      // the Host claims a pending occurrence (removing it from the inbox)
+      // before its durable `user/message` lands, so re-presenting the echo in
+      // that window keeps the accepted content continuously visible. Identity
+      // only — never text.
+      const authoritativeRpcIds = new Set<string>()
+      for (const row of [...queued, ...steering]) {
+        if (row.rpcId !== undefined) authoritativeRpcIds.add(row.rpcId)
       }
-      const queued = pending.items
-        .filter(item => item.placement === 'queued')
-        .map(queueInboxMessageOf)
-      app.setQueueItems(foldQueueRows(queued, 'followup').rows, pending.running)
+      for (const echo of pendingSubmissionsNotReplaced(pendingSubmissions.snapshot(), authoritativeRpcIds)) {
+        if (echo.sessionId !== sessionId) continue
+        if (echo.placement === 'queued') {
+          queued.push({ id: echo.requestId, rpcId: echo.requestId, text: echo.text, mode: 'followup', local: true })
+        } else {
+          steering.push({
+            id: echo.requestId,
+            rpcId: echo.requestId,
+            text: echo.text,
+            local: true,
+            status: echo.placement === 'transcript' ? 'sending' : 'steering',
+          })
+        }
+      }
+      app.setPendingInputPresentation({ queued, steering, running })
     }
     // The Direct stream adapter keeps active prefixes for Agents that were not
     // being displayed yet; enterView replays this exact-agent baseline before
@@ -3966,9 +4016,11 @@ export function apply(ctx: Context, config: Config): void {
       app.setTasks([])
       app.setAgents([])
       taskBrowserRows = []
-      // The queue pane is session-scoped too: clear old semantic rows at the
-      // synchronous generation boundary before the new subject is published.
-      app.setQueueItems([])
+      // The pending-input presentation is session-scoped too: clear old
+      // semantic rows AND local submission echoes at the synchronous
+      // generation boundary before the new subject is published.
+      pendingSubmissions.clear()
+      app.setPendingInputPresentation({ queued: [], steering: [], running: false })
       // A new session owns the surface: tear down the subagent viewer. The
       // old viewer's parent session is gone (the continuation contract
       // requires the EXACT live parent), so the child transcript, the
@@ -4233,7 +4285,7 @@ export function apply(ctx: Context, config: Config): void {
       app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity: childActivity, access })
       // The queue pane follows the child only after the viewer and its exact
       // queue authority are both published.
-      refreshQueue()
+      refreshPendingInput()
 
        } finally {
          if (openingViewer === opening) openingViewer = undefined
@@ -4271,7 +4323,7 @@ export function apply(ctx: Context, config: Config): void {
       // so the pop never loses an intentional history anchor.
       windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
       refreshStatusCheap()
-      refreshQueue()
+      refreshPendingInput()
       return true
     }
     /** Error sink for a failed session creation: restore the draft and
@@ -4391,6 +4443,17 @@ export function apply(ctx: Context, config: Config): void {
     const localSubmitAck: SubmitAckState = freshSubmitAckState()
     const submitLatencyTracker = new SubmitLatencyTracker({ sink: diag })
     /**
+     * Client-local submission echoes (D2.1 follow-up): the presentation-only
+     * bridge between the editor clearing and the authoritative inbox/durable
+     * occurrence. Keyed by the request id minted before the first async
+     * preparation await and persisted on the Direct user-message source as
+     * `rpcId`, so the handoff correlates by identity — never by text.
+     */
+    const pendingSubmissions = new PendingSubmissions()
+    /** The official `beginSubmission` placement for one local echo. */
+    const submissionPlacement = (mode: 'queue' | 'steer', running: boolean): PendingSubmissionPlacement =>
+      running ? (mode === 'steer' ? 'steering' : 'queued') : 'transcript'
+    /**
      * Accept one submission: show the pending row NOW (Submit/Queued by
      * the agent's live status) and start the latency timeline. Returns
      * the gesture's EPOCH TOKEN: the enclosing workflow's terminal exits
@@ -4435,6 +4498,43 @@ export function apply(ctx: Context, config: Config): void {
       if (elapsed === undefined) return
       diag.debug('submit ack settled', { reason, elapsed: `${elapsed}ms` })
       app.setSubmitPending(undefined)
+    }
+    /**
+     * Register one local submission echo and publish it immediately, so an
+     * accepted submission is never visually silent between the editor clearing
+     * and its authoritative occurrence.
+     *
+     * A RUNNING placement (queued/steering) settles this gesture's generic
+     * working-row label: the echo now carries the accepted content, and the
+     * generic `Queued…` label would both duplicate the pending row and
+     * mislabel a running steer. An IDLE (transcript) placement keeps the
+     * generic `Submitting…` bridge — it is the pre-session/first-event
+     * feedback and the durable row replaces it.
+     */
+    const beginLocalSubmission = (
+      requestId: string,
+      text: string,
+      placement: PendingSubmissionPlacement,
+      sessionId: string | undefined,
+      generation: number,
+      ackToken: number,
+    ): void => {
+      pendingSubmissions.begin({
+        requestId,
+        placement,
+        text: localEchoText(text),
+        createdAt: Date.now(),
+        ...(sessionId === undefined ? {} : { sessionId }),
+        generation,
+      })
+      refreshPendingInput()
+      if (placement !== 'transcript') settleLocalSubmitAck('local pending echo', { token: ackToken })
+    }
+    /** Remove one local submission echo on a known terminal exit. */
+    const settleLocalSubmission = (requestId: string | undefined): void => {
+      if (requestId === undefined) return
+      pendingSubmissions.settle(requestId)
+      refreshPendingInput()
     }
     /**
      * Notify one submission failure WITHOUT restoring (the task's catch
@@ -4651,6 +4751,11 @@ export function apply(ctx: Context, config: Config): void {
       // authoritative event lands. The TOKEN arms every terminal exit of
       // THIS workflow: a newer gesture supersedes them.
       const submitAckToken = acceptLocalSubmitAck()
+      // The local submission echo's correlation identity, minted BEFORE the
+      // first asynchronous preparation/admission await. It is only persisted
+      // (as the Direct user-message `source.rpcId`) when this line becomes an
+      // ordinary human prompt — never for a Host command that consumes it.
+      const submitRequestId = randomUUID()
       const parsedAtSubmit = parseCommand(text)
       // The advertised NAME claim, captured BEFORE any session creation: a
       // refresh may have revoked it since (the completion generation the user
@@ -4666,6 +4771,40 @@ export function apply(ctx: Context, config: Config): void {
       // change may turn it into an invocation except the final catalog
       // actually CLAIMING it.
       const submitView = parsedAtSubmit === undefined ? undefined : hostClaimOf?.(parsedAtSubmit)
+      // Whether this line is an ordinary agent-facing prompt (never a Host
+      // command, a TUI-local control, or a skill invocation) at submit time.
+      // Such a line installs its local echo SYNCHRONOUSLY, before the FIFO
+      // turn and any admission await: a second queued submission must not be
+      // textually invisible merely because an earlier one is still blocked in
+      // canonicalization. A line the FINAL catalog only later claims as a
+      // command is consumed through the command paths below, which settle the
+      // echo.
+      //
+      // Skill invocations (`/skill <name> ...` and per-skill wrappers) are
+      // EXCLUDED: their delivery is owned by the TUI skill handler, which
+      // prepares and writes the message WITHOUT the submit request identity
+      // (the correlation contract cannot be completed here), so a local echo
+      // would neither dedupe against nor retire on their authoritative
+      // occurrence. They keep their existing command feedback.
+      const ordinaryPromptAtSubmit = parsedAtSubmit === undefined
+        || (submitView?.claimed !== true
+          && !LOCAL_COMMANDS.has(parsedAtSubmit.name)
+          && isSkillWrapperName?.(parsedAtSubmit.name) !== true)
+      // Install the echo NOW for a known ordinary prompt on an existing
+      // session — before the FIFO turn and the asynchronous admission. A
+      // deferred start installs after the session materializes, below.
+      let localEchoInstalled = false
+      if (ordinaryPromptAtSubmit && submittedAgent !== undefined && !cleanedUp) {
+        beginLocalSubmission(
+          submitRequestId,
+          text,
+          submissionPlacement('queue', submittedAgent.status === 'running'),
+          submittedAgent.session.id,
+          submittedGeneration,
+          submitAckToken,
+        )
+        localEchoInstalled = true
+      }
       // The CLIENT-LOCAL eligibility of the submitted line, captured with the
       // routing decision (before any session creation): only a line whose
       // initial route was a LIVE client contribution keeps the client-local
@@ -4781,6 +4920,7 @@ export function apply(ctx: Context, config: Config): void {
             // Nothing can be written (degraded resolve after a successful
             // creation): the wait ends here with NO write — the pending
             // row must not outlive the submission.
+            settleLocalSubmission(submitRequestId)
             settleLocalSubmitAck('submit resolved without an agent', { token: submitAckToken, terminal: true })
             return
           }
@@ -4791,6 +4931,7 @@ export function apply(ctx: Context, config: Config): void {
           )) {
             const merged = mergeDraft(app.getDraft(), text)
             app.setEditorText(merged)
+            settleLocalSubmission(submitRequestId)
             settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
             app.notify(merged === text
               ? 'the session changed while waiting for submission — try again'
@@ -4807,6 +4948,7 @@ export function apply(ctx: Context, config: Config): void {
         if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
+          settleLocalSubmission(submitRequestId)
           settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
           app.notify(merged === text
             ? 'the session changed while sending — try again'
@@ -4877,6 +5019,7 @@ export function apply(ctx: Context, config: Config): void {
             fallbackPin()
             restoreCommandAttachmentDraft()
             app.notify(lateRefusal, 'error')
+            settleLocalSubmission(submitRequestId)
             settleLocalSubmitAck('attachments refused by the command declaration', { token: submitAckToken, terminal: true })
             return
           }
@@ -4888,6 +5031,7 @@ export function apply(ctx: Context, config: Config): void {
           if (transitionGate.busy) {
             fallbackPin()
             refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
+            settleLocalSubmission(submitRequestId)
             settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
             return
           }
@@ -4980,9 +5124,11 @@ export function apply(ctx: Context, config: Config): void {
                 fallbackPin()
                 submitTurn.release()
                 if (outcome.kind === 'cancelled') {
+                  settleLocalSubmission(submitRequestId)
                   settleLocalSubmitAck('command execution cancelled', { token: submitAckToken, terminal: true })
                   return
                 }
+                settleLocalSubmission(submitRequestId)
                 settleLocalSubmitAck(
                   outcome.kind === 'indeterminate' ? 'command result indeterminate' : 'command execution refused',
                   { token: submitAckToken, terminal: true },
@@ -5008,6 +5154,7 @@ export function apply(ctx: Context, config: Config): void {
               // before execute() resolved, so the fallback followup (a
               // plain prompt: execute → undefined) keeps its pending row.
               if (execution !== undefined) {
+                settleLocalSubmission(submitRequestId)
                 settleLocalSubmitAck('submit consumed by a command', { token: submitAckToken, terminal: true })
               }
               // A command the surface advertised (e.g. from the startup
@@ -5019,6 +5166,7 @@ export function apply(ctx: Context, config: Config): void {
                if (shouldConsumeAdvertisedMiss(execution, planeAdvertised)) {
                 restoreCommandAttachmentDraft()
                 app.notify(`/${parsedAtSubmit?.name ?? '?'} is not available in the created session`, 'error')
+                settleLocalSubmission(submitRequestId)
                 settleLocalSubmitAck('submit consumed by an unadvertised command', { token: submitAckToken, terminal: true })
                 fallbackPin()
                 submitTurn.release()
@@ -5054,13 +5202,30 @@ export function apply(ctx: Context, config: Config): void {
                       // phase 3).
                       try {
                         await operationBarrier.runWriter(agent.session.id, async () => {
-                          const message = await prepareUserMessage(text, draftImages, submitDeps)
+                          // Install the local echo before the first async
+                          // admission await when the gesture did not already
+                          // install it synchronously (a deferred start, or a
+                          // line the final catalog resolved as an ordinary
+                          // prompt after a command-claim change).
+                          if (!localEchoInstalled) {
+                            beginLocalSubmission(
+                              submitRequestId,
+                              text,
+                              submissionPlacement('queue', agent.status === 'running'),
+                              agent.session.id,
+                              generation,
+                              submitAckToken,
+                            )
+                            localEchoInstalled = true
+                          }
+                          const message = await prepareUserMessage(text, draftImages, submitDeps, { requestId: submitRequestId })
                           if (cleanedUp) return
                           // Re-check the captured session identity AFTER the
                           // async admission (the guard-window rule, AGENTS.md).
                           if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
                             const merged = mergeDraft(app.getDraft(), text)
                             app.setEditorText(merged)
+                            settleLocalSubmission(submitRequestId)
                             settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
                             app.notify(merged === text
                               ? 'the session changed while sending — try again'
@@ -5074,6 +5239,7 @@ export function apply(ctx: Context, config: Config): void {
                           if (outcome.kind !== 'committed') {
                             if (outcome.kind === 'indeterminate') {
                               if (cleanedUp) return
+                              settleLocalSubmission(submitRequestId)
                               settleLocalSubmitAck('session write result indeterminate', { token: submitAckToken, terminal: true })
                               app.notify('session write result is indeterminate — do not retry automatically', 'error')
                               return
@@ -5095,6 +5261,7 @@ export function apply(ctx: Context, config: Config): void {
                         }
                         if (error instanceof TransitionInProgressError) {
                           fallbackPin()
+                          settleLocalSubmission(submitRequestId)
                           refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
                           settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
                           return
@@ -5113,6 +5280,7 @@ export function apply(ctx: Context, config: Config): void {
                     // gesture's ack (token-scoped) and only notifies.
                     onError: (error) => {
                       submitTurn.release()
+                      settleLocalSubmission(submitRequestId)
                       settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
                       notifySubmissionFailure(error)
                     },
@@ -5122,6 +5290,7 @@ export function apply(ctx: Context, config: Config): void {
                     // the flow already restored the draft).
                     onCancel: () => {
                       submitTurn.release()
+                      settleLocalSubmission(submitRequestId)
                       settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
                     },
                   })
@@ -5130,6 +5299,7 @@ export function apply(ctx: Context, config: Config): void {
                   submitTurn.release()
                   const merged = mergeDraft(app.getDraft(), text)
                   app.setEditorText(merged)
+                  settleLocalSubmission(submitRequestId)
                   settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
                   app.notify(merged === text
                     ? 'the session changed while sending — try again'
@@ -5175,6 +5345,7 @@ export function apply(ctx: Context, config: Config): void {
               if (!indeterminateSkill && draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
                 restoreSubmissionDraft(text)
               }
+              settleLocalSubmission(submitRequestId)
               settleLocalSubmitAck(
                 indeterminateSkill ? 'skill write result indeterminate' : 'command execution failed',
                 { token: submitAckToken, terminal: true },
@@ -5204,6 +5375,7 @@ export function apply(ctx: Context, config: Config): void {
               if (draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
                 restoreSubmissionDraft(text)
               }
+              settleLocalSubmission(submitRequestId)
               settleLocalSubmitAck('command execution cancelled', { token: submitAckToken, terminal: true })
             },
           })
@@ -5218,13 +5390,27 @@ export function apply(ctx: Context, config: Config): void {
         // refused.
         try {
           await operationBarrier.runWriter(agent.session.id, async () => {
-            const message = await prepareUserMessage(text, draftImages, submitDeps)
+            // Install the local echo before the first async admission await
+            // (same handoff contract as the command-fallback path above).
+            if (!localEchoInstalled) {
+              beginLocalSubmission(
+                submitRequestId,
+                text,
+                submissionPlacement('queue', agent.status === 'running'),
+                agent.session.id,
+                generation,
+                submitAckToken,
+              )
+              localEchoInstalled = true
+            }
+            const message = await prepareUserMessage(text, draftImages, submitDeps, { requestId: submitRequestId })
             if (cleanedUp) return
             // Re-check the captured session identity AFTER the async
             // admission (the guard-window rule, AGENTS.md).
             if (!sessionUnchanged({ agent, generation }, liveAgent, sessionGeneration)) {
               const merged = mergeDraft(app.getDraft(), text)
               app.setEditorText(merged)
+              settleLocalSubmission(submitRequestId)
               settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
               app.notify(merged === text
                 ? 'the session changed while sending — try again'
@@ -5239,6 +5425,7 @@ export function apply(ctx: Context, config: Config): void {
             if (outcome.kind !== 'committed') {
               if (outcome.kind === 'indeterminate') {
                 if (cleanedUp) return
+                settleLocalSubmission(submitRequestId)
                 settleLocalSubmitAck('session write result indeterminate', { token: submitAckToken, terminal: true })
                 app.notify('session write result is indeterminate — do not retry automatically', 'error')
                 return
@@ -5256,6 +5443,7 @@ export function apply(ctx: Context, config: Config): void {
         } catch (error) {
           if (cleanedUp) return
           if (error instanceof TransitionInProgressError) {
+            settleLocalSubmission(submitRequestId)
             settleLocalSubmitAck('submit refused by transition fence', { token: submitAckToken, terminal: true })
             refuseByTransitionFence(text, () => app.getDraft(), (t) => app.setEditorText(t), (m, k) => app.notify(m, k))
             return
@@ -5270,6 +5458,7 @@ export function apply(ctx: Context, config: Config): void {
         // The flow restored the editor; this sink settles the gesture's
         // ack (token-scoped) and only notifies.
         onError: (error) => {
+          settleLocalSubmission(submitRequestId)
           settleLocalSubmitAck('failure', { token: submitAckToken, terminal: true })
           notifySubmissionFailure(error)
         },
@@ -5279,6 +5468,7 @@ export function apply(ctx: Context, config: Config): void {
         // terminated HERE (the flow already restored the draft — plan D
         // exit enumeration).
         onCancel: () => {
+          settleLocalSubmission(submitRequestId)
           settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
         },
       })
@@ -5448,6 +5638,31 @@ export function apply(ctx: Context, config: Config): void {
       // gesture's prepared input or history row.
       const submittedAgent = liveAgent
       const submittedGeneration = sessionGeneration
+      // The steered draft's correlation identity, minted before the first
+      // asynchronous preparation await. An EXISTING session installs its local
+      // steering echo right now (the editor just cleared); a deferred start
+      // installs it once the session materializes below.
+      const steerRequestId = randomUUID()
+      // The delivery mode RESOLVED AT THE GESTURE for the draft prompt: it
+      // drives BOTH the local echo placement and the written mode, so a status
+      // flip while this gesture waits on the submit FIFO can never make the
+      // pending surface disagree with the actual delivery. A deferred start
+      // resolves it once the session materializes, below.
+      let steerDelivery: 'queue' | 'steer' | undefined
+      if ((draftHasPayload || onlyDraft) && submittedAgent !== undefined) {
+        const running = submittedAgent.status === 'running'
+        steerDelivery = running ? 'steer' : 'queue'
+        if (draftHasPayload) {
+          beginLocalSubmission(
+            steerRequestId,
+            text,
+            submissionPlacement(steerDelivery, running),
+            submittedAgent.session.id,
+            submittedGeneration,
+            steerAckToken,
+          )
+        }
+      }
       const submitTurn = takeSubmitTurn()
       // An owned workflow: the send's outcome drives the draft restore and
       // the notices — runOwned (AGENTS.md), never a bare void. Reserve the
@@ -5511,6 +5726,7 @@ export function apply(ctx: Context, config: Config): void {
         )) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
+          settleLocalSubmission(steerRequestId)
           settleLocalSubmitAck('steer stale', { token: steerAckToken, terminal: true })
           app.notify(merged === text
             ? 'the session changed while sending — try again'
@@ -5520,6 +5736,7 @@ export function apply(ctx: Context, config: Config): void {
         if (liveAgent === undefined) {
           // Nothing can be sent (degraded resolve after a successful
           // creation): the ack row must not outlive the submission.
+          settleLocalSubmission(steerRequestId)
           settleLocalSubmitAck('steer resolved without an agent', { token: steerAckToken, terminal: true })
           return
         }
@@ -5528,10 +5745,27 @@ export function apply(ctx: Context, config: Config): void {
         // creation and before message admission.
         const agentForSteer = submittedAgent ?? liveAgent
         const generationForSteer = submittedAgent === undefined ? sessionGeneration : submittedGeneration
+        // A deferred start now has its session identity: resolve the gesture's
+        // delivery mode and install the local echo before the async admission
+        // await.
+        if (submittedAgent === undefined && (draftHasPayload || onlyDraft)) {
+          const running = agentForSteer.status === 'running'
+          steerDelivery = running ? 'steer' : 'queue'
+          if (draftHasPayload) {
+            beginLocalSubmission(
+              steerRequestId,
+              text,
+              submissionPlacement(steerDelivery, running),
+              agentForSteer.session.id,
+              generationForSteer,
+              steerAckToken,
+            )
+          }
+        }
         // The draft message is prepared BEFORE the send: admission is
         // async I/O, and the prepared message is exactly what the send
         // delivers (§13).
-        const prepared = await prepareUserMessage(text, draftImages, submitDeps)
+        const prepared = await prepareUserMessage(text, draftImages, submitDeps, { requestId: steerRequestId })
         if (cleanedUp) return
         // Re-check the identity after async admission, before entering the
         // writer barrier. A session switch during preparation must restore
@@ -5543,6 +5777,7 @@ export function apply(ctx: Context, config: Config): void {
         )) {
           const merged = mergeDraft(app.getDraft(), text)
           app.setEditorText(merged)
+          settleLocalSubmission(steerRequestId)
           settleLocalSubmitAck('steer stale', { token: steerAckToken, terminal: true })
           app.notify(merged === text
             ? 'the session changed while sending — try again'
@@ -5589,7 +5824,7 @@ export function apply(ctx: Context, config: Config): void {
           writer: backend.sessionWriter,
         },
         text,
-        onlyDraft ? { onlyDraft: true, draftHasPayload } : { draftHasPayload },
+        onlyDraft ? { onlyDraft: true, draftHasPayload, draftDelivery: steerDelivery } : { draftHasPayload, draftDelivery: steerDelivery },
       )
         if (cleanedUp) return
         // Only a successful send consumes the drafts: on block/stale the
@@ -5606,8 +5841,13 @@ export function apply(ctx: Context, config: Config): void {
         // for the authoritative inbox event (plan D — an event, a failure
         // or a session switch ends the wait, never the delivery itself);
         // 'stale' wrote nothing and restored the draft, so the row must
-        // not linger (a retry re-accepts).
-        if (outcome !== 'ok') settleLocalSubmitAck(`steer ${outcome}`, { token: steerAckToken, terminal: true })
+        // not linger (a retry re-accepts). The local echo follows the same
+        // rule: a failed delivery removes it, a committed one waits for its
+        // authoritative rpc-correlated replacement.
+        if (outcome !== 'ok') {
+          settleLocalSubmission(steerRequestId)
+          settleLocalSubmitAck(`steer ${outcome}`, { token: steerAckToken, terminal: true })
+        }
         },
         restore: (t) => {
           if (!steerRestored) restoreSubmissionDraft(t)
@@ -5619,6 +5859,7 @@ export function apply(ctx: Context, config: Config): void {
         // ack (token-scoped) and only notifies.
         onError: (error) => {
           if (cleanedUp) return
+          settleLocalSubmission(steerRequestId)
           settleLocalSubmitAck('failure', { token: steerAckToken, terminal: true })
           notifySubmissionFailure(error)
         },
@@ -5629,6 +5870,7 @@ export function apply(ctx: Context, config: Config): void {
         // exit enumeration).
         onCancel: () => {
           if (cleanedUp) return
+          settleLocalSubmission(steerRequestId)
           settleLocalSubmitAck('steer cancelled', { token: steerAckToken, terminal: true })
         },
       })
@@ -6684,7 +6926,7 @@ export function apply(ctx: Context, config: Config): void {
                 const current = app.getDraft()
                 app.setDraft(current === '' ? restoreText : `${restoreText}\n\n${current}`)
               }
-              refreshQueue()
+              refreshPendingInput()
               releaseRecalled()
             },
           })
@@ -6740,7 +6982,7 @@ export function apply(ctx: Context, config: Config): void {
               const current = app.getDraft()
               app.setDraft(recalledText === '' ? current : current === '' ? recalledText : `${recalledText}\n\n${current}`)
               draftApplied = true
-              refreshQueue()
+              refreshPendingInput()
               return
             }
             if (outcome.kind === 'indeterminate') {
@@ -6766,7 +7008,7 @@ export function apply(ctx: Context, config: Config): void {
             if (outcome.kind === 'cancelled') throw cancellationError('queue pull-back cancelled')
             const failure = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
             app.notify(`queue pull-back stopped after ${confirmed.length} message${confirmed.length === 1 ? '' : 's'}: ${failure}`, 'error')
-            refreshQueue()
+            refreshPendingInput()
           } catch (error) {
             // Preserve or discard local representations before releasing the
             // writer barrier. A waiting transition must not overtake this
@@ -8297,7 +8539,7 @@ export function apply(ctx: Context, config: Config): void {
         : ` — final output: ask the agent to run job_output in the conversation${detail === undefined ? '' : ` (${detail})`}`
       return `${status}${tail}`
     }
-    refreshQueue()
+    refreshPendingInput()
     // The TUI-owned slash commands are registered as soon as the runner
     // surface exists — the commands service's GLOBAL layer needs no agent,
     // so the whole command surface (and the editor's tab completion) is
@@ -8387,7 +8629,7 @@ export function apply(ctx: Context, config: Config): void {
       // (or none); the context measure is deferred one event-loop turn so
       // cold resume never blocks first paint on a long-session scan.
       refreshStatusCheap()
-      refreshQueue()
+      refreshPendingInput()
       scheduleInitialContextMeasure(agent)
       // Repaint both background channels: the dock/badge are owner-fenced,
       // and a session switch must not leave the previous session's tasks
@@ -9098,7 +9340,7 @@ export function apply(ctx: Context, config: Config): void {
           // never on every streaming delta. A turn START also refreshes so
           // the activity flips to running the moment a cold resume begins.
           if (event.type === 'turn/start' || event.type === 'step/end' || event.type === 'turn/end') refreshViewerFooter()
-          if (event.type === 'turn/start' || event.type === 'agent/inbox/spliced') queueMicrotask(refreshQueue)
+          if (event.type === 'turn/start' || event.type === 'agent/inbox/spliced') queueMicrotask(refreshPendingInput)
           if (event.type === 'turn/end') paintNow()
           return
         }
@@ -9154,7 +9396,7 @@ export function apply(ctx: Context, config: Config): void {
       if (event.type === 'agent/inbox/spliced') {
         settleLocalSubmitAck('inbox inserted')
         submitLatencyTracker.mark(liveAgent.session.id, 'inbox.inserted')
-        queueMicrotask(refreshQueue)
+        queueMicrotask(refreshPendingInput)
       }
       // The user message committing to the session is the ack row's
       // AUTHORITATIVE clear (the host pre-step can delay it well past the
@@ -9163,6 +9405,21 @@ export function apply(ctx: Context, config: Config): void {
       if (event.type === 'user/message') {
         settleLocalSubmitAck('user message')
         submitLatencyTracker.mark(liveAgent.session.id, 'user.message')
+        // The durable human prompt is now applied to the transcript folder:
+        // retire the matching local submission echo by identity. The `source`
+        // is read structurally here and never routed into the shared
+        // presentation port.
+        const source = (event.data as { readonly source?: unknown }).source as
+          | { readonly kind?: unknown; readonly rpcId?: unknown }
+          | undefined
+        if (source?.kind === 'user' && typeof source.rpcId === 'string') {
+          pendingSubmissions.observeDurable(source.rpcId)
+          // Paint the durable replacement into the message tree FIRST, then
+          // retire the local echo in the same frame: removing the lane before
+          // the durable row is paintable would leave one blank frame.
+          paintNow()
+          refreshPendingInput()
+        }
       }
       // Compaction lifecycle (dsh-compaction is not a peer — the event
       // data is read structurally): the working row advertises the
@@ -9277,14 +9534,14 @@ export function apply(ctx: Context, config: Config): void {
           if (agents.get(viewing.id) !== viewing.viewAgent) {
             viewing.viewAgent = subject
             setViewedQueueAgent(subject)
-            queueMicrotask(refreshQueue)
+            queueMicrotask(refreshPendingInput)
             return true
           }
           return false
         }
         viewing.viewAgent = subject
         setViewedQueueAgent(subject)
-        queueMicrotask(refreshQueue)
+        queueMicrotask(refreshPendingInput)
         return true
       },
       onInput: (input) => {
@@ -9320,11 +9577,11 @@ export function apply(ctx: Context, config: Config): void {
     // may have changed, so they re-list.
     ctx.on('subagent/start', () => {
       refreshAgents()
-      queueMicrotask(refreshQueue)
+      queueMicrotask(refreshPendingInput)
     })
     ctx.on('subagent/end', () => {
       refreshAgents()
-      queueMicrotask(refreshQueue)
+      queueMicrotask(refreshPendingInput)
     })
     // `agent/status` is the LIVE runtime channel: a child's driver
     // transition (running ↔ idle) must repaint the task browser and the
@@ -9346,12 +9603,12 @@ export function apply(ctx: Context, config: Config): void {
       if (cleanedUp || liveAgent === undefined) return
       if (agent.id === liveAgent.id) {
         completionController.onAgentStatus(agent.id, status)
-        queueMicrotask(refreshQueue)
+        queueMicrotask(refreshPendingInput)
         return
       }
       if (taskRuntime?.has(agent.id) !== true) return
       refreshAgentRuntimeOnly()
-      if (viewing?.id === agent.id) queueMicrotask(refreshQueue)
+      if (viewing?.id === agent.id) queueMicrotask(refreshPendingInput)
     })
     // Provider-topology and credential events refresh the footer model row
     // and the welcome card: a /login /logout /add-provider (or an external

@@ -21,6 +21,11 @@ export interface PendingInputItem {
   readonly id: string
   readonly placement: PendingInputPlacement
   readonly content: readonly unknown[]
+  /** The plain correlation identity of a user-origin occurrence (the official
+   * prompt `requestId` / Host message `source.rpcId`). Only a correlation
+   * string crosses the port — never the raw `source` object. Absent for an
+   * occurrence with no user request identity. */
+  readonly rpcId?: string
 }
 
 /** One coherent read of pending input and session activity. */

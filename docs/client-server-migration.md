@@ -11,7 +11,7 @@
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
-M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence; Remote writes remain unimplemented)
+M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; Remote writes remain unimplemented)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -676,6 +676,61 @@ Remote `PendingInputReader` should normalize the official
 `SessionSnapshot.queue` projection rather than expose transport fields. Remote
 title auto-regeneration remains unsupported until its official Client contract
 is available.
+
+### D2.1 follow-up — pending-input presentation parity
+
+D2.1 converged the pending-input read vocabulary but left the TUI consuming only
+`queued` for user-visible presentation: an accepted running steer had no durable
+visible representation until its durable `user/message` (the long `job_output`
+wait was the reported repro). The follow-up completes the presentation half
+without putting `steering`/`context` back into the queue pane and without Direct
+`source` leaking across the semantic port.
+
+- `PendingInputItem` optionally exposes a plain `rpcId` (the official prompt
+  `requestId` / Host message `source.rpcId`). Only the correlation string crosses
+  the port; the `source` object never does.
+- The presentation split is: queue pane consumes `queued`; the conversation tail
+  consumes `steering`; `context` has no pending user surface. This mirrors the
+  official Client (`QueueDock` vs `ChatView`).
+- Ordinary Direct human prompts mint a request id before their first async
+  preparation await and persist it on the Direct user-message source as `rpcId`.
+  Injected context, Host commands and non-prompt workflows do not.
+- A new Client-local ledger (`src/pending-submission.ts`, zero Host coupling)
+  holds one echo per in-flight human submission, keyed by request id and
+  insertion-ordered. It is presentation-only; the durable transcript stays the
+  sole record. Same-text submissions stay distinct because their ids differ.
+  A known ordinary prompt on an existing session installs its echo
+  synchronously, before the submit FIFO turn and any admission await, so a
+  later queued submission is never textually invisible behind a blocked earlier
+  one. Skill invocations (`/skill <name> ...` and per-skill wrappers) are
+  deliberately excluded: the TUI skill handler owns their delivery and prepares
+  the message without the submit request identity, so an echo there could
+  neither dedupe against nor retire on the authoritative occurrence. They keep
+  their existing command feedback.
+- The runner publishes one atomic `TuiApp.setPendingInputPresentation({ queued,
+  steering, running })`: authoritative `queued` rows plus local queued echoes in
+  the queue pane, authoritative `steering` rows plus local user echoes in the
+  ephemeral conversation-tail lane. Local echoes carry attachment markers so an
+  attachment-only submission is never an empty row.
+- The handoff correlates by identity only: an authoritative occurrence exposing
+  the same `rpcId` suppresses the local echo in the same presentation frame;
+  the durable `user/message` retires it (painted into the message tree first,
+  so no blank frame). Suppression is render-time, so an echo is re-presented
+  when the Host claims its pending occurrence before the asynchronous pre-step
+  emits the durable message. Never by text.
+- A running placement's local echo settles the gesture's generic working-row
+  label: the accepted content is visible and a running steer is never labeled
+  merely `Queued…`. Idle (transcript) submissions keep the generic `Submitting…`
+  bridge and render their echo at the conversation tail until the durable row
+  lands.
+- Local echoes are main-session only, matching the pinned official Web (which
+  skips the browser echo for continuable subagents). The child viewer still
+  gains authoritative steering presentation, scoped to the exact child, and
+  never leaks parent rows.
+
+Per-occurrence QueueDock controls (Edit/Remove/Steer) remain a deliberate
+follow-up with its own terminal interaction design; the data/presentation model
+is compatible with it but does not invent it.
 
 The D1 closure ledger is:
 

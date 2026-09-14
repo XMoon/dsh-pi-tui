@@ -46,3 +46,48 @@ test('an unavailable Direct session has no fabricated empty snapshot', () => {
   const reader = new DirectPendingInputReader(() => undefined)
   assert.equal(reader.snapshot('missing'), undefined)
 })
+
+test('a user-origin occurrence exposes its plain rpc correlation id', () => {
+  const agent = {
+    session: { id: 'session-rpc' },
+    status: 'running',
+    inbox: {
+      nextTurn: [
+        { id: 'queued-a', content: [], source: { kind: 'user', rpcId: 'req-1' } },
+      ],
+      nextStep: [
+        { id: 'steering-b', content: [], source: { kind: 'user', rpcId: 'req-2' } },
+      ],
+    },
+  }
+  const reader = new DirectPendingInputReader(sessionId => sessionId === agent.session.id ? agent : undefined)
+  const snapshot = reader.snapshot('session-rpc')
+  assert.ok(snapshot !== undefined)
+  assert.equal(snapshot.items.find(item => item.id === 'queued-a')?.rpcId, 'req-1')
+  assert.equal(snapshot.items.find(item => item.id === 'steering-b')?.rpcId, 'req-2')
+})
+
+test('a non-user or malformed rpc id is omitted and source never crosses the port', () => {
+  const agent = {
+    session: { id: 'session-rpc-gone' },
+    status: 'idle',
+    inbox: {
+      nextTurn: [
+        { id: 'plugin-queued', content: [], source: { kind: 'plugin', plugin: 'p', rpcId: 'leak' } },
+      ],
+      nextStep: [
+        { id: 'user-no-rpc', content: [], source: { kind: 'user' } },
+        { id: 'user-malformed', content: [], source: { kind: 'user', rpcId: 42 } },
+        { id: 'user-valid', content: [], source: { kind: 'user', rpcId: 'ok' } },
+      ],
+    },
+  }
+  const reader = new DirectPendingInputReader(sessionId => sessionId === agent.session.id ? agent : undefined)
+  const snapshot = reader.snapshot('session-rpc-gone')
+  assert.ok(snapshot !== undefined)
+  assert.ok(snapshot.items.every(item => !Object.hasOwn(item, 'source')), 'source must not cross the port')
+  assert.equal(snapshot.items.find(item => item.id === 'plugin-queued')?.rpcId, undefined)
+  assert.equal(snapshot.items.find(item => item.id === 'user-no-rpc')?.rpcId, undefined)
+  assert.equal(snapshot.items.find(item => item.id === 'user-malformed')?.rpcId, undefined)
+  assert.equal(snapshot.items.find(item => item.id === 'user-valid')?.rpcId, 'ok')
+})

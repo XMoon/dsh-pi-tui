@@ -67,6 +67,48 @@ no source-specific notice filter, settlement classifier, or failure-notify side
 channel. If a future surface needs to hide a class of messages, that policy
 must be represented by a semantic projection available to every backend.
 
+## Pending user input never disappears between the editor and the transcript
+
+The D2.1 follow-up completes the official Client's split between the queue pane
+and the conversation tail, and bridges the window where a submission has been
+accepted but has no authoritative representation yet:
+
+- **Queue pane** — authoritative `placement === 'queued'` rows plus a
+  client-local queued echo (marked `sending…`) until the authoritative
+  occurrence with the same `rpcId` arrives. A local-only row is not addressable
+  by `updateQueue` (it has no authoritative occurrence id). The `sending…`
+  marker is part of the row width budget; an ultra-narrow pane that cannot hold
+  the marker plus one text cell drops the marker rather than wrapping it onto a
+  detached row.
+- **Conversation tail** — an ephemeral steering lane rendered with the same
+  user-bubble visual language: authoritative `placement === 'steering'` rows
+  and client-local steering/transcript echoes. It is never inserted into
+  `TranscriptFolder`, never durable, never searchable, and never in the queue
+  pane. It appears while the turn/tool surface (Working, tool cards,
+  `job_output`) stays active.
+- **Context** — `placement === 'context'` has no pending user surface; it
+  presents through its normal conversation/context surface once materialized.
+- **Identity, never text** — each human submission mints a request id before its
+  first async preparation await and persists it as the Direct user-message
+  source `rpcId`. Local echoes and authoritative occurrences correlate by that
+  id; a local echo is suppressed only while an authoritative counterpart is
+  visible, and is retired on the durable `user/message` (or a known terminal
+  exit). Because the Host claims a pending occurrence before its asynchronous
+  pre-step emits the durable message, the echo is re-presented in that window
+  rather than deleted — the accepted content stays continuously visible. Two
+  same-text submissions stay two distinct pending rows.
+- **One atomic update** — the runner publishes queued rows, steering rows and
+  activity in a single `setPendingInputPresentation` call, so a handoff never
+  paints an intermediate blank/duplicate frame.
+- **Gesture-captured delivery** — a Ctrl+S/steer draft resolves its delivery
+  mode at the gesture boundary and uses that SAME mode for both the local echo
+  placement and the written prompt, so an agent status flip while the gesture
+  waits on the submit FIFO can never make the pending surface disagree with the
+  actual delivery.
+
+Per-occurrence QueueDock controls (Edit / Remove / Steer) remain a separate,
+deliberately deferred interaction design.
+
 ## /login and /logout resolve credential targets, not just DEEPSEEK_API_KEY
 
 The official deepseek adapter authenticates through `DEEPSEEK_API_KEY`;

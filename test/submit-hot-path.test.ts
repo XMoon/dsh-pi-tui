@@ -120,7 +120,7 @@ type FakeQueuedMessage = {
   id: string
   role: 'user'
   content: readonly FakeQueuedContent[]
-  source: { kind: 'user' }
+  source: { kind: 'user'; rpcId?: string } | { kind: 'plugin'; plugin: string }
 }
 
 interface FakeAgentHost {
@@ -1761,6 +1761,376 @@ test('running + steer: an ordinary prompt still steers (PR115-fix problem 1)', a
   assert.equal(harness.host.steered.length, 1, 'a plain prompt must keep the steer delivery')
   assert.equal(harness.host.followedUp.length, 0, 'steer preference never queues')
   assert.equal(harness.executed.length, 0, 'a plain prompt is not a command')
+})
+
+test('a running steer during a long tool wait stays visible and hands off by rpc identity', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-steer-lane-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'steer-lane-session', events: sessionEvents('resumed answer') })
+  harness.host.status = 'running'
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'steer-lane-session' })
+  harness.host.status = 'running'
+  mounted.app.setDraft('steer during job_output')
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  await waitForDelivery(harness.host, 'steer lane')
+  await waitForRenderView(vt)
+
+  // Reported bug class: the agent is running (a long tool/job_output wait) and
+  // the user steers. The editor cleared, and the accepted text must remain
+  // visible as an ephemeral pending-steering row — not vanish.
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ steer during job_output'), `the accepted steer must stay visible:\n${view}`)
+  assert.ok(view.includes('steering…'), `the pending lane must read as steering:\n${view}`)
+  assert.ok(!view.includes('ctrl+s to steer all'), `the steer must not enter the queue pane:\n${view}`)
+
+  // The Host inbox accepts the steer: the authoritative occurrence carries the
+  // SAME rpc id the Direct user-message source persisted.
+  const steered = harness.host.steered[0] as { source: { rpcId?: string } }
+  const requestId = steered.source.rpcId
+  assert.ok(requestId !== undefined, 'the Direct user message must carry the minted request id')
+  harness.host.nextStep.push({
+    id: 'authoritative-steer-1',
+    role: 'user',
+    content: [{ type: 'text', text: 'steer during job_output' }],
+    source: { kind: 'user', rpcId: requestId },
+  })
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-step',
+    start: 0,
+    inserted: [],
+  }, 900) as never)
+  await waitForRenderView(vt)
+  view = vt.getViewport().join('\n')
+  assert.equal((view.match(/❯ steer during job_output/g) ?? []).length, 1,
+    `exactly one steering row across the local -> authoritative handoff:\n${view}`)
+  assert.ok(view.includes('steering…'), `the authoritative steer stays visible:\n${view}`)
+
+  // The turn CLAIMS the steer: the inbox row leaves (agent/inbox/spliced) while
+  // the asynchronous pre-step has NOT yet emitted the durable user/message. The
+  // accepted content must stay visible — the local echo is re-presented rather
+  // than deleted — so the long job_output wait never blanks.
+  harness.host.nextStep.length = 0
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-step',
+    start: 0,
+    inserted: [],
+  }, 901) as never)
+  await waitForRenderView(vt)
+  const duringClaim = vt.getViewport().join('\n')
+  assert.equal((duringClaim.match(/❯ steer during job_output/g) ?? []).length, 1,
+    `the accepted text must remain visible after the inbox claim before the durable message:\n${duringClaim}`)
+
+  // The durable human prompt finally lands: the pending lane disappears; the
+  // durable transcript row stays.
+  context.emit('session/event', harness.session as never, event('user/message', {
+    id: MessageId('steer-lane-user'),
+    role: 'user',
+    content: [{ type: 'text', text: 'steer during job_output' }],
+    source: { kind: 'user', rpcId: requestId as never },
+  }, 902) as never)
+  await waitForRenderView(vt)
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('steering…'), `the pending lane must retire on the durable message:\n${view}`)
+  assert.ok(view.includes('❯ steer during job_output'), `the durable transcript row must remain:\n${view}`)
+})
+
+test('a running queued submission shows a local sending row, then exactly one authoritative row', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-queue-echo-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'queue-echo-session', events: sessionEvents('resumed answer') })
+  harness.host.status = 'running'
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'queue-echo-session' })
+  harness.host.status = 'running'
+  mounted.app.setDraft('queued during run')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'queue echo')
+  await waitForRenderView(vt)
+
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ queued during run'), `the queued content must be visible immediately:\n${view}`)
+  assert.ok(view.includes('sending…'), `the local queue row must be marked sending:\n${view}`)
+
+  const followed = harness.host.followedUp[0] as { source: { rpcId?: string } }
+  const requestId = followed.source.rpcId
+  assert.ok(requestId !== undefined, 'the queued Direct user message must carry the minted request id')
+  harness.host.nextTurn.push({
+    id: 'authoritative-queued-1',
+    role: 'user',
+    content: [{ type: 'text', text: 'queued during run' }],
+    source: { kind: 'user', rpcId: requestId },
+  })
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-turn',
+    start: 0,
+    inserted: [],
+  }, 910) as never)
+  await waitForRenderView(vt)
+  view = vt.getViewport().join('\n')
+  assert.equal((view.match(/❯ queued during run/g) ?? []).length, 1,
+    `exactly one queue row after the authoritative occurrence:\n${view}`)
+  assert.ok(!view.includes('sending…'), `the local sending marker must be gone after handoff:\n${view}`)
+})
+
+test('a queued submission is visible while an earlier FIFO submission is still in flight', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fifo-echo-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'fifo-session', events: sessionEvents('resumed answer') })
+  const commands = harness.commands as {
+    register(def: { name: string; handler: () => unknown }): () => void
+    execute(agent: unknown, line: string, attachments?: readonly unknown[]): Promise<unknown>
+  }
+  commands.register({ name: 'slowcmd', handler: () => ({ kind: 'success' }) })
+  // Gate A's Host-command execution so the first submission holds the FIFO
+  // turn open while B is accepted.
+  let releaseSlow: (() => void) | undefined
+  const slowGate = new Promise<void>(resolve => { releaseSlow = resolve })
+  const originalExecute = commands.execute.bind(commands)
+  commands.execute = async (agent, line, attachments) => {
+    if (line.trim().startsWith('/slowcmd')) {
+      await slowGate
+      return { commandId: CommandId('cmd-slow'), result: { kind: 'success' } }
+    }
+    return originalExecute(agent, line, attachments)
+  }
+  harness.host.status = 'running'
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'fifo-session' })
+  harness.host.status = 'running'
+
+  // A: a host command still executing (it holds the FIFO turn).
+  mounted.app.setDraft('/slowcmd')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  // B: a queued ordinary prompt accepted while A is still blocked.
+  mounted.app.setDraft('B visible while A runs')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+
+  await drainUntil(() => vt.getViewport().join('\n').includes('❯ B visible while A runs'), 5000)
+  await waitForRenderView(vt)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ B visible while A runs'),
+    `B must be visible before A releases the FIFO turn:\n${view}`)
+  assert.equal(harness.host.followedUp.length, 0, 'B must still be waiting behind A')
+
+  releaseSlow?.()
+  await drainUntil(() => harness.host.followedUp.length > 0, 5000)
+  assert.equal(harness.host.followedUp.length, 1, 'B must reach the agent once A releases')
+})
+
+test('a steer gesture keeps its gesture-time delivery mode across a FIFO status flip', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-steer-mode-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'steer-mode-session', events: sessionEvents('resumed answer') })
+  const commands = harness.commands as {
+    register(def: { name: string; handler: () => unknown }): () => void
+    execute(agent: unknown, line: string, attachments?: readonly unknown[]): Promise<unknown>
+  }
+  commands.register({ name: 'slowcmd', handler: () => ({ kind: 'success' }) })
+  let releaseSlow: (() => void) | undefined
+  const slowGate = new Promise<void>(resolve => { releaseSlow = resolve })
+  const originalExecute = commands.execute.bind(commands)
+  commands.execute = async (agent, line, attachments) => {
+    if (line.trim().startsWith('/slowcmd')) {
+      await slowGate
+      return { commandId: CommandId('cmd-slow'), result: { kind: 'success' } }
+    }
+    return originalExecute(agent, line, attachments)
+  }
+  harness.host.status = 'running'
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'steer-mode-session' })
+  harness.host.status = 'running'
+
+  // A holds the FIFO turn open.
+  mounted.app.setDraft('/slowcmd')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  // B: a steer gesture resolved while the agent is running.
+  mounted.app.setDraft('steer with captured mode')
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  const atGesture = mounted.app.pendingInputForTest()
+  assert.ok(atGesture.steering.some(row => row.local === true && row.text === 'steer with captured mode'),
+    `the running steer must present in the steering lane: ${JSON.stringify(atGesture.steering)}`)
+
+  // The agent flips idle while B waits on the FIFO turn.
+  harness.host.status = 'idle'
+  releaseSlow?.()
+  await drainUntil(() => harness.host.steered.length + harness.host.followedUp.length > 0, 5000)
+  // The captured mode wins: the write matches the lane (steer), never the
+  // later idle status.
+  assert.equal(harness.host.steered.length, 1,
+    'the gesture-time steer mode must win over the later idle status')
+  assert.equal(harness.host.followedUp.length, 0,
+    'a captured steer must never fall back to a queued followup')
+})
+
+test('a skill invocation installs no client-local submission echo', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    skills: true,
+  })
+  mounted.app.setDraft('/skill grilling fix it')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  // The install would be SYNCHRONOUS if the skill route qualified; it must not
+  // (the skill handler owns the delivery and cannot complete the rpc
+  // correlation), so no local echo exists even before the command resolves.
+  const pending = mounted.app.pendingInputForTest()
+  assert.ok(!pending.queued.some(row => row.local === true),
+    `a skill invocation must not install a queue echo: ${JSON.stringify(pending.queued)}`)
+  assert.ok(!pending.steering.some(row => row.local === true),
+    `a skill invocation must not install a steering echo: ${JSON.stringify(pending.steering)}`)
+  // The skill still delivers through its existing command path.
+  await waitForDelivery(harness.host, 'skill invocation')
+  assert.ok(harness.host.steered.length + harness.host.followedUp.length >= 1,
+    'the skill invocation must still reach the agent')
+})
+
+test('a submission refused by the transition fence leaves no pending echo', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running' })
+  const newHandler = (harness.commands as {
+    handler(name: string): ((...args: never[]) => unknown) | undefined
+  }).handler('new')
+  assert.ok(newHandler, 'the /new handler must be registered')
+  // Hold the transition open (its create is gated) so `transitionGate.busy`
+  // stays true while the submission reaches the fence check.
+  harness.armCreateGate()
+  const transition = (newHandler as () => Promise<unknown>)()
+  for (let index = 0; index < 4; index += 1) await Promise.resolve()
+  mounted.app.setDraft('refused during transition')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => /session transition is in progress/.test(mounted.app.notifyTextForTest()), 5000), true,
+    'the transition fence must refuse the submission')
+  const pending = mounted.app.pendingInputForTest()
+  assert.ok(!pending.queued.some(row => row.local === true),
+    `the refused submission must not leave a queue echo: ${JSON.stringify(pending.queued)}`)
+  assert.ok(!pending.steering.some(row => row.local === true),
+    `the refused submission must not leave a steering echo: ${JSON.stringify(pending.steering)}`)
+  harness.releaseCreateGate()
+  await transition
+})
+
+test('a context occurrence never becomes a pending user row', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-context-lane-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'context-lane-session', events: sessionEvents('resumed answer') })
+  harness.host.status = 'running'
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'context-lane-session' })
+  // A non-user next-step occurrence (injected context): not a user prompt.
+  harness.host.nextStep.push({
+    id: 'context-1',
+    role: 'user',
+    content: [{ type: 'text', text: 'injected-context-marker' }],
+    source: { kind: 'plugin', plugin: 'p' },
+  })
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-step',
+    start: 0,
+    inserted: [],
+  }, 920) as never)
+  await waitForRenderView(vt)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('injected-context-marker'), `context must not render as pending user input:\n${view}`)
+  assert.ok(!view.includes('steering…'), `context must not render as a steering row:\n${view}`)
+  assert.ok(!view.includes('ctrl+s to steer all'), `context must not enter the queue pane:\n${view}`)
+  void mounted
+})
+
+test('an empty Ctrl+S sweep creates no synthetic local submission row', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-empty-steer-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'empty-steer-session', events: sessionEvents('resumed answer') })
+  harness.host.status = 'running'
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'empty-steer-session' })
+  harness.host.status = 'running'
+  harness.host.nextTurn.push(queuedText('q-a', 'queue A'), queuedText('q-b', 'queue B'))
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-turn',
+    start: 0,
+    inserted: [],
+  }, 930) as never)
+  await waitForRenderView(vt)
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ queue A') && view.includes('❯ queue B'), `both authoritative rows must show:\n${view}`)
+
+  // Empty draft: the sweep steers the EXISTING occurrences; it never mints a
+  // new human submission (no local echo, therefore no sending marker).
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  await drainUntil(() => harness.host.steered.length >= 2, 5000)
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-turn',
+    start: 0,
+    inserted: [],
+  }, 931) as never)
+  await waitForRenderView(vt)
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('sending…'), `the sweep must not create a synthetic local submission:\n${view}`)
+  assert.ok(!view.includes('❯ queue A'), `the steered occurrence must leave the queue pane:\n${view}`)
 })
 
 test('running + steer: /skill <name> stays an agent-facing invocation (PR115-fix problem 1)', async (t) => {
