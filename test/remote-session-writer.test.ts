@@ -16,6 +16,7 @@ import {
   type RemoteWriteSessionFace,
   type RemoteWriteSessionsSource,
 } from '../src/runtime/remote/session-writer-remote.ts'
+import { classifyRemoteWriteFailure } from '../src/runtime/remote/write-failure.ts'
 import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
 
 interface GenerationHarness {
@@ -309,6 +310,28 @@ test('a plain wire carrier failure is indeterminate with its human message prese
   const outcome = await writer.cancel('session-a')
   assert.equal(outcome.kind, 'indeterminate')
   assert.equal(outcome.kind === 'indeterminate' ? outcome.error.message : undefined, 'carrier reset')
+})
+
+test('gateway settlement follows the pinned pre/post-invocation boundary', () => {
+  const cases: Array<[string, 'rejected' | 'cancelled' | 'indeterminate']> = [
+    ['gateway/bad-request', 'rejected'],
+    ['gateway/cancelled', 'cancelled'],
+    ['gateway/internal', 'indeterminate'],
+    // The only gateway code raised AFTER the business method returns.
+    ['gateway/result-invalid', 'indeterminate'],
+    // Pre-invocation infrastructure codes prove the operation did not commit.
+    ['gateway/invocation-unavailable', 'rejected'],
+    ['gateway/service-unavailable', 'rejected'],
+    ['gateway/arguments-invalid', 'rejected'],
+    ['gateway/context-failed', 'rejected'],
+    ['gateway/lookup-failed', 'rejected'],
+    // An unknown future gateway code is never assumed to be a refusal.
+    ['gateway/unknown-future-code', 'indeterminate'],
+    ['session/queue-item-not-found', 'rejected'],
+  ]
+  for (const [code, kind] of cases) {
+    assert.equal(classifyRemoteWriteFailure({ code, message: code }).kind, kind, code)
+  }
 })
 
 test('a business RemoteFailure is rejected with its stable code preserved', async () => {

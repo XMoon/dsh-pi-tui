@@ -1,23 +1,26 @@
 /**
  * Remote write settlement classification (D2.2): map one official Client
- * `RemoteResult` failure (or an assembly throw) into the shared `WriteOutcome`
- * vocabulary without inventing a second Remote-only taxonomy.
+ * `RemoteResult` failure into the shared `WriteOutcome` vocabulary without
+ * inventing a second Remote-only taxonomy.
  *
  * The official failure vocabulary is code-discriminated. Business refusals
- * carry their domain code (`session/*`, `subagent/*`, `agent-preset/*`, ...)
- * or the gateway's own admission code (`gateway/bad-request`); the universal
- * carrier codes (`gateway/cancelled`, `gateway/internal`) are the only ones
- * that describe transport/lifecycle rather than a proven Host refusal. A
- * failure this classifier cannot prove was a refusal must never be reported as
- * `rejected` — it stays `indeterminate`, because the write may still have
- * committed.
+ * carry their domain code (`session/*`, `subagent/*`, `agent-preset/*`, ...),
+ * the gateway's own admission code (`gateway/bad-request`), or one of the
+ * pinned Gateway's infrastructure codes that are raised BEFORE the addressed
+ * business method runs (descriptor/argument/receiver/endpoint resolution and
+ * context/lookup provider resolution), so the operation definitely did not
+ * commit. `gateway/cancelled` is a caller cancellation; `gateway/internal` and
+ * `gateway/result-invalid` (which the Gateway raises AFTER the method returned)
+ * leave the commit state unproven. A failure this classifier cannot prove was a
+ * refusal must never be reported as `rejected` — it stays `indeterminate`,
+ * because the write may still have committed.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/write-failure
  */
 
 import { isCancellation } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import type { WriteError, WriteOutcome } from '../write-outcome.ts'
+import { isRemoteBusinessRefusalCode, type WriteError, type WriteOutcome } from '../write-outcome.ts'
 
 /** Structural official Remote failure: the stable `code` is the discriminator. */
 export interface RemoteFailureLike {
@@ -59,23 +62,14 @@ function isRemoteCancellation(error: unknown): boolean {
   return code === 'gateway/cancelled'
 }
 
-/** A proven Host business refusal. Its code is preserved for diagnostics. */
-function isRemoteBusinessRefusal(code: string | undefined): boolean {
-  if (code === undefined) return false
-  if (code === 'gateway/bad-request') return true
-  // Every other `gateway/*` code is carrier infrastructure, never a business
-  // refusal; domain codes (any other prefix) are the owner's own vocabulary.
-  return !code.startsWith('gateway/')
-}
-
 /**
- * Classify one failed official write (a `RemoteResult` error branch, or a
- * thrown assembly fault) into the shared non-committed outcome vocabulary.
+ * Classify one failed official write (a `RemoteResult` error branch) into the
+ * shared non-committed outcome vocabulary.
  */
 export function classifyRemoteWriteFailure(error: unknown): RemoteWriteFailure {
   if (isRemoteCancellation(error)) return { kind: 'cancelled' }
   const code = remoteFailureCode(error)
-  if (isRemoteBusinessRefusal(code)) {
+  if (isRemoteBusinessRefusalCode(code)) {
     return {
       kind: 'rejected',
       error: {

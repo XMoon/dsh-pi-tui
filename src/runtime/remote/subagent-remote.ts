@@ -27,6 +27,7 @@ import type {
   SubagentPromptContext,
   SubagentPort,
 } from '../subagent-port.ts'
+import { isRemoteBusinessRefusalCode } from '../write-outcome.ts'
 import { remoteFailureMessage } from './write-failure.ts'
 
 /** Structural official `RemoteResult`. */
@@ -66,7 +67,8 @@ function errorCode(error: unknown): string | undefined {
 
 function classifyInterruptFailure(error: unknown): SubagentInterruptOutcome {
   const message = remoteFailureMessage(error)
-  switch (errorCode(error)) {
+  const code = errorCode(error)
+  switch (code) {
     case 'subagent/not-found':
     case 'subagent/catalog-diagnostic':
     case 'subagent/parent-unavailable':
@@ -75,12 +77,14 @@ function classifyInterruptFailure(error: unknown): SubagentInterruptOutcome {
     case 'subagent/unauthorized':
     case 'UNAUTHORIZED':
       return { kind: 'rejected', reason: { kind: 'unauthorized', message } }
-    case 'gateway/bad-request':
-      return { kind: 'rejected', reason: { kind: 'error', message } }
     default:
-      // A carrier/internal failure after dispatch may already have stopped the
-      // child; never a proven no-op and never a blind retry.
-      return { kind: 'indeterminate', message }
+      // A proven refusal (domain code, bad request, or a pre-invocation Gateway
+      // infrastructure code) is rejected; a carrier/internal/result failure
+      // after dispatch may already have stopped the child and stays
+      // indeterminate — never a proven no-op and never a blind retry.
+      return isRemoteBusinessRefusalCode(code)
+        ? { kind: 'rejected', reason: { kind: 'error', message } }
+        : { kind: 'indeterminate', message }
   }
 }
 
