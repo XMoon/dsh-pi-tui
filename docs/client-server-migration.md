@@ -775,7 +775,13 @@ correct presentation.
   contract OR an operation a captured Connection generation proved was not
   dispatched; D2.2 does not claim caller-originated in-flight prompt abort
   (the semantic `prompt` port has no `AbortSignal` today, and the port is not
-  widened for a caller that does not exist).
+  widened for a caller that does not exist). The Remote adapters consume the
+  generated Remote's `RemoteResult` error branch as the settlement source:
+  carrier failures arrive there, so a rejection of the generated call itself is
+  an assembly/programming defect and PROPAGATES rather than being disguised as
+  `indeterminate`; only the explicit local pre-dispatch steps (preflight,
+  echo registration, serialization, mention canonicalization, identity minting)
+  are caught and mapped to a known refusal.
 - `RemotePendingInputReader` maps the official `SessionSnapshot.queue`
   (`queued`/`steering`/`context`, occurrence id, optional plain `rpcId`) with
   the official order preserved, detached/frozen content, and a Connection
@@ -800,21 +806,21 @@ correct presentation.
   execution never falls back to a model prompt.
 - `RemoteSubagentPort` uses the official generated `subagents.prompt` and
   `subagents.interruptByParent` Remotes with the exact durable parent/child
-  address and `continuable` mode. A continuation prompt mints one request
-  identity before the call. Preparation (service lookup, signal, `@`-mention
-  canonicalization) is separated from the dispatch call: a preparation failure
-  is a known pre-dispatch refusal (`rejected`), never indeterminate. Only the
-  `prompt()`/`interruptByParent()` call itself can be ambiguous, and the
-  settlement is code-based: every structured Host code (a `subagent/*`
-  admission refusal such as `parent-unavailable`, `not-resumable`,
-  `not-found`, `catalog-diagnostic`, `unauthorized`, `delivery-unavailable`,
-  `projections-unavailable`, `attachment-invalid`, `invalid-time-zone`, or
-  `gateway/bad-request`) is a proven `rejected`; only `gateway/internal` or a
-  code-less throw settles `indeterminate`. The runner then never restores an
-  indeterminate viewer draft as unsent and never reports a false "not
-  stopped" — the child's authoritative state decides, with no automatic
-  replay. A committed interrupt admission is likewise never presented as a
-  durably stopped child.
+  address and `continuable` mode. The continuation request identity is minted in
+  the pre-dispatch phase. Preparation (service lookup, signal, `@`-mention
+  canonicalization, identity minting) is separated from the dispatch call: a
+  preparation failure is a known pre-dispatch refusal (`rejected`), never
+  indeterminate, and the generated call is not wrapped in a defensive catch (a
+  rejection is an assembly defect and propagates). The settlement is
+  code-based: every structured Host code (a `subagent/*` admission refusal such
+  as `parent-unavailable`, `not-resumable`, `not-found`, `catalog-diagnostic`,
+  `unauthorized`, `delivery-unavailable`, `projections-unavailable`,
+  `attachment-invalid`, `invalid-time-zone`, or `gateway/bad-request`) is a
+  proven `rejected`; only `gateway/internal` or a code-less throw settles
+  `indeterminate`. The runner then never restores an indeterminate viewer draft
+  as unsent and never reports a false "not stopped" — the child's authoritative
+  state decides, with no automatic replay. A committed interrupt admission is
+  likewise never presented as a durably stopped child.
 - Ctrl+S already converges on official per-occurrence `updateQueue({kind:'steer'})`
   choreography from D2.1 (`src/steer.ts`): FIFO best-effort, partial progress is
   real, no fake rollback, and the authoritative snapshot reconciles the

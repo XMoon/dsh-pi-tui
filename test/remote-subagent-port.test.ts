@@ -212,14 +212,18 @@ test('a missing addressed child settles rejected stale-child, not indeterminate'
   assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'stale-child' } })
 })
 
-test('a prompt throw after dispatch is indeterminate, not a false rejection', async () => {
+test('a prompt assembly fault propagates instead of becoming indeterminate', async () => {
   const h = harness()
   h.setPromptThrows(new Error('assembly fault'))
-  const outcome = await h.port.prompt(
-    { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: 'x' }] },
-    context(),
+  // The generated Remote resolves carrier failures into RemoteResult; only an
+  // assembly/programming defect rejects, and that must stay visible.
+  await assert.rejects(
+    () => h.port.prompt(
+      { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: 'x' }] },
+      context(),
+    ),
+    /assembly fault/,
   )
-  assert.deepEqual(outcome, { kind: 'indeterminate', message: 'assembly fault' })
 })
 
 test('a carrier failure on interrupt is indeterminate and never a false stop', async () => {

@@ -251,15 +251,13 @@ export class RemoteSessionWriter implements SessionWriter {
       return remoteNotDispatched()
     }
 
-    // 4. Dispatch. From here the prompt has been invoked: a failure must NEVER
-    //    abandon the echo (the official Client retires it on an identified
-    //    prompt failure), because the Host may already have committed.
-    let result: RemoteResultLike<{ readonly accepted: true }>
-    try {
-      result = await binding.session.prompt(serialized.content, mode, undefined, handle.requestId)
-    } catch (error) {
-      return classifyRemoteWriteFailure(error)
-    }
+    // 4. Dispatch. The generated Remote resolves to `RemoteResult` — carrier
+    //    failures arrive in the error branch, and only an assembly/programming
+    //    defect rejects. A rejection here is therefore NOT an ambiguous write
+    //    and must propagate instead of being disguised as `indeterminate`; the
+    //    identified echo is never abandoned (the official Client retires it on
+    //    an identified prompt failure).
+    const result = await binding.session.prompt(serialized.content, mode, undefined, handle.requestId)
     if (result.ok) return { kind: 'committed', value: undefined }
     return classifyRemoteWriteFailure(result.error)
   }
@@ -268,39 +266,27 @@ export class RemoteSessionWriter implements SessionWriter {
     const resolved = this.resolve<undefined>(sessionId)
     if (resolved === undefined) return remoteNotDispatched()
     if ('kind' in resolved) return resolved
-    try {
-      const result = await resolved.binding.session.updateQueue(itemId, action)
-      if (result.ok) return { kind: 'committed', value: undefined }
-      return classifyRemoteWriteFailure(result.error)
-    } catch (error) {
-      return classifyRemoteWriteFailure(error)
-    }
+    const result = await resolved.binding.session.updateQueue(itemId, action)
+    if (result.ok) return { kind: 'committed', value: undefined }
+    return classifyRemoteWriteFailure(result.error)
   }
 
   async cancel(sessionId: string): Promise<WriteOutcome> {
     const resolved = this.resolve<undefined>(sessionId)
     if (resolved === undefined) return remoteNotDispatched()
     if ('kind' in resolved) return resolved
-    try {
-      const result = await resolved.binding.session.cancel()
-      if (result.ok) return { kind: 'committed', value: undefined }
-      return classifyRemoteWriteFailure(result.error)
-    } catch (error) {
-      return classifyRemoteWriteFailure(error)
-    }
+    const result = await resolved.binding.session.cancel()
+    if (result.ok) return { kind: 'committed', value: undefined }
+    return classifyRemoteWriteFailure(result.error)
   }
 
   async rename(sessionId: string, title: string): Promise<WriteOutcome<{ readonly title: string }>> {
     const resolved = this.resolve<{ readonly title: string }>(sessionId)
     if (resolved === undefined) return remoteNotDispatched()
     if ('kind' in resolved) return resolved
-    try {
-      const result = await resolved.binding.session.rename(title)
-      if (result.ok) return { kind: 'committed', value: { title: result.value.title } }
-      return classifyRemoteWriteFailure(result.error)
-    } catch (error) {
-      return classifyRemoteWriteFailure(error)
-    }
+    const result = await resolved.binding.session.rename(title)
+    if (result.ok) return { kind: 'committed', value: { title: result.value.title } }
+    return classifyRemoteWriteFailure(result.error)
   }
 
   async refreshTitle(_sessionId: string, _signal: AbortSignal): Promise<

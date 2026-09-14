@@ -139,9 +139,12 @@ export class RemoteSubagentPort implements SubagentPort {
     context: SubagentPromptContext,
   ): Promise<SubagentPromptOutcome> {
     // Pre-dispatch preparation. Any failure here happens BEFORE prompt() is
-    // called, so it is a KNOWN non-dispatch (never indeterminate).
+    // called, so it is a KNOWN non-dispatch (never indeterminate). The request
+    // identity is minted here too: it is an argument evaluated before the call,
+    // so a mint failure must not be mistaken for an ambiguous delivery.
     let signal: AbortSignal
     let canonical: SubagentPromptContentPart[]
+    let requestId: string
     try {
       signal = context.makeSignal()
       canonical = []
@@ -153,42 +156,38 @@ export class RemoteSubagentPort implements SubagentPort {
         }
       }
       if (signal.aborted) return { kind: 'rejected', reason: { kind: 'cancelled' } }
+      // The identity is minted BEFORE the call and persisted on the accepted
+      // message; only a NEW human submit mints another.
+      requestId = randomUUID()
     } catch (error) {
       return { kind: 'rejected', reason: { kind: 'error', message: remoteFailureMessage(error) } }
     }
-    // Dispatch: only a failure of prompt() itself can be ambiguous.
-    try {
-      const result = await this.subagents.prompt(
-        {
-          // The identity is minted BEFORE the call and persisted on the
-          // accepted message; only a NEW human submit mints another.
-          requestId: randomUUID(),
-          parentSessionId: request.parentSessionId,
-          childSessionId: request.childSessionId,
-          mode: 'continuable',
-          delivery: request.delivery,
-          content: canonical,
-        },
-        signal,
-      )
-      if (result.ok) return { kind: 'ok', messageId: result.value.messageId }
-      return promptOutcomeOf(result.error)
-    } catch (error) {
-      return promptOutcomeOf(error)
-    }
+    // Dispatch. The generated Remote resolves to `RemoteResult` (carrier
+    // failures are in the error branch); a rejection is an assembly/programming
+    // defect and must propagate, never become an ambiguous delivery.
+    const result = await this.subagents.prompt(
+      {
+        requestId,
+        parentSessionId: request.parentSessionId,
+        childSessionId: request.childSessionId,
+        mode: 'continuable',
+        delivery: request.delivery,
+        content: canonical,
+      },
+      signal,
+    )
+    if (result.ok) return { kind: 'ok', messageId: result.value.messageId }
+    return promptOutcomeOf(result.error)
   }
 
   async interrupt(request: SubagentInterruptRequest): Promise<SubagentInterruptOutcome> {
-    try {
-      const result = await this.subagents.interruptByParent(
-        request.childSessionId,
-        request.parentSessionId,
-        'continuable',
-      )
-      if (result.ok) return { kind: 'committed' }
-      return classifyInterruptFailure(result.error)
-    } catch (error) {
-      return classifyInterruptFailure(error)
-    }
+    // No defensive catch: the generated Remote resolves to `RemoteResult`.
+    const result = await this.subagents.interruptByParent(
+      request.childSessionId,
+      request.parentSessionId,
+      'continuable',
+    )
+    if (result.ok) return { kind: 'committed' }
+    return classifyInterruptFailure(result.error)
   }
 }

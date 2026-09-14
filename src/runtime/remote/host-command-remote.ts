@@ -52,15 +52,10 @@ export class RemoteHostCommandPort implements HostCommandPort {
   }
 
   async execute(request: HostCommandRequest): Promise<HostCommandOutcome> {
-    let result: RemoteCommandResult
-    try {
-      result = await this.commands.execute(request.sessionId, request.line, request.attachments, request.signal)
-    } catch (error) {
-      const failure = classifyRemoteWriteFailure(error)
-      if (failure.kind === 'cancelled') return { kind: 'cancelled' }
-      if (failure.kind === 'rejected') return { kind: 'rejected', error: failure.error }
-      return { kind: 'indeterminate', error: failure.error }
-    }
+    // The generated Remote resolves to `RemoteResult`; carrier failures are in
+    // the error branch, so a rejection is an assembly/programming defect and
+    // propagates rather than becoming an ambiguous command result.
+    const result = await this.commands.execute(request.sessionId, request.line, request.attachments, request.signal)
     if (result.ok) {
       if (result.value === undefined) return { kind: 'committed', matched: false }
       // The official Remote yields the whole `CommandExecution`

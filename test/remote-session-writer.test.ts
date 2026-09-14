@@ -278,14 +278,14 @@ test('a serialization that declares unsupported after begin abandons the echo wi
   assert.equal(harness.calls.promptCalls.length, 0)
 })
 
-test('a prompt throw after dispatch is indeterminate and NEVER abandons the official echo', async () => {
+test('a prompt assembly fault propagates instead of being disguised as indeterminate', async () => {
   const harness = writerHarness()
   harness.setPromptThrows(new Error('assembly fault'))
   const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer())
-  const outcome = await writer.prompt('session-a', {}, 'queue')
-  assert.equal(outcome.kind, 'indeterminate')
-  // prompt() was already invoked, so the Host may have committed; deleting the
-  // official echo here would hide an accepted submission.
+  // The generated Remote resolves carrier failures into RemoteResult; a
+  // rejection is an assembly/programming defect and must not become an
+  // ambiguous write. The identified echo is never abandoned here.
+  await assert.rejects(() => writer.prompt('session-a', {}, 'queue'), /assembly fault/)
   assert.equal(harness.calls.promptCalls.length, 1)
   assert.equal(harness.calls.abandonCalls, 0)
 })

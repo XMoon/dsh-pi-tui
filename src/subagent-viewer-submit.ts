@@ -242,6 +242,7 @@ export async function submitSubagentPrompt(
   let subagents: SubagentPromptService
   let signal: AbortSignal
   let canonical: SubagentPromptContentPart[]
+  let requestId: string
   try {
     // 1. The official control surface, read lazily: the continuation
     //    runtime may appear/disappear between calls (draining / activation
@@ -274,6 +275,10 @@ export async function submitSubagentPrompt(
       }
     }
     if (signal.aborted) return { kind: 'rejected', reason: { kind: 'cancelled' } }
+    // 3. Mint the caller-owned identity in the PRE-DISPATCH phase: it is an
+    //    argument evaluated before `prompt()`, so a mint failure is a known
+    //    non-dispatch, not an ambiguous delivery.
+    requestId = deps.mintRequestId()
   } catch (error) {
     return { kind: 'rejected', reason: { kind: 'error', message: safeErrorMessage(error) } }
   }
@@ -288,7 +293,7 @@ export async function submitSubagentPrompt(
     // persisted on the accepted message.
     const receipt = await subagents.prompt(
       {
-        requestId: deps.mintRequestId(),
+        requestId,
         parentSessionId: request.parentSessionId,
         childSessionId: request.childSessionId,
         mode: 'continuable',
