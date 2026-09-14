@@ -9,6 +9,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/host-command-direct
  */
 
+import { isCancellation } from '../../detached.ts'
 import type {
   HostCommandExecution,
   HostCommandOutcome,
@@ -42,6 +43,16 @@ function rejected(code: string, message: string): { kind: 'rejected'; error: Wri
   return { kind: 'rejected', error: { code, message } }
 }
 
+function indeterminate(error: unknown): Extract<HostCommandOutcome, { readonly kind: 'indeterminate' }> {
+  return {
+    kind: 'indeterminate',
+    error: {
+      code: 'session/write-indeterminate',
+      message: error instanceof Error ? error.message : String(error),
+    },
+  }
+}
+
 /** The Direct backend's Host command port. */
 export class DirectHostCommandPort implements HostCommandPort {
   private readonly ctx: HostContextLike
@@ -59,8 +70,12 @@ export class DirectHostCommandPort implements HostCommandPort {
     if (agent === undefined) return rejected('session/not-found', `session "${request.sessionId}" is not available`)
     // The caller-owned lifecycle signal is forwarded unchanged; do not mint a
     // replacement that could outlive the TUI surface.
-    const execution = await commands.execute(agent, request.line, request.attachments, request.signal)
-    if (execution === undefined) return { kind: 'committed', matched: false }
-    return { kind: 'committed', matched: true, execution }
+    try {
+      const execution = await commands.execute(agent, request.line, request.attachments, request.signal)
+      if (execution === undefined) return { kind: 'committed', matched: false }
+      return { kind: 'committed', matched: true, execution }
+    } catch (error) {
+      return isCancellation(error) ? { kind: 'cancelled' } : indeterminate(error)
+    }
   }
 }

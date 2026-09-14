@@ -8,6 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { SessionTitleInvalidError } from '@deepseek-ai/dsh-session-title'
 import { DirectSessionWriter, type HostContextLike, type LiveAgentLike } from '../src/runtime/direct/session-writer-direct.ts'
 
 function host(services: Record<string, unknown>): HostContextLike {
@@ -454,16 +455,56 @@ test('rename returns the accepted normalized title from the sessionTitle service
   assert.equal((renames[0]!.session as { id: string }).id, 'session-a')
 })
 
-test('rename rejects when the title service or the session is absent', async () => {
+test('rename follows official service and session availability precedence', async () => {
   const noService = writer(new Map([['session-a', agent('session-a')]]))
   assert.deepEqual(await noService.rename('session-a', 'x'), {
     kind: 'rejected',
-    error: { code: 'service/unavailable', message: 'session title service unavailable' },
+    error: {
+      code: 'gateway/internal',
+      message: 'renaming is unavailable: this deployment mounts no session-title service',
+      details: {},
+    },
   })
-  const noSession = writer(new Map(), { sessionTitle: { rename: () => ({ title: 'x' }), refresh: async () => undefined } })
+  const titles = { rename: () => ({ title: 'x' }), refresh: async () => undefined }
+  const noSession = writer(new Map(), { sessionTitle: titles })
   assert.deepEqual(await noSession.rename('session-a', 'x'), {
     kind: 'rejected',
     error: { code: 'session/not-found', message: 'session "session-a" is not available' },
+  })
+  const neither = writer(new Map())
+  assert.deepEqual(await neither.rename('session-a', 'x'), {
+    kind: 'rejected',
+    error: { code: 'session/not-found', message: 'session "session-a" is not available' },
+  })
+})
+
+test('rename maps title validation and other failures to official outcomes', async () => {
+  const invalid = writer(new Map([['session-a', agent('session-a')]]), {
+    sessionTitle: {
+      rename: () => { throw new SessionTitleInvalidError('session title must contain visible characters') },
+      refresh: async () => undefined,
+    },
+  })
+  assert.deepEqual(await invalid.rename('session-a', ' ​ '), {
+    kind: 'rejected',
+    error: {
+      code: 'session/title-invalid',
+      message: 'session title must contain visible characters',
+      details: { sessionId: 'session-a' },
+    },
+  })
+
+  const failure = new Error('title persistence failed')
+  const failed = writer(new Map([['session-a', agent('session-a')]]), {
+    sessionTitle: { rename: () => { throw failure }, refresh: async () => undefined },
+  })
+  assert.deepEqual(await failed.rename('session-a', 'name'), {
+    kind: 'rejected',
+    error: {
+      code: 'gateway/internal',
+      message: 'failed to rename session "session-a": Error: title persistence failed',
+      details: {},
+    },
   })
 })
 
@@ -480,10 +521,27 @@ test('refreshTitle returns the regenerated title or explicit unsupported settlem
   assert.deepEqual(await absent.refreshTitle('session-a', new AbortController().signal), { kind: 'unsupported', reason: 'session title service unavailable' })
 })
 
-test('unexpected Direct write exceptions reject instead of claiming committed', async () => {
-  const failure = new Error('invariant failure')
-  const w = writer(new Map([['session-a', agent('session-a', { followup: () => { throw failure } })]]))
-  await assert.rejects(w.prompt('session-a', { text: 'x' }, 'queue'), failure)
+test('maps Direct prompt admission exceptions to agent-busy rejection', async () => {
+  const failures = [
+    new Error('invariant failure'),
+    Object.assign(new Error('prompt cancelled'), { name: 'AbortError' }),
+  ]
+  for (const [index, failure] of failures.entries()) {
+    for (const mode of ['queue', 'steer'] as const) {
+      const delivery = mode === 'queue'
+        ? { followup: () => { throw failure } }
+        : { steer: () => { throw failure } }
+      const w = writer(new Map([['session-a', agent('session-a', delivery)]]))
+      assert.deepEqual(await w.prompt('session-a', { text: 'x' }, mode), {
+        kind: 'rejected',
+        error: {
+          code: 'session/agent-busy',
+          message: 'prompt rejected',
+          details: { reason: index === 0 ? 'Error: invariant failure' : 'AbortError: prompt cancelled' },
+        },
+      })
+    }
+  }
 })
 
 test('updateQueue steer returns indeterminate when steering throws after removal', async () => {

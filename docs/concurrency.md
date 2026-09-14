@@ -168,8 +168,9 @@ D2.1 makes the current Direct writes asynchronous at the semantic boundary
 without changing the ownership or ordering rules:
 
 - Ordinary input uses `SessionWriter.prompt(sessionId, message, mode)`;
-  `queue` and `steer` are explicit, and only a successful Direct call settles
-  as `committed`.
+  `queue` and `steer` are explicit. Direct Agent admission exceptions settle as
+  the official `session/agent-busy` rejection (`prompt rejected` plus the
+  exception reason); only a successful Direct call settles as `committed`.
 - Ctrl+S remains one operation-barrier turn. A payload-bearing draft takes
   priority and is sent alone through `prompt(..., 'steer')`; it never sweeps
   the queue. With an empty draft, it reads the `PendingInputReader` snapshot,
@@ -197,8 +198,11 @@ without changing the ownership or ordering rules:
   restores the appropriate confirmed or indeterminate representation in the
   original editor.
 - Host command execution uses `HostCommandPort` after the runner has already
-  decided that the line belongs to the Host. The port's settled command result
-  is committed separately from the TUI's fallback prompt path.
+  decided that the line belongs to the Host. Cancellation-shaped adapter throws
+  settle `cancelled`; other execution throws settle `indeterminate`, so the
+  runner never restores or automatically retries a command whose side effect
+  status is unknown. A settled command result is committed separately from the
+  TUI's fallback prompt path.
 - Task Center child interruption uses `SubagentPort` with the durable direct
   parent and child identities. The semantic writer hides Direct cancellation
   knobs such as the user reason and inbox-preservation option.
