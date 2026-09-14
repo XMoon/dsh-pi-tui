@@ -13,6 +13,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-writer-direct
  */
 
+import { safeErrorMessage, safeErrorString } from '../../error-boundary.ts'
 import { isCancellation } from '../../detached.ts'
 import type { QueueAction, SessionWriter, WriteOutcome } from '../session-writer-port.ts'
 
@@ -73,13 +74,21 @@ function indeterminate(error: unknown): WriteOutcome {
     kind: 'indeterminate',
     error: {
       code: 'session/write-indeterminate',
-      message: error instanceof Error ? error.message : String(error),
+      message: safeErrorMessage(error),
     },
   }
 }
 
 function mutationFailure(error: unknown): WriteOutcome {
   return isCancellation(error) ? { kind: 'cancelled' } : indeterminate(error)
+}
+
+function isSessionTitleInvalid(error: unknown): error is Error {
+  try {
+    return error instanceof Error && error.name === 'SessionTitleInvalidError'
+  } catch {
+    return false
+  }
 }
 
 /** The Direct backend's session writer: identity-based operations over the
@@ -114,7 +123,7 @@ export class DirectSessionWriter implements SessionWriter {
         error: {
           code: 'session/agent-busy',
           message: 'prompt rejected',
-          details: { reason: String(error) },
+          details: { reason: safeErrorString(error) },
         },
       }
     }
@@ -247,17 +256,17 @@ export class DirectSessionWriter implements SessionWriter {
       const snapshot = titles.rename(agent.session, title)
       return { kind: 'committed', value: { title: snapshot.title } }
     } catch (error) {
-      if (error instanceof Error && error.name === 'SessionTitleInvalidError') {
+      if (isSessionTitleInvalid(error)) {
         return {
           kind: 'rejected',
-          error: { code: 'session/title-invalid', message: error.message, details: { sessionId } },
+          error: { code: 'session/title-invalid', message: safeErrorMessage(error), details: { sessionId } },
         }
       }
       return {
         kind: 'rejected',
         error: {
           code: 'gateway/internal',
-          message: `failed to rename session "${sessionId}": ${String(error)}`,
+          message: `failed to rename session "${sessionId}": ${safeErrorString(error)}`,
           details: {},
         },
       }

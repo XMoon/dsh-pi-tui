@@ -506,6 +506,48 @@ test('rename maps title validation and other failures to official outcomes', asy
       details: {},
     },
   })
+
+  const hostile = { toString: () => { throw new Error('coercion failure') } }
+  const hostileFailed = writer(new Map([['session-a', agent('session-a')]]), {
+    sessionTitle: { rename: () => { throw hostile }, refresh: async () => undefined },
+  })
+  assert.deepEqual(await hostileFailed.rename('session-a', 'name'), {
+    kind: 'rejected',
+    error: {
+      code: 'gateway/internal',
+      message: 'failed to rename session "session-a": <unprintable error>',
+      details: {},
+    },
+  })
+
+  const unreadableTitleError = new Error('unreadable title error')
+  Object.defineProperty(unreadableTitleError, 'name', { value: 'SessionTitleInvalidError' })
+  Object.defineProperty(unreadableTitleError, 'message', { get: () => { throw new Error('message getter failure') } })
+  const unreadableInvalid = writer(new Map([['session-a', agent('session-a')]]), {
+    sessionTitle: { rename: () => { throw unreadableTitleError }, refresh: async () => undefined },
+  })
+  assert.deepEqual(await unreadableInvalid.rename('session-a', 'name'), {
+    kind: 'rejected',
+    error: {
+      code: 'session/title-invalid',
+      message: '<error with unreadable message>',
+      details: { sessionId: 'session-a' },
+    },
+  })
+
+  const unreadableNameError = new Error('unreadable name error')
+  Object.defineProperty(unreadableNameError, 'name', { get: () => { throw new Error('name getter failure') } })
+  const unreadableName = writer(new Map([['session-a', agent('session-a')]]), {
+    sessionTitle: { rename: () => { throw unreadableNameError }, refresh: async () => undefined },
+  })
+  assert.deepEqual(await unreadableName.rename('session-a', 'name'), {
+    kind: 'rejected',
+    error: {
+      code: 'gateway/internal',
+      message: 'failed to rename session "session-a": <unprintable error>',
+      details: {},
+    },
+  })
 })
 
 test('refreshTitle returns the regenerated title or explicit unsupported settlement', async () => {
@@ -522,11 +564,15 @@ test('refreshTitle returns the regenerated title or explicit unsupported settlem
 })
 
 test('maps Direct prompt admission exceptions to agent-busy rejection', async () => {
-  const failures = [
-    new Error('invariant failure'),
-    Object.assign(new Error('prompt cancelled'), { name: 'AbortError' }),
+  const unreadable = new Error('unreadable prompt error')
+  Object.defineProperty(unreadable, 'message', { get: () => { throw new Error('message getter failure') } })
+  const failures: readonly (readonly [unknown, string])[] = [
+    [new Error('invariant failure'), 'Error: invariant failure'],
+    [Object.assign(new Error('prompt cancelled'), { name: 'AbortError' }), 'AbortError: prompt cancelled'],
+    [{ toString: () => { throw new Error('coercion failure') } }, '<unprintable error>'],
+    [unreadable, '<unprintable error>'],
   ]
-  for (const [index, failure] of failures.entries()) {
+  for (const [failure, reason] of failures) {
     for (const mode of ['queue', 'steer'] as const) {
       const delivery = mode === 'queue'
         ? { followup: () => { throw failure } }
@@ -537,7 +583,7 @@ test('maps Direct prompt admission exceptions to agent-busy rejection', async ()
         error: {
           code: 'session/agent-busy',
           message: 'prompt rejected',
-          details: { reason: index === 0 ? 'Error: invariant failure' : 'AbortError: prompt cancelled' },
+          details: { reason },
         },
       })
     }
@@ -559,4 +605,28 @@ test('updateQueue steer returns indeterminate when steering throws after removal
     error: { code: 'session/write-indeterminate', message: 'steer invariant failure' },
   })
   assert.deepEqual(removed, ['message-1'], 'the exact occurrence was removed before the uncertain steer')
+})
+
+test('queue mutation settlement is total for hostile thrown values', async () => {
+  const hostile = { toString: () => { throw new Error('coercion failure') } }
+  const actions = [
+    { kind: 'edit' as const, content: [{ type: 'text' as const, text: 'updated' }] },
+    { kind: 'remove' as const },
+    { kind: 'steer' as const },
+  ]
+  for (const action of actions) {
+    const agents = new Map([['session-a', agent('session-a', {
+      inbox: {
+        nextTurn: [{ id: 'message-1' }],
+        nextStep: [],
+        replace: () => { throw hostile },
+        remove: () => action.kind === 'remove' ? (() => { throw hostile })() : true,
+      },
+      steer: () => { if (action.kind === 'steer') throw hostile },
+    })]])
+    assert.deepEqual(await writer(agents).updateQueue('session-a', 'message-1', action), {
+      kind: 'indeterminate',
+      error: { code: 'session/write-indeterminate', message: '<unprintable error>' },
+    })
+  }
 })

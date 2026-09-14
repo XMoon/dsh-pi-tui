@@ -84,9 +84,13 @@ test('does not rewrite an already-aborted signal before official execution', asy
 })
 
 test('maps non-cancellation command exceptions to indeterminate', async () => {
+  const unreadable = new Error('unreadable command error')
+  Object.defineProperty(unreadable, 'message', { get: () => { throw new Error('message getter failure') } })
   for (const [failure, message] of [
     [new Error('command invariant failure'), 'command invariant failure'],
     ['non-error command failure', 'non-error command failure'],
+    [{ toString: () => { throw new Error('coercion failure') } }, '<unprintable error>'],
+    [unreadable, '<error with unreadable message>'],
   ] as const) {
     const live = new Map([['session-a', { session: { id: 'session-a' } }]])
     const port = new DirectHostCommandPort(host({
