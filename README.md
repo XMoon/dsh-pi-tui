@@ -52,8 +52,8 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.4.5`（已发布 `@latest`） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 当前稳定版；最低 rc.1，兼容 rc.2 |
-| 当前 `next` npm 线（本 checkout；版本 `0.4.5`） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 当前 next 线 |
+| `0.4.6`（已发布 `@latest`） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 当前稳定版；最低 rc.1，兼容 rc.2 |
+| 当前 `next` npm 线（本 checkout；版本 `0.4.6`） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 当前 next 线 |
 
 不要把稳定线与 `next` 线混装。当前 `next` checkout 的 peer floor 是
 `>=0.1.5-rc.1`，旧 runtime 会在正常的不兼容边界以非零状态失败。完整的

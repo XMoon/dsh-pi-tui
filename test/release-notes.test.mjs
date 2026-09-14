@@ -126,6 +126,22 @@ test('0.4.5 release guidance pins the recommended rc.2 DSH/TUI pairing', (t) => 
   assert.doesNotMatch(body, /@xmoon76\/dsh-pi-tui@(latest|next)/u)
 })
 
+test('0.4.6 release guidance keeps the 0.4.5 rc.2 DSH pairing', (t) => {
+  const life = testLifecycle(t)
+  const guidance = '\n```sh\nnpm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2\n```\n- @xmoon76/dsh-pi-tui@0.4.6\n- @xmoon76/dsh-pi-tui@0.3'
+  const fixture = createFixture(life, { version: '0.4.6', guidance })
+  const result = run(fixture, 'v0.4.6')
+  assert.equal(result.status, 0, result.stderr)
+  const body = readFileSync(fixture.output, 'utf8')
+  for (const command of [
+    '@deepseek-ai/dsh@0.1.5-rc.2',
+    '@xmoon76/dsh-pi-tui@0.4.6',
+    '@xmoon76/dsh-pi-tui@0.3',
+  ]) {
+    assert.ok(body.includes(command), `release body is missing ${command}`)
+  }
+})
+
 test('0.4 release guidance pins the exact release TUI version', (t) => {
   const life = testLifecycle(t)
   // A fixture on the alpha.4 floor (any 0.4 prerelease after 0.4.0-alpha.1)
