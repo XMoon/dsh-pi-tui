@@ -42,3 +42,13 @@ export function safeErrorMessage(value: unknown): string {
     return '<unprintable error>'
   }
 }
+
+/** Describe an arbitrary thrown value using its normal `String` form without
+ * allowing hostile coercion to escape the async boundary. */
+export function safeErrorString(value: unknown): string {
+  try {
+    return String(value)
+  } catch {
+    return '<unprintable error>'
+  }
+}

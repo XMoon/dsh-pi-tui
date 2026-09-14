@@ -9,6 +9,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/host-command-direct
  */
 
+import { safeErrorMessage } from '../../error-boundary.ts'
 import { isCancellation } from '../../detached.ts'
 import type {
   HostCommandExecution,
@@ -48,7 +49,7 @@ function indeterminate(error: unknown): Extract<HostCommandOutcome, { readonly k
     kind: 'indeterminate',
     error: {
       code: 'session/write-indeterminate',
-      message: error instanceof Error ? error.message : String(error),
+      message: safeErrorMessage(error),
     },
   }
 }
