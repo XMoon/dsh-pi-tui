@@ -2881,12 +2881,6 @@ export class TuiApp {
   /** The ephemeral pending user-input lane (authoritative steering + local
    * submission echoes) rendered after the live transcript tail. */
   private pendingUserRows: readonly PendingUserRow[] = []
-  /** The semantic identities (`rpcId ?? id`) of the pending lane's current
-   * rows: a NEW identity is OWN input (a local submission or an
-   * authoritative steering occurrence) and takes the fullscreen viewport to
-   * the tail; an authoritative replacement of an existing identity does not
-   * jump a second time. */
-  private pendingUserKeys: ReadonlySet<string> = new Set()
   /** Activity of the same pending-input subject shown in queueItems. */
   private queueRunning = true
 
@@ -4098,7 +4092,6 @@ export class TuiApp {
     this.disposeMessageComponents()
     this.localMessages.length = 0
     this.pendingUserRows = []
-    this.pendingUserKeys = new Set()
     // The transcript-search overlay dies with the surface: stale handles
     // must never focus() or repaint a dead component.
     this.searchOverlay = undefined
@@ -8568,7 +8561,6 @@ export class TuiApp {
       // so the cleared lists are rebuilt from the child content.
       this.localMessages.length = 0
       this.pendingUserRows = []
-      this.pendingUserKeys = new Set()
       this.rebuildMessages()
     } else if (isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access))) {
       // Switching child: park the outgoing child's draft first.
@@ -12511,13 +12503,6 @@ export class TuiApp {
    * pending USER input only.
    */
   setPendingInputPresentation(presentation: PendingInputPresentation): void {
-    // Own pending input must become VISIBLE even when the reader deliberately
-    // browsed away from the tail (official Web: an appended user node /
-    // steering node / submission echo forces `toBottom`). Detect a NEW semantic
-    // identity so the authoritative rpc-correlated replacement of an existing
-    // identity never causes a second visible jump.
-    const nextKeys = new Set(presentation.steering.map(row => row.rpcId ?? row.id))
-    const hasNewIdentity = [...nextKeys].some(key => !this.pendingUserKeys.has(key))
     this.queueItems = presentation.queued
     this.pendingUserRows = presentation.steering
     this.queueRunning = presentation.running
@@ -12527,8 +12512,6 @@ export class TuiApp {
     // The lane lives in the transcript tail: rebuild it in the SAME call so
     // the queue and the lane never diverge across frames.
     this.rebuildMessages()
-    if (hasNewIdentity) this.applyFullscreenFollowEndViewport()
-    this.pendingUserKeys = nextKeys
     this.syncExtensionState()
   }
 
@@ -12567,14 +12550,17 @@ export class TuiApp {
     // The bulk steer-all/recall-all gestures address only AUTHORITATIVE queued
     // occurrences; a client-local `sending…` row has no occurrence id yet. A
     // pane holding ONLY local echoes must not advertise a no-op action (the
-    // `sending…` suffix already communicates the state). A mixed pane keeps
-    // the hint — the actions do apply to its authoritative rows.
+    // `sending…` suffix already communicates the state). A MIXED pane keeps
+    // the hint but scopes it to the accepted rows, so `sending…` rows are
+    // never implied to participate.
+    const hasLocalRows = items.some(item => item.local === true)
     if (items.some(item => item.local !== true)) {
+      const scope = hasLocalRows ? 'accepted' : 'all'
       const steerHint = this.queueRunning
-        ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer all`
+        ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer ${scope}`
         : 'queued until the current task resumes'
       const hint = this.viewerMode === undefined
-        ? `${steerHint} · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to recall all`
+        ? `${steerHint} · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to recall ${scope}`
         : steerHint
       lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, safeWidth - 2), '…')))
     }

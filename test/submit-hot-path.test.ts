@@ -1950,6 +1950,73 @@ test('a queued submission is visible while an earlier FIFO submission is still i
   assert.equal(harness.host.followedUp.length, 1, 'B must reach the agent once A releases')
 })
 
+test('own steer takes a history-browsed fullscreen viewport to the live tail; a background steering row does not', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-history-steer-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'history-steer-session', events: longSessionEvents(30) })
+  harness.host.status = 'running'
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'history-steer-session' })
+  harness.host.status = 'running'
+  mounted.app.setFullscreen(true)
+  await waitForRenderView(vt)
+
+  // Page the VIRTUAL transcript window into history through the runner's own
+  // seam (Ctrl+Up / previousPrompt wires to this callback).
+  const events = (mounted.app as unknown as {
+    events: { onTranscriptTurnOlder?: () => boolean }
+  }).events
+  const windowState = (): { mode?: string; endTurn?: number } | undefined =>
+    (mounted.app as unknown as { transcriptWindow?: { mode?: string; endTurn?: number } }).transcriptWindow
+  assert.equal(events.onTranscriptTurnOlder?.(), true, 'the runner must move the virtual window older')
+  assert.equal(windowState()?.mode, 'history',
+    `the virtual window must be in history mode: ${JSON.stringify(windowState())}`)
+  let view = vt.getViewport().join('\n')
+
+  // Own steer: the runner must return the window to latest AND scroll to the
+  // tail, so the accepted content is actually visible in the live projection.
+  mounted.app.setDraft('HISTORY-STEER-PROBE')
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  await waitForDelivery(harness.host, 'history steer')
+  await waitForRenderView(vt)
+  view = vt.getViewport().join('\n')
+  assert.equal(windowState()?.mode, 'latest', `own steer must return the window to latest: ${JSON.stringify(windowState())}`)
+  assert.ok(view.includes('❯ HISTORY-STEER-PROBE'), `the own steer must be visible:\n${view}`)
+  assert.ok(view.includes('steering…'), `the own steer must read as pending steering:\n${view}`)
+
+  // A background authoritative steering occurrence (no local echo, a producer
+  // we did not initiate) must NOT steal the viewport.
+  mounted.app.scrollToTop({ disableFollow: true })
+  await waitForRenderView(vt)
+  assert.equal(mounted.app.fullscreenScrollForTest()?.isFollowingEnd, false, 'the reader must be browsing history')
+  harness.host.nextStep.push({
+    id: 'background-steer-1',
+    role: 'user',
+    content: [{ type: 'text', text: 'BACKGROUND-STEER' }],
+    source: { kind: 'user', rpcId: 'background-rpc' },
+  })
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-step',
+    start: 0,
+    inserted: [],
+  }, 990) as never)
+  await waitForRenderView(vt)
+  assert.equal(mounted.app.fullscreenScrollForTest()?.isFollowingEnd, false,
+    'a background authoritative steering row must not steal the viewport')
+})
+
 test('a steer gesture keeps its gesture-time delivery mode across a FIFO status flip', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-steer-mode-')
