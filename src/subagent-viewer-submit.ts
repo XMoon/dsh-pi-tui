@@ -219,9 +219,10 @@ export function viewerCanonicalizeScope(
 
 /**
  * Deliver one viewer prompt to a continuable child through the official
- * subagent control API, or classify why it could not be delivered. Never
- * throws for a classified rejection; an unexpected throw surfaces as
- * `{ kind: 'error' }`.
+ * subagent control API, or settle why it could not be delivered. Never throws:
+ * a proven refusal is `{ kind: 'rejected' }`, while a carrier or unidentified
+ * failure that may already have been accepted settles `{ kind: 'indeterminate' }`
+ * (see {@link classifySubagentPromptSettlement}).
  */
 export async function submitSubagentPrompt(
   request: SubagentViewerSubmitRequest,
