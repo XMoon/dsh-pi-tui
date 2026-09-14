@@ -233,3 +233,19 @@ test('interrupt settles an unidentified failure as indeterminate, never a false 
   })
   assert.deepEqual(outcome, { kind: 'indeterminate', message: 'carrier lost' })
 })
+
+test('interrupt settles a missing addressed child as a rejected unavailable, not indeterminate', async () => {
+  const failing = {
+    ...service([]),
+    interrupt: () => {
+      const error = new Error('child is gone') as Error & { code?: string }
+      error.code = 'subagent/not-found'
+      throw error
+    },
+  }
+  const outcome = await new DirectSubagentPort(host(failing)).interrupt({
+    parentSessionId: 'session-parent', childSessionId: 'session-child', mode: 'continuable',
+  })
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind === 'rejected') assert.equal(outcome.reason.kind, 'unavailable')
+})

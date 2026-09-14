@@ -62,6 +62,8 @@ interface WriterHarness {
   setRenameResult(result: { ok: true; value: { title: string; seq: number } } | { ok: false; error: unknown }): void
   setPromptHook(hook: () => void): void
   setQueueHook(hook: () => void): void
+  setBeginHook(hook: () => void): void
+  setBeginThrows(error: unknown): void
 }
 
 function writerHarness(): WriterHarness {
@@ -94,9 +96,13 @@ function writerHarness(): WriterHarness {
     ok: true,
     value: { title: 'accepted', seq: 7 },
   }
+  let beginThrows: unknown
+  let beginHook: (() => void) | undefined
   const session: RemoteWriteSessionFace = {
     beginSubmission: input => {
       calls.beginInputs.push(input)
+      beginHook?.()
+      if (beginThrows !== undefined) throw beginThrows
       return {
         requestId: `req-${calls.beginInputs.length}`,
         abandon: () => { calls.abandonCalls += 1 },
@@ -136,6 +142,8 @@ function writerHarness(): WriterHarness {
     setRenameResult: result => { renameResult = result },
     setPromptHook: hook => { promptHook = hook },
     setQueueHook: hook => { queueHook = hook },
+    setBeginHook: hook => { beginHook = hook },
+    setBeginThrows: error => { beginThrows = error },
   }
 }
 
@@ -211,6 +219,8 @@ test('an unsupported preflight is refused before any official echo or Host mutat
 test('the official echo is registered after preflight and before serialization', async () => {
   const harness = writerHarness()
   const order: string[] = []
+  harness.setBeginHook(() => order.push('begin'))
+  harness.setPromptHook(() => order.push('prompt'))
   const serializer: RemotePromptSerializer = {
     preflight: () => {
       order.push('preflight')
@@ -223,9 +233,20 @@ test('the official echo is registered after preflight and before serialization',
   }
   const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer)
   assert.equal((await writer.prompt('session-a', {}, 'queue')).kind, 'committed')
-  order.push('prompt')
-  assert.deepEqual(order, ['preflight', 'serialize', 'prompt'])
+  // `begin` is recorded AT the registration call, so the assertion actually
+  // pins the official ordering (it would fail if begin ran after serialize).
+  assert.deepEqual(order, ['preflight', 'begin', 'serialize', 'prompt'])
   assert.equal(harness.calls.beginInputs.length, 1)
+})
+
+test('an echo-registration failure is a pre-dispatch refusal, never indeterminate', async () => {
+  const harness = writerHarness()
+  harness.setBeginThrows(new Error('echo store closed'))
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer())
+  const outcome = await writer.prompt('session-a', {}, 'queue')
+  assert.equal(outcome.kind, 'rejected')
+  assert.equal(outcome.kind === 'rejected' ? outcome.error.code : undefined, 'session/prompt-echo-failed')
+  assert.equal(harness.calls.promptCalls.length, 0)
 })
 
 test('a post-begin serialization failure abandons the official echo and is a known local refusal', async () => {

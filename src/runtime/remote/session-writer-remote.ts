@@ -153,12 +153,13 @@ function generationChanged(generation: RemoteConnectionGenerationSource, capture
   return !Object.is(captured, generation.getSnapshot())
 }
 
-/** A local preflight/serialization failure. The Host was never dispatched, so
- * the caller may safely restore its draft (unlike an indeterminate write). */
-function serializeFailed(error: unknown): WriteOutcome {
+/** A local failure that happens BEFORE the identified prompt dispatch: the Host
+ * was never called, so the caller may safely restore its draft (unlike an
+ * indeterminate write). */
+function preDispatchFailure(code: string, error: unknown): WriteOutcome {
   return {
     kind: 'rejected',
-    error: { code: 'session/prompt-serialize-failed', message: safeErrorMessage(error) },
+    error: { code, message: safeErrorMessage(error) },
   }
 }
 
@@ -206,7 +207,7 @@ export class RemoteSessionWriter implements SessionWriter {
       preflight = this.serializer.preflight(message)
     } catch (error) {
       // No dispatch happened, so this is a known local refusal.
-      return serializeFailed(error)
+      return preDispatchFailure('session/prompt-preflight-failed', error)
     }
     if (preflight.kind === 'unsupported') {
       return { kind: 'unsupported', reason: preflight.reason }
@@ -224,10 +225,9 @@ export class RemoteSessionWriter implements SessionWriter {
         attachments: preflight.echo.attachments,
       })
     } catch (error) {
-      // Registration is a local synchronous step; an assembly fault here is not
-      // a business refusal, so it settles through the same vocabulary rather
-      // than escaping the port as a throw.
-      return classifyRemoteWriteFailure(error)
+      // Local registration is still BEFORE the prompt dispatch, so the Host
+      // was never called: a known refusal, never indeterminate.
+      return preDispatchFailure('session/prompt-echo-failed', error)
     }
 
     // 3. Serialize. This runs AFTER the echo exists, so a failure here is a
@@ -238,7 +238,7 @@ export class RemoteSessionWriter implements SessionWriter {
       serialized = await this.serializer.serialize(message)
     } catch (error) {
       handle.abandon()
-      return serializeFailed(error)
+      return preDispatchFailure('session/prompt-serialize-failed', error)
     }
     if (serialized.kind === 'unsupported') {
       handle.abandon()

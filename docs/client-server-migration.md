@@ -801,12 +801,20 @@ correct presentation.
 - `RemoteSubagentPort` uses the official generated `subagents.prompt` and
   `subagents.interruptByParent` Remotes with the exact durable parent/child
   address and `continuable` mode. A continuation prompt mints one request
-  identity before the call. Prompt and interrupt both settle `indeterminate`
-  when a carrier/unidentified failure leaves the child's ownership unproven
-  (a domain refusal stays `rejected`); the runner then never restores the draft
-  as an unsent submission and never reports a false "not stopped" — the child's
-  authoritative state decides, with no automatic replay. A committed interrupt
-  admission is likewise never presented as a durably stopped child.
+  identity before the call. Preparation (service lookup, signal, `@`-mention
+  canonicalization) is separated from the dispatch call: a preparation failure
+  is a known pre-dispatch refusal (`rejected`), never indeterminate. Only the
+  `prompt()`/`interruptByParent()` call itself can be ambiguous, and the
+  settlement is code-based: every structured Host code (a `subagent/*`
+  admission refusal such as `parent-unavailable`, `not-resumable`,
+  `not-found`, `catalog-diagnostic`, `unauthorized`, `delivery-unavailable`,
+  `projections-unavailable`, `attachment-invalid`, `invalid-time-zone`, or
+  `gateway/bad-request`) is a proven `rejected`; only `gateway/internal` or a
+  code-less throw settles `indeterminate`. The runner then never restores an
+  indeterminate viewer draft as unsent and never reports a false "not
+  stopped" — the child's authoritative state decides, with no automatic
+  replay. A committed interrupt admission is likewise never presented as a
+  durably stopped child.
 - Ctrl+S already converges on official per-occurrence `updateQueue({kind:'steer'})`
   choreography from D2.1 (`src/steer.ts`): FIFO best-effort, partial progress is
   real, no fake rollback, and the authoritative snapshot reconciles the
@@ -816,6 +824,14 @@ Validation for this stage: per-adapter unit contract tests, the
 submission-presentation and pending-input mapping tests, and the same-Host
 `smoke:remote-d2-write` integration smoke. D1 closure and the boundary gate stay
 green. `packages/pi-tui/**` and the DSH source pin are unchanged.
+
+> Frozen-plan note: the maintainer froze `temp/m2/` plan documents. The D2.2
+> plan's §29 ("serialize all prerequisites that may fail before admission ->
+> begin official local submission -> call prompt") still describes the
+> single-phase ordering; the implemented and reviewed contract is the two-phase
+> `preflight -> beginSubmission -> serialize -> prompt` described above and in
+> plan §19. The residue is recorded here for the owner; the frozen plan itself
+> is not edited.
 
 ### D2.2 serialization / D4 boundary matrix
 

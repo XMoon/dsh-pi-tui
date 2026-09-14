@@ -192,6 +192,26 @@ test('a plain wire prompt carrier failure is indeterminate with its human messag
   assert.deepEqual(outcome, { kind: 'indeterminate', message: 'carrier reset' })
 })
 
+test('a pre-dispatch canonicalization failure is rejected, never indeterminate', async () => {
+  const h = harness()
+  const outcome = await h.port.prompt(
+    { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: '@a' }] },
+    context({ canonicalizeText: () => { throw new Error('mention failed') } }),
+  )
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'error', message: 'mention failed' } })
+  assert.equal(h.promptCalls.length, 0, 'prompt must not be called after a preparation failure')
+})
+
+test('a missing addressed child settles rejected stale-child, not indeterminate', async () => {
+  const h = harness()
+  h.setPromptResult({ ok: false, error: { code: 'subagent/not-found', message: 'gone' } })
+  const outcome = await h.port.prompt(
+    { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: 'x' }] },
+    context(),
+  )
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'stale-child' } })
+})
+
 test('a prompt throw after dispatch is indeterminate, not a false rejection', async () => {
   const h = harness()
   h.setPromptThrows(new Error('assembly fault'))

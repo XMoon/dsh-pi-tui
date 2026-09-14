@@ -130,14 +130,21 @@ export type SubagentPromptSettlement =
   | { readonly kind: 'indeterminate'; readonly message: string }
 
 /**
- * Settle a failed viewer prompt. Known business codes (and a caller
- * cancellation) are proven refusals; anything else — a `gateway/internal`
- * carrier failure or an unidentified throw — may already have been accepted by
- * the child, so it is `indeterminate` rather than a false "not sent".
+ * Settle a failed viewer prompt. A caller cancellation and EVERY structured
+ * Host failure code (a domain `subagent/*` admission refusal or
+ * `gateway/bad-request`) are proven refusals; only the unclassified carrier
+ * failure (`gateway/internal`) or a code-less throw may already have been
+ * accepted by the child, so only those settle `indeterminate`.
  */
 export function classifySubagentPromptSettlement(error: unknown): SubagentPromptSettlement {
   const reason = classifySubagentPromptError(error)
   if (reason.kind !== 'error') return { kind: 'rejected', reason }
+  const code = remoteErrorCode(error)
+  // `error` is the catch-all reason kind: it covers both proven refusals with
+  // no dedicated category (invalid attachment/zone, bad request, a legacy
+  // code) and genuinely unidentified failures. A structured code is still a
+  // proven Host refusal; only an unclassified/absent code is ambiguous.
+  if (code !== undefined && code !== 'gateway/internal') return { kind: 'rejected', reason }
   return { kind: 'indeterminate', message: reason.message }
 }
 
@@ -228,15 +235,22 @@ export async function submitSubagentPrompt(
   request: SubagentViewerSubmitRequest,
   deps: SubagentViewerSubmitDeps,
 ): Promise<SubagentPromptOutcome> {
+  // ── Pre-dispatch preparation. Every failure here happens BEFORE
+  //    `prompt()` is called, so it is a KNOWN non-dispatch: the caller may
+  //    restore its draft and it is never indeterminate.
+  let subagents: SubagentPromptService
+  let signal: AbortSignal
+  let canonical: SubagentPromptContentPart[]
   try {
     // 1. The official control surface, read lazily: the continuation
     //    runtime may appear/disappear between calls (draining / activation
     //    disposal).
-    const subagents = deps.subagents()
-    if (subagents === undefined) {
+    const resolved = deps.subagents()
+    if (resolved === undefined) {
       return { kind: 'rejected', reason: { kind: 'unavailable' } }
     }
-    const signal = deps.makeSignal()
+    subagents = resolved
+    signal = deps.makeSignal()
     // 2. The TUI's own @-mention grammar is canonicalized BEFORE delivery
     //    (the editor keeps `@src/foo.ts`, the child model receives the
     //    absolute path). The canonicalization MAY be async (migration
@@ -246,7 +260,7 @@ export async function submitSubagentPrompt(
     //    while the UI already treats the send as stale (the draft is
     //    restored by the caller). Parent/child authority itself is the
     //    Host's job — the official prompt() rejects it authoritatively.
-    const canonical: SubagentPromptContentPart[] = []
+    canonical = []
     for (const part of request.content) {
       if (part.type === 'text') {
         canonical.push({ type: 'text', text: await deps.canonicalizeText?.(part.text) ?? part.text })
@@ -259,12 +273,18 @@ export async function submitSubagentPrompt(
       }
     }
     if (signal.aborted) return { kind: 'rejected', reason: { kind: 'cancelled' } }
-    // 3. The ONE correct write path: the official browser prompt contract.
-    //    A HUMAN-authored message to a continuable direct child — the
-    //    resolved queue/steer delivery is passed unchanged to the child;
-    //    the child owns the selected placement;
-    //    the requestId (minted fresh for THIS submit, before the call) is
-    //    persisted on the accepted message.
+  } catch (error) {
+    return { kind: 'rejected', reason: { kind: 'error', message: safeErrorMessage(error) } }
+  }
+  // ── Dispatch. Only a failure of the `prompt()` call itself can leave the
+  //    child's ownership unproven.
+  try {
+    // The ONE correct write path: the official browser prompt contract.
+    // A HUMAN-authored message to a continuable direct child — the
+    // resolved queue/steer delivery is passed unchanged to the child;
+    // the child owns the selected placement;
+    // the requestId (minted fresh for THIS submit, before the call) is
+    // persisted on the accepted message.
     const receipt = await subagents.prompt(
       {
         requestId: deps.mintRequestId(),
@@ -293,17 +313,25 @@ export async function submitSubagentPrompt(
  */
 export function classifySubagentPromptError(error: unknown): SubagentPromptReject {
   if (isAbortError(error)) return { kind: 'cancelled' }
-  const code = typeof error === 'object' && error !== null
-    ? (error as { code?: unknown }).code
-    : undefined
-  if (typeof code === 'string') {
-    if (code === 'gateway/cancelled') return { kind: 'cancelled' }
-    if (code === 'subagent/parent-unavailable') return { kind: 'parent-unavailable' }
-    if (code === 'subagent/not-resumable') return { kind: 'stale-child' }
-    if (code === 'subagent/unauthorized') return { kind: 'unauthorized' }
-    if (code === 'subagent/delivery-unavailable') return { kind: 'unavailable' }
-  }
+  const code = remoteErrorCode(error)
+  if (code === 'gateway/cancelled') return { kind: 'cancelled' }
+  if (code === 'subagent/parent-unavailable') return { kind: 'parent-unavailable' }
+  // A missing or descriptor-damaged addressed child cannot take a
+  // continuation, exactly like the official not-resumable case.
+  if (code === 'subagent/not-resumable'
+    || code === 'subagent/not-found'
+    || code === 'subagent/catalog-diagnostic') return { kind: 'stale-child' }
+  if (code === 'subagent/unauthorized') return { kind: 'unauthorized' }
+  if (code === 'subagent/delivery-unavailable'
+    || code === 'subagent/projections-unavailable') return { kind: 'unavailable' }
   return { kind: 'error', message: safeErrorMessage(error) }
+}
+
+/** The stable failure code of a structural official failure, if any. */
+function remoteErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const code = (error as { readonly code?: unknown }).code
+  return typeof code === 'string' && code !== '' ? code : undefined
 }
 
 function isAbortError(error: unknown): boolean {
