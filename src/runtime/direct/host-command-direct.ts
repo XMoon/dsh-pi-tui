@@ -10,7 +10,6 @@
  */
 
 import { safeErrorMessage } from '../../error-boundary.ts'
-import { isCancellation } from '../../detached.ts'
 import type {
   HostCommandExecution,
   HostCommandOutcome,
@@ -71,12 +70,18 @@ export class DirectHostCommandPort implements HostCommandPort {
     if (agent === undefined) return rejected('session/not-found', `session "${request.sessionId}" is not available`)
     // The caller-owned lifecycle signal is forwarded unchanged; do not mint a
     // replacement that could outlive the TUI surface.
+    if (request.signal.aborted) return { kind: 'cancelled' }
+    // Once the Host command is dispatched, a cancellation-shaped throw is NOT
+    // proof that nothing happened: the pinned executor appends `command/run`
+    // before the handler and `command/done` after it, so an aborted handler may
+    // already have run (and side-effected). Such a failure is therefore
+    // indeterminate, never a known `cancelled`.
     try {
       const execution = await commands.execute(agent, request.line, request.attachments, request.signal)
       if (execution === undefined) return { kind: 'committed', matched: false }
       return { kind: 'committed', matched: true, execution }
     } catch (error) {
-      return isCancellation(error) ? { kind: 'cancelled' } : indeterminate(error)
+      return indeterminate(error)
     }
   }
 }

@@ -48,6 +48,14 @@ export const GATEWAY_PRE_INVOCATION_CODES: ReadonlySet<string> = new Set([
  * infrastructure codes qualify. `gateway/cancelled`, `gateway/internal`,
  * `gateway/result-invalid`, an unknown `gateway/*` code, or a code-less failure
  * do NOT (the commit state stays unproven).
+ *
+ * SCOPE: this predicate expresses ONLY the D2.2-verified write vocabulary plus
+ * the pinned Gateway pre-invocation codes. It is NOT a general
+ * idempotency/commit judgement: a domain code does not universally prove that
+ * no mutation happened (e.g. `session/workspace-attach-failed` can follow a
+ * successful Session create/fork). Later operation families (D2.3/D2.4) must
+ * use their own operation-specific settlement table rather than extending this
+ * helper.
  */
 export function isRemoteBusinessRefusalCode(code: string | undefined): boolean {
   if (code === undefined) return false

@@ -68,19 +68,21 @@ test('resolves a replacement live Agent on the next call', async () => {
   assert.deepEqual(seen, [first, second])
 })
 
-test('does not rewrite an already-aborted signal before official execution', async () => {
+test('an already-aborted signal before dispatch settles cancelled without executing', async () => {
   const live = new Map([['session-a', { session: { id: 'session-a' } }]])
   const controller = new AbortController()
   controller.abort()
-  let receivedSignal: AbortSignal | undefined
+  let calls = 0
   const port = new DirectHostCommandPort(host({
-    execute: async (_agent: unknown, _line: string, _attachments: readonly unknown[], signal: AbortSignal) => {
-      receivedSignal = signal
-      return undefined
-    },
+    execute: async () => { calls += 1; return undefined },
   }, live), sessionId => live.get(sessionId))
-  await port.execute({ sessionId: 'session-a', line: '/command', attachments: [], signal: controller.signal })
-  assert.equal(receivedSignal, controller.signal)
+  // A signal already aborted BEFORE dispatch proves the command never ran, so
+  // this is a known cancellation and the executor is not invoked.
+  assert.deepEqual(
+    await port.execute({ sessionId: 'session-a', line: '/command', attachments: [], signal: controller.signal }),
+    { kind: 'cancelled' },
+  )
+  assert.equal(calls, 0)
 })
 
 test('maps non-cancellation command exceptions to indeterminate', async () => {
@@ -103,15 +105,18 @@ test('maps non-cancellation command exceptions to indeterminate', async () => {
   }
 })
 
-test('maps cancellation-shaped command exceptions to cancelled', async () => {
+test('a cancellation-shaped exception AFTER dispatch is indeterminate, never a known cancellation', async () => {
   const failure = new Error('command cancelled')
   failure.name = 'AbortError'
   const live = new Map([['session-a', { session: { id: 'session-a' } }]])
   const port = new DirectHostCommandPort(host({
     execute: async () => { throw failure },
   }, live), sessionId => live.get(sessionId))
+  // The pinned executor appends command/run before the handler, so an aborted
+  // handler may already have run: the outcome cannot claim "not executed".
   assert.deepEqual(await port.execute({ sessionId: 'session-a', line: '/x', attachments: [], signal: new AbortController().signal }), {
-    kind: 'cancelled',
+    kind: 'indeterminate',
+    error: { code: 'session/write-indeterminate', message: 'command cancelled' },
   })
 })
 
