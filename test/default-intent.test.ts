@@ -156,3 +156,15 @@ test('reconcile converges CONSECUTIVE unresolved ancestors with one authoritativ
   assert.equal(tracker.intent, undefined, 'the matching unresolved ancestor commits')
   assert.equal(tracker.outcome, 'committed', 'one reconciliation call converges the whole chain')
 })
+
+test('reconcile stops at a restored PENDING ancestor (the sessionless marker derives from it)', () => {
+  const tracker = new DefaultIntentTracker()
+  tracker.set(a) // A is pending (its write has not settled)
+  tracker.set(b)
+  const idB = tracker.record!.id
+  tracker.settle(idB, 'unresolved')
+  // An authoritative read matches nothing: B fails, A (pending) is restored.
+  tracker.reconcile(() => false)
+  assert.deepEqual(tracker.intent, a, 'the pending ancestor becomes the active intent again')
+  assert.equal(tracker.outcome, undefined, 'a restored pending ancestor has no settled outcome')
+})

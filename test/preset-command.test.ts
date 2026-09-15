@@ -94,6 +94,10 @@ function presetService(
   selectLocked?: boolean,
   /** Per-call official roster projection override (gating/disabled tests). */
   rosterOverride?: () => Promise<unknown>,
+  /** Explicit resolve override (subject-drift windows). */
+  resolveOverride?: (id?: string) => Promise<{ readonly id: string; readonly trust: string; readonly path: string }>,
+  /** Runs inside the official Host select BEFORE it settles (transition drift). */
+  selectHook?: () => void,
 ) {
   const resolved: string[] = []
   const selected: string[] = []
@@ -123,6 +127,7 @@ function presetService(
         ...row.description === undefined ? {} : { description: row.description },
       })),
       resolve: async (id?: string) => {
+        if (resolveOverride !== undefined) return resolveOverride(id)
         const row = rows.find(candidate => candidate.id === id)
         if (row === undefined) throw new Error(`agent-presets: preset "${id}" not found (available: standard)`)
         resolved.push(id!)
@@ -131,6 +136,7 @@ function presetService(
       // The official blank-session select: re-checks the session's turn
       // boundary and refuses a started one with agent-preset/locked.
       select: async (agent: unknown, id: string) => {
+        selectHook?.()
         if (selectFailure !== undefined) throw selectFailure
         const row = rows.find(candidate => candidate.id === id)
         if (row === undefined) throw Object.assign(new Error(`agent-presets: preset "${id}" not found (available: standard)`), { code: 'agent-preset/not-found' })
@@ -315,6 +321,10 @@ function setup(options: {
   selectLocked?: boolean
   /** Per-call official roster override (see presetService). */
   roster?: () => Promise<unknown>
+  /** Explicit resolve override (see presetService). */
+  resolve?: (id?: string) => Promise<{ readonly id: string; readonly trust: string; readonly path: string }>
+  /** Runs inside the official Host select before it settles (see presetService). */
+  selectHook?: () => void
   refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
   settings?: { get(ns: string): unknown; mutate(ns: string, patch: unknown[]): Promise<unknown> }
   tuiSettings?: TuiSettingsLike
@@ -336,7 +346,7 @@ function setup(options: {
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
-  const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked, options.roster)
+  const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked, options.roster, options.resolve, options.selectHook)
   ctx.provide('agentPresets', presets.service as never)
   if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
   const ensureCalls: string[] = []
@@ -1384,5 +1394,63 @@ test('a sessionless /preset picker cannot switch a Session that appeared in the 
   await Promise.resolve()
   await Promise.resolve()
   assert.deepEqual(t.presets.selected, [], 'a stale sessionless picker must not switch the new live Session')
+  t.app.stop()
+})
+
+test('typed /preset whose subject drifts to a same-generation live Session is superseded', async () => {
+  const state = { agent: undefined as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const t = setup({
+    state,
+    roster: async () => {
+      // A first create publishes a live Agent while the roster is in flight,
+      // WITHOUT a generation bump.
+      state.agent = fakeAgent('s2', [])
+      return {
+        presets: SHIPPED_ROWS.map(row => ({ id: row.id, trust: row.trust ?? 'system', isDefault: row.id === 'standard' })),
+        modeSelectionEnabled: true,
+      }
+    },
+  })
+  const result = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(result.kind, 'success')
+  assert.equal(result.text, undefined, 'a drifted subject is silent')
+  assert.deepEqual(t.presets.selected, [], 'the stale op must never switch the newly appeared Session')
+  assert.equal(t.pending.value, undefined, 'no sessionless intent is staged onto a now-live surface')
+  t.app.stop()
+})
+
+test('typed /preset whose subject drifts during resolve() is superseded', async () => {
+  const state = { agent: undefined as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const t = setup({
+    state,
+    resolve: async (id?: string) => {
+      state.agent = fakeAgent('s2', [])
+      return { id: id ?? 'standard', trust: 'system', path: `/presets/${id ?? 'standard'}` }
+    },
+  })
+  const result = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(result.kind, 'success')
+  assert.equal(result.text, undefined)
+  assert.deepEqual(t.presets.selected, [], 'a subject that drifts during resolve must not stage or switch')
+  assert.equal(t.pending.value, undefined)
+  t.app.stop()
+})
+
+test('a /preset whose subject moves during the Host switch stays silent (transition-await fence)', async () => {
+  const state = { agent: fakeAgent('s1', []), generation: 1 }
+  const t = setup({
+    state,
+    selectLocked: true,
+    selectHook: () => {
+      // The subject moves to another Session in the SAME generation while the
+      // official Host switch is in flight; the switch then refuses (locked).
+      state.agent = fakeAgent('s2', [])
+    },
+  })
+  const result = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(result.kind, 'success', 'a drifted subject must not surface the stale lock rejection')
+  assert.equal(result.text, undefined, 'a drifted subject is silent')
+  assert.deepEqual(t.presets.selected, [], 'the Host refusal never committed')
+  assert.ok(!t.vt.getViewport().join('\n').includes('locked'), 'no stale lock notice is rendered')
   t.app.stop()
 })
