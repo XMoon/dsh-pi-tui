@@ -3253,6 +3253,21 @@ export class TuiApp {
    * session log; compatible floors remain active during historical browsing
    * and release only at explicit lifecycle or structural boundaries. */
   private readonly focusLiveHeightStates = new Map<number, FocusLiveHeightState>()
+  /**
+   * The transcript block batch currently committed to `messagesView` by
+   * {@link rebuildMessages}. It is the presentation metadata of the MOUNTED
+   * batch: `refreshMessageRows()` remeasures these exact component instances and
+   * must never project or create another batch, otherwise measurement advances
+   * the message-component cache ownership independently of what is still
+   * mounted.
+   *
+   * ZERO-HEIGHT EXCEPTION: a block whose measured height is 0 keeps its entry
+   * (and its component) in this batch but is NOT wrapped in a gutter, so it has
+   * no mounted counterpart. The identity invariant is therefore over the batch's
+   * components, with zero-height blocks having no mounted row — see
+   * `docs/focus-replay-harness.md`.
+   */
+  private mountedTranscriptBlocks: readonly RenderedTranscriptBlock[] = []
   /** The currently measured inert padding after a Focus turn's boundary
    * spacer. Padding components read this map at paint time, retaining the
    * compatible floor while historical and releasing it with the same explicit
@@ -6742,6 +6757,41 @@ export class TuiApp {
     })
   }
 
+  /**
+   * Re-measure an already-mounted transcript batch without touching component
+   * lifecycle: the SAME `entry.component` instances are re-rendered at the
+   * current width and the height-derived geometry (attachment ranges, sub-call
+   * and workflow hit offsets) is re-derived. No projection, no
+   * `componentForMessage`, no cache replacement, no new component batch.
+   */
+  private remeasureTranscriptBlocks(
+    mounted: readonly RenderedTranscriptBlock[],
+    width: number,
+  ): RenderedTranscriptBlock[] {
+    return mounted.map(entry => {
+      const rendered = entry.component.render(width)
+      if (entry.block.kind !== 'message') {
+        return { ...entry, rendered }
+      }
+      const attachments = this.attachmentRangesOf(entry.component, width)
+      const subCallInfo = this.subCallHitsByMessage.get(entry.block.message)
+      const subCallHits = subCallInfo === undefined
+        ? undefined
+        : subCallInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - subCallInfo.total }))
+      const workflowInfo = this.workflowHitsByMessage.get(entry.block.message)
+      const workflowHits = workflowInfo === undefined
+        ? undefined
+        : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
+      return {
+        ...entry,
+        rendered,
+        attachments,
+        ...(subCallHits === undefined ? { subCallHits: undefined } : { subCallHits }),
+        ...(workflowHits === undefined ? { workflowHits: undefined } : { workflowHits }),
+      }
+    })
+  }
+
   /** The semantic turn owner of a rendered block. Do not use the Focus
    * collapse owner here: that marker is an interaction target, not turn
    * membership, and final assistant rows deliberately have no marker. */
@@ -6884,6 +6934,9 @@ export class TuiApp {
     // the frame pass — so the heights match the screen exactly.
     const width = this.transcriptRenderWidth()
     const renderedBlocks = this.renderTranscriptBlocks(projectionExpanded, width)
+    // Publish the batch that this rebuild is about to mount. Measurement paths
+    // (refreshMessageRows) read it instead of projecting a second batch.
+    this.mountedTranscriptBlocks = renderedBlocks
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     const rows: FullscreenRowEntry[] = []
     // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
@@ -7027,11 +7080,14 @@ export class TuiApp {
    * (the gutter contract), or the hit map drifts from the layout. */
   private refreshMessageRows(): void {
     const width = this.transcriptRenderWidth()
-    // The derived projection set is computed ONCE per refresh (never per
-    // activity block — review finding), and the same rendered metadata drives
-    // both the high-water measurement and the hit map.
+    // Measurement-only: the derived projection set is read once, and the
+    // MOUNTED batch is remeasured in place. Projecting a second component batch
+    // here used to advance the message-component cache ownership independently
+    // of the components still mounted in `messagesView`, so a later prune could
+    // dispose the mounted live-assistant component and a paint rendered it as
+    // zero rows (fullscreen Focus transient collapse).
     const projectionExpanded = this.focusProjectionExpandedTurns()
-    const renderedBlocks = this.renderTranscriptBlocks(projectionExpanded, width)
+    const renderedBlocks = this.remeasureTranscriptBlocks(this.mountedTranscriptBlocks, width)
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     const rows: FullscreenRowEntry[] = []
     for (let index = 0; index < renderedBlocks.length; index += 1) {
