@@ -535,7 +535,7 @@ introduced by D1.1/D1.2.
 ## D1.2 status — pinned-master command/skill authority shadow
 
 D1.2 is complete for the experimental live-session authority read shadow. The
-`next` Source Mode pin is `c291e7961a515f6d7af9304e7fd1d257929aef26` (`0.1.5-rc.2`).
+`next` Source Mode pin is `0a15e36e7f82b6ed45af6fa9759f29b40dcd965d` (`0.1.6-alpha.1`).
 The shadow uses the official Connection and generated Remotes only:
 
 - `commands/list(sessionId)` and `skills/list({ sessionId }, signal)` are mapped
@@ -1022,6 +1022,19 @@ model/preset/create/open presentation tests; and the same-Host
 and `packages/pi-tui/**` is unchanged. D2.3 is COMPLETE; the next stage is D2.4
 (seed/fork metadata convergence), which owns Host fork and the remaining
 create/fork metadata.
+
+**DSH 0.1.6 compatibility note.** `next` now targets the published DSH
+`0.1.6-alpha.1` family in npm mode, and the Source Mode pin moves to
+`0a15e36e7f82b6ed45af6fa9759f29b40dcd965d` (`0.1.6-alpha.1`). This compatibility
+stage changes no Semantic Port: the Direct `forkSeed()`/`rewindSeed()`/
+`snapshotEvents()` reads remain in-process implementation details. 0.1.6 states
+the official fork cut more precisely — a selected completed turn's seed ends at
+and includes that `turn/end`, and queued input, title and model settings after
+it do not enter the child seed — so D2.4 must take the official `session.fork`
+contract as its authority rather than serializing TUI raw seed payloads into a
+future Remote contract. Plugin-owned durable events such as `image/offload`
+inherit by the official cut/prefix; the TUI keeps no event-type inheritance
+whitelist. This note does not advance the D2.4 status.
 
 
 

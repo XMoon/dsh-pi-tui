@@ -2640,6 +2640,48 @@ test('a notice-form injection records its one-line summary', () => {
   assert.equal(system.summary, 'saved the todo list')
 })
 
+test('a subagent settlement notice folds as the Host-constructed text-only notice', () => {
+  // 0.1.6's parent settlement notice carries ONLY the child's closing text
+  // blocks; the Host builds it and the TUI folds it as-is — it never
+  // re-filters the child's blocks nor rebuilds a notice of its own.
+  const messages = foldTranscript([
+    event('user/message', {
+      id: MessageId('msg-settled'),
+      role: 'user',
+      content: [{ type: 'text', text: 'child finished: 2 files written' }],
+      source: { kind: 'subagent-settled' } as never,
+    }, 0),
+  ])
+  const notice = messages[0]
+  assert.ok(notice !== undefined && notice.kind === 'system')
+  assert.equal(notice.icon, 'context-notice')
+  assert.equal(notice.text, 'child finished: 2 files written')
+})
+
+test('multiple subagent settlement notices keep their Host order', () => {
+  const text = (message: TranscriptMessage | undefined): string | undefined =>
+    message !== undefined && message.kind === 'system' ? message.text : undefined
+  const messages = foldTranscript([
+    event('user/message', {
+      id: MessageId('m1'),
+      role: 'user',
+      content: [{ type: 'text', text: 'first child closed' }],
+      source: { kind: 'subagent-settled' } as never,
+    }, 0),
+    event('user/message', {
+      id: MessageId('m2'),
+      role: 'user',
+      content: [{ type: 'text', text: 'second child closed' }],
+      source: { kind: 'subagent-settled' } as never,
+    }, 1),
+  ])
+  assert.deepEqual(
+    messages.map(text),
+    ['first child closed', 'second child closed'],
+    'settlement notices must present in the order the Host projected them',
+  )
+})
+
 test('an unreadable injection source degrades to its kind as the label', () => {
   const messages = foldTranscript([
     event('user/message', {
@@ -5178,4 +5220,91 @@ test('failed-attempt reasoning resets on retry and matches a cold replay', () =>
   assert.equal(liveThinking.length, 1)
   assert.ok(liveThinking[0] !== undefined && liveThinking[0].kind === 'thinking')
   assert.equal(liveThinking[0].text, 'attempt B reasoning', 'the retry reset the failed attempt\'s reasoning text')
+})
+
+test('image/offload is a safe presentation no-op across transcript, markdown, stats and Focus', () => {
+  // The official 0.1.6 plugin-owned durable event changes the MODEL-visible
+  // image surface only; it must never add a human transcript row, an export
+  // line, a stats count, or a Focus anchor. The TUI deliberately has no
+  // `image/offload` case — the fold ignores it structurally.
+  const header = { id: 's1' as never, cwd: '/ws', version: 1, createdAt: 0 }
+  // A REAL image occurrence on the user message: `image/offload` targets a
+  // current image-bearing node, so the safe-ignore assertion is not vacuous.
+  const IMAGE_REF = { attachmentId: 'att-image-1', mediaType: 'image/png', bytes: 4, width: 800, height: 600, name: 'shot.png' }
+  const base = (): SessionEvent[] => [
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('u1'),
+      role: 'user',
+      content: [
+        { type: 'text', text: 'hello' },
+        { type: 'image', attachment: IMAGE_REF },
+      ] as never,
+      source: { kind: 'user' },
+    }, 1),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('a1'),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hi' }],
+        source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+      },
+      stream: [],
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ]
+  // A structurally legal log-only projection event: a target names the
+  // user/message node by its seq with a nonempty depth-first image index list
+  // (the message really carries an image occurrence).
+  const offload = rawEvent('image/offload', { targets: [{ seq: 1, imageIndexes: [0] }] }, 4)
+  const after = [...base(), offload]
+  const fold = (events: readonly SessionEvent[]): TranscriptFolder => {
+    const folder = new TranscriptFolder()
+    folder.hydrate(events)
+    return folder
+  }
+  const plain = fold(base())
+  const offloaded = fold(after)
+
+  // The fixture must target a REAL image-bearing message (not an orphan).
+  const plainUser = plain.messages()[0]
+  assert.ok(
+    plainUser !== undefined && plainUser.kind === 'user'
+      && (plainUser.content?.some(block => (block as { type?: string }).type === 'image') ?? false),
+    'the image/offload fixture must target a real image-bearing user message',
+  )
+  // 1. No human transcript row is added.
+  assert.deepEqual(offloaded.messages(), plain.messages(), 'image/offload must not create a transcript row')
+  // 2. No markdown export line is added.
+  assert.equal(
+    renderTranscriptMarkdown({ header, snapshotEvents: () => after } as never),
+    renderTranscriptMarkdown({ header, snapshotEvents: () => base() } as never),
+    'image/offload must not change the markdown export',
+  )
+  // 3. No turn/step/tool/user count changes.
+  assert.deepEqual(computeStats(after), computeStats(base()), 'image/offload must not change stats')
+  // 4. Focus owner/anchor projection is unchanged.
+  assert.deepEqual(
+    projectFocus(offloaded.messages(), offloaded.turnActivities(), new Set([0]), true),
+    projectFocus(plain.messages(), plain.turnActivities(), new Set([0]), true),
+    'image/offload must not move a Focus anchor',
+  )
+  // 5. Replay is deterministic and does not crash.
+  assert.deepEqual(fold(after).messages(), offloaded.messages(), 'replay of the offload stream must be stable')
+  // 6. An ordinary user/assistant presentation after the event is normal.
+  const postMessages = fold([
+    ...after,
+    event('user/message', {
+      id: MessageId('u2'),
+      role: 'user',
+      content: [{ type: 'text', text: 'again' }],
+      source: { kind: 'user' },
+    }, 5),
+  ]).messages()
+  assert.deepEqual(kinds(postMessages), ['user', 'assistant', 'user'], 'a post-offload message presents normally')
+  const last = postMessages[2]
+  assert.ok(last !== undefined && last.kind === 'user')
+  assert.equal(last.text, 'again')
 })

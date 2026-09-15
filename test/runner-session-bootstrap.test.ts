@@ -2515,6 +2515,61 @@ test('the Preparing status stays on screen through the catalog ready barrier', a
   await new Promise(resolve => setTimeout(resolve, 200))
 })
 
+test('an emitted skills/change reaches the runner catalog refresh for the current owner', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-skills-change-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const resumed: FakeSession = fakeSession({
+    id: 'skills-change-session',
+    header: { id: 'skills-change-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('skills change answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  let snapshots = 0
+  const scopes: unknown[] = []
+  context.provide('skills', {
+    snapshot: async (options: { readonly scope?: object }) => {
+      snapshots += 1
+      scopes.push(options?.scope)
+      return { skills: [], complete: true }
+    },
+  } as never)
+  const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  life.defer(() => fiber.dispose())
+  await settle()
+  const before = snapshots
+  const emitSkillsChange = (): void =>
+    (context as unknown as { emit(name: string, payload: unknown): void }).emit('skills/change', {})
+  // A BURST of invalidations: the runner's `skills/change` listener must reach
+  // the CoalescingRefreshGate and drive a catalog refresh for the CURRENT
+  // owner (re-reading the skill catalog), while coalescing the burst.
+  emitSkillsChange()
+  emitSkillsChange()
+  emitSkillsChange()
+  const deadline = Date.now() + 3000
+  while (snapshots === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.ok(snapshots > before,
+    'an emitted skills/change must drive a catalog refresh (skill re-read) for the current owner')
+  await new Promise(resolve => setTimeout(resolve, 250))
+  assert.ok(snapshots - before <= 2,
+    `a burst of skills/change must coalesce to at most two reads (observed ${snapshots - before})`)
+  // The refresh must read in the CURRENT LIVE AGENT scope, never the standing
+  // or global scope: the Agent object carries `session`; a standing key does
+  // not, and the global target passes `undefined`.
+  assert.ok(scopes.length > 0, 'the invalidation refresh must read the skill catalog with a scope')
+  assert.ok(
+    scopes.every(scope => typeof scope === 'object' && scope !== null && 'session' in scope),
+    'every skills/change refresh must read the skill catalog in the LIVE AGENT scope (not standing/global)',
+  )
+})
+
 test('a fresh start with a FAILING preset resolution stays silent (no Preparing status)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fresh-preset-fail-')
