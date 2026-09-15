@@ -88,7 +88,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
   }
 
   async create(request: CreateSessionRequest): Promise<CreateResult> {
-    if (request.signal?.aborted === true) return { ownership: 'current', outcome: { kind: 'cancelled' } }
+    if (Boolean(request.signal?.aborted)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
     const agents = this.ctx.get('agents') as AgentsServiceLike | undefined
     if (agents === undefined) {
       return currentCreateRejected('session/create-unavailable', 'agents service unavailable')
@@ -97,12 +97,17 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       // The preset composition (with its agent-setup callback) is a Direct
       // concern: resolved inside the adapter from the request's preset id.
       const composition = await this.compose(request.agentPreset)
+      // The semantic `agentPreset` is the SINGLE preset authority: the adapter
+      // persists the preset it actually composed. A legacy seeded/fork caller
+      // that still carries `meta.agentPreset` must agree with it (D2.4 folds
+      // that transition path away).
+      const metaPreset = request.meta.agentPreset
+      if (metaPreset !== undefined && composition.agentPreset !== undefined && metaPreset !== composition.agentPreset) {
+        throw new Error(`create meta.agentPreset "${String(metaPreset)}" disagrees with the semantic agentPreset "${composition.agentPreset}"`)
+      }
       const handle = await agents.create({
         sessionId: SessionId(request.sessionId),
-        // The composed preset is part of the durable session header even when a
-        // caller supplied only the semantic `agentPreset` intent: a later resume
-        // reads the recorded preset from the log. Caller metadata always wins.
-        meta: composition.agentPreset === undefined || request.meta.agentPreset !== undefined
+        meta: composition.agentPreset === undefined
           ? request.meta
           : { ...request.meta, agentPreset: composition.agentPreset },
         agentOptions: this.agentOptions(),
@@ -120,14 +125,18 @@ export class DirectSessionLifecycle implements SessionLifecycle {
         outcome: { kind: 'created', handle: { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } } },
       }
     } catch (error) {
-      // An in-process create failure is a proven pre-publication rejection
-      // (there is no wire ambiguity in the Direct path).
+      // The upstream `agents.create` signal is a PRE-PUBLICATION cancellation
+      // contract: an abort mid-create provably did not publish (v2 §0.2.4), so
+      // it stays `cancelled` instead of a bogus rejection.
+      if (Boolean(request.signal?.aborted)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
+      // Any other in-process create failure is a proven pre-publication
+      // rejection (there is no wire ambiguity in the Direct path).
       return currentCreateRejected('session/create-failed', safeErrorMessage(error))
     }
   }
 
   async open(request: OpenSessionRequest): Promise<OpenResult> {
-    if (request.signal?.aborted === true) return { ownership: 'current', outcome: { kind: 'cancelled' } }
+    if (Boolean(request.signal?.aborted)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
     const agents = this.ctx.get('agents') as AgentsServiceLike | undefined
     if (agents === undefined) {
       return { ownership: 'current', outcome: { kind: 'unavailable', message: 'agents service unavailable' } }
@@ -151,6 +160,9 @@ export class DirectSessionLifecycle implements SessionLifecycle {
         outcome: { kind: 'opened', handle: { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } } },
       }
     } catch (error) {
+      // A mid-open abort is a client-local cancellation, not an unavailable
+      // Session (v2 §0.2.4/§0.5).
+      if (Boolean(request.signal?.aborted)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
       return { ownership: 'current', outcome: { kind: 'unavailable', message: safeErrorMessage(error) } }
     }
   }

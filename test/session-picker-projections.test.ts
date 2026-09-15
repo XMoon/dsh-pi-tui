@@ -98,7 +98,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
       // WHICH ids were requested, not the map contents.
       return new Map(batch.map(({ id }) => [id, { title: `title-of-${id}`, preset: 'standard' }]))
     },
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   }
 
   const defs: { name: string; handler?: unknown }[] = []

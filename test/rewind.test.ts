@@ -325,7 +325,7 @@ function makeRig(options: {
   composePreset?: string
   createError?: string
   /** Full transitionTo override (wins over the default implementation). */
-  transitionTo?: <T>(steps: { target?: { id: string; header?: { cwd?: string } }; inheritSelection?: ModelSelection; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string }>
+  transitionTo?: <T>(steps: { target?: { id: string; header?: { cwd?: string } }; inheritSelection?: ModelSelection; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => Promise<{ ok: true; next: T } | { ok: false; message: string; error?: unknown }>
   createHook?: (call: CreatedCall) => void
 } = {}): ForkRig {
   const created: CreatedCall[] = []
@@ -373,7 +373,7 @@ function makeRig(options: {
       } catch (error) {
         // The runner's transaction maps any create failure to an outcome —
         // it never lets a create error escape as a rejection.
-        return { ok: false, message: options.createError ?? (error instanceof Error ? error.message : String(error)) }
+        return { ok: false, message: options.createError ?? (error instanceof Error ? error.message : String(error)), error }
       }
     },
     replaceDraft: (text) => { drafts.push(text) },
@@ -770,8 +770,7 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(),
-      measureContext: () => undefined,
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
     },
     catalog: new DirectCatalogPort(options.ctx as never, () => undefined),
     config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),
@@ -1043,4 +1042,20 @@ test('review round 27: /preset live-swap runs inside the session-transition gate
   assert.deepEqual(outcome, { kind: 'success', text: 'session preset switched to minimal' })
   assert.equal(gateRuns, 1, 'the live preset swap must run inside the transition gate (recompose + append atomic)')
   app.stop()
+})
+
+test('a SUPERSEDED rewind create is silent (stale), not a failure', async () => {
+  const { LifecycleError } = await import('../src/runtime/session-lifecycle-port.ts')
+  const rig = makeRig({
+    transitionTo: async () => ({
+      ok: false as const,
+      message: 'the Session was created but the local surface was superseded',
+      error: new LifecycleError('superseded', 'superseded', 'the Session was created but the local surface was superseded', 'session-pub'),
+    }),
+  })
+  const events = [...turn(0, 1, 'A'), ...turn(4, 2, 'B')]
+  const candidates = collectRewindCandidates(events)
+  const outcome = await commitRewind(rig.host, sourceAgent('session-source', events), candidates[0]!, { sessionId: 'session-source', generation: 1 })
+  assert.deepEqual(outcome, { kind: 'stale' }, 'a superseded rewind must not surface an error')
+  assert.deepEqual(rig.drafts, [], 'nothing is restored onto the surface')
 })

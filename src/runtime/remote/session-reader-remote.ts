@@ -44,6 +44,8 @@ export interface RemoteSessionListRow {
   readonly running: boolean
   readonly updatedAt: number
   readonly projectionValues?: RemoteProjectionValues
+  /** Official Client host-authoritative blank bit (v2 §0.6). */
+  readonly blank?: boolean
 }
 
 /** The official Client Session list snapshot subset consumed by this adapter. */
@@ -178,6 +180,15 @@ export class RemoteSessionReader implements SessionReader {
         live: false,
       }
     })
+  }
+
+  /** Official Client Session-summary blank bit — the Remote mapping of the
+   *  semantic read (v2 §0.6). */
+  blank(sessionId: string): boolean | undefined {
+    if (this.generation.getSnapshot() === undefined) return undefined
+    const snapshot = this.sessions.list.getSnapshot()
+    if (snapshot.phase !== 'ready') return undefined
+    return snapshot.byId[sessionId]?.blank
   }
 
   async projectionBatch(rows: readonly SessionSummary[], signal?: AbortSignal): Promise<Map<string, SessionProjectionSummary>> {

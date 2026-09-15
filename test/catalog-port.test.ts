@@ -825,3 +825,48 @@ test('selectSessionPreset reports an unrecognized preset failure as indeterminat
   assert.equal(outcome.kind, 'indeterminate')
   if (outcome.kind === 'indeterminate') assert.equal(outcome.error.code, 'agent-preset/select-indeterminate')
 })
+
+test('Direct selectSessionModel honours an abort during normalization (before the durable append)', async () => {
+  const appended: unknown[] = []
+  let release!: (value: { provider: string; model: string }) => void
+  const gate = new Promise<{ provider: string; model: string }>((resolve) => { release = resolve })
+  const owner = {
+    current: () => undefined,
+    appendSelection: (_agent: unknown, next: unknown) => { appended.push(next) },
+    setCurrent: () => {},
+    selectForNextRequest: () => {},
+  }
+  const models = new DirectCatalogPort(host({
+    llm: { resolveCallConfig: async () => gate, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    agentDefaultModel: { currentSelection: () => undefined, saveSelection: async () => {} },
+  }), () => liveAgent, owner).models
+  const controller = new AbortController()
+  const pending = models.selectSessionModel('session-live', { provider: 'p', model: 'm' }, controller.signal)
+  await Promise.resolve()
+  controller.abort()
+  release({ provider: 'p', model: 'm' })
+  const result = await pending
+  assert.equal(result.ownership, 'current')
+  assert.equal(result.outcome.kind, 'cancelled', 'an abort before the durable append provably did not commit')
+  assert.deepEqual(appended, [])
+})
+
+test('Direct selectSessionModel reports cancelled for an already-aborted signal', async () => {
+  const models = new DirectCatalogPort(host({
+    llm: { resolveCallConfig: async (next: unknown) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+  }), () => liveAgent).models
+  const controller = new AbortController()
+  controller.abort()
+  const result = await models.selectSessionModel('session-live', { provider: 'p', model: 'm' }, controller.signal)
+  assert.deepEqual(result, { ownership: 'current', outcome: { kind: 'cancelled' } })
+})
+
+test('Direct selectSessionPreset reports cancelled for an already-aborted signal', async () => {
+  const presets = new DirectCatalogPort(host({
+    llm: { resolveCallConfig: async (next: unknown) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+  }), () => liveAgent).presets
+  const controller = new AbortController()
+  controller.abort()
+  const result = await presets.selectSessionPreset('session-live', 'minimal', controller.signal)
+  assert.deepEqual(result, { ownership: 'current', outcome: { kind: 'cancelled' } })
+})

@@ -84,7 +84,11 @@ test('the canonical order is flush → prepare → create → commit → dispose
 test('a quiesce/flush failure aborts with zero child side effects', async () => {
   const { host, events, failures } = fakeHost({ quiesceError: 'flush disk full' })
   const outcome = await runTransitionTo(host, steps(events))
-  assert.deepEqual(outcome, { ok: false, message: 'transition failed: flush disk full' })
+  assert.equal(outcome.ok, false)
+  if (!outcome.ok) {
+    assert.equal(outcome.message, 'transition failed: flush disk full')
+    assert.ok(outcome.error instanceof Error, 'the raw abort is carried for machine-readable callers')
+  }
   assert.deepEqual(events, ['old.flush'], 'nothing was prepared or created')
   assert.deepEqual(failures, ['quiesce:flush disk full'])
 })
@@ -105,7 +109,8 @@ test('a create rejection leaves the old session current — no pin, no retry', a
   assert.deepEqual(events, [
     'old.flush', 'prepare', 'child.create',
   ], 'no same-id recovery, no second fresh create — the old session stays current')
-  assert.deepEqual(outcome, { ok: false, message: 'transition failed: DSH publication failed' })
+  assert.equal(outcome.ok, false)
+  if (!outcome.ok) assert.equal(outcome.message, 'transition failed: DSH publication failed')
   assert.deepEqual(failures, ['create:DSH publication failed'])
 })
 
@@ -118,4 +123,22 @@ test('a retire failure NEVER rolls the committed child back', async () => {
     'old.flush', 'prepare', 'child.create', 'child.commit', 'old.dispose',
   ])
   assert.deepEqual(failures, ['retire:old dispose exploded'])
+})
+
+test('a superseded LifecycleError abort is carried raw so the caller can stay UI-silent', async () => {
+  const { host, events } = fakeHost()
+  const { LifecycleError } = await import('../src/runtime/session-lifecycle-port.ts')
+  const abort = new LifecycleError('superseded', 'superseded', 'the Session was created but the local surface was superseded', 'session-published')
+  const outcome = await runTransitionTo(host, {
+    target: { id: 'session-c' },
+    create: async () => { throw abort },
+  })
+  assert.equal(outcome.ok, false)
+  if (!outcome.ok) {
+    assert.equal(outcome.error, abort, 'the caller receives the machine-readable abort, not just a message')
+    assert.ok(outcome.error instanceof LifecycleError)
+    assert.equal(outcome.error.settlement, 'superseded')
+    assert.equal(outcome.error.publishedSessionId, 'session-published')
+  }
+  assert.deepEqual(events, ['old.flush'], 'no commit happened')
 })

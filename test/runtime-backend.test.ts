@@ -38,7 +38,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     list: async () => [],
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   }
   const pendingInputReader: PendingInputReader = {
     snapshot: () => ({ running: false, items: [] }),

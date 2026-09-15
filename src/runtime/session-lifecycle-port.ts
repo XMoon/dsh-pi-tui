@@ -128,18 +128,22 @@ export class LifecycleError extends Error {
   readonly settlement: LifecycleSettlement
   readonly ownership: OperationOwnership
   readonly publishedSessionId: string | undefined
+  /** CORRELATION ONLY for an indeterminate create — never publication proof. */
+  readonly requestedSessionId: string | undefined
 
   constructor(
     settlement: LifecycleSettlement,
     ownership: OperationOwnership,
     message: string,
     publishedSessionId?: string,
+    requestedSessionId?: string,
   ) {
     super(message)
     this.name = 'LifecycleError'
     this.settlement = settlement
     this.ownership = ownership
     this.publishedSessionId = publishedSessionId
+    this.requestedSessionId = requestedSessionId
   }
 }
 
@@ -163,7 +167,7 @@ export function requireCreated(result: CreateResult): SessionHandle {
     case 'indeterminate':
       throw new LifecycleError(outcome.kind, ownership,
         `the create is indeterminate — do not retry: ${outcome.error.message} (${outcome.error.code})`,
-        undefined)
+        undefined, outcome.requestedSessionId)
     case 'rejected':
       throw new LifecycleError(outcome.kind, ownership, `${outcome.error.message} (${outcome.error.code})`, undefined)
     case 'cancelled':

@@ -664,3 +664,22 @@ test('search honors cancellation through list and provider', async () => {
   }))
   await assert.rejects(reader.search('needle', controller.signal), /abort/i)
 })
+
+test('blank reads the Host turn-boundary authority for the live Session', () => {
+  const liveHeader = header('session-blank', 400)
+  const session = { header: liveHeader }
+  const liveAgent = { session, ctx: {} }
+  let boundary: unknown = { openTurnStartSeq: null, lastTurn: 0 }
+  const reader = new DirectSessionReader(host({
+    sessionProjections: {
+      stateOf: (target: unknown, key: string) => target === session && key === 'turnBoundary' ? boundary : undefined,
+    },
+  }), {
+    sessionOf: id => String(id) === 'session-blank' ? session : undefined,
+    agentOf: id => String(id) === 'session-blank' ? liveAgent : undefined,
+  })
+  assert.equal(reader.blank('session-blank'), true, 'a turn boundary with no turn is blank')
+  boundary = { openTurnStartSeq: null, lastTurn: 2 }
+  assert.equal(reader.blank('session-blank'), false, 'a started turn makes the Session non-blank')
+  assert.equal(reader.blank('session-missing'), undefined, 'an unknown Session is unknown, never inferred')
+})

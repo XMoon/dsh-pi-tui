@@ -91,6 +91,11 @@ export interface SessionReader {
    * rejects with an abort-shaped error, never a normal empty result.
    */
   search(query: string, signal?: AbortSignal): Promise<SessionContentSearchPage | undefined>
+  /** Host-authoritative blankness for one Session (v2 §0.6): whether the
+   *  Session has no started turn — the /preset affordance authority. `undefined`
+   *  means the Host authority is unavailable; it is NEVER inferred from the
+   *  transcript, rendered rows, running state, or a live Agent object. */
+  blank(sessionId: string): boolean | undefined
   /** Best-effort context-pressure measurement for one session (the
    * /status context row). `undefined` = unmeasurable (service absent,
    * session unknown, or a measurement failure — never a crash). */
