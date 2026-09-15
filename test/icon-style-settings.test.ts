@@ -142,6 +142,7 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},

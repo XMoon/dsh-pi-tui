@@ -92,6 +92,8 @@ function presetService(
   /** Scripted Host lock state; undefined = derive from the fake transcript
    *  (the pre-D2.3 double), true/false = the Host turn-boundary authority. */
   selectLocked?: boolean,
+  /** Per-call official roster projection override (gating/disabled tests). */
+  rosterOverride?: () => Promise<unknown>,
 ) {
   const resolved: string[] = []
   const selected: string[] = []
@@ -101,16 +103,18 @@ function presetService(
     service: {
       defaultId: defaultPresetId,
       // The PUBLIC official roster projection (the @Remote('list') method).
-      remoteExportList: async () => ({
-        presets: rows.map(row => ({
-          id: row.id,
-          trust: row.trust ?? 'system',
-          isDefault: row.id === defaultPresetId,
-          ...row.name === undefined ? {} : { name: row.name },
-          ...row.description === undefined ? {} : { description: row.description },
-        })),
-        modeSelectionEnabled: true,
-      }),
+      remoteExportList: async () => rosterOverride !== undefined
+        ? await rosterOverride()
+        : {
+            presets: rows.map(row => ({
+              id: row.id,
+              trust: row.trust ?? 'system',
+              isDefault: row.id === defaultPresetId,
+              ...row.name === undefined ? {} : { name: row.name },
+              ...row.description === undefined ? {} : { description: row.description },
+            })),
+            modeSelectionEnabled: true,
+          },
       list: async () => rows.map(row => ({
         id: row.id,
         trust: row.trust ?? 'system',
@@ -201,6 +205,7 @@ function stubRunner(options: {
     trackDefaultWrite: () => {},
     get defaultIntentOutcome() { return undefined },
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => options.sessionBlank,
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
@@ -308,6 +313,8 @@ function setup(options: {
   sessionBlank?: boolean
   selectFailure?: unknown
   selectLocked?: boolean
+  /** Per-call official roster override (see presetService). */
+  roster?: () => Promise<unknown>
   refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
   settings?: { get(ns: string): unknown; mutate(ns: string, patch: unknown[]): Promise<unknown> }
   tuiSettings?: TuiSettingsLike
@@ -329,7 +336,7 @@ function setup(options: {
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
-  const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked)
+  const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked, options.roster)
   ctx.provide('agentPresets', presets.service as never)
   if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
   const ensureCalls: string[] = []
@@ -1270,5 +1277,78 @@ test('a newer sessionless preset pick supersedes an older one', async () => {
   assert.equal(first.kind, 'success')
   assert.equal(first.text, undefined, 'a superseded sessionless pick is silent')
   assert.equal(t.pending.value, 'minimal', 'the newest sessionless pick is the effective pending preset')
+  t.app.stop()
+})
+
+test('an older /preset superseded during the roster read is silent even when the roster is disabled', async () => {
+  let calls = 0
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const t = setup({
+    roster: async () => {
+      calls += 1
+      if (calls === 1) await gate
+      return {
+        presets: SHIPPED_ROWS.map(row => ({
+          id: row.id,
+          trust: row.trust ?? 'system',
+          isDefault: row.id === 'standard',
+          ...row.name === undefined ? {} : { name: row.name },
+        })),
+        modeSelectionEnabled: false,
+      }
+    },
+  })
+  const first = t.run('minimal') as Promise<{ kind: string; text?: string }>
+  await new Promise(resolve => setImmediate(resolve))
+  const second = t.run('standard') as Promise<{ kind: string; text?: string }>
+  const newer = await second
+  release()
+  const older = await first
+  // The older op lost ownership while its roster was in flight: it must be
+  // UI-silent, NOT surface the policy rejection (§0.2.5/§0.3.3).
+  assert.equal(older.kind, 'success')
+  assert.equal(older.text, undefined, 'a superseded op must not emit a stale notice')
+  assert.equal(newer.kind, 'error', 'the newest op still reports the disabled-policy rejection')
+  t.app.stop()
+})
+
+test('a superseded preset-roster read keeps /preset silent (typed verb and picker)', async () => {
+  const { SupersededReadError } = await import('../src/runtime/read-error.ts')
+  const t = setup({ roster: async () => { throw new SupersededReadError('connection changed') } })
+  const verbResult = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(verbResult.kind, 'success')
+  assert.equal(verbResult.text, undefined, 'a superseded roster read must not surface a stale error')
+  const pickerResult = await t.run('') as { kind: string; text?: string }
+  assert.equal(pickerResult.kind, 'success')
+  const view = await t.view()
+  assert.ok(!view.includes('connection changed'), `no stale roster notice:\n${view}`)
+  t.app.stop()
+})
+
+test('an older /preset whose Session generation moved during the roster read is silent even when disabled', async () => {
+  const state = { agent: undefined as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const t = setup({
+    state,
+    roster: async () => {
+      // A /new/switch lands while the DIRECT roster is in flight, and a new
+      // blank Agent appears: the old sessionless operation must NOT apply to it.
+      state.generation = 2
+      state.agent = fakeAgent('s2', [])
+      return {
+        presets: SHIPPED_ROWS.map(row => ({
+          id: row.id,
+          trust: row.trust ?? 'system',
+          isDefault: row.id === 'standard',
+          ...row.name === undefined ? {} : { name: row.name },
+        })),
+        modeSelectionEnabled: false,
+      }
+    },
+  })
+  const result = await t.run('minimal') as { kind: string; text?: string }
+  assert.equal(result.kind, 'success', 'a generation-moved op must not surface the policy rejection')
+  assert.equal(result.text, undefined, 'a generation-moved op is silent')
+  assert.deepEqual(t.presets.selected, [], 'the stale op must not apply its preset to the new Session')
   t.app.stop()
 })

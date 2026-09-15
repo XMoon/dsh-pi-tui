@@ -8,10 +8,12 @@
  *
  * The record is the SETTLE AUTHORITY: an older operation settling after a newer
  * one must never clear or restore the newer pending intent, and a failed newer
- * operation walks the operation ancestry back to the nearest still-pending
- * operation (keeping its settle authority). A committed ancestor means the
- * persisted default carries the choice; a failed ancestor is walked back for
- * PRESENTATION only — v2 §0.8.4 forbids seeding a failed choice into create.
+ * operation walks the operation ancestry back NEWEST-first to the nearest
+ * non-failed ancestor: a still-PENDING ancestor restores settle authority, an
+ * UNRESOLVED ancestor keeps its explicit indeterminate state for a later Host
+ * read (v2 §0.3.2), and a committed ancestor means the persisted default
+ * carries the choice. A failed ancestor is walked back for PRESENTATION only —
+ * v2 §0.8.4 forbids seeding a failed choice into create.
  *
  * Pure and Host-free: the selection is the structural `ModelSelectionValue`
  * (or any caller-supplied selection type), never a DSH Host type.
@@ -29,13 +31,18 @@ export interface DefaultIntentRecord<TSelection = ModelSelectionValue> {
 
 interface Operation<TSelection> extends DefaultIntentRecord<TSelection> {
   readonly previous: Operation<TSelection> | undefined
-  status: 'pending' | 'committed' | 'failed'
+  status: 'pending' | 'committed' | 'failed' | 'unresolved'
 }
 
-/** The newest settle result: 'committed' (the persisted default carries the
- *  choice), 'failed' (the UI walks back; the failed choice is NEVER seeded into
- *  a create, v2 §0.8.4), or undefined while an operation is still pending. */
-export type DefaultIntentOutcome = 'committed' | 'failed' | undefined
+/** The newest settle result:
+ *  - 'committed': the persisted default carries the choice;
+ *  - 'failed': the UI walks back (the failed choice is NEVER seeded into a
+ *    create, v2 §0.8.4);
+ *  - 'unresolved': the write was dispatched but the durable result is not
+ *    provable — keep an explicit unresolved state until a Host read/reconnect
+ *    establishes truth (v2 §0.3.2/§0.8.1);
+ *  - undefined while an operation is still pending. */
+export type DefaultIntentOutcome = 'committed' | 'failed' | 'unresolved' | undefined
 
 /** The default-intent state machine (generic over the caller's selection type;
  *  defaults to the structural `ModelSelectionValue`). */
@@ -57,9 +64,10 @@ export class DefaultIntentTracker<TSelection = ModelSelectionValue> {
   }
 
   /** Report one operation's outcome. The machine decides whether the intent
-   *  clears (committed), walks the ancestry back to the nearest still-pending
-   *  operation (failed), or stays with a newer operation. */
-  settle(id: number, outcome: 'committed' | 'failed'): void {
+   *  clears (committed), keeps an explicit unresolved operation active for a
+   *  later Host reconciliation (unresolved), walks the ancestry back to the
+   *  nearest still-pending ancestor (failed), or stays with a newer operation. */
+  settle(id: number, outcome: 'committed' | 'failed' | 'unresolved'): void {
     let op: Operation<TSelection> | undefined = this.active
     while (op !== undefined && op.id !== id) op = op.previous
     if (op === undefined) return
@@ -70,22 +78,43 @@ export class DefaultIntentTracker<TSelection = ModelSelectionValue> {
       this.settledOutcome = 'committed'
       return
     }
-    let settledOutcome: 'committed' | 'failed' = 'failed'
+    if (outcome === 'unresolved') {
+      // Keep the operation active so the UI can show an EXPLICIT unresolved
+      // state until a Host read/reconnect establishes truth (v2 §0.3.2). It is
+      // never treated as a failed choice, and it is never seeded into create.
+      this.settledOutcome = 'unresolved'
+      return
+    }
+    // Walk the ancestry NEWEST-first: the nearest ancestor that is not itself
+    // failed decides. `pending` restores settle authority; `unresolved` keeps
+    // the explicit unresolved state (v2 §0.3.2/§0.8.1 — a newer failure must
+    // never erase an indeterminate intent that still needs a Host read); a
+    // nearer `committed` means the persisted default already carries the choice.
     let cursor = op.previous
     while (cursor !== undefined) {
+      if (cursor.status === 'committed') {
+        this.active = undefined
+        this.settledOutcome = 'committed'
+        return
+      }
+      if (cursor.status === 'unresolved') {
+        this.active = cursor
+        this.settledOutcome = 'unresolved'
+        return
+      }
       if (cursor.status === 'pending') {
         this.active = cursor
         this.settledOutcome = undefined
         return
       }
-      if (cursor.status === 'committed') settledOutcome = 'committed'
       cursor = cursor.previous
     }
     this.active = undefined
-    this.settledOutcome = settledOutcome
+    this.settledOutcome = 'failed'
   }
 
-  /** The newest pending intent, or undefined. */
+  /** The active intent (latest PENDING or an UNRESOLVED operation awaiting a
+   *  Host read), or undefined. */
   get intent(): TSelection | undefined {
     return this.active?.selection
   }

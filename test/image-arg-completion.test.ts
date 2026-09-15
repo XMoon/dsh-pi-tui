@@ -129,6 +129,7 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     focusEnabled: () => false,

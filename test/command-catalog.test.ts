@@ -152,6 +152,7 @@ function stubRunner(
     trackDefaultWrite: () => {},
     get defaultIntentOutcome() { return undefined },
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     focusEnabled: () => false,

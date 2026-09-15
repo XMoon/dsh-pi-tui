@@ -12,7 +12,7 @@ import test from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { composeAgent, recordedPreset } from '../src/index.ts'
 import { presetDisplayText } from '../src/commands.ts'
-import { selectBlankSessionPreset, sessionPresetOf, turnBoundaryBlank, type SessionObservationLike } from '../src/runtime/direct/session-preset-direct.ts'
+import { recordedSessionPreset, selectBlankSessionPreset, sessionPresetOf, turnBoundaryBlank, type SessionObservationLike } from '../src/runtime/direct/session-preset-direct.ts'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
@@ -330,4 +330,37 @@ test('turnBoundaryBlank reads the official turn-boundary authority, never the tr
   assert.equal(turnBoundaryBlank({ openTurnStartSeq: 'x', lastTurn: 0 }), undefined, 'a malformed value is unknown')
   assert.equal(turnBoundaryBlank({ lastTurn: 0 }), undefined)
   assert.equal(turnBoundaryBlank(42), undefined)
+})
+
+test('sessionPresetOf is undefined (never a crash) when the projection read throws', () => {
+  const ctx = {
+    get: (name: string) => name === 'sessionProjections'
+      ? { stateOf: () => { throw new Error('projection teardown') } }
+      : undefined,
+  }
+  assert.equal(sessionPresetOf(ctx as never, { header: { id: 's' } } as never), undefined)
+})
+
+test('recordedSessionPreset aborts after the observe await (no compose/resume on a cancelled open)', async () => {
+  const started = { resolve: () => {} }
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const observed = new Promise<void>((resolve) => { started.resolve = resolve })
+  const ctx = {
+    get: (name: string) => name === 'sessionQuery'
+      ? {
+          observeSession: async () => {
+            started.resolve()
+            await gate
+            return { projections: { values: { agentPreset: 'standard' } }, [Symbol.dispose]: () => {} }
+          },
+        }
+      : undefined,
+  }
+  const controller = new AbortController()
+  const pending = recordedSessionPreset(ctx as never, 'session-a', controller.signal)
+  await observed
+  controller.abort()
+  release()
+  await assert.rejects(pending, /abort/i)
 })

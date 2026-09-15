@@ -116,7 +116,13 @@ export function sessionPresetOf(
 ): string | undefined {
   const projections = ctx.get('sessionProjections') as SessionProjectionReader | undefined
   if (projections === undefined) return undefined
-  return projections.stateOf(session, 'agentPreset') ?? undefined
+  try {
+    return projections.stateOf(session, 'agentPreset') ?? undefined
+  } catch {
+    // A projection read during teardown/after a bad cut is best-effort: the
+    // preset is simply unknown, never a crash (the Host stays the authority).
+    return undefined
+  }
 }
 
 /**
@@ -139,6 +145,9 @@ export async function recordedSessionPreset(
 
   signal?.throwIfAborted()
   const observation = await query.observeSession(SessionId(sessionId), { signal, projectionMode: 'all' })
+  // Fence AFTER the observation await: a cancellation mid-read must not let the
+  // caller compose/resume on a cancelled open (v2 §0.2.4/§0.5).
+  signal?.throwIfAborted()
   try {
     return observation.projections?.values?.agentPreset ?? undefined
   } finally {

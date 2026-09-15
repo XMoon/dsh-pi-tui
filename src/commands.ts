@@ -76,6 +76,7 @@ import { FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { ModelSubmenu, type ModelApplyOutcome } from './model-menu.ts'
 import type { OperationResult } from './runtime/write-outcome.ts'
 import { LifecycleError } from './runtime/session-lifecycle-port.ts'
+import { SupersededReadError } from './runtime/read-error.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { textOf } from './transcript.ts'
 import {
@@ -435,14 +436,16 @@ export interface TuiCommandRunner {
    * optimistic choice and never gets installed into an Agent context.
    */
   readonly selected: ModelSelectionRef
-  /** The default selection a NEW Session should observe: the latest explicit
-   * default intent (a /model commit this run), falling back to the persisted
-   * global default. Distinct from {@link selected}: a fresh Session observes
-   * the default, never the current Session's local choice. */
+  /** Legacy/display facade: the newest SESSIONLESS `/model` intent (pending or
+   * unresolved) falling back to the persisted global default. A fresh create
+   * NEVER seeds from it — the Direct adapter captures the persisted Host default
+   * at admission, and a failed/ambiguous intent is never seeded (v2 §0.8.4).
+   * Distinct from {@link selected}: it never exposes a live Session's local
+   * choice. Retained for the footer/legacy facade and tests. */
   defaultSelection(): ModelSelection | undefined
-  /** The latest explicit default intent, or undefined when no /model commit
-   * happened this run (a fresh Session then observes the persisted default
-   * dynamically instead of being seeded). */
+  /** The newest SESSIONLESS `/model` intent (pending or unresolved), or
+   * undefined when no sessionless commit happened this run. A fresh create
+   * never seeds from it (it reads the persisted Host default). */
   readonly defaultIntent: ModelSelection | undefined
   /** The current default-intent OWNERSHIP record (id + selection), or
    * undefined when no intent is active. The id is the operation's settle
@@ -456,10 +459,15 @@ export interface TuiCommandRunner {
   setDefaultIntent(selection: ModelSelection | undefined): void
   /** Report one operation's save outcome to the intent state machine. The
    * machine decides whether the intent clears (committed), walks the
-   * ancestry back to the nearest still-pending operation (failed), or stays
-   * with a newer operation — the caller never restores or settles the
-   * intent itself. */
-  settleIntent(id: number, outcome: 'committed' | 'failed'): void
+   * ancestry back to the nearest still-PENDING ancestor, retains the nearest
+   * UNRESOLVED ancestor (an ambiguous write still needs a Host read), or
+   * clears on committed — the caller never restores or settles the intent
+   * itself. */
+  settleIntent(id: number, outcome: 'committed' | 'failed' | 'unresolved'): void
+  /** Reconcile an UNRESOLVED sessionless default intent against an
+   *  authoritative Host read (v2 §0.3.2): the persisted default either carries
+   *  the choice (committed) or proves it did not land (clear). Never guesses. */
+  reconcileDefaultIntent(persisted: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string } | undefined): void
   /** Await EVERY in-flight sessionless `/model` global-default write (each
    * includes its own fenced correction) so a fresh create observes the settled
    * newest Host default instead of racing it. Aborts as soon as the lifetime
@@ -472,16 +480,19 @@ export interface TuiCommandRunner {
   trackDefaultWrite(write: Promise<unknown>): void
   /** The newest default-write settle: 'committed' (the persisted default
    * carries the choice), 'failed' (the UI walks back; a failed choice is NEVER
-   * seeded into a create, v2 §0.8.4), or undefined while pending. */
-  readonly defaultIntentOutcome: 'committed' | 'failed' | undefined
+   * seeded into a create, v2 §0.8.4), 'unresolved' (dispatched but unprovable —
+   * keep the explicit unresolved state until a Host read, v2 §0.3.2), or
+   * undefined while pending. */
+  readonly defaultIntentOutcome: 'committed' | 'failed' | 'unresolved' | undefined
   /** Record (or clear) the in-flight Session model selection the footer
    *  reports as `selecting` while the semantic write settles. A newer
    *  surface generation makes a stale record invisible; the display always
    *  follows the authoritative Session selection, never this request. */
   /** Set (or clear) the footer's in-flight model marker. `token` is the
    *  owning `/model` operation: a clear from an older operation is ignored so
-   *  it can never wipe a newer operation's marker (v2 §0.2.5). */
-  setModelSelectionPending(selection: ModelSelection | undefined, token?: number): void
+   *  it can never wipe a newer operation's marker (v2 §0.2.5). `status`
+   *  distinguishes `selecting…` from an explicit `unresolved` state. */
+  setModelSelectionPending(selection: ModelSelection | undefined, token?: number, status?: 'pending' | 'unresolved'): void
   /** The TUI settings document, when the settings service is present. */
   readonly tuiSettings: TuiSettingsLike | undefined
   /** The session lifecycle port (D2.1): /new and /fork create/open sessions
@@ -3683,12 +3694,29 @@ export function registerTuiCommands(
       // One Host-generation directory read (official `session.modelCatalog`
       // semantics): the whole provider/model/effort tree renders from this
       // snapshot, never from N in-process registry calls.
+      // The picker belongs to the Session that opened it: capture BOTH the
+      // generation and the identity before the catalog read, then bail
+      // silently if either moved (v2 §0.2.5/§0.3.1) — never open the overlay
+      // onto a different Session.
+      const readGeneration = runner.sessionGeneration
+      const pickerSessionId = runner.liveAgent?.session.id
       let directory
       try {
         directory = await models.loadDirectory(runner.signal)
       } catch (error) {
+        // A superseded/aborted read no longer owns the surface: stay silent
+        // instead of surfacing a stale catalog failure (v2 §0.2.3/§0.3.1).
+        if (error instanceof SupersededReadError || runner.sessionGeneration !== readGeneration || runner.signal.aborted) {
+          return { kind: 'success' }
+        }
         return { kind: 'error', text: `model catalog unavailable: ${safeErrorMessage(error)}` }
       }
+      if (runner.sessionGeneration !== readGeneration || runner.liveAgent?.session.id !== pickerSessionId) {
+        return { kind: 'success' }
+      }
+      // An authoritative Host read reconciles a lingering UNRESOLVED sessionless
+      // default intent (v2 §0.3.2) — the read is the truth, no guessing.
+      runner.reconcileDefaultIntent(directory.default)
       const current = selected.current ?? directory.default ?? models.defaultSelection() ?? { provider: '', model: '' }
       /** Commit a selection (model, optional effort) and resolve with its
        *  semantic settlement so the picker stays truthful: a rejected write
@@ -3722,10 +3750,20 @@ export function registerTuiCommands(
           // Settle the transient intent BEFORE the ownership check: a stale
           // operation must never leak a pending tracker entry (which a later
           // failure of the newer op would resurrect as an active ancestor).
-          if (intentId !== undefined) runner.settleIntent(intentId, outcome.kind === 'committed' ? 'committed' : 'failed')
+          if (intentId !== undefined) {
+            runner.settleIntent(intentId, outcome.kind === 'committed'
+              ? 'committed'
+              : outcome.kind === 'indeterminate' ? 'unresolved' : 'failed')
+          }
           // A newer `/model` now owns the footer marker and the notices.
           if (token !== modelOperationToken) return 'superseded'
-          runner.setModelSelectionPending(undefined, token)
+          if (outcome.kind === 'indeterminate') {
+            // Keep an EXPLICIT unresolved marker until a Host read/reconnect
+            // establishes truth (v2 §0.3.2) — never clear it as a failed choice.
+            runner.setModelSelectionPending(next, token, 'unresolved')
+          } else {
+            runner.setModelSelectionPending(undefined, token)
+          }
           if (outcome.kind !== 'committed') {
             runner.refreshStatus()
             runner.updateWelcomeCard()
@@ -3745,12 +3783,11 @@ export function registerTuiCommands(
           runner.updateWelcomeCard()
           return 'committed'
         }
-        // A live Session owns the durable intent. The semantic write settles
-        // through the shared outcome vocabulary: the port contains a
-        // global-default save failure, so it can never turn a committed
-        // Session selection into a rejection.
-        runner.setDefaultIntent(next)
-        const intentId = runner.defaultIntentRecord?.id
+        // A live Session model write is NOT a sessionless global-default intent:
+        // the official `session.selectModel` best-effort default save is a Host
+        // side effect, so the runner's DefaultIntentTracker is reserved for the
+        // sessionless path only. Here the Session write settlement plus the
+        // pending marker are the whole owned state.
         const generation = runner.sessionGeneration
         runner.setModelSelectionPending(next, token)
         let result: Awaited<ReturnType<typeof models.selectSessionModel>>
@@ -3764,7 +3801,6 @@ export function registerTuiCommands(
           )
         } catch (error) {
           // A refused/aborted writer never crossed admission.
-          if (intentId !== undefined) runner.settleIntent(intentId, 'failed')
           // A newer `/model` owns the marker and the notices.
           if (token !== modelOperationToken) return 'superseded'
           // The Session generation moved while the write was in flight (writer
@@ -3783,25 +3819,18 @@ export function registerTuiCommands(
           return error instanceof TransitionInProgressError ? 'cancelled' : 'indeterminate'
         }
         const outcome = result.outcome
-        // Settle the transient default intent regardless of the UI generation
-        // fence: a stale operation must never leak a pending intent into a
-        // later fresh create.
-        if (intentId !== undefined) runner.settleIntent(intentId, outcome.kind === 'committed' ? 'committed' : 'failed')
         // A newer `/model` owns the footer marker and the notices (v2 §0.2.5).
         if (token !== modelOperationToken) return 'superseded'
+        const generationReplaced = runner.sessionGeneration !== generation
         // Ownership is superseded either by the port's own fence OR by a Session
         // generation swap while the write was in flight. Both mean this result
-        // no longer owns the overlay: no close/open decision, no repaint, no
-        // stale notice — and an indeterminate commit stays NON-retryable.
-        const generationReplaced = runner.sessionGeneration !== generation
-        if (generationReplaced || result.ownership === 'superseded') {
-          if (!generationReplaced) {
-            runner.setModelSelectionPending(undefined, token)
-            runner.refreshStatus()
-            runner.updateWelcomeCard()
-          }
-          return 'superseded'
-        }
+        // no longer owns the overlay or the footer marker: v2 §0.3.1 requires
+        // NO close/open decision, NO repaint (even clearing the in-flight
+        // marker repaints a surface this operation no longer owns — the newer
+        // operation or the surface swap clears it), and NO stale notice. A live
+        // Session write has no sessionless default intent, so there is nothing
+        // to settle or leak into a later create.
+        if (generationReplaced || result.ownership === 'superseded') return 'superseded'
         runner.setModelSelectionPending(undefined, token)
         if (outcome.kind === 'rejected') app.notify(`model selection: ${outcome.error.message}`, 'error')
         else if (outcome.kind === 'indeterminate') app.notify('model selection is indeterminate — the display reconciles from the Session; do not retry', 'error')
@@ -3881,7 +3910,19 @@ export function registerTuiCommands(
       // The preset COMPOSITION (setup callback) is resolved inside the
       // Direct session lifecycle from this id — the command surface only
       // ever sees the identity (migration M1.11).
-      const resolved = await runner.catalog.presets.resolve(runner.effectivePresetId, runner.signal)
+      let resolved
+      try {
+        resolved = await runner.catalog.presets.resolve(runner.effectivePresetId, runner.signal)
+      } catch (error) {
+        // A lifecycle cancellation (exit/HMR) during the read aborts it: no
+        // create is dispatched, and the abort must not surface as an unhandled
+        // rejection. Any OTHER failure keeps its real diagnostic — never
+        // mislabeled as a cancellation.
+        if (runner.signal.aborted) {
+          return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}` }
+        }
+        return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}` }
+      }
       // Coordinate with the newest sessionless `/model` global-default write
       // BEFORE dispatching the create (v2 §0.8.3/§0.8.4): quiesce EVERY
       // in-flight default write/correction so the Direct adapter captures the
@@ -3921,17 +3962,11 @@ export function registerTuiCommands(
             publishedSessionId: result.error.publishedSessionId,
             requestedSessionId: result.error.requestedSessionId,
           })
-          // A locally SUPERSEDED create emits no error notice (§0.2.1): the
-          // surface moved, so the message belongs to a stale operation.
-          if (result.error.ownership === 'superseded') {
-            const published = result.error.publishedSessionId
-            return {
-              kind: 'success',
-              text: published === undefined
-                ? 'fresh session creation superseded by a session/connection change'
-                : `fresh session creation superseded; published session ${published} retained for reconciliation`,
-            }
-          }
+          // A locally SUPERSEDED create emits no error notice and NO
+          // user-visible success text (§0.2.1): the surface moved, so this
+          // result owns nothing. The machine-readable cause (incl. any
+          // published id) is already recorded in the diagnostic above.
+          if (result.error.ownership === 'superseded') return { kind: 'success' }
         }
         return { kind: 'error', text: result.message }
       }
@@ -4088,8 +4123,16 @@ export function registerTuiCommands(
           | { kind: 'indeterminate'; message: string }
         > => {
         const token = ++presetOperationToken
+        const operationGeneration = runner.sessionGeneration
         try {
         const roster = await presets.roster(runner.signal)
+        // FIRST fences after the await: a newer `/preset` operation OR a Session
+        // generation swap while the roster loaded means this one no longer owns
+        // the surface — no policy/rejection notice, no repaint
+        // (§0.2.5/§0.3.1/§0.3.3). A Direct roster can resolve across a
+        // `/new`/switch (no Remote generation fence).
+        if (token !== presetOperationToken) return { kind: 'superseded' }
+        if (runner.sessionGeneration !== operationGeneration) return { kind: 'superseded' }
         if (!roster.modeSelectionEnabled) {
           return { kind: 'rejected', message: 'preset selection is disabled in this deployment' }
         }
@@ -4105,9 +4148,11 @@ export function registerTuiCommands(
           if (runner.liveAgent !== undefined) {
             return { kind: 'rejected', message: 'a session appeared — reopen /preset' }
           }
-          // A newer sessionless pick superseded this one while the roster was
-          // loading: never overwrite the newer pending value with the older id.
+          // A newer sessionless pick — or a Session/generation move —
+          // superseded this one while the roster was loading: never overwrite
+          // the newer pending value with the older id.
           if (token !== presetOperationToken) return { kind: 'superseded' }
+          if (runner.sessionGeneration !== operationGeneration) return { kind: 'superseded' }
           runner.pendingPreset = resolved.id
           // The sessionless catalog follows the choice through the STANDING
           // scope of the new preset (no Agent, no session — composition
@@ -4119,6 +4164,7 @@ export function registerTuiCommands(
             target: { kind: 'preset', presetId: resolved.id },
           })
           if (token !== presetOperationToken) return { kind: 'superseded' }
+          if (runner.sessionGeneration !== operationGeneration) return { kind: 'superseded' }
           if (outcome.kind === 'applied' && outcome.notice !== undefined) app.notify(outcome.notice, 'error')
           return { kind: 'pending', preset: resolved.id }
         }
@@ -4181,9 +4227,15 @@ export function registerTuiCommands(
         if (refreshed.kind !== 'superseded') runner.updateWelcomeCard()
         return { kind: 'switched', preset: outcome.value.preset }
         } catch (error) {
-          // A newer `/preset` operation owns the surface: an error from this
-          // superseded operation must not surface a stale notice (v2 §0.2.1).
+          // A newer `/preset` operation — or a superseded/aborted read — owns
+          // the surface: an error from this stale operation must not surface a
+          // stale notice (v2 §0.2.1/§0.2.3).
           if (token !== presetOperationToken) return { kind: 'superseded' }
+          if (error instanceof SupersededReadError
+            || runner.sessionGeneration !== operationGeneration
+            || runner.signal.aborted) {
+            return { kind: 'superseded' }
+          }
           throw error
         }
       }
@@ -4246,7 +4298,17 @@ export function registerTuiCommands(
       // switch during the roster read must not paint the old current preset
       // (or the old blankness) onto the new Session's picker.
       const pickerGeneration = runner.sessionGeneration
-      const roster = await presets.roster(runner.signal)
+      let roster
+      try {
+        roster = await presets.roster(runner.signal)
+      } catch (error) {
+        // A superseded/aborted read no longer owns the surface: stay silent
+        // instead of surfacing a stale roster failure (v2 §0.2.3/§0.3.1).
+        if (error instanceof SupersededReadError || runner.sessionGeneration !== pickerGeneration || runner.signal.aborted) {
+          return { kind: 'success' }
+        }
+        throw error
+      }
       if (runner.sessionGeneration !== pickerGeneration) return { kind: 'success' }
       if (!roster.modeSelectionEnabled) {
         return { kind: 'error', text: 'preset selection is disabled in this deployment' }
@@ -4605,15 +4667,8 @@ export function registerTuiCommands(
             publishedSessionId: result.error.publishedSessionId,
             requestedSessionId: result.error.requestedSessionId,
           })
-          if (result.error.ownership === 'superseded') {
-            const published = result.error.publishedSessionId
-            return {
-              kind: 'success',
-              text: published === undefined
-                ? 'fork superseded by a session/connection change'
-                : `fork superseded; published session ${published} retained for reconciliation`,
-            }
-          }
+          // Superseded owns nothing: no user-visible text (§0.2.1).
+          if (result.error.ownership === 'superseded') return { kind: 'success' }
         }
         return { kind: 'error', text: result.message }
       }

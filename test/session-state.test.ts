@@ -170,6 +170,19 @@ function stubRunner(
     trackDefaultWrite: () => {},
     get defaultIntentOutcome() { return defaultIntent.outcome },
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: (persisted) => {
+      if (defaultIntent.outcome !== 'unresolved') return
+      const active = defaultIntent.record
+      if (active === undefined) return
+      if (persisted !== undefined
+        && persisted.provider === active.selection.provider
+        && persisted.model === active.selection.model
+        && persisted.reasoningEffort === active.selection.reasoningEffort) {
+        defaultIntent.settle(active.id, 'committed')
+      } else {
+        defaultIntent.settle(active.id, 'failed')
+      }
+    },
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     focusEnabled: () => false,
@@ -462,7 +475,7 @@ test('/exit and /quit route through the runner requestExit, never their own tear
   app.stop()
 })
 
-test('a failed global-default save keeps the durable Session choice and restores the default intent', async () => {
+test('a failed global-default save keeps the durable Session choice (a live write never enters the sessionless tracker)', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -485,8 +498,8 @@ test('a failed global-default save keeps the durable Session choice and restores
   } as never)
   ctx.provide('agentDefaultModel', {
     currentSelection: () => ({ provider: 'p', model: 'm1' }),
-    // The persistence write FAILS: the durable Session choice must stand
-    // and the default intent must return to its previous value.
+    // The persistence write FAILS: the durable Session choice must stand, and
+    // no SESSIONLESS default intent is involved (a live write never records one).
     saveSelection: async () => { throw new Error('quota exceeded') },
   } as never)
   const state = { agent: fakeAgent('session-a'), generation: 1 }
@@ -517,7 +530,7 @@ test('a failed global-default save keeps the durable Session choice and restores
     assert.deepEqual(sessionSelection, { provider: 'p', model: 'm1' },
       'the durable Session choice must stand even when the global-default save fails')
     assert.equal(proxy.defaultIntent, undefined,
-      'a failed global-default save must restore the transient default intent')
+      'a live Session write never enters the sessionless default-intent tracker')
     const view = vt.getViewport().join('\n')
     assert.ok(!view.includes('model selection save'),
       `a best-effort default-save failure must not surface as a Session selection failure:\n${view}`)
@@ -527,7 +540,7 @@ test('a failed global-default save keeps the durable Session choice and restores
   }
 })
 
-test('a FAILED global-default save settles the transient intent and still commits the live Session choice', async () => {
+test('a FAILED global-default save still commits the live Session choice (no sessionless intent involved)', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -546,8 +559,8 @@ test('a FAILED global-default save settles the transient intent and still commit
     resolveModelInfo: async () => ({}),
   } as never)
   // The default save is gated: the Session append commits first, then the
-  // default write FAILS. The failure is best-effort and must settle the
-  // transient intent, never surface as a Session selection failure.
+  // default write FAILS. The failure is best-effort and must NEVER surface as
+  // a Session selection failure (a live write has no sessionless intent).
   const gates = new Map<string, { reject: (e: Error) => void }>()
   const saveStarted = new Map<string, () => void>()
   ctx.provide('agentDefaultModel', {
@@ -597,7 +610,7 @@ test('a FAILED global-default save settles the transient intent and still commit
     await Promise.resolve()
     await Promise.resolve()
     assert.equal(proxy.defaultIntent, undefined,
-      'a failed global-default save must settle the transient default intent')
+      'a live Session write never enters the sessionless default-intent tracker')
     assert.deepEqual(catalog.models.sessionSelection('session-a'), { provider: 'p', model: 'm1' },
       'a best-effort default-save failure must not undo the committed Session choice')
     assert.ok(!vt.getViewport().join('\n').includes('model selection save'),
@@ -607,7 +620,7 @@ test('a FAILED global-default save settles the transient intent and still commit
   }
 })
 
-test('a failed save after a session switch restores the default intent, never any Session selection', async () => {
+test('a failed live default save after a session switch never mutates any Session selection', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -658,19 +671,21 @@ test('a failed save after a session switch restores the default intent, never an
     await saveStarted.promise
     const saveM1 = gates.get('m1')
     assert.ok(saveM1 !== undefined, 'save(m1) must have started')
-    assert.equal(proxy.defaultIntent?.model, 'm1', 'the transient default intent must be recorded optimistically')
+    // A live Session write is NOT a sessionless global-default intent: the
+    // DefaultIntentTracker is reserved for the sessionless path.
+    assert.equal(proxy.defaultIntent, undefined, 'a live Session write never enters the default-intent tracker')
     const catalog = proxy.catalog as DirectCatalogPort
     assert.deepEqual(catalog.models.sessionSelection('session-a'), { provider: 'p', model: 'm1' },
       'the durable append must commit the Session choice before the save settles')
-    // The user switches to another Session while the save is pending; the
-    // rollback only restores the runner-level default intent and never
-    // touches any Session selection.
+    // The user switches to another Session while the save is pending. A live
+    // Session write never enters the sessionless default-intent tracker, so a
+    // late failure can only affect Session-level state — never a global intent.
     state.agent = fakeAgent('session-b')
     saveM1.reject(new Error('quota exceeded'))
     await vt.waitForRender()
     await Promise.resolve()
     assert.equal(proxy.defaultIntent, undefined,
-      'a failed save after a switch must restore the default intent, never leave the failed choice')
+      'a live Session write never enters the sessionless default-intent tracker')
     assert.deepEqual(catalog.models.sessionSelection('session-b'), { provider: 'p', model: 'default-model' },
       'a failed save after a switch must never mutate the NEW Session selection (it keeps its default fallback)')
   } finally {
@@ -678,7 +693,7 @@ test('a failed save after a session switch restores the default intent, never an
   }
 })
 
-test('a stale live /model settle still settles the transient default intent (no leak into a later create)', async () => {
+test('a stale live /model settle never repaints the new Session (no sessionless-intent leak)', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -729,7 +744,7 @@ test('a stale live /model settle still settles the transient default intent (no 
     await Promise.resolve()
     vt.sendInput('\r')
     await saveStartedM1.promise
-    assert.equal(proxy.defaultIntent?.model, 'm1', 'the in-flight selection owns the transient intent')
+    assert.equal(proxy.defaultIntent, undefined, 'a live Session write never enters the default-intent tracker')
     // The surface switches to Session B before the write settles.
     state.generation = 2
     state.agent = fakeAgent('session-b')
@@ -738,7 +753,7 @@ test('a stale live /model settle still settles the transient default intent (no 
     await Promise.resolve()
     await Promise.resolve()
     assert.equal(proxy.defaultIntent, undefined,
-      'a stale settle must still settle the intent, never leak it into a later fresh create')
+      'a stale live settle never leaks a sessionless default intent into a later fresh create')
     assert.ok(!vt.getViewport().join('\n').includes('model selection save'),
       'a stale settle must not repaint the new Session')
   } finally {
@@ -799,14 +814,14 @@ test('a sessionless /model pick awaits its default save and reports the committe
     await Promise.resolve()
     await Promise.resolve()
     assert.deepEqual(persisted, { provider: 'p', model: 'm1' }, 'the committed default is persisted')
-    assert.equal(proxy.defaultIntent, undefined, 'a committed save clears the transient intent')
+    assert.equal(proxy.defaultIntent, undefined, 'a committed sessionless save clears the intent')
     assert.equal(proxy.defaultIntentOutcome, 'committed')
   } finally {
     app.stop()
   }
 })
 
-test('a FAILED sessionless default save keeps the picker truthful and does not stick the intent', async () => {
+test('an AMBIGUOUS sessionless default save keeps an explicit UNRESOLVED intent, never a failed choice', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -852,8 +867,10 @@ test('a FAILED sessionless default save keeps the picker truthful and does not s
     await vt.waitForRender()
     await Promise.resolve()
     await Promise.resolve()
-    assert.equal(proxy.defaultIntent, undefined, 'a failed save must settle the transient intent')
-    assert.equal(proxy.defaultIntentOutcome, 'failed')
+    // A thrown settings write may or may not have landed: v2 §0.3.2 keeps the
+    // explicit unresolved state (never a failed choice) until a Host read.
+    assert.deepEqual(proxy.defaultIntent, { provider: 'p', model: 'm1' }, 'the ambiguous intent stays explicit')
+    assert.equal(proxy.defaultIntentOutcome, 'unresolved')
     assert.ok(vt.getViewport().join('\n').includes('model default save'), 'the failure is surfaced')
     assert.deepEqual(persisted, { provider: 'p', model: 'original' }, 'the failed write is not persisted')
   } finally {
@@ -1481,20 +1498,27 @@ function scriptedModelCatalog(
   outcome: () => Promise<{ kind: string; value?: { provider: string; model: string }; error?: { code: string; message: string }; reason?: string }>,
   current: { provider: string; model: string } = { provider: 'p', model: 'old-model' },
   ownership: 'current' | 'superseded' = 'current',
+  /** Optional loader failure (e.g. a typed SupersededReadError). */
+  loadDirectoryError?: unknown,
+  /** Optional global-default write outcome (defaults to committed). */
+  saveDefaultOutcome?: { kind: string; error?: { code: string; message: string }; reason?: string },
 ): TuiCommandRunner['catalog'] {
   return {
     models: {
       available: () => true,
-      loadDirectory: async () => ({
-        default: current,
-        routableProviders: ['p'],
-        groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm1', name: 'M1' }] }],
-        failures: [],
-      }),
+      loadDirectory: async () => {
+        if (loadDirectoryError !== undefined) throw loadDirectoryError
+        return {
+          default: current,
+          routableProviders: ['p'],
+          groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm1', name: 'M1' }] }],
+          failures: [],
+        }
+      },
       listProviders: () => [{ id: 'p', name: 'Provider P' }],
       listModels: async () => [{ id: 'm1' }],
       defaultSelection: () => current,
-      saveDefaultSelection: async () => ({ kind: 'committed' as const, value: undefined }),
+      saveDefaultSelection: async () => (saveDefaultOutcome ?? { kind: 'committed' as const, value: undefined }) as never,
       sessionSelection: () => current,
       selectSessionModel: (async () => ({ ownership, outcome: await outcome() })) as TuiCommandRunner['catalog']['models']['selectSessionModel'],
       discoverModels: async () => [],
@@ -1698,5 +1722,140 @@ test('a /model result whose Session generation was swapped mid-write makes NO cl
   assert.ok(!view.includes('model selection:'), `a generation-swapped result must not emit a notice:\n${view}`)
   assert.ok(view.includes('Selecting…'),
     `the stale overlay must not make a close/open decision (it stays as-is):\n${view}`)
+  app.stop()
+})
+
+test('a same-generation port-superseded /model result makes NO repaint/close decision (v2 §0.3.1)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  // The port itself reports superseded WITHOUT a generation swap (e.g. a newer
+  // selection or a vanished binding): the command must not clear the marker,
+  // repaint, close/open, or notify.
+  const catalog = scriptedModelCatalog(
+    async () => ({ kind: 'committed', value: { provider: 'p', model: 'm1' } }),
+    { provider: 'p', model: 'old-model' },
+    'superseded',
+  )
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('model selection:'), `a superseded result must not emit a notice:\n${view}`)
+  assert.ok(view.includes('Selecting…'),
+    `a same-generation superseded result must not make a close/open decision:\n${view}`)
+  app.stop()
+})
+
+test('a superseded model-catalog read keeps the /model surface silent (no stale error notice)', async () => {
+  const { SupersededReadError } = await import('../src/runtime/read-error.ts')
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const catalog = scriptedModelCatalog(async () => ({ kind: 'committed' }), undefined, 'current', new SupersededReadError('connection changed'))
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  const result = await (modelDef!.handler as () => Promise<{ kind: string; text?: string }>)()
+  assert.equal(result.text, undefined, 'a superseded read must not surface a catalog error')
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('model catalog unavailable'), `no stale catalog notice:\n${view}`)
+  app.stop()
+})
+
+test('a sessionless INDETERMINATE default write keeps an explicit UNRESOLVED intent (v2 §0.3.2)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  // No live agent: the choice is a sessionless global-default intent.
+  const state = { agent: undefined, generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const catalog = scriptedModelCatalog(
+    async () => ({ kind: 'committed', value: { provider: 'p', model: 'm1' } }),
+    { provider: 'p', model: 'old-model' },
+    'current',
+    undefined,
+    { kind: 'indeterminate', error: { code: 'session/model-default-indeterminate', message: 'possibly landed' } },
+  )
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  assert.equal(proxy.defaultIntentOutcome, 'unresolved',
+    'an ambiguous default write is unresolved, never a failed choice')
+  assert.deepEqual(proxy.defaultIntent, { provider: 'p', model: 'm1' }, 'the unresolved intent stays explicit')
+  app.stop()
+})
+
+test('an authoritative Host read reconciles an UNRESOLVED sessionless default intent (v2 §0.3.2)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: undefined, generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  // The persisted Host default already carries m1, but the write result was
+  // ambiguous — a later authoritative read must reconcile it to committed.
+  const catalog = scriptedModelCatalog(
+    async () => ({ kind: 'committed', value: { provider: 'p', model: 'm1' } }),
+    { provider: 'p', model: 'm1' },
+    'current',
+    undefined,
+    { kind: 'indeterminate', error: { code: 'session/model-default-indeterminate', message: 'ambiguous' } },
+  )
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  assert.equal(proxy.defaultIntentOutcome, 'unresolved')
+  // Reopen /model: the directory read is the authoritative Host truth.
+  await (modelDef!.handler as () => Promise<unknown>)()
+  await vt.waitForRender()
+  assert.equal(proxy.defaultIntentOutcome, 'committed', 'the Host read proves the ambiguous write landed')
+  assert.equal(proxy.defaultIntent, undefined, 'the resolved intent clears')
   app.stop()
 })

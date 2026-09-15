@@ -93,6 +93,9 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     if (agents === undefined) {
       return currentCreateRejected('session/create-unavailable', 'agents service unavailable')
     }
+    // Capture the Host default at ADMISSION (v2 §0.8.3): a later sessionless
+    // `/model` default write must not rewrite an already-started create.
+    const agentOptions = this.agentOptions()
     try {
       // The preset composition (with its agent-setup callback) is a Direct
       // concern: resolved inside the adapter from the request's preset id.
@@ -110,7 +113,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
         meta: composition.agentPreset === undefined
           ? request.meta
           : { ...request.meta, agentPreset: composition.agentPreset },
-        agentOptions: this.agentOptions(),
+        agentOptions,
         setup: composition.setup,
         seed: request.seed as readonly SessionEvent[] | undefined,
         ...request.inheritedEventCount === undefined ? {} : { inheritedEventCount: SessionLogOffset(request.inheritedEventCount) },
@@ -141,6 +144,8 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     if (agents === undefined) {
       return { ownership: 'current', outcome: { kind: 'unavailable', message: 'agents service unavailable' } }
     }
+    // Capture the activation fallback at admission (v2 §0.8.3).
+    const agentOptions = this.agentOptions()
     try {
       // The Direct adapter owns the persisted-preset lookup the official open
       // semantic needs in-process: the recorded preset wins (a session that
@@ -151,7 +156,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       // transport-neutral semantic exposed to the runner and future clients.
       const handle = await agents.resume({
         resumeSessionId: SessionId(request.sessionId),
-        agentOptions: this.agentOptions(),
+        agentOptions,
         setup: composition.setup,
         signal: request.signal,
       })

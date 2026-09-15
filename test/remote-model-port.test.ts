@@ -68,6 +68,8 @@ interface ModelHarness {
   setSelectionHook(hook: () => void): void
   /** Gate the Host selectModel result (for overlapping-call tests). */
   setSelectionGate(gate: () => Promise<void>): void
+  /** Make the Host selectModel THROW (official transport failure). */
+  setSelectionThrow(error: unknown): void
   /** Queue distinct per-call selection results (consumed in order). */
   queueSelectionResults(...results: Array<{ ok: true; value: { selected: { provider: string; model: string; reasoningEffort?: string } } } | { ok: false; error: unknown }>): void
   setCatalogHook(hook: () => void | Promise<void>): void
@@ -85,6 +87,7 @@ function modelHarness(): ModelHarness {
   let projection: unknown = { lastUsed: null, next: null }
   let selectionHook: (() => void) | undefined
   let selectionGate: (() => Promise<void>) | undefined
+  let selectionThrow: unknown
   let catalogHook: (() => void | Promise<void>) | undefined
   const catalogQueue: Array<{ ok: true; value: typeof DIRECTORY } | { ok: false; error: unknown }> = []
   const selectionQueue: Array<{ ok: true; value: { selected: { provider: string; model: string; reasoningEffort?: string } } } | { ok: false; error: unknown }> = []
@@ -103,6 +106,7 @@ function modelHarness(): ModelHarness {
       const result = selectionQueue.length > 0 ? selectionQueue.shift()! : selectionResult
       selectionHook?.()
       if (selectionGate !== undefined) await selectionGate()
+      if (selectionThrow !== undefined) throw selectionThrow
       return result
     },
   }
@@ -130,6 +134,7 @@ function modelHarness(): ModelHarness {
     setBinding: (sessionId, present) => { if (present) bound.add(sessionId); else bound.delete(sessionId) },
     setSelectionHook: (hook) => { selectionHook = hook },
     setSelectionGate: (gate) => { selectionGate = gate },
+    setSelectionThrow: (error) => { selectionThrow = error },
     queueSelectionResults: (...results) => { selectionQueue.push(...results) },
     setCatalogHook: (hook) => { catalogHook = hook },
     queueCatalogResults: (...results) => { catalogQueue.push(...results) },
@@ -141,8 +146,10 @@ test('loadDirectory maps the official session.modelCatalog value', async () => {
   const directory = await harness.catalog.loadDirectory()
   assert.deepEqual(directory, DIRECTORY)
   assert.deepEqual(harness.catalog.defaultSelection(), { provider: 'p', model: 'm-default' })
-  assert.deepEqual(harness.catalog.listProviders(), [{ id: 'p', name: 'Provider P' }])
-  assert.deepEqual(await harness.catalog.listModels('p'), [{ id: 'm1' }])
+  // Provider ENDPOINT discovery is UNAVAILABLE on Remote D2.3 (no official
+  // capability) — the directory is not that capability.
+  assert.deepEqual(harness.catalog.listProviders(), [])
+  assert.deepEqual(await harness.catalog.listModels('p'), [])
 })
 
 test('loadDirectory detaches the returned value from the Host object', async () => {
@@ -293,7 +300,7 @@ test('loadDirectory returns a detached copy that cannot corrupt the adapter cach
   const returned = await harness.catalog.loadDirectory()
   ;(returned.groups as unknown as Array<{ models: Array<{ id: string }> }>)[0]!.models[0]!.id = 'MUTATED'
   ;(returned.routableProviders as unknown as string[]).push('ghost')
-  assert.deepEqual(harness.catalog.listProviders(), [{ id: 'p', name: 'Provider P' }],
+  assert.deepEqual(harness.catalog.defaultSelection(), { provider: 'p', model: 'm-default' },
     'consumer mutation must not reach the adapter cache')
   assert.deepEqual(await harness.catalog.loadDirectory(), DIRECTORY)
 })
@@ -444,4 +451,29 @@ test('an aborted directory read reports the LOCAL abort, not a stale Host failur
   harness.setCatalogResult({ ok: false, error: failure('gateway/internal', 'host boom') })
   harness.setCatalogHook(() => controller.abort())
   await assert.rejects(harness.catalog.loadDirectory(controller.signal), /abort/i)
+})
+
+test('a superseded model-catalog read throws the typed SupersededReadError (not a generic error)', async () => {
+  const { SupersededReadError } = await import('../src/runtime/read-error.ts')
+  const harness = modelHarness()
+  harness.setCatalogHook(() => harness.generation.set({ id: 2 }))
+  await assert.rejects(harness.catalog.loadDirectory(), (error: unknown) => error instanceof SupersededReadError)
+})
+
+test('a THROWING selectModel transport failure settles indeterminate, never a rejected promise', async () => {
+  const harness = modelHarness()
+  harness.setSelectionThrow(new Error('transport exploded'))
+  const result = await harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'm1' })
+  assert.equal(result.outcome.kind, 'indeterminate', 'a post-dispatch transport throw is not proof of non-commit')
+})
+
+test('copySelection rejects empty provider/model and a present non-string effort from an untrusted success', async () => {
+  const harness = modelHarness()
+  harness.setSelectionResult({ ok: true, value: { selected: { provider: '', model: 'm1' } } } as never)
+  const emptyProvider = await harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'wanted' })
+  assert.equal(emptyProvider.outcome.kind, 'indeterminate', 'an empty provider is not a usable normalized selection')
+
+  harness.setSelectionResult({ ok: true, value: { selected: { provider: 'p', model: 'm1', reasoningEffort: 123 } } } as never)
+  const badEffort = await harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'wanted' })
+  assert.equal(badEffort.outcome.kind, 'indeterminate', 'a non-string effort must not be silently dropped into a commit')
 })

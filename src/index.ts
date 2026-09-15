@@ -2004,23 +2004,39 @@ export function apply(ctx: Context, config: Config): void {
     const modelSelections = new DirectModelSelectionOwner(
       defaultModel as unknown as DefaultModelServiceLike,
     )
-    // The latest explicit default-model intent: every /model commit
-    // (sessionless or live) records the value a NEW Session should observe
-    // while the global-default save is still in flight. It is TRANSIENT:
-    // a settled save clears it (the next /new reads the persisted default
-    // dynamically), and a failed save walks the operation ancestry back to
-    // the nearest still-pending operation.
+    // The latest SESSIONLESS /model global-default intent (a live Session write
+    // is NOT recorded here: the official `session.selectModel` best-effort
+    // default save is a Host side effect, so the tracker is sessionless-only).
+    // It is TRANSIENT: a committed save clears it (the next /new reads the
+    // persisted default dynamically), an ambiguous save stays UNRESOLVED until
+    // an authoritative Host read reconciles it, and a failed save walks the
+    // operation ancestry back to the nearest still-pending ancestor.
     //
     // The intent is a small OPERATION CHAIN state machine (the pure
     // `DefaultIntentTracker`): each operation carries its own save status and
     // links the operation that owned the intent before it. A settle reports
     // ONLY the operation id and outcome; the machine decides whether the intent
-    // clears, restores a pending ancestor, or stays with a newer operation.
+    // clears (committed), restores the nearest pending ancestor, retains the
+    // nearest unresolved ancestor, or clears as failed when none remains.
     // An optimistic intent is NOT a committed save — the semantic settlement
     // still awaits the Host write.
     const defaultIntent = new DefaultIntentTracker<ModelSelection>()
     const setDefaultIntent = (next: ModelSelection | undefined): void => { defaultIntent.set(next) }
-    const settleIntent = (id: number, outcome: 'committed' | 'failed'): void => { defaultIntent.settle(id, outcome) }
+    const settleIntent = (id: number, outcome: 'committed' | 'failed' | 'unresolved'): void => { defaultIntent.settle(id, outcome) }
+    /** Reconcile an UNRESOLVED sessionless default intent against an
+     *  authoritative Host read (v2 §0.3.2): the persisted default either
+     *  carries the choice (committed) or proves it did not land (clear). */
+    const reconcileDefaultIntent = (persisted: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string } | undefined): void => {
+      if (defaultIntent.outcome !== 'unresolved') return
+      const active = defaultIntent.record
+      if (active === undefined) return
+      if (persisted !== undefined && sameModelSelection(persisted as ModelSelection, active.selection)) {
+        defaultIntent.settle(active.id, 'committed')
+      } else {
+        defaultIntent.settle(active.id, 'failed')
+      }
+      setModelSelectionPending(undefined)
+    }
     /** TUI-only facade; this ref is NEVER installed into an Agent context. */
     const selected: ModelSelectionRef = {
       get current(): ModelSelection | undefined {
@@ -2768,17 +2784,22 @@ export function apply(ctx: Context, config: Config): void {
         : `${selection.provider}/${selection.model} @${selection.reasoningEffort}`
       // The base is the AUTHORITATIVE current selection: for a sessionless
       // surface that is the persisted Host default, NOT the optimistic intent
-      // (which is shown only by `currentModelSelectionPending()`). Otherwise a
-      // pending sessionless save would paint m1 as both base and pending.
+      // (which is shown only by the marker below). Otherwise a pending
+      // sessionless save would paint m1 as both base and pending.
       const selection = liveAgent === undefined
         ? (defaultModel.currentSelection() as ModelSelection | undefined)
         : modelSelections.current(liveAgent)
       const base = selection !== undefined
         ? labelOf(selection)
         : liveAgent === undefined ? 'no model' : `${liveAgent.options.provider}/${liveAgent.options.model}`
-      const pending = currentModelSelectionPending()
-      if (pending === undefined) return base
-      const pendingLabel = labelOf(pending)
+      const marker = currentModelSelectionMarker()
+      if (marker === undefined) return base
+      const pendingLabel = labelOf(marker.selection)
+      // An ambiguous write keeps an EXPLICIT unresolved marker until a Host
+      // read/reconnect establishes truth (v2 §0.3.2) — never "committed".
+      if (marker.status === 'unresolved') {
+        return pendingLabel === base ? `${base} (unconfirmed)` : `${base} → ${pendingLabel} (unconfirmed)`
+      }
       // A sessionless intent is also the optimistic base, so avoid the
       // redundant `m1 → m1`; still mark it as in flight.
       return pendingLabel === base ? `${base} (selecting…)` : `${base} → ${pendingLabel} (selecting…)`
@@ -3935,8 +3956,8 @@ export function apply(ctx: Context, config: Config): void {
     /** The in-flight Session model selection the footer reports as
      *  `selecting`; the display itself always follows the authoritative
      *  Session selection, never this request. */
-    let pendingModelSelection: { readonly generation: number; readonly selection: ModelSelection; readonly token: number } | undefined
-    const setModelSelectionPending = (selection: ModelSelection | undefined, token?: number): void => {
+    let pendingModelSelection: { readonly generation: number; readonly selection: ModelSelection; readonly token: number; readonly status: 'pending' | 'unresolved' } | undefined
+    const setModelSelectionPending = (selection: ModelSelection | undefined, token?: number, status: 'pending' | 'unresolved' = 'pending'): void => {
       if (selection === undefined) {
         // Only the operation that OWNS the marker may clear it: an older
         // completion must never wipe a newer operation's `(selecting…)`.
@@ -3944,11 +3965,15 @@ export function apply(ctx: Context, config: Config): void {
         pendingModelSelection = undefined
         return
       }
-      pendingModelSelection = { generation: sessionGeneration, selection, token: token ?? 0 }
+      pendingModelSelection = { generation: sessionGeneration, selection, token: token ?? 0, status }
     }
-    const currentModelSelectionPending = (): ModelSelection | undefined =>
+    /** The owned in-flight marker for the CURRENT generation (status included),
+     *  so the footer can distinguish `selecting…` from an explicit `unconfirmed`
+     *  unresolved state (v2 §0.3.2). */
+    const currentModelSelectionMarker = ():
+      { readonly selection: ModelSelection; readonly status: 'pending' | 'unresolved' } | undefined =>
       pendingModelSelection !== undefined && pendingModelSelection.generation === sessionGeneration
-        ? pendingModelSelection.selection
+        ? { selection: pendingModelSelection.selection, status: pendingModelSelection.status }
         : undefined
     const bumpSessionGeneration = (): number => {
       if (cleanedUp) return sessionGeneration
@@ -8962,6 +8987,11 @@ export function apply(ctx: Context, config: Config): void {
             diag,
             sessionId: () => sourceId,
             onResult: (outcome) => {
+              if (outcome.kind === 'superseded') {
+                // A locally superseded lifecycle result during the commit owns
+                // nothing: no notice, no repaint (v2 §0.2.1).
+                return
+              }
               if (outcome.kind === 'stale') {
                 // The stale gate runs BEFORE any create (inside the gate a
                 // switch cannot interleave): the picker's selection is
@@ -9016,9 +9046,10 @@ export function apply(ctx: Context, config: Config): void {
       setNotificationMethod: (method) => completionController.setMethod(parseNotificationMethod(method)),
       ensureSession,
       get selected() { return selected },
-      // The default selection a NEW Session should observe: the latest
-      // explicit default intent (a /model commit this run), falling back to
-      // the persisted global default.
+      // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending
+      // or unresolved) falling back to the persisted global default. A fresh
+      // create never seeds from it — the Direct adapter captures the persisted
+      // Host default at admission.
       defaultSelection: (): ModelSelection | undefined =>
         defaultIntent.intent ?? (defaultModel.currentSelection() as ModelSelection | undefined),
       get defaultIntent() { return defaultIntent.intent },
@@ -9027,6 +9058,7 @@ export function apply(ctx: Context, config: Config): void {
       awaitPendingDefaultWrite,
       trackDefaultWrite,
       setModelSelectionPending,
+      reconcileDefaultIntent,
       setDefaultIntent,
       settleIntent,
       get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },

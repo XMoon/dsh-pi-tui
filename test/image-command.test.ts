@@ -137,6 +137,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     trackDefaultWrite: () => {},
     get defaultIntentOutcome() { return undefined },
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     focusEnabled: () => false,

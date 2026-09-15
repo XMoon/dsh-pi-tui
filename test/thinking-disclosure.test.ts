@@ -621,6 +621,7 @@ function setupSettings() {
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     focusEnabled: () => false,

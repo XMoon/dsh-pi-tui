@@ -201,13 +201,28 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     if (request.agentPreset !== undefined) {
       // Guaranteed-fresh TUI create with an explicit preset: one Host mutation
       // (`session.create` with the preset) preserves creation-time atomicity.
+      // The official generated Remote THROWS on transport/envelope failure;
+      // normalize it so a post-dispatch failure is `indeterminate` with the
+      // requested id as correlation (v2 §0.7.3), never a rejected Promise.
       const result = await this.session.create({
         sessionId: request.sessionId,
         ...cwd === undefined ? {} : { cwd },
         agentPreset: request.agentPreset,
-      })
+      }).catch((error: unknown) => ({ ok: false as const, error }))
       if (!result.ok) return { ownership: ownership(), outcome: classifyCreateFailure(result.error, request.sessionId) }
       const publishedId = result.value.sessionId
+      // The connection envelope parser does not validate the nested payload:
+      // a malformed success must not fake a created Session identity.
+      if (typeof publishedId !== 'string' || publishedId === '') {
+        return {
+          ownership: ownership(),
+          outcome: {
+            kind: 'indeterminate',
+            error: { code: 'session/create-result-invalid', message: 'the Host returned an unusable Session id' },
+            requestedSessionId: request.sessionId,
+          },
+        }
+      }
       const handle = { session: { id: publishedId } }
       // Classify FIRST, then ownership: a Host success after a reconnect is
       // `created + superseded`, never a downgraded indeterminate.

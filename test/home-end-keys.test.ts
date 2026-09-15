@@ -645,6 +645,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     focusEnabled: () => false,

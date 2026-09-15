@@ -33,6 +33,8 @@ interface LifecycleHarness {
   setGeneration(id: number | undefined): void
   /** Run inside the Host RPC before it resolves (a mid-RPC reconnect). */
   setRemoteCreateHook(hook: () => void): void
+  /** Make the generated session.create THROW (official transport failure). */
+  setRemoteCreateThrow(error: unknown): void
   setClientCreateHook(hook: () => void): void
   /** Make the Client list reconciliation throw after publication. */
   setHandleAddedThrows(throws: boolean): void
@@ -61,6 +63,7 @@ function lifecycleHarness(): LifecycleHarness {
   let openHook: (() => void) | undefined
   let generation: { id: number } | undefined = { id: 1 }
   let remoteCreateHook: (() => void) | undefined
+  let remoteCreateThrow: unknown
   let clientCreateHook: (() => void) | undefined
   const sessions: RemoteLifecycleSessions = {
     create: async (opts) => {
@@ -84,6 +87,7 @@ function lifecycleHarness(): LifecycleHarness {
     create: async (request) => {
       calls.remoteCreates.push(request)
       remoteCreateHook?.()
+      if (remoteCreateThrow !== undefined) throw remoteCreateThrow
       return remoteCreateResult
     },
   }
@@ -97,6 +101,7 @@ function lifecycleHarness(): LifecycleHarness {
     setFailReconcile: (fail) => { failReconcile = fail },
     setGeneration: (id) => { generation = id === undefined ? undefined : { id } },
     setRemoteCreateHook: (hook) => { remoteCreateHook = hook },
+    setRemoteCreateThrow: (error) => { remoteCreateThrow = error },
     setClientCreateHook: (hook) => { clientCreateHook = hook },
     setHandleAddedThrows: (throws) => { handleAddedThrows = throws },
     setHandleAddedHook: (hook) => { handleAddedHook = hook },
@@ -385,4 +390,32 @@ test('a generation replaced during the local open is opened + superseded', async
   assert.equal(result.outcome.kind, 'opened')
   assert.equal(result.ownership, 'superseded')
   assert.deepEqual(harness.calls.opens, ['session-a'], 'the local selection happened, but its result is not owned')
+})
+
+test('a THROWING session.create transport failure settles indeterminate with the requested id as correlation only', async () => {
+  const harness = lifecycleHarness()
+  harness.setRemoteCreateThrow(new Error('transport exploded'))
+  const result = await harness.lifecycle.create({ sessionId: 'session-a', meta: { cwd: '/ws' }, agentPreset: 'minimal' })
+  assert.equal(result.outcome.kind, 'indeterminate')
+  assert.equal(result.ownership, 'current')
+  if (result.outcome.kind === 'indeterminate') assert.equal(result.outcome.requestedSessionId, 'session-a')
+})
+
+test('a THROWING explicit create after a reconnect is indeterminate + superseded', async () => {
+  const harness = lifecycleHarness()
+  harness.setRemoteCreateThrow(new Error('transport exploded'))
+  harness.setRemoteCreateHook(() => harness.setGeneration(2))
+  const result = await harness.lifecycle.create({ sessionId: 'session-a', meta: { cwd: '/ws' }, agentPreset: 'minimal' })
+  assert.equal(result.outcome.kind, 'indeterminate')
+  assert.equal(result.ownership, 'superseded')
+})
+
+test('a malformed successful session.create payload is indeterminate with the requested id, never a fake created', async () => {
+  const harness = lifecycleHarness()
+  harness.setRemoteCreateResult({ ok: true, value: { sessionId: '' } })
+  const result = await harness.lifecycle.create({ sessionId: 'session-a', meta: { cwd: '/ws' }, agentPreset: 'minimal' })
+  assert.equal(result.outcome.kind, 'indeterminate')
+  if (result.outcome.kind === 'indeterminate') assert.equal(result.outcome.error.code, 'session/create-result-invalid')
+  if (result.outcome.kind === 'indeterminate') assert.equal(result.outcome.requestedSessionId, 'session-a')
+  assert.deepEqual(harness.calls.added, [], 'a malformed id is never reconciled into Client state')
 })

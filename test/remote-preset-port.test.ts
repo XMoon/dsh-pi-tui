@@ -53,6 +53,8 @@ interface PresetHarness {
   setListHook(hook: () => void | Promise<void>): void
   /** Gate the Host select result (for overlapping-call tests). */
   setSelectGate(gate: () => Promise<void>): void
+  /** Make the Host select THROW (official transport failure). */
+  setSelectThrow(error: unknown): void
   queueListResults(...results: Array<{ ok: true; value: RemotePresetRoster } | { ok: false; error: unknown }>): void
 }
 
@@ -62,6 +64,7 @@ function presetHarness(): PresetHarness {
   let selectResult: { ok: true; value: string } | { ok: false; error: unknown } = { ok: true, value: 'minimal' }
   let selectHook: (() => void) | undefined
   let selectGate: (() => Promise<void>) | undefined
+  let selectThrow: unknown
   let listHook: (() => void | Promise<void>) | undefined
   const listQueue: Array<{ ok: true; value: RemotePresetRoster } | { ok: false; error: unknown }> = []
   const generation = generationHarness()
@@ -76,6 +79,7 @@ function presetHarness(): PresetHarness {
       calls.selects.push({ sessionId, presetId })
       selectHook?.()
       if (selectGate !== undefined) await selectGate()
+      if (selectThrow !== undefined) throw selectThrow
       return selectResult
     },
   }
@@ -87,6 +91,7 @@ function presetHarness(): PresetHarness {
     setSelectResult: (result) => { selectResult = result },
     setSelectHook: (hook) => { selectHook = hook },
     setSelectGate: (gate) => { selectGate = gate },
+    setSelectThrow: (error) => { selectThrow = error },
     setListHook: (hook) => { listHook = hook },
     queueListResults: (...results) => { listQueue.push(...results) },
   }
@@ -264,4 +269,26 @@ test('an aborted roster read reports the LOCAL abort, not a stale Host failure',
   harness.setListResult({ ok: false, error: failure('gateway/internal', 'host boom') })
   harness.setListHook(() => controller.abort())
   await assert.rejects(harness.catalog.roster(controller.signal), /abort/i)
+})
+
+test('a superseded preset-roster read throws the typed SupersededReadError (not a generic error)', async () => {
+  const { SupersededReadError } = await import('../src/runtime/read-error.ts')
+  const harness = presetHarness()
+  harness.setListHook(() => harness.generation.set({ id: 2 }))
+  await assert.rejects(harness.catalog.roster(), (error: unknown) => error instanceof SupersededReadError)
+})
+
+test('a THROWING agentPresets.select transport failure settles indeterminate, never a rejected promise', async () => {
+  const harness = presetHarness()
+  harness.setSelectThrow(new Error('transport exploded'))
+  const result = await harness.catalog.selectSessionPreset('session-a', 'minimal')
+  assert.equal(result.outcome.kind, 'indeterminate')
+})
+
+test('a malformed successful agentPresets.select payload is indeterminate, never a fake commit', async () => {
+  const harness = presetHarness()
+  harness.setSelectResult({ ok: true, value: '' })
+  const result = await harness.catalog.selectSessionPreset('session-a', 'minimal')
+  assert.equal(result.outcome.kind, 'indeterminate')
+  if (result.outcome.kind === 'indeterminate') assert.equal(result.outcome.error.code, 'agent-preset/select-result-invalid')
 })
