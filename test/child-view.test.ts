@@ -107,6 +107,67 @@ test('the viewer transcript never shows a seeded parent completion notice', () =
   assert.ok(!text.includes('Background subagent parent-child'), `the notice body must not leak:\n${text}`)
 })
 
+test('the child viewer keeps the child full assistant surface (never text-only)', () => {
+  // 0.1.6's parent settlement notice projects only the child's closing TEXT
+  // blocks; that filtering belongs to the Host and must never shrink the
+  // CHILD viewer's own transcript. The child's tool cards survive alongside
+  // the text, so the viewer is not a text-only projection.
+  const log = [
+    event(0, 'user/message', { content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' } }),
+    event(1, 'turn/start', { turn: 1 }),
+    event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child reply' }] } }),
+    event(3, 'tool/call', { turn: 1, step: 1, callId: 'call-1', name: 'bash', arguments: '{"command":"ls"}' }),
+    event(4, 'tool/result', {
+      turn: 1,
+      step: 1,
+      message: {
+        id: 'msg-4',
+        role: 'user',
+        content: [{ type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'text', text: 'TOOL OUTPUT' }] }],
+        source: { kind: 'tool', callId: 'call-1' },
+      },
+    }),
+    event(5, 'assistant/message', { turn: 1, step: 2, message: { role: 'assistant', content: [{ type: 'text', text: 'child closing' }] } }),
+  ]
+  const folder = new TranscriptFolder()
+  folder.apply(log)
+  const messages = folder.messages()
+  const kinds = messages.map(message => message.kind)
+  assert.ok(kinds.includes('assistant'), `the child's assistant text must survive:\n${JSON.stringify(kinds)}`)
+  assert.ok(kinds.includes('tool'), `the child's tool card must survive (never trimmed to text-only):\n${JSON.stringify(kinds)}`)
+  const text = messages.map(message => 'text' in message ? message.text : '').join('\n')
+  assert.ok(text.includes('child reply'), `first reply missing:\n${text}`)
+  assert.ok(text.includes('child closing'), `closing reply missing:\n${text}`)
+})
+
+test('a parent settlement notice never alters the child viewer surface', () => {
+  // The parent's subagent-settled notice is seeded BEFORE the ownership
+  // marker; the child's OWN folded surface must be byte-identical with and
+  // without it (the parent projection must not shrink the child's output).
+  const childLog = [
+    event(8, 'user/message', { content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' } }),
+    event(9, 'turn/start', { turn: 1 }),
+    event(10, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child reply' }] } }),
+    event(11, 'tool/call', { turn: 1, step: 1, callId: 'call-1', name: 'bash', arguments: '{"command":"ls"}' }),
+    event(12, 'tool/result', {
+      turn: 1,
+      step: 1,
+      message: {
+        id: 'msg-12',
+        role: 'user',
+        content: [{ type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'text', text: 'TOOL OUTPUT' }] }],
+        source: { kind: 'tool', callId: 'call-1' },
+      },
+    }),
+  ]
+  const withParent = new TranscriptFolder()
+  withParent.apply(childOwnEvents([parentNotice, event(7, 'session/end-seed', { inherited: true }), ...childLog]))
+  const withoutParent = new TranscriptFolder()
+  withoutParent.apply(childLog)
+  assert.deepEqual(withParent.messages(), withoutParent.messages(),
+    'the parent settlement projection must not change the child viewer surface')
+})
+
 // ── viewer content isolation (TuiApp level) ──────────────────────────────
 
 import { TuiApp } from '../src/tui-app.ts'

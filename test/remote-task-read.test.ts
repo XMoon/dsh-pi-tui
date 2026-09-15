@@ -153,6 +153,27 @@ test('Direct re-projects child activity from the live Agent registry and reads p
   assert.deepEqual(active?.jobs, [job('job')])
 })
 
+test('a settled continuable child keeps its status and result fields (plan §9.3)', async () => {
+  // The parent settlement notice projection must never make the TUI drop the
+  // child's own task fields: the task read reports the settled child's
+  // mode/activity (status) and label (result metadata) independently.
+  const direct = new DirectTaskReader({
+    agentFor: id => id === 'parent' ? { status: 'idle' } : undefined,
+    subagents: {
+      async listChildren() {
+        return [{ kind: 'child', id: 'child', label: 'Child result', mode: 'continuable', activity: 'inactive', hasChildren: false }]
+      },
+    },
+    jobs: { list: () => [] },
+  })
+  const read = await direct.readDirectChildren('parent')
+  const child = read?.children[0]
+  assert.ok(child !== undefined && child.kind === 'child', 'the settled child must stay a readable row')
+  assert.equal(child.mode, 'continuable', 'the continuable mode must survive settlement')
+  assert.equal(child.activity, 'inactive', 'the settled activity must survive')
+  assert.equal(child.label, 'Child result', 'the child result metadata must survive')
+})
+
 test('Direct re-resolves the parent Agent before reading jobs after an awaited listing', async () => {
   const oldParent: DirectTaskAgent = { status: 'running' }
   const newParent: DirectTaskAgent = { status: 'running' }

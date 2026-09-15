@@ -14,12 +14,14 @@ import {
   readHumanSkillCatalog,
   resolveColdSkillTarget,
   resolveLiveSkillTarget,
+  subscribeSkillsChange,
   type AgentPresetsLike,
   type SkillCatalogContext,
   type SkillCatalogReadOptions,
   type SkillRegistryLike,
   type SkillSummaryLike,
 } from '../src/skill-catalog.ts'
+import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 
 /** A catalog entry helper with the full invocation policy. */
 function skill(name: string, userInvocable: boolean, extra: Partial<SkillSummaryLike> = {}): SkillSummaryLike {
@@ -296,4 +298,40 @@ test('the live target falls back to the host registry without a preset-scoped on
 
 test('no reachable registry resolves no live target', () => {
   assert.equal(resolveLiveSkillTarget(fakeCtx({}), { ctx: {} }, '/ws'), undefined)
+})
+
+test('the skills/change subscription registers its listener and degrades without an event bus', () => {
+  const listeners: (() => void)[] = []
+  let fired = 0
+  subscribeSkillsChange(
+    { on: (event, listener) => { assert.equal(event, 'skills/change'); listeners.push(listener) } },
+    () => { fired += 1 },
+  )
+  assert.equal(listeners.length, 1, 'the invalidation listener must be subscribed')
+  listeners[0]!()
+  assert.equal(fired, 1, 'the subscription must forward the invalidation notification')
+  // An absent `on` (a composition without the event bus) degrades to NO
+  // subscription instead of throwing.
+  assert.doesNotThrow(() => subscribeSkillsChange({}, () => {}))
+})
+
+test('the Direct catalog skills capability wires the skills/change subscription through the adapter', () => {
+  // The runner subscribes via `backend.catalog.skills.onSkillsChange(...)`;
+  // this pins the DIRECT adapter's half of the wiring (the event-bus
+  // registration). The coalescer that the listener drives is covered by
+  // test/skill-catalog-refresh.test.ts.
+  const listeners: (() => void)[] = []
+  const ctx = {
+    get: () => undefined,
+    on: (event: string, listener: () => void) => {
+      assert.equal(event, 'skills/change')
+      listeners.push(listener)
+    },
+  }
+  const port = new DirectCatalogPort(ctx as never, () => undefined)
+  let fired = 0
+  port.skills.onSkillsChange(() => { fired += 1 })
+  assert.equal(listeners.length, 1, 'the Direct skills capability must subscribe to skills/change')
+  listeners[0]!()
+  assert.equal(fired, 1, 'the invalidation notification must reach the registered listener')
 })

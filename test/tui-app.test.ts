@@ -19,10 +19,11 @@ import { toolPresenterFrom } from '../src/present.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { Text, visibleWidth } from '@xmoon76/pi-tui'
+import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { APP_KEYBINDINGS } from '../src/keybindings/definitions.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -411,6 +412,21 @@ test('the queue pane renders pending rows and hides when empty', async () => {
   assert.ok(view.includes('❯ steer a correction'), `steer row missing:\n${view}`)
   assert.ok(view.includes('ctrl+s to steer all'), `steer-all hint missing:\n${view}`)
   assert.ok(view.includes('alt+up to recall all'), `recall-all hint missing:\n${view}`)
+  // The TUI exposes ONLY the three bulk/submit gestures (plan §6.2 D): the
+  // keymap has NO per-row queue edit/remove action, so a symbolic or
+  // key-only row action cannot exist silently.
+  const queueActions = Object.keys(APP_KEYBINDINGS).filter(id => /queue|dequeue|steer/i.test(id)).sort()
+  assert.deepEqual(queueActions, ['app.input.dequeue', 'app.input.queue', 'app.input.steer'],
+    'no per-row queue edit/remove action may be bound')
+  assert.equal((view.match(/❯/g) ?? []).length, 3, 'two queue rows plus the editor prompt only')
+  // Every rendered queue row is EXACTLY the marker plus its text — no action
+  // token, bracket hint, or extra control (viewport padding is trimmed).
+  const plainLines = stripTerminalSequences(view).split('\n').map(line => line.trim())
+  assert.deepEqual(
+    plainLines.filter(line => line.startsWith('❯ ') && line !== '❯'),
+    ['❯ follow up on the audit', '❯ steer a correction'],
+    'each queued row is exactly the marker plus its text',
+  )
   app.setQueueItems([])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
