@@ -113,6 +113,26 @@ export class DefaultIntentTracker<TSelection = ModelSelectionValue> {
     this.settledOutcome = 'failed'
   }
 
+  /**
+   * Reconcile every CONSECUTIVE unresolved operation against ONE authoritative
+   * Host snapshot: the nearest matching selection commits; every non-matching
+   * unresolved operation is failed (which may restore the next unresolved
+   * ancestor), and the SAME snapshot is then applied to it. Stops at a pending
+   * ancestor (a future write cannot be guessed) or when no unresolved operation
+   * remains. Never guesses: only the caller-provided authoritative matcher decides.
+   */
+  reconcile(matches: (selection: TSelection) => boolean): void {
+    for (;;) {
+      const active = this.active
+      if (active === undefined || active.status !== 'unresolved') return
+      if (matches(active.selection)) {
+        this.settle(active.id, 'committed')
+        return
+      }
+      this.settle(active.id, 'failed')
+    }
+  }
+
   /** The active intent (latest PENDING or an UNRESOLVED operation awaiting a
    *  Host read), or undefined. */
   get intent(): TSelection | undefined {

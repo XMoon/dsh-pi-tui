@@ -2027,15 +2027,12 @@ export function apply(ctx: Context, config: Config): void {
      *  authoritative Host read (v2 §0.3.2): the persisted default either
      *  carries the choice (committed) or proves it did not land (clear). */
     const reconcileDefaultIntent = (persisted: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string } | undefined): void => {
-      if (defaultIntent.outcome !== 'unresolved') return
-      const active = defaultIntent.record
-      if (active === undefined) return
-      if (persisted !== undefined && sameModelSelection(persisted as ModelSelection, active.selection)) {
-        defaultIntent.settle(active.id, 'committed')
-      } else {
-        defaultIntent.settle(active.id, 'failed')
-      }
-      setModelSelectionPending(undefined)
+      // Only an AUTHORITATIVE snapshot reconciles; an unavailable read is not
+      // proof. The tracker itself walks the whole unresolved ancestry with the
+      // SAME snapshot (a matching ancestor commits; non-matching ones fail).
+      if (persisted === undefined) return
+      defaultIntent.reconcile(selection => sameModelSelection(persisted as ModelSelection, selection))
+      if (defaultIntent.outcome !== 'unresolved') setModelSelectionPending(undefined)
     }
     /** TUI-only facade; this ref is NEVER installed into an Agent context. */
     const selected: ModelSelectionRef = {

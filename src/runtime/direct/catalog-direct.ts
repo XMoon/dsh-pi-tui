@@ -21,8 +21,7 @@ import {
   copyModelSelection,
   normalizeModelSelection,
 } from '../../model-selection.ts'
-import type { OperationResult, WriteOutcome } from '../write-outcome.ts'
-import { currentResult } from '../write-outcome.ts'
+import type { OperationOwnership, OperationResult, WriteOutcome } from '../write-outcome.ts'
 import type { SessionModelSelectionOwnerLike } from './model-selection-direct.ts'
 import {
   readHumanSkillCatalog,
@@ -373,9 +372,12 @@ export class DirectModelCatalog implements ModelCatalog {
   }
 
   async selectSessionModel(sessionId: string, selection: ModelSelectionDto, signal?: AbortSignal): Promise<OperationResult<ModelSelectionDto>> {
-    // The Direct adapter is the only writer for its own process-local Agent,
-    // so its settlement always owns the current surface (never superseded).
-    return currentResult(await this.selectSessionModelOutcome(sessionId, selection, signal))
+    const outcome = await this.selectSessionModelOutcome(sessionId, selection, signal)
+    // Direct has no connection generation, but the caller abort IS its ownership
+    // axis (v2 §0.2.1/§0.2.4): a PRE-commit abort is `cancelled + current`; a
+    // proven settlement followed by an abort keeps the settlement and loses
+    // local ownership (`committed|rejected|indeterminate + superseded`).
+    return { ownership: ownershipOf(signal, outcome.kind), outcome }
   }
 
   private async selectSessionModelOutcome(sessionId: string, selection: ModelSelectionDto, signal?: AbortSignal): Promise<WriteOutcome<ModelSelectionDto>> {
@@ -405,6 +407,9 @@ export class DirectModelCatalog implements ModelCatalog {
         ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
       })
     } catch (error) {
+      // An abort during normalization is a PROVEN PRE-commit cancellation (the
+      // durable append has not happened) — never a bogus rejection.
+      if (Boolean(signal?.aborted)) return { kind: 'cancelled' }
       return {
         kind: 'rejected',
         error: { code: 'session/model-unavailable', message: safeErrorMessage(error) },
@@ -558,7 +563,8 @@ export class DirectPresetCatalog implements PresetCatalog {
   }
 
   async selectSessionPreset(sessionId: string, presetId: string, signal?: AbortSignal): Promise<OperationResult<{ readonly preset: string }>> {
-    return currentResult(await this.selectSessionPresetOutcome(sessionId, presetId, signal))
+    const outcome = await this.selectSessionPresetOutcome(sessionId, presetId, signal)
+    return { ownership: ownershipOf(signal, outcome.kind), outcome }
   }
 
   private async selectSessionPresetOutcome(sessionId: string, presetId: string, signal?: AbortSignal): Promise<WriteOutcome<{ readonly preset: string }>> {
@@ -599,6 +605,13 @@ export class DirectPresetCatalog implements PresetCatalog {
       }
     }
   }
+}
+
+/** The Direct ownership axis: an abort AFTER a proven settlement leaves the
+ *  settlement intact while the local surface is no longer owned. A pre-commit
+ *  `cancelled` outcome already IS the cancellation, so it stays `current`. */
+function ownershipOf(signal: AbortSignal | undefined, kind: WriteOutcome<unknown>['kind']): OperationOwnership {
+  return signal?.aborted === true && kind !== 'cancelled' ? 'superseded' : 'current'
 }
 
 /** The official preset-switch refusal codes that PROVE no durable commit

@@ -171,17 +171,10 @@ function stubRunner(
     get defaultIntentOutcome() { return defaultIntent.outcome },
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: (persisted) => {
-      if (defaultIntent.outcome !== 'unresolved') return
-      const active = defaultIntent.record
-      if (active === undefined) return
-      if (persisted !== undefined
-        && persisted.provider === active.selection.provider
-        && persisted.model === active.selection.model
-        && persisted.reasoningEffort === active.selection.reasoningEffort) {
-        defaultIntent.settle(active.id, 'committed')
-      } else {
-        defaultIntent.settle(active.id, 'failed')
-      }
+      if (persisted === undefined) return
+      defaultIntent.reconcile(selection => persisted.provider === selection.provider
+        && persisted.model === selection.model
+        && persisted.reasoningEffort === selection.reasoningEffort)
     },
     sessionBlank: () => undefined,
     refreshStatus: () => {},
@@ -1857,5 +1850,111 @@ test('an authoritative Host read reconciles an UNRESOLVED sessionless default in
   await vt.waitForRender()
   assert.equal(proxy.defaultIntentOutcome, 'committed', 'the Host read proves the ambiguous write landed')
   assert.equal(proxy.defaultIntent, undefined, 'the resolved intent clears')
+  app.stop()
+})
+
+test('a /model picker opened on S1 cannot apply to S2 after a session switch (subject fence)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  const saved: unknown[] = []
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'default-model' }),
+    saveSelection: async (next: unknown) => { saved.push(next) },
+  } as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await (modelDef!.handler as () => Promise<unknown>)()
+  await vt.waitForRender()
+  vt.sendInput('\r') // provider -> model list (the overlay is now open on S1)
+  await vt.waitForRender()
+  // Prove the overlay actually opened (not a vacuous early return).
+  assert.match(vt.getViewport().join('\n'), /Type to search/, 'the model picker must open before the switch')
+  // A Session switch lands AFTER the overlay opened.
+  state.agent = fakeAgent('session-b')
+  state.generation = 2
+  vt.sendInput('\r') // submit the STALE overlay
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(saved, [], 'a stale picker must not dispatch any model write')
+  const catalog = proxy.catalog as DirectCatalogPort
+  assert.deepEqual(catalog.models.sessionSelection('session-b'), { provider: 'p', model: 'default-model' },
+    'a stale picker must never apply its selection to the new Session')
+  app.stop()
+})
+
+test('a sessionless /model picker cannot write a Session that appeared in the same generation', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  const saved: unknown[] = []
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'default-model' }),
+    saveSelection: async (next: unknown) => { saved.push(next) },
+  } as never)
+  const state = { agent: undefined as Agent | undefined, generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await (modelDef!.handler as () => Promise<unknown>)()
+  await vt.waitForRender()
+  vt.sendInput('\r') // provider -> model list (sessionless picker opened)
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join('\n'), /Type to search/, 'the sessionless picker must open before the create')
+  // A first create publishes a live Agent BEFORE the generation bump.
+  state.agent = fakeAgent('session-new')
+  vt.sendInput('\r') // submit the stale sessionless overlay
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(saved, [], 'the stale sessionless picker must not dispatch any model write')
+  const catalog = proxy.catalog as DirectCatalogPort
+  assert.deepEqual(catalog.models.sessionSelection('session-new'), { provider: 'p', model: 'default-model' },
+    'the stale sessionless picker must not write the new Session')
   app.stop()
 })

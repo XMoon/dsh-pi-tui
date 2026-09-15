@@ -960,3 +960,67 @@ test('Direct preset resolve aborts between the code probe and the ptc fallback',
   await assert.rejects(pending, /abort/i)
   assert.deepEqual(calls, ['code'], 'the fallback Host read must not run after an abort')
 })
+
+test('Direct selectSessionModel reports cancelled (not rejected) when aborted while normalization rejects', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const started = deferred<void>()
+  const appended: unknown[] = []
+  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
+  const models = new DirectCatalogPort(host({
+    llm: {
+      resolveCallConfig: async () => { started.resolve(); await gate; throw new Error('route gone') },
+      listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [],
+    },
+    agentDefaultModel: { currentSelection: () => undefined, saveSelection: async () => {} },
+  }), () => liveAgent, owner).models
+  const controller = new AbortController()
+  const pending = models.selectSessionModel('session-live', { provider: 'p', model: 'm1' }, controller.signal)
+  await started.promise
+  controller.abort()
+  release()
+  const result = await pending
+  assert.deepEqual(result, { ownership: 'current', outcome: { kind: 'cancelled' } },
+    'an abort during normalization is a proven pre-commit cancellation, not a rejection')
+  assert.deepEqual(appended, [])
+})
+
+test('Direct selectSessionModel reports committed + superseded when aborted after the durable commit', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const saveStarted = deferred<void>()
+  const appended: unknown[] = []
+  const owner = { current: () => undefined, appendSelection: (_a: unknown, next: unknown) => { appended.push(next) }, setCurrent: () => {}, selectForNextRequest: () => {} }
+  const models = new DirectCatalogPort(host({
+    llm: { resolveCallConfig: async (next: unknown) => next, listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}), discoverModels: async () => [], listConfigurableProviders: () => [] },
+    agentDefaultModel: { currentSelection: () => undefined, saveSelection: async () => { saveStarted.resolve(); await gate } },
+  }), () => liveAgent, owner).models
+  const controller = new AbortController()
+  const pending = models.selectSessionModel('session-live', { provider: 'p', model: 'm1' }, controller.signal)
+  await saveStarted.promise
+  controller.abort()
+  release()
+  const result = await pending
+  assert.deepEqual(appended, [{ provider: 'p', model: 'm1' }], 'the durable append already committed')
+  assert.equal(result.outcome.kind, 'committed', 'a post-commit abort keeps the settlement')
+  assert.equal(result.ownership, 'superseded', 'but loses local ownership')
+})
+
+test('Direct selectSessionPreset reports committed + superseded when aborted after the Host switch', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const started = deferred<void>()
+  const presets = new DirectCatalogPort(host({
+    agentPresets: {
+      select: async () => { started.resolve(); await gate; return 'minimal' },
+    },
+  }), () => liveAgent).presets
+  const controller = new AbortController()
+  const pending = presets.selectSessionPreset('session-live', 'minimal', controller.signal)
+  await started.promise
+  controller.abort()
+  release()
+  const result = await pending
+  assert.equal(result.outcome.kind, 'committed')
+  assert.equal(result.ownership, 'superseded')
+})

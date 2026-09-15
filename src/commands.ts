@@ -3725,6 +3725,12 @@ export function registerTuiCommands(
         // This operation owns its footer pending marker and notices; a newer
         // selection invalidates that ownership even on the same generation.
         const token = ++modelOperationToken
+        // The submitted value must belong to the Session (generation + identity)
+        // that OPENED the picker: a switch after the overlay opened must never
+        // apply the old operation to the new Session (v2 §0.2.5/§0.3.1).
+        if (runner.sessionGeneration !== readGeneration || runner.liveAgent?.session.id !== pickerSessionId) {
+          return 'superseded'
+        }
         const liveSessionId = runner.liveAgent?.session.id
         if (liveSessionId === undefined) {
           // Before a Session exists, `/model` is a global-default intent. It
@@ -4113,7 +4119,7 @@ export function registerTuiCommands(
       // Operation ownership for `/preset` (shared across invocations, declared
       // beside the registration): a newer pick supersedes an older one's
       // notification/repaint even on the SAME Session generation.
-      const applyPresetSelection = async (id: string):
+      const applyPresetSelection = async (id: string, owner?: { readonly generation: number; readonly sessionId: string | undefined }):
         Promise<
           | { kind: 'pending'; preset: string }
           | { kind: 'switched'; preset: string }
@@ -4123,7 +4129,10 @@ export function registerTuiCommands(
           | { kind: 'indeterminate'; message: string }
         > => {
         const token = ++presetOperationToken
-        const operationGeneration = runner.sessionGeneration
+        // For a PICKER submission the owner is the Session that opened the
+        // overlay; the typed verb path binds to the current Session instead.
+        const operationGeneration = owner?.generation ?? runner.sessionGeneration
+        const operationSessionId = owner?.sessionId
         try {
         const roster = await presets.roster(runner.signal)
         // FIRST fences after the await: a newer `/preset` operation OR a Session
@@ -4133,6 +4142,13 @@ export function registerTuiCommands(
         // `/new`/switch (no Remote generation fence).
         if (token !== presetOperationToken) return { kind: 'superseded' }
         if (runner.sessionGeneration !== operationGeneration) return { kind: 'superseded' }
+        // A PICKER owner must still match EXACTLY — including a sessionless owner
+        // (`sessionId: undefined`): if a live Agent appeared in the same
+        // generation before the bump, this stale picker no longer owns it. The
+        // typed verb path has no owner and binds to the current Session above.
+        if (owner !== undefined && runner.liveAgent?.session.id !== operationSessionId) {
+          return { kind: 'superseded' }
+        }
         if (!roster.modeSelectionEnabled) {
           return { kind: 'rejected', message: 'preset selection is disabled in this deployment' }
         }
@@ -4241,10 +4257,10 @@ export function registerTuiCommands(
       }
       const lockedPresetMessage = (sessionId: string): string =>
         `session "${sessionId}" has already started; its agent preset is fixed — preset switching is only available in a new session`
-      const pickPreset = async (id: string): Promise<void> => {
+      const pickPreset = async (id: string, owner?: { readonly generation: number; readonly sessionId: string | undefined }): Promise<void> => {
         let outcome: Awaited<ReturnType<typeof applyPresetSelection>>
         try {
-          outcome = await applyPresetSelection(id)
+          outcome = await applyPresetSelection(id, owner)
         } catch (error) {
           app.notify(presetErrorText(error, id), 'error')
           return
@@ -4298,6 +4314,7 @@ export function registerTuiCommands(
       // switch during the roster read must not paint the old current preset
       // (or the old blankness) onto the new Session's picker.
       const pickerGeneration = runner.sessionGeneration
+      const pickerSessionId = runner.liveAgent?.session.id
       let roster
       try {
         roster = await presets.roster(runner.signal)
@@ -4357,7 +4374,7 @@ export function registerTuiCommands(
           // The picker's selection is an async result-consuming flow: the
           // outcome drives the notices — runOwned (AGENTS.md), never a bare
           // void; cancellation (a torn-down TUI) is debug-only.
-          runOwned('preset pick', () => pickPreset(id), {
+          runOwned('preset pick', () => pickPreset(id, { generation: pickerGeneration, sessionId: pickerSessionId }), {
             diag: runner.diag,
             sessionId: () => runner.liveAgent?.session.id,
             onError: (error) => app.notify(`preset selection failed: ${safeErrorMessage(error)}`, 'error'),
