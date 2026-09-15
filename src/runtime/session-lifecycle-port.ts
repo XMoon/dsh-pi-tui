@@ -1,17 +1,25 @@
 /**
- * The session LIFECYCLE domain port (D2.1 contract convergence): the
- * transport-neutral semantic boundary for creating a fresh Session and
- * opening an existing Session. Direct implements `open()` with the Host's
- * `agents.resume()` detail today; a future Remote adapter maps the same
- * semantic operation to official ClientSessions.open()/binding().
+ * The session LIFECYCLE domain port (D2.1 contract convergence, D2.3
+ * semantic convergence): the transport-neutral semantic boundary for
+ * creating a fresh Session and opening an existing Session.
  *
- * The request types are transitional. `sessionId`, metadata such as cwd and
- * the preset id express current semantic intent. Provider/model are still
- * Direct activation inputs and D2.3 owns their convergence to official
- * Session-local selection. Seed/inheritedEventCount/parent metadata remain
- * Direct fork/rewind creation inputs and D2.4 owns their retirement in favor
- * of Host session.fork. These fields must not be described as an already
- * Remote-ready wire payload.
+ * D2.3 removed the ordinary `provider`/`model` semantic inputs. The official
+ * create/open contracts own only current Client/Host concepts (session id,
+ * location/preset metadata) and derive the activation model from the Host
+ * global default; a Direct adapter that still needs in-process activation
+ * options resolves them from the Host default service itself, never from the
+ * cross-backend request.
+ *
+ * Open is the official Client semantic `select/open this Session` — not
+ * `resume a Host Agent`. The Direct adapter still calls `agents.resume()`
+ * internally so the in-process TUI has a live Agent; a Remote adapter maps
+ * the same operation to `ClientSessions.open()/binding()`.
+ *
+ * `meta` still carries the Direct session-header metadata (cwd, parent session
+ * and the seeded marker); `seed`/`inheritedEventCount` remain Direct D2.4
+ * fork/rewind inputs and must not be described as an already Remote-ready wire
+ * payload. The DIRECT adapter still supports them (fork/rewind rely on it); the
+ * REMOTE adapter fails closed on a seeded create until D2.4 owns Host fork.
  *
  * Requests carry serializable data plus the explicitly client-local lifecycle
  * signal. The signal is never serialized; a Remote adapter maps it to its own
@@ -23,20 +31,16 @@
  */
 
 /** Create one fresh session (the /new and first-session paths). The identity,
- * cwd-like metadata and preset are semantic intent. The provider/model fields
- * are current Direct activation inputs; D2.3 owns their convergence. The seed,
- * inherited count and parent metadata are current Direct fork/rewind inputs;
- * D2.4 owns their retirement. `signal` is client-local and never serialized. */
+ * cwd-like metadata and preset are semantic intent. The seed, inherited count
+ * and parent metadata are current Direct fork/rewind creation inputs; D2.4
+ * owns their Host-fork convergence. `signal` is client-local and never
+ * serialized. */
 export interface CreateSessionRequest {
   /** The pre-generated session identity (the TUI owns the id). */
   sessionId: string
   /** Durable session metadata (currently includes cwd, parent session and the
    * Direct seeded-session marker). D2.4 owns convergence of fork metadata. */
   meta: Record<string, unknown>
-  /** Current Direct activation fallback; D2.3 owns Session-local selection. */
-  provider?: string
-  /** Current Direct activation fallback; D2.3 owns Session-local selection. */
-  model?: string
   /** Semantic preset intent; the Direct adapter resolves its setup. */
   agentPreset?: string
   /** Current Direct fork/rewind seed; D2.4 owns Host fork convergence. */
@@ -47,18 +51,12 @@ export interface CreateSessionRequest {
   signal?: AbortSignal
 }
 
-/** Open a persisted session (the ordinary Client semantic). The Direct
- * adapter still maps this to `agents.resume()` until lifecycle convergence. */
+/** Open a persisted session (the ordinary Client semantic:
+ * `select/open this Session`, NOT `resume a Host Agent`). The Direct adapter
+ * resolves the persisted preset and activation fallback internally. */
 export interface OpenSessionRequest {
-  /** The persisted Session identity to open. The field retains the current
-   * Direct request spelling until the lifecycle payload converges. */
-  resumeSessionId: string
-  /** Current Direct activation fallback; D2.3 owns Session-local selection. */
-  provider?: string
-  /** Current Direct activation fallback; D2.3 owns Session-local selection. */
-  model?: string
-  /** Semantic preset intent; the Direct adapter resolves its setup. */
-  agentPreset?: string
+  /** The persisted Session identity to open. */
+  sessionId: string
   /** Client-local open cancellation; never serialized. */
   signal?: AbortSignal
 }

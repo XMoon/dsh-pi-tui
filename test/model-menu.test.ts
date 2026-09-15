@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { CURSOR_MARKER } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
-import { ModelSubmenu } from '../src/model-menu.ts'
+import { ModelSubmenu, type ModelApplyOutcome } from '../src/model-menu.ts'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
 import { createDiag } from '../src/diag.ts'
@@ -88,7 +88,7 @@ async function openModelFlow(
       submenu: (value, done) => new ModelSubmenu('p', current.model, undefined, {
         listModels: llm.listModels as never,
         resolveModelInfo: llm.resolveModelInfo as never,
-        apply: (next) => applied.push(next),
+        apply: (next) => { applied.push(next); return 'committed' },
         requestRender: () => app.requestRender(),
         done,
         runOwned: owned,
@@ -368,7 +368,7 @@ test('applying an effort closes the whole overlay (web settleSelection parity)',
       submenu: (value, done) => new ModelSubmenu('p', current.model, undefined, {
         listModels: async () => [{ id: 'm1' }],
         resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'high', name: 'High' }] } }),
-        apply: (next) => applied.push(next),
+        apply: (next) => { applied.push(next); return 'committed' },
         requestRender: () => app.requestRender(),
         done: (picked) => {
           if (picked !== undefined) closer()
@@ -438,7 +438,7 @@ function directModelSubmenu(
   return new ModelSubmenu('p', 'm0', undefined, {
     listModels: llm.listModels as never,
     resolveModelInfo: llm.resolveModelInfo as never,
-    apply: (next) => { applied.push(next) },
+    apply: (next) => { applied.push(next); return 'committed' },
     requestRender: () => {},
     done,
     runOwned: (label, task, options) => {
@@ -509,7 +509,7 @@ test('externally disposing ModelSubmenu aborts pending work without side effects
   const menu = new ModelSubmenu('p', 'm0', undefined, {
     listModels: async () => [{ id: 'm0' }],
     resolveModelInfo: () => pending.promise,
-    apply: (next) => { applied.push(next) },
+    apply: (next) => { applied.push(next); return 'committed' },
     requestRender: () => { renders += 1 },
     done: (selected) => { doneValue = selected },
     runOwned: (label, task, options) => {
@@ -541,7 +541,7 @@ test('externally disposing ModelSubmenu terminates a nested EffortSubmenu', asyn
   const menu = new ModelSubmenu('p', 'm0', undefined, {
     listModels: async () => [{ id: 'm0' }],
     resolveModelInfo: () => info.promise,
-    apply: (next) => { applied.push(next) },
+    apply: (next) => { applied.push(next); return 'committed' },
     requestRender: () => { renders += 1 },
     done: (selected) => { doneValue = selected },
     runOwned: (label, task, options) => {
@@ -572,7 +572,7 @@ test('model submenu: a click on the painted Loading row cannot apply an unpainte
   const submenu = new ModelSubmenu('p', 'm0', undefined, {
     listModels: () => models.promise,
     resolveModelInfo: () => info.promise,
-    apply: (next) => applied.push(next.model),
+    apply: (next) => { applied.push(next.model); return 'committed' },
     requestRender: () => {},
     done: (selected) => done.push(selected ?? ''),
     runOwned: (label, task, options) => {
@@ -619,4 +619,112 @@ test('model submenu: a click on the painted Loading row cannot apply an unpainte
   effortList.handleMouse(mouse('press', 0))
   effortList.handleMouse(mouse('click', 0))
   assert.deepEqual(applied, ['m0'], 'the painted effort row must apply after repaint')
+})
+
+/** A ModelSubmenu whose semantic write resolves a scripted outcome. */
+function scriptedModelSubmenu(
+  outcome: () => Promise<ModelApplyOutcome>,
+  applied: ModelSelection[],
+  done: (selected?: string) => void,
+): ModelSubmenu {
+  return new ModelSubmenu('p', 'm0', undefined, {
+    listModels: async () => [{ id: 'm0' }],
+    resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'low', name: 'Low' }] } }),
+    apply: async (next) => { applied.push(next); return outcome() },
+    requestRender: () => {},
+    done,
+    runOwned: (label, task, options) => {
+      runOwned(label, task, { ...options, diag: createDiag({ filePath: undefined, stderrLevel: 'off' }) })
+    },
+  })
+}
+
+test('a REJECTED model selection returns to the model list, keeping the picker usable', async () => {
+  const applied: ModelSelection[] = []
+  const dones: (string | undefined)[] = []
+  const menu = scriptedModelSubmenu(async () => 'rejected', applied, (selected) => { dones.push(selected) })
+  await settle()
+  menu.handleInput('\r') // open the effort level
+  await settle()
+  menu.handleInput('\r') // pick Default -> apply -> rejected
+  await settle()
+  assert.deepEqual(applied, [{ provider: 'p', model: 'm0' }])
+  assert.deepEqual(dones, [], 'a rejected write must not close the overlay')
+  assert.ok(menu.render(80).join('\n').includes('m0'), 'the model list stays usable after a rejection')
+})
+
+test('an INDETERMINATE model selection dismisses the picker and is never retried', async () => {
+  const applied: ModelSelection[] = []
+  const dones: (string | undefined)[] = []
+  const menu = scriptedModelSubmenu(async () => 'indeterminate', applied, (selected) => { dones.push(selected) })
+  await settle()
+  menu.handleInput('\r')
+  await settle()
+  menu.handleInput('\r')
+  await settle()
+  assert.equal(applied.length, 1, 'an indeterminate settle is never automatically retried')
+  assert.deepEqual(dones, ['__default'], 'the picker dismisses; the caller notice explains the reconcile')
+})
+
+test('a duplicate apply while the selection is in flight is not a second commit', async () => {
+  const applied: ModelSelection[] = []
+  const gate = deferred<ModelApplyOutcome>()
+  const menu = scriptedModelSubmenu(() => gate.promise, applied, () => {})
+  await settle()
+  menu.handleInput('\r')
+  await settle()
+  menu.handleInput('\r') // first apply -> selecting
+  await settle()
+  menu.handleInput('\r') // duplicate while selecting must be ignored
+  await settle()
+  assert.equal(applied.length, 1, 'only one semantic write is dispatched while selecting')
+  gate.resolve('committed')
+  await settle()
+})
+
+test('a committed no-effort model selection dismisses the whole overlay', async () => {
+  const applied: ModelSelection[] = []
+  const dones: (string | undefined)[] = []
+  const menu = new ModelSubmenu('p', 'm0', undefined, {
+    listModels: async () => [{ id: 'm0' }],
+    resolveModelInfo: async () => ({}),
+    apply: async (next) => { applied.push(next); return 'committed' as const },
+    requestRender: () => {},
+    done: (selected) => { dones.push(selected) },
+    runOwned: (label, task, options) => {
+      runOwned(label, task, { ...options, diag: createDiag({ filePath: undefined, stderrLevel: 'off' }) })
+    },
+  })
+  await settle()
+  menu.handleInput('\r') // open the model row: no efforts -> apply directly
+  await settle()
+  assert.deepEqual(applied, [{ provider: 'p', model: 'm0' }])
+  assert.deepEqual(dones, ['m0'], 'a committed no-effort selection carries the model id and dismisses the overlay')
+})
+
+test('an UNSUPPORTED model selection keeps the picker usable (walks back)', async () => {
+  const applied: ModelSelection[] = []
+  const dones: (string | undefined)[] = []
+  const menu = scriptedModelSubmenu(async () => 'unsupported', applied, (selected) => { dones.push(selected) })
+  await settle()
+  menu.handleInput('\r')
+  await settle()
+  menu.handleInput('\r')
+  await settle()
+  assert.equal(applied.length, 1)
+  assert.deepEqual(dones, [], 'an unsupported write must not close the overlay')
+  assert.ok(menu.render(80).join('\n').includes('m0'), 'the model list stays usable after unsupported')
+})
+
+test('a SUPERSEDED model selection makes no close/open decision (v2 §0.3.1)', async () => {
+  const applied: ModelSelection[] = []
+  const dones: (string | undefined)[] = []
+  const menu = scriptedModelSubmenu(async () => 'superseded', applied, (selected) => { dones.push(selected) })
+  await settle()
+  menu.handleInput('\r')
+  await settle()
+  menu.handleInput('\r')
+  await settle()
+  assert.equal(applied.length, 1)
+  assert.deepEqual(dones, [], 'a superseded write must not close/dismiss the overlay on the stale surface')
 })

@@ -34,10 +34,17 @@ export interface ModelMenuServices {
   ): Promise<{ reasoning?: { efforts?: readonly { id: string; name: string; description?: string }[] } }>
 }
 
+/** The semantic settlement of one applied selection, as the picker needs it:
+ *  a rejected/cancelled/unsupported write never committed, so the picker stays
+ *  usable; a committed/indeterminate settle dismisses it. */
+export type ModelApplyOutcome = 'committed' | 'rejected' | 'cancelled' | 'indeterminate' | 'unsupported' | 'superseded'
+
 /** Shared deps threaded through both submenu levels. */
 interface SubmenuDeps extends ModelMenuServices {
-  /** Commit a selection (model, optional effort) and refresh the footer. */
-  apply(selection: ModelSelection): void
+  /** Commit a selection (model, optional effort) and resolve with its semantic
+   *  settlement. A rejected/indeterminate result must not be presented as a
+   *  completed commit. */
+  apply(selection: ModelSelection): Promise<ModelApplyOutcome> | ModelApplyOutcome
   /** Request a frame so the swapped-in list renders. */
   requestRender(): void
   /** Close this submenu level (Esc, or after an applied selection). */
@@ -83,9 +90,12 @@ class EscDismiss implements Component {
 }
 
 /**
- * The reasoning-effort picker for one model; applies on selection. Esc or a
- * parent close latches `disposed` and aborts the info load; a resolve or
- * reject that settles afterwards is ignored (debug diagnostics only).
+ * The reasoning-effort picker for one model. A selection enters a `Selecting…`
+ * state and the overlay dismisses only after the semantic write settles; a
+ * rejected/cancelled write returns to the model list so the picker stays
+ * usable. Esc or a parent close latches `disposed` and aborts the info load; a
+ * resolve or reject that settles afterwards is ignored (debug diagnostics
+ * only).
  */
 class EffortSubmenu implements Component, RowBudgetAware, Focusable {
   private inner: Component
@@ -101,6 +111,8 @@ class EffortSubmenu implements Component, RowBudgetAware, Focusable {
   private rowGrant = Number.POSITIVE_INFINITY
   /** Focus state for the CURRENT inner (re-applied after async swaps). */
   private _focused = false
+  /** Whether a semantic selection is in flight (blocks a duplicate apply). */
+  private selecting = false
 
   get focused(): boolean {
     return this._focused
@@ -136,14 +148,77 @@ class EffortSubmenu implements Component, RowBudgetAware, Focusable {
       this.abort.abort()
       deps.done(selected)
     }
-    const applyAndClose = (effortId: string | undefined): void => {
-      // Only a still-current selection flow may commit the model: a late
-      // "no effort options" must not override what the user did after Esc.
-      if (this.disposed) return
-      deps.apply(effortId === undefined || effortId === '__default'
+    /** Submit one selection: the semantic write owns the settlement, so the
+     *  overlay shows a selecting state and only dismisses once the outcome is
+     *  known. A rejected/cancelled/unsupported write returns to the model list
+     *  (the picker stays usable); committed/indeterminate dismiss. */
+    const submit = (effortId: string | undefined): void => {
+      if (this.disposed || this.selecting) return
+      this.selecting = true
+      this.inner = new Text('Selecting…', 0, 0)
+      this.setMaxRows(this.rowGrant)
+      this.applyFocused()
+      this.requestRender()
+      deps.runOwned('model selection', () => deps.apply(effortId === undefined || effortId === '__default'
         ? { provider: providerId, model: modelId }
-        : { provider: providerId, model: modelId, reasoningEffort: ReasoningEffortId(effortId) })
-      close(effortId)
+        : { provider: providerId, model: modelId, reasoningEffort: ReasoningEffortId(effortId) }), {
+        isCancellation: () => this.disposed,
+        onResult: (outcome) => {
+          if (this.disposed) return
+          this.selecting = false
+          // v2 §0.3.1: a locally superseded operation makes NO close/open
+          // decision and emits no success/error notice — a newer operation owns
+          // the surface.
+          if (outcome === 'superseded') return
+          // A write that provably did not commit keeps the picker usable: walk
+          // back to the model list; the caller's notice explains the refusal.
+          // `unsupported` (e.g. the Remote backend's global-default write, or
+          // a model unsupported by the current backend) is likewise NOT a
+          // commit.
+          if (outcome === 'rejected' || outcome === 'cancelled' || outcome === 'unsupported') {
+            close(undefined)
+            return
+          }
+          // A no-effort model has no effort id to carry; use the model id as
+          // the applied marker so the committed selection DISMISSES the whole
+          // overlay (web ModelSelect settleSelection parity).
+          close(effortId ?? modelId)
+        },
+        onError: () => {
+          if (this.disposed) return
+          this.selecting = false
+          close(undefined)
+        },
+      })
+    }
+    const showEfforts = (efforts: readonly { id: string; name: string; description?: string }[]): void => {
+      this.inner = new SettingsList(
+        [
+          {
+            id: '__default',
+            label: 'Default',
+            description: 'Provider default reasoning effort',
+            currentValue: currentEffort === undefined ? '← current' : '',
+            values: ['✓'],
+          },
+          ...efforts.map(effort => ({
+            id: effort.id,
+            label: effort.name,
+            description: effort.description,
+            currentValue: currentEffort === effort.id ? '← current' : '',
+            values: ['✓'],
+          })),
+        ],
+        6,
+        settingsListTheme(),
+        (effortId) => submit(effortId),
+        () => close(),
+        {},
+      )
+      // The async list lands AFTER any resize: re-apply the last grant.
+      this.setMaxRows(this.rowGrant)
+      this.applyFocused()
+      this.requestRender()
     }
     this.inner = new EscDismiss(new Text('Loading model info…', 0, 0), () => close())
     this.requestRender = deps.requestRender
@@ -159,37 +234,12 @@ class EffortSubmenu implements Component, RowBudgetAware, Focusable {
         if (this.disposed) return
         const efforts = info.reasoning?.efforts
         if (efforts === undefined || efforts.length === 0) {
-          // No effort choice: apply the model directly and return to the list.
-          applyAndClose(undefined)
+          // No effort choice: apply the model directly (through the same
+          // selecting/settlement flow).
+          submit(undefined)
           return
         }
-        this.inner = new SettingsList(
-          [
-            {
-              id: '__default',
-              label: 'Default',
-              description: 'Provider default reasoning effort',
-              currentValue: currentEffort === undefined ? '← current' : '',
-              values: ['✓'],
-            },
-            ...efforts.map(effort => ({
-              id: effort.id,
-              label: effort.name,
-              description: effort.description,
-              currentValue: currentEffort === effort.id ? '← current' : '',
-              values: ['✓'],
-            })),
-          ],
-          6,
-          settingsListTheme(),
-          (effortId) => applyAndClose(effortId),
-          () => close(),
-          {},
-        )
-        // The async list lands AFTER any resize: re-apply the last grant.
-        this.setMaxRows(this.rowGrant)
-        this.applyFocused()
-        this.requestRender()
+        showEfforts(efforts)
       },
       onError: () => {
         // Only a CURRENT menu shows the failure (a rejection after the

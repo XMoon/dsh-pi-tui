@@ -16,6 +16,27 @@ export type WriteOutcome<T = undefined> =
   | { readonly kind: 'unsupported'; readonly reason: string }
 
 /**
+ * Local operation OWNERSHIP — a SECOND, INDEPENDENT axis from the business
+ * settlement (D2.3 v2 §0.2.1). `superseded` says only that this async
+ * operation no longer owns the current TUI/cache surface; it says NOTHING
+ * about whether the Host mutation committed. Never fold it into
+ * `WriteOutcome` as a synonym for `cancelled`/`rejected`: a committed but
+ * locally superseded result stays a real Host commit (UI-silent, non-retryable).
+ */
+export type OperationOwnership = 'current' | 'superseded'
+
+/** A settlement result paired with its local ownership. */
+export interface OperationResult<T = undefined> {
+  readonly ownership: OperationOwnership
+  readonly outcome: WriteOutcome<T>
+}
+
+/** Wrap a settlement that still owns the current surface. */
+export function currentResult<T>(outcome: WriteOutcome<T>): OperationResult<T> {
+  return { ownership: 'current', outcome }
+}
+
+/**
  * Pinned Gateway infrastructure codes raised strictly BEFORE the addressed
  * business method is invoked (descriptor/argument/receiver/endpoint resolution
  * and context/lookup provider resolution — all inside `prepareInvocation` and

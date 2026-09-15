@@ -145,9 +145,10 @@ across a transition could write an Agent a concurrent transition is
 about to retire), the `!` shell submit, and the
 per-skill slash invocations — refuses the write, restores/keeps the draft
 or the invocation line (or keeps the shell card) and notifies "a session
-transition is in progress". The live `/preset` swap (recompose +
-`agent-preset/selected` append) likewise runs INSIDE the transition gate,
-so the captured agent can never be quiesced mid-append (review round 27).
+transition is in progress". The live `/preset` swap (the official
+`agentPresets.select` blank check + recompose transaction + durable
+`agent-preset/selected` commit) likewise runs INSIDE the transition gate,
+so the captured Session can never be quiesced mid-swap (review round 27).
 The submission re-validation (agent object + session generation) covers
 the window AFTER the transition commits; the fence covers the window
 DURING it.
@@ -234,6 +235,53 @@ prompts, Ctrl+S per-occurrence steer sweeps, and command execution including its
 prompt. Each gesture takes its turn before async preparation and releases it
 only after the semantic command/write path settles, so delayed mention or
 attachment preparation cannot let a later gesture overtake an earlier one.
+
+### D2.3 model / preset / create-open ordering
+
+- A live Session model selection is a Session WRITE: `/model` dispatches
+  `ModelCatalog.selectSessionModel` INSIDE the writer barrier
+  (`withSessionWriter`), so a transition that started first refuses the write
+  before dispatch and a transition that starts after waits for it. The picker
+  itself enters an in-place `Selecting…` state (a duplicate apply is never a
+  second commit) and the footer shows the in-flight choice as `(selecting…)`
+  while keeping the authoritative current value. The
+  outcome drives presentation: `committed` follows the authoritative Session
+  projection, `rejected`/`cancelled` returns to the model list with the Host
+  refusal, and `indeterminate` dismisses without retry and never claims the
+  requested model. A late settle whose captured session generation no longer
+  matches is dropped (no repaint of a newer Session) but still settles its
+  transient default intent, so it never leaks into a later fresh create.
+- Preset selection stays inside the local transition gate as coordination
+  only: the Host owns the serialized switch, the blank re-check, the recompose
+  transaction and the durable commit. The command revalidates the captured
+  Session identity/generation INSIDE the gate before dispatch AND after the
+  follow-up catalog refresh (a superseded refresh never repaints), and blankness
+  for the picker comes from the official turn-boundary projection, never the
+  TUI transcript. `agent-preset/locked` is the
+  race-proof final authority and maps to the started-session wording; the TUI
+  never mutates its display to a rejected choice.
+- A sessionless `/model` choice is a global-default intent. EVERY in-flight
+  write (and its fenced correction) is tracked and a fresh create AWAITS their
+  settle before dispatching, so the Direct adapter's Host-default activation
+  cannot race an older value; the wait is abort-aware, so a hung Host save can
+  never block first creation past shutdown. The fresh create consumes the
+  SETTLED persisted Host default and
+  never durable-seeds a Session choice: a committed save is observed
+  dynamically, and a FAILED latest intent is walked back in the UI (v2 §0.8.4)
+  — the create uses the actual Host default, it does NOT seed the failed
+  selection (a fabricated choice would freeze a default the user never
+  durably set, and the sticky failure would leak into later creates). The
+  global default is BEST-EFFORT Host state (plan §6.1): a fencing correction
+  that itself fails is warned and leaves the persisted default stale until the
+  next save — it never becomes durable Session authority.
+- Fresh create has NO blind retry: one Host dispatch, and a post-publication
+  create error is never reported as "the Session was never created" — the
+  requested/published identity is preserved for later reconciliation (D2.4
+  closes the full reconnect-settlement matrix). `/new` keeps the old surface
+  until the create commits.
+- Remote open is a Client selection, not Host activation:
+  `ClientSessions.open()/binding()`. It fails closed for an unaddressable
+  Session and never invents a Host resume RPC.
 
 ### Generation/stale fences
 

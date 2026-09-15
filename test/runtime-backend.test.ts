@@ -62,23 +62,22 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   const catalog = {
     models: {
       available: () => true,
+      loadDirectory: async () => ({ default: { provider: '', model: '' }, routableProviders: [], groups: [], failures: [] }),
       listProviders: () => [],
       listModels: async () => [],
-      resolveModelInfo: async () => ({}),
       defaultSelection: () => undefined,
-      saveDefaultSelection: async () => {},
+      saveDefaultSelection: async () => ({ kind: 'committed' as const, value: undefined }),
       sessionSelection: () => undefined,
-      selectSessionModel: async (_sessionId: string, selection: { provider: string; model: string }) => selection,
-      currentSelection: () => undefined,
-      saveSelection: async () => {},
+      selectSessionModel: async () => ({ ownership: 'current' as const, outcome: { kind: 'committed' as const, value: { provider: '', model: '' } } }),
       discoverModels: async () => [],
       listConfigurableProviders: () => [],
     },
     presets: {
       available: () => false,
-      list: async () => [],
+      roster: async () => ({ presets: [], modeSelectionEnabled: false }),
       resolve: async () => ({}),
       defaultId: () => undefined,
+      selectSessionPreset: async () => ({ ownership: 'current' as const, outcome: { kind: 'committed' as const, value: { preset: '' } } }),
     },
     skills: {
       standing: async () => ({ catalog: { skills: [], complete: true } }),

@@ -91,8 +91,6 @@ export async function createForkedAgent(
       isSeeded: true,
     },
     inheritedEventCount: seed.length,
-    provider: source.options.provider,
-    model: source.options.model,
     agentPreset: inheritedPreset,
     seed,
   })

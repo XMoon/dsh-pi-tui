@@ -373,11 +373,16 @@ function makeHarness(
   let defaultSelection = { ...initialDefault }
   const defaultModel = {
     currentSelection: () => ({ ...defaultSelection }),
-    saveSelection: saveDefault ?? (async (next: { provider: string; model: string; reasoningEffort?: string }) => {
+    // A successful save persists the value even when the test supplies its own
+    // gated hook; a rejecting hook leaves the persisted default untouched
+    // (exactly like the real settings write).
+    saveSelection: async (next: { provider: string; model: string; reasoningEffort?: string }) => {
+      const result = saveDefault === undefined ? undefined : await saveDefault(next)
       defaultSelection = { ...next }
-    }),
+      return result
+    },
   }
-  const llm = {
+  const llm = { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
     listProviders: () => [{ id: 'p', name: 'provider p' }],
     listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
     resolveModelInfo: async () => ({}),
@@ -468,6 +473,8 @@ interface RunnerProbe {
   scrollToBottomCount: number
   capturedModels: string[]
   capturedWelcomeModels: string[]
+  /** Every `app.notify(message, kind)` this run surfaced. */
+  notices: string[]
   apps: TuiApp[]
   restore: () => void
 }
@@ -488,6 +495,7 @@ function installProbe(): RunnerProbe {
     scrollToBottomCount: 0,
     capturedModels: [],
     capturedWelcomeModels: [],
+    notices: [],
     apps: [],
     restore: () => {},
   }
@@ -501,6 +509,7 @@ function installProbe(): RunnerProbe {
   const originalShowApprovalPrompt = TuiApp.prototype.showApprovalPrompt
   const originalSetStatus = TuiApp.prototype.setStatus
   const originalSetWelcomeCard = TuiApp.prototype.setWelcomeCard
+  const originalNotify = TuiApp.prototype.notify
   const originalStart = TuiApp.prototype.start
   const originalScrollToBottom = TuiApp.prototype.scrollToBottom
   TranscriptFolder.prototype.apply = function (events) {
@@ -553,6 +562,10 @@ function installProbe(): RunnerProbe {
     probe.scrollToBottomCount += 1
     return originalScrollToBottom.call(this, options)
   }
+  TuiApp.prototype.notify = function (...args: Parameters<typeof originalNotify>) {
+    probe.notices.push(`${args[1] ?? 'info'}:${String(args[0])}`)
+    return originalNotify.apply(this, args)
+  }
   probe.restore = () => {
     TranscriptFolder.prototype.apply = originalTranscriptApply
     StatsFolder.prototype.apply = originalStatsApply
@@ -564,6 +577,7 @@ function installProbe(): RunnerProbe {
     TuiApp.prototype.showApprovalPrompt = originalShowApprovalPrompt
     TuiApp.prototype.setStatus = originalSetStatus
     TuiApp.prototype.setWelcomeCard = originalSetWelcomeCard
+    TuiApp.prototype.notify = originalNotify
     TuiApp.prototype.start = originalStart
     TuiApp.prototype.scrollToBottom = originalScrollToBottom
   }
@@ -1215,7 +1229,7 @@ test('/fork avoids a duplicate selection when the inherited prefix already match
     'matching inherited state must not append a redundant child selection')
 })
 
-test('a sessionless /model choice seeds the first Session while its default save is still pending', async (t) => {
+test('a sessionless /model choice waits for its default save before the first create', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-runner-race-bridge-')
   const previousHome = process.env.DSH_HOME
@@ -1239,21 +1253,28 @@ test('a sessionless /model choice seeds the first Session while its default save
   assert.ok(app, 'the production runner must create a TuiApp')
   await pickSecondModel(app, harness)
   assert.equal(harness.createOptions.length, 0, '/model must not create a Session')
+  // v2 §0.3.2: while the sessionless default write is pending the footer shows
+  // the AUTHORITATIVE persisted default plus the pending selection.
+  assert.match(probe.capturedModels.at(-1) ?? '', /p\/m → p\/m2 \(selecting…\)/,
+    `the footer must show base → pending while the default save is in flight: ${JSON.stringify(probe.capturedModels)}`)
+  assert.doesNotMatch(probe.capturedModels.at(-1) ?? '', /p\/m2 → p\/m2/,
+    'the footer must never paint the optimistic intent as both base and pending')
   app.setDraft('first deferred prompt')
   ;(app as unknown as { submitDraft(): void }).submitDraft()
   await settle()
-  assert.deepEqual(harness.createOptions[0], { provider: 'p', model: 'm2' },
-    'deferred create must read the pending sessionless choice')
-  assert.deepEqual(durableSelectionOf(harness.createdSessions[0]!), {
-    provider: 'p', model: 'm2',
-  }, 'the pending default intent must bridge the race and seed the first Session durably')
+  assert.equal(harness.createOptions.length, 0,
+    'the first create must coordinate with the still-pending sessionless default save instead of racing it')
   releaseSave()
   await settle()
+  assert.deepEqual(harness.createOptions[0], { provider: 'p', model: 'm2' },
+    'the settled Host default is what the fresh create consumes')
+  assert.equal(durableSelectionOf(harness.createdSessions[0]!), undefined,
+    'a committed default save leaves the blank Session observing the Host default dynamically')
 })
 
-test('a newer sessionless /model during the awaited first create seeds the newest pending choice', async (t) => {
+test('a FAILED sessionless default save is never seeded into the first create (v2 §0.8.4)', async (t) => {
   const life = testLifecycle(t)
-  const home = life.tempDir('dsh-pi-tui-runner-create-race-')
+  const home = life.tempDir('dsh-pi-tui-runner-failed-default-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
   life.defer(() => {
@@ -1266,49 +1287,24 @@ test('a newer sessionless /model during the awaited first create seeds the newes
   let fiber: { dispose: () => Promise<unknown> } | undefined
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
-  let releaseCreate!: () => void
-  const createGate = new Promise<void>((resolve) => { releaseCreate = resolve })
-  let releaseSave!: () => void
-  const saveGate = new Promise<void>((resolve) => { releaseSave = resolve })
-  const harness = makeHarness(home, undefined, { provider: 'p', model: 'm' }, async () => saveGate, async () => createGate)
+  const harness = makeHarness(home, undefined, { provider: 'p', model: 'm' }, async () => {
+    throw new Error('settings write failed')
+  })
   context = new Context()
   fiber = await mountRunner(context, home, harness, {}, {})
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
-  const modelHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('model')
-  assert.ok(modelHandler, 'the real runner must register /model')
-  const input = (data: string): void => {
-    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
-    tui.handleTerminalInput(data)
-  }
-  // /model → m1 (its save hangs on the gate).
-  await modelHandler()
+  await pickSecondModel(app, harness)
   await settle()
-  input('\r') // provider -> model list
-  await settle()
-  input('\r') // select m1
-  await settle()
-  // Submit: the first create hangs on the gate.
   app.setDraft('first deferred prompt')
   ;(app as unknown as { submitDraft(): void }).submitDraft()
   await settle()
-  // A NEWER /model → m2 while the create is still awaiting.
-  input('\r') // back to the provider list
-  await settle()
-  input('\r') // provider -> model list
-  await settle()
-  input('\x1b[B') // choose m2 instead of the first listed model
-  input('\r')
-  await settle()
-  // Release the create: the seed must use the NEWEST pending choice (m2).
-  releaseCreate()
-  await settle()
-  assert.deepEqual(durableSelectionOf(harness.createdSessions[0]!), {
-    provider: 'p', model: 'm2',
-  }, 'the first Session must seed the newest pending sessionless choice, not the captured one')
-  releaseSave()
-  await settle()
+  assert.deepEqual(harness.createOptions[0], { provider: 'p', model: 'm' },
+    'a failed default save must fall back to the persisted Host default, never a fabricated choice')
+  assert.equal(durableSelectionOf(harness.createdSessions[0]!), undefined,
+    'a FAILED latest intent must NOT be seeded into the created Session')
 })
+
 
 test('/model refreshes the Welcome card and footer from the authoritative Session selection', async (t) => {
   const life = testLifecycle(t)
@@ -2554,6 +2550,50 @@ test('a fresh start with a FAILING preset resolution stays silent (no Preparing 
   // The TUI still mounts (degraded — the failure is a one-shot warn).
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must still create a TuiApp')
+})
+
+test('an invalid --preset on a healthy resumed session never degrades the resume', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-resume-invalid-preset-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'resume-invalid-preset',
+    header: { id: 'resume-invalid-preset', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  context = new Context()
+  context.provide('agentPresets', {
+    defaultId: 'standard',
+    resolve: async (id?: string) => {
+      if (id === 'broken') throw new Error('agent-presets: preset "broken" not found (available: standard)')
+      return { id: id ?? 'standard', trust: 'system' }
+    },
+    // The composition the resumed Agent mounts on (the recorded/default preset).
+    mount: async () => {},
+    recompose: async () => ({ id: 'standard' }),
+    composedPreset: () => undefined,
+    // The started resumed session refuses the launch override.
+    select: async () => { throw Object.assign(new Error('session has already started; its agent preset is fixed'), { code: 'agent-preset/locked' }) },
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id, presetId: 'broken' }, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the healthy resume must still mount')
+  assert.ok(!probe.notices.some(notice => notice.includes('unavailable; started with the default')),
+    `an invalid --preset must not degrade a healthy resume: ${JSON.stringify(probe.notices)}`)
+  assert.ok(!probe.notices.some(notice => notice.includes('not applied on resume')),
+    `the started-session locked override is expected, not a degradation notice: ${JSON.stringify(probe.notices)}`)
 })
 
 // --- Direct owned-session retirement (exit / HMR / transition) ---

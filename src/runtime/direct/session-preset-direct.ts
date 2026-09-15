@@ -62,6 +62,53 @@ export interface SessionPresetContext {
   get(name: string): unknown
 }
 
+/** The official `turnBoundary` projection value (structural subset). */
+export interface TurnBoundaryProjectionLike {
+  readonly openTurnStartSeq?: number | null
+  readonly lastTurn?: number
+}
+
+/**
+ * Whether the official turn-boundary projection reports a still-blank Session
+ * — the SAME authority the official `agentPresets.select` blank re-check uses.
+ * An absent value means no turn boundary was recorded yet (blank); a malformed
+ * value is unknown (`undefined`), so the Host stays the final authority.
+ */
+export function turnBoundaryBlank(value: unknown): boolean | undefined {
+  if (value === undefined || value === null) return true
+  if (typeof value !== 'object') return undefined
+  const boundary = value as TurnBoundaryProjectionLike
+  const open = boundary.openTurnStartSeq
+  if (open !== null && typeof open !== 'number') return undefined
+  if (typeof boundary.lastTurn !== 'number') return undefined
+  return open === null && boundary.lastTurn === 0
+}
+
+/** The official `agentPresets.select` capability (structural). */
+export interface AgentPresetSelectLike {
+  select?(agent: unknown, agentPreset: string): Promise<string>
+}
+
+/**
+ * Select the preset of a still-blank Session through the official in-process
+ * `agentPresets.select` service. The Host owns the serialized switch ordering,
+ * the blank-session re-check, the recompose transaction and the durable
+ * `agent-preset/selected` commit; the TUI never reimplements them. A started
+ * Session is refused by the Host with `agent-preset/locked`.
+ * @throws when the preset service is absent or the Host refuses the switch.
+ */
+export async function selectBlankSessionPreset(
+  ctx: SessionPresetContext,
+  agent: unknown,
+  presetId: string,
+): Promise<string> {
+  const presets = ctx.get('agentPresets') as AgentPresetSelectLike | undefined
+  if (presets === undefined || typeof presets.select !== 'function') {
+    throw new Error('agent presets unavailable in this deployment')
+  }
+  return presets.select(agent, presetId)
+}
+
 /** Read the raw current preset from the official DSH projection. */
 export function sessionPresetOf(
   ctx: SessionPresetContext,
