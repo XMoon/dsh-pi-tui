@@ -22,3 +22,6 @@ temp/
 .dsh-dev-env
 .envrc
 .dsh-dev-bootstrap.lock/
+
+# Focus replay-harness run output (investigation tooling; see docs/focus-replay-harness.md)
+artifacts/focus-replay/
