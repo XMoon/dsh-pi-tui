@@ -1709,6 +1709,10 @@ function gatedStaleEnabledRoster() {
   const gate = new Promise<void>((resolve) => { release = resolve })
   const roster = async () => {
     calls += 1
+    // Snapshot the policy at CALL time: the shared counter advances while the
+    // gated first read waits, and the first (stale) read must still report the
+    // policy it observed (ENABLED).
+    const enabled = calls === 1
     if (calls === 1) await gate
     return {
       presets: SHIPPED_ROWS.map(row => ({
@@ -1716,16 +1720,16 @@ function gatedStaleEnabledRoster() {
         trust: row.trust ?? 'system',
         isDefault: row.id === 'standard',
       })),
-      modeSelectionEnabled: calls === 1,
+      modeSelectionEnabled: enabled,
     }
   }
   return { roster, release: () => release() }
 }
 
-test('a late typed /preset roster read cannot overwrite a newer visibility read', async () => {
+test('a late typed /preset roster read cannot overwrite newer visibility, but still dispatches', async () => {
   const state = { agent: fakeAgent('s1', []) as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
   const gated = gatedStaleEnabledRoster()
-  const t = setup({ state, commandsListRegistered: true, roster: gated.roster })
+  const t = setup({ state, commandsListRegistered: true, sessionBlank: true, roster: gated.roster })
   // The typed /preset read STARTS first (stale ENABLED) and is held open.
   const typed = t.run('minimal')
   await new Promise(resolve => setImmediate(resolve))
@@ -1736,8 +1740,11 @@ test('a late typed /preset roster read cannot overwrite a newer visibility read'
   await typed
   await new Promise(resolve => setTimeout(resolve, 25))
   assert.ok(!t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
-    'the stale typed-/preset read must not re-show /preset after the newer visibility read')
-  assert.deepEqual(t.presets.selected, [], 'a stale typed read must not dispatch the Host select')
+    'the stale typed read must not overwrite the newer visibility state')
+  // Presentation freshness is separate from mutation ownership: the still-current
+  // user operation decides from ITS OWN roster and must still dispatch.
+  assert.deepEqual(t.presets.selected, ['minimal'],
+    'a still-current typed /preset operation must still dispatch the Host select')
   t.app.stop()
 })
 
@@ -1762,12 +1769,13 @@ test('a late /preset picker roster read cannot overwrite a newer visibility read
   t.app.stop()
 })
 
-test('a stale /preset default read must not write the default (fail closed)', async () => {
+test('a stale /preset default read cannot overwrite newer visibility, but still writes', async () => {
   const state = { agent: undefined as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
   const gated = gatedStaleEnabledRoster()
   const writes: unknown[] = []
   const t = setup({
     state,
+    commandsListRegistered: true,
     roster: gated.roster,
     refreshCatalog: async () => standingOutcome(['glab']),
     settings: { get: () => undefined, mutate: async (_ns, patch) => { writes.push(patch); return undefined } },
@@ -1779,8 +1787,10 @@ test('a stale /preset default read must not write the default (fail closed)', as
   gated.release()
   await run
   await new Promise(resolve => setTimeout(resolve, 25))
-  assert.deepEqual(writes, [], 'a stale default read must not write settings')
-  assert.deepEqual(t.refreshes, [], 'a stale default read must not refresh the catalog')
+  assert.ok(!t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'the stale default read must not overwrite the newer visibility state')
+  assert.deepEqual(writes, [[{ op: 'set', path: ['default'], value: 'ptc' }]],
+    'a still-current /preset default mutation must still write, decided by ITS OWN roster')
   t.app.stop()
 })
 

@@ -1614,9 +1614,11 @@ export function registerTuiCommands(
   let presetSelectionEnabled: boolean | undefined
   let presetSelectionOwner: PresetSelectionOwner | undefined
   let presetSelectionRequest = 0
-  /** Register a roster read that feeds the presentation. The token is taken
-   * at START, so a read that merely SETTLES later can never overwrite a newer
-   * one — every reader (probe, typed `/preset`, picker) participates. */
+  /** Register a roster read that feeds the PRESENTATION cache. The token is
+   * taken at START, so a read that merely SETTLES later can never overwrite a
+   * newer one — every reader (probe, typed `/preset`, picker) participates.
+   * Mutation ownership is SEPARATE: an operation that already passed its own
+   * subject/token fences still dispatches even when this cache commit loses. */
   const beginPresetSelectionRead = (): number => ++presetSelectionRequest
   const currentPresetOwner = (): PresetSelectionOwner => ({
     generation: runner.sessionGeneration,
@@ -1814,14 +1816,16 @@ export function registerTuiCommands(
       : commands.list(liveAgent).map(commandSummaryOf))
   }
   /**
-   * Apply one roster read for `owner` while `request` is still the newest
-   * registered read. Returns FALSE when a later-started read superseded it —
-   * the caller must then treat its own (stale) roster value as non-authoritative
-   * and must NOT gate a mutation on it. A change re-installs the candidate
-   * list; execution authority is unchanged (the handler still rejects when
-   * disabled).
+   * Commit one roster read to the PRESENTATION cache while `request` is still
+   * the newest registered read, returning whether it committed. This owns ONLY
+   * the display cache: a `false` return means a later-started presentation read
+   * already owns the cache and the value must not repaint it — it must NEVER
+   * cancel the caller's own user operation. A user mutation decides from the
+   * roster IT read: the official Web keeps `loadGeneration` (presentation) and
+   * `select()` (mutation ownership) separate, and the Host
+   * `agentPresets.select` owns the blank-session/mount/commit authority.
    */
-  const applyPresetSelectionEnabled = (enabled: boolean, owner: PresetSelectionOwner, request: number): boolean => {
+  const commitPresetVisibility = (enabled: boolean, owner: PresetSelectionOwner, request: number): boolean => {
     if (request !== presetSelectionRequest) return false
     if (presetSelectionOwner !== undefined && samePresetOwner(presetSelectionOwner, owner) && presetSelectionEnabled === enabled) return true
     presetSelectionEnabled = enabled
@@ -1846,7 +1850,7 @@ export function registerTuiCommands(
     runOwned('preset selection visibility', async () => {
       const roster = await presets.roster(runner.signal)
       if (!samePresetOwner(owner, currentPresetOwner())) return
-      applyPresetSelectionEnabled(roster.modeSelectionEnabled, owner, request)
+      commitPresetVisibility(roster.modeSelectionEnabled, owner, request)
     }, {
       diag: runner.diag,
       sessionId: () => runner.liveAgent?.session.id,
@@ -4192,12 +4196,12 @@ export function registerTuiCommands(
           // new surface (v2 §0.2.1).
           return { kind: 'success' }
         }
-        if (!applyPresetSelectionEnabled(defaultRoster.modeSelectionEnabled, defaultOwner, defaultVisibilityRequest)) {
-          // A newer read superseded this one: its policy value is not
-          // authoritative, so the mutation must not proceed (fail closed).
-          return { kind: 'success' }
-        }
-        if (!defaultRoster.modeSelectionEnabled) {          return { kind: 'error', text: 'preset selection is disabled in this deployment' }
+        // Presentation freshness only: a newer background read may own the
+        // visibility cache, but it must NOT cancel this user mutation — the
+        // policy THIS operation read decides, fail-closed.
+        commitPresetVisibility(defaultRoster.modeSelectionEnabled, defaultOwner, defaultVisibilityRequest)
+        if (!defaultRoster.modeSelectionEnabled) {
+          return { kind: 'error', text: 'preset selection is disabled in this deployment' }
         }
         // The saved default only affects sessions created from now on. A
         // standing catalog refresh follows ONLY when no higher-precedence
@@ -4259,11 +4263,10 @@ export function registerTuiCommands(
         // roster can resolve across a `/new`/switch (no Remote generation fence).
         if (token !== presetOperationToken) return { kind: 'superseded' }
         if (!ownerCurrent()) return { kind: 'superseded' }
-        if (!applyPresetSelectionEnabled(roster.modeSelectionEnabled, owner, visibilityRequest)) {
-          // A newer read superseded this one: never gate or dispatch a
-          // mutation on a stale policy value (fail closed, UI-silent).
-          return { kind: 'superseded' }
-        }
+        // Presentation freshness only: losing the visibility-cache commit to a
+        // newer background read must not cancel this still-current user
+        // operation. The policy THIS operation read decides, fail-closed.
+        commitPresetVisibility(roster.modeSelectionEnabled, owner, visibilityRequest)
         if (!roster.modeSelectionEnabled) {
           return { kind: 'rejected', message: 'preset selection is disabled in this deployment' }
         }
@@ -4434,8 +4437,9 @@ export function registerTuiCommands(
         throw error
       }
       if (!pickerOwnerCurrent()) return { kind: 'success' }
-      if (!applyPresetSelectionEnabled(roster.modeSelectionEnabled, { generation: pickerGeneration, sessionId: pickerSessionId }, visibilityRequest)) {
-        // A newer read superseded this one (UI-silent, no stale picker).
+      // The picker IS presentation: it may lose to a newer presentation read
+      // (no stale overlay), unlike a user mutation below.
+      if (!commitPresetVisibility(roster.modeSelectionEnabled, { generation: pickerGeneration, sessionId: pickerSessionId }, visibilityRequest)) {
         return { kind: 'success' }
       }
       if (!roster.modeSelectionEnabled) {
