@@ -1670,6 +1670,11 @@ export function apply(ctx: Context, config: Config): void {
   let retireOwnedSessionRef: (() => Promise<RetirementReport>) | undefined
 
   void (async () => { // allowlist: startup lifecycle root — see AGENTS.md
+    // The TUI required surface is committed to running: synchronous init
+    // succeeded and this async root is established, so the startup row's
+    // readiness handshake must not report a missing surface. A later failure
+    // in this root is owned by its own catch below.
+    startup.markSurfaceMounted?.()
     // Loader siblings mount concurrently. Await the complete application before
     // creating an Agent so its scoped tools and adapters are not half-composed.
     await ctx.get('loader')?.await()
