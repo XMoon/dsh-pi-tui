@@ -24,7 +24,8 @@ import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { recordedSessionPreset } from './session-preset-direct.ts'
-import type { CreateSessionRequest, OpenSessionRequest, SessionHandle, SessionLifecycle } from '../session-lifecycle-port.ts'
+import { safeErrorMessage } from '../../error-boundary.ts'
+import type { CreateResult, CreateSessionRequest, OpenResult, OpenSessionRequest, SessionLifecycle } from '../session-lifecycle-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -86,47 +87,76 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     return selection === undefined ? {} : { provider: selection.provider, model: selection.model }
   }
 
-  async create(request: CreateSessionRequest): Promise<SessionHandle> {
+  async create(request: CreateSessionRequest): Promise<CreateResult> {
+    if (request.signal?.aborted === true) return { ownership: 'current', outcome: { kind: 'cancelled' } }
     const agents = this.ctx.get('agents') as AgentsServiceLike | undefined
-    if (agents === undefined) throw new Error('agents service unavailable')
-    // The preset composition (with its agent-setup callback) is a Direct
-    // concern: resolved inside the adapter from the request's preset id.
-    const composition = await this.compose(request.agentPreset)
-    const handle = await agents.create({
-      sessionId: SessionId(request.sessionId),
-      // The composed preset is part of the durable session header even when a
-      // caller supplied only the semantic `agentPreset` intent: a later resume
-      // reads the recorded preset from the log. Caller metadata always wins.
-      meta: composition.agentPreset === undefined || request.meta.agentPreset !== undefined
-        ? request.meta
-        : { ...request.meta, agentPreset: composition.agentPreset },
-      agentOptions: this.agentOptions(),
-      setup: composition.setup,
-      seed: request.seed as readonly SessionEvent[] | undefined,
-      ...request.inheritedEventCount === undefined ? {} : { inheritedEventCount: SessionLogOffset(request.inheritedEventCount) },
-      signal: request.signal,
-    })
-    // Preserve both the live Agent and the real AgentHandle. The latter is
-    // the ownership capability the runner disposes at retirement.
-    return { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } }
+    if (agents === undefined) {
+      return currentCreateRejected('session/create-unavailable', 'agents service unavailable')
+    }
+    try {
+      // The preset composition (with its agent-setup callback) is a Direct
+      // concern: resolved inside the adapter from the request's preset id.
+      const composition = await this.compose(request.agentPreset)
+      const handle = await agents.create({
+        sessionId: SessionId(request.sessionId),
+        // The composed preset is part of the durable session header even when a
+        // caller supplied only the semantic `agentPreset` intent: a later resume
+        // reads the recorded preset from the log. Caller metadata always wins.
+        meta: composition.agentPreset === undefined || request.meta.agentPreset !== undefined
+          ? request.meta
+          : { ...request.meta, agentPreset: composition.agentPreset },
+        agentOptions: this.agentOptions(),
+        setup: composition.setup,
+        seed: request.seed as readonly SessionEvent[] | undefined,
+        ...request.inheritedEventCount === undefined ? {} : { inheritedEventCount: SessionLogOffset(request.inheritedEventCount) },
+        signal: request.signal,
+      })
+      // Preserve both the live Agent and the real AgentHandle. The latter is
+      // the ownership capability the runner disposes at retirement. The Direct
+      // adapter is the only writer for its own in-process Agent, so its result
+      // always owns the current surface.
+      return {
+        ownership: 'current',
+        outcome: { kind: 'created', handle: { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } } },
+      }
+    } catch (error) {
+      // An in-process create failure is a proven pre-publication rejection
+      // (there is no wire ambiguity in the Direct path).
+      return currentCreateRejected('session/create-failed', safeErrorMessage(error))
+    }
   }
 
-  async open(request: OpenSessionRequest): Promise<SessionHandle> {
+  async open(request: OpenSessionRequest): Promise<OpenResult> {
+    if (request.signal?.aborted === true) return { ownership: 'current', outcome: { kind: 'cancelled' } }
     const agents = this.ctx.get('agents') as AgentsServiceLike | undefined
-    if (agents === undefined) throw new Error('agents service unavailable')
-    // The Direct adapter owns the persisted-preset lookup the official open
-    // semantic needs in-process: the recorded preset wins (a session that
-    // switched while blank ran every turn under the newer composition).
-    const recorded = await recordedSessionPreset(this.ctx, request.sessionId, request.signal)
-    const composition = await this.compose(recorded)
-    // `resume` is deliberately the Direct service call; `open` is the
-    // transport-neutral semantic exposed to the runner and future clients.
-    const handle = await agents.resume({
-      resumeSessionId: SessionId(request.sessionId),
-      agentOptions: this.agentOptions(),
-      setup: composition.setup,
-      signal: request.signal,
-    })
-    return { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } }
+    if (agents === undefined) {
+      return { ownership: 'current', outcome: { kind: 'unavailable', message: 'agents service unavailable' } }
+    }
+    try {
+      // The Direct adapter owns the persisted-preset lookup the official open
+      // semantic needs in-process: the recorded preset wins (a session that
+      // switched while blank ran every turn under the newer composition).
+      const recorded = await recordedSessionPreset(this.ctx, request.sessionId, request.signal)
+      const composition = await this.compose(recorded)
+      // `resume` is deliberately the Direct service call; `open` is the
+      // transport-neutral semantic exposed to the runner and future clients.
+      const handle = await agents.resume({
+        resumeSessionId: SessionId(request.sessionId),
+        agentOptions: this.agentOptions(),
+        setup: composition.setup,
+        signal: request.signal,
+      })
+      return {
+        ownership: 'current',
+        outcome: { kind: 'opened', handle: { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } } },
+      }
+    } catch (error) {
+      return { ownership: 'current', outcome: { kind: 'unavailable', message: safeErrorMessage(error) } }
+    }
   }
+}
+
+/** A Direct create rejection that still owns the local surface. */
+function currentCreateRejected(code: string, message: string): CreateResult {
+  return { ownership: 'current', outcome: { kind: 'rejected', error: { code, message } } }
 }

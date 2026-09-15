@@ -163,9 +163,10 @@ test('an unknown agent-preset/* code stays indeterminate, never a blind rejectio
   assert.equal(classifyRemotePresetFailure(failure('agent-preset/locked', 'x')).kind, 'rejected')
 })
 
-test('a session/* error from agentPresets.select stays indeterminate (v2 §0.7.2: no Client binding precondition)', () => {
-  assert.equal(classifyRemotePresetFailure(failure('session/agent-busy', 'busy')).kind, 'indeterminate')
-  assert.equal(classifyRemotePresetFailure(failure('session/not-found', 'gone')).kind, 'indeterminate')
+test('an Agent-lookup refusal is a proven preset rejection; gateway/internal is not (v2 §0.7.2)', () => {
+  assert.equal(classifyRemotePresetFailure(failure('session/agent-busy', 'busy')).kind, 'rejected')
+  assert.equal(classifyRemotePresetFailure(failure('session/not-found', 'gone')).kind, 'rejected')
+  assert.equal(classifyRemotePresetFailure(failure('gateway/internal', 'x')).kind, 'indeterminate')
 })
 
 test('a PROVEN REFUSAL returned after a generation replacement stays rejected but superseded', async () => {

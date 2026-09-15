@@ -30,6 +30,8 @@
  * @module @xmoon76/dsh-pi-tui/runtime/session-lifecycle-port
  */
 
+import type { OperationOwnership, WriteError } from './write-outcome.ts'
+
 /** Create one fresh session (the /new and first-session paths). The identity,
  * cwd-like metadata and preset are semantic intent. The seed, inherited count
  * and parent metadata are current Direct fork/rewind creation inputs; D2.4
@@ -77,8 +79,113 @@ export interface SessionHandle {
 
 /** The session LIFECYCLE domain port. */
 export interface SessionLifecycle {
-  create(request: CreateSessionRequest): Promise<SessionHandle>
-  open(request: OpenSessionRequest): Promise<SessionHandle>
+  create(request: CreateSessionRequest): Promise<CreateResult>
+  open(request: OpenSessionRequest): Promise<OpenResult>
+}
+
+/**
+ * The CREATE settlement (v2 §0.3.4/§0.7.3): a lifecycle-specific outcome, NOT a
+ * plain `WriteOutcome<void>`. `published-with-error` preserves the identity the
+ * Host published even though a later step failed; `indeterminate` keeps the
+ * requested id as CORRELATION ONLY (`requestedSessionId` is never publication
+ * evidence).
+ */
+export type CreateOutcome =
+  | { readonly kind: 'created'; readonly handle: SessionHandle }
+  | { readonly kind: 'rejected'; readonly error: WriteError }
+  | { readonly kind: 'cancelled' }
+  | { readonly kind: 'published-with-error'; readonly sessionId: string; readonly error: WriteError }
+  | { readonly kind: 'indeterminate'; readonly error: WriteError; readonly requestedSessionId?: string }
+
+/** The OPEN settlement (v2 §0.3.5/§0.7.4): Client-local selection, never an
+ *  indeterminate Host write. */
+export type OpenOutcome =
+  | { readonly kind: 'opened'; readonly handle: SessionHandle }
+  | { readonly kind: 'unavailable'; readonly message: string }
+  | { readonly kind: 'cancelled' }
+
+/** A lifecycle settlement paired with its local ownership (v2 §0.2.1). The
+ *  axes are independent: `created + superseded` and `rejected + superseded`
+ *  are both real and legal. */
+export interface CreateResult {
+  readonly ownership: OperationOwnership
+  readonly outcome: CreateOutcome
+}
+
+/** A lifecycle open result paired with its local ownership. */
+export interface OpenResult {
+  readonly ownership: OperationOwnership
+  readonly outcome: OpenOutcome
+}
+
+/** Every settlement a lifecycle error can carry (machine-readable, never a
+ *  bare message). */
+export type LifecycleSettlement = CreateOutcome['kind'] | OpenOutcome['kind'] | 'superseded'
+
+/** A lifecycle outcome that must ABORT the caller's transition, carrying the
+ *  two independent axes so a Remote caller never has to parse a string. */
+export class LifecycleError extends Error {
+  readonly settlement: LifecycleSettlement
+  readonly ownership: OperationOwnership
+  readonly publishedSessionId: string | undefined
+
+  constructor(
+    settlement: LifecycleSettlement,
+    ownership: OperationOwnership,
+    message: string,
+    publishedSessionId?: string,
+  ) {
+    super(message)
+    this.name = 'LifecycleError'
+    this.settlement = settlement
+    this.ownership = ownership
+    this.publishedSessionId = publishedSessionId
+  }
+}
+
+/** Unwrap a CREATE result for the runner's transition: a `created` result that
+ *  still owns the surface yields the handle; everything else aborts with a
+ *  machine-readable `LifecycleError` (a superseded create is NOT committed to
+ *  the local surface, though its identity stays available). */
+export function requireCreated(result: CreateResult): SessionHandle {
+  const { ownership, outcome } = result
+  switch (outcome.kind) {
+    case 'created':
+      if (ownership === 'superseded') {
+        throw new LifecycleError('superseded', ownership,
+          'the Session was created but the local surface was superseded', outcome.handle.session.id)
+      }
+      return outcome.handle
+    case 'published-with-error':
+      throw new LifecycleError(outcome.kind, ownership,
+        `the Session may already have been published: ${outcome.error.message} (${outcome.error.code})`,
+        outcome.sessionId)
+    case 'indeterminate':
+      throw new LifecycleError(outcome.kind, ownership,
+        `the create is indeterminate — do not retry: ${outcome.error.message} (${outcome.error.code})`,
+        undefined)
+    case 'rejected':
+      throw new LifecycleError(outcome.kind, ownership, `${outcome.error.message} (${outcome.error.code})`, undefined)
+    case 'cancelled':
+      throw new LifecycleError('cancelled', ownership, 'the Session creation was cancelled before dispatch', undefined)
+  }
+}
+
+/** Unwrap an OPEN result for the runner's transition. */
+export function requireOpened(result: OpenResult): SessionHandle {
+  const { ownership, outcome } = result
+  switch (outcome.kind) {
+    case 'opened':
+      if (ownership === 'superseded') {
+        throw new LifecycleError('superseded', ownership,
+          'the Session was opened but the local surface was superseded', outcome.handle.session.id)
+      }
+      return outcome.handle
+    case 'unavailable':
+      throw new LifecycleError('unavailable', ownership, outcome.message, undefined)
+    case 'cancelled':
+      throw new LifecycleError('cancelled', ownership, 'the Session open was cancelled before selection', undefined)
+  }
 }
 
 /** Extract the Direct ownership handle (the real AgentHandle with

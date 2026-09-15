@@ -966,12 +966,14 @@ Session mount.
   `session.create({sessionId, cwd, agentPreset})` + Client-state reconciliation
   for a guaranteed-fresh explicit-preset create (never create-then-select), and
   `ClientSessions.open()/binding()` for open (no Host resume RPC is invented).
-  A Connection generation captured before dispatch fences the reconciliation
-  (including a failing create: a reconnect during the RPC is `indeterminate`,
-  never a pre-publication refusal), the Host-returned session identity (not the
-  requested one) is authoritative, seeded/fork creates fail closed until D2.4
-  owns Host fork, and a post-publication create error carries the published
-  identity with no automatic same-id retry. The generated-create reconciliation
+  `create`/`open` return a first-class two-axis result (ownership + lifecycle
+  settlement, distinct from each other): a reconnect during a Host success is
+  `created + superseded`, and during a Host refusal is `rejected + superseded` —
+  the settlement is never downgraded to `indeterminate`. The Host-returned
+  session identity (not the requested one) is authoritative, seeded/fork
+  creates fail closed until D2.4 owns Host fork, a post-publication create error
+  is `published-with-error` carrying the published identity, and no same-id
+  retry happens. The generated-create reconciliation
   inserts the Client LIST row/binding only; it deliberately does NOT fabricate a
   `projectionValues` hint, because `SessionProjectionHints.asOfSeq` is a durable
   Host sequence the TUI does not own — the preset projection stays authoritative

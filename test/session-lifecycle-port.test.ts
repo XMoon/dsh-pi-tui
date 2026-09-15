@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectSessionLifecycle, type HostContextLike } from '../src/runtime/direct/session-lifecycle-direct.ts'
-import { ownerHandleOf, type CreateSessionRequest, type OpenSessionRequest } from '../src/runtime/session-lifecycle-port.ts'
+import { ownerHandleOf, requireCreated, requireOpened, type CreateSessionRequest, type OpenSessionRequest } from '../src/runtime/session-lifecycle-port.ts'
 
 function host(agents: unknown, defaultSelection?: { provider: string; model: string }): HostContextLike {
   return {
@@ -48,7 +48,7 @@ test('create resolves the preset composition internally and delegates with the D
     },
     resume: async () => ({ agent: { session: { id: 'x' } }, dispose: async () => {} }),
   }, { provider: 'p', model: 'm' }), compose('preset-a'))
-  const handle = await lifecycle.create(createRequest)
+  const handle = requireCreated(await lifecycle.create(createRequest))
   assert.equal(handle.session.id, 'session-new')
   assert.equal(handle.direct !== undefined, true, 'Direct handle carries the ownership escape')
   assert.ok(handle.direct && typeof handle.direct.agent === 'object', 'carries the live agent')
@@ -72,7 +72,7 @@ test('create preserves explicit caller metadata over the composed preset', async
     },
     resume: async () => ({ agent: { session: { id: 'x' } }, dispose: async () => {} }),
   }), compose('preset-a'))
-  await lifecycle.create({ sessionId: 'session-new', meta: { cwd: '/ws', agentPreset: 'caller-choice' }, agentPreset: 'preset-a' })
+  await requireCreated(await lifecycle.create({ sessionId: 'session-new', meta: { cwd: '/ws', agentPreset: 'caller-choice' }, agentPreset: 'preset-a' }))
   assert.deepEqual(calls[0].meta, { cwd: '/ws', agentPreset: 'caller-choice' }, 'caller metadata always wins')
 })
 
@@ -98,7 +98,7 @@ test('open resolves the persisted preset internally and delegates with the Direc
       return { agent: { session: { id: 'session-old' } }, dispose: async () => {} }
     },
   }, { provider: 'p', model: 'm' }), compose('preset-a'))
-  const handle = await lifecycle.open(openRequest)
+  const handle = requireOpened(await lifecycle.open(openRequest))
   assert.equal(handle.session.id, 'session-old')
   assert.equal(handle.direct !== undefined, true)
   assert.equal(calls.length, 1)
@@ -162,10 +162,14 @@ test('create and open forward the caller-owned signal unchanged and do not inven
   assert.equal(resumeSignals[1], undefined)
 })
 
-test('create and open fail loudly when the agents service is absent', async () => {
+test('create and open report unavailable when the agents service is absent', async () => {
   const lifecycle = new DirectSessionLifecycle(host(undefined), compose('preset-a'))
-  await assert.rejects(() => lifecycle.create(createRequest), /agents service unavailable/)
-  await assert.rejects(() => lifecycle.open(openRequest), /agents service unavailable/)
+  const created = await lifecycle.create(createRequest)
+  assert.equal(created.ownership, 'current')
+  assert.equal(created.outcome.kind, 'rejected')
+  if (created.outcome.kind === 'rejected') assert.match(created.outcome.error.message, /agents service unavailable/)
+  const opened = await lifecycle.open(openRequest)
+  assert.deepEqual(opened, { ownership: 'current', outcome: { kind: 'unavailable', message: 'agents service unavailable' } })
 })
 
 test('P1 regression: the ownership escape preserves the real AgentHandle so the runner can dispose it on retirement', async () => {
@@ -181,7 +185,7 @@ test('P1 regression: the ownership escape preserves the real AgentHandle so the 
     }),
     resume: async () => ({ agent: { session: { id: 'session-a' } }, dispose: async () => {} }),
   }), compose('preset-a'))
-  const handle = await lifecycle.create(createRequest)
+  const handle = requireCreated(await lifecycle.create(createRequest))
   // The runner's retirement path:
   const liveHandle = handle.direct?.ownerHandle as { dispose(): Promise<void> } | undefined
   assert.ok(liveHandle !== undefined, 'the runner receives the real owner handle')
@@ -210,7 +214,7 @@ test('P1 regression (round 3): transition commit stores the OWNER HANDLE, and a 
   }), compose('preset-a'))
 
   // Transition A -> B: create B's SessionHandle.
-  const handleB = await lifecycle.create({ sessionId: 'session-b', meta: {} })
+  const handleB = requireCreated(await lifecycle.create({ sessionId: 'session-b', meta: {} }))
   // The commit stores the OWNER HANDLE (exactly what the runner does):
   let liveHandle = ownerHandleOf(handleB) as { dispose(): Promise<void> }
   assert.ok(liveHandle !== undefined, 'the commit stores the real owner handle, never the SessionHandle')
@@ -220,7 +224,7 @@ test('P1 regression (round 3): transition commit stores the OWNER HANDLE, and a 
   assert.deepEqual(disposed, ['session-b'], 'transition B→C disposes B\x27s original AgentHandle exactly once')
 
   // And a third transition disposes C exactly once:
-  const handleC = await lifecycle.create({ sessionId: 'session-c', meta: {} })
+  const handleC = requireCreated(await lifecycle.create({ sessionId: 'session-c', meta: {} }))
   liveHandle = ownerHandleOf(handleC) as { dispose(): Promise<void> }
   await liveHandle.dispose()
   assert.deepEqual(disposed, ['session-b', 'session-c'], 'each retired session disposes exactly once, in order')
