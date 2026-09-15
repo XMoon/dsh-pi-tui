@@ -179,8 +179,12 @@ semantics converged in D2.3; they are not a Web-affordance clone.
   blank state opens the picker and lets the Host be the final authority. A
   started Session keeps its recorded preset visible and refuses
   the switch with the Host's `agent-preset/locked` wording — never a false
-  switched display. A deployment with `modeSelectionEnabled: false` refuses
-  the selection surface. Failure settlement: `rejected` keeps the prior
+  switched display. A deployment with `modeSelectionEnabled: false` hides the
+  `/preset` affordance from the slash candidates and `/help` (a presentation
+  filter only); the handler stays registered and still refuses the selection
+  surface, so a typed invocation fails closed identically, and an
+  unavailable/unknown roster keeps the affordance rather than infer a policy.
+  Failure settlement: `rejected` keeps the prior
   preset and shows the reason; `indeterminate` claims neither the old nor the
   requested preset and is never retried.
 - **`/new` rides guaranteed-fresh create.** The TUI owns this transition, so
