@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 /**
- * D1.1 integration smoke over the published rc1 official Client faces.
+ * D1.1 integration smoke over the published 0.1.6 official Client faces.
  *
  * The browser-facing Client packages are module-loader chunks rather than
  * Node modules, so this harness installs the same tiny loader boundary that a
- * web page provides. The fixture RPC is still the official Connection fixture;
- * Connection, API Gateway, generated Remote contributions, and Session
- * Controller Client are all real package implementations. No TUI production
- * runner or Remote write path is mounted.
+ * web page provides. 0.1.6 removed the production query-selected fixture
+ * transport from `dsh-client-connection`; the carrier is now an explicit
+ * `ClientTransportHooks` (or the page's `__DSH_TRANSPORT__` global). This smoke
+ * installs the official `@deepseek-ai/dsh-remote-mock` carrier face as
+ * `__DSH_TRANSPORT__.rpc`, so Connection, API Gateway, the generated Remote
+ * contributions, the Session Controller Client and the TUI RemoteSessionReader
+ * are all REAL package implementations over a mock Host carrier. No TUI
+ * production runner or Remote write path is mounted.
  *
  * @module dsh-remote-session-read-smoke
  */
@@ -19,6 +23,7 @@ import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import commandsRemote from '@deepseek-ai/dsh-commands/remote'
 import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
 import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
+import { RemoteMock, ok, openStream } from '@deepseek-ai/dsh-remote-mock'
 import { RemoteSessionReader } from '../src/runtime/remote/session-reader-remote.ts'
 
 const PACKAGE_IDS = {
@@ -78,11 +83,74 @@ const WRITE_ENDPOINTS = new Set([
   'workspace/archiveSession',
 ])
 
+const SESSION_ID = 'fx-alpha'
+const SESSION_TITLE = 'Fixture 历史会话'
+const SESSION_PRESET = 'fixture-preset'
+const SESSION_CWD = '/tmp/dsh-d1-1-fixture'
+const SESSION_FORMAT_VERSION = 3
+
+/** One fixture turn cycle: turn/start, user/message, assistant/message, turn/end. */
+const TURN_EVENTS = 4
+/** Durable events in the fixture log (enough that a 50-message `loadOlder` page is bounded). */
+const LOG_EVENTS = 120
+/** Records in the opening `session/follow` window (the log tail). */
+const TAIL_RECORDS = 20
+
+/** One history record as the Host wire carries it. */
+function record(seq, type, data, surfaceOp) {
+  return {
+    type: 'event',
+    event: {
+      type,
+      seq,
+      time: 1_700_000_000_000 + seq,
+      data,
+      ...(surfaceOp === undefined ? {} : { surfaceOp }),
+    },
+  }
+}
+
+/** The contiguous fixture log: every seq carries a durable `event` record. */
+function fixtureLog() {
+  const records = []
+  for (let seq = 0; seq < LOG_EVENTS; seq += 1) {
+    const turn = Math.floor(seq / TURN_EVENTS)
+    const phase = seq % TURN_EVENTS
+    if (phase === 0) records.push(record(seq, 'turn/start', { turn }))
+    else if (phase === 1) {
+      records.push(record(seq, 'user/message', {
+        id: `fx-user-${seq}`,
+        role: 'user',
+        content: [{ type: 'text', text: `fixture needle ${seq}` }],
+        source: { kind: 'user' },
+      }, 'append'))
+    } else if (phase === 2) {
+      records.push(record(seq, 'assistant/message', {
+        turn,
+        step: 0,
+        message: {
+          id: `fx-assistant-${seq}`,
+          role: 'assistant',
+          content: [{ type: 'text', text: `fixture reply ${seq}` }],
+          source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+        },
+        stream: [],
+      }, 'append'))
+    } else records.push(record(seq, 'turn/end', { turn, reason: { kind: 'completed' } }))
+  }
+  return records
+}
+
+const LOG = fixtureLog()
+const TAIL = LOG.slice(-TAIL_RECORDS)
+const TAIL_CURSOR = TAIL.at(-1).event.seq
+
 function installModuleLoader() {
   const nodeRequire = createRequire(import.meta.url)
   const modules = new Map()
   const previousWindow = globalThis.window
   const previousLocation = globalThis.location
+  const previousTransport = globalThis.__DSH_TRANSPORT__
   const requireModule = (specifier) => {
     if (specifier.endsWith('/client')) {
       const id = specifier.slice(0, -'/client'.length)
@@ -100,7 +168,7 @@ function installModuleLoader() {
       },
     },
   }
-  globalThis.location = { hostname: 'localhost', search: '?fixture' }
+  globalThis.location = { hostname: 'localhost', origin: 'http://dsh-fixture.local', search: '' }
   return {
     modules,
     restore() {
@@ -108,8 +176,66 @@ function installModuleLoader() {
       else globalThis.window = previousWindow
       if (previousLocation === undefined) delete globalThis.location
       else globalThis.location = previousLocation
+      if (previousTransport === undefined) delete globalThis.__DSH_TRANSPORT__
+      else globalThis.__DSH_TRANSPORT__ = previousTransport
     },
   }
+}
+
+/** The official mock carrier table for the D1 read surface. */
+function fixtureMock() {
+  const mock = RemoteMock.create({ host: { home: SESSION_CWD } })
+  mock.unary('session/list', () => ok({
+    items: [{
+      sessionId: SESSION_ID,
+      updatedAt: 1_700_000_000_000,
+      running: false,
+      blank: false,
+      cwd: SESSION_CWD,
+      projections: {
+        asOfSeq: TAIL_CURSOR,
+        values: { title: SESSION_TITLE, agentPreset: SESSION_PRESET },
+      },
+    }],
+  }))
+  // The generated Remote proxy wraps a one-object request as `{ request }`.
+  // Content search matches a whitespace-delimited token of a fixture message,
+  // the way the Host's full-text index does (so a hyphenated non-token misses).
+  mock.unary('session/search', (args) => {
+    const request = args?.request ?? args
+    const query = String((typeof request === 'string' ? request : request?.query) ?? '').trim().toLowerCase()
+    const hit = query !== '' && LOG.some(entry => {
+      const text = entry.event.data?.content?.[0]?.text
+      return typeof text === 'string' && text.toLowerCase().split(/\s+/).includes(query)
+    })
+    return ok(hit
+      ? { items: [{ sessionId: SESSION_ID, snippet: 'fixture needle' }], hasMore: false }
+      : { items: [], hasMore: false })
+  })
+  // One contiguous backwards page: the newest `maxMessages` records strictly
+  // before the requested cursor, with `hasMore` reporting any older remainder.
+  mock.unary('session/page', (args) => {
+    const request = args?.request ?? args
+    const beforeSeq = request?.beforeSeq ?? request?.throughSeq ?? TAIL_CURSOR + 1
+    const maxMessages = typeof request?.maxMessages === 'number' ? request.maxMessages : 50
+    const before = LOG.filter(entry => entry.event.seq < beforeSeq)
+    const page = before.slice(-maxMessages)
+    return ok({ records: page, hasMore: before.length > page.length })
+  })
+  mock.unary('subagents/list', () => ok({ entries: [], parentAvailable: true }))
+  mock.stream('session/control', openStream([{ type: 'baseline', value: { queues: {}, jobs: {}, projections: {} } }]))
+  mock.stream('session/follow', (_args, stream) => {
+    stream.push({
+      type: 'snapshot',
+      header: { version: SESSION_FORMAT_VERSION, id: SESSION_ID, createdAt: 0, cwd: SESSION_CWD, isSeeded: false },
+      cursor: TAIL_CURSOR,
+      records: TAIL,
+      hasMore: true,
+      projections: { asOfSeq: TAIL_CURSOR, values: {} },
+      assistantStream: { revision: 0 },
+    })
+  })
+  return mock
 }
 
 async function waitFor(predicate, label, timeoutMs = 5_000) {
@@ -142,6 +268,8 @@ function assertContiguous(values, label) {
 
 async function main() {
   const loader = installModuleLoader()
+  const mock = fixtureMock()
+  globalThis.__DSH_TRANSPORT__ = { rpc: mock.rpc }
   let context
   try {
     await import('@deepseek-ai/dsh-client-connection/client')
@@ -171,26 +299,6 @@ async function main() {
       'official Connection generation and Session list readiness',
     )
 
-    const rpc = context.connection.rpc
-    const writes = []
-    let followOpens = 0
-    const recordMutation = endpoint => {
-      if (WRITE_ENDPOINTS.has(endpoint)) writes.push(endpoint)
-    }
-    const originalCall = rpc.call
-    rpc.call = function (...args) {
-      recordMutation(args[1])
-      return originalCall.apply(rpc, args)
-    }
-    const originalOpen = rpc.open
-    if (typeof originalOpen === 'function') {
-      rpc.open = function (...args) {
-        if (args[1] === 'session/follow') followOpens += 1
-        recordMutation(args[1])
-        return originalOpen.apply(rpc, args)
-      }
-    }
-
     const reader = new RemoteSessionReader(context.sessions, context.connection.generation)
     const rows = await reader.list(undefined)
     assert.ok(rows !== undefined, 'official generation must produce a Remote list')
@@ -201,7 +309,8 @@ async function main() {
     assert.ok(rows.every(row => !Object.hasOwn(row, 'createdAt')), 'Remote rows must not invent createdAt')
 
     const projections = await reader.projectionBatch(rows)
-    assert.equal(projections.get('fx-alpha')?.title, 'Fixture 历史会话')
+    assert.equal(projections.get(SESSION_ID)?.title, SESSION_TITLE)
+    assert.equal(projections.get(SESSION_ID)?.preset, SESSION_PRESET)
     const search = await reader.search('fixture')
     assert.ok(search !== undefined && search.items.length > 0, 'official Session search must return fixture hits')
     const emptySearch = await reader.search('definitely-not-in-fixture')
@@ -232,18 +341,16 @@ async function main() {
     assert.ok(oldGeneration !== undefined)
     const listBeforeReconnect = context.sessions.list.getSnapshot()
     const historyBeforeReconnect = binding.eventSource.getSnapshot()
-    const followOpensBeforeReconnect = followOpens
-    const fixtureTiming = globalThis.__fxTiming
-    assert.ok(typeof fixtureTiming?.breakStreams === 'function', 'fixture stream timing hook missing')
+    const followOpensBeforeReconnect = mock.log.streams('session/follow').length
     context.connection.reconnect()
     await waitFor(
       () => context.connection.generation.getSnapshot() === undefined,
       'official Connection generation loss',
     )
-    // The fixture's stream-break hook is the documented way to exercise the
-    // Gateway-owned follow recovery path; reconnect alone only repairs the
-    // Connection generation and does not close an already-open journal.
-    fixtureTiming.breakStreams()
+    // The journal stays open across reconnect (reconnect only repairs the
+    // Connection generation), so close it to exercise the Gateway-owned
+    // follow recovery that re-opens the stream for the new generation.
+    mock.streams.end('session/follow')
     await waitFor(
       () => {
         const nextGeneration = context.connection.generation.getSnapshot()
@@ -259,7 +366,7 @@ async function main() {
       'replaced Session list snapshot after reconnect',
     )
     await waitFor(
-      () => followOpens > followOpensBeforeReconnect,
+      () => mock.log.streams('session/follow').length > followOpensBeforeReconnect,
       'reopened official session/follow stream after reconnect',
     )
     await waitFor(
@@ -318,6 +425,15 @@ async function main() {
     assertUnique(jumpedSeqs, 'loadThrough history')
     assertContiguous(jumpedSeqs, 'loadThrough history')
 
+    // Write-free guard over EVERYTHING the carrier saw: answered unary calls,
+    // opened streams, AND requests that found no rule. A write attempt is a
+    // failure whether or not the mock had a rule for it.
+    const attempted = [
+      ...mock.log.calls().map(call => call.endpoint),
+      ...mock.log.streams().map(stream => stream.endpoint),
+      ...mock.log.unmatched().map(miss => miss.endpoint),
+    ]
+    const writes = attempted.filter(endpoint => WRITE_ENDPOINTS.has(endpoint))
     assert.deepEqual(writes, [], 'RemoteSessionReader must not call an official Session write endpoint')
     console.log(`dsh remote session read smoke passed: ${String(rows.length)} rows, ${String(pagedSeqs.length)} paged events, generation ${String(oldGeneration.id)} -> ${String(context.connection.generation.getSnapshot()?.id)}`)
   } finally {
