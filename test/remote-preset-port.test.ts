@@ -257,3 +257,11 @@ test('roster aborts when the signal aborts during the read', async () => {
   harness.setListHook(() => controller.abort())
   await assert.rejects(harness.catalog.roster(controller.signal), /abort/i)
 })
+
+test('an aborted roster read reports the LOCAL abort, not a stale Host failure', async () => {
+  const harness = presetHarness()
+  const controller = new AbortController()
+  harness.setListResult({ ok: false, error: failure('gateway/internal', 'host boom') })
+  harness.setListHook(() => controller.abort())
+  await assert.rejects(harness.catalog.roster(controller.signal), /abort/i)
+})

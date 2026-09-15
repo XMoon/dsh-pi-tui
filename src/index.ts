@@ -40,7 +40,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-tool-todo'
 import { resolvePresetRequest } from './runtime/session-preset.ts'
-import { recordedSessionPreset, selectBlankSessionPreset, sessionPresetOf, turnBoundaryBlank } from './runtime/direct/session-preset-direct.ts'
+import { recordedSessionPreset, selectBlankSessionPreset, sessionPresetOf } from './runtime/direct/session-preset-direct.ts'
 import { DirectModelSelectionOwner, type DefaultModelServiceLike } from './runtime/direct/model-selection-direct.ts'
 import { foldPendingModelSelection, rawSelectionFromRequestHeader, sameModelSelection } from './model-selection.ts'
 // Empty type imports carry the loader Context merge for the settlement await
@@ -209,7 +209,7 @@ import { serializeTuiSettingsMutation } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
 import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-direct.ts'
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
-import { directAgentOf, ownerHandleOf, requireCreated, requireOpened, type CreateSessionRequest, type OpenSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
+import { LifecycleError, directAgentOf, ownerHandleOf, requireCreated, requireOpened, type CreateSessionRequest, type OpenSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
 import type { HostCommandOutcome } from './runtime/host-command-port.ts'
 import type { PendingInputItem } from './runtime/pending-input-reader-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
@@ -2043,8 +2043,6 @@ export function apply(ctx: Context, config: Config): void {
     }
     const installSessionModelSelection = (_agentCtx: Context, agent: Agent): void => { modelSelections.installForAgent(agent) }
     const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, installSessionModelSelection, presetId, focusState, diag)
-    const withPresetMeta = (composition: AgentComposition): { agentPreset?: string } =>
-      composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }
 
     // The semantic backend (server/client migration): the TUI consumes
     // Host domains through narrow ports, never ctx.* directly. Direct is the
@@ -2361,11 +2359,10 @@ export function apply(ctx: Context, config: Config): void {
      *  Never derived from the TUI transcript. */
     const sessionBlank = (): boolean | undefined => {
       if (liveAgent === undefined) return undefined
-      const projections = ctx.get('sessionProjections') as {
-        stateOf(session: unknown, key: string): unknown
-      } | undefined
-      if (projections === undefined) return undefined
-      return turnBoundaryBlank(projections.stateOf(liveAgent.session, 'turnBoundary'))
+      // The Host-authoritative blank read lives BEHIND the semantic Session
+      // reader port (v2 §0.6): the runner no longer knows the Direct
+      // projection name or the turn-boundary reducer.
+      return backend.sessionReader.blank(liveAgent.session.id)
     }
     // Incremental fold state for the live session's log; reset on switch. A
     // resumed session is hydrated only by initLiveSession below, so startup
@@ -2667,6 +2664,18 @@ export function apply(ctx: Context, config: Config): void {
           })),
         })
         if (!result.ok) {
+          if (result.error instanceof LifecycleError) {
+            // Preserve the machine-readable cause even on the silent path.
+            diag.warn('session switch did not own the surface', {
+              settlement: result.error.settlement,
+              ownership: result.error.ownership,
+              publishedSessionId: result.error.publishedSessionId,
+              requestedSessionId: result.error.requestedSessionId,
+            })
+            // A locally SUPERSEDED open/switch emits no error notice (§0.2.1):
+            // the surface moved, so the message belongs to a stale operation.
+            if (result.error.ownership === 'superseded') return undefined
+          }
           // The resume failed: the CURRENT session is still live.
           return result.message
         }
@@ -8676,7 +8685,10 @@ export function apply(ctx: Context, config: Config): void {
           lifecycleController.signal.throwIfAborted()
           return requireCreated(await backend.sessionLifecycle.create({
             sessionId: String(sessionId),
-            meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
+            // The semantic `agentPreset` is the sole preset authority; the
+            // Direct adapter writes the actually composed preset into the
+            // durable header (never a duplicated meta field).
+            meta: { cwd: process.cwd() },
             agentPreset: composition.agentPreset,
             signal: lifecycleController.signal,
           }))
@@ -8685,6 +8697,16 @@ export function apply(ctx: Context, config: Config): void {
         try {
           created = await createFirstSession(launched.composition)
         } catch (error) {
+          if (error instanceof LifecycleError && error.ownership === 'superseded') {
+            // v2 §0.2.1: a superseded first-session create is UI-silent — no
+            // degradation notice; the surface simply stays sessionless.
+            diag.warn('first session creation superseded', {
+              settlement: error.settlement,
+              publishedSessionId: error.publishedSessionId,
+              requestedSessionId: error.requestedSessionId,
+            })
+            return
+          }
           // A failed create leaves the surface sessionless — the next user
           // input starts a NEW attempt (no pin, no second fresh fallback).
           // Preset mount failures are no longer auto-replaced; the

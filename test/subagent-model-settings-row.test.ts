@@ -173,7 +173,7 @@ function makeHarness(initial: SettingsDoc): {
     settleIntent: () => {},
     tuiSettings: undefined,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), measureContext: () => undefined },
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
     interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),

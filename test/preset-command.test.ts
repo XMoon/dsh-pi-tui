@@ -133,13 +133,7 @@ function presetService(
         if (selectLocked === true) {
           throw Object.assign(new Error('session has already started; its agent preset is fixed'), { code: 'agent-preset/locked' })
         }
-        if (selectLocked !== false) {
-          const session = (agent as { session?: { snapshotEvents?: () => readonly { type: string }[] } }).session
-          const events = session?.snapshotEvents?.() ?? []
-          if (events.some(event => event.type === 'turn/start')) {
-            throw Object.assign(new Error('session has already started; its agent preset is fixed'), { code: 'agent-preset/locked' })
-          }
-        }
+        void agent
         selected.push(id)
         return id
       },
@@ -217,8 +211,7 @@ function stubRunner(options: {
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(),
-      measureContext: () => undefined,
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
        ...options.sessionReader,
     },
     catalog: new DirectCatalogPort(options.ctx as never, (sessionId) => {
@@ -601,7 +594,9 @@ test('/preset on a blank session opens the roster (Host blank authority, not the
 })
 
 test('/preset <id> with a started session refuses with the locked text', async () => {
-  const t = setup({ agent: fakeAgent('s1', [{ type: 'turn/start' }]) })
+  // The Host outcome is scripted explicitly (agent-preset/locked); the double
+  // must NOT re-implement the Host blank state machine (§0.11).
+  const t = setup({ agent: fakeAgent('s1', [{ type: 'turn/start' }]), sessionBlank: false, selectLocked: true })
   const result = await t.run('minimal') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
   assert.match(result.text, /has already started; its agent preset is fixed/)
@@ -1213,11 +1208,11 @@ test('/preset supersedes (never error-notifies) a switch whose Session was repla
       return { kind: 'failed', error: 'superseded by a switch' }
     },
   })
-  const result = await t.run('minimal') as { kind: string; text: string }
+  const result = await t.run('minimal') as { kind: string; text?: string }
   // v2 §0.2.1/§0.3.3: the committed switch lost local ownership — the surface
-  // moved, so no error notice belongs to it.
+  // moved, so superseded is SILENT (no notice, no success text).
   assert.equal(result.kind, 'success')
-  assert.match(result.text, /superseded by a newer choice/)
+  assert.equal(result.text, undefined)
   assert.deepEqual(t.presets.selected, ['minimal'],
     'the Host switch itself committed before the surface moved')
   t.app.stop()
@@ -1251,10 +1246,9 @@ test('a newer preset pick supersedes an older pick on the same Session generatio
     },
   })
   holder.run = t.run
-  const first = await t.run('standard') as { kind: string; text: string }
+  const first = await t.run('standard') as { kind: string; text?: string }
   assert.equal(first.kind, 'success')
-  assert.match(first.text, /superseded by a newer choice/,
-    'the older pick must not report its superseded switch as the current one')
+  assert.equal(first.text, undefined, 'a superseded pick is silent (no success text)')
   t.app.stop()
 })
 
@@ -1272,9 +1266,9 @@ test('a newer sessionless preset pick supersedes an older one', async () => {
     },
   })
   holder.run = t.run
-  const first = await t.run('standard') as { kind: string; text: string }
+  const first = await t.run('standard') as { kind: string; text?: string }
   assert.equal(first.kind, 'success')
-  assert.match(first.text, /superseded by a newer choice/)
+  assert.equal(first.text, undefined, 'a superseded sessionless pick is silent')
   assert.equal(t.pending.value, 'minimal', 'the newest sessionless pick is the effective pending preset')
   t.app.stop()
 })

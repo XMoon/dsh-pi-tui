@@ -362,13 +362,16 @@ export class DirectModelCatalog implements ModelCatalog {
     return copyModelSelection(normalizeModelSelection(this.modelSelections.current(agent)))
   }
 
-  async selectSessionModel(sessionId: string, selection: ModelSelectionDto, _signal?: AbortSignal): Promise<OperationResult<ModelSelectionDto>> {
+  async selectSessionModel(sessionId: string, selection: ModelSelectionDto, signal?: AbortSignal): Promise<OperationResult<ModelSelectionDto>> {
     // The Direct adapter is the only writer for its own process-local Agent,
     // so its settlement always owns the current surface (never superseded).
-    return currentResult(await this.selectSessionModelOutcome(sessionId, selection))
+    return currentResult(await this.selectSessionModelOutcome(sessionId, selection, signal))
   }
 
-  private async selectSessionModelOutcome(sessionId: string, selection: ModelSelectionDto): Promise<WriteOutcome<ModelSelectionDto>> {
+  private async selectSessionModelOutcome(sessionId: string, selection: ModelSelectionDto, signal?: AbortSignal): Promise<WriteOutcome<ModelSelectionDto>> {
+    // A client-local cancellation BEFORE the durable append provably did not
+    // commit (v2 §0.2.4).
+    if (Boolean(signal?.aborted)) return { kind: 'cancelled' }
     const llm = this.llm()
     const agent = this.agentFor(sessionId)
     if (agent === undefined || this.modelSelections === undefined || llm === undefined) {
@@ -397,6 +400,9 @@ export class DirectModelCatalog implements ModelCatalog {
         error: { code: 'session/model-unavailable', message: safeErrorMessage(error) },
       }
     }
+    // Re-check AFTER the normalization await and BEFORE the durable append:
+    // an abort during resolution provably did not commit.
+    if (Boolean(signal?.aborted)) return { kind: 'cancelled' }
     const next = normalizeModelSelection({
       provider: resolved.provider,
       model: resolved.model,
@@ -514,7 +520,7 @@ export class DirectPresetCatalog implements PresetCatalog {
     }
   }
 
-  async resolve(id?: string): Promise<{ readonly id?: string }> {
+  async resolve(id?: string, _signal?: AbortSignal): Promise<{ readonly id?: string }> {
     const presets = this.presets()
     // Rosterless deployment: no preset identity to record (the old compose
     // path returned `agentPreset: undefined`).
@@ -536,11 +542,14 @@ export class DirectPresetCatalog implements PresetCatalog {
     return this.presets()?.defaultId
   }
 
-  async selectSessionPreset(sessionId: string, presetId: string, _signal?: AbortSignal): Promise<OperationResult<{ readonly preset: string }>> {
-    return currentResult(await this.selectSessionPresetOutcome(sessionId, presetId))
+  async selectSessionPreset(sessionId: string, presetId: string, signal?: AbortSignal): Promise<OperationResult<{ readonly preset: string }>> {
+    return currentResult(await this.selectSessionPresetOutcome(sessionId, presetId, signal))
   }
 
-  private async selectSessionPresetOutcome(sessionId: string, presetId: string): Promise<WriteOutcome<{ readonly preset: string }>> {
+  private async selectSessionPresetOutcome(sessionId: string, presetId: string, signal?: AbortSignal): Promise<WriteOutcome<{ readonly preset: string }>> {
+    // A client-local cancellation BEFORE the switch dispatch provably did not
+    // commit (v2 §0.2.4/§0.5).
+    if (Boolean(signal?.aborted)) return { kind: 'cancelled' }
     const presets = this.presets()
     if (presets === undefined || typeof presets.select !== 'function') {
       return {

@@ -194,7 +194,7 @@ export interface PresetCatalog {
    *  compose path); a composition setup callback never crosses the port.
    *  Throws when the roster exists but no configured root supplies the
    *  id. */
-  resolve(id?: string): Promise<{ readonly id?: string }>
+  resolve(id?: string, signal?: AbortSignal): Promise<{ readonly id?: string }>
   /** The preset id mounted when a caller names none. */
   defaultId(): string | undefined
   /** Select the preset for one still-blank Session. The Host owns the blank

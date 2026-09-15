@@ -123,7 +123,7 @@ function harness(options: {
       return search(query, signal)
     },
     projectionBatch: options.projectionBatch ?? (async () => new Map()),
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   }
   const runner: TuiCommandRunner = {
     ctx,

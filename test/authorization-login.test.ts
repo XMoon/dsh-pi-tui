@@ -199,8 +199,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(),
-      measureContext: () => undefined,
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),

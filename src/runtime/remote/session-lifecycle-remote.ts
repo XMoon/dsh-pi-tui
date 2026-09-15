@@ -128,9 +128,8 @@ function errorCode(error: unknown): string | undefined {
   const direct = remoteFailureCode(error)
   if (direct !== undefined) return direct
   if (typeof error !== 'object' || error === null) return undefined
-  const record = error as { readonly rpcError?: unknown; readonly code?: unknown }
-  if (typeof record.code === 'string' && record.code !== '') return record.code
-  return remoteFailureCode(record.rpcError)
+  // The official Client carrier may nest the generated Remote failure.
+  return remoteFailureCode((error as { readonly rpcError?: unknown }).rpcError)
 }
 
 /**

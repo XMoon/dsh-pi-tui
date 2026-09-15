@@ -390,3 +390,20 @@ test('measureContext is explicitly unavailable because the Client read face has 
   const reader = new RemoteSessionReader(remoteSource({ state: state([], {}) }), generations.source)
   assert.equal(reader.measureContext('session-a'), undefined)
 })
+
+test('blank reads the official Client Session-summary blank bit (v2 §0.6)', () => {
+  const generations = generationHarness()
+  const source = remoteSource({
+    state: state(
+      ['session-a', 'session-b'],
+      {
+        'session-a': listRow('session-a', 10, { blank: true }),
+        'session-b': listRow('session-b', 20, { blank: false }),
+      },
+    ),
+  })
+  const reader = new RemoteSessionReader(source, generations.source)
+  assert.equal(reader.blank('session-a'), true)
+  assert.equal(reader.blank('session-b'), false)
+  assert.equal(reader.blank('session-missing'), undefined)
+})

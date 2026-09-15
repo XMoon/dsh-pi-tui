@@ -15,6 +15,7 @@
  */
 
 import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { turnBoundaryBlank } from './session-preset-direct.ts'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   projectionBatch,
@@ -141,6 +142,18 @@ export class DirectSessionReader implements SessionReader {
   }
 
   /** Resolve the attached Session independently from the current TUI owner. */
+  /** Host-authoritative blankness through the official turn-boundary
+   *  projection (v2 §0.6) — the Direct mapping of the semantic read. */
+  blank(sessionId: string): boolean | undefined {
+    const live = this.liveAgent(sessionId)
+    if (live === undefined) return undefined
+    const projections = this.ctx.get('sessionProjections') as {
+      stateOf(session: unknown, key: string): unknown
+    } | undefined
+    if (projections === undefined) return undefined
+    return turnBoundaryBlank(projections.stateOf(live.session, 'turnBoundary'))
+  }
+
   private liveSession(sessionId: string): Session | undefined {
     return this.liveResolvers?.sessionOf(SessionId(sessionId)) as Session | undefined
   }

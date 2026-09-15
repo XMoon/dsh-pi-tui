@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectSessionLifecycle, type HostContextLike } from '../src/runtime/direct/session-lifecycle-direct.ts'
-import { ownerHandleOf, requireCreated, requireOpened, type CreateSessionRequest, type OpenSessionRequest } from '../src/runtime/session-lifecycle-port.ts'
+import { LifecycleError, ownerHandleOf, requireCreated, requireOpened, type CreateResult, type CreateSessionRequest, type OpenSessionRequest } from '../src/runtime/session-lifecycle-port.ts'
 
 function host(agents: unknown, defaultSelection?: { provider: string; model: string }): HostContextLike {
   return {
@@ -63,7 +63,7 @@ test('create resolves the preset composition internally and delegates with the D
   assert.equal(typeof calls[0].setup, 'function', 'the setup callback is built INSIDE the adapter')
 })
 
-test('create preserves explicit caller metadata over the composed preset', async () => {
+test('the semantic agentPreset is the SINGLE preset authority for the durable header', async () => {
   const calls: Array<{ meta: unknown }> = []
   const lifecycle = new DirectSessionLifecycle(host({
     create: async (options: { meta: unknown }) => {
@@ -72,8 +72,10 @@ test('create preserves explicit caller metadata over the composed preset', async
     },
     resume: async () => ({ agent: { session: { id: 'x' } }, dispose: async () => {} }),
   }), compose('preset-a'))
-  await requireCreated(await lifecycle.create({ sessionId: 'session-new', meta: { cwd: '/ws', agentPreset: 'caller-choice' }, agentPreset: 'preset-a' }))
-  assert.deepEqual(calls[0].meta, { cwd: '/ws', agentPreset: 'caller-choice' }, 'caller metadata always wins')
+  // A legacy caller carrying the SAME preset in meta is tolerated, and the
+  // durable header records the composed preset.
+  await requireCreated(await lifecycle.create({ sessionId: 'session-new', meta: { cwd: '/ws', agentPreset: 'preset-a' }, agentPreset: 'preset-a' }))
+  assert.deepEqual(calls[0].meta, { cwd: '/ws', agentPreset: 'preset-a' })
 })
 
 test('create omits agentOptions when no Host default selection exists', async () => {
@@ -228,4 +230,110 @@ test('P1 regression (round 3): transition commit stores the OWNER HANDLE, and a 
   liveHandle = ownerHandleOf(handleC) as { dispose(): Promise<void> }
   await liveHandle.dispose()
   assert.deepEqual(disposed, ['session-b', 'session-c'], 'each retired session disposes exactly once, in order')
+})
+
+// ── D2.3 two-axis lifecycle result contract ────────────────────────────────
+
+test('requireCreated preserves settlement + ownership + published identity as a LifecycleError', () => {
+  const cases: Array<{ result: CreateResult; settlement: string; ownership: string; published: string | undefined }> = [
+    { result: { ownership: 'current', outcome: { kind: 'rejected', error: { code: 'x', message: 'no' } } }, settlement: 'rejected', ownership: 'current', published: undefined },
+    { result: { ownership: 'superseded', outcome: { kind: 'rejected', error: { code: 'x', message: 'no' } } }, settlement: 'rejected', ownership: 'superseded', published: undefined },
+    { result: { ownership: 'current', outcome: { kind: 'cancelled' } }, settlement: 'cancelled', ownership: 'current', published: undefined },
+    { result: { ownership: 'superseded', outcome: { kind: 'published-with-error', sessionId: 'session-pub', error: { code: 'session/reconcile-failed', message: 'boom' } } }, settlement: 'published-with-error', ownership: 'superseded', published: 'session-pub' },
+    { result: { ownership: 'current', outcome: { kind: 'indeterminate', error: { code: 'gateway/internal', message: 'lost' }, requestedSessionId: 'session-req' } }, settlement: 'indeterminate', ownership: 'current', published: undefined }, // requestedSessionId stays correlation-only
+    { result: { ownership: 'superseded', outcome: { kind: 'created', handle: { session: { id: 'session-made' } } } }, settlement: 'superseded', ownership: 'superseded', published: 'session-made' },
+  ]
+  for (const testCase of cases) {
+    const error = (() => { try { requireCreated(testCase.result); return undefined } catch (thrown) { return thrown } })()
+    assert.ok(error instanceof LifecycleError, `requireCreated must throw for ${testCase.result.outcome.kind}`)
+    assert.equal(error.settlement, testCase.settlement)
+    assert.equal(error.ownership, testCase.ownership)
+    assert.equal(error.publishedSessionId, testCase.published)
+  }
+})
+
+test('requireCreated returns the handle only for a created result that still owns the surface', () => {
+  const handle = requireCreated({ ownership: 'current', outcome: { kind: 'created', handle: { session: { id: 'ok' } } } })
+  assert.deepEqual(handle, { session: { id: 'ok' } })
+})
+
+test('requireOpened reports unavailable/cancelled/superseded-opened as a LifecycleError', () => {
+  const unavailable = (() => { try { requireOpened({ ownership: 'current', outcome: { kind: 'unavailable', message: 'gone' } }); return undefined } catch (thrown) { return thrown } })()
+  assert.ok(unavailable instanceof LifecycleError)
+  assert.equal(unavailable.settlement, 'unavailable')
+  assert.match(unavailable.message, /gone/)
+
+  const cancelled = (() => { try { requireOpened({ ownership: 'current', outcome: { kind: 'cancelled' } }); return undefined } catch (thrown) { return thrown } })()
+  assert.ok(cancelled instanceof LifecycleError)
+  assert.equal(cancelled.settlement, 'cancelled')
+
+  const superseded = (() => { try { requireOpened({ ownership: 'superseded', outcome: { kind: 'opened', handle: { session: { id: 's' } } } }); return undefined } catch (thrown) { return thrown } })()
+  assert.ok(superseded instanceof LifecycleError)
+  assert.equal(superseded.settlement, 'superseded')
+  assert.equal(superseded.publishedSessionId, 's')
+})
+
+test('Direct create classifies an in-process throw as a proven rejection and a pre-abort as cancelled', async () => {
+  const lifecycle = new DirectSessionLifecycle(host({
+    create: async () => { throw new Error('in-process create exploded') },
+    resume: async () => ({ agent: { session: { id: 'x' } }, dispose: async () => {} }),
+  }), compose('preset-a'))
+  const rejected = await lifecycle.create(createRequest)
+  assert.equal(rejected.ownership, 'current')
+  assert.equal(rejected.outcome.kind, 'rejected')
+  if (rejected.outcome.kind === 'rejected') assert.match(rejected.outcome.error.message, /in-process create exploded/)
+
+  const controller = new AbortController()
+  controller.abort()
+  const cancelled = await lifecycle.create({ ...createRequest, signal: controller.signal })
+  assert.deepEqual(cancelled, { ownership: 'current', outcome: { kind: 'cancelled' } })
+})
+
+test('Direct open classifies an in-process throw as unavailable and a pre-abort as cancelled', async () => {
+  const lifecycle = new DirectSessionLifecycle(host({
+    create: async () => ({ agent: { session: { id: 'x' } } }),
+    resume: async () => { throw new Error('in-process resume exploded') },
+  }), compose('preset-a'))
+  const unavailable = await lifecycle.open(openRequest)
+  assert.equal(unavailable.ownership, 'current')
+  assert.equal(unavailable.outcome.kind, 'unavailable')
+
+  const controller = new AbortController()
+  controller.abort()
+  const cancelled = await lifecycle.open({ ...openRequest, signal: controller.signal })
+  assert.deepEqual(cancelled, { ownership: 'current', outcome: { kind: 'cancelled' } })
+})
+
+test('requireCreated keeps an indeterminate requestedSessionId as CORRELATION ONLY', () => {
+  const error = (() => {
+    try {
+      requireCreated({ ownership: 'current', outcome: { kind: 'indeterminate', error: { code: 'gateway/internal', message: 'lost' }, requestedSessionId: 'session-req' } })
+      return undefined
+    } catch (thrown) { return thrown }
+  })()
+  assert.ok(error instanceof LifecycleError)
+  assert.equal(error.publishedSessionId, undefined, 'a requested id is never publication proof')
+  assert.equal(error.requestedSessionId, 'session-req')
+})
+
+test('Direct create persists the COMPOSED preset and rejects a mismatched legacy meta.agentPreset', async () => {
+  const metas: unknown[] = []
+  const lifecycle = new DirectSessionLifecycle(host({
+    create: async (options: { meta: unknown }) => {
+      metas.push(options.meta)
+      return { agent: { session: { id: 'session-new' } }, dispose: async () => {} }
+    },
+    resume: async () => ({ agent: { session: { id: 'x' } }, dispose: async () => {} }),
+  }), async () => ({ agentPreset: 'composed', setup: () => {} }))
+  // The semantic preset is the single authority: the durable header records the
+  // actually composed preset, not a caller-supplied duplicate.
+  const created = await lifecycle.create({ sessionId: 'session-new', meta: { cwd: '/ws' }, agentPreset: 'ignored-by-compose' })
+  assert.equal(created.outcome.kind, 'created')
+  assert.deepEqual(metas[0], { cwd: '/ws', agentPreset: 'composed' })
+
+  // A legacy seeded/fork caller whose meta disagrees with the semantic intent
+  // fails closed instead of persisting a divergent preset.
+  const mismatched = await lifecycle.create({ sessionId: 'session-forked', meta: { cwd: '/ws', agentPreset: 'other' }, agentPreset: 'x', seed: [] })
+  assert.equal(mismatched.outcome.kind, 'rejected')
+  if (mismatched.outcome.kind === 'rejected') assert.match(mismatched.outcome.error.message, /disagrees with the semantic agentPreset/)
 })

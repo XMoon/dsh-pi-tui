@@ -75,6 +75,7 @@ import { suggestPathArgument } from './mentions.ts'
 import { FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { ModelSubmenu, type ModelApplyOutcome } from './model-menu.ts'
 import type { OperationResult } from './runtime/write-outcome.ts'
+import { LifecycleError } from './runtime/session-lifecycle-port.ts'
 import { computeStats, formatStats } from './stats.ts'
 import { textOf } from './transcript.ts'
 import {
@@ -148,9 +149,6 @@ function displaySessionId(id: string): string {
 }
 
 /** Session meta for a fresh/forked session: the cwd plus the preset id when composed. */
-function metaOf(cwd: string, presetId: string | undefined): Record<string, unknown> {
-  return presetId === undefined ? { cwd } : { cwd, agentPreset: presetId }
-}
 
 /**
  * The `/sessions` category tabs (the 2026-08-22 plan, item 3): the session
@@ -599,7 +597,7 @@ export interface TuiCommandRunner {
     inheritSelection?: ModelSelection
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
-  }): Promise<{ ok: true; next: T } | { ok: false; message: string }>
+  }): Promise<{ ok: true; next: T } | { ok: false; message: string; error?: unknown }>
   /** The preset the live agent runs on, when the deployment composes one. */
   currentPreset(): string | undefined
   /** The Host turn-boundary authority's blank state for the live Session
@@ -3687,7 +3685,7 @@ export function registerTuiCommands(
       // snapshot, never from N in-process registry calls.
       let directory
       try {
-        directory = await models.loadDirectory()
+        directory = await models.loadDirectory(runner.signal)
       } catch (error) {
         return { kind: 'error', text: `model catalog unavailable: ${safeErrorMessage(error)}` }
       }
@@ -3881,7 +3879,7 @@ export function registerTuiCommands(
       // The preset COMPOSITION (setup callback) is resolved inside the
       // Direct session lifecycle from this id — the command surface only
       // ever sees the identity (migration M1.11).
-      const resolved = await runner.catalog.presets.resolve(runner.effectivePresetId)
+      const resolved = await runner.catalog.presets.resolve(runner.effectivePresetId, runner.signal)
       // Coordinate with the newest sessionless `/model` global-default write
       // BEFORE dispatching the create (v2 §0.8.3/§0.8.4): quiesce EVERY
       // in-flight default write/correction so the Direct adapter captures the
@@ -3903,12 +3901,38 @@ export function registerTuiCommands(
           await runner.awaitPendingDefaultWrite(signal)
           return runner.agents.create({
             sessionId: String(sessionId),
-            meta: metaOf(cwd, resolved.id),
+            // The semantic `agentPreset` is the SINGLE preset authority; the
+            // Direct adapter persists the actually composed preset into the
+            // durable header. Never duplicate it into generic meta.
+            meta: { cwd },
             agentPreset: resolved.id,
           })
         },
       })
-      if (!result.ok) return { kind: 'error', text: result.message }
+      if (!result.ok) {
+        if (result.error instanceof LifecycleError) {
+          // Preserve the machine-readable cause (incl. a published identity for
+          // D2.4 reconciliation) even on the UI-silent superseded path.
+          runner.diag.warn('fresh session create did not own the surface', {
+            settlement: result.error.settlement,
+            ownership: result.error.ownership,
+            publishedSessionId: result.error.publishedSessionId,
+            requestedSessionId: result.error.requestedSessionId,
+          })
+          // A locally SUPERSEDED create emits no error notice (§0.2.1): the
+          // surface moved, so the message belongs to a stale operation.
+          if (result.error.ownership === 'superseded') {
+            const published = result.error.publishedSessionId
+            return {
+              kind: 'success',
+              text: published === undefined
+                ? 'fresh session creation superseded by a session/connection change'
+                : `fresh session creation superseded; published session ${published} retained for reconciliation`,
+            }
+          }
+        }
+        return { kind: 'error', text: result.message }
+      }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
       // drop the unpinned ones now, never before (a failed create keeps
       // the current session and its drafts intact; in-flight submissions
@@ -3995,7 +4019,7 @@ export function registerTuiCommands(
         // keeps status/default display consistent with composition: a real
         // custom code remains code, while old settings without code display ptc.
         try {
-          return (await presets.resolve()).id ?? configured
+          return (await presets.resolve(undefined, runner.signal)).id ?? configured
         } catch {
           return configured
         }
@@ -4027,7 +4051,7 @@ export function registerTuiCommands(
           // Validate before writing settings. `code` is legal when the current
           // DSH roster contains a custom preset with that id; an unknown code
           // remains an ordinary unknown-preset failure and is never aliased.
-          await presets.resolve(rest)
+          await presets.resolve(rest, runner.signal)
           await runner.config.presetDefault.set(rest)
         } catch (error) {
           return { kind: 'error', text: presetErrorText(error, rest) }
@@ -4063,13 +4087,13 @@ export function registerTuiCommands(
         > => {
         const token = ++presetOperationToken
         try {
-        const roster = await presets.roster()
+        const roster = await presets.roster(runner.signal)
         if (!roster.modeSelectionEnabled) {
           return { kind: 'rejected', message: 'preset selection is disabled in this deployment' }
         }
         const agent = runner.liveAgent
         if (agent === undefined) {
-          const resolved = await presets.resolve(id)
+          const resolved = await presets.resolve(id, runner.signal)
           // A roster that vanished between the availability check and the
           // resolve is a hard failure (the old compose path threw too) —
           // never a "preset undefined" success.
@@ -4196,7 +4220,9 @@ export function registerTuiCommands(
             return { kind: 'success', text: `session preset switched to ${outcome.preset}` }
           }
           if (outcome.kind === 'superseded') {
-            return { kind: 'success', text: 'session preset switch superseded by a newer choice' }
+            // v2 §0.2.1: a superseded operation owns nothing — no notice, no
+            // repaint, no close decision, and no success text.
+            return { kind: 'success' }
           }
           if (outcome.kind === 'locked') {
             const message = lockedPresetMessage(outcome.sessionId)
@@ -4218,7 +4244,7 @@ export function registerTuiCommands(
       // switch during the roster read must not paint the old current preset
       // (or the old blankness) onto the new Session's picker.
       const pickerGeneration = runner.sessionGeneration
-      const roster = await presets.roster()
+      const roster = await presets.roster(runner.signal)
       if (runner.sessionGeneration !== pickerGeneration) return { kind: 'success' }
       if (!roster.modeSelectionEnabled) {
         return { kind: 'error', text: 'preset selection is disabled in this deployment' }
@@ -4569,7 +4595,26 @@ export function registerTuiCommands(
         ...(sourceSelection === undefined ? {} : { inheritSelection: sourceSelection }),
         create: () => createForkedAgent(runner, source, seed, sessionId, sourcePreset),
       })
-      if (!result.ok) return { kind: 'error', text: result.message }
+      if (!result.ok) {
+        if (result.error instanceof LifecycleError) {
+          runner.diag.warn('fork create did not own the surface', {
+            settlement: result.error.settlement,
+            ownership: result.error.ownership,
+            publishedSessionId: result.error.publishedSessionId,
+            requestedSessionId: result.error.requestedSessionId,
+          })
+          if (result.error.ownership === 'superseded') {
+            const published = result.error.publishedSessionId
+            return {
+              kind: 'success',
+              text: published === undefined
+                ? 'fork superseded by a session/connection change'
+                : `fork superseded; published session ${published} retained for reconciliation`,
+            }
+          }
+        }
+        return { kind: 'error', text: result.message }
+      }
       // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
       // drop the unpinned ones now (durable attachments are untouched, plan
       // §14; in-flight submissions keep their pinned drafts — review

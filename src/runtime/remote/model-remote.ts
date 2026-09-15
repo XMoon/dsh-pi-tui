@@ -196,8 +196,10 @@ export class RemoteModelCatalog implements ModelCatalog {
     if (generationChanged(this.generation, captured)) {
       throw new Error('remote connection changed while loading the model catalog')
     }
-    if (!result.ok) throw new Error(`session.modelCatalog failed: ${remoteFailureMessage(result.error)}`)
+    // v2 §0.2.3 order: generation, then a LOCAL abort, then Host classification
+    // — an aborted caller must not surface a stale Host failure.
     signal?.throwIfAborted()
+    if (!result.ok) throw new Error(`session.modelCatalog failed: ${remoteFailureMessage(result.error)}`)
     // Latest-only read (v2 §0.2.3): a newer read — or a select invalidation —
     // that started during the await supersedes this one. Never write the cache
     // and never return the stale DTO; serve the NEWER value when one exists.
@@ -310,11 +312,16 @@ export class RemoteModelCatalog implements ModelCatalog {
       || epoch !== this.writeEpoch
       || this.sessions.binding(sessionId) === undefined
       || Boolean(signal?.aborted)
-    // The Host best-effort saved the global default as a side effect (success)
-    // or may have (indeterminate), but the reply cannot prove it. Only an
-    // operation that still owns the surface may invalidate the cache; a
-    // superseded old-generation write must not kill a newer in-flight read.
-    if (!superseded && (outcome.kind === 'committed' || outcome.kind === 'indeterminate')) this.invalidateDirectory()
+    // Cache invalidation is a HOST-GENERATION fact, independent of UI
+    // ownership: the Host best-effort saved (or may have saved) the global
+    // default, so the cached default is no longer provable. A same-generation
+    // operation must invalidate EVEN when it lost local ownership (`epoch`,
+    // binding or abort) — only a real generation REPLACEMENT must not touch the
+    // replacement generation's cache.
+    if (!generationChanged(this.generation, captured)
+      && (outcome.kind === 'committed' || outcome.kind === 'indeterminate')) {
+      this.invalidateDirectory()
+    }
     return { ownership: superseded ? 'superseded' : 'current', outcome }
   }
 

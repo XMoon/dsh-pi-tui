@@ -114,7 +114,10 @@ export class RemotePresetCatalog implements PresetCatalog {
   /** The last loaded Host roster (default + rows + policy), generation-tagged,
    *  latest-read-wins, detached on read AND write. */
   private readonly rosterCache = new GenerationCache<PresetRosterDto>(copyRoster)
-  /** Owner token for overlapping same-generation preset selections (v2 §0.2.5). */
+  /** Owner token for overlapping same-generation preset selections (v2 §0.2.5).
+   *  adapter-global is accepted ONLY under the current single-live-session TUI
+   *  invariant; if one adapter later serves independently writable concurrent
+   *  Session surfaces, key the ownership epoch by semantic subject/sessionId. */
   private writeEpoch = 0
 
   constructor(presets: RemotePresetRemotes, generation: RemoteConnectionGenerationSource) {
@@ -138,8 +141,10 @@ export class RemotePresetCatalog implements PresetCatalog {
     if (generationChanged(this.generation, captured)) {
       throw new Error('remote connection changed while loading the preset roster')
     }
-    if (!result.ok) throw new Error(`agentPresets.list failed: ${remoteFailureMessage(result.error)}`)
+    // v2 §0.2.3 order: generation, then a LOCAL abort, then Host classification
+    // — an aborted caller must not surface a stale Host failure.
     signal?.throwIfAborted()
+    if (!result.ok) throw new Error(`agentPresets.list failed: ${remoteFailureMessage(result.error)}`)
     const defaultId = result.value.presets.find(preset => preset.isDefault === true)?.id
     const dto: PresetRosterDto = {
       presets: result.value.presets.map(copyRosterEntry),
@@ -156,8 +161,8 @@ export class RemotePresetCatalog implements PresetCatalog {
     return this.rosterCache.snapshot(captured)!
   }
 
-  async resolve(id?: string): Promise<{ readonly id?: string }> {
-    const roster = await this.roster()
+  async resolve(id?: string, signal?: AbortSignal): Promise<{ readonly id?: string }> {
+    const roster = await this.roster(signal)
     const wanted = id ?? roster.defaultId
     if (wanted === undefined) return {}
     const found = roster.presets.find(preset => preset.id === wanted)

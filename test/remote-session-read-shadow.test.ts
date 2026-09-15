@@ -51,7 +51,7 @@ function reader(options: {
     list: async (_current, signal) => options.list?.(signal) ?? [row('session-a', 10, { cwd: '/ws' })],
     projectionBatch: async (rows, signal) => options.projections?.(rows, signal) ?? new Map(),
     search: async (query, signal) => options.search?.(query, signal) ?? { items: [], hasMore: false },
-    measureContext: () => undefined,
+    blank: () => undefined, measureContext: () => undefined,
   }
 }
 

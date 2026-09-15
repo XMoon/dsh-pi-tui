@@ -68,6 +68,8 @@ interface ModelHarness {
   setSelectionHook(hook: () => void): void
   /** Gate the Host selectModel result (for overlapping-call tests). */
   setSelectionGate(gate: () => Promise<void>): void
+  /** Queue distinct per-call selection results (consumed in order). */
+  queueSelectionResults(...results: Array<{ ok: true; value: { selected: { provider: string; model: string; reasoningEffort?: string } } } | { ok: false; error: unknown }>): void
   setCatalogHook(hook: () => void | Promise<void>): void
   /** Queue distinct per-call catalog results (consumed in order). */
   queueCatalogResults(...results: Array<{ ok: true; value: typeof DIRECTORY } | { ok: false; error: unknown }>): void
@@ -85,6 +87,7 @@ function modelHarness(): ModelHarness {
   let selectionGate: (() => Promise<void>) | undefined
   let catalogHook: (() => void | Promise<void>) | undefined
   const catalogQueue: Array<{ ok: true; value: typeof DIRECTORY } | { ok: false; error: unknown }> = []
+  const selectionQueue: Array<{ ok: true; value: { selected: { provider: string; model: string; reasoningEffort?: string } } } | { ok: false; error: unknown }> = []
   const bound = new Set<string>(['session-a'])
   const session: RemoteModelRemotes = {
     modelCatalog: async () => {
@@ -97,9 +100,10 @@ function modelHarness(): ModelHarness {
     },
     selectModel: async (request) => {
       calls.selections.push(request)
+      const result = selectionQueue.length > 0 ? selectionQueue.shift()! : selectionResult
       selectionHook?.()
       if (selectionGate !== undefined) await selectionGate()
-      return selectionResult
+      return result
     },
   }
   const sessions: RemoteModelSessionsSource = {
@@ -126,6 +130,7 @@ function modelHarness(): ModelHarness {
     setBinding: (sessionId, present) => { if (present) bound.add(sessionId); else bound.delete(sessionId) },
     setSelectionHook: (hook) => { selectionHook = hook },
     setSelectionGate: (gate) => { selectionGate = gate },
+    queueSelectionResults: (...results) => { selectionQueue.push(...results) },
     setCatalogHook: (hook) => { catalogHook = hook },
     queueCatalogResults: (...results) => { catalogQueue.push(...results) },
   }
@@ -407,4 +412,36 @@ test('an unparseable successful Host payload is indeterminate, never the request
   const result = await harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'wanted' })
   assert.equal(result.outcome.kind, 'indeterminate')
   if (result.outcome.kind === 'indeterminate') assert.equal(result.outcome.error.code, 'session/model-result-invalid')
+})
+
+test('a superseded same-generation COMMITTED select still invalidates the model cache', async () => {
+  const harness = modelHarness()
+  await harness.catalog.loadDirectory()
+  assert.deepEqual(harness.catalog.defaultSelection(), { provider: 'p', model: 'm-default' })
+  const gates: Array<() => void> = []
+  harness.setSelectionGate(() => new Promise<void>((resolve) => { gates.push(resolve) }))
+  harness.queueSelectionResults(
+    { ok: true, value: { selected: { provider: 'p', model: 'm1' } } },
+    { ok: false, error: failure('session/model-unavailable', 'no') },
+  )
+  const a = harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'm1' })
+  const b = harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'm2' })
+  await Promise.resolve()
+  gates[0]!(); gates[1]!()
+  const [resultA, resultB] = await Promise.all([a, b])
+  assert.equal(resultA.ownership, 'superseded')
+  assert.equal(resultA.outcome.kind, 'committed')
+  assert.equal(resultB.outcome.kind, 'rejected')
+  // A committed on the SAME generation, so the Host default is unprovable even
+  // though A lost local ownership; B was a refusal and invalidates nothing.
+  assert.equal(harness.catalog.defaultSelection(), undefined,
+    'a committed+superseded same-generation select must still invalidate the cached Host default')
+})
+
+test('an aborted directory read reports the LOCAL abort, not a stale Host failure', async () => {
+  const harness = modelHarness()
+  const controller = new AbortController()
+  harness.setCatalogResult({ ok: false, error: failure('gateway/internal', 'host boom') })
+  harness.setCatalogHook(() => controller.abort())
+  await assert.rejects(harness.catalog.loadDirectory(controller.signal), /abort/i)
 })

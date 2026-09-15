@@ -100,8 +100,7 @@ function stubRunner(
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(),
-      measureContext: () => undefined,
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
     config: new DirectConfigPort(ctx as never, undefined, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
