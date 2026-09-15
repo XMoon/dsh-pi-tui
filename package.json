@@ -221,6 +221,7 @@
     "smoke:remote-presentation-parity": "node --import tsx/esm scripts/dsh-remote-presentation-parity-smoke.mjs",
     "smoke:remote-d1-closure": "node --import tsx/esm scripts/dsh-remote-d1-closure-smoke.mjs",
     "smoke:remote-d2-write": "node --import tsx/esm scripts/dsh-remote-d2-write-smoke.mjs",
+    "smoke:remote-d2-lifecycle": "node scripts/dsh-remote-d2.3-parity-smoke.mjs",
     "smoke:boundary": "node scripts/dsh-runtime-boundary-smoke.mjs",
     "dsh:source:pack": "node scripts/dsh-source-pack.mjs",
     "compat:dsh:source": "node scripts/dsh-source-verify.mjs",

@@ -1,0 +1,501 @@
+#!/usr/bin/env node
+/**
+ * D2.3 same-Host model / preset / session-lifecycle parity smoke over the
+ * official rc2 Host and Client contracts.
+ *
+ * One Host Context owns a real live Agent (production AgentLoop + an
+ * in-process stub LLM route), the real `AgentPresets` service over a fixture
+ * preset root, Session projections, Session Controller, Gateway, and the
+ * forwarded-event source. An independent official Client Context reaches the
+ * same Host through the official Connection/Gateway carrier and mounts the
+ * generated `session` and `agentPresets` Remote namespaces.
+ *
+ * The three D2.3 Remote adapters are then driven from the real official
+ * Client objects:
+ * - `RemoteModelCatalog` reads the official `session.modelCatalog` directory
+ *   and commits through `session.selectModel`, proving the durable
+ *   `modelSelection` projection carries the accepted pair;
+ * - `RemotePresetCatalog` reads the official `agentPresets.list` roster and
+ *   commits a blank-Session switch through `agentPresets.select`, while a
+ *   started Session settles as `agent-preset/locked`;
+ * - `RemoteSessionLifecycle` maps ordinary create to `ClientSessions.create`,
+ *   an explicit-preset fresh create to the generated `session.create`, and
+ *   open to `ClientSessions.open`/`binding` with no Host resume call.
+ *
+ * No external network and no real provider: the only model route is the
+ * in-process `SmokeAdapter` registered on the Host LlmRuntime.
+ *
+ * @module dsh-remote-d2.3-parity-smoke
+ */
+
+import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm'
+import CommandRuntime from '@deepseek-ai/dsh-commands'
+import commandsRemote from '@deepseek-ai/dsh-commands/remote'
+import SessionTitleService, { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
+import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
+import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
+import AgentPresets, { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
+import agentPresetsRemote from '@deepseek-ai/dsh-agent-presets/remote'
+import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
+import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
+import { apply as applyApiRemotes, inject as apiRemotesInject } from '@deepseek-ai/dsh-api-remotes'
+import SessionController from '@deepseek-ai/dsh-api-session-controller'
+import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import { RemoteModelCatalog } from '../src/runtime/remote/model-remote.ts'
+import { RemotePresetCatalog } from '../src/runtime/remote/preset-remote.ts'
+import { RemoteSessionLifecycle } from '../src/runtime/remote/session-lifecycle-remote.ts'
+
+const PACKAGE_IDS = {
+  connection: '@deepseek-ai/dsh-client-connection',
+  gateway: '@deepseek-ai/dsh-api-gateway',
+  session: '@deepseek-ai/dsh-api-session-controller',
+}
+
+const ANCHOR_SESSION_ID = 'd2-3-anchor-session'
+const ORDINARY_SESSION_ID = 'd2-3-ordinary-session'
+const FRESH_SESSION_ID = 'd2-3-fresh-session'
+const BLANK_SESSION_ID = 'd2-3-blank-session'
+const PROVIDER = 'smoke'
+const MODEL = 'smoke'
+const PRESET_A = 'probe-a'
+const PRESET_B = 'probe-b'
+const OFFICIAL_PRESET_IDS = ['standard', 'ptc', 'minimal', 'cordis']
+
+const IMAGE_LIMITS = Object.freeze({
+  maxImageBytes: 5 * 1024 * 1024,
+  maxImagesPerMessage: 20,
+  maxMessageImageBytes: 100 * 1024 * 1024,
+  maxImagePixels: 40_000_000,
+  maxImageDimension: 2000,
+  mediaTypes: Object.freeze(['image/png']),
+})
+
+/** In-process stub LLM route: advertises one routable model and completes
+ * every turn with one plain text block so a Session can become "started". */
+class SmokeAdapter extends LlmAdapter {
+  resolveModel(provider, model) {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+
+  listModels(provider) {
+    return Promise.resolve([{ provider, id: MODEL, name: MODEL }])
+  }
+
+  async * stream() {
+    const text = 'stub response'
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+    yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+function installModuleLoader() {
+  const nodeRequire = createRequire(import.meta.url)
+  const modules = new Map()
+  const previousWindow = globalThis.window
+  const previousLocation = globalThis.location
+  const previousTransport = globalThis.__DSH_TRANSPORT__
+  const requireModule = (specifier) => {
+    if (specifier.endsWith('/client')) {
+      const id = specifier.slice(0, -'/client'.length)
+      const module = modules.get(id)
+      if (module === undefined) throw new Error(`official Client module ${specifier} loaded before ${id}`)
+      return module
+    }
+    return nodeRequire(specifier)
+  }
+  globalThis.window = {
+    __ModuleLoader__: {
+      load({ id, factory }) {
+        if (modules.has(id)) throw new Error(`official Client module ${id} loaded twice`)
+        modules.set(id, factory(requireModule))
+      },
+    },
+  }
+  globalThis.location = { hostname: 'localhost', origin: 'http://dsh-d2-3-parity.local', search: '' }
+  return {
+    modules,
+    restore() {
+      if (previousWindow === undefined) delete globalThis.window
+      else globalThis.window = previousWindow
+      if (previousLocation === undefined) delete globalThis.location
+      else globalThis.location = previousLocation
+      if (previousTransport === undefined) delete globalThis.__DSH_TRANSPORT__
+      else globalThis.__DSH_TRANSPORT__ = previousTransport
+    },
+  }
+}
+
+function provideHostPeripheralServices(ctx) {
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: PROVIDER, model: MODEL }),
+    saveSelection: async () => {},
+  })
+  ctx.provide('attachments', {
+    imageLimits: IMAGE_LIMITS,
+    admitPromptContent: async content => content,
+  })
+  ctx.provide('fileUploads', {
+    registerAgentResolver: () => () => {},
+    resolve: () => undefined,
+    bindPrompt: () => ({ commit: () => {}, [Symbol.dispose]: () => {} }),
+    retirePrompt: () => {},
+  })
+  ctx.provide('workspaceRegistry', { list: () => [] })
+  ctx.provide('webServer', {
+    registerUpgrade: () => () => {},
+  })
+}
+
+/** Write one intentionally-empty fixture preset (no composition rows, so the
+ * standing mount needs no plugin outside the bundle dependency tree). */
+function writeFixturePreset(root, id) {
+  mkdirSync(join(root, id), { recursive: true })
+  writeFileSync(join(root, id, 'preset.yml'), `id: ${id}\nname: ${id} preset\ndescription: D2.3 parity smoke fixture\ntrust: system\n`)
+  writeFileSync(join(root, id, 'agent.cordis.yml'), '[]\n')
+}
+
+async function createHost(presetRoot, workRoot) {
+  const ctx = new Context()
+  const persistenceRoot = join(workRoot, 'persistence')
+  let persistenceFiber
+  try {
+    await ctx.plugin(TypertRegistry)
+    await mountAgentLoopTestDependencies(ctx)
+    persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: persistenceRoot })
+    const loop = await mountAgentLoopTestHarness(ctx)
+    await ctx.plugin(CommandRuntime)
+    await ctx.plugin(SessionTitleService, { fallbackMaxWords: 8, fallbackMaxBytes: 64, maxTitleBytes: 256 })
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
+    provideHostPeripheralServices(ctx)
+    ctx.get('sessionProjections').register(titleProjectionDefinition)
+    ctx.get('sessionProjections').register(agentPresetProjectionDefinition)
+    // The real official preset roster service. The fixture root supplies two
+    // mountable presets; the shipped root supplies the official rows the
+    // roster parity assertion observes.
+    await ctx.plugin(Loader)
+    ctx.baseUrl = pathToFileURL(`${process.cwd()}/`).href
+    await ctx.plugin(AgentPresets, {
+      default: PRESET_A,
+      roots: [{ path: presetRoot, trust: 'system' }],
+      includeShippedRoot: true,
+      includeUserRoot: false,
+    })
+    await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
+      new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
+    })
+    await ctx.inject(SessionController.inject, controllerCtx => {
+      new SessionController(controllerCtx, { nativeOpen: false })
+    })
+    await ctx.plugin(hostCtx => {
+      new HostConnectionService(hostCtx, [], {})
+    })
+    await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
+      new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
+    })
+    await ctx.plugin({ inject: apiRemotesInject, apply: applyApiRemotes })
+
+    ctx.llm.registerAdapter([PROVIDER], new SmokeAdapter())
+
+    // Record every Host Agent resume. D2.3 open must never reach one.
+    const resumeCalls = []
+    const agents = ctx.agents
+    const originalResume = agents.resume.bind(agents)
+    agents.resume = (...args) => {
+      resumeCalls.push(args[0]?.resumeSessionId)
+      return originalResume(...args)
+    }
+
+    const agent = await loop.create(SessionId(ANCHOR_SESSION_ID), { provider: PROVIDER, model: MODEL }, { cwd: join(workRoot, 'anchor') })
+    return { ctx, agent, resumeCalls, persistenceRoot, persistenceFiber }
+  } catch (error) {
+    if (persistenceFiber !== undefined) await persistenceFiber.dispose()
+    rmSync(persistenceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+    throw error
+  }
+}
+
+function hostTransport(host, fetchLog) {
+  const shared = host.ctx.get('connection').createSharedFetchHandler('/api')
+  return {
+    ownsHost: true,
+    fetch(input, init) {
+      const request = input instanceof Request
+        ? new Request(input, init)
+        : new Request(new URL(String(input), 'http://dsh-d2-3-parity.local'), init)
+      fetchLog.push(`${request.method} ${new URL(request.url).pathname}`)
+      return shared.fetch(request)
+    },
+    openStream(endpoint, payload, signal) {
+      return (async function* () {
+        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, signal)
+      })()
+    },
+  }
+}
+
+async function waitFor(description, predicate, timeoutMs = 5_000) {
+  const started = Date.now()
+  for (;;) {
+    const value = await predicate()
+    if (value) return value
+    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for ${description}`)
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+/** Wait until one Client Session projection face carries a value. */
+function waitForProjection(binding, key, predicate, description) {
+  return waitFor(description, () => {
+    const value = binding.session.projections.faceOf(key).getSnapshot()
+    return predicate(value) ? value : undefined
+  })
+}
+
+async function main() {
+  const scenarios = {}
+  const loader = installModuleLoader()
+  const fetchLog = []
+  const workRoot = mkdtempSync(join(tmpdir(), 'dsh-d2-3-parity-'))
+  const presetRoot = join(workRoot, 'presets')
+  writeFixturePreset(presetRoot, PRESET_A)
+  writeFixturePreset(presetRoot, PRESET_B)
+  let client
+  let host
+  try {
+    await import('@deepseek-ai/dsh-client-connection/client')
+    await import('@deepseek-ai/dsh-api-gateway/client')
+    await import('@deepseek-ai/dsh-api-session-controller/client')
+    const connectionClient = loader.modules.get(PACKAGE_IDS.connection)
+    const gatewayClient = loader.modules.get(PACKAGE_IDS.gateway)
+    const sessionClient = loader.modules.get(PACKAGE_IDS.session)
+    assert.ok(connectionClient !== undefined, 'official Connection Client did not load')
+    assert.ok(gatewayClient !== undefined, 'official API Gateway Client did not load')
+    assert.ok(sessionClient !== undefined, 'official Session Controller Client did not load')
+
+    host = await createHost(presetRoot, workRoot)
+    globalThis.__DSH_TRANSPORT__ = hostTransport(host, fetchLog)
+
+    client = new Context()
+    await client.plugin(TypertRegistry)
+    await client.plugin(connectionClient)
+    await client.plugin(gatewayClient)
+    for (const contribution of [commandsRemote, subagentsRemote, sessionRemote, agentPresetsRemote]) {
+      await client.remote.$mount(contribution)
+    }
+    client.provide('fileUpload', { available: false })
+    await client.plugin(sessionClient)
+
+    const connection = client.get('connection')
+    const sessions = client.get('sessions')
+    await waitFor('same-Host Client readiness', () => (
+      connection.generation.getSnapshot() !== undefined
+        && sessions.list.getSnapshot().phase === 'ready'
+    ))
+    await waitFor('the anchor session to be listed', () => sessions.list.getSnapshot().ids.includes(ANCHOR_SESSION_ID))
+
+    // Record every official Client open so the lifecycle mapping is observable.
+    const openCalls = []
+    const realOpen = sessions.open.bind(sessions)
+    sessions.open = (id) => {
+      openCalls.push(String(id))
+      realOpen(id)
+    }
+
+    const modelCatalog = new RemoteModelCatalog(client.remote.session, sessions, connection.generation)
+    const presetCatalog = new RemotePresetCatalog(client.remote.agentPresets, connection.generation)
+    const lifecycle = new RemoteSessionLifecycle(sessions, client.remote.session, connection.generation)
+
+    // CREATE (a): ordinary create with no explicit preset routes through the
+    // official ClientSessions.create and is addressable on resolution.
+    {
+      const handle = await lifecycle.create({ sessionId: ORDINARY_SESSION_ID, meta: { cwd: join(workRoot, 'ordinary') } })
+      assert.deepEqual(handle, { session: { id: ORDINARY_SESSION_ID } })
+      assert.ok(sessions.binding(ORDINARY_SESSION_ID) !== undefined, 'ordinary create left no Client binding')
+      assert.equal(sessions.list.getSnapshot().ids.includes(ORDINARY_SESSION_ID), true)
+      assert.ok(host.ctx.sessions.get(SessionId(ORDINARY_SESSION_ID)) !== undefined, 'ordinary create reached no Host Session')
+      scenarios.createOrdinary = { status: 'covered', sessionId: ORDINARY_SESSION_ID }
+    }
+
+    // CREATE (b): a guaranteed-fresh create WITH an explicit preset uses the
+    // generated `session.create` and reconciles Client state.
+    {
+      const handle = await lifecycle.create({
+        sessionId: FRESH_SESSION_ID,
+        meta: { cwd: join(workRoot, 'fresh') },
+        agentPreset: PRESET_B,
+      })
+      assert.deepEqual(handle, { session: { id: FRESH_SESSION_ID } })
+      assert.ok(sessions.binding(FRESH_SESSION_ID) !== undefined, 'explicit-preset create left no Client binding')
+      const hostSession = host.ctx.sessions.get(SessionId(FRESH_SESSION_ID))
+      assert.ok(hostSession !== undefined, 'explicit-preset create reached no Host Session')
+      const hostPreset = host.ctx.get('sessionProjections').snapshot(hostSession, ['agentPreset']).values.agentPreset
+      assert.equal(hostPreset, PRESET_B, 'the Host durable agentPreset projection did not carry the requested preset')
+      scenarios.createWithPreset = { status: 'covered', sessionId: FRESH_SESSION_ID, preset: hostPreset }
+    }
+
+    // A dedicated blank Session for the committed preset switch.
+    await lifecycle.create({ sessionId: BLANK_SESSION_ID, meta: { cwd: join(workRoot, 'blank') } })
+
+    // MODEL: the official directory read, the normalized commit, and the
+    // durable `modelSelection` projection for the same Session.
+    {
+      await sessions.open(ORDINARY_SESSION_ID)
+      const binding = sessions.binding(ORDINARY_SESSION_ID)
+      assert.ok(binding !== undefined, 'the ordinary Session binding disappeared before the model scenario')
+      await waitForProjection(binding, 'modelSelection', value => value !== undefined, 'the modelSelection projection baseline')
+
+      const directory = await modelCatalog.loadDirectory()
+      assert.deepEqual(directory.default, { provider: PROVIDER, model: MODEL })
+      assert.ok(directory.routableProviders.includes(PROVIDER), 'the stub provider is not routable')
+      const group = directory.groups.find(candidate => candidate.id === PROVIDER)
+      assert.ok(group !== undefined, 'the stub provider group is missing from the model directory')
+      assert.deepEqual(group.models.map(model => model.id), [MODEL])
+      assert.deepEqual(directory.failures, [])
+      assert.deepEqual(modelCatalog.listProviders(), [{ id: PROVIDER, name: PROVIDER }])
+      assert.deepEqual(await modelCatalog.listModels(PROVIDER), [{ id: MODEL }])
+
+      const selected = { provider: PROVIDER, model: MODEL }
+      const result = await modelCatalog.selectSessionModel(ORDINARY_SESSION_ID, selected)
+      assert.equal(result.ownership, 'current', `selectSessionModel lost local ownership: ${JSON.stringify(result)}`)
+      const outcome = result.outcome
+      assert.equal(outcome.kind, 'committed', `selectSessionModel did not commit: ${JSON.stringify(result)}`)
+      assert.deepEqual(outcome.value, selected)
+
+      const projected = await waitForProjection(
+        binding,
+        'modelSelection',
+        value => value?.next?.provider === PROVIDER && value.next.model === MODEL,
+        'the durable modelSelection projection to carry the selected pair',
+      )
+      assert.deepEqual(projected.next, selected)
+      const hostSelection = host.ctx.get('sessionProjections')
+        .snapshot(host.ctx.sessions.get(SessionId(ORDINARY_SESSION_ID)), ['modelSelection']).values.modelSelection
+      assert.deepEqual(hostSelection.next, selected, 'the Host durable modelSelection projection diverged from the commit')
+      scenarios.model = { status: 'covered', sessionId: ORDINARY_SESSION_ID, selected: outcome.value }
+    }
+
+    // PRESET: the official roster and a committed blank-Session switch.
+    {
+      const roster = await presetCatalog.roster()
+      assert.equal(roster.modeSelectionEnabled, true)
+      assert.equal(roster.defaultId, PRESET_A)
+      assert.equal(presetCatalog.defaultId(), PRESET_A)
+      for (const id of OFFICIAL_PRESET_IDS) {
+        const row = roster.presets.find(candidate => candidate.id === id)
+        assert.ok(row !== undefined, `official preset "${id}" is missing from the roster`)
+        assert.equal(row.trust, 'system')
+      }
+
+      await sessions.open(BLANK_SESSION_ID)
+      const binding = sessions.binding(BLANK_SESSION_ID)
+      assert.ok(binding !== undefined, 'the blank Session binding disappeared before the preset scenario')
+      const initial = await waitForProjection(binding, 'agentPreset', value => value !== undefined, 'the agentPreset projection baseline')
+      assert.equal(initial, PRESET_A, 'a blank Session did not adopt the deployment default preset')
+
+      const result = await presetCatalog.selectSessionPreset(BLANK_SESSION_ID, PRESET_B)
+      assert.deepEqual(result, { ownership: 'current', outcome: { kind: 'committed', value: { preset: PRESET_B } } })
+      const committed = await waitForProjection(binding, 'agentPreset', value => value === PRESET_B, 'the committed agentPreset projection')
+      assert.equal(committed, PRESET_B)
+      const hostPreset = host.ctx.get('sessionProjections')
+        .snapshot(host.ctx.sessions.get(SessionId(BLANK_SESSION_ID)), ['agentPreset']).values.agentPreset
+      assert.equal(hostPreset, PRESET_B, 'the Host durable agentPreset projection diverged from the commit')
+      scenarios.preset = { status: 'covered', defaultId: roster.defaultId, committed: PRESET_B }
+    }
+
+    // PRESET (locked): a Session with one completed turn refuses the switch
+    // through the adapter as a proven `agent-preset/locked` rejection.
+    {
+      host.agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'starting turn' }],
+        source: { kind: 'user' },
+      }))
+      await waitFor('the anchor turn to complete', () => (
+        host.agent.session.snapshotEvents().some(event => event.type === 'turn/end') ? true : undefined
+      ))
+      const result = await presetCatalog.selectSessionPreset(ANCHOR_SESSION_ID, PRESET_B)
+      const outcome = result.outcome
+      assert.equal(outcome.kind, 'rejected', `a started Session preset switch was not rejected: ${JSON.stringify(result)}`)
+      assert.equal(outcome.error.code, 'agent-preset/locked')
+      scenarios.presetLocked = { status: 'covered', sessionId: ANCHOR_SESSION_ID, code: outcome.error.code }
+    }
+
+    // OPEN: official Client open/binding, the Client current identity moves,
+    // and no Host resume is issued.
+    {
+      const resumeBefore = host.resumeCalls.length
+      const opensBefore = openCalls.length
+      const handle = await lifecycle.open({ sessionId: FRESH_SESSION_ID })
+      assert.deepEqual(handle, { session: { id: FRESH_SESSION_ID } })
+      assert.equal(openCalls.length, opensBefore + 1, 'open did not route through ClientSessions.open')
+      assert.equal(openCalls.at(-1), FRESH_SESSION_ID)
+      await waitFor('the Client current selection to become the opened Session', () => (
+        sessions.list.getSnapshot().current === FRESH_SESSION_ID ? true : undefined
+      ))
+      const binding = sessions.binding(FRESH_SESSION_ID)
+      assert.ok(binding !== undefined, 'the opened Session lost its binding')
+      await waitForProjection(binding, 'agentPreset', value => value === PRESET_B, 'the opened Session agentPreset projection')
+      assert.equal(host.resumeCalls.length, resumeBefore, 'open issued a Host Agent resume')
+      scenarios.open = { status: 'covered', sessionId: FRESH_SESSION_ID, current: String(sessions.list.getSnapshot().current) }
+    }
+
+    assert.equal(host.resumeCalls.length, 0, `no Host Agent resume may occur in this smoke, saw ${JSON.stringify(host.resumeCalls)}`)
+
+    // Read-only gate: every request travelled through the mounted official
+    // carrier (the session Client plugin itself refreshes the `subagents`
+    // catalog from the mounted namespace, which is incidental to the D2.3
+    // verbs), and each D2.3 semantic verb was actually exercised.
+    {
+      const paths = fetchLog.map(entry => entry.slice(entry.indexOf(' ') + 1))
+      assert.deepEqual(
+        paths.filter(path => !/^\/api\/(session|agentPresets|subagents|commands)\//.test(path)),
+        [],
+        'a request left the mounted official remote domains',
+      )
+      for (const expected of [
+        '/api/session/create',
+        '/api/session/modelCatalog',
+        '/api/session/selectModel',
+        '/api/agentPresets/list',
+        '/api/agentPresets/select',
+      ]) {
+        assert.ok(paths.includes(expected), `the smoke never used the official ${expected} endpoint`)
+      }
+      scenarios.readOnlyGate = {
+        status: 'covered',
+        requests: fetchLog.length,
+        resumeCalls: host.resumeCalls.length,
+        paths: [...new Set(paths)].sort(),
+      }
+    }
+
+    console.log(JSON.stringify({ ok: true, scenarios }))
+  } finally {
+    if (client !== undefined) await client.fiber.dispose()
+    if (host !== undefined) await host.ctx.fiber.dispose()
+    rmSync(workRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+    loader.restore()
+  }
+}
+
+main().catch(error => {
+  console.error(`DSH_REMOTE_D2_3_PARITY_FAILURE: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+  process.exitCode = 1
+})

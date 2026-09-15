@@ -1,12 +1,12 @@
 /**
  * Adapter contract tests for the Direct session lifecycle
- * (runtime/direct/session-lifecycle-direct.ts, migration M1.5,
- * contract-reviewed): the port is the semantic boundary — the runner
- * depends on `SessionLifecycle`, the Direct adapter owns the `ctx.agents`
- * access AND the preset composition (converting the semantic request into
+ * (runtime/direct/session-lifecycle-direct.ts, migration M1.5/D2.3): the port
+ * is the semantic boundary — the runner depends on `SessionLifecycle`, the
+ * Direct adapter owns the `ctx.agents` access, the preset composition AND the
+ * Direct-only activation/preset lookups (converting the semantic request into
  * the Direct setup callback), and a Remote adapter must satisfy the SAME
- * contract in a later milestone. These tests pin the contract with a fake
- * Host context, so the two backends cannot drift.
+ * contract. These tests pin the contract with a fake Host context, so the two
+ * backends cannot drift.
  * @module @xmoon76/dsh-pi-tui/session-lifecycle-port.test
  */
 
@@ -15,8 +15,14 @@ import test from 'node:test'
 import { DirectSessionLifecycle, type HostContextLike } from '../src/runtime/direct/session-lifecycle-direct.ts'
 import { ownerHandleOf, type CreateSessionRequest, type OpenSessionRequest } from '../src/runtime/session-lifecycle-port.ts'
 
-function host(agents: unknown): HostContextLike {
-  return { get: (name) => (name === 'agents' ? agents : undefined) }
+function host(agents: unknown, defaultSelection?: { provider: string; model: string }): HostContextLike {
+  return {
+    get: (name) => name === 'agents'
+      ? agents
+      : name === 'agentDefaultModel' && defaultSelection !== undefined
+        ? { currentSelection: () => defaultSelection }
+        : undefined,
+  }
 }
 
 function compose(presetId?: string) {
@@ -26,16 +32,11 @@ function compose(presetId?: string) {
 const createRequest: CreateSessionRequest = {
   sessionId: 'session-new',
   meta: { cwd: '/ws' },
-  provider: 'p',
-  model: 'm',
   agentPreset: 'preset-a',
 }
 
 const openRequest: OpenSessionRequest = {
-  resumeSessionId: 'session-old',
-  provider: 'p',
-  model: 'm',
-  agentPreset: 'preset-a',
+  sessionId: 'session-old',
 }
 
 test('create resolves the preset composition internally and delegates with the Direct shapes', async () => {
@@ -46,7 +47,7 @@ test('create resolves the preset composition internally and delegates with the D
       return { agent: { session: { id: 'session-new' } }, dispose: async () => {} }
     },
     resume: async () => ({ agent: { session: { id: 'x' } }, dispose: async () => {} }),
-  }), compose('preset-a'))
+  }, { provider: 'p', model: 'm' }), compose('preset-a'))
   const handle = await lifecycle.create(createRequest)
   assert.equal(handle.session.id, 'session-new')
   assert.equal(handle.direct !== undefined, true, 'Direct handle carries the ownership escape')
@@ -54,11 +55,41 @@ test('create resolves the preset composition internally and delegates with the D
   assert.ok(handle.direct && typeof handle.direct.ownerHandle === 'object' && typeof (handle.direct.ownerHandle as { dispose?: unknown }).dispose === 'function', 'carries the real owner handle with dispose()')
   assert.equal(calls.length, 1)
   assert.equal(calls[0].sessionId, 'session-new')
+  // The activation fallback is the Host default, never a cross-backend request
+  // input (D2.3 convergence).
   assert.deepEqual(calls[0].agentOptions, { provider: 'p', model: 'm' })
+  assert.deepEqual(calls[0].meta, { cwd: '/ws', agentPreset: 'preset-a' },
+    'the composed preset is recorded in the durable session header from the semantic intent')
   assert.equal(typeof calls[0].setup, 'function', 'the setup callback is built INSIDE the adapter')
 })
 
-test('open resolves the preset composition internally and delegates with the Direct shapes', async () => {
+test('create preserves explicit caller metadata over the composed preset', async () => {
+  const calls: Array<{ meta: unknown }> = []
+  const lifecycle = new DirectSessionLifecycle(host({
+    create: async (options: { meta: unknown }) => {
+      calls.push({ meta: options.meta })
+      return { agent: { session: { id: 'session-new' } }, dispose: async () => {} }
+    },
+    resume: async () => ({ agent: { session: { id: 'x' } }, dispose: async () => {} }),
+  }), compose('preset-a'))
+  await lifecycle.create({ sessionId: 'session-new', meta: { cwd: '/ws', agentPreset: 'caller-choice' }, agentPreset: 'preset-a' })
+  assert.deepEqual(calls[0].meta, { cwd: '/ws', agentPreset: 'caller-choice' }, 'caller metadata always wins')
+})
+
+test('create omits agentOptions when no Host default selection exists', async () => {
+  const calls: unknown[] = []
+  const lifecycle = new DirectSessionLifecycle(host({
+    create: async (options: { agentOptions: unknown }) => {
+      calls.push(options.agentOptions)
+      return { agent: { session: { id: 'session-new' } }, dispose: async () => {} }
+    },
+    resume: async () => ({ agent: { session: { id: 'x' } }, dispose: async () => {} }),
+  }), compose('preset-a'))
+  await lifecycle.create(createRequest)
+  assert.deepEqual(calls, [{}])
+})
+
+test('open resolves the persisted preset internally and delegates with the Direct shapes', async () => {
   const calls: Array<{ resumeSessionId: unknown; agentOptions: unknown; setup: unknown }> = []
   const lifecycle = new DirectSessionLifecycle(host({
     create: async () => ({ agent: { session: { id: 'x' } } }),
@@ -66,7 +97,7 @@ test('open resolves the preset composition internally and delegates with the Dir
       calls.push({ resumeSessionId: options.resumeSessionId, agentOptions: options.agentOptions, setup: options.setup })
       return { agent: { session: { id: 'session-old' } }, dispose: async () => {} }
     },
-  }), compose('preset-a'))
+  }, { provider: 'p', model: 'm' }), compose('preset-a'))
   const handle = await lifecycle.open(openRequest)
   assert.equal(handle.session.id, 'session-old')
   assert.equal(handle.direct !== undefined, true)
@@ -74,6 +105,34 @@ test('open resolves the preset composition internally and delegates with the Dir
   assert.equal(calls[0].resumeSessionId, 'session-old')
   assert.deepEqual(calls[0].agentOptions, { provider: 'p', model: 'm' })
   assert.equal(typeof calls[0].setup, 'function')
+})
+
+test('open composes the recorded preset resolved from the official observation seam', async () => {
+  const composed: Array<string | undefined> = []
+  const lifecycle = new DirectSessionLifecycle({
+    get: (name) => {
+      if (name === 'agents') {
+        return {
+          create: async () => ({ agent: { session: { id: 'x' } } }),
+          resume: async () => ({ agent: { session: { id: 'session-old' } }, dispose: async () => {} }),
+        }
+      }
+      if (name === 'sessionQuery') {
+        return {
+          observeSession: async () => ({
+            projections: { values: { agentPreset: 'recorded' } },
+            [Symbol.dispose]: () => {},
+          }),
+        }
+      }
+      return undefined
+    },
+  }, async (presetId) => {
+    composed.push(presetId)
+    return { agentPreset: presetId, setup: () => {} }
+  })
+  await lifecycle.open(openRequest)
+  assert.deepEqual(composed, ['recorded'], 'the Direct adapter owns the persisted-preset lookup')
 })
 
 test('create and open forward the caller-owned signal unchanged and do not invent one', async () => {
@@ -139,7 +198,6 @@ test('P1 regression (round 3): transition commit stores the OWNER HANDLE, and a 
   // ownerHandle, dispose() would be missing and B would PIN — never
   // cooling. This pins ownerHandleOf + the double-transition dispose.
   const disposed: string[] = []
-  let sequence = 0
   const lifecycle = new DirectSessionLifecycle(host({
     create: async (request: { sessionId: string }) => {
       const id = request.sessionId
@@ -158,7 +216,6 @@ test('P1 regression (round 3): transition commit stores the OWNER HANDLE, and a 
   assert.ok(liveHandle !== undefined, 'the commit stores the real owner handle, never the SessionHandle')
 
   // Transition B -> C: the OLD live handle (B) is disposed exactly once.
-  sequence += 1
   await liveHandle.dispose()
   assert.deepEqual(disposed, ['session-b'], 'transition B→C disposes B\x27s original AgentHandle exactly once')
 

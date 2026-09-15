@@ -11,7 +11,7 @@
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
-M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 IN REVIEW: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section)
+M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 IN PROGRESS: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -903,6 +903,104 @@ port is never invoked and the draft is preserved
 (`test/submit-hot-path.test.ts`, "still refuses a FILE (no receipt seam)").
 `HostCommandOutcome` is therefore deliberately not widened with an
 `unsupported` branch.
+
+## D2.3 status — experimental Remote model / preset / create-open lifecycle
+
+D2.3 converges Session-local model selection, blank-Session preset selection,
+ordinary fresh create and ordinary open onto the official DSH Host/Client
+contracts. Production remains Direct; the Remote adapters are consumed by
+tests and the same-Host `smoke:remote-d2-lifecycle` only. There is still no
+`BackendKind='remote'`, no CLI/environment switch, and no production Remote
+Session mount.
+
+- `ModelCatalog` gained one semantic directory read, `loadDirectory()`, matching
+  the official `session.modelCatalog()` generation snapshot (deployment
+  default, routable providers, grouped models, isolated provider failures).
+  `listProviders()`/`listModels()` remain a separately scoped
+  provider-discovery capability used by the subagent allowlist picker, not the
+  `/model` directory.
+- `ModelCatalog.selectSessionModel()` now settles through the shared
+  `WriteOutcome` vocabulary with operation-specific semantics: the Direct
+  adapter resolves the request through the Host-owned `llm.resolveCallConfig`
+  (provider/model validation + reasoning-effort normalization) and commits the
+  NORMALIZED result; an unavailable model/effort is refused before any durable
+  append. The Host owns the durable Session-local commit and the best-effort
+  global-default save; a failed global-default save no longer rejects a
+  committed Session selection — it is a diagnostic only, exactly like the
+  pinned official `session.selectModel`. The live write runs inside the runner's
+  writer barrier, so a transition that started first refuses it (a proven
+  pre-dispatch `cancelled`, keeping the picker usable) and a transition that
+  starts after waits for it. `saveDefaultSelection()` settles as
+  `WriteOutcome` too (`rejected` for a proven pre-write refusal, `indeterminate`
+  for an ambiguous settings write, `unsupported` on Remote), and the run-local
+  sessionless default-intent ancestry lives in the pure `DefaultIntentTracker`
+  the runner and its tests share.
+- `RemoteModelCatalog` maps the directory read to `session.modelCatalog`, the
+  Session write to `session.selectModel`, and the display authority to the
+  Session binding's `modelSelection` projection under a Connection-generation
+  fence (before and after dispatch). It performs no second global-default
+  write and no custom reasoning normalization, its synchronous cached default
+  is invalidated by a reconnect, and its refusal table is an EXACT allowlist —
+  an unknown `session/model-*` code stays `indeterminate`, never a blind
+  rejection.
+- `PresetCatalog` gained `roster()` (path-free rows + Host-effective default +
+  `modeSelectionEnabled`, matching `agentPresets.list`) and
+  `selectSessionPreset(sessionId, presetId)` (`WriteOutcome<{preset}>`). Both
+  adapters map the blank-Session write to the official blank check + recompose
+  transaction + durable `agent-preset/selected` commit; the TUI owns neither
+  the blank reducer nor the recompose. The runner's previous
+  `recomposeBlank()` business path is retired — even the launch `--preset`
+  override goes through the official `agentPresets.select`.
+- `SessionLifecycle` converged: `CreateSessionRequest` no longer carries the
+  ordinary `provider`/`model` semantic inputs and `OpenSessionRequest` is
+  `{ sessionId, signal? }` (no `resumeSessionId`, provider/model or preset
+  knobs). The Direct adapter resolves the Host global default for activation
+  and the persisted recorded preset for an open; the `create`/`open` port
+  surface stays the official Client concept. A fresh create coordinates with
+  the newest sessionless `/model` global-default write before dispatch so it
+  consumes the settled Host default instead of racing an older one; that wait
+  is abort-aware, so a hung Host save can never block first creation past
+  shutdown.
+- `RemoteSessionLifecycle` uses official `ClientSessions.create()` for the
+  ordinary create (reconciled list + binding), the generated
+  `session.create({sessionId, cwd, agentPreset})` + Client-state reconciliation
+  for a guaranteed-fresh explicit-preset create (never create-then-select), and
+  `ClientSessions.open()/binding()` for open (no Host resume RPC is invented).
+  A Connection generation captured before dispatch fences the reconciliation
+  (including a failing create: a reconnect during the RPC is `indeterminate`,
+  never a pre-publication refusal), the Host-returned session identity (not the
+  requested one) is authoritative, seeded/fork creates fail closed until D2.4
+  owns Host fork, and a post-publication create error carries the published
+  identity with no automatic same-id retry. The generated-create reconciliation
+  inserts the Client LIST row/binding only; it deliberately does NOT fabricate a
+  `projectionValues` hint, because `SessionProjectionHints.asOfSeq` is a durable
+  Host sequence the TUI does not own — the preset projection stays authoritative
+  from the Host control stream/binding (plan §9.3 requires Client visibility +
+  binding, not a synthesized projection). `open` is Client-LOCAL selection: it
+  requires a valid current Client generation AND an addressable Client Session,
+  fails closed otherwise, reports `superseded` when the generation changes
+  during the local open, and never dispatches a Host mutation or an invented
+  resume RPC (v2 §0.5/§0.7.4).
+- Presentation closure: the `/model` picker enters a `Selecting…` state and
+  dismisses only after the semantic write settles — a rejected/cancelled write
+  walks back to the model list so the picker stays usable, a duplicate apply is
+  never a second commit, and an indeterminate settle dismisses without retry.
+  The footer model label shows the in-flight selection as `(selecting…)` while
+  keeping the authoritative current value; a rejected settle keeps the prior
+  current and shows the Host refusal; a late settle from a replaced Session
+  generation cannot repaint the new Session (and still settles the transient
+  default intent, so it never leaks into a later fresh create). `/preset`
+  respects the Host `modeSelectionEnabled` policy, reads blankness from the
+  official turn-boundary projection (never the TUI transcript), revalidates the
+  Session identity/generation inside the transition gate, and maps
+  `agent-preset/locked` to the started-session wording. `/new` keeps the old
+  surface until the create commits.
+
+Validation for this stage: per-adapter contract tests for the Remote model,
+preset and lifecycle adapters; the D2.3 Direct contract/outcome tests; headless
+model/preset/create/open presentation tests; and the same-Host
+`smoke:remote-d2-lifecycle` integration smoke. The boundary gate stays green
+and `packages/pi-tui/**` is unchanged.
 
 
 

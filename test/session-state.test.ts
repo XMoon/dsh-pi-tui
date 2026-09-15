@@ -21,6 +21,7 @@ import { SettingsRegistry } from '../src/settings-registry.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
+import { DefaultIntentTracker } from '../src/default-intent.ts'
 import { DirectModelSelectionOwner } from '../src/runtime/direct/model-selection-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
@@ -93,10 +94,9 @@ function stubRunner(
   state: { agent: Agent | undefined; generation: number },
   diag: ReturnType<typeof createDiag> = createDiag({ filePath: undefined, stderrLevel: 'off' }),
 ): TuiCommandRunner {
-  interface Op { id: number; selection: ModelSelection; previous: Op | undefined; status: 'pending' | 'committed' | 'failed' }
-  let nextIntentId = 0
-  let activeDefaultIntent: Op | undefined
-  let defaultIntentOutcome: 'committed' | 'failed' | undefined
+  // The REAL pure intent machine (the same class the production runner uses),
+  // so the command-level tests exercise the authoritative state machine.
+  const defaultIntent = new DefaultIntentTracker<ModelSelection>()
   const owner = new DirectModelSelectionOwner({ currentSelection: () => ({ provider: 'p', model: 'default-model' }) })
   return {
     ctx,
@@ -105,43 +105,12 @@ function stubRunner(
     get liveAgent() { return state.agent },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
-    defaultSelection: () => activeDefaultIntent?.selection
+    defaultSelection: () => defaultIntent.intent
       ?? (ctx.get('agentDefaultModel') as { currentSelection(): ModelSelection } | undefined)?.currentSelection(),
-    get defaultIntent() { return activeDefaultIntent?.selection },
-    get defaultIntentRecord() { return activeDefaultIntent },
-    setDefaultIntent: (next) => {
-      if (next === undefined) activeDefaultIntent = undefined
-      else {
-        nextIntentId += 1
-        activeDefaultIntent = { id: nextIntentId, selection: next, previous: activeDefaultIntent, status: 'pending' }
-      }
-      defaultIntentOutcome = undefined
-    },
-    settleIntent: (id, outcome) => {
-      let op: Op | undefined = activeDefaultIntent
-      while (op !== undefined && op.id !== id) op = op.previous
-      if (op === undefined) return
-      op.status = outcome
-      if (op !== activeDefaultIntent) return
-      if (outcome === 'committed') {
-        activeDefaultIntent = undefined
-        defaultIntentOutcome = 'committed'
-        return
-      }
-      let settledOutcome: 'committed' | 'failed' = 'failed'
-      let cursor = op.previous
-      while (cursor !== undefined) {
-        if (cursor.status === 'pending') {
-          activeDefaultIntent = cursor
-          defaultIntentOutcome = undefined
-          return
-        }
-        if (cursor.status === 'committed') settledOutcome = 'committed'
-        cursor = cursor.previous
-      }
-      activeDefaultIntent = undefined
-      defaultIntentOutcome = settledOutcome
-    },
+    get defaultIntent() { return defaultIntent.intent },
+    get defaultIntentRecord() { return defaultIntent.record },
+    setDefaultIntent: (next) => { defaultIntent.set(next) },
+    settleIntent: (id, outcome) => { defaultIntent.settle(id, outcome) },
     tuiSettings: undefined,
     applyFooterSettings: () => {},
     agents: {} as never,
@@ -198,7 +167,11 @@ function stubRunner(
     pendingPreset: undefined,
     effectivePresetId: undefined,
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
-    recomposeBlank: async () => ({ kind: 'locked' }),
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return defaultIntent.outcome },
+    setModelSelectionPending: () => {},
+    sessionBlank: () => undefined,
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
@@ -506,7 +479,7 @@ test('a failed global-default save keeps the durable Session choice and restores
     assembled: undefined,
     saveSelection: async () => {},
   }
-  ctx.provide('llm', {
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
     listProviders: () => [{ id: 'p', name: 'provider p' }],
     listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
     resolveModelInfo: async () => ({}),
@@ -547,14 +520,15 @@ test('a failed global-default save keeps the durable Session choice and restores
     assert.equal(proxy.defaultIntent, undefined,
       'a failed global-default save must restore the transient default intent')
     const view = vt.getViewport().join('\n')
-    assert.ok(view.includes('model selection save'), `failure notice missing:\n${view}`)
+    assert.ok(!view.includes('model selection save'),
+      `a best-effort default-save failure must not surface as a Session selection failure:\n${view}`)
   } finally {
     process.off('unhandledRejection', onUnhandled)
     app.stop()
   }
 })
 
-test('a late FAILED save never leaves the failed choice as the default intent', async () => {
+test('a FAILED global-default save settles the transient intent and still commits the live Session choice', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -567,24 +541,21 @@ test('a late FAILED save never leaves the failed choice as the default intent', 
     assembled: undefined,
     saveSelection: async () => {},
   }
-  ctx.provide('llm', {
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
     listProviders: () => [{ id: 'p', name: 'provider p' }],
     listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
     resolveModelInfo: async () => ({}),
   } as never)
-  // Saves are gated manually: save(m1) hangs, save(m2) succeeds, then
-  // save(m1) FAILS LATE — the failed choice must not stick as the default
-  // intent (the Session selection itself is committed by the port only).
-  const gates = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
+  // The default save is gated: the Session append commits first, then the
+  // default write FAILS. The failure is best-effort and must settle the
+  // transient intent, never surface as a Session selection failure.
+  const gates = new Map<string, { reject: (e: Error) => void }>()
   const saveStarted = new Map<string, () => void>()
   ctx.provide('agentDefaultModel', {
     currentSelection: () => ({ provider: 'p', model: 'm1' }),
     saveSelection: (next: { model: string }) => {
-      const gate = { resolve: () => {}, reject: () => {} } as { resolve: (v: unknown) => void; reject: (e: Error) => void }
-      const promise = new Promise<unknown>((res, rej) => {
-        gate.resolve = res
-        gate.reject = rej
-      })
+      const gate = { reject: () => {} } as { reject: (e: Error) => void }
+      const promise = new Promise<unknown>((_resolve, reject) => { gate.reject = reject })
       gates.set(next.model, gate)
       saveStarted.get(next.model)?.()
       return promise
@@ -606,43 +577,32 @@ test('a late FAILED save never leaves the failed choice as the default intent', 
     await vt.waitForRender()
     const saveStartedM1 = deferred<void>()
     saveStarted.set('m1', saveStartedM1.resolve)
-    const saveStartedM2 = deferred<void>()
-    saveStarted.set('m2', saveStartedM2.resolve)
-    // Select m1: its save hangs (deferred).
+    // Select m1: the picker enters the selecting state and the default save
+    // hangs on the gate.
     vt.sendInput('\r')
     await vt.waitForRender()
     await Promise.resolve()
     vt.sendInput('\r')
     await saveStartedM1.promise
+    await vt.waitForRender()
     const saveM1 = gates.get('m1')
     assert.ok(saveM1 !== undefined, 'save(m1) must have started')
-    // Back on the provider list: re-enter and select m2 while m1 is pending.
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    await Promise.resolve()
-    vt.sendInput('\x1b[B') // ↓ to m2
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await saveStartedM2.promise
-    const saveM2 = gates.get('m2')
-    assert.ok(saveM2 !== undefined, 'save(m2) must have started')
-    // m2 succeeds first, then m1 FAILS LATE.
-    saveM2.resolve(undefined)
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent, undefined, 'a successful save settles the transient default intent')
+    assert.ok(vt.getViewport().join('\n').includes('Selecting'),
+      'the picker must show a selecting state while the write settles')
+    // The durable Session append already committed (the save is best-effort).
+    const catalog = proxy.catalog as DirectCatalogPort
+    assert.deepEqual(catalog.models.sessionSelection('session-a'), { provider: 'p', model: 'm1' },
+      'the durable append must commit the Session choice before the save settles')
     saveM1.reject(new Error('quota exceeded'))
     await vt.waitForRender()
     await Promise.resolve()
+    await Promise.resolve()
     assert.equal(proxy.defaultIntent, undefined,
-      'a late failed save must not leave the failed choice as the default intent')
-    const sessionSelection = (proxy.catalog as DirectCatalogPort).models.sessionSelection('session-a')
-    assert.deepEqual(sessionSelection, { provider: 'p', model: 'm2' },
-      'the newer successful Session choice must stand over the older failed one')
-    const view = vt.getViewport().join('\n')
-    assert.ok(view.includes('model selection save'), `failure notice missing:\n${view}`)
+      'a failed global-default save must settle the transient default intent')
+    assert.deepEqual(catalog.models.sessionSelection('session-a'), { provider: 'p', model: 'm1' },
+      'a best-effort default-save failure must not undo the committed Session choice')
+    assert.ok(!vt.getViewport().join('\n').includes('model selection save'),
+      'the default-save failure must not surface as a Session selection failure')
   } finally {
     app.stop()
   }
@@ -661,7 +621,7 @@ test('a failed save after a session switch restores the default intent, never an
     assembled: undefined,
     saveSelection: async () => {},
   }
-  ctx.provide('llm', {
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
     listProviders: () => [{ id: 'p', name: 'provider p' }],
     listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
     resolveModelInfo: async () => ({}),
@@ -719,7 +679,7 @@ test('a failed save after a session switch restores the default intent, never an
   }
 })
 
-test('an older live /model completion never clears a newer pending default intent', async () => {
+test('a stale live /model settle still settles the transient default intent (no leak into a later create)', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -732,38 +692,21 @@ test('an older live /model completion never clears a newer pending default inten
     assembled: undefined,
     saveSelection: async () => {},
   }
-  ctx.provide('llm', {
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
     listProviders: () => [{ id: 'p', name: 'provider p' }],
     listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
     resolveModelInfo: async () => ({}),
   } as never)
-  const gates = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
+  const gates = new Map<string, { reject: (e: Error) => void }>()
   const saveStarted = new Map<string, () => void>()
   ctx.provide('agentDefaultModel', {
     currentSelection: () => ({ provider: 'p', model: 'm1' }),
     saveSelection: (next: { model: string }) => {
-      if (next.model === 'm1') {
-        const gate = { resolve: () => {}, reject: () => {} } as { resolve: (v: unknown) => void; reject: (e: Error) => void }
-        const promise = new Promise<unknown>((res, rej) => {
-          gate.resolve = res
-          gate.reject = rej
-        })
-        gates.set('m1', gate)
-        saveStarted.get('m1')?.()
-        return promise
-      }
-      // m2: the FIRST write is held; any later fencing correction resolves.
-      if (!gates.has('m2')) {
-        const gate = { resolve: () => {}, reject: () => {} } as { resolve: (v: unknown) => void; reject: (e: Error) => void }
-        const promise = new Promise<unknown>((res, rej) => {
-          gate.resolve = res
-          gate.reject = rej
-        })
-        gates.set('m2', gate)
-        saveStarted.get('m2')?.()
-        return promise
-      }
-      return Promise.resolve()
+      const gate = { reject: () => {} } as { reject: (e: Error) => void }
+      const promise = new Promise<unknown>((_resolve, reject) => { gate.reject = reject })
+      gates.set(next.model, gate)
+      saveStarted.get(next.model)?.()
+      return promise
     },
   } as never)
   const state = { agent: fakeAgent('session-a'), generation: 1 }
@@ -782,235 +725,29 @@ test('an older live /model completion never clears a newer pending default inten
     await vt.waitForRender()
     const saveStartedM1 = deferred<void>()
     saveStarted.set('m1', saveStartedM1.resolve)
-    const saveStartedM2 = deferred<void>()
-    saveStarted.set('m2', saveStartedM2.resolve)
-    // Select m1: its save hangs.
     vt.sendInput('\r')
     await vt.waitForRender()
     await Promise.resolve()
     vt.sendInput('\r')
     await saveStartedM1.promise
-    const saveM1 = gates.get('m1')
-    assert.ok(saveM1 !== undefined, 'save(m1) must have started')
-    // Re-enter and select m2 while m1 is pending.
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    await Promise.resolve()
-    vt.sendInput('\x1b[B') // ↓ to m2
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await saveStartedM2.promise
-    const saveM2 = gates.get('m2')
-    assert.ok(saveM2 !== undefined, 'save(m2) must have started')
-    assert.equal(proxy.defaultIntent?.model, 'm2', 'the newest pending intent must be m2')
-    // m1 FAILS LATE: the older completion must not restore over m2.
-    saveM1.reject(new Error('quota exceeded'))
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent?.model, 'm2',
-      'an older failed completion must never clear or restore over a newer pending intent')
-    // m2 succeeds: the CURRENT operation settles the intent.
-    saveM2.resolve(undefined)
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent, undefined, 'the newest successful completion settles the intent')
-  } finally {
-    app.stop()
-  }
-})
-
-test('an older sessionless /model completion never clears a newer pending default intent', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const selection = {
-    current: { provider: 'p', model: 'old-model' },
-    assembled: undefined,
-    saveSelection: async () => {},
-  }
-  ctx.provide('llm', {
-    listProviders: () => [{ id: 'p', name: 'provider p' }],
-    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
-    resolveModelInfo: async () => ({}),
-  } as never)
-  const gates = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
-  const saveStarted = new Map<string, () => void>()
-  ctx.provide('agentDefaultModel', {
-    currentSelection: () => ({ provider: 'p', model: 'm1' }),
-    saveSelection: (next: { model: string }) => {
-      if (next.model === 'm1') {
-        const gate = { resolve: () => {}, reject: () => {} } as { resolve: (v: unknown) => void; reject: (e: Error) => void }
-        const promise = new Promise<unknown>((res, rej) => {
-          gate.resolve = res
-          gate.reject = rej
-        })
-        gates.set('m1', gate)
-        saveStarted.get('m1')?.()
-        return promise
-      }
-      if (!gates.has('m2')) {
-        const gate = { resolve: () => {}, reject: () => {} } as { resolve: (v: unknown) => void; reject: (e: Error) => void }
-        const promise = new Promise<unknown>((res, rej) => {
-          gate.resolve = res
-          gate.reject = rej
-        })
-        gates.set('m2', gate)
-        saveStarted.get('m2')?.()
-        return promise
-      }
-      return Promise.resolve()
-    },
-  } as never)
-  const state = { agent: undefined, generation: 1 }
-  const runner = stubRunner(ctx, app, state)
-  const proxy = new Proxy(runner, {
-    get(target, prop, receiver) {
-      if (prop === 'selected') return selection
-      return Reflect.get(target, prop, receiver)
-    },
-  })
-  registerTuiCommands(proxy as unknown as typeof runner)
-  try {
-    const modelDef = services.defs.find(entry => entry.name === 'model')
-    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
-    await (modelDef!.handler as () => Promise<unknown>)()
-    await vt.waitForRender()
-    const saveStartedM1 = deferred<void>()
-    saveStarted.set('m1', saveStartedM1.resolve)
-    const saveStartedM2 = deferred<void>()
-    saveStarted.set('m2', saveStartedM2.resolve)
-    // Select m1: its save hangs.
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    await Promise.resolve()
-    vt.sendInput('\r')
-    await saveStartedM1.promise
-    const saveM1 = gates.get('m1')
-    assert.ok(saveM1 !== undefined, 'save(m1) must have started')
-    // Re-enter and select m2 while m1 is pending.
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    await Promise.resolve()
-    vt.sendInput('\x1b[B') // ↓ to m2
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await saveStartedM2.promise
-    const saveM2 = gates.get('m2')
-    assert.ok(saveM2 !== undefined, 'save(m2) must have started')
-    assert.equal(proxy.defaultIntent?.model, 'm2', 'the newest pending intent must be m2')
-    // m1 FAILS LATE: the older completion must not restore over m2.
-    saveM1.reject(new Error('quota exceeded'))
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent?.model, 'm2',
-      'an older failed completion must never clear or restore over a newer pending intent')
-    // m2 succeeds: the CURRENT operation settles the intent.
-    saveM2.resolve(undefined)
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent, undefined, 'the newest successful completion settles the intent')
-  } finally {
-    app.stop()
-  }
-})
-
-test('a failed restore keeps the restored operation settle authority: both saves fail', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const selection = {
-    current: { provider: 'p', model: 'old-model' },
-    assembled: undefined,
-    saveSelection: async () => {},
-  }
-  ctx.provide('llm', {
-    listProviders: () => [{ id: 'p', name: 'provider p' }],
-    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
-    resolveModelInfo: async () => ({}),
-  } as never)
-  const gates = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
-  const saveStarted = new Map<string, () => void>()
-  let persisted = { provider: 'p', model: 'original' }
-  ctx.provide('agentDefaultModel', {
-    currentSelection: () => ({ ...persisted }),
-    saveSelection: (next: { provider: string; model: string }) => {
-      const gate = { resolve: () => {}, reject: () => {} } as { resolve: (v: unknown) => void; reject: (e: Error) => void }
-      const promise = new Promise<unknown>((res, rej) => {
-        gate.resolve = (value) => { persisted = { ...next }; res(value) }
-        gate.reject = rej
-      })
-      gates.set(next.model, gate)
-      saveStarted.get(next.model)?.()
-      return promise
-    },
-  } as never)
-  const state = { agent: undefined, generation: 1 }
-  const runner = stubRunner(ctx, app, state)
-  const proxy = new Proxy(runner, {
-    get(target, prop, receiver) {
-      if (prop === 'selected') return selection
-      return Reflect.get(target, prop, receiver)
-    },
-  })
-  registerTuiCommands(proxy as unknown as typeof runner)
-  try {
-    const modelDef = services.defs.find(entry => entry.name === 'model')
-    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
-    await (modelDef!.handler as () => Promise<unknown>)()
-    await vt.waitForRender()
-    const saveStartedM1 = deferred<void>()
-    saveStarted.set('m1', saveStartedM1.resolve)
-    const saveStartedM2 = deferred<void>()
-    saveStarted.set('m2', saveStartedM2.resolve)
-    // /model → m1 (save A held), then /model → m2 (save B held). The
-    // applied selection walks back to the model list, so the second pick
-    // just moves DOWN to m2 and confirms.
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    await Promise.resolve()
-    vt.sendInput('\r')
-    await saveStartedM1.promise
-    vt.sendInput('\x1b[B') // ↓ to m2
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await saveStartedM2.promise
-    assert.equal(proxy.defaultIntent?.model, 'm2', 'the newest pending intent must be m2')
-    // B fails first: the intent must restore A's ORIGINAL record (same id).
-    gates.get('m2')!.reject(new Error('quota exceeded'))
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent?.model, 'm1',
-      'a failed newer operation must restore the previous intent record')
-    // A fails LATE: the restored operation must STILL own the intent and
-    // settle it (restore its own previous = undefined).
+    assert.equal(proxy.defaultIntent?.model, 'm1', 'the in-flight selection owns the transient intent')
+    // The surface switches to Session B before the write settles.
+    state.generation = 2
+    state.agent = fakeAgent('session-b')
     gates.get('m1')!.reject(new Error('quota exceeded'))
     await vt.waitForRender()
     await Promise.resolve()
     await Promise.resolve()
     assert.equal(proxy.defaultIntent, undefined,
-      'the restored operation must keep its settle authority: a late failure clears the intent')
-    assert.deepEqual(persisted, { provider: 'p', model: 'original' },
-      'both saves failed: the persisted default must stay the original')
-    assert.deepEqual(proxy.defaultSelection(), { provider: 'p', model: 'original' },
-      '/new must observe the original persisted default, never a failed choice')
+      'a stale settle must still settle the intent, never leak it into a later fresh create')
+    assert.ok(!vt.getViewport().join('\n').includes('model selection save'),
+      'a stale settle must not repaint the new Session')
   } finally {
     app.stop()
   }
 })
 
-test('a failed restore keeps the restored operation settle authority: the older save then succeeds', async () => {
+test('a sessionless /model pick awaits its default save and reports the committed selection', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -1023,26 +760,18 @@ test('a failed restore keeps the restored operation settle authority: the older 
     assembled: undefined,
     saveSelection: async () => {},
   }
-  ctx.provide('llm', {
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
     listProviders: () => [{ id: 'p', name: 'provider p' }],
     listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
     resolveModelInfo: async () => ({}),
   } as never)
-  const gates = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
-  const saveStarted = new Map<string, () => void>()
   let persisted = { provider: 'p', model: 'original' }
+  const saveStarted = deferred<void>()
+  let releaseSave!: () => void
+  const saveGate = new Promise<void>(resolve => { releaseSave = resolve })
   ctx.provide('agentDefaultModel', {
     currentSelection: () => ({ ...persisted }),
-    saveSelection: (next: { provider: string; model: string }) => {
-      const gate = { resolve: () => {}, reject: () => {} } as { resolve: (v: unknown) => void; reject: (e: Error) => void }
-      const promise = new Promise<unknown>((res, rej) => {
-        gate.resolve = (value) => { persisted = { ...next }; res(value) }
-        gate.reject = rej
-      })
-      gates.set(next.model, gate)
-      saveStarted.get(next.model)?.()
-      return promise
-    },
+    saveSelection: async (next: { provider: string; model: string }) => { saveStarted.resolve(); await saveGate; persisted = { ...next } },
   } as never)
   const state = { agent: undefined, generation: 1 }
   const runner = stubRunner(ctx, app, state)
@@ -1058,46 +787,27 @@ test('a failed restore keeps the restored operation settle authority: the older 
     assert.ok(modelDef?.handler !== undefined, '/model handler missing')
     await (modelDef!.handler as () => Promise<unknown>)()
     await vt.waitForRender()
-    const saveStartedM1 = deferred<void>()
-    saveStarted.set('m1', saveStartedM1.resolve)
-    const saveStartedM2 = deferred<void>()
-    saveStarted.set('m2', saveStartedM2.resolve)
-    // /model → m1 (save A held), then /model → m2 (save B held). The
-    // applied selection walks back to the model list, so the second pick
-    // just moves DOWN to m2 and confirms.
     vt.sendInput('\r')
     await vt.waitForRender()
     await Promise.resolve()
-    vt.sendInput('\r')
-    await saveStartedM1.promise
-    vt.sendInput('\x1b[B') // ↓ to m2
+    vt.sendInput('\r') // pick m1 -> the picker awaits the global-default save
+    await saveStarted.promise
     await vt.waitForRender()
-    vt.sendInput('\r')
-    await saveStartedM2.promise
-    assert.equal(proxy.defaultIntent?.model, 'm2', 'the newest pending intent must be m2')
-    // B fails first: the intent must restore A's ORIGINAL record (same id).
-    gates.get('m2')!.reject(new Error('quota exceeded'))
+    assert.ok(vt.getViewport().join('\n').includes('Selecting'),
+      'a sessionless pick shows the selecting state while the save settles')
+    releaseSave()
     await vt.waitForRender()
     await Promise.resolve()
-    assert.equal(proxy.defaultIntent?.model, 'm1',
-      'a failed newer operation must restore the previous intent record')
-    // A succeeds LATE: the restored operation must STILL own the intent and
-    // settle it (clear — the persisted default now carries A).
-    gates.get('m1')!.resolve(undefined)
-    await vt.waitForRender()
     await Promise.resolve()
-    assert.equal(proxy.defaultIntent, undefined,
-      'the restored operation must keep its settle authority: a late success clears the transient intent')
-    assert.deepEqual(persisted, { provider: 'p', model: 'm1' },
-      'the older save succeeded: the persisted default must be A')
-    assert.deepEqual(proxy.defaultSelection(), { provider: 'p', model: 'm1' },
-      '/new must dynamically observe the persisted A, with no sticky intent to seed durably')
+    assert.deepEqual(persisted, { provider: 'p', model: 'm1' }, 'the committed default is persisted')
+    assert.equal(proxy.defaultIntent, undefined, 'a committed save clears the transient intent')
+    assert.equal(proxy.defaultIntentOutcome, 'committed')
   } finally {
     app.stop()
   }
 })
 
-test('an already-settled older operation is never restored as pending after a newer failure', async () => {
+test('a FAILED sessionless default save keeps the picker truthful and does not stick the intent', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -1110,26 +820,16 @@ test('an already-settled older operation is never restored as pending after a ne
     assembled: undefined,
     saveSelection: async () => {},
   }
-  ctx.provide('llm', {
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
     listProviders: () => [{ id: 'p', name: 'provider p' }],
     listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
     resolveModelInfo: async () => ({}),
   } as never)
-  const gates = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
-  const saveStarted = new Map<string, () => void>()
   let persisted = { provider: 'p', model: 'original' }
+  const saveStarted = deferred<void>()
   ctx.provide('agentDefaultModel', {
     currentSelection: () => ({ ...persisted }),
-    saveSelection: (next: { provider: string; model: string }) => {
-      const gate = { resolve: () => {}, reject: () => {} } as { resolve: (v: unknown) => void; reject: (e: Error) => void }
-      const promise = new Promise<unknown>((res, rej) => {
-        gate.resolve = (value) => { persisted = { ...next }; res(value) }
-        gate.reject = rej
-      })
-      gates.set(next.model, gate)
-      saveStarted.get(next.model)?.()
-      return promise
-    },
+    saveSelection: async () => { saveStarted.resolve(); throw new Error('quota exceeded') },
   } as never)
   const state = { agent: undefined, generation: 1 }
   const runner = stubRunner(ctx, app, state)
@@ -1145,237 +845,22 @@ test('an already-settled older operation is never restored as pending after a ne
     assert.ok(modelDef?.handler !== undefined, '/model handler missing')
     await (modelDef!.handler as () => Promise<unknown>)()
     await vt.waitForRender()
-    const saveStartedM1 = deferred<void>()
-    saveStarted.set('m1', saveStartedM1.resolve)
-    const saveStartedM2 = deferred<void>()
-    saveStarted.set('m2', saveStartedM2.resolve)
-    // /model → m1 (save A held), then /model → m2 (save B held).
     vt.sendInput('\r')
     await vt.waitForRender()
     await Promise.resolve()
-    vt.sendInput('\r')
-    await saveStartedM1.promise
-    vt.sendInput('\x1b[B') // ↓ to m2
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await saveStartedM2.promise
-    assert.equal(proxy.defaultIntent?.model, 'm2', 'the newest pending intent must be m2')
-    // A SUCCEEDS while B is still pending: A's settle callback is skipped
-    // (B owns the record), but its outcome must be remembered.
-    gates.get('m1')!.resolve(undefined)
+    vt.sendInput('\r') // pick m1 -> the save FAILS
+    await saveStarted.promise
     await vt.waitForRender()
     await Promise.resolve()
-    assert.equal(proxy.defaultIntent?.model, 'm2',
-      'an older success must not clear the newer pending intent')
-    // B FAILS: the restore must NOT bring the already-committed A back as a
-    // pending intent — the persisted default carries A, so the transient
-    // intent settles instead.
-    gates.get('m2')!.reject(new Error('quota exceeded'))
-    await vt.waitForRender()
     await Promise.resolve()
-    assert.equal(proxy.defaultIntent, undefined,
-      'an already-committed older operation must never be restored as a pending intent')
-    assert.deepEqual(persisted, { provider: 'p', model: 'm1' },
-      'the older save succeeded: the persisted default must be A')
-    assert.deepEqual(proxy.defaultSelection(), { provider: 'p', model: 'm1' },
-      '/new must dynamically observe the persisted A, with no sticky intent to seed durably')
+    assert.equal(proxy.defaultIntent, undefined, 'a failed save must settle the transient intent')
+    assert.equal(proxy.defaultIntentOutcome, 'failed')
+    assert.ok(vt.getViewport().join('\n').includes('model default save'), 'the failure is surfaced')
+    assert.deepEqual(persisted, { provider: 'p', model: 'original' }, 'the failed write is not persisted')
   } finally {
     app.stop()
   }
 })
-
-test('a three-layer rollback never resurrects an already-failed operation', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const selection = {
-    current: { provider: 'p', model: 'old-model' },
-    assembled: undefined,
-    saveSelection: async () => {},
-  }
-  ctx.provide('llm', {
-    listProviders: () => [{ id: 'p', name: 'provider p' }],
-    listModels: async () => [{ id: 'm1' }, { id: 'm2' }, { id: 'm3' }],
-    resolveModelInfo: async () => ({}),
-  } as never)
-  const gates = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
-  const saveStarted = new Map<string, () => void>()
-  let persisted = { provider: 'p', model: 'original' }
-  ctx.provide('agentDefaultModel', {
-    currentSelection: () => ({ ...persisted }),
-    saveSelection: (next: { provider: string; model: string }) => {
-      const gate = { resolve: () => {}, reject: () => {} } as { resolve: (v: unknown) => void; reject: (e: Error) => void }
-      const promise = new Promise<unknown>((res, rej) => {
-        gate.resolve = (value) => { persisted = { ...next }; res(value) }
-        gate.reject = rej
-      })
-      gates.set(next.model, gate)
-      saveStarted.get(next.model)?.()
-      return promise
-    },
-  } as never)
-  const state = { agent: undefined, generation: 1 }
-  const runner = stubRunner(ctx, app, state)
-  const proxy = new Proxy(runner, {
-    get(target, prop, receiver) {
-      if (prop === 'selected') return selection
-      return Reflect.get(target, prop, receiver)
-    },
-  })
-  registerTuiCommands(proxy as unknown as typeof runner)
-  try {
-    const modelDef = services.defs.find(entry => entry.name === 'model')
-    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
-    await (modelDef!.handler as () => Promise<unknown>)()
-    await vt.waitForRender()
-    const saveStartedM1 = deferred<void>()
-    saveStarted.set('m1', saveStartedM1.resolve)
-    const saveStartedM2 = deferred<void>()
-    saveStarted.set('m2', saveStartedM2.resolve)
-    const saveStartedM3 = deferred<void>()
-    saveStarted.set('m3', saveStartedM3.resolve)
-    // /model → m1, then ↓ to m2, then ↓ to m3 (each applied selection walks
-    // back to the model list).
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    await Promise.resolve()
-    vt.sendInput('\r')
-    await saveStartedM1.promise
-    vt.sendInput('\x1b[B') // ↓ to m2
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await saveStartedM2.promise
-    vt.sendInput('\x1b[B') // ↓ to m3
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await saveStartedM3.promise
-    assert.equal(proxy.defaultIntent?.model, 'm3', 'the newest pending intent must be m3')
-    // A (m1) FAILS while B (m2) is pending: its status is retained along the
-    // ancestry chain.
-    gates.get('m1')!.reject(new Error('quota exceeded'))
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent?.model, 'm3', 'an older failure must not touch the newer pending intent')
-    // C (m3) fails → the chain restores B (m2, still pending).
-    gates.get('m3')!.reject(new Error('quota exceeded'))
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent?.model, 'm2', 'a failed newest operation must restore the nearest pending ancestor')
-    // B (m2) fails → the chain must SKIP the already-failed A and clear.
-    gates.get('m2')!.reject(new Error('quota exceeded'))
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent, undefined,
-      'a three-layer rollback must never resurrect an already-failed operation')
-    assert.deepEqual(persisted, { provider: 'p', model: 'original' },
-      'all saves failed: the persisted default must stay the original')
-    assert.deepEqual(proxy.defaultSelection(), { provider: 'p', model: 'original' },
-      '/new must observe the original persisted default, never a failed choice')
-  } finally {
-    app.stop()
-  }
-})
-
-test('a three-layer rollback never resurrects an already-committed operation', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const selection = {
-    current: { provider: 'p', model: 'old-model' },
-    assembled: undefined,
-    saveSelection: async () => {},
-  }
-  ctx.provide('llm', {
-    listProviders: () => [{ id: 'p', name: 'provider p' }],
-    listModels: async () => [{ id: 'm1' }, { id: 'm2' }, { id: 'm3' }],
-    resolveModelInfo: async () => ({}),
-  } as never)
-  const gates = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
-  const saveStarted = new Map<string, () => void>()
-  let persisted = { provider: 'p', model: 'original' }
-  ctx.provide('agentDefaultModel', {
-    currentSelection: () => ({ ...persisted }),
-    saveSelection: (next: { provider: string; model: string }) => {
-      const gate = { resolve: () => {}, reject: () => {} } as { resolve: (v: unknown) => void; reject: (e: Error) => void }
-      const promise = new Promise<unknown>((res, rej) => {
-        gate.resolve = (value) => { persisted = { ...next }; res(value) }
-        gate.reject = rej
-      })
-      gates.set(next.model, gate)
-      saveStarted.get(next.model)?.()
-      return promise
-    },
-  } as never)
-  const state = { agent: undefined, generation: 1 }
-  const runner = stubRunner(ctx, app, state)
-  const proxy = new Proxy(runner, {
-    get(target, prop, receiver) {
-      if (prop === 'selected') return selection
-      return Reflect.get(target, prop, receiver)
-    },
-  })
-  registerTuiCommands(proxy as unknown as typeof runner)
-  try {
-    const modelDef = services.defs.find(entry => entry.name === 'model')
-    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
-    await (modelDef!.handler as () => Promise<unknown>)()
-    await vt.waitForRender()
-    const saveStartedM1 = deferred<void>()
-    saveStarted.set('m1', saveStartedM1.resolve)
-    const saveStartedM2 = deferred<void>()
-    saveStarted.set('m2', saveStartedM2.resolve)
-    const saveStartedM3 = deferred<void>()
-    saveStarted.set('m3', saveStartedM3.resolve)
-    // /model → m1, then ↓ to m2, then ↓ to m3.
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    await Promise.resolve()
-    vt.sendInput('\r')
-    await saveStartedM1.promise
-    vt.sendInput('\x1b[B') // ↓ to m2
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await saveStartedM2.promise
-    vt.sendInput('\x1b[B') // ↓ to m3
-    await vt.waitForRender()
-    vt.sendInput('\r')
-    await saveStartedM3.promise
-    assert.equal(proxy.defaultIntent?.model, 'm3', 'the newest pending intent must be m3')
-    // A (m1) SUCCEEDS while B (m2) is pending: its committed status is
-    // retained along the ancestry chain.
-    gates.get('m1')!.resolve(undefined)
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent?.model, 'm3', 'an older success must not touch the newer pending intent')
-    // C (m3) fails → the chain restores B (m2, still pending).
-    gates.get('m3')!.reject(new Error('quota exceeded'))
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent?.model, 'm2', 'a failed newest operation must restore the nearest pending ancestor')
-    // B (m2) fails → the chain must SKIP the already-committed A and clear
-    // (the persisted default carries A).
-    gates.get('m2')!.reject(new Error('quota exceeded'))
-    await vt.waitForRender()
-    await Promise.resolve()
-    assert.equal(proxy.defaultIntent, undefined,
-      'a three-layer rollback must never resurrect an already-committed operation')
-    assert.deepEqual(persisted, { provider: 'p', model: 'm1' },
-      'the oldest save succeeded: the persisted default must be A')
-    assert.deepEqual(proxy.defaultSelection(), { provider: 'p', model: 'm1' },
-      '/new must dynamically observe the persisted A, with no sticky intent to seed durably')
-  } finally {
-    app.stop()
-  }
-})
-
 test('a failing skill catalog refresh degrades to a detached issue, never an unhandled rejection', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
@@ -1986,5 +1471,200 @@ test('/settings theme autodetect applies only while auto stays the latest choice
   }
   assert.equal(currentPalette, darkColors,
     'a detection landing after the user left auto must not apply (a light reply must be refused)')
+  app.stop()
+})
+
+// ── D2.3 model-selection settlement presentation ──────────────────────────
+
+/** A catalog whose ONLY Session model write is a scripted semantic outcome;
+ * the presentation must follow the outcome, never the requested value. */
+function scriptedModelCatalog(
+  outcome: () => Promise<{ kind: string; value?: { provider: string; model: string }; error?: { code: string; message: string }; reason?: string }>,
+  current: { provider: string; model: string } = { provider: 'p', model: 'old-model' },
+  ownership: 'current' | 'superseded' = 'current',
+): TuiCommandRunner['catalog'] {
+  return {
+    models: {
+      available: () => true,
+      loadDirectory: async () => ({
+        default: current,
+        routableProviders: ['p'],
+        groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm1', name: 'M1' }] }],
+        failures: [],
+      }),
+      listProviders: () => [{ id: 'p', name: 'Provider P' }],
+      listModels: async () => [{ id: 'm1' }],
+      defaultSelection: () => current,
+      saveDefaultSelection: async () => ({ kind: 'committed' as const, value: undefined }),
+      sessionSelection: () => current,
+      selectSessionModel: (async () => ({ ownership, outcome: await outcome() })) as TuiCommandRunner['catalog']['models']['selectSessionModel'],
+      discoverModels: async () => [],
+      listConfigurableProviders: () => [],
+    },
+    presets: {} as never,
+    skills: {} as never,
+  }
+}
+
+/** Drive /model → provider → model so `apply` runs exactly once. */
+async function pickFirstModel(vt: VirtualTerminal, handler: () => Promise<unknown>): Promise<void> {
+  await handler()
+  await vt.waitForRender()
+  vt.sendInput('\r') // provider -> model list
+  await vt.waitForRender()
+  await Promise.resolve()
+  vt.sendInput('\r') // select m1 -> apply
+  await vt.waitForRender()
+  await Promise.resolve()
+}
+
+test('a REJECTED model selection keeps the prior authoritative selection and shows the Host refusal', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const catalog = scriptedModelCatalog(async () => ({
+    kind: 'rejected',
+    error: { code: 'session/model-unavailable', message: 'no such route' },
+  }))
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('no such route'), `the Host refusal must be shown:\n${view}`)
+  app.stop()
+})
+
+test('an INDETERMINATE model selection never claims the requested model as committed', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const catalog = scriptedModelCatalog(async () => ({
+    kind: 'indeterminate',
+    error: { code: 'session/model-indeterminate', message: 'carrier lost' },
+  }))
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('indeterminate'), `an indeterminate settle must be explained, never retried:\n${view}`)
+  assert.ok(view.includes('do not retry'), `the no-retry guidance must be shown:\n${view}`)
+  app.stop()
+})
+
+test('a late model selection settle from a replaced Session cannot repaint the new Session', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const gate = deferred<{ kind: 'rejected'; error: { code: string; message: string } }>()
+  const catalog = scriptedModelCatalog(() => gate.promise)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  // The surface switches to Session B before A's selection settles.
+  state.generation = 2
+  state.agent = fakeAgent('session-b')
+  gate.resolve({ kind: 'rejected', error: { code: 'session/model-unavailable', message: 'stale refusal' } })
+  await vt.waitForRender()
+  await Promise.resolve()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('stale refusal'), `a stale settle must not repaint the new Session:\n${view}`)
+  app.stop()
+})
+
+test('/model dismisses the whole overlay after a committed no-effort selection', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const catalog = scriptedModelCatalog(async () => ({ kind: 'committed', value: { provider: 'p', model: 'm1' } }))
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Provider P'), `the provider overlay must be dismissed:\n${view}`)
+  assert.ok(!view.includes('M1'), `the model list must be dismissed too:\n${view}`)
+  app.stop()
+})
+
+test('a SUPERSEDED /model result emits no notice and never claims the requested model (v2 §0.2.1)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  // The Host committed, but this result no longer owns the local surface.
+  const catalog = scriptedModelCatalog(
+    async () => ({ kind: 'committed', value: { provider: 'p', model: 'm1' } }),
+    { provider: 'p', model: 'old-model' },
+    'superseded',
+  )
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('model selection:'), `a superseded result must not emit a stale notice:\n${view}`)
+  assert.ok(!view.includes('do not retry'), `a superseded result must not emit the indeterminate notice:\n${view}`)
   app.stop()
 })

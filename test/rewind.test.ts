@@ -299,8 +299,6 @@ interface CreatedCall {
   sessionId: string
   meta: Record<string, unknown>
   inheritedEventCount?: number
-  provider?: string
-  model?: string
   agentPreset?: string
   seed?: readonly unknown[]
 }
@@ -352,8 +350,6 @@ function makeRig(options: {
           sessionId: String(call.sessionId),
           meta: call.meta,
           ...call.inheritedEventCount === undefined ? {} : { inheritedEventCount: call.inheritedEventCount },
-          provider: call.provider,
-          model: call.model,
           agentPreset: call.agentPreset,
           seed: call.seed,
         }
@@ -361,7 +357,7 @@ function makeRig(options: {
         options.createHook?.(record)
         return { session: { id: record.sessionId }, direct: { agent: { session: { id: record.sessionId } }, ownerHandle: { dispose: async () => {} } } }
       },
-      open: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
+      open: async (call) => ({ session: { id: String(call.sessionId) }, directAgent: { session: { id: String(call.sessionId) } } }),
     },
     liveIdentity: () => ({ sessionId: state.sessionId, generation: state.generation }),
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; inheritSelection?: ModelSelection; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
@@ -401,7 +397,7 @@ function sourceAgent(sessionId = 'session-source', events: readonly SessionEvent
   } as unknown as Agent
 }
 
-test('C04: createForkedAgent records preset, source cwd, parent, seeded lineage, provider/model', async () => {
+test('C04: createForkedAgent records preset, source cwd, parent and seeded lineage', async () => {
   const rig = makeRig({ sessionCwd: '/other-cwd' })
   const seed = turn(0, 1, 'A')
   // The concrete preset id rides the create (migration M1.11 — no
@@ -417,8 +413,6 @@ test('C04: createForkedAgent records preset, source cwd, parent, seeded lineage,
   assert.equal(call.meta.parentSession, 'session-parent')
   assert.equal(call.meta.isSeeded, true)
   assert.equal(call.inheritedEventCount, 4)
-  assert.equal(call.provider, 'deepseek')
-  assert.equal(call.model, 'deepseek-chat')
   assert.equal(call.seed, seed)
   assert.equal(next.session.id, call.sessionId)
   assert.ok(call.sessionId.startsWith('session-'))
@@ -436,10 +430,10 @@ test('review P2: the cwd is captured BEFORE the create await (no parent=A cwd=B 
     agents: {
       create: async (call) => {
         liveCwd = '/ws-b' // a switch lands DURING the create await
-        created.push({ sessionId: String(call.sessionId), meta: call.meta, ...call.inheritedEventCount === undefined ? {} : { inheritedEventCount: call.inheritedEventCount }, provider: call.provider, model: call.model, agentPreset: call.agentPreset, seed: call.seed })
+        created.push({ sessionId: String(call.sessionId), meta: call.meta, ...call.inheritedEventCount === undefined ? {} : { inheritedEventCount: call.inheritedEventCount }, agentPreset: call.agentPreset, seed: call.seed })
         return { session: { id: String(call.sessionId) }, direct: { agent: { session: { id: String(call.sessionId) } }, ownerHandle: { dispose: async () => {} } } }
       },
-      open: async (call) => ({ session: { id: String(call.resumeSessionId) }, directAgent: { session: { id: String(call.resumeSessionId) } } }),
+      open: async (call) => ({ session: { id: String(call.sessionId) }, directAgent: { session: { id: String(call.sessionId) } } }),
     },
   }
   // The source header has NO cwd: the fallback is the live cwd captured at
@@ -762,7 +756,7 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     ctx: options.ctx,
     app: options.app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    get liveAgent() { return options.agent },
+        get liveAgent() { return options.agent },
     ensureSession: async () => { options.ensureCalls.push('ensureSession') },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -817,7 +811,11 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     pendingPreset: undefined,
     effectivePresetId: undefined,
     refreshCatalog: async () => ({ kind: 'failed', error: 'not wired in tests' }),
-    recomposeBlank: async () => ({ kind: 'locked' }),
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    sessionBlank: () => undefined,
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
@@ -1006,15 +1004,31 @@ test('review round 27: /preset live-swap runs inside the session-transition gate
   ctx.provide('agentPresets', {
     composedPreset: () => undefined,
     defaultId: 'standard',
+    remoteExportList: async () => ({
+      presets: [
+        { id: 'standard', trust: 'system', isDefault: true },
+        { id: 'minimal', trust: 'system' },
+      ],
+      modeSelectionEnabled: true,
+    }),
+    list: async () => [{ id: 'standard', trust: 'system' }, { id: 'minimal', trust: 'system' }],
+    select: async (_agent: unknown, id: string) => id,
   } as never)
   const rewinds: number[] = []
   const ensureCalls: string[] = []
   const base = stubRunner({ ctx, app, rewinds, ensureCalls })
+  const liveAgent = sourceAgent('session-source', [], 'standard')
   let gateRuns = 0
   const runner: TuiCommandRunner = {
     ...base,
-    liveAgent: sourceAgent('session-source', [], 'standard'),
-    recomposeBlank: async () => ({ kind: 'switched', preset: 'minimal' }),
+    liveAgent,
+    catalog: new DirectCatalogPort(ctx as never, (sessionId) =>
+      liveAgent.session.id === sessionId ? liveAgent : undefined),
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    sessionBlank: () => undefined,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => {
       gateRuns += 1
       return task()

@@ -40,7 +40,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-tool-todo'
 import { resolvePresetRequest } from './runtime/session-preset.ts'
-import { recordedSessionPreset, sessionPresetOf } from './runtime/direct/session-preset-direct.ts'
+import { recordedSessionPreset, selectBlankSessionPreset, sessionPresetOf, turnBoundaryBlank } from './runtime/direct/session-preset-direct.ts'
 import { DirectModelSelectionOwner, type DefaultModelServiceLike } from './runtime/direct/model-selection-direct.ts'
 import { foldPendingModelSelection, rawSelectionFromRequestHeader, sameModelSelection } from './model-selection.ts'
 // Empty type imports carry the loader Context merge for the settlement await
@@ -144,7 +144,9 @@ import {
 import type { TaskBrowserViewState, TaskPanelItem } from './task-panel.ts'
 import { TaskBrowserRuntime, type TaskBrowserDatasetScope } from './task-browser-runtime.ts'
 import type { ComposerSubmitGesture, ComposerSubmitRequest, TaskBrowserHandle, WorkflowAction } from './tui-app.ts'
-import { isIndeterminateSkillWrite, resolveComposerDelivery, registerTuiCommands, type DefaultIntentRecord, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
+import { isIndeterminateSkillWrite, resolveComposerDelivery, registerTuiCommands, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from './commands.ts'
+import { DefaultIntentTracker } from './default-intent.ts'
+import { DefaultWriteBarrier } from './default-write-barrier.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, cancellationError, type OwnedTaskOptions } from './detached.ts'
@@ -1510,40 +1512,11 @@ export async function recordedPreset(ctx: Context, sessionId: string): Promise<s
   return recordedSessionPreset(ctx, sessionId)
 }
 
-/** The session surface {@link recomposeBlank} needs: its log and the append seam. */
-export interface RecomposableSession {
-  readonly id: string
-  snapshotEvents(): readonly SessionEvent[]
-  append(type: 'agent-preset/selected', data: { agentPreset: string }): unknown
-}
-
-/** Outcome of {@link recomposeBlank}: the swap committed, or the session is locked. */
-export type RecomposeOutcome = { kind: 'switched'; preset: string } | { kind: 'locked' }
-
-/**
- * Re-compose one agent onto another preset while its session is still blank.
- *
- * A started conversation's history was produced under its preset's tools, so
- * only a session with no `turn/start` event may swap — the same rule as the
- * official `agentPreset.select` RPC. The selection is appended to the log only
- * after the swap committed (a rejected mount leaves the old composition).
- * @param ctx - the runner context.
- * @param agent - the live agent whose composition to swap.
- * @param id - the target preset id.
- * @returns `switched` with the committed preset id, or `locked` when a turn has run.
- * @throws when the roster supplies no such preset or its composition is unusable.
- */
-export async function recomposeBlank(
-  ctx: Context,
-  agent: { ctx: Context; session: RecomposableSession },
-  id: string,
-): Promise<RecomposeOutcome> {
-  const presets = ctx.get('agentPresets')
-  if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
-  if (agent.session.snapshotEvents().some(event => event.type === 'turn/start')) return { kind: 'locked' }
-  const preset = await presets.recompose(agent.ctx, id)
-  agent.session.append('agent-preset/selected', { agentPreset: preset.id })
-  return { kind: 'switched', preset: preset.id }
+/** Read the official `RemoteError` code off a refused preset switch. */
+function presetErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const code = (error as { readonly code?: unknown }).code
+  return typeof code === 'string' && code !== '' ? code : undefined
 }
 
 /** Set the terminal window title (OSC 0); a no-op without a TTY. */
@@ -2038,83 +2011,21 @@ export function apply(ctx: Context, config: Config): void {
     // dynamically), and a failed save walks the operation ancestry back to
     // the nearest still-pending operation.
     //
-    // The intent is a small OPERATION CHAIN state machine: each operation
-    // carries its own save status and links the operation that owned the
-    // intent before it (ancestry). A settle reports ONLY the operation id
-    // and outcome; the machine decides whether the intent clears, restores
-    // a pending ancestor, or stays with a newer operation. An operation's
-    // status is retained as long as it is reachable along the chain, so a
-    // deep rollback (C fails → restore B → B fails → restore A) can never
-    // resurrect an already-settled operation as pending.
-    interface DefaultIntentOperation {
-      id: number
-      selection: ModelSelection
-      previous: DefaultIntentOperation | undefined
-      status: 'pending' | 'committed' | 'failed'
-    }
-    let nextIntentId = 0
-    let activeDefaultIntent: DefaultIntentOperation | undefined
-    /** Why the intent is currently unset: 'committed' (the persisted default
-     *  carries the latest committed choice — the blank Session observes it
-     *  dynamically), 'failed' (the latest settle failed and no pending or
-     *  committed operation remains — the deferred-create boundary seeds the
-     *  captured choice), or undefined while an operation is still pending. */
-    let defaultIntentOutcome: 'committed' | 'failed' | undefined
-    const setDefaultIntent = (next: ModelSelection | undefined): void => {
-      // A NEW operation owns the intent: allocate a fresh id and link the
-      // previous operation as ancestry (the rollback chain).
-      if (next === undefined) {
-        activeDefaultIntent = undefined
-      } else {
-        nextIntentId += 1
-        activeDefaultIntent = {
-          id: nextIntentId,
-          selection: next,
-          previous: activeDefaultIntent,
-          status: 'pending',
-        }
-      }
-      defaultIntentOutcome = undefined
-    }
-    const settleIntent = (id: number, outcome: 'committed' | 'failed'): void => {
-      // Find the operation in the active chain (every operation is an
-      // ancestor of the active one).
-      let op: DefaultIntentOperation | undefined = activeDefaultIntent
-      while (op !== undefined && op.id !== id) op = op.previous
-      if (op === undefined) return
-      op.status = outcome
-      if (op !== activeDefaultIntent) return // a newer operation owns the intent
-      if (outcome === 'committed') {
-        // The persisted default carries the choice: the transient intent
-        // settles and the blank Session observes it dynamically.
-        activeDefaultIntent = undefined
-        defaultIntentOutcome = 'committed'
-        return
-      }
-      // The active operation FAILED: walk the ancestry to the nearest
-      // still-pending operation (it keeps its settle authority), skipping
-      // settled ones. A committed ancestor means the persisted default
-      // carries it (no seed); only failed ancestors leave the captured
-      // choice to be seeded by the deferred-create boundary.
-      let settledOutcome: 'committed' | 'failed' = 'failed'
-      let cursor = op.previous
-      while (cursor !== undefined) {
-        if (cursor.status === 'pending') {
-          activeDefaultIntent = cursor
-          defaultIntentOutcome = undefined
-          return
-        }
-        if (cursor.status === 'committed') settledOutcome = 'committed'
-        cursor = cursor.previous
-      }
-      activeDefaultIntent = undefined
-      defaultIntentOutcome = settledOutcome
-    }
+    // The intent is a small OPERATION CHAIN state machine (the pure
+    // `DefaultIntentTracker`): each operation carries its own save status and
+    // links the operation that owned the intent before it. A settle reports
+    // ONLY the operation id and outcome; the machine decides whether the intent
+    // clears, restores a pending ancestor, or stays with a newer operation.
+    // An optimistic intent is NOT a committed save — the semantic settlement
+    // still awaits the Host write.
+    const defaultIntent = new DefaultIntentTracker<ModelSelection>()
+    const setDefaultIntent = (next: ModelSelection | undefined): void => { defaultIntent.set(next) }
+    const settleIntent = (id: number, outcome: 'committed' | 'failed'): void => { defaultIntent.settle(id, outcome) }
     /** TUI-only facade; this ref is NEVER installed into an Agent context. */
     const selected: ModelSelectionRef = {
       get current(): ModelSelection | undefined {
         return liveAgent === undefined
-          ? activeDefaultIntent?.selection ?? (defaultModel.currentSelection() as ModelSelection | undefined)
+          ? defaultIntent.intent ?? (defaultModel.currentSelection() as ModelSelection | undefined)
           : modelSelections.current(liveAgent)
       },
       set current(next: ModelSelection | undefined) {
@@ -2273,33 +2184,18 @@ export function apply(ctx: Context, config: Config): void {
       // explaining: deferred / sessionless starts have nothing to resume.
       startupStatus.show('Resuming session…')
       try {
-        // The stored session's recorded preset wins (resolved from the log,
-        // not the header): a session that switched while blank ran every turn
-        // under the newer composition, and rebuilding it differently would
-        // replay tool calls the model can no longer make.
-        const recorded = await recordedPreset(ctx, sessionId)
-        // Preflight: the preset composition is resolved BEFORE the DSH
-        // boundary. The RESOLVED composition (with its concrete
-        // agentPreset) is what the adapter re-mounts — never a second
-        // compose(undefined) that could resolve a different default preset.
-        const launchComposition = await compose(recorded)
-        // Agent options are only the creation/resume fallback. The setup
-        // installs an Agent-local selection and reconstructs the target
-        // Session's durable model choice after resume.
-        const fallback = defaultModel.currentSelection()
         if (lifecycleController.signal.aborted) {
           // No owner exists yet and the full fiber disposer is not
           // registered: close the diagnostics handle (idempotent).
           diag.dispose()
           return
         }
+        // The Direct adapter resolves the recorded preset and the Host
+        // default activation fallback internally from the official
+        // observation seam; the cross-backend open request carries only the
+        // Session identity.
         handle = await backend.sessionLifecycle.open({
-          resumeSessionId: SessionId(sessionId),
-          provider: fallback.provider,
-          model: fallback.model,
-          // The RESOLVED preset id from the preflight composition — the
-          // adapter composes this EXACT id, never a re-resolved default.
-          agentPreset: launchComposition.agentPreset,
+          sessionId: String(sessionId),
           signal: lifecycleController.signal,
         })
         resumeResolved = true
@@ -2310,27 +2206,33 @@ export function apply(ctx: Context, config: Config): void {
         // clear can never erase the wrong line. The 'Preparing
         // conversation…' stage re-arms it.
         startupStatus.clear()
+        // The ACTUAL resumed composition, read from the LIVE projection AFTER
+        // open — never a second pre-open observation. The `--preset` override
+        // decision and the diagnostic therefore cannot disagree with what the
+        // adapter actually mounted.
+        const recorded = sessionPresetOf(ctx, (handle.direct!.agent as Agent).session)
         diag.info('resume ok', {
           session: sessionId,
           seq: Number((handle.direct!.agent as Agent).session.seq),
-          preset: launchComposition.agentPreset ?? 'default',
+          preset: recorded ?? 'default',
         })
         // A launch-time preset may still apply while the session is blank;
-        // the blank check lives inside recomposeBlank (shared with /preset).
+        // the Host owns the blank check and refuses a started Session with
+        // `agent-preset/locked`.
         if (launchPreset !== undefined && launchPreset !== recorded) {
           try {
-            const outcome = await recomposeBlank(ctx, handle.direct!.agent as Agent, launchPreset)
-            if (outcome.kind === 'locked') {
+            await selectBlankSessionPreset(ctx, handle.direct!.agent, launchPreset)
+          } catch (error) {
+            startupStatus.clear()
+            if (presetErrorCode(error) === 'agent-preset/locked') {
               const message = `session ${sessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`
-              startupStatus.clear()
               ctx.logger.warn(`tui-runner: ${message}`)
               diag.warn('preset ignored on resume', { session: sessionId, preset: launchPreset })
+            } else {
+              const message = `--preset ${launchPreset} not applied on resume: ${safeErrorMessage(error)}`
+              ctx.logger.warn(`tui-runner: ${message}`)
+              diag.warn('preset not applied on resume', { session: sessionId, preset: launchPreset, error: safeErrorMessage(error) })
             }
-          } catch (error) {
-            const message = `--preset ${launchPreset} not applied on resume: ${safeErrorMessage(error)}`
-            startupStatus.clear()
-            ctx.logger.warn(`tui-runner: ${message}`)
-            diag.warn('preset not applied on resume', { session: sessionId, preset: launchPreset, error: message })
           }
         }
       } catch (error) {
@@ -2406,21 +2308,21 @@ export function apply(ctx: Context, config: Config): void {
       // inside resolveColdSkillTarget if that is broken too), and
       // ensureSession surfaces the preset failure on the first input.
       let effectivePresetId: string | undefined
-      try {
-        const launched = await launchComposition()
-        if (launched.failure !== undefined) resumeFailure = launched.failure
-        effectivePresetId = launched.composition.agentPreset
-      } catch (error) {
-        // Suspend the status before the log, then re-arm it ONLY for a
-        // live resumed session: the catalog barrier below is still part
-        // of the pre-mount wait for a resume, but a fresh/deferred start
-        // (or a failed resume) never shows any startup status — the
-        // "fresh start stays silent" contract must hold on this failure
-        // path too.
-        startupStatus.clear()
-        diag.warn('preset resolution failed at startup', { error: safeErrorMessage(error) })
-        if (liveAgent !== undefined) {
-          startupStatus.show('Preparing conversation…')
+      if (liveAgent === undefined) {
+        // Only a deferred/fresh start resolves the LAUNCH preset. A live
+        // resumed agent already runs its recorded composition, so resolving
+        // `--preset` here would spuriously degrade a healthy resume when the
+        // launch preset is invalid (the catalog read uses the live projection).
+        try {
+          const launched = await launchComposition()
+          if (launched.failure !== undefined) resumeFailure = launched.failure
+          effectivePresetId = launched.composition.agentPreset
+        } catch (error) {
+          // Suspend the status before the log. The "fresh start stays silent"
+          // contract holds on this failure path; ensureSession surfaces the
+          // preset failure on the first input.
+          startupStatus.clear()
+          diag.warn('preset resolution failed at startup', { error: safeErrorMessage(error) })
         }
       }
       const resolution = await resolveInitialCatalog({
@@ -2453,6 +2355,17 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       return sessionPresetOf(ctx, liveAgent.session)
+    }
+    /** The Host turn-boundary authority's blank state for the live Session —
+     *  the SAME projection the official `agentPresets.select` re-check reads.
+     *  Never derived from the TUI transcript. */
+    const sessionBlank = (): boolean | undefined => {
+      if (liveAgent === undefined) return undefined
+      const projections = ctx.get('sessionProjections') as {
+        stateOf(session: unknown, key: string): unknown
+      } | undefined
+      if (projections === undefined) return undefined
+      return turnBoundaryBlank(projections.stateOf(liveAgent.session, 'turnBoundary'))
     }
     // Incremental fold state for the live session's log; reset on switch. A
     // resumed session is hydrated only by initLiveSession below, so startup
@@ -2740,32 +2653,18 @@ export function apply(ctx: Context, config: Config): void {
         // create leaves the current session live — there is nothing to
         // re-acquire (the DSH SessionWriteLease is the only writer
         // authority).
-        // The recorded preset drives the resume; the composition is
-        // resolved by the Direct adapter from that id (preflight here only
-        // for the composition — a roster failure must not enter the DSH
-        // boundary).
-        const recorded = await recordedPreset(ctx, sessionId)
-        // Preflight with the resolved composition (see the launch resume
-        // note): the adapter re-mounts the EXACT resolved preset id.
-        const switchComposition = await compose(recorded)
-        // The target's setup reconstructs its own effective selection. These
-        // values are only the dynamic fallback required by Agent resume; never
-        // copy the old Session's selected ref into the target.
-        const fallback = defaultModel.currentSelection()
+        // The recorded preset drives the Direct adapter's internal resume
+        // composition; the cross-backend open request carries only the
+        // Session identity (D2.3 convergence).
         if (lifecycleController.signal.aborted) return undefined
-        const openOptions = {
-          resumeSessionId: SessionId(sessionId),
-          provider: fallback.provider,
-          model: fallback.model,
-          agentPreset: switchComposition.agentPreset,
-          signal: lifecycleController.signal,
-        }
         const result = await transitionTo({
           target: { id: sessionId },
-          // A rejected resume (e.g. SessionAlreadyOwnedError) leaves the
-          // target untouched: no pin, no retry — the CURRENT session stays
-          // live and the user can retry the switch.
-          create: () => backend.sessionLifecycle.open(openOptions),
+          // A rejected open leaves the target untouched: no pin, no retry —
+          // the CURRENT session stays live and the user can retry the switch.
+          create: () => backend.sessionLifecycle.open({
+            sessionId,
+            signal: lifecycleController.signal,
+          }),
         })
         if (!result.ok) {
           // The resume failed: the CURRENT session is still live.
@@ -2850,16 +2749,30 @@ export function apply(ctx: Context, config: Config): void {
       seed(sessionCwd())
       return map
     }
-    /** The footer model label: the live selection (with effort) when one exists. */
+    /** The footer model label: the live selection (with effort) when one exists,
+     *  plus the in-flight selection while a semantic write settles. The
+     *  authoritative current value stays visible; the pending one is explicit
+     *  and never painted as committed. */
     const modelLabel = (): string => {
-      const selection = selected.current
-      if (selection !== undefined) {
-        return selection.reasoningEffort === undefined
-          ? `${selection.provider}/${selection.model}`
-          : `${selection.provider}/${selection.model} @${selection.reasoningEffort}`
-      }
-      if (liveAgent === undefined) return 'no model'
-      return `${liveAgent.options.provider}/${liveAgent.options.model}`
+      const labelOf = (selection: ModelSelection): string => selection.reasoningEffort === undefined
+        ? `${selection.provider}/${selection.model}`
+        : `${selection.provider}/${selection.model} @${selection.reasoningEffort}`
+      // The base is the AUTHORITATIVE current selection: for a sessionless
+      // surface that is the persisted Host default, NOT the optimistic intent
+      // (which is shown only by `currentModelSelectionPending()`). Otherwise a
+      // pending sessionless save would paint m1 as both base and pending.
+      const selection = liveAgent === undefined
+        ? (defaultModel.currentSelection() as ModelSelection | undefined)
+        : modelSelections.current(liveAgent)
+      const base = selection !== undefined
+        ? labelOf(selection)
+        : liveAgent === undefined ? 'no model' : `${liveAgent.options.provider}/${liveAgent.options.model}`
+      const pending = currentModelSelectionPending()
+      if (pending === undefined) return base
+      const pendingLabel = labelOf(pending)
+      // A sessionless intent is also the optimistic base, so avoid the
+      // redundant `m1 → m1`; still mark it as in flight.
+      return pendingLabel === base ? `${base} (selecting…)` : `${base} → ${pendingLabel} (selecting…)`
     }
     /** M0: the composition section (how the agent is composed — NOT
      * permission, NOT plan). */
@@ -4001,6 +3914,33 @@ export function apply(ctx: Context, config: Config): void {
     // their own abort signals — the disposed agent aborts them — so they
     // need no explicit teardown here.
     let sessionGeneration = 0
+    /** EVERY in-flight sessionless `/model` global-default write (the pure
+     *  `DefaultWriteBarrier`): the Direct adapter intentionally allows
+     *  overlapping writes, so an older write can still be settling — and
+     *  re-asserting the newest committed value — after a newer one resolved. A
+     *  fresh create waits for ALL of them before reading the persisted Host
+     *  default. */
+    const defaultWriteBarrier = new DefaultWriteBarrier()
+    const trackDefaultWrite = (write: Promise<unknown>): void => { defaultWriteBarrier.track(write) }
+    const awaitPendingDefaultWrite = (signal?: AbortSignal): Promise<void> => defaultWriteBarrier.wait(signal)
+    /** The in-flight Session model selection the footer reports as
+     *  `selecting`; the display itself always follows the authoritative
+     *  Session selection, never this request. */
+    let pendingModelSelection: { readonly generation: number; readonly selection: ModelSelection; readonly token: number } | undefined
+    const setModelSelectionPending = (selection: ModelSelection | undefined, token?: number): void => {
+      if (selection === undefined) {
+        // Only the operation that OWNS the marker may clear it: an older
+        // completion must never wipe a newer operation's `(selecting…)`.
+        if (token !== undefined && pendingModelSelection !== undefined && pendingModelSelection.token !== token) return
+        pendingModelSelection = undefined
+        return
+      }
+      pendingModelSelection = { generation: sessionGeneration, selection, token: token ?? 0 }
+    }
+    const currentModelSelectionPending = (): ModelSelection | undefined =>
+      pendingModelSelection !== undefined && pendingModelSelection.generation === sessionGeneration
+        ? pendingModelSelection.selection
+        : undefined
     const bumpSessionGeneration = (): number => {
       if (cleanedUp) return sessionGeneration
       sessionGeneration += 1
@@ -8727,43 +8667,18 @@ export function apply(ctx: Context, config: Config): void {
         const createFirstSession = async (composition: { agentPreset?: string; setup: (agentCtx: Context, agent: Agent) => Promise<void> | void }): Promise<SessionHandle> => {
           const sessionId = SessionId(`session-${randomUUID()}`)
            openingSession = { id: String(sessionId), events: [] }
-          // Read the sessionless facade at the actual create boundary so a
-          // `/model` choice made while composition was loading is used by
-          // the first deferred Session. The intent and its generation are
-          // captured HERE: the save may settle while the create awaits,
-          // and the seed decision below must know whether the choice was
-          // still pending or failed at this boundary.
-          const creationSelection = selected.current ?? defaultModel.currentSelection()
-          const creationIntent = activeDefaultIntent?.selection
+          // Quiesce EVERY sessionless `/model` default write (and its fenced
+          // correction) BEFORE the create: the Direct adapter captures the
+          // settled persisted Host default for Agent activation. A failed
+          // latest intent is NOT seeded (v2 §0.8.4) — the fresh Session uses
+          // the actual Host default, not a fabricated choice.
+          await awaitPendingDefaultWrite(lifecycleController.signal)
+          lifecycleController.signal.throwIfAborted()
           return backend.sessionLifecycle.create({
             sessionId: String(sessionId),
             meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
-            provider: creationSelection?.provider,
-            model: creationSelection?.model,
             agentPreset: composition.agentPreset,
             signal: lifecycleController.signal,
-          }).then(created => {
-            // A sessionless /model choice must seed the first Session's own
-            // selection: the create options carry it, but the installed ref
-            // would otherwise fall back to the global default while the
-            // default save is still in flight (or after it failed). Seed
-            // the NEWEST still-pending intent (a newer /model during the
-            // create wait wins), or the captured choice when its save
-            // FAILED — a successfully settled save leaves the blank Session
-            // observing the persisted default dynamically.
-            const newestPending = activeDefaultIntent?.selection
-            try {
-               if (newestPending !== undefined) {
-                 modelSelections.selectForNextRequest(created.direct!.agent as Agent, newestPending)
-               } else if (creationIntent !== undefined && defaultIntentOutcome === 'failed') {
-                 modelSelections.selectForNextRequest(created.direct!.agent as Agent, creationIntent)
-            }
-            } catch (error) {
-               // A failed seed must not discard the already-created SessionHandle;
-               // publish it and let normal initialization keep the surface usable.
-               diag.warn('first session selection seed failed', { error: safeErrorMessage(error) })
-             }
-             return created
           })
         }
         let created: SessionHandle
@@ -9083,9 +8998,13 @@ export function apply(ctx: Context, config: Config): void {
       // explicit default intent (a /model commit this run), falling back to
       // the persisted global default.
       defaultSelection: (): ModelSelection | undefined =>
-        activeDefaultIntent?.selection ?? (defaultModel.currentSelection() as ModelSelection | undefined),
-      get defaultIntent() { return activeDefaultIntent?.selection },
-      get defaultIntentRecord() { return activeDefaultIntent },
+        defaultIntent.intent ?? (defaultModel.currentSelection() as ModelSelection | undefined),
+      get defaultIntent() { return defaultIntent.intent },
+      get defaultIntentRecord() { return defaultIntent.record },
+      get defaultIntentOutcome() { return defaultIntent.outcome },
+      awaitPendingDefaultWrite,
+      trackDefaultWrite,
+      setModelSelectionPending,
       setDefaultIntent,
       settleIntent,
       get tuiSettings() { return tuiSettings as unknown as TuiCommandRunner['tuiSettings'] },
@@ -9184,7 +9103,7 @@ export function apply(ctx: Context, config: Config): void {
       switchSession,
       transitionTo,
       currentPreset,
-      recomposeBlank: (id) => recomposeBlank(ctx, liveAgent as Agent, id),
+      sessionBlank,
       // PR D2: the command surface's generic refresh is UI-only (a
       // measurement-triggering command uses refreshContextMeasurement or
       // the /status port call directly).

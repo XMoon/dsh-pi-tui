@@ -148,6 +148,57 @@ echoes by request/rpc identity only and routes `queued` to the queue pane and
 user surface. The Remote path therefore never runs a second optimistic ledger
 beside the official one, and a steer echo can never render as a queued row.
 
+## D2.3 model / preset / new presentation decisions
+
+These are TUI product decisions expressed through the official DSH Host/Client
+semantics converged in D2.3; they are not a Web-affordance clone.
+
+- **`/model` is projection-authoritative.** The current Session value is the
+  durable Session model selection (`modelSelection` projection `next`, then
+  `lastUsed`), falling back to the Host catalog default only while the Session
+  has no selection. The picker renders one Host-generation directory read
+  (`session.modelCatalog` semantics) with isolated provider-failure rows. A
+  chosen model puts the picker itself into an in-place `Selecting…` state while
+  the semantic write settles (a duplicate apply is never a second commit); a
+  `rejected`/`cancelled` write walks back to the model list so the picker stays
+  usable, while a `committed`/`indeterminate` settle dismisses it. The footer
+  model label shows the in-flight selection as `(selecting…)` while the
+  authoritative current value stays visible; an `indeterminate` settle never
+  paints the requested model and is never retried (the display reconciles from
+  the Session projection). A late settle from a replaced Session generation
+  cannot repaint the new Session.
+- **`/preset` is honest about blankness.** With no Session it stages a
+  run-local pending preset for the next fresh Session and never creates one.
+  On a blank current Session it dispatches the official blank-Session select
+  (`agentPresets.select`), then refreshes the same Session's command/skill
+  catalog. Blankness is read from the official turn-boundary projection (the
+  same authority the Host re-checks), never from the TUI transcript; an unknown
+  blank state opens the picker and lets the Host be the final authority. A
+  started Session keeps its recorded preset visible and refuses
+  the switch with the Host's `agent-preset/locked` wording — never a false
+  switched display. A deployment with `modeSelectionEnabled: false` refuses
+  the selection surface. Failure settlement: `rejected` keeps the prior
+  preset and shows the reason; `indeterminate` claims neither the old nor the
+  requested preset and is never retried.
+- **`/new` rides guaranteed-fresh create.** The TUI owns this transition, so
+  an explicit preset intent is carried by the create operation itself
+  (creation-time atomicity); the TUI never emulates `create()` then
+  `agentPresets.select()`. The old Session stays current and its draft/command
+  context stays usable until the create commits; a pre-publication refusal
+  leaves it untouched, and an ambiguous/post-publication failure is never
+  reported as "the Session was never created" and is never blind-retried.
+- **Sessionless `/model` is a global-default intent.** It is persisted as the
+  Host global default (never smuggled into `session.create`); the pick AWAITS
+  that write so it reports a truthful settlement (a `rejected`/`cancelled`/
+  `unsupported` outcome keeps the picker usable, an `indeterminate` one
+  dismisses with the reconcile notice), and an optimistic intent is explicitly
+  not a committed save. EVERY in-flight default write (and its fenced
+  correction) is awaited before a fresh create, so the create consumes the
+  settled Host default. A FAILED latest intent is walked back in the UI and is
+  NOT seeded into the created Session (v2 §0.8.4): the fresh Session runs the
+  actual persisted Host default, never a fabricated choice, and the failure
+  cannot leak into a later create.
+
 ## /login and /logout resolve credential targets, not just DEEPSEEK_API_KEY
 
 The official deepseek adapter authenticates through `DEEPSEEK_API_KEY`;

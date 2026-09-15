@@ -1,7 +1,8 @@
 /**
- * Headless tests for the P6 preset wiring: `composeAgent` (roster-absent and
- * roster-present composition), `recordedPreset` (log-first resolution),
- * `recomposeBlank` (blank-only swap shared by /preset and --preset), and
+ * Headless tests for the P6/D2.3 preset wiring: `composeAgent` (roster-absent
+ * and roster-present composition), `recordedPreset` (log-first resolution),
+ * `selectBlankSessionPreset` (the official Host blank-Session write) +
+ * `turnBoundaryBlank` (the Host turn-boundary blank read), and
  * `presetDisplayText` (the English display copy for the shipped presets).
  * @module @xmoon76/dsh-pi-tui/preset.test
  */
@@ -9,13 +10,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
-import { composeAgent, recordedPreset, recomposeBlank, type RecomposableSession } from '../src/index.ts'
+import { composeAgent, recordedPreset } from '../src/index.ts'
 import { presetDisplayText } from '../src/commands.ts'
-import { sessionPresetOf, type SessionObservationLike } from '../src/runtime/direct/session-preset-direct.ts'
+import { selectBlankSessionPreset, sessionPresetOf, turnBoundaryBlank, type SessionObservationLike } from '../src/runtime/direct/session-preset-direct.ts'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import type { SessionHeader } from '@deepseek-ai/dsh-session'
 
 /** Minimal roster double recording every mount. */
 function roster(overrides: {
@@ -266,75 +267,33 @@ test('sessionPresetOf reads a header-only session through the projection seam', 
   assert.equal(sessionPresetOf(projectedCtx(), session), 'standard')
 })
 
-/** A blank/started session double recording appended selections. */
-function sessionWith(events: readonly SessionEvent[]): { session: RecomposableSession; appended: unknown[] } {
-  const appended: unknown[] = []
-  return {
-    appended,
-    // The current Session shape: the log is served through snapshot reads,
-    // never a live `events` array.
-    session: {
-      id: 's1',
-      snapshotEvents: () => events,
-      append: (_type: string, data: unknown) => { appended.push(data) },
-    },
-  }
-}
-
-test('recomposeBlank swaps a blank session and records the selection', async () => {
-  const recomposed: string[] = []
-  const fake = roster()
+test('selectBlankSessionPreset delegates to the official agentPresets.select seam', async () => {
+  const calls: Array<{ agent: unknown; id: string }> = []
   const service = {
-    ...fake.service,
-    recompose: async (_agentCtx: Context, id: string) => { recomposed.push(id); return { id } },
+    select: async (agent: unknown, id: string) => { calls.push({ agent, id }); return id },
   }
   const ctx = ctxWith(name => name === 'agentPresets' ? service : undefined)
-  const { session, appended } = sessionWith([])
-  const outcome = await recomposeBlank(ctx, { ctx: agentCtx(), session }, 'minimal')
-  assert.deepEqual(outcome, { kind: 'switched', preset: 'minimal' })
-  assert.deepEqual(recomposed, ['minimal'])
-  assert.deepEqual(appended, [{ agentPreset: 'minimal' }])
+  const agent = { id: 'agent-1' }
+  assert.equal(await selectBlankSessionPreset(ctx, agent, 'minimal'), 'minimal')
+  assert.deepEqual(calls, [{ agent, id: 'minimal' }], 'the Host owns the blank check and the recompose transaction')
 })
 
-test('recomposeBlank accepts a legal custom code preset', async () => {
-  const fake = roster()
-  const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)
-  const { session, appended } = sessionWith([])
-  const outcome = await recomposeBlank(ctx, { ctx: agentCtx(), session }, 'code')
-  assert.deepEqual(outcome, { kind: 'switched', preset: 'code' })
-  assert.deepEqual(appended, [{ agentPreset: 'code' }])
-})
-
-test('recomposeBlank refuses a started session without touching the roster', async () => {
-  let recomposed = 0
-  const service = {
-    ...roster().service,
-    recompose: async () => { recomposed += 1; return { id: 'x' } },
-  }
-  const ctx = ctxWith(name => name === 'agentPresets' ? service : undefined)
-  const { session, appended } = sessionWith([{ type: 'turn/start', seq: 1, time: 1, data: {} } as SessionEvent])
-  const outcome = await recomposeBlank(ctx, { ctx: agentCtx(), session }, 'minimal')
-  assert.deepEqual(outcome, { kind: 'locked' })
-  assert.equal(recomposed, 0)
-  assert.equal(appended.length, 0)
-})
-
-test('recomposeBlank throws without a roster', async () => {
+test('selectBlankSessionPreset throws without a preset service', async () => {
   const ctx = ctxWith(() => undefined)
-  const { session } = sessionWith([])
   await assert.rejects(
-    recomposeBlank(ctx, { ctx: agentCtx(), session }, 'standard'),
+    selectBlankSessionPreset(ctx, { id: 'agent-1' }, 'standard'),
     /agent presets unavailable/,
   )
 })
 
-test('recomposeBlank propagates an unknown-preset rejection', async () => {
-  const fake = roster({ unknown: true })
-  const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)
-  const { session } = sessionWith([])
+test('selectBlankSessionPreset propagates the official refusal (e.g. agent-preset/locked)', async () => {
+  const service = {
+    select: async () => { throw Object.assign(new Error('session has already started'), { code: 'agent-preset/locked' }) },
+  }
+  const ctx = ctxWith(name => name === 'agentPresets' ? service : undefined)
   await assert.rejects(
-    recomposeBlank(ctx, { ctx: agentCtx(), session }, 'nope'),
-    /not found/,
+    selectBlankSessionPreset(ctx, { id: 'agent-1' }, 'minimal'),
+    /already started/,
   )
 })
 
@@ -358,4 +317,17 @@ test('presetDisplayText renders file metadata for everything else', () => {
   // A user-authored preset may shadow a shipped id: trust decides.
   assert.deepEqual(presetDisplayText({ id: 'standard', trust: 'user', name: 'User Standard' }), { name: 'User Standard' })
   assert.deepEqual(presetDisplayText({ id: 'custom', trust: 'system' }), { name: 'custom' })
+})
+
+// ── D2.3 Host turn-boundary blank authority ───────────────────────────────
+
+test('turnBoundaryBlank reads the official turn-boundary authority, never the transcript', () => {
+  assert.equal(turnBoundaryBlank(undefined), true, 'no boundary recorded yet = blank')
+  assert.equal(turnBoundaryBlank(null), true)
+  assert.equal(turnBoundaryBlank({ openTurnStartSeq: null, lastTurn: 0 }), true)
+  assert.equal(turnBoundaryBlank({ openTurnStartSeq: 3, lastTurn: 0 }), false, 'an open turn is started')
+  assert.equal(turnBoundaryBlank({ openTurnStartSeq: null, lastTurn: 2 }), false, 'a completed turn is started')
+  assert.equal(turnBoundaryBlank({ openTurnStartSeq: 'x', lastTurn: 0 }), undefined, 'a malformed value is unknown')
+  assert.equal(turnBoundaryBlank({ lastTurn: 0 }), undefined)
+  assert.equal(turnBoundaryBlank(42), undefined)
 })

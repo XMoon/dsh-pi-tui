@@ -88,12 +88,29 @@ const SHIPPED_ROWS = [
 function presetService(
   rows: { id: string; name?: string; description?: string; trust?: string }[],
   defaultPresetId = 'standard',
+  selectFailure?: unknown,
+  /** Scripted Host lock state; undefined = derive from the fake transcript
+   *  (the pre-D2.3 double), true/false = the Host turn-boundary authority. */
+  selectLocked?: boolean,
 ) {
   const resolved: string[] = []
+  const selected: string[] = []
   return {
     resolved,
+    selected,
     service: {
       defaultId: defaultPresetId,
+      // The PUBLIC official roster projection (the @Remote('list') method).
+      remoteExportList: async () => ({
+        presets: rows.map(row => ({
+          id: row.id,
+          trust: row.trust ?? 'system',
+          isDefault: row.id === defaultPresetId,
+          ...row.name === undefined ? {} : { name: row.name },
+          ...row.description === undefined ? {} : { description: row.description },
+        })),
+        modeSelectionEnabled: true,
+      }),
       list: async () => rows.map(row => ({
         id: row.id,
         trust: row.trust ?? 'system',
@@ -106,6 +123,25 @@ function presetService(
         if (row === undefined) throw new Error(`agent-presets: preset "${id}" not found (available: standard)`)
         resolved.push(id!)
         return { id: row.id, trust: row.trust ?? 'system', path: `/presets/${row.id}` }
+      },
+      // The official blank-session select: re-checks the session's turn
+      // boundary and refuses a started one with agent-preset/locked.
+      select: async (agent: unknown, id: string) => {
+        if (selectFailure !== undefined) throw selectFailure
+        const row = rows.find(candidate => candidate.id === id)
+        if (row === undefined) throw Object.assign(new Error(`agent-presets: preset "${id}" not found (available: standard)`), { code: 'agent-preset/not-found' })
+        if (selectLocked === true) {
+          throw Object.assign(new Error('session has already started; its agent preset is fixed'), { code: 'agent-preset/locked' })
+        }
+        if (selectLocked !== false) {
+          const session = (agent as { session?: { snapshotEvents?: () => readonly { type: string }[] } }).session
+          const events = session?.snapshotEvents?.() ?? []
+          if (events.some(event => event.type === 'turn/start')) {
+            throw Object.assign(new Error('session has already started; its agent preset is fixed'), { code: 'agent-preset/locked' })
+          }
+        }
+        selected.push(id)
+        return id
       },
       composedPreset: () => undefined,
     },
@@ -129,7 +165,7 @@ function fakeCommands() {
   }
 }
 
-/** A stub runner with a MUTABLE pending preset and an optional recompose.
+/** A stub runner with a MUTABLE pending preset and a scripted Host blank read.
  * `refreshCatalog` records every request and resolves a scripted outcome
  * (a failed outcome by default, so a test that does not care about the
  * refresh still sees the preset change succeed). */
@@ -137,7 +173,9 @@ function stubRunner(options: {
   ctx: Context
   app: TuiApp
   agent: Agent | undefined
-  recomposeBlank?: (id: string) => Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
+  /** A mutable live-Session holder (agent + generation) for stale tests. */
+  state?: { agent: Agent | undefined; generation: number }
+  sessionBlank?: boolean
   refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
   ensureCalls?: string[]
   tuiSettings?: TuiSettingsLike
@@ -157,7 +195,7 @@ function stubRunner(options: {
     ctx: options.ctx,
     app: options.app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    get liveAgent() { return options.agent },
+    get liveAgent() { return options.state !== undefined ? options.state.agent : options.agent },
     ensureSession: async () => { options.ensureCalls?.push('ensureSession') },
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -165,6 +203,11 @@ function stubRunner(options: {
     setDefaultIntent: () => {},
     defaultIntentRecord: undefined,
     settleIntent: () => {},
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    sessionBlank: () => options.sessionBlank,
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
     agents: options.agents ?? {
@@ -178,7 +221,10 @@ function stubRunner(options: {
       measureContext: () => undefined,
        ...options.sessionReader,
     },
-    catalog: new DirectCatalogPort(options.ctx as never, () => undefined),
+    catalog: new DirectCatalogPort(options.ctx as never, (sessionId) => {
+      const live = options.state !== undefined ? options.state.agent : options.agent
+      return live?.session.id === sessionId ? live : undefined
+    }),
     config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),
     commandRegistry: options.ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
     hostFile: new DirectHostFilePort(() => undefined),
@@ -202,7 +248,7 @@ function stubRunner(options: {
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
-    get sessionGeneration() { return 0 },
+    get sessionGeneration() { return options.state?.generation ?? 0 },
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -216,7 +262,6 @@ function stubRunner(options: {
       refreshes.push(request)
       return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
     },
-    recomposeBlank: options.recomposeBlank ?? (async () => ({ kind: 'switched', preset: 'standard' })),
     refreshStatus: () => {},
     focusEnabled: () => false,
     setFocusMode: () => {},
@@ -266,7 +311,10 @@ function invoke(rawInput: string): CommandInvocation {
 function setup(options: {
   rows?: { id: string; name?: string; description?: string; trust?: string }[]
   agent?: Agent
-  recomposeBlank?: (id: string) => Promise<{ kind: 'switched'; preset: string } | { kind: 'locked' }>
+  state?: { agent: Agent | undefined; generation: number }
+  sessionBlank?: boolean
+  selectFailure?: unknown
+  selectLocked?: boolean
   refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
   settings?: { get(ns: string): unknown; mutate(ns: string, patch: unknown[]): Promise<unknown> }
   tuiSettings?: TuiSettingsLike
@@ -288,7 +336,7 @@ function setup(options: {
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
-  const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId)
+  const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked)
   ctx.provide('agentPresets', presets.service as never)
   if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
   const ensureCalls: string[] = []
@@ -296,7 +344,8 @@ function setup(options: {
     ctx,
     app,
     agent: options.agent,
-    recomposeBlank: options.recomposeBlank,
+    state: options.state,
+    sessionBlank: options.sessionBlank,
     refreshCatalog: options.refreshCatalog,
     ensureCalls,
     tuiSettings: options.tuiSettings,
@@ -509,16 +558,12 @@ test('/preset picker with no session sets the pending preset on one Enter', asyn
 })
 
 test('/preset picker switches a blank session with one Enter', async () => {
-  const recomposed: string[] = []
-  const t = setup({
-    agent: fakeAgent('s1', []),
-    recomposeBlank: async (id) => { recomposed.push(id); return { kind: 'switched', preset: id } },
-  })
+  const t = setup({ agent: fakeAgent('s1', []) })
   await t.run('')
   await t.view()
   t.vt.sendInput('\r')
   await t.view()
-  assert.deepEqual(recomposed, ['standard'], 'Enter must confirm the switch (values mechanism)')
+  assert.deepEqual(t.presets.selected, ['standard'], 'Enter must confirm the switch (values mechanism)')
   assert.equal(t.pending.value, undefined)
   const view = t.vt.getViewport().join('\n')
   assert.ok(view.includes('session preset switched to standard'), `notify missing:\n${view}`)
@@ -527,43 +572,40 @@ test('/preset picker switches a blank session with one Enter', async () => {
 })
 
 test('/preset <id> switches a blank session', async () => {
-  const recomposed: string[] = []
-  const t = setup({
-    agent: fakeAgent('s1', []),
-    recomposeBlank: async (id) => { recomposed.push(id); return { kind: 'switched', preset: id } },
-  })
+  const t = setup({ agent: fakeAgent('s1', []) })
   const result = await t.run('minimal')
   assert.deepEqual(result, { kind: 'success', text: 'session preset switched to minimal' })
-  assert.deepEqual(recomposed, ['minimal'])
+  assert.deepEqual(t.presets.selected, ['minimal'])
   t.app.stop()
 })
 
 test('/preset with a started session refuses without offering a roster', async () => {
-  const recomposed: string[] = []
-  const t = setup({
-    agent: fakeAgent('s1', [{ type: 'turn/start' }]),
-    recomposeBlank: async (id) => { recomposed.push(id); return { kind: 'locked' } },
-  })
+  const t = setup({ agent: fakeAgent('s1', [{ type: 'turn/start' }]), sessionBlank: false })
   const result = await t.run('') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
   assert.match(result.text, /only available in a new session/)
   const view = await t.view()
   assert.ok(!view.includes('Standard mode (standard)'), `roster offered for a started session:\n${view}`)
   assert.ok(view.includes('only available in a new session'), `notify missing:\n${view}`)
-  assert.deepEqual(recomposed, [])
+  assert.deepEqual(t.presets.selected, [])
+  t.app.stop()
+})
+
+test('/preset on a blank session opens the roster (Host blank authority, not the transcript)', async () => {
+  const t = setup({ agent: fakeAgent('s1', []), sessionBlank: true })
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  const view = await t.view()
+  assert.ok(view.includes('Standard mode (standard)'), `a blank session must offer the roster:\n${view}`)
   t.app.stop()
 })
 
 test('/preset <id> with a started session refuses with the locked text', async () => {
-  let recomposed = 0
-  const t = setup({
-    agent: fakeAgent('s1', [{ type: 'turn/start' }]),
-    recomposeBlank: async () => { recomposed += 1; return { kind: 'locked' } },
-  })
+  const t = setup({ agent: fakeAgent('s1', [{ type: 'turn/start' }]) })
   const result = await t.run('minimal') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
   assert.match(result.text, /has already started; its agent preset is fixed/)
-  assert.equal(recomposed, 1)
+  assert.deepEqual(t.presets.selected, [], 'the Host refusal is the final race check')
   t.app.stop()
 })
 
@@ -1129,5 +1171,110 @@ test('/keybindings reload refuses an absent settings service (no false "reloaded
   const result = await t.runCommand('keybindings', 'reload')
   assert.equal((result as { kind: string }).kind, 'error', 'an absent settings service must report an error result')
   assert.ok((result as { text: string }).text.includes('unavailable'), `error text missing: ${JSON.stringify(result)}`)
+  t.app.stop()
+})
+
+test('/preset <id> surfaces an indeterminate switch without retrying', async () => {
+  const t = setup({ agent: fakeAgent('s1', []), selectFailure: new Error('append exploded after recompose') })
+  const result = await t.run('minimal') as { kind: string; text: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /append exploded after recompose/)
+  assert.match(result.text, /do not retry/)
+  assert.deepEqual(t.presets.selected, [], 'an ambiguous switch is never retried')
+  t.app.stop()
+})
+
+test('/preset commits a Host-blank selection even when the transcript has a turn', async () => {
+  // The fake Host select is authoritative (selectLocked: false) while the fake
+  // transcript still has a turn/start: the command must open the roster AND
+  // commit the switch, proving it never folds the transcript itself.
+  const t = setup({ agent: fakeAgent('s1', [{ type: 'turn/start' }]), sessionBlank: true, selectLocked: false })
+  const opened = await t.run('') as { kind: string }
+  assert.equal(opened.kind, 'success')
+  const view = await t.view()
+  assert.ok(view.includes('Standard mode (standard)'), 'the Host turn-boundary authority wins over the transcript')
+  t.vt.sendInput('\r') // pick the first roster row
+  await t.view()
+  assert.deepEqual(t.presets.selected, ['standard'],
+    'the Host blank selection commits despite the transcript turn')
+  t.app.stop()
+})
+
+test('/preset supersedes (never error-notifies) a switch whose Session was replaced during the catalog refresh', async () => {
+  const state = { agent: fakeAgent('s1', []), generation: 1 }
+  const t = setup({
+    state,
+    sessionBlank: true,
+    selectLocked: false,
+    refreshCatalog: async () => {
+      // A transition lands while the refresh is in flight.
+      state.generation = 2
+      state.agent = fakeAgent('s2', [])
+      return { kind: 'failed', error: 'superseded by a switch' }
+    },
+  })
+  const result = await t.run('minimal') as { kind: string; text: string }
+  // v2 §0.2.1/§0.3.3: the committed switch lost local ownership — the surface
+  // moved, so no error notice belongs to it.
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /superseded by a newer choice/)
+  assert.deepEqual(t.presets.selected, ['minimal'],
+    'the Host switch itself committed before the surface moved')
+  t.app.stop()
+})
+
+test('/preset refuses an EMPTY transcript when the Host turn boundary says started', async () => {
+  const t = setup({ agent: fakeAgent('s1', []), sessionBlank: false })
+  const result = await t.run('') as { kind: string; text: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /only available in a new session/)
+  const view = await t.view()
+  assert.ok(!view.includes('Standard mode (standard)'), 'no roster is offered for a Host-started Session')
+  t.app.stop()
+})
+
+test('a newer preset pick supersedes an older pick on the same Session generation', async () => {
+  const state = { agent: fakeAgent('s1', []), generation: 1 }
+  let secondStarted = false
+  const holder: { run?: (rawInput: string) => Promise<unknown> } = {}
+  const t = setup({
+    state,
+    sessionBlank: true,
+    selectLocked: false,
+    refreshCatalog: async () => {
+      if (!secondStarted) {
+        secondStarted = true
+        // A newer pick starts while the older refresh is in flight.
+        await holder.run!('minimal')
+      }
+      return { kind: 'superseded', error: 'a newer refresh started' }
+    },
+  })
+  holder.run = t.run
+  const first = await t.run('standard') as { kind: string; text: string }
+  assert.equal(first.kind, 'success')
+  assert.match(first.text, /superseded by a newer choice/,
+    'the older pick must not report its superseded switch as the current one')
+  t.app.stop()
+})
+
+test('a newer sessionless preset pick supersedes an older one', async () => {
+  let secondStarted = false
+  const holder: { run?: (rawInput: string) => Promise<unknown> } = {}
+  const t = setup({
+    refreshCatalog: async () => {
+      if (!secondStarted) {
+        secondStarted = true
+        // A newer sessionless pick starts while the older refresh is in flight.
+        await holder.run!('minimal')
+      }
+      return { kind: 'applied', snapshot: {} as never }
+    },
+  })
+  holder.run = t.run
+  const first = await t.run('standard') as { kind: string; text: string }
+  assert.equal(first.kind, 'success')
+  assert.match(first.text, /superseded by a newer choice/)
+  assert.equal(t.pending.value, 'minimal', 'the newest sessionless pick is the effective pending preset')
   t.app.stop()
 })

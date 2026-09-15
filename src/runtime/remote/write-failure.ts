@@ -56,7 +56,7 @@ export function remoteFailureMessage(error: unknown): string {
 }
 
 /** A caller/backend cancellation proved by the official code or the error name. */
-function isRemoteCancellation(error: unknown): boolean {
+export function isRemoteCancellation(error: unknown): boolean {
   if (isCancellation(error)) return true
   const code = remoteFailureCode(error)
   return code === 'gateway/cancelled'
