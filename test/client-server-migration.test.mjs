@@ -1,9 +1,23 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join, sep } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+import {
+  classifyDeprecatedReaders,
+  collectSourceFiles,
+  DEPRECATED_READER_ALLOWLIST,
+  scanDeprecatedReaders,
+  scanSessionEvents,
+} from '../scripts/check-no-session-events.mjs'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const MIGRATION_DOC = new URL('../docs/client-server-migration.md', import.meta.url)
 const CI_WORKFLOW = new URL('../.github/workflows/ci.yml', import.meta.url)
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const GATE_SCRIPT = join(REPO_ROOT, 'scripts', 'check-no-session-events.mjs')
 
 test('migration status records the completed D1 read parity gates', () => {
   const document = readFileSync(MIGRATION_DOC, 'utf8')
@@ -50,4 +64,92 @@ test('D1.3 task, presentation, and closure smokes are Source Mode gates', () => 
       new RegExp(`- name: ${name}\\n\\s+if: env\\.DSH_MODE == 'source'\\n\\s+run: pnpm ${command}`),
     )
   }
+})
+
+// ── deprecated synchronous Session history reader freeze (WP2) ─────────────
+
+/** Write one synthetic source file under a temp root at `relPath`. */
+function syntheticSource(life, label, relPath, content) {
+  const root = life.tempDir(label)
+  const path = join(root, relPath)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, content)
+  return { root, path }
+}
+
+test('the real production tree passes the frozen deprecated-reader baseline', () => {
+  const result = spawnSync(process.execPath, [GATE_SCRIPT], { cwd: REPO_ROOT, encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stderr, /frozen deprecated-reader debt call site/u)
+})
+
+test('the gate scans production src/** only, never test fixtures', () => {
+  const files = collectSourceFiles()
+  assert.ok(files.length > 0)
+  for (const path of files) {
+    assert.ok(path.startsWith(join(REPO_ROOT, 'src') + sep), `scanned outside src: ${path}`)
+    assert.ok(!path.includes(`${sep}test${sep}`), `scanned a test fixture: ${path}`)
+  }
+})
+
+test('a NEW production deprecated-reader call is rejected (snapshotEvents / eventAt / ownEvents)', (t) => {
+  const life = testLifecycle(t)
+  for (const [call, line] of [
+    ['snapshotEvents', 'export const events = session.snapshotEvents()\n'],
+    ['eventAt', 'export const event = session.eventAt(seq)\n'],
+    ['ownEvents', 'export const events = session.ownEvents()\n'],
+  ]) {
+    const { root, path } = syntheticSource(life, `gate-${call}-`, 'src/new-reader.ts', line)
+    const offenders = scanDeprecatedReaders([path], { root })
+    assert.equal(offenders.length, 1, `${call} must be detected`)
+    assert.equal(offenders[0].call, call)
+    const { unallowed, stale } = classifyDeprecatedReaders(offenders, [])
+    assert.equal(unallowed.length, 1, `${call} must be rejected without an allowance`)
+    assert.deepEqual(stale, [])
+  }
+})
+
+test('a whitespace or newline form of a deprecated reader is still detected', (t) => {
+  const life = testLifecycle(t)
+  for (const [call, content] of [
+    ['snapshotEvents', 'export const a = session.snapshotEvents ()\n'],
+    ['eventAt', 'export const b = session.eventAt\n  (seq)\n'],
+    ['ownEvents', 'export const c = session.ownEvents\t()\n'],
+  ]) {
+    const { root, path } = syntheticSource(life, `gate-ws-${call}-`, 'src/new-reader.ts', content)
+    const offenders = scanDeprecatedReaders([path], { root })
+    assert.equal(offenders.length, 1, `${call} whitespace form must be detected`)
+    assert.equal(offenders[0].call, call)
+    assert.equal(classifyDeprecatedReaders(offenders, []).unallowed.length, 1)
+  }
+})
+
+test('a removed Session.events read is still rejected', (t) => {
+  const life = testLifecycle(t)
+  const { path } = syntheticSource(life, 'gate-events-', 'src/legacy.ts', 'export const events = session.events\n')
+  const offenders = scanSessionEvents([path])
+  assert.equal(offenders.length, 1)
+  assert.equal(offenders[0].line, 1)
+})
+
+test('an allowlisted call cannot be swapped for a different call site in the same file', (t) => {
+  const life = testLifecycle(t)
+  // Same file as an allowance, DIFFERENT expression: a per-file count would
+  // excuse it; the file + normalized call-site key must not.
+  const { root, path } = syntheticSource(life, 'gate-swap-', 'src/transcript.ts', 'export const events = session.snapshotEvents()\n')
+  const offenders = scanDeprecatedReaders([path], { root })
+  const { unallowed, stale } = classifyDeprecatedReaders(offenders)
+  assert.equal(unallowed.length, 1, 'a renamed/moved call site must not be excused')
+  assert.ok(stale.some(entry => entry.file === 'src/transcript.ts'), 'the original allowance is now stale')
+})
+
+test('the exact allowlisted call site is accepted and leaves no stale allowance', (t) => {
+  const life = testLifecycle(t)
+  const allowance = DEPRECATED_READER_ALLOWLIST.find(entry => entry.file === 'src/transcript.ts')
+  assert.ok(allowance !== undefined)
+  const { root, path } = syntheticSource(life, 'gate-allow-', allowance.file, `${allowance.site}\n`)
+  const offenders = scanDeprecatedReaders([path], { root })
+  const { unallowed, stale } = classifyDeprecatedReaders(offenders, [allowance])
+  assert.deepEqual(unallowed, [])
+  assert.deepEqual(stale, [])
 })

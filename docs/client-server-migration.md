@@ -361,17 +361,31 @@ The M2/M3 Remote backend should additionally map to the official seams below
 its current implementation; these are recorded as the official Remote
 opportunities, not as Direct-mode changes.
 
-### Session log access (alpha.4)
+### Session log access (0.1.6 deprecation)
 
-`Session.events` was REMOVED as a public getter in alpha.4. The official
-reads are `session.seq` (the next event's offset — the count without
-materializing the log), `session.eventAt(SessionSeq)` (one exact event), and
-`session.snapshotEvents(from?, toExclusive?)` (a cached immutable range
-snapshot; the TUI uses it only where a complete raw fold is genuinely
-needed — transcript export, rewind/fork seeds, cold hydration — never for a
-count or a last-event peek). A future Remote adapter maps these onto the
-official client session contract; nothing in the TUI may regress to a live
-`events` array (`scripts/check-no-session-events.mjs` gates `src/`).
+`Session.events` was REMOVED as a public getter in alpha.4. DSH 0.1.6 then
+DEPRECATED the synchronous history readers `session.eventAt(SessionSeq)`,
+`session.snapshotEvents(from?, toExclusive?)` and `session.ownEvents()`:
+existing production logic may remain unmigrated for now, but NEW production
+calls, aliases and wrappers are prohibited.
+
+- `session.seq` remains the count/offset fact that needs no history
+  materialization.
+- The Direct backend's existing reader calls (transcript reconstruction,
+  rewind/fork seeds, cold hydration, Direct status/presentation folds) are
+  compatibility debt FROZEN by `scripts/check-no-session-events.mjs`: an explicit
+  file + normalized call-site allowlist, so a call cannot move to another file
+  or be swapped for another call site, and a removed call must drop its
+  allowance. `ownEvents()` has no allowance — its first appearance fails.
+- Projection/state consumers must not scan history; they read the projection (or
+  the current event).
+- Remote/client history uses the official Client observation seam plus explicit
+  async paging; nothing in the TUI may regress to a live `events` array or a
+  synchronous raw-log wrapper.
+- A genuine full-history read (fork, canonical export) must later use the
+  official async authoritative seam — never a new TUI-private history service.
+  D2.4's fork authority is the official `session.fork` completed-turn cut (see
+  the D2.4 note below), never the Direct raw snapshot helper.
 
 ### Subagent human prompt (alpha.4)
 
