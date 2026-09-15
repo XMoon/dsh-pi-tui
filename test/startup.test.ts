@@ -210,6 +210,66 @@ test('--help never runs the action, on any harness', (t) => {
   }
 })
 
+/** Mount the startup row with captured `appReady` listeners and `appExit` codes. */
+function mountStartupWithReady(args: string[] = []): {
+  ctx: Context
+  fireReady: () => void
+  exitCodes: number[]
+  readyListenerCount: () => number
+} {
+  const exitCodes: number[] = []
+  const listeners: (() => void)[] = []
+  const ctx = new Context()
+  ctx.provide('cmdlineArgs', { get: () => args })
+  ctx.provide('appExit', ((code: number) => { exitCodes.push(code) }) as never)
+  ctx.provide('appReady', ({
+    onReady: (listener: () => void) => { listeners.push(listener); return () => {} },
+  }) as never)
+  applyStartup(ctx)
+  return { ctx, fireReady: () => { for (const listener of [...listeners]) listener() }, exitCodes, readyListenerCount: () => listeners.length }
+}
+
+test('committed readiness without a mounted TUI surface exits nonzero with an actionable error', () => {
+  const { ctx, fireReady, exitCodes } = mountStartupWithReady([])
+  const startup = ctx.get(TUI_STARTUP_SERVICE) as { markSurfaceMounted?: () => void } | undefined
+  assert.ok(startup !== undefined, 'a normal invocation provides the startup service')
+  assert.equal(typeof startup.markSurfaceMounted, 'function', 'the runner mount seam must be provided')
+  const stderr = captureStderr()
+  try {
+    fireReady()
+  } finally {
+    stderr.restore()
+  }
+  assert.deepEqual(exitCodes, [1], 'a missing required surface must exit nonzero')
+  const joined = stderr.lines.join('')
+  assert.match(joined, /required TUI surface did not mount/u)
+  assert.match(joined, /--profile pi-tui/u)
+})
+
+test('a mounted surface leaves committed readiness untouched', () => {
+  const { ctx, fireReady, exitCodes } = mountStartupWithReady([])
+  const startup = ctx.get(TUI_STARTUP_SERVICE) as { markSurfaceMounted?: () => void } | undefined
+  startup?.markSurfaceMounted?.()
+  const stderr = captureStderr()
+  try {
+    fireReady()
+  } finally {
+    stderr.restore()
+  }
+  assert.deepEqual(exitCodes, [], 'a mounted surface must not exit')
+  assert.deepEqual(stderr.lines, [])
+})
+
+test('--help never arms the missing-surface handshake', () => {
+  // `--help` runs no action, so the readiness handshake is never registered
+  // (commander's own help path exits 0 through appExit, which is unrelated).
+  const { ctx, fireReady, exitCodes, readyListenerCount } = mountStartupWithReady(['--help'])
+  assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined)
+  assert.equal(readyListenerCount(), 0, '--help must not register a readiness listener')
+  fireReady()
+  assert.deepEqual(exitCodes, [0], 'only commander\'s own help exit is requested')
+})
+
 test('incompatibleHarnessMessage is actionable and names both versions', () => {
   const entry = harnessCompatEntryFor('0.1.0-rc.8')
   assert.ok(entry !== undefined, 'rc.8 must match an incompatible entry')

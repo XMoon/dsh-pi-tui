@@ -242,6 +242,7 @@ async function main() {
       ['documentation tests', ['test:docs']],
       ['Pi surface compatibility gate', ['gate:pi-surface-compat']],
       ['TUI candidate build and pack', ['pack:release']],
+      ['TUI startup strictness smoke', ['smoke:startup-strictness']],
     ]) await run(PNPM_COMMAND, args, workspace, label, npmEnvironment)
     const candidate = candidateTarball(workspace)
     assertNoSourceLeak(candidate)

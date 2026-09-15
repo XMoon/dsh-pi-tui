@@ -213,6 +213,30 @@ export interface TuiStartupValues {
   sessionId?: string
   /** `--preset`, the agent preset a fresh session starts on. */
   presetId?: string
+  /**
+   * Mark the TUI required surface as mounted. `src/index.ts` calls this once
+   * its synchronous initialization succeeded and its async startup root is
+   * established. The readiness handshake registered by this row exits nonzero
+   * when the launcher commits readiness without it: 0.1.6 app-boot treats a
+   * failed `tui-app` row as an OPTIONAL plugin failure, so without this the
+   * explicitly requested TUI could report a successful startup that never
+   * mounted. Optional so structural test providers can omit it.
+   */
+  markSurfaceMounted?(): void
+}
+
+/**
+ * The actionable error for a committed startup whose TUI surface never
+ * mounted. The launcher proved the tree booted, but `--profile pi-tui` asked
+ * for this surface, so the outcome is an error rather than an optional plugin
+ * warning.
+ */
+function surfaceNotMountedMessage(): string {
+  return [
+    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked with --profile pi-tui, but the required TUI surface did not mount.`,
+    'The tui-app row failed to import/apply or stayed pending on a dependency (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
+    'This installation cannot run the terminal UI; reinstall the profile or fix its composition, then re-run: dsh --profile pi-tui',
+  ].join('\n')
 }
 
 /** This app's command: its flags, its description, and its help text. */
@@ -256,10 +280,25 @@ export function apply(ctx: Context): void {
         process.stderr.write(`\n${message}\n\n`)
       }
     }
+    // TUI-owned startup strictness. 0.1.6 app-boot fails fast only for the
+    // launcher's OWN required entry ids; every other inactive or failed entry
+    // is an OPTIONAL warning and healthy siblings continue. The user
+    // explicitly invoked `--profile pi-tui`, so the TUI owns the strictness
+    // for its OWN required surface: when readiness commits without the runner
+    // having mounted, print the actionable error and exit nonzero. `--help`
+    // never reaches this action, and a fatal launcher boot never calls
+    // `onReady`, so this cannot mask a real boot failure.
+    let surfaceMounted = false
+    ctx.get('appReady')?.onReady(() => {
+      if (surfaceMounted) return
+      process.stderr.write(`\n${surfaceNotMountedMessage()}\n\n`)
+      ctx.get('appExit')?.(1)
+    })
     const options = program.opts<{ session?: string; preset?: string }>()
     ctx.provide(TUI_STARTUP_SERVICE, {
       ...(options.session !== undefined ? { sessionId: options.session } : {}),
       ...(options.preset !== undefined ? { presetId: options.preset } : {}),
+      markSurfaceMounted: () => { surfaceMounted = true },
     } satisfies TuiStartupValues)
   })
   parseCmdline(ctx, program)

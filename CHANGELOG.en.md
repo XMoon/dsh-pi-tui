@@ -39,6 +39,13 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   bounded edit search (256 edits) degrades to a coarse whole-fragment
   replacement, and the folded `+N/-M` totals come from the same derivation as
   the expanded body.
+- **A failed TUI startup is no longer silently treated as an optional plugin
+  failure.** DSH 0.1.6 app-boot fails fast only for its own required rows and
+  merely warns about inactive/failed ones, while `--profile pi-tui` explicitly
+  asks for the TUI surface. When startup commits but the `tui-app` row never
+  mounted (import/apply failure or a dependency left pending), the bundle now
+  prints an actionable error and **exits nonzero** — never a warning-plus-success
+  or a lingering process.
 
 ## [0.4.6] - 2026-09-13
 
