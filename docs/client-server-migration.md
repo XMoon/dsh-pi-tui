@@ -11,7 +11,7 @@
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
-M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 IN PROGRESS: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section)
+M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 DONE: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section; D2.4 (NEXT): seed/fork metadata convergence)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -904,7 +904,7 @@ port is never invoked and the draft is preserved
 `HostCommandOutcome` is therefore deliberately not widened with an
 `unsupported` branch.
 
-## D2.3 status — experimental Remote model / preset / create-open lifecycle
+## D2.3 status (COMPLETE) — experimental Remote model / preset / create-open lifecycle
 
 D2.3 converges Session-local model selection, blank-Session preset selection,
 ordinary fresh create and ordinary open onto the official DSH Host/Client
@@ -961,11 +961,11 @@ Session mount.
   `{ sessionId, signal? }` (no `resumeSessionId`, provider/model or preset
   knobs). The Direct adapter resolves the Host global default for activation
   and the persisted recorded preset for an open; the `create`/`open` port
-  surface stays the official Client concept. A fresh create coordinates with
-  the newest sessionless `/model` global-default write before dispatch so it
-  consumes the settled Host default instead of racing an older one; that wait
-  is abort-aware, so a hung Host save can never block first creation past
-  shutdown.
+  surface stays the official Client concept. A fresh create quiesces ALL
+  in-flight sessionless `/model` global-default writes and their fenced
+  corrections before dispatch, so it consumes the settled Host default instead
+  of racing any of them; that wait is abort-aware, so a hung Host save can never
+  block first creation past shutdown.
 - `RemoteSessionLifecycle` uses official `ClientSessions.create()` for the
   ordinary create (reconciled list + binding), the generated
   `session.create({sessionId, cwd, agentPreset})` + Client-state reconciliation
@@ -995,7 +995,13 @@ Session mount.
   The footer model label shows the in-flight selection as `(selecting…)` while
   keeping the authoritative current value; a rejected settle keeps the prior
   current and shows the Host refusal; a late settle from a replaced Session
-  generation cannot repaint the new Session and makes no close/open decision. A
+  generation cannot repaint the new Session and makes no close/open decision.
+  `/model` and `/preset` capture their semantic SUBJECT once — the Session
+  GENERATION plus the EXACT session identity (including `undefined` for a
+  sessionless surface) — and re-fence it after every await and before any UI
+  mutation, so a same-generation Session-identity drift is `superseded` too,
+  not only a generation bump; the typed `/preset <id>` path binds the subject it
+  started with, never whatever Session exists when an await returns. A
   live Session model write is NOT a sessionless global-default intent (the
   tracker is sessionless-only). A sessionless default write that settles
   `indeterminate` keeps an explicit `(unconfirmed)` footer marker until an
@@ -1012,7 +1018,9 @@ Validation for this stage: per-adapter contract tests for the Remote model,
 preset and lifecycle adapters; the D2.3 Direct contract/outcome tests; headless
 model/preset/create/open presentation tests; and the same-Host
 `smoke:remote-d2-lifecycle` integration smoke. The boundary gate stays green
-and `packages/pi-tui/**` is unchanged.
+and `packages/pi-tui/**` is unchanged. D2.3 is COMPLETE; the next stage is D2.4
+(seed/fork metadata convergence), which owns Host fork and the remaining
+create/fork metadata.
 
 
 

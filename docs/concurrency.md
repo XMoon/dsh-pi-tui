@@ -248,20 +248,32 @@ attachment preparation cannot let a later gesture overtake an earlier one.
   outcome drives presentation: `committed` follows the authoritative Session
   projection, `rejected`/`cancelled` returns to the model list with the Host
   refusal, and `indeterminate` dismisses without retry and never claims the
-  requested model. A late settle whose captured session generation no longer
-  matches is dropped (no repaint, no close/open decision) and makes no
-  default-intent claim: the sessionless global-default tracker is never
-  entered by a live Session write, so nothing leaks into a later fresh create.
+  requested model. `/model` and `/preset` capture their semantic SUBJECT once —
+  the Session generation PLUS the exact session identity (including `undefined`
+  for a sessionless surface) — and re-fence it after EVERY await and before any
+  UI mutation; a same-generation Session-identity drift is `superseded` exactly
+  like a generation bump, so it is dropped (no repaint, no close/open decision,
+  no notice). A dropped live Session write also makes no default-intent claim:
+  the sessionless global-default tracker is never entered by a live Session
+  write, so nothing leaks into a later fresh create.
 - Preset selection stays inside the local transition gate as coordination
   only: the Host owns the serialized switch, the blank re-check, the recompose
-  transaction and the durable commit. The command revalidates the captured
-  Session identity/generation INSIDE the gate before dispatch AND after the
-  follow-up catalog refresh (a superseded refresh never repaints), and blankness
-  for the picker comes from the official turn-boundary projection, never the
-  TUI transcript. `agent-preset/locked` is the
+  transaction and the durable commit. The command captures the subject once
+  (the typed `/preset <id>` path binds the subject it started with, never
+  whatever Session exists when an await returns) and revalidates it after every
+  await — roster, resolve, the Host transition (before classifying the result)
+  and the follow-up catalog refresh (a superseded refresh never repaints).
+  Blankness for the picker comes from the official turn-boundary projection,
+  never the TUI transcript. `agent-preset/locked` is the
   race-proof final authority and maps to the started-session wording; the TUI
   never mutates its display to a rejected choice.
-- A sessionless `/model` choice is a global-default intent. EVERY in-flight
+- A sessionless `/model` choice is a global-default intent. The footer derives
+  its sessionless marker from that single tracker: `(selecting…)` while the
+  default write is in flight, an explicit `(unconfirmed)` once it settles
+  `indeterminate`, and NOTHING once an authoritative Host read reconciles it
+  (the persisted default either carries the choice — committed — or proves it
+  did not land); a reconciliation that restores an older still-pending intent
+  shows `(selecting…)` again. EVERY in-flight
   write (and its fenced correction) is tracked and a fresh create AWAITS their
   settle before dispatching, so the Direct adapter's Host-default activation
   cannot race an older value; the wait is abort-aware, so a hung Host save can
