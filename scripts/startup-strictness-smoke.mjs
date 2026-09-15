@@ -16,6 +16,11 @@
  * Usage: node scripts/startup-strictness-smoke.mjs [path-to-candidate.tgz]
  *        pnpm smoke:startup-strictness -- [path-to-candidate.tgz]
  *
+ * CI runs this as the npm-mode step of the `Build and pack` job against the
+ * packed candidate. It is deliberately NOT part of `compat:dsh:npm`, which
+ * would install the whole DSH distribution a second time in the same lane;
+ * a standalone run performs that isolated install itself.
+ *
  * Set STARTUP_STRICTNESS_KEEP=1 to preserve the isolated profile on failure.
  * @module startup-strictness-smoke
  */
