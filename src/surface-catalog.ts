@@ -31,8 +31,8 @@ interface SurfaceCatalogAgent {
 }
 
 /** Local structural command face, compatible with both npm and Source Mode DSH.
- * The optional identity is absent from the npm rc.1 descriptor but present in
- * the pinned Source Mode descriptor. */
+ * The optional identity is part of the official 0.1.6 descriptor; an older
+ * runtime's descriptor may omit it. */
 interface SurfaceCommandDescriptor {
   readonly definitionId?: string
   readonly name: string

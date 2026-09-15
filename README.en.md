@@ -55,10 +55,10 @@ next compatibility range, and fallback paths.
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
 | `0.4.6` (published `@latest`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable line; rc.1 minimum, rc.2 compatible |
-| Current `next` npm line (this checkout; version `0.4.6`) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current next line |
+| Current `next` npm line (this checkout; version `0.4.7-alpha.1`) | `dsh-v0.1.6-alpha.1` | Current next line |
 
 Do not mix the stable and `next` lines. The current `next` checkout declares
-the published `0.1.5-rc.1` npm floor; older runtimes fail at the normal
+the published `0.1.6-alpha.1` npm floor; older runtimes fail at the normal
 incompatible-runtime boundary. The startup notice is best-effort rather than a
 Loader startup-order guarantee. See the [full historical compatibility matrix](docs/dsh-compatibility.md)
 for official-tag pairings and fallback commands, and see the [latest `next`
@@ -557,7 +557,7 @@ This section contains DSH compatibility and CI validation details only; ordinary
 ### npm mode (current `next`)
 
 The current `next` line is npm mode: it targets the published
-`dsh-v0.1.5-rc.1` family declared by this checkout's `package.json` and
+`dsh-v0.1.6-alpha.1` family declared by this checkout's `package.json` and
 resolved by its frozen lockfile. The isolated npm driver installs that exact
 family from the public registry and exercises the TUI build/test/package path:
 

@@ -265,11 +265,11 @@ test('official preset npm target uses the checkout npm dependency version', () =
   const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   const expectedNpmVersion = Object.entries(packageJson.devDependencies ?? {})
     .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
-  const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.5-rc.1'
+  const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.6-alpha.1'
   assert.equal(expectedNpmVersion, expectedNpmTarget, 'the package must keep the declared npm target')
-  assert.equal(currentValidatedDshVersion(), '0.1.5-rc.2')
+  assert.equal(currentValidatedDshVersion(), '0.1.6-alpha.1')
   assert.equal(npmDshVersion(), expectedNpmVersion)
-  assert.equal(npmDshVersion({ devDependencies: { '@deepseek-ai/dsh-agent': '0.1.5-rc.1' } }), '0.1.5-rc.1')
+  assert.equal(npmDshVersion({ devDependencies: { '@deepseek-ai/dsh-agent': '0.1.6-alpha.1' } }), '0.1.6-alpha.1')
   assert.throws(() => npmDshVersion({ devDependencies: { '@deepseek-ai/dsh-agent': 'workspace:*' } }), /exact SemVer/u)
 })
 

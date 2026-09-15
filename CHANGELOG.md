@@ -7,6 +7,31 @@
 
 ## [Unreleased]
 
+### 安装与版本对应
+
+本版本把 `next` npm 线的 DSH 兼容目标推进到 `0.1.6-alpha.1`：最低兼容 DSH
+`0.1.6-alpha.1`，peer floor 为 `>=0.1.6-alpha.1`。安装 DSH 时需要显式允许其
+原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+旧版 DSH `0.1.5-rc.1`/`0.1.5-rc.2` 继续使用稳定版
+`@xmoon76/dsh-pi-tui@0.4.6`。
+
+### 变更
+
+- **preset 选择可见性跟随部署策略。** 当部署把 `modeSelectionEnabled` 设为
+  `false` 时，`/preset` 不再出现在斜杠候选与 `/help` 中，直接输入 `/preset`
+  仍按官方策略拒绝；roster 不可用时保持原展示，不做推测。
+- **PTC / workflow runtime 对齐官方 0.1.6 组合。** `ptc` preset 现在通过官方
+  `ptc-runtime` 行获得 PTC 运行时；TUI 不再自行插入已退休的
+  `code-runtime-worker-thread` 行，host 平面的 workflow 行也对齐到官方
+  `workflow-ptc`。
+
 ## [0.4.6] - 2026-09-13
 
 ### 安装与版本对应
