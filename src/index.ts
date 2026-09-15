@@ -209,7 +209,7 @@ import { serializeTuiSettingsMutation } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
 import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-direct.ts'
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
-import { directAgentOf, ownerHandleOf, type CreateSessionRequest, type OpenSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
+import { directAgentOf, ownerHandleOf, requireCreated, requireOpened, type CreateSessionRequest, type OpenSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
 import type { HostCommandOutcome } from './runtime/host-command-port.ts'
 import type { PendingInputItem } from './runtime/pending-input-reader-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
@@ -2194,10 +2194,10 @@ export function apply(ctx: Context, config: Config): void {
         // default activation fallback internally from the official
         // observation seam; the cross-backend open request carries only the
         // Session identity.
-        handle = await backend.sessionLifecycle.open({
+        handle = requireOpened(await backend.sessionLifecycle.open({
           sessionId: String(sessionId),
           signal: lifecycleController.signal,
-        })
+        }))
         resumeResolved = true
         // Suspend the pre-mount status before ANY ordinary log output
         // (uniform rule): the status owns the current terminal line, and
@@ -2661,10 +2661,10 @@ export function apply(ctx: Context, config: Config): void {
           target: { id: sessionId },
           // A rejected open leaves the target untouched: no pin, no retry —
           // the CURRENT session stays live and the user can retry the switch.
-          create: () => backend.sessionLifecycle.open({
+          create: async () => requireOpened(await backend.sessionLifecycle.open({
             sessionId,
             signal: lifecycleController.signal,
-          }),
+          })),
         })
         if (!result.ok) {
           // The resume failed: the CURRENT session is still live.
@@ -3094,8 +3094,8 @@ export function apply(ctx: Context, config: Config): void {
     // All command/fork/rewind lifecycle calls share this composition-root
     // bridge so no child-creation path can bypass the runner lifetime.
     const lifecycleAgents: TuiCommandRunner['agents'] = {
-      create: (options) => backend.sessionLifecycle.create({ ...options, signal }),
-      open: (options) => backend.sessionLifecycle.open({ ...options, signal }),
+      create: async (options) => requireCreated(await backend.sessionLifecycle.create({ ...options, signal })),
+      open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }
     // Abort handle for the currently running `!` shell command.
     let localShellController: AbortController | undefined
@@ -8674,12 +8674,12 @@ export function apply(ctx: Context, config: Config): void {
           // the actual Host default, not a fabricated choice.
           await awaitPendingDefaultWrite(lifecycleController.signal)
           lifecycleController.signal.throwIfAborted()
-          return backend.sessionLifecycle.create({
+          return requireCreated(await backend.sessionLifecycle.create({
             sessionId: String(sessionId),
             meta: { cwd: process.cwd(), ...withPresetMeta(composition) },
             agentPreset: composition.agentPreset,
             signal: lifecycleController.signal,
-          })
+          }))
         }
         let created: SessionHandle
         try {

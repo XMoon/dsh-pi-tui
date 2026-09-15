@@ -326,8 +326,9 @@ async function main() {
     // CREATE (a): ordinary create with no explicit preset routes through the
     // official ClientSessions.create and is addressable on resolution.
     {
-      const handle = await lifecycle.create({ sessionId: ORDINARY_SESSION_ID, meta: { cwd: join(workRoot, 'ordinary') } })
-      assert.deepEqual(handle, { session: { id: ORDINARY_SESSION_ID } })
+      const ordinaryResult = await lifecycle.create({ sessionId: ORDINARY_SESSION_ID, meta: { cwd: join(workRoot, 'ordinary') } })
+      assert.equal(ordinaryResult.ownership, 'current')
+      assert.deepEqual(ordinaryResult.outcome, { kind: 'created', handle: { session: { id: ORDINARY_SESSION_ID } } })
       assert.ok(sessions.binding(ORDINARY_SESSION_ID) !== undefined, 'ordinary create left no Client binding')
       assert.equal(sessions.list.getSnapshot().ids.includes(ORDINARY_SESSION_ID), true)
       assert.ok(host.ctx.sessions.get(SessionId(ORDINARY_SESSION_ID)) !== undefined, 'ordinary create reached no Host Session')
@@ -337,12 +338,13 @@ async function main() {
     // CREATE (b): a guaranteed-fresh create WITH an explicit preset uses the
     // generated `session.create` and reconciles Client state.
     {
-      const handle = await lifecycle.create({
+      const freshResult = await lifecycle.create({
         sessionId: FRESH_SESSION_ID,
         meta: { cwd: join(workRoot, 'fresh') },
         agentPreset: PRESET_B,
       })
-      assert.deepEqual(handle, { session: { id: FRESH_SESSION_ID } })
+      assert.equal(freshResult.ownership, 'current')
+      assert.deepEqual(freshResult.outcome, { kind: 'created', handle: { session: { id: FRESH_SESSION_ID } } })
       assert.ok(sessions.binding(FRESH_SESSION_ID) !== undefined, 'explicit-preset create left no Client binding')
       const hostSession = host.ctx.sessions.get(SessionId(FRESH_SESSION_ID))
       assert.ok(hostSession !== undefined, 'explicit-preset create reached no Host Session')
@@ -352,7 +354,8 @@ async function main() {
     }
 
     // A dedicated blank Session for the committed preset switch.
-    await lifecycle.create({ sessionId: BLANK_SESSION_ID, meta: { cwd: join(workRoot, 'blank') } })
+    const blankResult = await lifecycle.create({ sessionId: BLANK_SESSION_ID, meta: { cwd: join(workRoot, 'blank') } })
+    assert.equal(blankResult.outcome.kind, 'created')
 
     // MODEL: the official directory read, the normalized commit, and the
     // durable `modelSelection` projection for the same Session.
@@ -442,7 +445,10 @@ async function main() {
     {
       const resumeBefore = host.resumeCalls.length
       const opensBefore = openCalls.length
-      const handle = await lifecycle.open({ sessionId: FRESH_SESSION_ID })
+      const openResult = await lifecycle.open({ sessionId: FRESH_SESSION_ID })
+      assert.equal(openResult.ownership, 'current')
+      assert.equal(openResult.outcome.kind, 'opened')
+      const handle = openResult.outcome.kind === 'opened' ? openResult.outcome.handle : undefined
       assert.deepEqual(handle, { session: { id: FRESH_SESSION_ID } })
       assert.equal(openCalls.length, opensBefore + 1, 'open did not route through ClientSessions.open')
       assert.equal(openCalls.at(-1), FRESH_SESSION_ID)

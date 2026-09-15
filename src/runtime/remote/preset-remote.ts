@@ -68,14 +68,15 @@ function copyRoster(roster: PresetRosterDto): PresetRosterDto {
 /**
  * Operation-specific settlement for `agentPresets.select`. Only an EXACT
  * proven pre-commit refusal (`agent-preset/locked`, `agent-preset/not-found`,
- * `agent-preset/invalid`, `gateway/bad-request`, a pre-invocation Gateway code)
- * is `rejected`; anything else is `indeterminate`. The D2.2 broad refusal
- * helper is deliberately NOT used and no namespace prefix is treated as proof.
+ * `agent-preset/invalid`, `session/not-found`, `session/agent-busy`,
+ * `gateway/bad-request`, a pre-invocation Gateway code) is `rejected`;
+ * anything else is `indeterminate`. The D2.2 broad refusal helper is
+ * deliberately NOT used and no namespace prefix is treated as proof.
  *
- * Unlike `session.selectModel`, `agentPresets.select` has no Client-side
- * binding precondition, so a `session/*` error raised inside the generated
- * call is NOT, at the Client boundary, proof that the preset business method
- * was never invoked (v2 §0.7.2) — it stays `indeterminate`.
+ * `session/not-found`/`session/agent-busy` are proven because the pinned Host
+ * resolves the Agent via `resolveAgent()` BEFORE `agentPresets.select` enters
+ * its mutation (§0.7.2). `gateway/internal` stays indeterminate: it is too
+ * broad to prove no preset mutation happened.
  *
  * This classifier only ever runs AFTER dispatch, so a cancellation code is
  * likewise `indeterminate` (§0.2.4); pre-dispatch cancellation is
@@ -85,6 +86,8 @@ export function classifyRemotePresetFailure(error: unknown): RemoteWriteFailure 
   const code = remoteFailureCode(error)
   const proven = code !== undefined && (
     code === 'gateway/bad-request'
+    || code === 'session/not-found'
+    || code === 'session/agent-busy'
     || REMOTE_PRESET_REFUSAL_CODES.has(code)
     || GATEWAY_PRE_INVOCATION_CODES.has(code)
   )

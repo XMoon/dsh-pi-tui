@@ -164,7 +164,10 @@ export class RemoteModelCatalog implements ModelCatalog {
    *  reconnect hides the (possibly not-yet-reset) live binding projection too,
    *  so the previous Host's model can never become authoritative. */
   private lastLoadedGeneration: unknown
-  /** Owner token for overlapping same-generation selections (v2 §0.2.5). */
+  /** Owner token for overlapping same-generation selections (v2 §0.2.5).
+   *  adapter-global is accepted ONLY under the current single-live-session TUI
+   *  invariant; if one adapter later serves independently writable concurrent
+   *  Session surfaces, key the ownership epoch by semantic subject/sessionId. */
   private writeEpoch = 0
 
   constructor(

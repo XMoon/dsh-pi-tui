@@ -32,7 +32,16 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/session-lifecycle-remote
  */
 
-import type { CreateSessionRequest, OpenSessionRequest, SessionHandle, SessionLifecycle } from '../session-lifecycle-port.ts'
+import type {
+  CreateOutcome,
+  CreateResult,
+  CreateSessionRequest,
+  OpenResult,
+  OpenSessionRequest,
+  SessionLifecycle,
+} from '../session-lifecycle-port.ts'
+import type { OperationOwnership } from '../write-outcome.ts'
+import { GATEWAY_PRE_INVOCATION_CODES } from '../write-outcome.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
 import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
@@ -63,23 +72,20 @@ export interface RemoteLifecycleSessionRemotes {
   }): Promise<RemoteResultLike<{ readonly sessionId: string; readonly agentPreset?: string }>>
 }
 
-/** A create failure carrying the code and any published Session identity. */
-export class RemoteCreateError extends Error {
-  override readonly name = 'RemoteCreateError'
-  readonly code: string
-  /** The Session the Host may already have published (post-publication error
-   *  or reconciliation ambiguity), or undefined when the create proved no
-   *  publication. */
-  readonly publishedSessionId: string | undefined
-
-  constructor(code: string, message: string, publishedSessionId: string | undefined) {
-    super(publishedSessionId === undefined
-      ? `session create failed (${code}): ${message}`
-      : `session create failed (${code}): ${message} — session "${publishedSessionId}" may already have been published`)
-    this.code = code
-    this.publishedSessionId = publishedSessionId
-  }
-}
+/** Exact `session.create` refusal codes the pinned Host proves happen BEFORE a
+ *  new ordinary Session is published (v2 §0.7.3). `session/conflict` and
+ *  `agent-preset/conflict` name an EXISTING/adopted identity — a rejection, but
+ *  never new-publication evidence. `gateway/internal` is deliberately absent:
+ *  it is too broad to prove no publication. */
+const CREATE_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  'gateway/bad-request',
+  'workspace/not-found',
+  'agent-preset/not-found',
+  'agent-preset/invalid',
+  'agent-preset/conflict',
+  'session/conflict',
+  'session/agent-busy',
+])
 
 /** Whether the request carries the Direct D2.4 fork/rewind legacy payload. */
 function isSeededCreate(request: CreateSessionRequest): boolean {
@@ -128,14 +134,29 @@ function errorCode(error: unknown): string | undefined {
 }
 
 /**
- * Turn one failed create into an identity-preserving error. Only a PROVEN
- * published identity is exposed so a later reconciliation (D2.4) can finish
- * the settlement; the caller never retries the same id.
+ * Classify one failed create WITHOUT losing the settlement (v2 §0.7.3). Only a
+ * PROVEN published identity becomes `published-with-error`; only an exact
+ * pre-publication refusal code becomes `rejected`; everything else is
+ * `indeterminate` with the requested id as CORRELATION ONLY.
  */
-function createFailureError(error: unknown): RemoteCreateError {
-  const code = errorCode(error) ?? 'session/create-failed'
-  const message = remoteFailureMessage(error)
-  return new RemoteCreateError(code, message, publishedSessionId(error))
+function classifyCreateFailure(error: unknown, requestedSessionId: string): CreateOutcome {
+  const code = errorCode(error)
+  const published = publishedSessionId(error)
+  if (published !== undefined) {
+    return {
+      kind: 'published-with-error',
+      sessionId: published,
+      error: { code: code ?? 'session/workspace-attach-failed', message: remoteFailureMessage(error) },
+    }
+  }
+  if (code !== undefined && (CREATE_REFUSAL_CODES.has(code) || GATEWAY_PRE_INVOCATION_CODES.has(code))) {
+    return { kind: 'rejected', error: { code, message: remoteFailureMessage(error) } }
+  }
+  return {
+    kind: 'indeterminate',
+    error: { code: code ?? 'session/create-indeterminate', message: remoteFailureMessage(error) },
+    requestedSessionId,
+  }
 }
 
 /** The experimental Remote session lifecycle. */
@@ -154,29 +175,30 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     this.generation = generation
   }
 
-  async create(request: CreateSessionRequest): Promise<SessionHandle> {
-    request.signal?.throwIfAborted()
+  async create(request: CreateSessionRequest): Promise<CreateResult> {
+    // A provable PRE-dispatch cancellation is `cancelled` (never a throw).
+    if (request.signal?.aborted === true) return { ownership: 'current', outcome: { kind: 'cancelled' } }
     if (isSeededCreate(request)) {
       // Never serialize the legacy Direct seed payload as a Remote contract.
-      throw new Error('the Remote ordinary create path cannot create a seeded/forked Session; D2.4 owns Host fork')
+      return {
+        ownership: 'current',
+        outcome: {
+          kind: 'rejected',
+          error: { code: 'session/create-seeded-unsupported', message: 'the Remote ordinary create path cannot create a seeded/forked Session; D2.4 owns Host fork' },
+        },
+      }
     }
     const cwd = requestCwd(request)
     const captured = this.generation.getSnapshot()
     // A disconnected client must not dispatch through stale/queued state.
-    if (captured === undefined) {
-      throw new RemoteCreateError('session/create-unavailable', 'the remote connection is not connected', undefined)
-    }
-    const generationChanged = (): boolean => !Object.is(captured, this.generation.getSnapshot())
-    /** Whether a dispatched create is no longer provable against the live
-     *  Client: a reconnect or a post-dispatch cancellation. */
-    const ambiguousAfterDispatch = (): boolean => generationChanged() || request.signal?.aborted === true
-    /** The ambiguous post-dispatch error (checked BEFORE any success/failure
-     *  classification, so a Host refusal after a reconnect is NOT reported as
-     *  a pre-publication refusal). */
-    const ambiguousError = (publishedId: string | undefined): RemoteCreateError =>
-      request.signal?.aborted === true
-        ? new RemoteCreateError('session/create-aborted-after-dispatch', 'the create was cancelled after dispatch', publishedId)
-        : new RemoteCreateError('session/create-indeterminate', 'the Host connection changed during the create', publishedId)
+    if (captured === undefined) return { ownership: 'current', outcome: { kind: 'cancelled' } }
+    // Ownership is a SEPARATE axis (v2 §0.2.1): a reconnect or a post-dispatch
+    // abort means this result no longer owns the surface — it does NOT prove
+    // the Host did not create the Session.
+    const ownership = (): OperationOwnership =>
+      !Object.is(captured, this.generation.getSnapshot()) || request.signal?.aborted === true
+        ? 'superseded'
+        : 'current'
     if (request.agentPreset !== undefined) {
       // Guaranteed-fresh TUI create with an explicit preset: one Host mutation
       // (`session.create` with the preset) preserves creation-time atomicity.
@@ -185,21 +207,15 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
         ...cwd === undefined ? {} : { cwd },
         agentPreset: request.agentPreset,
       })
-      // Fence BEFORE classification: a reconnect/cancellation during the RPC
-      // makes BOTH a refusal and a success unprovable, and a post-publication
-      // refusal identity is preserved.
-      if (ambiguousAfterDispatch()) {
-        throw ambiguousError(result.ok ? result.value.sessionId : publishedSessionId(result.error))
-      }
-      if (!result.ok) throw createFailureError(result.error)
-      // The Host-returned identity is authoritative (it may differ from the
-      // requested one); never reconcile the wrong id.
+      if (!result.ok) return { ownership: ownership(), outcome: classifyCreateFailure(result.error, request.sessionId) }
       const publishedId = result.value.sessionId
+      const handle = { session: { id: publishedId } }
+      // Classify FIRST, then ownership: a Host success after a reconnect is
+      // `created + superseded`, never a downgraded indeterminate.
+      if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'created', handle } }
       // Reconcile the official Client object layer so the Session is visible
-      // and addressable synchronously (the same guarantee ClientSessions.create
-      // gives the no-preset path). A reconciliation throw is a POST-PUBLICATION
-      // failure: it must preserve the published identity and never look like a
-      // pre-publication refusal.
+      // and addressable synchronously. A reconciliation failure is
+      // POST-PUBLICATION: it preserves the published identity.
       try {
         this.sessions.handleSessionAdded({
           sessionId: publishedId,
@@ -209,16 +225,29 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
           ...cwd === undefined ? {} : { cwd },
         })
       } catch (error) {
-        throw new RemoteCreateError(
-          'session/reconcile-failed',
-          `the created Session could not be reconciled into Client state: ${remoteFailureMessage(error)}`,
-          publishedId,
-        )
+        return {
+          ownership: 'current',
+          outcome: {
+            kind: 'published-with-error',
+            sessionId: publishedId,
+            error: { code: 'session/reconcile-failed', message: `the created Session could not be reconciled into Client state: ${remoteFailureMessage(error)}` },
+          },
+        }
       }
       if (this.sessions.binding(publishedId) === undefined) {
-        throw new RemoteCreateError('session/created-not-addressable', 'the created Session is not addressable in Client state', publishedId)
+        return {
+          ownership: 'current',
+          outcome: {
+            kind: 'published-with-error',
+            sessionId: publishedId,
+            error: { code: 'session/created-not-addressable', message: 'the created Session is not addressable in Client state' },
+          },
+        }
       }
-      return { session: { id: publishedId } }
+      // A caller abort observed during the SYNCHRONOUS reconciliation cannot
+      // un-publish the Session, but it does mean this result no longer owns the
+      // surface: recompute ownership so it is `created + superseded`.
+      return { ownership: ownership(), outcome: { kind: 'created', handle } }
     }
     let id: string
     try {
@@ -227,37 +256,31 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
         ...cwd === undefined ? {} : { cwd },
       }))
     } catch (error) {
-      // A reconnect/cancellation during the failing RPC makes the refusal
-      // unprovable; preserve any post-publication identity from the error.
-      if (ambiguousAfterDispatch()) throw ambiguousError(publishedSessionId(error))
-      throw createFailureError(error)
+      return { ownership: ownership(), outcome: classifyCreateFailure(error, request.sessionId) }
     }
-    if (ambiguousAfterDispatch()) throw ambiguousError(id)
-    return { session: { id } }
+    return { ownership: ownership(), outcome: { kind: 'created', handle: { session: { id } } } }
   }
 
-  async open(request: OpenSessionRequest): Promise<SessionHandle> {
-    request.signal?.throwIfAborted()
+  async open(request: OpenSessionRequest): Promise<OpenResult> {
+    if (request.signal?.aborted === true) return { ownership: 'current', outcome: { kind: 'cancelled' } }
     // v2 §0.5: open is Client-local selection, but it still requires a valid
     // current Client generation; a disconnected Client cannot select.
     const captured = this.generation.getSnapshot()
     if (captured === undefined) {
-      throw new Error(`session "${request.sessionId}" cannot be opened: the remote connection is not connected`)
+      return { ownership: 'current', outcome: { kind: 'unavailable', message: `session "${request.sessionId}" cannot be opened: the remote connection is not connected` } }
     }
     // Fail closed when the id is not an addressable Client Session — before
     // mutating the Client's current selection.
     if (this.sessions.binding(request.sessionId) === undefined) {
-      throw new Error(`session "${request.sessionId}" is not available in Client state`)
+      return { ownership: 'current', outcome: { kind: 'unavailable', message: `session "${request.sessionId}" is not available in Client state` } }
     }
     this.sessions.open(request.sessionId)
     if (this.sessions.binding(request.sessionId) === undefined) {
-      throw new Error(`session "${request.sessionId}" could not be opened in Client state`)
+      return { ownership: 'current', outcome: { kind: 'unavailable', message: `session "${request.sessionId}" could not be opened in Client state` } }
     }
     // The local selection is only this operation's result while the Client
     // generation that owned it is still current.
-    if (!Object.is(captured, this.generation.getSnapshot())) {
-      throw new Error(`session "${request.sessionId}" open was superseded by a connection change`)
-    }
-    return { session: { id: request.sessionId } }
+    const ownershipNow: OperationOwnership = Object.is(captured, this.generation.getSnapshot()) ? 'current' : 'superseded'
+    return { ownership: ownershipNow, outcome: { kind: 'opened', handle: { session: { id: request.sessionId } } } }
   }
 }
