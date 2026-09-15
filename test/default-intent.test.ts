@@ -142,3 +142,17 @@ test('a failed newer operation restores the nearest UNRESOLVED ancestor (never e
   assert.equal(tracker.intent, undefined)
   assert.equal(tracker.outcome, 'committed')
 })
+
+test('reconcile converges CONSECUTIVE unresolved ancestors with one authoritative snapshot', () => {
+  const tracker = new DefaultIntentTracker()
+  tracker.set(a)
+  const idA = tracker.record!.id
+  tracker.settle(idA, 'unresolved')
+  tracker.set(b)
+  const idB = tracker.record!.id
+  tracker.settle(idB, 'unresolved')
+  // One authoritative read proves the persisted default is A.
+  tracker.reconcile(selection => selection === a)
+  assert.equal(tracker.intent, undefined, 'the matching unresolved ancestor commits')
+  assert.equal(tracker.outcome, 'committed', 'one reconciliation call converges the whole chain')
+})

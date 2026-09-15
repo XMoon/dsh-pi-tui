@@ -1352,3 +1352,37 @@ test('an older /preset whose Session generation moved during the roster read is 
   assert.deepEqual(t.presets.selected, [], 'the stale op must not apply its preset to the new Session')
   t.app.stop()
 })
+
+test('a /preset picker opened on S1 cannot switch S2 after a session switch (subject fence)', async () => {
+  const state = { agent: fakeAgent('s1', []), generation: 1 }
+  const t = setup({ state, sessionBlank: true })
+  await t.run('') // open the picker on S1
+  await t.vt.waitForRender()
+  // Prove the overlay actually opened (not a vacuous early return).
+  assert.match(t.vt.getViewport().join('\n'), /standard/i, 'the preset picker must open before the switch')
+  // A Session switch lands AFTER the overlay opened.
+  state.agent = fakeAgent('s2', [])
+  state.generation = 2
+  t.vt.sendInput('\r') // submit the STALE overlay
+  await t.vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(t.presets.selected, [], 'a stale preset picker must not switch the new Session')
+  t.app.stop()
+})
+
+test('a sessionless /preset picker cannot switch a Session that appeared in the same generation', async () => {
+  const state = { agent: undefined as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const t = setup({ state })
+  await t.run('') // sessionless picker (owner sessionId === undefined)
+  await t.vt.waitForRender()
+  assert.match(t.vt.getViewport().join('\n'), /standard/i, 'the sessionless preset picker must open before the create')
+  // A first create publishes a live Agent BEFORE the generation bump.
+  state.agent = fakeAgent('s1', [])
+  t.vt.sendInput('\r') // submit the stale sessionless overlay
+  await t.vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(t.presets.selected, [], 'a stale sessionless picker must not switch the new live Session')
+  t.app.stop()
+})
