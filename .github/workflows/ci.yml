@@ -377,7 +377,7 @@ jobs:
       - prepare-dsh-source
     if: ${{ always() && needs.dsh-context.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
 
@@ -484,6 +484,10 @@ jobs:
           else
             node scripts/dsh-source-leak-gate.mjs "$DSH_CANDIDATE"
           fi
+
+      - name: Verify the TUI startup strictness handshake
+        if: env.DSH_MODE == 'npm'
+        run: pnpm smoke:startup-strictness -- "${{ steps.package.outputs.tarball }}"
 
       - name: Upload release tarball
         uses: actions/upload-artifact@v7
