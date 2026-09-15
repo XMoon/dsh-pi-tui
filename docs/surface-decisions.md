@@ -165,8 +165,11 @@ semantics converged in D2.3; they are not a Web-affordance clone.
   model label shows the in-flight selection as `(selecting…)` while the
   authoritative current value stays visible; an `indeterminate` settle never
   paints the requested model and is never retried (the display reconciles from
-  the Session projection). A late settle from a replaced Session generation
-  cannot repaint the new Session.
+  the Session projection). `/model` and `/preset` capture their semantic SUBJECT
+  once — the Session generation PLUS the exact session identity (including
+  `undefined` for a sessionless surface) — and re-fence it after every await and
+  before any UI mutation, so a same-generation Session-identity drift is
+  `superseded`, not a stale repaint or notice.
 - **`/preset` is honest about blankness.** With no Session it stages a
   run-local pending preset for the next fresh Session and never creates one.
   On a blank current Session it dispatches the official blank-Session select
@@ -192,12 +195,17 @@ semantics converged in D2.3; they are not a Web-affordance clone.
   that write so it reports a truthful settlement (a `rejected`/`cancelled`/
   `unsupported` outcome keeps the picker usable, an `indeterminate` one
   dismisses with the reconcile notice), and an optimistic intent is explicitly
-  not a committed save. EVERY in-flight default write (and its fenced
-  correction) is awaited before a fresh create, so the create consumes the
-  settled Host default. A FAILED latest intent is walked back in the UI and is
-  NOT seeded into the created Session (v2 §0.8.4): the fresh Session runs the
-  actual persisted Host default, never a fabricated choice, and the failure
-  cannot leak into a later create.
+  not a committed save. The sessionless footer marker is DERIVED from the one
+  default-intent tracker: `(selecting…)` while the write is in flight, an
+  explicit `(unconfirmed)` once it settles `indeterminate`, and cleared only
+  when an authoritative Host read reconciles it (the persisted default either
+  carries the choice — committed — or proves it did not land; a restored older
+  still-pending intent shows `(selecting…)` again). EVERY in-flight default
+  write (and its fenced correction) is awaited before a fresh create, so the
+  create consumes the settled Host default. A FAILED latest intent is walked
+  back in the UI and is NOT seeded into the created Session (v2 §0.8.4): the
+  fresh Session runs the actual persisted Host default, never a fabricated
+  choice, and the failure cannot leak into a later create.
 
 ## /login and /logout resolve credential targets, not just DEEPSEEK_API_KEY
 
