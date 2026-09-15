@@ -1454,3 +1454,25 @@ test('a /preset whose subject moves during the Host switch stays silent (transit
   assert.ok(!t.vt.getViewport().join('\n').includes('locked'), 'no stale lock notice is rendered')
   t.app.stop()
 })
+
+test('a /preset picker whose Session identity drifts during the roster read never opens', async () => {
+  const state = { agent: fakeAgent('s1', []) as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const t = setup({
+    state,
+    sessionBlank: true,
+    roster: async () => {
+      // The subject moves to another Session in the SAME generation while the
+      // roster read is in flight.
+      state.agent = fakeAgent('s2', [])
+      return {
+        presets: SHIPPED_ROWS.map(row => ({ id: row.id, trust: row.trust ?? 'system', isDefault: row.id === 'standard' })),
+        modeSelectionEnabled: true,
+      }
+    },
+  })
+  await t.run('')
+  await t.vt.waitForRender()
+  assert.ok(!t.vt.getViewport().join('\n').includes('standard'),
+    'the stale picker must never open on the newly appeared Session')
+  t.app.stop()
+})

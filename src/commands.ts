@@ -4286,23 +4286,26 @@ export function registerTuiCommands(
           return { kind: 'error', text: presetErrorText(error, verb) }
         }
       }
-      // The picker belongs to the Session generation that opened it: a session
-      // switch during the roster read must not paint the old current preset
-      // (or the old blankness) onto the new Session's picker.
+      // The picker belongs to the EXACT Session that opened it (generation +
+      // identity, `undefined` included): a switch during the roster read must
+      // not paint the old current preset (or the old blankness) onto the new
+      // Session's picker.
       const pickerGeneration = runner.sessionGeneration
       const pickerSessionId = runner.liveAgent?.session.id
+      const pickerOwnerCurrent = (): boolean =>
+        runner.sessionGeneration === pickerGeneration && runner.liveAgent?.session.id === pickerSessionId
       let roster
       try {
         roster = await presets.roster(runner.signal)
       } catch (error) {
         // A superseded/aborted read no longer owns the surface: stay silent
         // instead of surfacing a stale roster failure (v2 §0.2.3/§0.3.1).
-        if (error instanceof SupersededReadError || runner.sessionGeneration !== pickerGeneration || runner.signal.aborted) {
+        if (error instanceof SupersededReadError || !pickerOwnerCurrent() || runner.signal.aborted) {
           return { kind: 'success' }
         }
         throw error
       }
-      if (runner.sessionGeneration !== pickerGeneration) return { kind: 'success' }
+      if (!pickerOwnerCurrent()) return { kind: 'success' }
       if (!roster.modeSelectionEnabled) {
         return { kind: 'error', text: 'preset selection is disabled in this deployment' }
       }
@@ -4310,7 +4313,7 @@ export function registerTuiCommands(
       const defaultId = roster.defaultId ?? await displayedDefault()
       // Re-check AFTER the displayedDefault await too: a Session switch during
       // it must not mix the old roster/default with the new Session's state.
-      if (runner.sessionGeneration !== pickerGeneration) return { kind: 'success' }
+      if (!pickerOwnerCurrent()) return { kind: 'success' }
       // Re-read the live preset AFTER the awaits: never mark a stale `current`.
       const current = runner.currentPreset()
       // A started conversation's history was produced under its preset's
@@ -4318,7 +4321,8 @@ export function registerTuiCommands(
       // /preset <id> path above refuses the same way). Blankness comes from
       // the Host turn-boundary authority, never from the TUI transcript; an
       // unknown blank state opens the picker and lets the Host be the final
-      // authority.
+      // authority. Fence BEFORE the notify/openSettings UI mutation.
+      if (!pickerOwnerCurrent()) return { kind: 'success' }
       if (runner.sessionBlank() === false) {
         const message = `preset switching is only available in a new session — session "${runner.liveAgent?.session.id}" has already started; its preset is fixed (use /new for a fresh session, or /preset default <id> for future sessions)`
         app.notify(message, 'error')
