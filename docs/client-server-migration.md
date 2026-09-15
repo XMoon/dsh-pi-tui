@@ -47,8 +47,9 @@ before async preparation; already-authorized
 Host command execution uses `HostCommandPort`; and Task Center child
 interruption uses `SubagentPort`. Pending input is read through the semantic
 `PendingInputReader` projection, so consumers do not depend on Direct inbox
-collection names. These are Direct adapters today, so Direct behavior remains
-the production behavior and `Remote writes: none` remains a hard boundary.
+collection names. These remain Direct-AUTHORITATIVE in production. The
+experimental Remote write adapters added in D2.2/D2.3 are test/smoke-only and
+have no production wiring.
 
 ### Model-selection ownership
 

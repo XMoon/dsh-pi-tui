@@ -89,8 +89,8 @@ function presetService(
   rows: { id: string; name?: string; description?: string; trust?: string }[],
   defaultPresetId = 'standard',
   selectFailure?: unknown,
-  /** Scripted Host lock state; undefined = derive from the fake transcript
-   *  (the pre-D2.3 double), true/false = the Host turn-boundary authority. */
+  /** Scripted Host lock state; true = locked, false/undefined = unlocked. The
+   *  double never derives blankness from the fake transcript. */
   selectLocked?: boolean,
   /** Per-call official roster projection override (gating/disabled tests). */
   rosterOverride?: () => Promise<unknown>,
