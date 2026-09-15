@@ -1667,3 +1667,36 @@ test('a SUPERSEDED /model result emits no notice and never claims the requested 
   assert.ok(!view.includes('do not retry'), `a superseded result must not emit the indeterminate notice:\n${view}`)
   app.stop()
 })
+
+test('a /model result whose Session generation was swapped mid-write makes NO close/open decision (v2 §0.3.1)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  // The port reports `current`, but a transition commits while the write is in
+  // flight — the runner generation moves under the result.
+  const catalog = scriptedModelCatalog(async () => {
+    state.generation = 2
+    return { kind: 'committed', value: { provider: 'p', model: 'm1' } }
+  })
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('model selection:'), `a generation-swapped result must not emit a notice:\n${view}`)
+  assert.ok(view.includes('Selecting…'),
+    `the stale overlay must not make a close/open decision (it stays as-is):\n${view}`)
+  app.stop()
+})
