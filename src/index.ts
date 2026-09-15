@@ -2029,10 +2029,11 @@ export function apply(ctx: Context, config: Config): void {
     const reconcileDefaultIntent = (persisted: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string } | undefined): void => {
       // Only an AUTHORITATIVE snapshot reconciles; an unavailable read is not
       // proof. The tracker itself walks the whole unresolved ancestry with the
-      // SAME snapshot (a matching ancestor commits; non-matching ones fail).
+      // SAME snapshot (a matching ancestor commits; non-matching ones fail). The
+      // sessionless footer marker is DERIVED from the tracker, so a restored
+      // pending ancestor is shown again with no separate marker bookkeeping.
       if (persisted === undefined) return
       defaultIntent.reconcile(selection => sameModelSelection(persisted as ModelSelection, selection))
-      if (defaultIntent.outcome !== 'unresolved') setModelSelectionPending(undefined)
     }
     /** TUI-only facade; this ref is NEVER installed into an Agent context. */
     const selected: ModelSelectionRef = {
@@ -3966,12 +3967,24 @@ export function apply(ctx: Context, config: Config): void {
     }
     /** The owned in-flight marker for the CURRENT generation (status included),
      *  so the footer can distinguish `selecting…` from an explicit `unconfirmed`
-     *  unresolved state (v2 §0.3.2). */
+     *  unresolved state (v2 §0.3.2).
+     *
+     *  LIVE Session writes use the explicit `pendingModelSelection` marker. A
+     *  SESSIONLESS write has no live Session, so its marker is DERIVED from the
+     *  single `DefaultIntentTracker` source — pending `(selecting…)` while the
+     *  default write is in flight, `(unconfirmed)` while unresolved. There is
+     *  no second marker to diverge from the tracker. */
     const currentModelSelectionMarker = ():
-      { readonly selection: ModelSelection; readonly status: 'pending' | 'unresolved' } | undefined =>
-      pendingModelSelection !== undefined && pendingModelSelection.generation === sessionGeneration
-        ? { selection: pendingModelSelection.selection, status: pendingModelSelection.status }
-        : undefined
+      { readonly selection: ModelSelection; readonly status: 'pending' | 'unresolved' } | undefined => {
+      if (liveAgent !== undefined) {
+        return pendingModelSelection !== undefined && pendingModelSelection.generation === sessionGeneration
+          ? { selection: pendingModelSelection.selection, status: pendingModelSelection.status }
+          : undefined
+      }
+      const selection = defaultIntent.intent
+      if (selection === undefined) return undefined
+      return { selection, status: defaultIntent.outcome === 'unresolved' ? 'unresolved' : 'pending' }
+    }
     const bumpSessionGeneration = (): number => {
       if (cleanedUp) return sessionGeneration
       sessionGeneration += 1

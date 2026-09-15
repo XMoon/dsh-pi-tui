@@ -3743,9 +3743,8 @@ export function registerTuiCommands(
           // unsupported default write keeps the picker usable).
           runner.setDefaultIntent(next)
           const intentId = runner.defaultIntentRecord?.id
-          // Mark the in-flight default write so the footer shows the pending
-          // selection rather than painting the optimistic intent as committed.
-          runner.setModelSelectionPending(next, token)
+          // The sessionless footer marker is DERIVED from the tracker (see the
+          // runner), so recording the intent is enough to show `(selecting…)`.
           runner.refreshStatus()
           runner.updateWelcomeCard()
           // Track the raw write so a fresh create can await its settle before
@@ -3761,14 +3760,11 @@ export function registerTuiCommands(
               ? 'committed'
               : outcome.kind === 'indeterminate' ? 'unresolved' : 'failed')
           }
-          // A newer `/model` now owns the footer marker and the notices.
+          // A newer `/model` — or a Session that appeared while the write was in
+          // flight — owns the surface: no repaint/notice for a stale operation.
           if (token !== modelOperationToken) return 'superseded'
-          if (outcome.kind === 'indeterminate') {
-            // Keep an EXPLICIT unresolved marker until a Host read/reconnect
-            // establishes truth (v2 §0.3.2) — never clear it as a failed choice.
-            runner.setModelSelectionPending(next, token, 'unresolved')
-          } else {
-            runner.setModelSelectionPending(undefined, token)
+          if (runner.sessionGeneration !== readGeneration || runner.liveAgent?.session.id !== pickerSessionId) {
+            return 'superseded'
           }
           if (outcome.kind !== 'committed') {
             runner.refreshStatus()
@@ -3794,7 +3790,9 @@ export function registerTuiCommands(
         // side effect, so the runner's DefaultIntentTracker is reserved for the
         // sessionless path only. Here the Session write settlement plus the
         // pending marker are the whole owned state.
-        const generation = runner.sessionGeneration
+        // The picker-open subject; re-fenced after EVERY await.
+        const ownerLost = (): boolean =>
+          runner.sessionGeneration !== readGeneration || runner.liveAgent?.session.id !== pickerSessionId
         runner.setModelSelectionPending(next, token)
         let result: Awaited<ReturnType<typeof models.selectSessionModel>>
         try {
@@ -3809,11 +3807,10 @@ export function registerTuiCommands(
           // A refused/aborted writer never crossed admission.
           // A newer `/model` owns the marker and the notices.
           if (token !== modelOperationToken) return 'superseded'
-          // The Session generation moved while the write was in flight (writer
-          // release vs transition commit): this operation no longer owns the
-          // surface, so it makes NO close/open decision and emits no notice
-          // (v2 §0.3.1).
-          if (runner.sessionGeneration !== generation) return 'superseded'
+          // The subject moved while the write was in flight (writer release vs
+          // transition commit): this operation no longer owns the surface, so it
+          // makes NO close/open decision and emits no notice (v2 §0.3.1).
+          if (ownerLost()) return 'superseded'
           runner.setModelSelectionPending(undefined, token)
           // A transition fence is a proven pre-dispatch refusal; the write
           // may still be retried, so it must not surface as a failure.
@@ -3827,16 +3824,12 @@ export function registerTuiCommands(
         const outcome = result.outcome
         // A newer `/model` owns the footer marker and the notices (v2 §0.2.5).
         if (token !== modelOperationToken) return 'superseded'
-        const generationReplaced = runner.sessionGeneration !== generation
-        // Ownership is superseded either by the port's own fence OR by a Session
-        // generation swap while the write was in flight. Both mean this result
-        // no longer owns the overlay or the footer marker: v2 §0.3.1 requires
-        // NO close/open decision, NO repaint (even clearing the in-flight
-        // marker repaints a surface this operation no longer owns — the newer
-        // operation or the surface swap clears it), and NO stale notice. A live
-        // Session write has no sessionless default intent, so there is nothing
-        // to settle or leak into a later create.
-        if (generationReplaced || result.ownership === 'superseded') return 'superseded'
+        // Ownership is superseded either by the port's own fence OR by the
+        // subject moving while the write was in flight. Both mean this result no
+        // longer owns the overlay or the footer marker: v2 §0.3.1 requires NO
+        // close/open decision, NO repaint (even clearing the in-flight marker
+        // repaints a surface this operation no longer owns), and NO stale notice.
+        if (ownerLost() || result.ownership === 'superseded') return 'superseded'
         runner.setModelSelectionPending(undefined, token)
         if (outcome.kind === 'rejected') app.notify(`model selection: ${outcome.error.message}`, 'error')
         else if (outcome.kind === 'indeterminate') app.notify('model selection is indeterminate — the display reconciles from the Session; do not retry', 'error')
@@ -4119,7 +4112,7 @@ export function registerTuiCommands(
       // Operation ownership for `/preset` (shared across invocations, declared
       // beside the registration): a newer pick supersedes an older one's
       // notification/repaint even on the SAME Session generation.
-      const applyPresetSelection = async (id: string, owner?: { readonly generation: number; readonly sessionId: string | undefined }):
+      const applyPresetSelection = async (id: string, pickerOwner?: { readonly generation: number; readonly sessionId: string | undefined }):
         Promise<
           | { kind: 'pending'; preset: string }
           | { kind: 'switched'; preset: string }
@@ -4129,26 +4122,21 @@ export function registerTuiCommands(
           | { kind: 'indeterminate'; message: string }
         > => {
         const token = ++presetOperationToken
-        // For a PICKER submission the owner is the Session that opened the
-        // overlay; the typed verb path binds to the current Session instead.
-        const operationGeneration = owner?.generation ?? runner.sessionGeneration
-        const operationSessionId = owner?.sessionId
+        // The semantic subject is captured ONCE, when the operation starts: a
+        // picker passes the subject it was opened on; the typed verb path
+        // captures the CURRENT subject here. Every await below re-fences it, so
+        // the subject can never drift onto a Session that appeared later.
+        const owner = pickerOwner ?? { generation: runner.sessionGeneration, sessionId: runner.liveAgent?.session.id }
+        const ownerCurrent = (): boolean =>
+          runner.sessionGeneration === owner.generation && runner.liveAgent?.session.id === owner.sessionId
         try {
         const roster = await presets.roster(runner.signal)
-        // FIRST fences after the await: a newer `/preset` operation OR a Session
-        // generation swap while the roster loaded means this one no longer owns
-        // the surface — no policy/rejection notice, no repaint
-        // (§0.2.5/§0.3.1/§0.3.3). A Direct roster can resolve across a
-        // `/new`/switch (no Remote generation fence).
+        // Fence after EVERY await: a newer `/preset` operation OR a moved
+        // subject means this one no longer owns the surface — no
+        // policy/rejection notice, no repaint (§0.2.5/§0.3.1/§0.3.3). A Direct
+        // roster can resolve across a `/new`/switch (no Remote generation fence).
         if (token !== presetOperationToken) return { kind: 'superseded' }
-        if (runner.sessionGeneration !== operationGeneration) return { kind: 'superseded' }
-        // A PICKER owner must still match EXACTLY — including a sessionless owner
-        // (`sessionId: undefined`): if a live Agent appeared in the same
-        // generation before the bump, this stale picker no longer owns it. The
-        // typed verb path has no owner and binds to the current Session above.
-        if (owner !== undefined && runner.liveAgent?.session.id !== operationSessionId) {
-          return { kind: 'superseded' }
-        }
+        if (!ownerCurrent()) return { kind: 'superseded' }
         if (!roster.modeSelectionEnabled) {
           return { kind: 'rejected', message: 'preset selection is disabled in this deployment' }
         }
@@ -4159,16 +4147,11 @@ export function registerTuiCommands(
           // resolve is a hard failure (the old compose path threw too) —
           // never a "preset undefined" success.
           if (resolved.id === undefined) throw new Error('agent presets unavailable in this deployment')
-          // A Session may have appeared while the roster/resolve awaited: never
-          // stage a sessionless intent onto a now-live surface.
-          if (runner.liveAgent !== undefined) {
-            return { kind: 'rejected', message: 'a session appeared — reopen /preset' }
-          }
-          // A newer sessionless pick — or a Session/generation move —
-          // superseded this one while the roster was loading: never overwrite
-          // the newer pending value with the older id.
+          // A Session (or a newer pick) appeared while the resolve awaited: the
+          // sessionless subject is gone — superseded, never staged onto the
+          // now-live surface (v2 §0.2.5).
           if (token !== presetOperationToken) return { kind: 'superseded' }
-          if (runner.sessionGeneration !== operationGeneration) return { kind: 'superseded' }
+          if (!ownerCurrent()) return { kind: 'superseded' }
           runner.pendingPreset = resolved.id
           // The sessionless catalog follows the choice through the STANDING
           // scope of the new preset (no Agent, no session — composition
@@ -4180,23 +4163,19 @@ export function registerTuiCommands(
             target: { kind: 'preset', presetId: resolved.id },
           })
           if (token !== presetOperationToken) return { kind: 'superseded' }
-          if (runner.sessionGeneration !== operationGeneration) return { kind: 'superseded' }
+          if (!ownerCurrent()) return { kind: 'superseded' }
           if (outcome.kind === 'applied' && outcome.notice !== undefined) app.notify(outcome.notice, 'error')
           return { kind: 'pending', preset: resolved.id }
         }
-        // A newer pick may have superseded this one before dispatch.
-        if (token !== presetOperationToken) return { kind: 'superseded' }
         const sessionId = agent.session.id
-        const generation = runner.sessionGeneration
         // The live-session preset swap runs INSIDE the session-transition
         // gate: the official recompose + `agent-preset/selected` append must
-        // never interleave with a concurrent /new, /fork, rewind or switch —
-        // inside the gate the captured session cannot be quiesced or have its
-        // lock released mid-append. The identity/generation is revalidated
-        // INSIDE the gate, so a transition during the roster read can never
-        // switch the OLD Session (Direct) or dispatch a stale id (Remote).
+        // never interleave with a concurrent /new, /fork, rewind or switch.
+        // The subject is revalidated INSIDE the gate, so a transition during
+        // the roster read can never switch the OLD Session (Direct) or dispatch
+        // a stale id (Remote).
         const result = await runner.withSessionTransition(() => {
-          if (runner.liveAgent?.session.id !== sessionId || runner.sessionGeneration !== generation) {
+          if (!ownerCurrent()) {
             // The subject changed before dispatch: nothing was sent, and this
             // operation no longer owns the surface — superseded, never a
             // user-visible rejection (§0.2.1).
@@ -4207,6 +4186,12 @@ export function registerTuiCommands(
           }
           return presets.selectSessionPreset(sessionId, id, runner.signal)
         })
+        // Fence BEFORE classification: if the subject or operation ownership
+        // moved while the Host transition was in flight, this operation no
+        // longer owns the surface — it must not surface a stale rejection or
+        // notice (v2 §0.2.5/§0.3.1).
+        if (token !== presetOperationToken) return { kind: 'superseded' }
+        if (!ownerCurrent()) return { kind: 'superseded' }
         // A superseded operation owns nothing: no notice, no repaint.
         if (result.ownership === 'superseded') return { kind: 'superseded' }
         const outcome = result.outcome
@@ -4224,22 +4209,15 @@ export function registerTuiCommands(
         // catalog for the SAME owner (no transition — the old scoped
         // previews are being replaced by the new composition's). A late
         // commit from a replaced surface must not repaint it.
-        if (runner.sessionGeneration !== generation) {
-          return { kind: 'superseded' }
-        }
         const refreshed = await runner.refreshCatalog({
           source: 'preset',
-          target: { kind: 'agent', key: runner.sessionGeneration },
+          target: { kind: 'agent', key: owner.generation },
           agent: runner.liveAgent,
         })
-        // Re-check AFTER the await: a transition can replace the owner while
-        // the catalog refresh is in flight, and a newer refresh can supersede
-        // this one — neither may repaint or report the old Session's switch.
-        if (runner.sessionGeneration !== generation) {
-          return { kind: 'superseded' }
-        }
-        // A newer `/preset` operation now owns the surface/notification.
+        // Fence after the refresh await: a newer operation or a moved subject
+        // owns the surface, and a superseded refresh must not repaint.
         if (token !== presetOperationToken) return { kind: 'superseded' }
+        if (!ownerCurrent()) return { kind: 'superseded' }
         if (refreshed.kind !== 'superseded') runner.updateWelcomeCard()
         return { kind: 'switched', preset: outcome.value.preset }
         } catch (error) {
@@ -4247,9 +4225,7 @@ export function registerTuiCommands(
           // the surface: an error from this stale operation must not surface a
           // stale notice (v2 §0.2.1/§0.2.3).
           if (token !== presetOperationToken) return { kind: 'superseded' }
-          if (error instanceof SupersededReadError
-            || runner.sessionGeneration !== operationGeneration
-            || runner.signal.aborted) {
+          if (error instanceof SupersededReadError || !ownerCurrent() || runner.signal.aborted) {
             return { kind: 'superseded' }
           }
           throw error

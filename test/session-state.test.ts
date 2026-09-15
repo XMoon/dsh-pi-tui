@@ -1958,3 +1958,57 @@ test('a sessionless /model picker cannot write a Session that appeared in the sa
     'the stale sessionless picker must not write the new Session')
   app.stop()
 })
+
+test('a sessionless /model whose subject drifts to a same-generation live Session makes no UI decision', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const saveStarted = deferred<void>()
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'original' }),
+    saveSelection: async () => { saveStarted.resolve(); await gate; throw new Error('quota exceeded') },
+  } as never)
+  const state = { agent: undefined as Agent | undefined, generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await (modelDef!.handler as () => Promise<unknown>)()
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\r') // sessionless pick -> gated default write
+  await saveStarted.promise
+  // A first create publishes a live Agent BEFORE the generation bump.
+  state.agent = fakeAgent('session-new')
+  release()
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(proxy.defaultIntentOutcome, 'unresolved', 'the business settlement still settles the tracker')
+  assert.ok(!vt.getViewport().join('\n').includes('model default save'),
+    'a stale (drifted) operation must not touch the UI surface')
+  app.stop()
+})
