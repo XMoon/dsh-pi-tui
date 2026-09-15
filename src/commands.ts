@@ -27,6 +27,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
+import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import type { DefaultIntentRecord } from './default-intent.ts'
 import { createForkedAgent } from './session-fork.ts'
@@ -1623,10 +1624,23 @@ export function registerTuiCommands(
   })
   const samePresetOwner = (left: PresetSelectionOwner, right: PresetSelectionOwner): boolean =>
     left.generation === right.generation && left.sessionId === right.sessionId
-  const presetCommandVisible = (name: string): boolean => {
-    if (name !== 'preset') return true
-    // A value belonging to another owner is not this owner's policy: treat it
-    // as unknown and keep the affordance rather than inherit a stale `false`.
+  /**
+   * The TUI-owned `/preset` command IDENTITY — the official
+   * discovery/presentation identity (0.1.6 `definitionId`), never an
+   * authorization fact. Visibility is keyed on it so a scoped same-name
+   * `/preset` contributed by a preset/plugin (which selects its own full
+   * descriptor and does not inherit this identity) keeps its own presentation.
+   */
+  const TUI_PRESET_COMMAND_DEFINITION_ID = CommandDefinitionId('@xmoon76/dsh-pi-tui/preset')
+  /**
+   * Whether one effective command is visible in the preset-selection surface.
+   * Only the TUI's OWN `/preset` identity honors the Host mode-selection
+   * policy; a same-name command with a DIFFERENT definitionId is semantically
+   * unrelated and stays visible. A value belonging to another owner is
+   * unknown: keep the affordance rather than inherit a stale `false`.
+   */
+  const presetCommandVisible = (command: { readonly definitionId?: string }): boolean => {
+    if (command.definitionId !== TUI_PRESET_COMMAND_DEFINITION_ID) return true
     if (presetSelectionOwner === undefined || !samePresetOwner(presetSelectionOwner, currentPresetOwner())) return true
     return presetSelectionEnabled !== false
   }
@@ -1673,7 +1687,7 @@ export function registerTuiCommands(
     const display = options.display === 'none'
       ? []
       : [...mergeContributions(sorted)]
-          .filter(command => presetCommandVisible(command.name))
+          .filter(presetCommandVisible)
           .sort((left, right) => left.name < right.name ? -1 : 1)
     // M5: the plugin autocomplete chain (AutocompleteRegistry) is consulted
     // after the host's own provider returns null. The registry's suggest()
@@ -4117,6 +4131,7 @@ export function registerTuiCommands(
   let presetOperationToken = 0
   commands.register({
     name: 'preset',
+    definitionId: TUI_PRESET_COMMAND_DEFINITION_ID,
     description: 'Show or switch the session agent preset',
     input: { hint: '[status|<id>|default [<id>]]' },
     handler: async (invocation) => {
@@ -5069,7 +5084,7 @@ export function registerTuiCommands(
         { id: 'k-bang', label: '! cmd', description: 'Run a shell command and submit the command and its output to the session; !! runs locally without recording', currentValue: '' },
         { id: 'sep-help', label: color.border('─'.repeat(34)), currentValue: '' },
         ...commands.list(runner.liveAgent as unknown as Agent)
-          .filter(command => presetCommandVisible(command.name))
+          .filter(presetCommandVisible)
           .map(command => ({
             id: `cmd-${command.name}`,
             label: `/${command.name}`,

@@ -155,26 +155,35 @@ function presetService(
 /** A fake commands service recording the registered definitions. With
  * `registered` the effective list returns the recorded definitions too — the
  * real official service lists what the TUI registered (`/preset` included),
- * which the candidate-visibility tests must observe. */
-function fakeCommands(registered = false) {
-  const defs: { name: string; description?: string; input?: { hint: string }; handler?: unknown }[] = []
+ * which the candidate-visibility tests must observe. `presetOverride` models a
+ * scoped preset/plugin command that SHADOWS the TUI's `/preset` with its own
+ * descriptor (same name, its OWN definitionId). */
+function fakeCommands(
+  registered = false,
+  presetOverride?: { name: string; definitionId?: string; description?: string },
+) {
+  const defs: { name: string; definitionId?: string; description?: string; input?: { hint: string }; handler?: unknown }[] = []
   return {
     defs,
     service: {
-      register: (def: { name: string; description?: string; input?: { hint: string }; handler?: unknown }): (() => void) => {
+      register: (def: { name: string; definitionId?: string; description?: string; input?: { hint: string }; handler?: unknown }): (() => void) => {
         defs.push(def)
         return () => {}
       },
-      list: () => [
-        ...(registered
+      list: () => {
+        const entries = registered
           ? defs.map(def => ({
               name: def.name,
+              ...def.definitionId === undefined ? {} : { definitionId: def.definitionId },
               description: def.description ?? '',
               ...def.input === undefined ? {} : { input: def.input },
             }))
-          : []),
-        { name: 'builtin', description: 'a builtin', input: { hint: '' } },
-      ],
+          : []
+        const shadowed = presetOverride === undefined
+          ? entries
+          : entries.map(entry => entry.name === 'preset' ? { ...presetOverride } : entry)
+        return [...shadowed, { name: 'builtin', description: 'a builtin', input: { hint: '' } }]
+      },
       find: () => undefined,
       execute: async () => undefined,
     },
@@ -351,6 +360,9 @@ function setup(options: {
   /** Make the fake commands service list what was registered (the real
    * service's behavior; required to observe `/preset` in the candidates). */
   commandsListRegistered?: boolean
+  /** A scoped same-name `/preset` descriptor that shadows the TUI's own
+   * (its OWN definitionId — never the TUI identity). */
+  commandsPresetOverride?: { name: string; definitionId?: string; description?: string }
   /** Omit the `agentPresets` service (a rosterless deployment). */
   noPresets?: boolean
   width?: number
@@ -362,7 +374,7 @@ function setup(options: {
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
-  const commands = fakeCommands(options.commandsListRegistered === true)
+  const commands = fakeCommands(options.commandsListRegistered === true, options.commandsPresetOverride)
   ctx.provide('commands', commands.service as never)
   if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
   const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked, options.roster, options.resolve, options.selectHook)
@@ -1769,5 +1781,35 @@ test('a stale /preset default read must not write the default (fail closed)', as
   await new Promise(resolve => setTimeout(resolve, 25))
   assert.deepEqual(writes, [], 'a stale default read must not write settings')
   assert.deepEqual(t.refreshes, [], 'a stale default read must not refresh the catalog')
+  t.app.stop()
+})
+
+test('a scoped same-name /preset with a DIFFERENT definitionId stays visible when disabled', async () => {
+  // The mode-selection policy is bound to the TUI's OWN `/preset` identity
+  // (definitionId), not the command NAME. A preset/plugin command that
+  // shadows the name with its own descriptor is semantically unrelated and
+  // keeps its presentation even while the deployment disables mode selection.
+  const t = setup({
+    commandsListRegistered: true,
+    commandsPresetOverride: { name: 'preset', definitionId: 'example/scoped-preset', description: 'A scoped preset command' },
+    roster: policyRoster(false),
+    settings: { get: () => undefined, mutate: async () => undefined },
+    height: 80,
+  })
+  t.surface.installSnapshot(EMPTY_SURFACE_SNAPSHOT)
+  await new Promise(resolve => setTimeout(resolve, 25))
+  // The policy IS active: the TUI's own selection/default mutations fail closed.
+  const refused = await t.run('default ptc') as { kind: string; text?: string }
+  assert.equal(refused.kind, 'error')
+  assert.match(refused.text ?? '', /preset selection is disabled in this deployment/)
+  // ... yet the scoped same-name command stays visible in both surfaces.
+  assert.ok(t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
+    'a scoped same-name command with a different definitionId must stay a candidate')
+  await t.runCommand('help')
+  await t.vt.waitForRender()
+  t.vt.sendInput('preset')
+  await t.vt.waitForRender()
+  assert.ok((await t.view()).includes('A scoped preset command'),
+    '/help must keep the scoped same-name command visible')
   t.app.stop()
 })
