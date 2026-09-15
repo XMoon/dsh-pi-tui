@@ -933,8 +933,8 @@ function packageVersion(): string {
 
 /**
  * The welcome card's version line: the installed dsh version plus the
- * bundle's own version (header-badge parity — `dsh-0.1.5-rc.1 ·
- * tui-v0.4.5`). Without a resolvable dsh launcher it degrades to
+ * bundle's own version (header-badge parity — `dsh-0.1.6-alpha.1 ·
+ * tui-v0.4.7-alpha.1`). Without a resolvable dsh launcher it degrades to
  * the bundle version alone.
  * @returns the combined version string.
  */
@@ -1502,7 +1502,7 @@ export async function composeAgent(
 }
 
 /**
- * The preset a persisted session actually runs, read from DSH 0.1.5-rc.1's
+ * The preset a persisted session actually runs, read from DSH 0.1.6-alpha.1's
  * V3 session projection (header initialization plus the latest selection event).
  * @param ctx - the runner context.
  * @param sessionId - the persisted session id.
@@ -6165,7 +6165,7 @@ export function apply(ctx: Context, config: Config): void {
       const isSessionless = parsed !== undefined && SESSIONLESS_COMMANDS.has(parsed.name)
       // The submission's effective delivery mode — resolved ONCE, here at
       // the boundary (web ComposerSubmissionPolicy parity, DSH
-      // 0.1.5-rc.1): an idle agent queues, plain Enter takes the
+      // 0.1.6-alpha.1): an idle agent queues, plain Enter takes the
       // preference, the accelerated chord takes its OPPOSITE, and the
       // explicit queue action always queues. The resolved mode rides into
       // the command plane (dispatchViaSession → withDelivery → the TUI skill

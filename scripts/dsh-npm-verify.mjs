@@ -6,7 +6,7 @@
  * An explicit --dsh-version override resolves a temporary matching lockfile
  * before running the same frozen install and checks.
  *
- * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.5-rc.2]
+ * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.6-alpha.1]
  * Client-only family lanes add `--exact-family --client-smoke-only`.
  *
  * @module dsh-npm-verify

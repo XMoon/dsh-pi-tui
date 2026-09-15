@@ -63,12 +63,6 @@
     - id: subagent-model-selection-settings
       name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
 
-    # Host-plane TypeScript runtime: the `ptc` preset's `tool-presentation`
-    # row waits for `codeRuntime` and fails the preset at mount without it
-    # (same host row the web bundle inserts).
-    - id: code-runtime
-      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
-
     # Host-plane cordis runner: the `cordis` preset's `tool-cordis` row waits
     # for `dynamicCordisRunner`/`cordisInspect` and fails the preset at mount
     # without them (same host row the web bundle inserts).
@@ -93,7 +87,10 @@
 # goal/jobs/compaction services and
 # their host infrastructure, `permission`, `approval`, `sandbox*`,
 # `fs-observation-policy`, `spill*`, `timeout-policy`, `repeat-tool-reminder`,
-# `session-*`, `token-meter`. `command-goal` is disabled below and reintroduced
+# `session-*`, `token-meter`. The base's official `ptc-runtime` row also stays:
+# it provides `ptcRuntime`, which the `ptc` preset's `tool-presentation` row
+# waits for, and this overlay owns no second PTC runtime.
+# `command-goal` is disabled below and reintroduced
 # only by presets that own that command in their scoped composition.
 
 - id: tool-bash
@@ -147,7 +144,7 @@
 - id: tool-subagent-fork
   disabled: true
 
-- id: workflow-worker-thread
+- id: workflow-ptc
   disabled: true
 
 - id: tool-workflow

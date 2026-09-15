@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Installation and version pairing
+
+This release moves the `next` npm line's DSH compatibility target to
+`0.1.6-alpha.1`: the minimum is DSH `0.1.6-alpha.1`, with a peer floor of
+`>=0.1.6-alpha.1`. Its native install scripts must be explicitly allowed:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh --profile pi-tui
+```
+
+Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
+`@xmoon76/dsh-pi-tui@0.4.6`.
+
+### Changed
+
+- **Preset-selection visibility follows the deployment policy.** When a
+  deployment sets `modeSelectionEnabled` to `false`, `/preset` no longer
+  appears in the slash candidates or `/help`, while typing `/preset` still
+  fails closed under the official policy; an unavailable roster keeps the
+  current presentation instead of inferring a value.
+- **PTC/workflow runtime aligned with the official 0.1.6 composition.** The
+  `ptc` preset now receives its PTC runtime from the official `ptc-runtime`
+  row; the TUI no longer inserts the retired `code-runtime-worker-thread` row
+  and its host-plane workflow row is aligned to the official `workflow-ptc`.
+
 ## [0.4.6] - 2026-09-13
 
 ### Installation and version pairing

@@ -26,13 +26,24 @@ test('the TUI overlay supplies preset-required Host services', () => {
   for (const [id, packageName] of [
     ['agent-presets', '@deepseek-ai/dsh-agent-presets'],
     ['subagent-model-selection-settings', '@deepseek-ai/dsh-tool-subagent/model-selection-settings'],
-    ['code-runtime', '@deepseek-ai/dsh-code-runtime-worker-thread'],
     ['cordis-host-runner', '@deepseek-ai/dsh-cordis-host-runner'],
     ['authorization', '@deepseek-ai/dsh-authorization'],
   ] as const) {
-    assert.match(patch, new RegExp(`^    - id: ${id}\\n      name: '${packageName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}'$`, 'mu'),
+    assert.match(patch, new RegExp(`^    - id: ${id}\\n      name: '${packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'$`, 'mu'),
       `${id} must be present on the host overlay`)
   }
+})
+
+test('the TUI overlay owns no legacy PTC runtime row and inherits the official one', () => {
+  const patch = readFileSync(join(REPO_ROOT, 'cordis.patch.yml'), 'utf8')
+  // The official 0.1.6 base owns `ptc-runtime`; a surface overlay must not
+  // insert the retired `code-runtime`/`dsh-code-runtime-worker-thread` row.
+  assert.doesNotMatch(patch, /code-runtime/u)
+  assert.doesNotMatch(patch, /dsh-code-runtime-worker-thread/u)
+  // `ptc-runtime` is a base row the overlay neither inserts nor disables, so
+  // the `ptc` preset's tool-presentation row resolves it through the official
+  // composition rather than a TUI-owned duplicate.
+  assert.doesNotMatch(patch, /^\s*- id: ptc-runtime$/mu)
 })
 
 test('the TUI overlay keeps the complete agent-plane disable closure', () => {
@@ -58,7 +69,7 @@ test('the TUI overlay keeps the complete agent-plane disable closure', () => {
     'tool-subagent-list-agents',
     'tool-subagent',
     'tool-subagent-fork',
-    'workflow-worker-thread',
+    'workflow-ptc',
     'tool-workflow',
     'tool-ralph',
     'agent-instructions',
@@ -80,8 +91,8 @@ test('DSH owns the complete official shipped preset roster', async () => {
   const loader = ctx.plugin(Loader)
   await loader
   ctx.baseUrl = pathToFileURL(`${process.cwd()}/`).href
-  // rc.1 agent-presets registers its projection unit at construction and
-  // requires the shared projection registry to be composed first.
+  // The official 0.1.6 agent-presets registers its projection unit at
+  // construction and requires the shared projection registry to be composed first.
   const projectionsFiber = ctx.plugin(SessionProjectionRegistry)
   await projectionsFiber
   const presetsFiber = ctx.plugin(AgentPresets, {
@@ -98,8 +109,8 @@ test('DSH owns the complete official shipped preset roster', async () => {
     const official = rows.filter(row => (OFFICIAL_IDS as readonly string[]).includes(row.id))
     assert.deepEqual(official.map(row => row.id), [...OFFICIAL_IDS])
     assert.deepEqual(official.map(row => row.trust), OFFICIAL_IDS.map(() => 'system'))
-    // rc.1 discovery records an optional unresolved plugin row as `broken`;
-    // this package-only test intentionally does not install every Host plugin
+    // Official 0.1.6 discovery records an optional unresolved plugin row as
+    // `broken`; this package-only test intentionally does not install every Host plugin
     // named by the official rows. Full mount health belongs to the target DSH
     // profile integration, where the official distribution supplies those
     // plugins.
