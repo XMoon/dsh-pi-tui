@@ -31,6 +31,10 @@ dsh --profile pi-tui
   `ptc-runtime` 行获得 PTC 运行时；TUI 不再自行插入已退休的
   `code-runtime-worker-thread` 行，host 平面的 workflow 行也对齐到官方
   `workflow-ptc`。
+- **文件 edit/write diff 卡片对齐 DSH 0.1.6 的边界化上下文 diff。** 共享的上下文
+  行不再被误报为增删；大文件中的稀疏改动保持精确显示；只有超出官方边界化 edit
+  search（每个 fragment 256 次 edit）才退化为整段粗粒度替换，且折叠处的 `+N/-M`
+  与展开内容由同一推导产生。
 
 ## [0.4.6] - 2026-09-13
 

@@ -33,6 +33,12 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   `ptc` preset now receives its PTC runtime from the official `ptc-runtime`
   row; the TUI no longer inserts the retired `code-runtime-worker-thread` row
   and its host-plane workflow row is aligned to the official `workflow-ptc`.
+- **File edit/write diff cards follow DSH 0.1.6's bounded contextual diff.**
+  Shared context lines are no longer misreported as additions or deletions;
+  sparse edits in large files stay exact; only a fragment past the official
+  bounded edit search (256 edits) degrades to a coarse whole-fragment
+  replacement, and the folded `+N/-M` totals come from the same derivation as
+  the expanded body.
 
 ## [0.4.6] - 2026-09-13
 

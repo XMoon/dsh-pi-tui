@@ -1,111 +1,92 @@
 /**
- * Headless tests for the diff engine: LCS alignment, context clustering,
- * fold capping, and the create/delete special cases.
+ * Headless tests for the diff engine: the DSH 0.1.6 bounded contextual patch
+ * derivation (`structuredPatch`, `context: 3`, `maxEditLength: 256`), the
+ * coarse whole-fragment fallback past the bound, context/gap rendering, fold
+ * capping, the create/delete cases, and the absolute-anchor gutter rule.
  * @module @xmoon76/dsh-pi-tui/diff.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { computeDiffLines, renderDiffView, summarizeDiffs, type AnchoredFileDiff } from '../src/diff.ts'
+import { DIFF_CONTEXT_LINES, MAX_DIFF_EDIT_LENGTH, renderDiffView, summarizeDiffs, type AnchoredFileDiff } from '../src/diff.ts'
 
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 
-test('computeDiffLines aligns a replacement with context and line numbers', () => {
-  const lines = computeDiffLines('a\nb\nc\nd\ne', 'a\nB\nc\nd\ne')
-  assert.deepEqual(lines.map(line => line.kind), ['context', 'delete', 'add', 'context', 'context', 'context'])
-  const changed = lines.filter(line => line.kind !== 'context')
-  assert.deepEqual(changed, [
-    { kind: 'delete', lineNum: 2, code: 'b' },
-    { kind: 'add', lineNum: 2, code: 'B' },
-  ])
+/** Lines `prefix 0 .. prefix n-1`. */
+const lines = (prefix: string, count: number): string[] => Array.from({ length: count }, (_, i) => `${prefix} ${i}`)
+
+/** A one-to-one replacement fixture with a leading shared context line. */
+function replacementFragment(count: number): { path: string; oldText: string; newText: string } {
+  return {
+    path: 'f.ts',
+    oldText: ['shared', ...lines('old', count)].join('\n'),
+    newText: ['shared', ...lines('new', count)].join('\n'),
+  }
+}
+
+test('the bounded edit search is the official 0.1.6 contract', () => {
+  assert.equal(MAX_DIFF_EDIT_LENGTH, 256)
+  assert.equal(DIFF_CONTEXT_LINES, 3)
 })
 
-test('computeDiffLines handles insertions, deletions, and identical input', () => {
-  // Insertion: one new line in the middle.
-  const inserted = computeDiffLines('a\nc', 'a\nb\nc')
-  assert.deepEqual(inserted.filter(line => line.kind !== 'context'), [{ kind: 'add', lineNum: 2, code: 'b' }])
-  // Deletion: one removed line.
-  const deleted = computeDiffLines('a\nb\nc', 'a\nc')
-  assert.deepEqual(deleted.filter(line => line.kind !== 'context'), [{ kind: 'delete', lineNum: 2, code: 'b' }])
-  // Identical: all context.
-  const same = computeDiffLines('a\nb', 'a\nb')
-  assert.ok(same.every(line => line.kind === 'context'))
-  assert.equal(same.length, 2)
+// ── exact contextual patches ───────────────────────────────────────────────
+
+test('a single-line replacement is +1/-1 and never counts shared context', () => {
+  const diffs = [{ path: 'f.ts', oldText: 'a\nb\nc\nd\ne', newText: 'a\nB\nc\nd\ne' }]
+  assert.deepEqual(summarizeDiffs(diffs), { added: 1, removed: 1 })
+  const body = renderDiffView(diffs, undefined, { headerMode: 'none' }).map(strip)
+  assert.equal(body.filter(line => line.startsWith('- ')).length, 1)
+  assert.equal(body.filter(line => line.startsWith('+ ')).length, 1)
+  assert.equal(body.filter(line => line.startsWith('  ')).length, 4, 'shared context renders once and is not counted')
 })
 
-test('computeDiffLines degrades to a naive listing on very large input', () => {
-  const oldText = Array.from({ length: 1200 }, (_, i) => `old ${i}`).join('\n')
-  const newText = Array.from({ length: 1200 }, (_, i) => `new ${i}`).join('\n')
-  const lines = computeDiffLines(oldText, newText)
-  // 1200 + 1200 exceeds the LCS threshold: no context rows, all deletes then adds.
-  assert.equal(lines.filter(line => line.kind === 'context').length, 0)
-  assert.equal(lines.filter(line => line.kind === 'delete').length, 1200)
-  assert.equal(lines.filter(line => line.kind === 'add').length, 1200)
+test('an exact change keeps exactly three context lines per side', () => {
+  const oldText = lines('line', 20).join('\n')
+  const newText = lines('line', 20).map((line, i) => (i === 10 ? `${line} CHANGED` : line)).join('\n')
+  const body = renderDiffView([{ path: 'f.ts', oldText, newText }], undefined, { headerMode: 'none' }).map(strip)
+  const context = body.filter(line => line.startsWith('  ')).map(line => line.slice(2))
+  assert.deepEqual(context, ['line 7', 'line 8', 'line 9', 'line 11', 'line 12', 'line 13'])
+  assert.deepEqual(body.filter(line => line.startsWith('- ')), ['- line 10'])
+  assert.deepEqual(body.filter(line => line.startsWith('+ ')), ['+ line 10 CHANGED'])
 })
 
-test('renderDiffView emits the +N -M header with the relativized path', () => {
-  const lines = renderDiffView(
-    [{ path: '/ws/src/foo.ts', oldText: 'a\nb', newText: 'a\nB' }],
-    '/ws',
-  ).map(strip)
-  assert.equal(lines[0], '+1 -1 src/foo.ts')
-  assert.ok(lines.some(line => line.includes('- b')), `delete row missing:\n${lines.join('\n')}`)
-  assert.ok(lines.some(line => line.includes('+ B')), `add row missing:\n${lines.join('\n')}`)
+test('insertion-only and deletion-only fragments keep exact counts', () => {
+  assert.deepEqual(summarizeDiffs([{ path: 'f.ts', oldText: 'a\nc', newText: 'a\nb\nc' }]), { added: 1, removed: 0 })
+  assert.deepEqual(summarizeDiffs([{ path: 'f.ts', oldText: 'a\nb\nc', newText: 'a\nc' }]), { added: 0, removed: 1 })
+  assert.deepEqual(summarizeDiffs([{ path: 'f.ts', oldText: 'a\nb', newText: 'a\nb' }]), { added: 0, removed: 0 })
 })
 
-test('renderDiffView clusters changes and elides unchanged middle runs', () => {
-  const oldText = Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n')
-  const newText = Array.from({ length: 20 }, (_, i) => (i === 2 ? `line ${i} CHANGED` : i === 17 ? `line ${i} CHANGED` : `line ${i}`)).join('\n')
-  const lines = renderDiffView([{ path: 'f.ts', oldText, newText }]).map(strip)
-  assert.ok(lines.some(line => line.startsWith('… ') && line.includes('unchanged line')), `elision missing:\n${lines.join('\n')}`)
-  assert.ok(lines.some(line => line.includes('+ line 2 CHANGED')), `first change missing:\n${lines.join('\n')}`)
-  assert.ok(lines.some(line => line.includes('+ line 17 CHANGED')), `second change missing:\n${lines.join('\n')}`)
+test('two distant changes are separate hunks with a 3-context gap between', () => {
+  // Changes away from the file edges so both sides get their full 3 context rows.
+  const oldText = lines('line', 40).join('\n')
+  const newText = lines('line', 40).map((line, i) => (i === 10 || i === 30 ? `${line} CHANGED` : line)).join('\n')
+  const body = renderDiffView([{ path: 'f.ts', oldText, newText }], undefined, { headerMode: 'none' }).map(strip)
+  assert.ok(body.some(line => line.startsWith('… ') && line.includes('unchanged line')),
+    `a gap between distant hunks is required:\n${body.join('\n')}`)
+  assert.ok(body.includes('- line 10'))
+  assert.ok(body.includes('+ line 10 CHANGED'))
+  assert.ok(body.includes('- line 30'))
+  assert.ok(body.includes('+ line 30 CHANGED'))
+  assert.equal(body.filter(line => line.startsWith('  ')).length, 12, 'three context rows on each side of each change')
 })
 
-test('renderDiffView caps the body and appends a hidden-changes footer', () => {
-  const oldText = Array.from({ length: 40 }, (_, i) => `old ${i}`).join('\n')
-  const newText = Array.from({ length: 40 }, (_, i) => `new ${i}`).join('\n')
-  const lines = renderDiffView([{ path: 'f.ts', oldText, newText }], undefined, { maxLines: 10 }).map(strip)
-  const body = lines.slice(1)
-  assert.ok(body.length <= 10 + 1, `capped body too tall:\n${lines.join('\n')}`)
-  assert.ok(lines.some(line => line.includes('more changes hidden (click to expand)')), `footer missing:\n${lines.join('\n')}`)
+// ── content-line terminator rule ───────────────────────────────────────────
+
+test('a trailing newline is a terminator, never a phantom blank line', () => {
+  assert.deepEqual(summarizeDiffs([{ path: 'f.ts', oldText: 'a\nb\n', newText: 'a\nB\n' }]), { added: 1, removed: 1 })
+  const body = renderDiffView([{ path: 'f.ts', oldText: 'a\nb\n', newText: 'a\nB\n' }], undefined, { headerMode: 'none' }).map(strip)
+  assert.ok(!body.some(line => line === '  '), `no phantom blank context row:\n${JSON.stringify(body)}`)
 })
 
-test('renderDiffView marks a cap that hides context after all changes', () => {
-  const oldText = ['old', 'context 1', 'context 2', 'context 3', 'context 4', 'context 5'].join('\n')
-  const newText = ['new', 'context 1', 'context 2', 'context 3', 'context 4', 'context 5'].join('\n')
-  const lines = renderDiffView([{ path: 'f.ts', oldText, newText }], undefined, { maxLines: 2 }).map(strip)
-  assert.ok(lines.some(line => line.includes('more diff lines hidden (click to expand)')), `context marker missing:\n${lines.join('\n')}`)
-  assert.ok(!lines.some(line => line.includes('0 more changes hidden')), `must not report zero hidden changes:\n${lines.join('\n')}`)
+test('an interior blank line survives', () => {
+  const body = renderDiffView([{ path: 'f.ts', oldText: 'a\n\nb', newText: 'a\n\nB' }], undefined, { headerMode: 'none' }).map(strip)
+  assert.ok(body.includes('  '), `the interior blank line must render as context:\n${JSON.stringify(body)}`)
+  assert.deepEqual(summarizeDiffs([{ path: 'f.ts', oldText: 'a\n\nb', newText: 'a\n\nB' }]), { added: 1, removed: 1 })
 })
 
-test('renderDiffView does not add a marker when the body fits its cap', () => {
-  const lines = renderDiffView([{ path: 'f.ts', oldText: 'old', newText: 'new' }], undefined, { maxLines: 3 }).map(strip)
-  assert.ok(!lines.some(line => line.includes('hidden')), `unexpected truncation marker:\n${lines.join('\n')}`)
-})
-
-test('renderDiffView ignores a trailing no-op hunk when the body cap is full', () => {
-  const lines = renderDiffView([
-    { path: 'changed.ts', oldText: 'old', newText: 'new' },
-    { path: 'same.ts', oldText: 'same', newText: 'same' },
-  ], undefined, { maxLines: 2 }).map(strip)
-  assert.ok(!lines.some(line => line.includes('hidden')), `a no-op hunk must not trigger truncation:\n${lines.join('\n')}`)
-})
-
-test('diff header modes and stats share the rendered diff rows', () => {
-  const diffs = [
-    { path: 'src/foo.ts', oldText: 'same\nold', newText: 'same\nnew\nadded' },
-    { path: 'src/foo.ts', oldText: 'before', newText: 'after' },
-  ]
-  assert.deepEqual(summarizeDiffs(diffs), { added: 3, removed: 2 })
-  const statsOnly = renderDiffView(diffs.slice(0, 1), undefined, { headerMode: 'stats-only' }).map(strip)
-  assert.equal(statsOnly[0], '+2 -1')
-  assert.ok(!statsOnly[0]!.includes('src/foo.ts'))
-  const noHeader = renderDiffView(diffs.slice(0, 1), undefined, { headerMode: 'none' }).map(strip)
-  assert.ok(!noHeader.some(line => line.includes('src/foo.ts')), `body must not repeat path:\n${noHeader.join('\n')}`)
-})
-
-test('renderDiffView shows only new lines for a create and only old lines for a deletion', () => {
+test('empty text is zero lines (create and full deletion)', () => {
+  assert.deepEqual(summarizeDiffs([{ path: 'new.ts', oldText: null, newText: 'x\ny' }]), { added: 2, removed: 0 })
+  assert.deepEqual(summarizeDiffs([{ path: 'gone.ts', oldText: 'x\ny', newText: '' }]), { added: 0, removed: 2 })
   const created = renderDiffView([{ path: 'new.ts', oldText: null, newText: 'x\ny' }]).map(strip)
   assert.equal(created[0], '+2 new.ts')
   assert.ok(!created.some(line => line.startsWith('- ')), `create must not render deletions:\n${created.join('\n')}`)
@@ -114,7 +95,106 @@ test('renderDiffView shows only new lines for a create and only old lines for a 
   assert.ok(!deleted.some(line => line.startsWith('+ ')), `deletion must not render additions:\n${deleted.join('\n')}`)
 })
 
-// ── absolute line-number anchors (plan: hide the gutter, never guess) ───
+// ── sparse edits stay exact regardless of total file size ──────────────────
+
+test('one sparse replacement in 10,000 lines stays exact (no whole-file fallback)', () => {
+  const oldLines = lines('line', 10_000)
+  const newLines = oldLines.map((line, i) => (i === 5_000 ? `${line} CHANGED` : line))
+  const diffs = [{ path: 'big.ts', oldText: oldLines.join('\n'), newText: newLines.join('\n') }]
+  assert.deepEqual(summarizeDiffs(diffs), { added: 1, removed: 1 })
+  const body = renderDiffView(diffs, undefined, { headerMode: 'none' }).map(strip)
+  assert.ok(body.includes('- line 5000'))
+  assert.ok(body.includes('+ line 5000 CHANGED'))
+  assert.ok(!body.some(line => line.includes('- line 4999')), `a neighbouring line must stay context:\n${body.slice(0, 8).join('\n')}`)
+})
+
+test('100 sparse replacements in 10,000 lines stay exact', () => {
+  const oldLines = lines('line', 10_000)
+  const newLines = oldLines.map((line, i) => (i % 100 === 0 ? `${line} CHANGED` : line))
+  const diffs = [{ path: 'big.ts', oldText: oldLines.join('\n'), newText: newLines.join('\n') }]
+  assert.deepEqual(summarizeDiffs(diffs), { added: 100, removed: 100 })
+})
+
+// ── the 128/129 bounded edit-search boundary ───────────────────────────────
+
+test('a 256-edit comparison stays exact; one edit past it is a coarse replacement', () => {
+  // One replacement consumes two edits: 128 replacements with a shared context
+  // line is exactly 256 edits (exact); 129 is 258 (past the bound).
+  assert.deepEqual(summarizeDiffs([replacementFragment(128)]), { added: 128, removed: 128 },
+    '128 one-to-one replacements stay exact')
+  assert.deepEqual(summarizeDiffs([replacementFragment(129)]), { added: 130, removed: 130 },
+    'past the bound the COMPLETE fragment is replaced, shared context included')
+  const coarse = renderDiffView([replacementFragment(129)], undefined, { headerMode: 'none' }).map(strip)
+  assert.ok(coarse.includes('- shared'), 'the coarse fallback counts the shared line as removed')
+  assert.ok(coarse.includes('+ shared'), 'the coarse fallback counts the shared line as added')
+})
+
+// ── repeated lines, multi-file, multi-hunk ─────────────────────────────────
+
+test('repeated-line inputs produce a bounded deterministic result', () => {
+  const oldText = Array.from({ length: 40 }, (_, i) => (i % 2 === 0 ? 'old' : 'shared')).join('\n')
+  const newText = Array.from({ length: 40 }, (_, i) => (i % 2 === 0 ? 'new' : 'shared')).join('\n')
+  const stats = summarizeDiffs([{ path: 'f.ts', oldText, newText }])
+  assert.deepEqual(stats, { added: 20, removed: 20 })
+  // Deterministic: the same input derives the same totals.
+  assert.deepEqual(summarizeDiffs([{ path: 'f.ts', oldText, newText }]), stats)
+})
+
+test('multi-file and same-file multi-hunk summaries match the rendered body', () => {
+  const diffs = [
+    { path: 'src/foo.ts', oldText: 'same\nold', newText: 'same\nnew\nadded' },
+    { path: 'src/foo.ts', oldText: 'before', newText: 'after' },
+    { path: 'src/bar.ts', oldText: null, newText: 'fresh' },
+  ]
+  const stats = summarizeDiffs(diffs)
+  assert.deepEqual(stats, { added: 4, removed: 2 })
+  const rendered = renderDiffView(diffs, undefined, { headerMode: 'none' }).map(strip)
+  assert.deepEqual({
+    added: rendered.filter(line => line.startsWith('+ ')).length,
+    removed: rendered.filter(line => line.startsWith('- ')).length,
+  }, stats, 'the body and the summary must come from the same derivation')
+})
+
+test('header modes and stats-only share the rendered diff counts', () => {
+  const diffs = [{ path: 'src/foo.ts', oldText: 'same\nold', newText: 'same\nnew\nadded' }]
+  assert.equal(renderDiffView(diffs, undefined, { headerMode: 'stats-only' }).map(strip)[0], '+2 -1')
+  assert.ok(!renderDiffView(diffs, undefined, { headerMode: 'stats-only' }).map(strip)[0]!.includes('src/foo.ts'))
+  const noHeader = renderDiffView(diffs, undefined, { headerMode: 'none' }).map(strip)
+  assert.ok(!noHeader.some(line => line.includes('src/foo.ts')), `body must not repeat the path:\n${noHeader.join('\n')}`)
+})
+
+// ── fold capping ───────────────────────────────────────────────────────────
+
+test('renderDiffView caps the body and appends a hidden-changes footer', () => {
+  const oldText = lines('old', 40).join('\n')
+  const newText = lines('new', 40).join('\n')
+  const rendered = renderDiffView([{ path: 'f.ts', oldText, newText }], undefined, { maxLines: 10 }).map(strip)
+  assert.ok(rendered.slice(1).length <= 11, `capped body too tall:\n${rendered.join('\n')}`)
+  assert.ok(rendered.some(line => line.includes('more changes hidden (click to expand)')), `footer missing:\n${rendered.join('\n')}`)
+})
+
+test('renderDiffView marks a cap that hides context after all changes', () => {
+  const oldText = ['old', 'context 1', 'context 2', 'context 3', 'context 4', 'context 5'].join('\n')
+  const newText = ['new', 'context 1', 'context 2', 'context 3', 'context 4', 'context 5'].join('\n')
+  const rendered = renderDiffView([{ path: 'f.ts', oldText, newText }], undefined, { maxLines: 2 }).map(strip)
+  assert.ok(rendered.some(line => line.includes('more diff lines hidden (click to expand)')), `context marker missing:\n${rendered.join('\n')}`)
+  assert.ok(!rendered.some(line => line.includes('0 more changes hidden')), `must not report zero hidden changes:\n${rendered.join('\n')}`)
+})
+
+test('renderDiffView does not add a marker when the body fits its cap', () => {
+  const rendered = renderDiffView([{ path: 'f.ts', oldText: 'old', newText: 'new' }], undefined, { maxLines: 3 }).map(strip)
+  assert.ok(!rendered.some(line => line.includes('hidden')), `unexpected truncation marker:\n${rendered.join('\n')}`)
+})
+
+test('renderDiffView ignores a trailing no-op hunk when the body cap is full', () => {
+  const rendered = renderDiffView([
+    { path: 'changed.ts', oldText: 'old', newText: 'new' },
+    { path: 'same.ts', oldText: 'same', newText: 'same' },
+  ], undefined, { maxLines: 2 }).map(strip)
+  assert.ok(!rendered.some(line => line.includes('hidden')), `a no-op hunk must not trigger truncation:\n${rendered.join('\n')}`)
+})
+
+// ── absolute line-number anchors (plan: hide the gutter, never guess) ──────
 
 /** Whether a rendered body row carries a gutter (a padded absolute line
  * number before the diff marker). */
@@ -123,33 +203,32 @@ function hasGutter(line: string): boolean {
 }
 
 test('no anchor: the body renders WITHOUT a fake absolute gutter (Case A)', () => {
-  const lines = renderDiffView([{ path: 'foo.ts', oldText: 'a\nold\nc', newText: 'a\nnew\nc' }]).map(strip)
-  assert.equal(lines[0], '+1 -1 foo.ts', 'the +N -M header stays')
-  assert.ok(lines.some(line => line.includes('- old')), `delete row missing:\n${lines.join('\n')}`)
-  assert.ok(lines.some(line => line.includes('+ new')), `add row missing:\n${lines.join('\n')}`)
-  const body = lines.slice(1)
-  assert.ok(!body.some(hasGutter),
-    `a hunk without anchors must never render a fake absolute gutter:\n${lines.join('\n')}`)
+  const rendered = renderDiffView([{ path: 'foo.ts', oldText: 'a\nold\nc', newText: 'a\nnew\nc' }]).map(strip)
+  assert.equal(rendered[0], '+1 -1 foo.ts', 'the +N -M header stays')
+  assert.ok(rendered.some(line => line.includes('- old')), `delete row missing:\n${rendered.join('\n')}`)
+  assert.ok(rendered.some(line => line.includes('+ new')), `add row missing:\n${rendered.join('\n')}`)
+  assert.ok(!rendered.slice(1).some(hasGutter),
+    `a hunk without anchors must never render a fake absolute gutter:\n${rendered.join('\n')}`)
 })
 
 test('with anchors: the real absolute line numbers render (Case B)', () => {
-  const lines = renderDiffView([{
+  const rendered = renderDiffView([{
     path: 'foo.ts',
     oldText: 'a\nold\nc',
     newText: 'a\nnew\nc',
     oldStart: 830,
     newStart: 830,
   } as AnchoredFileDiff]).map(strip)
-  assert.equal(lines[0], '+1 -1 foo.ts')
-  const deleteRow = lines.find(line => line.includes('- old'))
-  const addRow = lines.find(line => line.includes('+ new'))
-  assert.ok(deleteRow !== undefined && hasGutter(deleteRow), `anchored delete must carry a gutter:\n${lines.join('\n')}`)
-  assert.ok(addRow !== undefined && hasGutter(addRow), `anchored add must carry a gutter:\n${lines.join('\n')}`)
-  // LCS alignment: context 'a' = 830, the delete is the OLD side line 831,
-  // the add the NEW side line 831, the trailing context 'c' advances to 832.
+  assert.equal(rendered[0], '+1 -1 foo.ts')
+  const deleteRow = rendered.find(line => line.includes('- old'))
+  const addRow = rendered.find(line => line.includes('+ new'))
+  assert.ok(deleteRow !== undefined && hasGutter(deleteRow), `anchored delete must carry a gutter:\n${rendered.join('\n')}`)
+  assert.ok(addRow !== undefined && hasGutter(addRow), `anchored add must carry a gutter:\n${rendered.join('\n')}`)
+  // The context 'a' is old/new line 830; the delete is the OLD-side line 831,
+  // the add the NEW-side line 831, the trailing context 'c' advances to 832.
   assert.match(deleteRow, /^\s*831\s+- old/, `old-side anchor wrong: ${deleteRow}`)
   assert.match(addRow, /^\s*831\s+\+ new/, `new-side anchor wrong: ${addRow}`)
-  const contextRow = lines.find(line => line.includes('  c'))
+  const contextRow = rendered.find(line => line.includes('  c'))
   assert.ok(contextRow !== undefined && /^\s*832\s+/.test(contextRow), `context must advance past the anchor: ${contextRow}`)
 })
 
@@ -161,9 +240,9 @@ test('anchors are validated: a missing or malformed anchor falls back to no gutt
     { ...base, oldStart: 1 },
     { ...base, oldStart: 1, newStart: undefined },
   ]) {
-    const lines = renderDiffView([hunk]).map(strip)
-    assert.ok(!lines.slice(1).some(hasGutter),
-      `malformed anchors must not render a gutter: ${JSON.stringify(hunk)}\n${lines.join('\n')}`)
+    const rendered = renderDiffView([hunk]).map(strip)
+    assert.ok(!rendered.slice(1).some(hasGutter),
+      `malformed anchors must not render a gutter: ${JSON.stringify(hunk)}\n${rendered.join('\n')}`)
   }
 })
 
@@ -185,9 +264,9 @@ test('no anchor: create/delete render no gutter at all (Cases C/D)', () => {
   assert.ok(!deleted.slice(1).some(hasGutter), `delete without anchors must not render a gutter:\n${deleted.join('\n')}`)
 })
 
-test('anchored elision and truncation footers align with the gutter column', () => {
-  const oldText = Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n')
-  const newText = Array.from({ length: 20 }, (_, i) => (i === 2 ? `line ${i} CHANGED` : i === 17 ? `line ${i} CHANGED` : `line ${i}`)).join('\n')
+test('anchored elision footers align with the gutter column', () => {
+  const oldText = lines('line', 20).join('\n')
+  const newText = lines('line', 20).map((line, i) => (i === 2 || i === 17 ? `${line} CHANGED` : line)).join('\n')
   const anchored = renderDiffView([{ path: 'f.ts', oldText, newText, oldStart: 100, newStart: 100 } as AnchoredFileDiff]).map(strip)
   assert.ok(anchored.some(line => line.startsWith('     … ') && line.includes('unchanged line')),
     `anchored elision must keep the gutter-column indent:\n${anchored.join('\n')}`)

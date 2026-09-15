@@ -69,6 +69,7 @@
   "dependencies": {
     "chalk": "^5.4.1",
     "commander": "^15.0.0",
+    "diff": "^9.0.0",
     "get-east-asian-width": "1.6.0",
     "marked": "18.0.5"
   },
