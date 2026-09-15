@@ -17,6 +17,9 @@ importers:
       commander:
         specifier: ^15.0.0
         version: 15.0.0
+      diff:
+        specifier: ^9.0.0
+        version: 9.0.0
       get-east-asian-width:
         specifier: 1.6.0
         version: 1.6.0
