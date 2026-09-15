@@ -3767,16 +3767,19 @@ export function registerTuiCommands(
           if (intentId !== undefined) runner.settleIntent(intentId, 'failed')
           // A newer `/model` owns the marker and the notices.
           if (token !== modelOperationToken) return 'superseded'
-          if (runner.sessionGeneration === generation) {
-            runner.setModelSelectionPending(undefined, token)
-            // A transition fence is a proven pre-dispatch refusal; the write
-            // may still be retried, so it must not surface as a failure.
-            if (!(error instanceof TransitionInProgressError)) {
-              app.notify(`model selection save: ${safeErrorMessage(error)}`, 'error')
-            }
-            runner.refreshStatus()
-            runner.updateWelcomeCard()
+          // The Session generation moved while the write was in flight (writer
+          // release vs transition commit): this operation no longer owns the
+          // surface, so it makes NO close/open decision and emits no notice
+          // (v2 §0.3.1).
+          if (runner.sessionGeneration !== generation) return 'superseded'
+          runner.setModelSelectionPending(undefined, token)
+          // A transition fence is a proven pre-dispatch refusal; the write
+          // may still be retried, so it must not surface as a failure.
+          if (!(error instanceof TransitionInProgressError)) {
+            app.notify(`model selection save: ${safeErrorMessage(error)}`, 'error')
           }
+          runner.refreshStatus()
+          runner.updateWelcomeCard()
           return error instanceof TransitionInProgressError ? 'cancelled' : 'indeterminate'
         }
         const outcome = result.outcome
@@ -3786,29 +3789,28 @@ export function registerTuiCommands(
         if (intentId !== undefined) runner.settleIntent(intentId, outcome.kind === 'committed' ? 'committed' : 'failed')
         // A newer `/model` owns the footer marker and the notices (v2 §0.2.5).
         if (token !== modelOperationToken) return 'superseded'
-        if (result.ownership === 'superseded') {
-          // v2 §0.2.1: a locally superseded operation says nothing about the
-          // Host commit, so it must not repaint or emit a stale notice — but an
-          // indeterminate commit stays NON-retryable.
-          if (runner.sessionGeneration === generation) {
+        // Ownership is superseded either by the port's own fence OR by a Session
+        // generation swap while the write was in flight. Both mean this result
+        // no longer owns the overlay: no close/open decision, no repaint, no
+        // stale notice — and an indeterminate commit stays NON-retryable.
+        const generationReplaced = runner.sessionGeneration !== generation
+        if (generationReplaced || result.ownership === 'superseded') {
+          if (!generationReplaced) {
             runner.setModelSelectionPending(undefined, token)
             runner.refreshStatus()
             runner.updateWelcomeCard()
           }
           return 'superseded'
         }
-        // A late settle from a replaced Session must not repaint it.
-        if (runner.sessionGeneration === generation) {
-          runner.setModelSelectionPending(undefined, token)
-          if (outcome.kind === 'rejected') app.notify(`model selection: ${outcome.error.message}`, 'error')
-          else if (outcome.kind === 'indeterminate') app.notify('model selection is indeterminate — the display reconciles from the Session; do not retry', 'error')
-          else if (outcome.kind === 'unsupported') app.notify(`model selection unsupported: ${outcome.reason}`, 'error')
-          // The authoritative Session projection decides the display in
-          // every case: a rejected/indeterminate outcome never paints the
-          // requested choice as committed.
-          runner.refreshStatus()
-          runner.updateWelcomeCard()
-        }
+        runner.setModelSelectionPending(undefined, token)
+        if (outcome.kind === 'rejected') app.notify(`model selection: ${outcome.error.message}`, 'error')
+        else if (outcome.kind === 'indeterminate') app.notify('model selection is indeterminate — the display reconciles from the Session; do not retry', 'error')
+        else if (outcome.kind === 'unsupported') app.notify(`model selection unsupported: ${outcome.reason}`, 'error')
+        // The authoritative Session projection decides the display in
+        // every case: a rejected/indeterminate outcome never paints the
+        // requested choice as committed.
+        runner.refreshStatus()
+        runner.updateWelcomeCard()
         return outcome.kind
       }
       if (directory.groups.length === 0 && directory.failures.length === 0) {
