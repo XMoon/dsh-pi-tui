@@ -249,8 +249,9 @@ attachment preparation cannot let a later gesture overtake an earlier one.
   projection, `rejected`/`cancelled` returns to the model list with the Host
   refusal, and `indeterminate` dismisses without retry and never claims the
   requested model. A late settle whose captured session generation no longer
-  matches is dropped (no repaint of a newer Session) but still settles its
-  transient default intent, so it never leaks into a later fresh create.
+  matches is dropped (no repaint, no close/open decision) and makes no
+  default-intent claim: the sessionless global-default tracker is never
+  entered by a live Session write, so nothing leaks into a later fresh create.
 - Preset selection stays inside the local transition gate as coordination
   only: the Host owns the serialized switch, the blank re-check, the recompose
   transaction and the durable commit. The command revalidates the captured

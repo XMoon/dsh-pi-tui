@@ -372,8 +372,10 @@ async function main() {
       assert.ok(group !== undefined, 'the stub provider group is missing from the model directory')
       assert.deepEqual(group.models.map(model => model.id), [MODEL])
       assert.deepEqual(directory.failures, [])
-      assert.deepEqual(modelCatalog.listProviders(), [{ id: PROVIDER, name: PROVIDER }])
-      assert.deepEqual(await modelCatalog.listModels(PROVIDER), [{ id: MODEL }])
+      // Provider ENDPOINT discovery has no official Remote capability in D2.3:
+      // it is UNAVAILABLE, never faked from the model-directory cache.
+      assert.deepEqual(modelCatalog.listProviders(), [], 'Remote provider discovery must be unavailable')
+      assert.deepEqual(await modelCatalog.listModels(PROVIDER), [], 'Remote per-provider discovery must be unavailable')
 
       const selected = { provider: PROVIDER, model: MODEL }
       const result = await modelCatalog.selectSessionModel(ORDINARY_SESSION_ID, selected)

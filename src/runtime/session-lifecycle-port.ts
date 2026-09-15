@@ -157,12 +157,14 @@ export function requireCreated(result: CreateResult): SessionHandle {
     case 'created':
       if (ownership === 'superseded') {
         throw new LifecycleError('superseded', ownership,
-          'the Session was created but the local surface was superseded', outcome.handle.session.id)
+          `Session "${outcome.handle.session.id}" was created, but the local surface was superseded — do not retry creation`,
+          outcome.handle.session.id)
       }
       return outcome.handle
     case 'published-with-error':
+      // The published identity is an AUTHORITATIVE fact, not a maybe.
       throw new LifecycleError(outcome.kind, ownership,
-        `the Session may already have been published: ${outcome.error.message} (${outcome.error.code})`,
+        `Session "${outcome.sessionId}" was published, but workspace attach/reconcile failed: ${outcome.error.message} (${outcome.error.code}) — do not retry creation`,
         outcome.sessionId)
     case 'indeterminate':
       throw new LifecycleError(outcome.kind, ownership,

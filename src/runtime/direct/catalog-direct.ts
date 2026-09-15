@@ -207,7 +207,11 @@ export class DirectModelCatalog implements ModelCatalog {
     return this.llm() !== undefined && this.defaultModel() !== undefined
   }
 
-  async loadDirectory(): Promise<ModelDirectoryDto> {
+  async loadDirectory(signal?: AbortSignal): Promise<ModelDirectoryDto> {
+    // Direct read-abort parity (v2 §0.5): the caller-owned signal is honored
+    // before any in-process registry work (the official registry calls are
+    // signal-less, so this is an admission check).
+    signal?.throwIfAborted()
     const llm = this.llm()
     // The deployment default is the one value the directory always carries
     // (official `buildModelCatalog` semantics): a Session with no local
@@ -249,12 +253,18 @@ export class DirectModelCatalog implements ModelCatalog {
         }))
         return { kind: 'group', group: { id: provider.id, name: provider.name, models: entries } }
       } catch (error) {
+        // An abort is NOT a provider failure row: propagate the cancellation
+        // so the read never returns a success DTO after the caller cancelled
+        // (v2 §0.2.3).
+        signal?.throwIfAborted()
         return {
           kind: 'failure',
           failure: { id: provider.id, name: provider.name, message: safeErrorMessage(error) },
         }
       }
     }))
+    // Fence AFTER the batch await: a cancellation mid-read never publishes.
+    signal?.throwIfAborted()
     return {
       default: fallback,
       routableProviders: providers.map(provider => provider.id),
@@ -483,7 +493,8 @@ export class DirectPresetCatalog implements PresetCatalog {
     return this.presets() !== undefined
   }
 
-  async roster(): Promise<PresetRosterDto> {
+  async roster(signal?: AbortSignal): Promise<PresetRosterDto> {
+    signal?.throwIfAborted()
     const presets = this.presets()
     if (presets === undefined) return { presets: [], modeSelectionEnabled: false }
     if (typeof presets.remoteExportList === 'function') {
@@ -491,6 +502,7 @@ export class DirectPresetCatalog implements PresetCatalog {
       // path-free rows, the Host-effective default and the mode-selection
       // policy from ONE settings snapshot.
       const roster = await presets.remoteExportList()
+      signal?.throwIfAborted()
       const defaultId = roster.presets.find(preset => preset.isDefault === true)?.id
       return {
         presets: roster.presets.map(preset => ({
@@ -508,6 +520,7 @@ export class DirectPresetCatalog implements PresetCatalog {
     // deployment's mode-selection policy: FAIL CLOSED rather than expose
     // presets a disabled deployment may have intended to hide.
     const roster = await presets.list()
+    signal?.throwIfAborted()
     return {
       presets: roster.map(preset => ({
         id: preset.id,
@@ -520,7 +533,8 @@ export class DirectPresetCatalog implements PresetCatalog {
     }
   }
 
-  async resolve(id?: string, _signal?: AbortSignal): Promise<{ readonly id?: string }> {
+  async resolve(id?: string, signal?: AbortSignal): Promise<{ readonly id?: string }> {
+    signal?.throwIfAborted()
     const presets = this.presets()
     // Rosterless deployment: no preset identity to record (the old compose
     // path returned `agentPreset: undefined`).
@@ -531,7 +545,8 @@ export class DirectPresetCatalog implements PresetCatalog {
     // An omitted id means "use the persisted deployment default". DSH allows
     // a user preset literally named `code`, so probe that real roster entry
     // before applying the old pi-tui default-data compatibility mapping.
-    const preset = await resolvePresetRequest(presets, id)
+    const preset = await resolvePresetRequest(presets, id, signal)
+    signal?.throwIfAborted()
     return { id: preset.id }
   }
 

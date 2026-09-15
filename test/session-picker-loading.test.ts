@@ -133,6 +133,7 @@ function harness(sessionReader: SessionReader): Harness {
     awaitPendingDefaultWrite: async () => {},
     trackDefaultWrite: () => {},
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},

@@ -168,6 +168,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     trackDefaultWrite: () => {},
     get defaultIntentOutcome() { return undefined },
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},

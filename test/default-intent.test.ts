@@ -124,3 +124,21 @@ test('clearing the intent resets the outcome', () => {
   assert.equal(tracker.intent, undefined)
   assert.equal(tracker.outcome, undefined)
 })
+
+test('a failed newer operation restores the nearest UNRESOLVED ancestor (never erases it)', () => {
+  const tracker = new DefaultIntentTracker()
+  tracker.set(a)
+  tracker.set(b)
+  const idB = tracker.record!.id
+  tracker.settle(idB, 'unresolved')
+  assert.deepEqual(tracker.intent, b, 'an unresolved intent stays active until a Host read/reconnect')
+  assert.equal(tracker.outcome, 'unresolved')
+  tracker.set(c)
+  const idC = tracker.record!.id
+  tracker.settle(idC, 'failed')
+  assert.deepEqual(tracker.intent, b, 'the nearest unresolved ancestor survives a newer failure')
+  assert.equal(tracker.outcome, 'unresolved', 'a newer failure must not erase the indeterminate state')
+  tracker.settle(idB, 'committed')
+  assert.equal(tracker.intent, undefined)
+  assert.equal(tracker.outcome, 'committed')
+})

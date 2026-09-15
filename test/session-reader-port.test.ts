@@ -683,3 +683,18 @@ test('blank reads the Host turn-boundary authority for the live Session', () => 
   assert.equal(reader.blank('session-blank'), false, 'a started turn makes the Session non-blank')
   assert.equal(reader.blank('session-missing'), undefined, 'an unknown Session is unknown, never inferred')
 })
+
+test('blank is undefined (never a crash) when the projection read throws', () => {
+  const liveHeader = header('session-blank-throw', 400)
+  const session = { header: liveHeader }
+  const liveAgent = { session, ctx: {} }
+  const reader = new DirectSessionReader(host({
+    sessionProjections: {
+      stateOf: () => { throw new Error('projection teardown') },
+    },
+  }), {
+    sessionOf: id => String(id) === 'session-blank-throw' ? session : undefined,
+    agentOf: id => String(id) === 'session-blank-throw' ? liveAgent : undefined,
+  })
+  assert.equal(reader.blank('session-blank-throw'), undefined)
+})

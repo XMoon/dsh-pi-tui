@@ -29,12 +29,19 @@ function isUnknownPresetError(error: unknown, id: string): boolean {
 export async function resolvePresetRequest<T extends { readonly id: string }>(
   presets: PresetResolverLike<T>,
   requestedId?: string,
+  signal?: AbortSignal,
 ): Promise<T> {
-  if (requestedId !== undefined || presets.defaultId !== 'code') return presets.resolve(requestedId)
+  if (requestedId !== undefined || presets.defaultId !== 'code') {
+    const resolved = await presets.resolve(requestedId)
+    signal?.throwIfAborted()
+    return resolved
+  }
   try {
     return await presets.resolve('code')
   } catch (error) {
     if (!isUnknownPresetError(error, 'code')) throw error
+    // A cancellation during the code probe must not fire the ptc fallback read.
+    signal?.throwIfAborted()
     return presets.resolve('ptc')
   }
 }

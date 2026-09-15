@@ -172,6 +172,7 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     trackDefaultWrite: () => {},
     get defaultIntentOutcome() { return undefined },
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},

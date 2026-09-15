@@ -149,10 +149,14 @@ export interface RewindCommitHost extends ForkAgentHost {
   replaceDraft(text: string): void
 }
 
-/** The settled outcome of a rewind commit. */
+/** The settled outcome of a rewind commit. `stale` is the INITIAL picker
+ *  identity mismatch (the user is told the selection is stale); `superseded`
+ *  is a locally superseded lifecycle result during the commit (silent, v2
+ *  §0.2.1) — the two must not share one kind. */
 export type RewindCommitOutcome =
   | { kind: 'rewound'; sessionId: string; turn: number; hasNonTextContent: boolean }
   | { kind: 'stale' }
+  | { kind: 'superseded' }
   | { kind: 'failed'; message: string }
 
 /**
@@ -232,7 +236,7 @@ export async function commitRewind(
   if (!result.ok) {
     // v2 §0.2.1: a locally SUPERSEDED rewind owns nothing — stay silent. A
     // published-with-error keeps its identity in the machine-readable cause.
-    if (result.error instanceof LifecycleError && result.error.ownership === 'superseded') return { kind: 'stale' }
+    if (result.error instanceof LifecycleError && result.error.ownership === 'superseded') return { kind: 'superseded' }
     return { kind: 'failed', message: result.message }
   }
   // The transaction COMMITTED: restore the selected prompt (synchronous,

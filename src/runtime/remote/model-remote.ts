@@ -31,6 +31,7 @@ import type {
 } from '../catalog-port.ts'
 import { GATEWAY_PRE_INVOCATION_CODES, type OperationResult, type WriteOutcome } from '../write-outcome.ts'
 import { GenerationCache } from './generation-cache.ts'
+import { SupersededReadError } from '../read-error.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import { remoteRejected, remoteNotDispatched, remoteFailureCode, remoteFailureMessage, type RemoteWriteFailure } from './write-failure.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
@@ -73,7 +74,13 @@ function generationChanged(generation: RemoteConnectionGenerationSource, capture
 function copySelection(value: unknown): ModelSelectionDto | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const record = value as { readonly provider?: unknown; readonly model?: unknown; readonly reasoningEffort?: unknown }
-  if (typeof record.provider !== 'string' || typeof record.model !== 'string') return undefined
+  // Untrusted success payloads must MATCH the normalized shape, not be coerced:
+  // an empty provider/model or a present-but-non-string effort is unusable
+  // (never a fabricated committed selection).
+  if (typeof record.provider !== 'string' || record.provider === '') return undefined
+  if (typeof record.model !== 'string' || record.model === '') return undefined
+  if (record.reasoningEffort !== undefined && record.reasoningEffort !== null
+    && (typeof record.reasoningEffort !== 'string' || record.reasoningEffort === '')) return undefined
   return {
     provider: record.provider,
     model: record.model,
@@ -194,7 +201,7 @@ export class RemoteModelCatalog implements ModelCatalog {
     // directory from the previous Host — and its FAILURE is likewise not the
     // current Host's failure.
     if (generationChanged(this.generation, captured)) {
-      throw new Error('remote connection changed while loading the model catalog')
+      throw new SupersededReadError('remote connection changed while loading the model catalog')
     }
     // v2 §0.2.3 order: generation, then a LOCAL abort, then Host classification
     // — an aborted caller must not surface a stale Host failure.
@@ -206,7 +213,7 @@ export class RemoteModelCatalog implements ModelCatalog {
     if (!this.directoryCache.publish(epoch, captured, result.value)) {
       const newer = this.directoryCache.snapshot(this.generation.getSnapshot())
       if (newer !== undefined) return newer
-      throw new Error('the model catalog read was superseded by a newer request')
+      throw new SupersededReadError('the model catalog read was superseded by a newer request')
     }
     this.lastLoadedGeneration = captured
     return this.directoryCache.snapshot(captured)!
@@ -224,16 +231,18 @@ export class RemoteModelCatalog implements ModelCatalog {
   }
 
   listProviders(): readonly ModelProviderSummary[] {
-    // Provider-discovery capability: served from the last loaded Host
-    // directory for the CURRENT generation. A caller that has not loaded the
-    // directory yet (or reconnected since) sees none.
-    return (this.cachedDirectory()?.groups ?? []).map(group => ({ id: group.id, name: group.name }))
+    // Provider ENDPOINT/config discovery has no official Remote capability in
+    // D2.3. The `/model` directory is NOT that capability (it drops empty and
+    // failing routable providers and only exists after a read), so the Remote
+    // adapter reports it UNAVAILABLE rather than faking it from the directory
+    // cache. The subagent allowlist and the `/login` merge stay Direct-only.
+    return []
   }
 
-  async listModels(providerId: string): Promise<readonly ModelInfoSummary[]> {
-    const directory = await this.loadDirectory()
-    return (directory.groups.find(group => group.id === providerId)?.models ?? [])
-      .map(model => ({ id: model.id }))
+  listModels(_providerId: string): Promise<readonly ModelInfoSummary[]> {
+    // Same: a per-provider list for provider discovery is not the `/model`
+    // directory read; no official Remote capability → unavailable.
+    return Promise.resolve([])
   }
 
   saveDefaultSelection(_selection: ModelSelectionDto): Promise<WriteOutcome<void>> {
@@ -284,12 +293,17 @@ export class RemoteModelCatalog implements ModelCatalog {
     // Same-generation overlapping selections need their own owner token
     // (v2 §0.2.5): only the newest one still owns the surface.
     const epoch = ++this.writeEpoch
+    // The official generated Remote THROWS on a transport/HTTP/envelope failure
+    // (it does not resolve `{ok:false}`). Normalize the throw to the failure
+    // shape so a post-dispatch transport failure is classified (v2 §0.7.1:
+    // code-less/transport after dispatch = indeterminate), never a rejected
+    // Promise.
     const result = await this.session.selectModel({
       sessionId,
       provider: selection.provider,
       model: selection.model,
       ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
-    })
+    }).catch((error: unknown) => ({ ok: false as const, error }))
     // Classify FIRST (v2 §0.2.2/§0.7.1: a Host refusal/success is provable
     // regardless of the generation), THEN mark local ownership. A superseded
     // result must not repaint or notify, but its settlement (including a

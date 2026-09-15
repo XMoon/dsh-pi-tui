@@ -814,6 +814,7 @@ function stubRunner(options: { ctx: Context; app: TuiApp; agent?: Agent; rewinds
     trackDefaultWrite: () => {},
     get defaultIntentOutcome() { return undefined },
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     updateWelcomeCard: () => {},
@@ -1027,6 +1028,7 @@ test('review round 27: /preset live-swap runs inside the session-transition gate
     trackDefaultWrite: () => {},
     get defaultIntentOutcome() { return undefined },
     setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => {
       gateRuns += 1
@@ -1044,7 +1046,7 @@ test('review round 27: /preset live-swap runs inside the session-transition gate
   app.stop()
 })
 
-test('a SUPERSEDED rewind create is silent (stale), not a failure', async () => {
+test('a SUPERSEDED rewind create is silent (its own kind), not a failure', async () => {
   const { LifecycleError } = await import('../src/runtime/session-lifecycle-port.ts')
   const rig = makeRig({
     transitionTo: async () => ({
@@ -1056,6 +1058,6 @@ test('a SUPERSEDED rewind create is silent (stale), not a failure', async () => 
   const events = [...turn(0, 1, 'A'), ...turn(4, 2, 'B')]
   const candidates = collectRewindCandidates(events)
   const outcome = await commitRewind(rig.host, sourceAgent('session-source', events), candidates[0]!, { sessionId: 'session-source', generation: 1 })
-  assert.deepEqual(outcome, { kind: 'stale' }, 'a superseded rewind must not surface an error')
+  assert.deepEqual(outcome, { kind: 'superseded' }, 'a superseded rewind must not surface an error or reuse the stale notice')
   assert.deepEqual(rig.drafts, [], 'nothing is restored onto the surface')
 })

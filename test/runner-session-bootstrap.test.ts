@@ -1296,6 +1296,10 @@ test('a FAILED sessionless default save is never seeded into the first create (v
   assert.ok(app, 'the production runner must create a TuiApp')
   await pickSecondModel(app, harness)
   await settle()
+  // An ambiguous (thrown) default write keeps an explicit unresolved footer
+  // marker until a Host read/reconnect establishes truth (v2 §0.3.2).
+  assert.match(probe.capturedModels.at(-1) ?? '', /\(unconfirmed\)/,
+    `the footer must show the unresolved marker: ${JSON.stringify(probe.capturedModels)}`)
   app.setDraft('first deferred prompt')
   ;(app as unknown as { submitDraft(): void }).submitDraft()
   await settle()

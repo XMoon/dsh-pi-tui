@@ -16,6 +16,13 @@ import test from 'node:test'
 import { DirectCatalogPort, type HostContextLike } from '../src/runtime/direct/catalog-direct.ts'
 import type { AgentPreset } from '@deepseek-ai/dsh-agent-presets'
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
 function host(services: Record<string, unknown>): HostContextLike {
   return { get: (name) => services[name], on: () => {} }
 }
@@ -869,4 +876,87 @@ test('Direct selectSessionPreset reports cancelled for an already-aborted signal
   controller.abort()
   const result = await presets.selectSessionPreset('session-live', 'minimal', controller.signal)
   assert.deepEqual(result, { ownership: 'current', outcome: { kind: 'cancelled' } })
+})
+
+test('Direct saveDefaultSelection settles committed for the official Promise<void> success', async () => {
+  // The pinned official `agentDefaultModel.saveSelection` resolves `void`; a
+  // fulfilled write is a commit and must NOT be mis-settled as indeterminate.
+  let saved: unknown
+  const models = new DirectCatalogPort(host({
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'p', model: 'm0' }),
+      saveSelection: async (next: unknown) => { saved = next },
+    },
+  }), () => undefined).models
+  const outcome = await models.saveDefaultSelection({ provider: 'p', model: 'm1' })
+  assert.deepEqual(outcome, { kind: 'committed', value: undefined })
+  assert.deepEqual(saved, { provider: 'p', model: 'm1' })
+})
+
+test('Direct loadDirectory aborts after the Host awaits (never publishes a success DTO)', async () => {
+  const started = deferred<void>()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const models = new DirectCatalogPort(host({
+    llm: {
+      resolveCallConfig: async (next: unknown) => next,
+      listProviders: () => [{ id: 'p', name: 'Provider P' }],
+      listModels: async () => { started.resolve(); await gate; return [{ id: 'm1' }] },
+      resolveModelInfo: async () => ({}),
+      discoverModels: async () => [],
+      listConfigurableProviders: () => [],
+    },
+  }), () => undefined).models
+  const controller = new AbortController()
+  const pending = models.loadDirectory(controller.signal)
+  await started.promise
+  controller.abort()
+  release()
+  await assert.rejects(pending, /abort/i)
+})
+
+test('Direct roster aborts after the Host await (never opens on a cancelled read)', async () => {
+  const started = deferred<void>()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const presets = new DirectCatalogPort(host({
+    agentPresets: {
+      remoteExportList: async () => { started.resolve(); await gate; return { presets: [], modeSelectionEnabled: true } },
+      list: async () => [],
+    },
+  }), () => undefined).presets
+  const controller = new AbortController()
+  const pending = presets.roster(controller.signal)
+  await started.promise
+  controller.abort()
+  release()
+  await assert.rejects(pending, /abort/i)
+})
+
+test('Direct preset resolve aborts between the code probe and the ptc fallback', async () => {
+  const started = deferred<void>()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const calls: (string | undefined)[] = []
+  const presets = new DirectCatalogPort(host({
+    agentPresets: {
+      defaultId: 'code',
+      resolve: async (id?: string) => {
+        calls.push(id)
+        if (id === 'code') {
+          started.resolve()
+          await gate
+          throw Object.assign(new Error('agent-presets: preset "code" not found (available: standard)'), { code: 'agent-preset/not-found' })
+        }
+        return { id: 'ptc', trust: 'system' }
+      },
+    },
+  }), () => undefined).presets
+  const controller = new AbortController()
+  const pending = presets.resolve(undefined, controller.signal)
+  await started.promise
+  controller.abort()
+  release()
+  await assert.rejects(pending, /abort/i)
+  assert.deepEqual(calls, ['code'], 'the fallback Host read must not run after an abort')
 })

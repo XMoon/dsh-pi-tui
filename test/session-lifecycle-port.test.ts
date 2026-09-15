@@ -337,3 +337,30 @@ test('Direct create persists the COMPOSED preset and rejects a mismatched legacy
   assert.equal(mismatched.outcome.kind, 'rejected')
   if (mismatched.outcome.kind === 'rejected') assert.match(mismatched.outcome.error.message, /disagrees with the semantic agentPreset/)
 })
+
+test('Direct create captures the Host default at ADMISSION (a later /model write must not rewrite it)', async () => {
+  let selection = { provider: 'p', model: 'm-admission' }
+  let releaseCompose!: () => void
+  const composeGate = new Promise<void>((resolve) => { releaseCompose = resolve })
+  const captured: unknown[] = []
+  const lifecycle = new DirectSessionLifecycle({
+    get: (name) => name === 'agents'
+      ? {
+          create: async (options: { agentOptions: unknown }) => {
+            captured.push(options.agentOptions)
+            return { agent: { session: { id: 'session-new' } }, dispose: async () => {} }
+          },
+          resume: async () => ({ agent: { session: { id: 'x' } }, dispose: async () => {} }),
+        }
+      : name === 'agentDefaultModel' ? { currentSelection: () => selection } : undefined,
+  }, async () => { await composeGate; return { setup: () => {} } })
+  const pending = lifecycle.create({ sessionId: 'session-new', meta: { cwd: '/ws' } })
+  await Promise.resolve()
+  // A later sessionless /model default write lands while compose is in flight.
+  selection = { provider: 'p', model: 'm-later' }
+  releaseCompose()
+  const result = await pending
+  assert.equal(result.outcome.kind, 'created')
+  assert.deepEqual(captured[0], { provider: 'p', model: 'm-admission' },
+    'the create must use the Host default captured at admission, not a later write')
+})

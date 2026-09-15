@@ -151,7 +151,13 @@ export class DirectSessionReader implements SessionReader {
       stateOf(session: unknown, key: string): unknown
     } | undefined
     if (projections === undefined) return undefined
-    return turnBoundaryBlank(projections.stateOf(live.session, 'turnBoundary'))
+    try {
+      return turnBoundaryBlank(projections.stateOf(live.session, 'turnBoundary'))
+    } catch {
+      // The semantic `SessionReader.blank` contract: an unavailable/broken
+      // projection authority is `undefined` (unknown), never a crash.
+      return undefined
+    }
   }
 
   private liveSession(sessionId: string): Session | undefined {

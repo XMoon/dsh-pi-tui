@@ -16,6 +16,7 @@
 import type { PresetCatalog, PresetRosterDto, PresetRosterEntry } from '../catalog-port.ts'
 import { GATEWAY_PRE_INVOCATION_CODES, type OperationResult, type WriteOutcome } from '../write-outcome.ts'
 import { GenerationCache } from './generation-cache.ts'
+import { SupersededReadError } from '../read-error.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import { remoteRejected, remoteNotDispatched, remoteFailureCode, remoteFailureMessage, type RemoteWriteFailure } from './write-failure.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
@@ -139,7 +140,7 @@ export class RemotePresetCatalog implements PresetCatalog {
     // roster from the previous Host — and its failure is likewise not the
     // current Host's failure.
     if (generationChanged(this.generation, captured)) {
-      throw new Error('remote connection changed while loading the preset roster')
+      throw new SupersededReadError('remote connection changed while loading the preset roster')
     }
     // v2 §0.2.3 order: generation, then a LOCAL abort, then Host classification
     // — an aborted caller must not surface a stale Host failure.
@@ -156,7 +157,7 @@ export class RemotePresetCatalog implements PresetCatalog {
     if (!this.rosterCache.publish(epoch, captured, dto)) {
       const newer = this.rosterCache.snapshot(this.generation.getSnapshot())
       if (newer !== undefined) return newer
-      throw new Error('the preset roster read was superseded by a newer request')
+      throw new SupersededReadError('the preset roster read was superseded by a newer request')
     }
     return this.rosterCache.snapshot(captured)!
   }
@@ -192,12 +193,19 @@ export class RemotePresetCatalog implements PresetCatalog {
     }
     // Owner token for overlapping same-generation preset selections (§0.2.5).
     const epoch = ++this.writeEpoch
-    const result = await this.presets.select(sessionId, presetId)
+    // The official generated Remote THROWS on transport/envelope failure;
+    // normalize it so a post-dispatch failure is `indeterminate` (v2 §0.7.2),
+    // never a rejected Promise.
+    const result = await this.presets.select(sessionId, presetId).catch((error: unknown) => ({ ok: false as const, error }))
     // Classify FIRST (v2 §0.2.2/§0.7.2), THEN mark local ownership: a refusal
     // or success from the Host that processed the call is provable regardless
     // of a later generation change; only the local surface ownership is lost.
+    // The connection envelope parser does not validate the nested payload, so
+    // a malformed success must not be presented as a committed preset.
     const outcome: WriteOutcome<{ readonly preset: string }> = result.ok
-      ? { kind: 'committed', value: { preset: result.value } }
+      ? typeof result.value === 'string' && result.value !== ''
+        ? { kind: 'committed', value: { preset: result.value } }
+        : { kind: 'indeterminate', error: { code: 'agent-preset/select-result-invalid', message: 'the Host returned an unusable preset id' } }
       : classifyRemotePresetFailure(result.error)
     const superseded = generationChanged(this.generation, captured)
       || epoch !== this.writeEpoch
