@@ -3938,7 +3938,7 @@ export function apply(ctx: Context, config: Config): void {
     }
     // Monotonic session generation: bumped on EVERY session swap (switch,
     // resume, deferred creation). Late async work (the skill command
-    // catalog refresh, model-menu info, title folds) captures the
+    // catalog refresh, title folds) captures the
     // generation it was issued for and refuses to commit state once a newer
     // session owns the surface. Bumping also tears down old-session-only
     // state: tool-call preview args, search results, and per-message

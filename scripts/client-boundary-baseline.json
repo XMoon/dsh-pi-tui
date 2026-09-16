@@ -26,9 +26,6 @@
     "tokenMeter",
     "tools"
   ],
-  "model-menu.ts": [
-    "import:dsh-agent"
-  ],
   "present.ts": [
     "import:dsh-session"
   ],

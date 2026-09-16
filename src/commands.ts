@@ -23,7 +23,7 @@ import { scheduler } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
@@ -70,11 +70,11 @@ import { FileInputError, probeAttachment } from './attachment/intake.ts'
 import { parseShellWords } from './shell-words.ts'
 import { color, loadCustomTheme, customThemeNames, settingsListTheme } from './theme.ts'
 import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from './theme-menu.ts'
-import { SubagentModelAllowlistSubmenu, allowlistSummary } from './subagent-model-menu.ts'
+import { SubagentModelAllowlistPicker, allowlistSummary } from './subagent-model-menu.ts'
 import { resolveThemeSelection, normalizePersistedTheme } from './theme-source.ts'
 import { suggestPathArgument } from './mentions.ts'
 import { FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
-import { ModelSubmenu, type ModelApplyOutcome } from './model-menu.ts'
+import { ModelPicker, type ModelApplyOutcome } from './model-picker.ts'
 import type { OperationResult } from './runtime/write-outcome.ts'
 import { LifecycleError } from './runtime/session-lifecycle-port.ts'
 import { SupersededReadError } from './runtime/read-error.ts'
@@ -2013,7 +2013,12 @@ export function registerTuiCommands(
       // opens): the panel teardown disposes it so a write pending when the
       // whole /settings overlay closes can never repaint or toast after
       // the panel is gone (review round 6).
-      let allowlistMenu: SubagentModelAllowlistSubmenu | undefined
+      let allowlistMenu: SubagentModelAllowlistPicker | undefined
+      // Whether the /settings overlay is still mounted: a late allowlist
+      // settle after the WHOLE panel closed must still update the (detached)
+      // row for bookkeeping, but must not schedule a repaint of a surface
+      // that no longer exists.
+      let settingsOpen = true
       const closeSettings = app.openSettings(
         [
           ...liveAgent === undefined ? [] : [{
@@ -2039,18 +2044,29 @@ export function registerTuiCommands(
           // dependency (configure allowed routes, then enable selection).
           ...(runner.config.subagentModelSelection.available() && runner.catalog.models.available()) ? (() => {
             const subagentSelection = runner.config.subagentModelSelection.get()
-            return [{
+            // The allowlist row's value is owned by the SUBMENU: a write
+            // settling after the submenu closed must converge the displayed
+            // summary through `summarize` (the fork rejects a `done` callback
+            // once the submenu generation advanced), without re-opening it.
+            const allowlistRow = {
               id: 'subagent-model-allowlist',
               label: 'Subagent allowed models',
               description: 'The child LLM routes the official subagent tool may pick from',
               currentValue: allowlistSummary(subagentSelection.allowedModels),
               submenu: (_currentValue: string, done: (selected?: string) => void) => {
-                const menu = new SubagentModelAllowlistSubmenu({
+                const menu = new SubagentModelAllowlistPicker({
                   selection: runner.config.subagentModelSelection,
                   catalog: runner.catalog.models,
                   notify: (message, kind) => app.notify(message, kind),
                   requestRender: () => app.requestRender(),
                   done,
+                  summarize: (value) => {
+                    allowlistRow.currentValue = value
+                    // Suppress the repaint once the WHOLE panel closed: the
+                    // row update above is inert bookkeeping, but a scheduled
+                    // render would repaint a surface the user already left.
+                    if (settingsOpen) app.requestRender()
+                  },
                   runOwned: (label, task, options) => {
                     runOwned(label, task, {
                       diag: runner.diag,
@@ -2062,7 +2078,8 @@ export function registerTuiCommands(
                 allowlistMenu = menu
                 return menu
               },
-            }, {
+            }
+            return [allowlistRow, {
               id: 'subagent-model-selection',
               label: 'Subagent model selection',
               description: 'Let new sessions pick a child provider/model in the subagent tool (official DSH setting; needs at least one allowed route)',
@@ -2595,9 +2612,15 @@ export function registerTuiCommands(
           // Esc: close without writing. The allowlist submenu is disposed
           // with the panel — a write pending when the whole /settings
           // overlay closes must not repaint or toast after teardown
-          // (review round 6).
+          // (review round 6). `settingsOpen` gates the summarize repaint.
+          settingsOpen = false
           allowlistMenu?.dispose()
         },
+        // Teardown-aware: a fullscreen screen swap (or any other hide path)
+        // removes the panel WITHOUT the Esc cancel, so the mounted state must
+        // also flip there — otherwise a late allowlist settle would schedule
+        // a repaint of a surface that no longer exists.
+        () => { settingsOpen = false },
       )
       return { kind: 'success' }
     },
@@ -3815,7 +3838,6 @@ export function registerTuiCommands(
       // An authoritative Host read reconciles a lingering UNRESOLVED sessionless
       // default intent (v2 §0.3.2) — the read is the truth, no guessing.
       runner.reconcileDefaultIntent(directory.default)
-      const current = selected.current ?? directory.default ?? models.defaultSelection() ?? { provider: '', model: '' }
       /** Commit a selection (model, optional effort) and resolve with its
        *  semantic settlement so the picker stays truthful: a rejected write
        *  keeps the picker usable, a committed/indeterminate one dismisses. */
@@ -3942,53 +3964,40 @@ export function registerTuiCommands(
       if (directory.groups.length === 0 && directory.failures.length === 0) {
         return { kind: 'error', text: 'no models are available' }
       }
-      // The model and effort levels render INSIDE the provider list's
-      // submenu slot (ModelSubmenu/EffortSubmenu): selecting applies
-      // immediately and Esc walks back one level. A nested openSettings
-      // would mount a second overlay and leave the first one hanging
-      // (the ghost-overlay trap the /subagents flow documents). The whole
-      // tree comes from the ONE Host directory read above; a provider whose
-      // catalog failed renders as an inert failure row.
-      const closer = app.openSettings(
-        [
-          ...directory.groups.map(group => ({
-            id: group.id,
-            label: group.name,
-            currentValue: current.provider === group.id ? current.model : '',
-            submenu: (_value: string, done: (selected?: string) => void) => new ModelSubmenu(group.id, current.model, selected.current?.reasoningEffort, {
-              listModels: () => Promise.resolve(group.models),
-              resolveModelInfo: (_providerId: string, modelId: string) => Promise.resolve({
-                reasoning: group.models.find(model => model.id === modelId)?.reasoning,
-              }),
-              apply,
-              requestRender: () => app.requestRender(),
-              // An APPLIED selection (non-undefined) closes the WHOLE overlay
-              // (web ModelSelect settleSelection parity): picking a model
-              // walks into the effort submenu, picking an effort (or Default)
-              // commits and dismisses the panel. Esc (undefined) keeps the
-              // step-by-step walk-back. closer() runs BEFORE done() — close
-              // the overlay first, then the submenu level (order-safe).
-              done: (picked) => {
-                if (picked !== undefined) closer()
-                done(picked)
-              },
-              // The owned-task entry for the menu loads: runOwned with the
-              // runner's diag pre-attached (AGENTS.md — never a bare void).
-              runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
-                runOwned(label, task, { ...options, diag: runner.diag, sessionId: () => runner.liveAgent?.session.id })
-              },
-            }),
-          })),
-          ...directory.failures.map(failure => ({
-            id: `failure:${failure.id}`,
-            label: failure.name,
-            description: failure.message,
-            currentValue: 'unavailable',
-          })),
-        ],
-        () => {},
-        () => {},
-      )
+      // `/model` opens ONE capturing picker overlay (ModelPicker): provider is
+      // a non-selectable group header, Enter applies the highlighted model
+      // directly, and Right drills into that model's effort view INSIDE the
+      // same overlay (never a nested openSettings/picker overlay — the
+      // ghost-overlay trap). The whole list comes from the ONE Host directory
+      // read above; a provider whose catalog failed renders as an inert
+      // failure row. The command layer keeps every semantic guard above
+      // (directory read, generation/identity fence, `apply()` write semantics).
+      const sessionless = runner.liveAgent?.session.id === undefined
+      // The picker's `close` closure needs the mounted overlay's closer; it is
+      // assigned right after the picker is constructed and only ever invoked
+      // later (a user Esc/settlement), never during construction.
+      let closer: () => void = () => {}
+      const picker = new ModelPicker({
+        directory,
+        // A live Session highlights its effective selection; a sessionless
+        // surface highlights the directory default and never fabricates a
+        // `current` model.
+        current: sessionless ? directory.default : selected.current,
+        sessionless,
+        // The picker owns presentation only: brand the effort id here so the
+        // official session/global-default write semantics stay untouched.
+        apply: (next) => apply(next.reasoningEffort === undefined
+          ? { provider: next.provider, model: next.model }
+          : { provider: next.provider, model: next.model, reasoningEffort: ReasoningEffortId(next.reasoningEffort) }),
+        requestRender: () => app.requestRender(),
+        close: () => closer(),
+        // The owned-task entry for the semantic write: runOwned with the
+        // runner's diag pre-attached (AGENTS.md — never a bare void).
+        runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
+          runOwned(label, task, { ...options, diag: runner.diag, sessionId: () => runner.liveAgent?.session.id })
+        },
+      })
+      closer = app.openModelPicker(picker)
       return { kind: 'success' }
     },
   })

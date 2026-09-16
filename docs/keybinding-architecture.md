@@ -280,7 +280,7 @@ remap updates every hint automatically.
   key-level reservation AND the runtime ACTION whitelist — a Stable
   plugin registers only the public `TuiAction` set; the Host-private
   `app.*` actions are never plugin-bindable, round-12 finding).
-- The model-menu / history-panel / output-viewer focused components keep
+- The model-picker / history-panel / output-viewer focused components keep
   their component-local keys (the plan's M5 covers QuestionFlow and
   TaskBrowserPanel; the others follow the same pattern later).
 
