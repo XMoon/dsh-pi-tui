@@ -763,3 +763,61 @@ test('a plugin-editor seat handoff under a nonCapturing overlay keeps the editor
   assert.equal(seatOf(host), 'editor', 'a nonCapturing overlay must not own the seat after a handoff')
   app.stop()
 })
+
+test('Save Location keeps the overlay dependency stack across a fullscreen swap', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+
+  const a = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'overlay A' }] })
+  await vt.waitForRender()
+  await settle()
+  const b = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'overlay B' }] })
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('overlay B'), `B must be visible:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('overlay A'), `A must be hidden beneath B:\n${viewOf(vt)}`)
+  assert.equal(app.overlayGraphState().dependents, 1, 'B owns A')
+
+  const deps: SaveLocationDeps = {
+    resolveDirectory: (input) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async () => null,
+  }
+  const prompt = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    deps,
+  )
+  await vt.waitForRender()
+  await settle()
+  assert.equal(seatOf(host), 'overlay', 'the Save prompt owns the seat')
+
+  // Fullscreen teardown clears the broker graph and re-mounts every
+  // remountable lease: the Save suspension must rebuild B → A, not flatten.
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  await settle()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  await settle()
+  assert.equal(app.overlayGraphState().dependents, 1, 'the remount must preserve the dependency chain')
+
+  vt.sendInput('\x1b') // cancel the prompt → B restored
+  assert.deepEqual(await prompt, { kind: 'cancelled' })
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('overlay B'), `B must be restored after the prompt:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('overlay A'), `A must stay hidden under B:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay')
+
+  b.close()
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('overlay A'), `A must be revealed when B closes:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay', 'the restored A owns the seat')
+  a.close()
+  app.stop()
+})

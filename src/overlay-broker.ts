@@ -152,6 +152,20 @@ export class OverlayBroker {
       // override (the caller takes responsibility for the modal
       // consistency) — the same forwarding contract as the question
       // branch.
+      if (options.nonCapturing !== true) {
+        // Symmetric with the question branch: a CAPTURING overlay takes the
+        // prompt's directly suspended handles as its OWN dependents (kept
+        // hidden), so the graph survives a fullscreen remount (which clears
+        // the broker graph and re-mounts every lease). Without this the
+        // remount flattens the stack into a single suspension level and the
+        // prompt's settle reveals every branch at once.
+        const dependents: HiddenDependent[] = []
+        for (const other of saveLocation.suspendedOverlays) dependents.push({ handle: other, wasFocused: true })
+        if (dependents.length > 0) {
+          for (const dependent of dependents) saveLocation.suspendedOverlays.delete(dependent.handle)
+          this.dependents.set(handle, dependents)
+        }
+      }
       handle.setHidden(true)
       saveLocation.suspendedOverlays.add(handle)
       return this.wrapClose(handle)

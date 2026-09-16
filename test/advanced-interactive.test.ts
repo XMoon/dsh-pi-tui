@@ -762,3 +762,27 @@ test('a hidden middle overlay reparents to its graph owner across a question rou
   c.close()
   app.stop()
 })
+
+test('an advanced overlay blur() intent survives a fullscreen swap', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const component = interactiveComponent({ text: () => 'advanced A' })
+  const a = app.showAdvancedInteractiveOverlay(component)
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+  a.blur()
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'blur() releases the keyboard')
+  assert.equal(app.focusSeatForTest(), 'editor')
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+
+  assert.equal(a.focused, false, 'the blur intent must survive the fullscreen remount')
+  assert.equal(app.focusSeatForTest(), 'editor')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'physical focus stays with the editor after the remount')
+  a.close()
+  app.stop()
+})

@@ -9572,6 +9572,10 @@ export class TuiApp {
     let wrapper: import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent | undefined
     let raw: OverlayHandle | undefined
     let hiddenByLease = false
+    /** The lease's EXPLICIT focus intent. `blur()` releases the keyboard but
+     * keeps the overlay visible, so the intent must survive a fullscreen
+     * remount instead of being re-derived from the (freshly focused) mount. */
+    let desiredFocus = true
     let closed = false
     const mount = (): void => {
       if (closed || raw !== undefined) return
@@ -9584,6 +9588,7 @@ export class TuiApp {
       this.advancedOverlayWrappers.add(created)
       raw = this.showOverlayOnHost(created, mountOptions, { remountable: true })
       if (hiddenByLease) raw.setHidden(true)
+      else if (!desiredFocus) raw.unfocus()
     }
     mount()
     const lease: import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void } = {
@@ -9597,11 +9602,13 @@ export class TuiApp {
       focus: () => {
         if (closed) return
         hiddenByLease = false
+        desiredFocus = true
         raw?.setHidden(false)
         raw?.focus()
       },
       blur: () => {
         if (closed) return
+        desiredFocus = false
         raw?.unfocus()
       },
       invalidate: () => {
@@ -9632,6 +9639,7 @@ export class TuiApp {
       show: () => {
         if (closed) return
         hiddenByLease = false
+        desiredFocus = true
         raw?.setHidden(false)
       },
       // Host-internal: re-create the raw handle on the CURRENT active
@@ -9804,6 +9812,9 @@ export class TuiApp {
     let adapter: import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter | undefined
     let raw: OverlayHandle | undefined
     let hiddenByLease = false
+    /** See the advanced lease: the EXPLICIT focus intent survives a
+     * fullscreen remount (blur() keeps the overlay visible but unfocused). */
+    let desiredFocus = true
     let closed = false
     const mount = (): void => {
       if (closed || raw !== undefined) return
@@ -9815,6 +9826,7 @@ export class TuiApp {
       this.unstableMountAdapters.add(created)
       raw = this.showOverlayOnHost(created, mountOptions, { remountable: true })
       if (hiddenByLease) raw.setHidden(true)
+      else if (!desiredFocus) raw.unfocus()
     }
     mount()
     const lease: import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void } = {
@@ -9828,11 +9840,13 @@ export class TuiApp {
       focus: () => {
         if (closed) return
         hiddenByLease = false
+        desiredFocus = true
         raw?.setHidden(false)
         raw?.focus()
       },
       blur: () => {
         if (closed) return
+        desiredFocus = false
         raw?.unfocus()
       },
       invalidate: () => {
@@ -9859,6 +9873,7 @@ export class TuiApp {
       show: () => {
         if (closed) return
         hiddenByLease = false
+        desiredFocus = true
         raw?.setHidden(false)
       },
       // Host-internal: re-create the raw handle on the CURRENT active
