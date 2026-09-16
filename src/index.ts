@@ -6855,30 +6855,20 @@ export function apply(ctx: Context, config: Config): void {
         refreshStatusCheap()
       },
       // Alt+↑: on the main surface, run the TUI-only recall-all extension:
-      // remove every semantic `queued` occurrence — plus every PARKED
-      // `steering` occurrence (the turn is no longer running, so the Host
-      // keeps it in the inbox until the next wake) — and pull its content
-      // back into the editor draft. An ACTIVE steering occurrence (running
-      // turn) is never touched: it belongs to the turn about to claim it.
-      // The parked/active split is captured from the coherent snapshot at the
-      // gesture and RE-VALIDATED before each steering removal: if the turn
-      // starts running while this gesture waits on the operation barrier, the
-      // now-active occurrence is left to the running turn and only the
-      // confirmed prefix is recalled. The gesture is disabled in every viewer
-      // so it cannot mutate a hidden main or child queue, and this is recall
-      // (remove → editor), never a resume/replay.
+      // remove every semantic `queued` occurrence and pull its content back
+      // into the editor draft. The gesture is disabled in every viewer so it
+      // cannot mutate a hidden main or child queue.
       onDequeue: () => {
         if (cleanedUp || viewing !== undefined || liveAgent === undefined) return
         const queuedAgent = liveAgent
         const queuedGeneration = sessionGeneration
         const pending = backend.pendingInputReader.snapshot(queuedAgent.session.id)
         if (pending === undefined) return
-        const recallable = pending.items
-          .filter(item => item.placement === 'queued'
-            || (item.placement === 'steering' && !pending.running))
-          .map(item => ({ message: queueInboxMessageOf(item), steering: item.placement === 'steering' }))
-        if (recallable.length === 0) return
-        // Multimodal pending messages (durable ImageBlocks) ARE pullable:
+        const queued = pending.items
+          .filter(item => item.placement === 'queued')
+          .map(queueInboxMessageOf)
+        if (queued.length === 0) return
+        // Multimodal queued messages (durable ImageBlocks) ARE pullable:
         // each image block becomes a RECALLED draft — a placeholder that
         // reuses the already-durable ImageAttachmentRef, so re-submitting
         // never re-uploads the bytes. The queue is spliced ONLY after the
@@ -6888,7 +6878,7 @@ export function apply(ctx: Context, config: Config): void {
         const recalledEntries: { text: string; staged: { kind: 'image' | 'file'; id: number }[] }[] = []
         try {
           const lines: string[] = []
-          for (const { message } of recallable) {
+          for (const message of queued) {
             const messageStaged: { kind: 'image' | 'file'; id: number }[] = []
             const parts: string[] = []
             for (const block of message.content) {
@@ -7001,49 +6991,15 @@ export function apply(ctx: Context, config: Config): void {
               return
             }
             const outcomes: InterruptWriteOutcome[] = []
-            // A parked steering occurrence is re-validated at EACH removal: the
-            // turn can start running while this gesture waits on the barrier,
-            // and an ACTIVE steering occurrence belongs to the turn about to
-            // claim it — never recall it. Queued occurrences have no such
-            // precondition. (The official remove has no running guard, so this
-            // is the narrowest re-check the contract allows.)
-            let activeSteeringStopped = false
-            for (const item of recallable) {
-              if (item.steering) {
-                const now = backend.pendingInputReader.snapshot(queuedAgent.session.id)
-                if (now === undefined || now.running) {
-                  activeSteeringStopped = true
-                  break
-                }
-              }
+            for (const message of queued) {
               const next = await backend.sessionWriter.updateQueue(
                 queuedAgent.session.id,
-                item.message.id,
+                message.id,
                 { kind: 'remove' },
               )
               outcomes.push(next)
               if (next.kind !== 'committed') break
               settledRemovals += 1
-            }
-            // The occurrence became active mid-gesture: preserve ONLY the
-            // confirmed prefix in the editor — the active occurrence stays with
-            // the running turn.
-            if (activeSteeringStopped) {
-              if (cleanedUp) return
-              if (transitionGate.pending || operationBarrier.inTransition) {
-                deferRecalledToTransition(settledRemovals)
-                return
-              }
-              discardStaged(settledRemovals)
-              const confirmedText = recalledEntries.slice(0, settledRemovals).map(entry => entry.text).join('\n\n')
-              if (confirmedText !== '') {
-                const current = app.getDraft()
-                app.setDraft(current === '' ? confirmedText : `${confirmedText}\n\n${current}`)
-              }
-              draftApplied = true
-              app.notify('a steering message is no longer parked — it was not recalled', 'info')
-              refreshPendingInput()
-              return
             }
             const outcome = outcomes[outcomes.length - 1]!
             const confirmed = recalledEntries.slice(0, settledRemovals)
