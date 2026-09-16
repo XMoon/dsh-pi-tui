@@ -145,12 +145,14 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   an overlay close, a restored **capturing** overlay underneath always regains
   keyboard focus and the focused seat, so "overlay visible but the editor still
   owns focus" no longer happens; a nonCapturing notice overlay still never takes
-  focus.
+  focus, and the Host shortcuts beneath it (e.g. the empty-editor `↓` that opens
+  Quick Tasks) still fire.
 - **The Job detail overlay has its own bottom action hint.** A running job shows
   `S stop · Esc back`; once the job settles the Stop hint disappears and its key
-  becomes a no-op; `Esc back` stays visible under a long body or a short
-  terminal (down to two rows); non-job notices (e.g. the sign-in notice) show
-  `Esc close` and never offer Stop.
+  becomes a no-op; `Esc back` stays visible under a long body, a short terminal
+  (down to two rows) or a narrow width, and degrades to the close/back verb
+  before Stop when the width cannot fit both; non-job notices (e.g. the sign-in
+  notice) show `Esc close` and never offer Stop.
 
 ## [0.4.6] - 2026-09-13
 

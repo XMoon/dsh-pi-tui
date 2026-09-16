@@ -1726,11 +1726,16 @@ const OUTPUT_VIEWER_SEPARATOR_ROWS = 2
  * lines (`overlayLines.slice(0, maxHeight)`), dropping the tail, so the
  * layout reserves the hint and title BEFORE the body: on a long body or a
  * short terminal the body shrinks (to zero) rather than the hint vanishing.
+ * The chrome also has a HORIZONTAL priority: the close/back verb outranks
+ * Stop, so a wrapped `S stop · Esc back` degrades to `Esc back` instead of
+ * leaving the first wrapped line (all Stop) on screen.
  */
 class OutputViewerPanel implements Component {
   private readonly title: Text
   private readonly body: Text
   private readonly hint: Text
+  /** The close-only hint used when the full hint does not fit one row. */
+  private readonly hintFallback: Text
   /** The granted CONTENT row budget (set by the responsive shell: the
    * overlay's clamped max height minus its top/bottom border rows). */
   private maxRows = OUTPUT_VIEWER_MAX_HEIGHT - 2
@@ -1743,21 +1748,23 @@ class OutputViewerPanel implements Component {
    * closer — a ref'd interval must not outlive the surface. */
   private timer: NodeJS.Timeout | undefined
   private refresh: (() => string) | undefined
-  private liveHint: (() => string) | undefined
+  private liveHint: (() => { hint: string; fallback: string }) | undefined
   private requestRender: (() => void) | undefined
   /** Latched by dispose(): an in-flight tick must not render. */
   private disposed = false
 
-  constructor(title: string, initial: string, hint: string) {
+  constructor(title: string, initial: string, hint: string, hintFallback: string) {
     this.title = new Text(title, 0, 0)
     this.body = new Text(initial, 0, 0)
     this.hint = new Text(hint, 0, 0)
+    this.hintFallback = new Text(hintFallback, 0, 0)
   }
 
   invalidate(): void {
     this.title.invalidate()
     this.body.invalidate()
     this.hint.invalidate()
+    this.hintFallback.invalidate()
   }
 
   /** Replace the output body (the caller refreshes it on a timer). */
@@ -1774,14 +1781,14 @@ class OutputViewerPanel implements Component {
   /** Start the refresh timer (openOutputViewer wires the live callbacks).
    * The interval is unref'd so a viewer left open never blocks process
    * exit by itself, and owned by THIS panel so the dispose chain stops
-   * it exactly once. The optional `liveHint` re-evaluates the action hint
+   * it exactly once. The optional `liveHint` re-evaluates BOTH hint forms
    * on every tick, so a stop capability that expires while the viewer is
    * open updates the chrome with the body. */
   startRefreshing(
     refresh: () => string,
     requestRender: () => void,
     intervalMs: number,
-    liveHint?: () => string,
+    liveHint?: () => { hint: string; fallback: string },
   ): void {
     this.refresh = refresh
     this.requestRender = requestRender
@@ -1791,8 +1798,11 @@ class OutputViewerPanel implements Component {
       this.body.setText(this.refresh!())
       this.body.invalidate()
       if (this.liveHint !== undefined) {
-        this.hint.setText(this.liveHint())
+        const next = this.liveHint()
+        this.hint.setText(next.hint)
         this.hint.invalidate()
+        this.hintFallback.setText(next.fallback)
+        this.hintFallback.invalidate()
       }
       this.requestRender!()
     }, intervalMs)
@@ -1810,12 +1820,15 @@ class OutputViewerPanel implements Component {
 
   render(width: number): string[] {
     const maxRows = Math.max(1, this.maxRows)
-    const hintLines = this.hint.render(width)
-    // Assemble by PRIORITY: the hint is mandatory chrome, then the title,
-    // then the separators, then the body. The body absorbs the remainder
-    // (0 rows on a genuinely short box). Output length is <= maxRows in
-    // every branch, so the fork's first-`maxHeight`-lines clip can never
-    // reach the bottom hint.
+    // HORIZONTAL priority: the close/back verb must survive even when the
+    // combined hint word-wraps (a wrapped first line could be all Stop).
+    const fullHintLines = this.hint.render(width)
+    const hintLines = fullHintLines.length > 1 ? this.hintFallback.render(width) : fullHintLines
+    // VERTICAL priority: the (chosen) hint is mandatory chrome, then the
+    // title, then the separators, then the body. The body absorbs the
+    // remainder (0 rows on a genuinely short box). Output length is <=
+    // maxRows in every branch, so the fork's first-`maxHeight`-lines clip can
+    // never reach the bottom hint.
     const hint = hintLines.slice(0, maxRows)
     let remaining = maxRows - hint.length
     const titleLines = this.title.render(width)
@@ -4713,7 +4726,7 @@ export class TuiApp {
     //   parent-owned lifecycle key is consumed here, BEFORE the host
     //   ladder, so the viewer can never steer/queue/recall-all the parent
     //   session or exit the TUI from inside the child view.
-    if (this.viewerMode !== undefined && !this.activeScreen.hasOverlayEntries) {
+    if (this.viewerMode !== undefined && !this.overlayBroker.hasVisibleCapturingOverlay()) {
       // A viewer owns this input stage; no parent keyboard exit request can
       // be confirmed from inside it. Treat the viewer event as fresh input
       // and discard any stale parent confirmation.
@@ -4821,9 +4834,12 @@ export class TuiApp {
     }
     // A managed non-search overlay owns the focused component. App-level
     // lifecycle handlers must not consume its keys before pi-tui dispatches
-    // them to that component. Discard any stale exit confirmation before
-    // letting the focused component process this fresh interaction.
-    if (this.activeScreen.hasOverlayEntries) {
+    // them to that component. Only a CAPTURING overlay is a keyboard owner:
+    // a nonCapturing notice never takes focus, so the Host shortcut ladder
+    // (and the editor) must keep working beneath it. Discard any stale exit
+    // confirmation before letting the focused component process this fresh
+    // interaction.
+    if (this.overlayBroker.hasVisibleCapturingOverlay()) {
       this.clearExitConfirmation()
       return undefined
     }
@@ -5163,8 +5179,9 @@ export class TuiApp {
       this.events.onCancel?.()
       return { consume: true }
     }
-    // Overlays (pickers, settings) own Esc while they are up.
-    if (this.activeScreen.hasOverlayEntries) return undefined
+    // Overlays (pickers, settings) own Esc while they are up. A nonCapturing
+    // notice is not a keyboard owner, so Esc still belongs to the editor.
+    if (this.overlayBroker.hasVisibleCapturingOverlay()) return undefined
     // Autocomplete owns Esc while the dropdown is open: let the editor
     // close it (TuiEditor intercepts; kimi parity). Without this the
     // app-level consume swallows Esc and the dropdown cannot close.
@@ -5439,15 +5456,18 @@ export class TuiApp {
    * the live editor is only read when a rule predicate actually needs it
    * (the input path must not add a draft read per keystroke). */
   private keybindingContext(): KeybindingContext {
+    // The keyboard-ownership fact: a VISIBLE CAPTURING overlay, never a
+    // nonCapturing notice (which owns no keyboard).
+    const capturingOverlay = this.overlayBroker.hasVisibleCapturingOverlay()
     return deriveKeybindingContext({
-      focusedSeat: this.activeScreen.hasOverlayEntries ? 'overlay' : 'editor',
+      focusedSeat: capturingOverlay ? 'overlay' : 'editor',
       questionActive: this.activeQuestions !== undefined,
       approvalActive: this.activeApproval !== undefined,
-      viewerMode: this.viewerMode === undefined || this.activeScreen.hasOverlayEntries
+      viewerMode: this.viewerMode === undefined || capturingOverlay
         ? 'none'
         : isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access)) ? 'continuable' : 'readonly',
       searchActive: this.searchOverlay !== undefined,
-      overlayActive: this.activeScreen.hasOverlayEntries,
+      overlayActive: capturingOverlay,
       agentRunning: this.busy,
       editorEmpty: () => this.seatEditor().getText().trim() === '',
       // LAZY like editorEmpty: the VISIBLE seat editor's input mode decides
@@ -5460,17 +5480,19 @@ export class TuiApp {
 
   /** The live surface context the InputRouter reads (M6). */
   private inputRouterContext(): Parameters<InputRouter['route']>[1] {
+    const capturingOverlay = this.overlayBroker.hasVisibleCapturingOverlay()
     return {
       questionActive: this.activeQuestions !== undefined,
       approvalActive: this.activeApproval !== undefined,
       // The viewer's input mode: 'readonly' locks the editor (one-shot AND
       // nested — only an interactive direct child edits), 'continuable'
       // keeps it live (the HOST guard already consumed the parent-owned
-      // chords before the router is consulted).
-      viewerInputMode: this.viewerMode === undefined || this.activeScreen.hasOverlayEntries
+      // chords before the router is consulted). A nonCapturing notice does
+      // not change the viewer's input mode.
+      viewerInputMode: this.viewerMode === undefined || capturingOverlay
         ? 'none'
         : isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access)) ? 'continuable' : 'readonly',
-      hasOverlay: this.activeScreen.hasOverlayEntries,
+      hasOverlay: capturingOverlay,
       searchActive: this.searchOverlay !== undefined,
       // The router's physical-key seams (the read-only viewer fold
       // pass-through, the search overlay ownership) consult the EFFECTIVE
@@ -8083,9 +8105,10 @@ export class TuiApp {
       return
     }
     this.questionPressGesture = undefined
-    // Any OTHER managed overlay owns the press: no transcript / dock /
-    // todo identity below is reachable (the click is inert behind it).
-    if (this.activeScreen.hasOverlayEntries) {
+    // Any OTHER CAPTURING overlay owns the press: no transcript / dock /
+    // todo identity below is reachable (the click is inert behind it). A
+    // nonCapturing notice is non-modal, so background clicks still resolve.
+    if (this.overlayBroker.hasVisibleCapturingOverlay()) {
       this.fullscreenCellGesture = undefined
       return
     }
@@ -8207,8 +8230,9 @@ export class TuiApp {
     // fallback stay inert behind it (plan §17/§23.7). The question frame
     // above is the only overlay that routes clicks itself. Any pre-overlay
     // todo/transcript gesture is dead (a cross-mode close before the
-    // release must not resurrect it on the background surface).
-    if (this.activeScreen.hasOverlayEntries) {
+    // release must not resurrect it on the background surface). A
+    // nonCapturing notice is non-modal and does not own the release.
+    if (this.overlayBroker.hasVisibleCapturingOverlay()) {
       this.fullscreenCellGesture = undefined
       return
     }
@@ -9905,10 +9929,11 @@ export class TuiApp {
       requestEditorFocus: () => {
         if (app.disposed) return
         // Best-effort: focus the seat component only when no capturing
-        // flow (question/approval/overlay) owns the seat — those flows
-        // restore their own focus and must never be stolen.
+        // flow (question/approval/CAPTURING overlay) owns the seat — those
+        // flows restore their own focus and must never be stolen. A
+        // nonCapturing notice owns no keyboard and never fences this.
         if (app.activeQuestions !== undefined || app.activeApproval !== undefined
-          || app.activeScreen.hasOverlayEntries) return
+          || app.overlayBroker.hasVisibleCapturingOverlay()) return
         app.activeScreen.setFocus(app.seatEditor().component)
       },
     }
@@ -10393,7 +10418,7 @@ export class TuiApp {
    */
   private taskBrowserAvailable(): boolean {
     return this.tasksActive
-      && !this.activeScreen.hasOverlayEntries
+      && !this.overlayBroker.hasVisibleCapturingOverlay()
       && this.seatEditor().getText().trim() === ''
       && this.seatInputMode() === 'prompt'
   }
@@ -12588,12 +12613,12 @@ export class TuiApp {
       return
     }
     const screen = this.activeScreen
-    // The seat reflects the ACTUAL keyboard owner: an overlay entry alone is
-    // NOT enough. A nonCapturing overlay never takes focus, and a hidden
-    // entry owns nothing, so the physically focused component must be an
-    // overlay (never the seat editor) for the seat to report 'overlay'.
+    // The seat reflects the ACTUAL keyboard owner: a VISIBLE CAPTURING
+    // overlay must exist AND the physically focused component must not be the
+    // seat editor. A nonCapturing notice never takes focus, and a hidden
+    // entry owns nothing, so neither may report 'overlay'.
     const focused = this.disposed ? null : screen.getFocusedComponent()
-    if (screen.hasOverlayEntries && focused !== null && focused !== this.seatEditor().component) {
+    if (this.overlayBroker.hasVisibleCapturingOverlay() && focused !== null && focused !== this.seatEditor().component) {
       this.setFocusSeat('overlay')
       return
     }
@@ -14792,15 +14817,19 @@ export class TuiApp {
     // job that settles (or leaves the registry) while the viewer is open
     // stops offering Stop on the next tick and its key becomes a no-op.
     const stopAvailable = (): boolean => options.onStop !== undefined && (options.canStop?.() ?? true)
-    const hintOf = (): string => {
+    const hintOf = (): { hint: string; fallback: string } => {
       const close = options.closeHint === 'back' ? 'Esc back' : 'Esc close'
-      if (!stopAvailable()) return color.textDim(close)
+      const closeHint = color.textDim(close)
+      // The close/back verb is the primary action; Stop degrades away when
+      // the combined hint cannot fit the viewer's content width.
+      if (!stopAvailable()) return { hint: closeHint, fallback: closeHint }
       // The stop label comes from the SAME app keybinding definition the
       // handler matches (tasks.stop) — never a hard-coded 's'.
       const key = this.keybindings.keyHint('tasks.stop')
-      return color.textDim(`${key} stop · ${close}`)
+      return { hint: color.textDim(`${key} stop · ${close}`), fallback: closeHint }
     }
-    const panel = new OutputViewerPanel(options.title, options.initial, hintOf())
+    const initialHint = hintOf()
+    const panel = new OutputViewerPanel(options.title, options.initial, initialHint.hint, initialHint.fallback)
     let closed = false
     const close = (): void => {
       if (closed) return
