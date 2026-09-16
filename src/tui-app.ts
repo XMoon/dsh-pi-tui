@@ -6351,7 +6351,10 @@ export class TuiApp {
     if (turn !== undefined && this.focusModeEnabled) {
       this.setFocusTurnExpanded(turn, true)
     }
-    if (isUserMessageDisclosureCandidate(message)) {
+    if (isUserMessageDisclosureCandidate(message) && this.userMessageCompactsAtCurrentWidth(message)) {
+      // Only a bubble that is actually collapsed needs the override: writing
+      // one for a short prompt would be an invisible no-op that later consumes
+      // a Ctrl+O collapse.
       if (this.expandedOverride.get(message) !== true) this.clearFocusLiveHeightState()
       this.expandedOverride.set(message, true)
     }
@@ -6409,15 +6412,17 @@ export class TuiApp {
     return false
   }
 
-  /** Whether the CURRENT projection shows a long user message with an
-   * explicit expansion override (the Ctrl+O user-collapse target, plan
-   * §6.4/§21.7). Only VISIBLE messages count: a parked override on a
-   * windowed-away message must not consume the Ctrl+O press and wedge the
-   * toggle into a collapse that does nothing on screen. */
+  /** Whether the CURRENT projection shows a long user message that is
+   * ACTUALLY compacted and explicitly expanded (the Ctrl+O user-collapse
+   * target, plan §6.4/§21.7). Only VISIBLE, compact-capable messages count: a
+   * parked override on a windowed-away message, or a stale override on a
+   * short/resized-short bubble with no visible effect, must not consume the
+   * Ctrl+O press and wedge the toggle into a no-op. */
   private hasVisibleExpandedUserMessage(): boolean {
     for (const message of this.messages) {
       if (!isUserMessageDisclosureCandidate(message)) continue
-      if (this.expandedOverride.get(message) === true) return true
+      if (this.expandedOverride.get(message) !== true) continue
+      if (this.userMessageCompactsAtCurrentWidth(message)) return true
     }
     return false
   }
@@ -10959,7 +10964,10 @@ export class TuiApp {
       // surface-adaptive disclosure rule) comes from the render-cache
       // identity, so Ctrl+O / a fullscreen marker click rebuilds this
       // component from the canonical full text — the text is never mutated.
-      if (!expanded) {
+      // A regular surface with NO effective expand key has no affordance at
+      // all (fullscreen keeps the marker click), so it must render the full
+      // prompt rather than strand it collapsed forever.
+      if (!expanded && this.userDisclosureAffordanceAvailable()) {
         const hint = expandHint
         return new UserBubbleComponent(
           new Text(message.text, 0, 0),
@@ -13514,15 +13522,30 @@ export class TuiApp {
    * VISUAL rows (never logical lines) and resolves the expand verb from the
    * message's fold-hint owner: fullscreen is click-owned (with the effective
    * key when Ctrl+O is still live there), regular is the Ctrl+O master (the
-   * effective key). A regular fold whose key is DISABLED has no usable
-   * affordance (regular has no click), so the marker drops the verb instead
-   * of advertising a dead key; narrow bubbles drop it too so it never wraps. */
+   * effective key). Narrow bubbles drop the verb and keep only the count so
+   * the marker never wraps. */
   private userCompactMarker(hiddenRows: number, availableWidth: number, hint: ExpandHint): string {
-    const disabledFold = hint === 'fold' && this.keybindings.keyHint('app.transcript.toggleExpand') === ''
-    const verb = disabledFold ? '' : this.expandHint(hint)
-    const full = `── ${hiddenRows} rows compacted${verb === '' ? '' : ` · ${verb} to expand`} ──`
+    const full = `── ${hiddenRows} rows compacted · ${this.expandHint(hint)} to expand ──`
     if (visibleWidth(full) <= availableWidth) return color.textDim(full)
     return color.textDim(`── ${hiddenRows} rows compacted ──`)
+  }
+
+  /** Whether the long-user fold has a usable expand affordance on THIS
+   * surface. Fullscreen always does (the compact-marker click); regular needs
+   * the effective `app.transcript.toggleExpand` key — compacting without one
+   * would strand a full prompt collapsed with no way to open it. */
+  private userDisclosureAffordanceAvailable(): boolean {
+    return this.fullscreen !== undefined || this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
+  }
+
+  /** Whether one long-user candidate ACTUALLY compacts at the current
+   * transcript width (the same visual-row threshold the bubble renderer
+   * applies). Shared by the search reveal (never write an override that has
+   * no visible effect) and the Ctrl+O user-collapse predicate (a short — or
+   * resized-short — bubble must not consume the press as a no-op). */
+  private userMessageCompactsAtCurrentWidth(message: Extract<TranscriptMessage, { kind: 'user' }>): boolean {
+    const inner = Math.max(1, this.transcriptRenderWidth() - visibleWidth(`${color.roleUser('❯')} `))
+    return new Text(message.text, 0, 0).render(inner).length > USER_MESSAGE_COMPACT_THRESHOLD_ROWS
   }
 
   /**
