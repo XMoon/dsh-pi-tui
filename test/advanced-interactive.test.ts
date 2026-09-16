@@ -697,7 +697,7 @@ test('a hidden root lease close still releases its dependents', async () => {
   app.stop()
 })
 
-test('a shown hidden dependent is still owned by the overlay above it', async () => {
+test('an explicit show() detaches a suppressed overlay from its suppressor', async () => {
   const { vt, app } = await appWithTasksTrigger()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
   const view = (): string => vt.getViewport().map(strip).join('\n')
@@ -706,17 +706,19 @@ test('a shown hidden dependent is still owned by the overlay above it', async ()
   const b = app.openPicker([{ value: 'p', label: 'provider option' }], () => {}, () => {})
   await vt.waitForRender()
   assert.equal(a.focused, false, 'A is hidden beneath B')
+  assert.equal(app.overlayGraphState().dependents, 1, 'B suppresses A')
 
-  // Explicit VISIBILITY override: A shows (and the fork focuses it), but the
-  // dependency graph still owns A under B.
+  // Explicit VISIBILITY override: A shows (and the fork focuses it) AND is
+  // detached from B — a node can never keep a suppressor it overrode (I2).
   a.show()
   await vt.waitForRender()
   assert.equal(a.focused, true)
+  assert.equal(app.overlayGraphState().dependents, 0, 'A detached from B — no stale parent')
 
-  a.close() // visibility override is NOT dependency-ownership override
+  a.close()
   await vt.waitForRender()
   assert.ok(view().includes('provider option'), `B must stay visible:\n${view()}`)
-  assert.equal(app.focusSeatForTest(), 'overlay', 'B must own the keyboard')
+  assert.equal(app.focusSeatForTest(), 'overlay', 'B owns the keyboard after A closes')
   assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component)
   vt.sendInput('x')
   await vt.waitForRender()
@@ -862,5 +864,153 @@ test('a fullscreen swap keeps a nonCapturing HUD above a capturing overlay', asy
   assert.equal(app.ownedExtensionOverlayLeasesForTest(), 1, 'the HUD lease survives')
   a.close()
   hud.close()
+  app.stop()
+})
+
+test('a fullscreen swap preserves the CURRENT front order, not the creation order', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+  assert.equal(b.focused, true, 'B is the front on creation')
+  assert.equal(app.overlayGraphState().dependents, 1, 'B suppresses A')
+
+  // Promote A to the front: the CURRENT logical order is now A above B.
+  a.focus()
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+  assert.equal(b.focused, false)
+  assert.equal(app.overlayGraphState().dependents, 0, 'A detached from B when it was focused')
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'the CURRENT front (A) survives the swap')
+  assert.equal(b.focused, false)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  assert.equal(app.overlayGraphState().handles, 2)
+  a.close()
+  b.close()
+  app.stop()
+})
+
+test('an explicit hide survives a fullscreen swap and the suppressor close', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'A is suppressed by B')
+  a.hide()
+  await vt.waitForRender()
+  assert.ok(!view().includes('advanced A'), `A must be hidden:\n${view()}`)
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.ok(!view().includes('advanced A'), `A must stay hidden across the swap:\n${view()}`)
+
+  b.close()
+  await vt.waitForRender()
+  assert.ok(!view().includes('advanced A'), `the explicit hide must survive B close:\n${view()}`)
+  assert.equal(app.focusSeatForTest(), 'editor', 'A must not be revealed/focused')
+  a.show()
+  await vt.waitForRender()
+  assert.ok(view().includes('advanced A'), `an explicit show reveals it:\n${view()}`)
+  a.close()
+  app.stop()
+})
+
+test('a question suspension keeps the overlay stack across a fullscreen swap', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const b = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'overlay B' }] })
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().dependents, 1, 'B suppresses A')
+
+  const questions = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+  await vt.waitForRender()
+  assert.ok(view().includes('proceed?'), `the question must be visible:\n${view()}`)
+  assert.equal(app.overlayGraphState().suspended, 1, 'the visible front root is suspended')
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().suspended, 1, 'the question suspension survives the swap')
+
+  vt.sendInput('\x1b')
+  await questions.catch(() => {})
+  await vt.waitForRender()
+  assert.ok(view().includes('overlay B'), `B must be restored:\n${view()}`)
+  assert.ok(!view().includes('advanced A'), `A must stay suppressed under B:\n${view()}`)
+  assert.equal(app.overlayGraphState().dependents, 1, 'the B -> A topology survived')
+  b.close()
+  await vt.waitForRender()
+  assert.ok(view().includes('advanced A'), `A is revealed when B closes:\n${view()}`)
+  a.close()
+  app.stop()
+})
+
+test('an explicit focus() of a nonCapturing advanced overlay fences the editor', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const a = app.showAdvancedInteractiveOverlay(
+    interactiveComponent({ text: () => 'advanced HUD' }),
+    { nonCapturing: true },
+  )
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'a nonCapturing overlay does not auto-focus')
+  assert.equal(app.focusSeatForTest(), 'editor')
+  vt.sendInput('h')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'h', 'the editor receives input by default')
+
+  a.focus()
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'an explicit focus() is honored')
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the focused seat follows the physical owner')
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'h', 'input no longer reaches the editor')
+
+  a.blur()
+  await vt.waitForRender()
+  assert.equal(a.focused, false)
+  assert.equal(app.focusSeatForTest(), 'editor')
+  a.close()
+  app.stop()
+})
+
+test('an approval rebuild across a fullscreen swap restores the overlay beneath it', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  assert.ok(view().includes('bash'), `the approval must be visible:\n${view()}`)
+  assert.equal(a.focused, false, 'the approval owns the keyboard')
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.ok(view().includes('bash'), `the approval must survive the swap:\n${view()}`)
+
+  vt.sendInput('\x1b') // cancel the approval
+  await approval.catch(() => {})
+  await vt.waitForRender()
+  assert.ok(view().includes('advanced A'), `A must be restored:\n${view()}`)
+  assert.equal(a.focused, true, 'A reclaims the keyboard')
+  a.close()
   app.stop()
 })

@@ -105,13 +105,14 @@ dsh --profile pi-tui
   行、滚动、过滤、搜索与展开状态），再按一次 `Esc` 才回到编辑器；能定位子会话的
   subagent 作业仍像以前一样直接打开子会话 transcript（替换 Task Center，保持自身
   `Esc` 语义）。`Esc` 或浮层关闭后，被恢复的下层**捕获型**浮层始终重新取得键盘焦点与
-  焦点席位，不再出现「浮层可见但焦点仍在编辑器」；nonCapturing 提示浮层照旧不夺取焦点，
-  其下方的 Host 快捷键（如空编辑器的 `↓` 打开 Quick Tasks）也照常生效；捕获型浮层被
-  `blur` 或临时隐藏后同样把键盘与焦点席位交还编辑器，`focus`/显示后再取回（fullscreen
-  切换后仍保持该意图），且浮层关闭恢复时始终聚焦**当前**的 editor seat（不会退回已被
-  替换的旧 editor）；跨 fullscreen 切换后所有可重挂浮层按原挂载顺序恢复，保留原有层级
-  （含 Save Location 提示下的层级），混合类型（extension/advanced/unstable 等）也不会
-  被反转或误隐藏。
+  焦点席位，不再出现「浮层可见但焦点仍在编辑器」；`nonCapturing` 提示浮层默认不自动
+  夺取焦点、也不压住同级浮层，其下方的 Host 快捷键（如空编辑器的 `↓` 打开 Quick Tasks）
+  照常生效，但显式 `focus()` 请求仍可让它取得物理键盘焦点与焦点席位；捕获型浮层被
+  `blur` 或临时隐藏后把键盘与焦点席位交还编辑器，`focus`/显示后再取回，且浮层关闭
+  恢复时始终聚焦**当前**的 editor seat（不会退回已被替换的旧 editor）。fullscreen 切换
+  保留**当前**的逻辑层级、可见性意图、焦点意图与前置顺序（只重绑物理 handle），因此
+  `blur` 意图、显式隐藏、`Save Location` 下的层级以及混合类型（extension/advanced/
+  unstable 等）的顺序都不会丢失或被反转。
 - **Job 详情浮层有独立的底部操作提示。** 运行中的 Job 显示 `S stop · Esc back`；任务
   结束后 `Stop` 提示消失且该键失效；`Esc back` 在长内容、短终端（低至 2 行）或窄屏下始终
   可见，且宽度不足时优先保留关闭/返回而不是 `Stop`；非 Job 的独立提示面板（如登录通知）

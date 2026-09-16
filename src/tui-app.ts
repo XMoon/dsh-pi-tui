@@ -3255,20 +3255,15 @@ export class TuiApp {
   private readonly keybindingEditorPanels = new Set<Component>()
   /** M8: still-owned plugin overlay leases (closed by the final dispose —
    * plan §13.3: leases are generation-scoped). */
-  private readonly extensionOverlayLeases = new Set<import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void; _ordinal: number }>()
+  private readonly extensionOverlayLeases = new Set<import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void }>()
   /** Phase 2: still-owned ADVANCED interactive overlay leases (closed by
    * the final dispose; re-mounted across fullscreen screen swaps). */
-  private readonly advancedOverlayLeases = new Set<import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void; _ordinal: number }>()
-  /** A single MONOTONIC mount ordinal across EVERY remountable overlay kind
-   * (stable / advanced / unstable / history / model picker). A fullscreen
-   * swap clears the broker graph and re-mounts each lease, so they must be
-   * replayed in their ORIGINAL global order — remounting grouped by type
-   * would reverse a mixed-type stack (and silently re-hide a nonCapturing
-   * HUD mounted above a capturing overlay). */
-  private overlayOrdinalSeq = 0
-  /** The global mount ordinal of the retained history panel / model picker. */
-  private historyOverlayOrdinal = 0
-  private modelPickerOrdinal = 0
+  private readonly advancedOverlayLeases = new Set<import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void }>()
+  /** Physical remount callbacks per stable managed handle: a fullscreen swap
+   * rebinds every remountable node by looking its callback up here. The ORDER
+   * comes from the broker's CURRENT logical z-order, never a creation
+   * ordinal. */
+  private readonly overlayRemounts = new Map<OverlayHandle, () => void>()
   /** Phase 2: the live ADVANCED overlay wrappers (recompiled on terminal
    * resize so the plugin's render(ctx) sees the new geometry). */
   private readonly advancedOverlayWrappers = new Set<import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent>()
@@ -3292,7 +3287,7 @@ export class TuiApp {
   private unstableEscPresses: { at: number; revision: number }[] = []
   /** Phase 3: still-owned UNSTABLE mount leases (closed by the final
    * dispose; re-mounted across fullscreen screen swaps). */
-  private readonly unstableMountLeases = new Set<import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void; _ordinal: number }>()
+  private readonly unstableMountLeases = new Set<import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void }>()
   /** Phase 3: the live UNSTABLE mount adapters (dropped on remount). */
   private readonly unstableMountAdapters = new Set<import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter>()
   /** Phase 3: the UNSTABLE mount lease id counter. */
@@ -4737,7 +4732,7 @@ export class TuiApp {
     //   parent-owned lifecycle key is consumed here, BEFORE the host
     //   ladder, so the viewer can never steer/queue/recall-all the parent
     //   session or exit the TUI from inside the child view.
-    if (this.viewerMode !== undefined && !this.overlayBroker.hasFocusedCapturingOverlay()) {
+    if (this.viewerMode !== undefined && !this.overlayBroker.hasFocusedOverlay()) {
       // A viewer owns this input stage; no parent keyboard exit request can
       // be confirmed from inside it. Treat the viewer event as fresh input
       // and discard any stale parent confirmation.
@@ -4851,7 +4846,7 @@ export class TuiApp {
     // ladder (and the editor) must keep working in both cases. Discard any
     // stale exit confirmation before letting the focused component process
     // this fresh interaction.
-    if (this.overlayBroker.hasFocusedCapturingOverlay()) {
+    if (this.overlayBroker.hasFocusedOverlay()) {
       this.clearExitConfirmation()
       return undefined
     }
@@ -5193,7 +5188,7 @@ export class TuiApp {
     }
     // Overlays (pickers, settings) own Esc while they are up. A nonCapturing
     // notice is not a keyboard owner, so Esc still belongs to the editor.
-    if (this.overlayBroker.hasFocusedCapturingOverlay()) return undefined
+    if (this.overlayBroker.hasFocusedOverlay()) return undefined
     // Autocomplete owns Esc while the dropdown is open: let the editor
     // close it (TuiEditor intercepts; kimi parity). Without this the
     // app-level consume swallows Esc and the dropdown cannot close.
@@ -5470,7 +5465,7 @@ export class TuiApp {
   private keybindingContext(): KeybindingContext {
     // The keyboard-ownership fact: a capturing overlay that HOLDS focus —
     // never a nonCapturing notice, nor a blurred/hidden entry.
-    const keyboardOwner = this.overlayBroker.hasFocusedCapturingOverlay()
+    const keyboardOwner = this.overlayBroker.hasFocusedOverlay()
     return deriveKeybindingContext({
       focusedSeat: keyboardOwner ? 'overlay' : 'editor',
       questionActive: this.activeQuestions !== undefined,
@@ -5492,7 +5487,7 @@ export class TuiApp {
 
   /** The live surface context the InputRouter reads (M6). */
   private inputRouterContext(): Parameters<InputRouter['route']>[1] {
-    const keyboardOwner = this.overlayBroker.hasFocusedCapturingOverlay()
+    const keyboardOwner = this.overlayBroker.hasFocusedOverlay()
     return {
       questionActive: this.activeQuestions !== undefined,
       approvalActive: this.activeApproval !== undefined,
@@ -5614,23 +5609,22 @@ export class TuiApp {
     const merged: OverlayOptions = ownership.remountable === true
       ? { ...options, disposeOnHide: false }
       : { disposeOnHide: true, ...options }
-    // Capture the CURRENT keyboard owners BEFORE the fork mounts+focusses the
-    // new overlay (showOverlay focuses immediately): the broker needs each
-    // hidden dependent's focus intent to restore it faithfully — pi-tui
-    // re-focuses a capturing overlay on setHidden(false), which would undo
-    // an explicit blur().
-    const previouslyFocused = new Set<OverlayHandle>()
-    for (const tracked of this.overlayBroker.handles()) {
-      if (tracked.isFocused()) previouslyFocused.add(tracked)
-    }
-    const handle = this.activeScreen.showOverlay(component, merged)
-    // M8: the stacking graph + suspension rules live in the broker (plan
-    // §13 — behavior identical; the existing modal-stacking tests gate
-    // the extraction).
-    return this.overlayBroker.track(handle, {
+    // Two-phase mount: the broker snapshots the CURRENT logical roots and
+    // their focus intent BEFORE the fork mounts+focusses the new overlay
+    // (showOverlay focuses immediately), then binds the fresh raw projection.
+    const prepared = this.overlayBroker.prepareMount({
       nonCapturing: options?.nonCapturing === true,
-      previouslyFocused,
+      remountable: ownership.remountable === true,
     })
+    const raw = this.activeScreen.showOverlay(component, merged)
+    return this.overlayBroker.commitMount(prepared, raw)
+  }
+
+  /** Mount a fresh PHYSICAL projection for an existing logical node during a
+   * fullscreen rebind (no topology / suppression side effects). */
+  private rebindOverlayRaw(handle: OverlayHandle, component: Component, options: OverlayOptions): void {
+    const raw = this.activeScreen.showOverlay(component, { ...options, disposeOnHide: false })
+    this.overlayBroker.rebind(handle, raw)
   }
 
   /**
@@ -5909,27 +5903,15 @@ export class TuiApp {
     }
     this.clearFocusLiveHeightState()
     const pending = this.activeApproval
-    const history = this.historyPanel
-    const modelPicker = this.modelPickerComponent
     pending?.handle?.hide()
     this.disposeTrackedKeybindingEditors()
-    // overlayHandles holds RAW handles (showOverlayOnHost stores them before
-    // wrapping), so this loop calls the pi-tui hide directly: it removes
-    // every overlay from the OLD screen's stack. The tracking graph below
-    // (overlayHandles, overlayDependents, the active question's suspension)
-    // is then cleared wholesale — every one of those handles is dead, and
-    // the pending-approval rebuild re-suspends a fresh handle on the new
-    // screen. Footer configurators have a timer-bearing panel behind their
-    // generic Frame, so close those explicitly before dropping the graph.
+    // The LOGICAL broker graph, the Question/Save suspensions, visibility
+    // intent, focus intent and z-order all SURVIVE the swap: only the raw
+    // physical projections die with the old screen (detachPhysical). The
+    // remount callbacks re-create them for the same logical nodes.
     for (const close of [...this.footerConfiguratorClosers]) close()
     this.footerConfiguratorClosers.clear()
-    for (const handle of this.overlayBroker.handles()) handle.hide()
-    this.overlayBroker.clear()
-    if (this.activeQuestions !== undefined) this.activeQuestions.suspendedOverlays.clear()
-    // The Save Location prompt's suspended handles are dead after the
-    // teardown too; the settle's isTracked guard skips them, but drop them
-    // now so the set never accumulates stale handles (question symmetry).
-    if (this.activeSaveLocation !== undefined) this.activeSaveLocation.suspendedOverlays.clear()
+    this.overlayBroker.detachPhysical()
     // The ordinary search overlay is NOT remounted across the screen swap
     // (only extension/advanced/unstable/history leases are): its raw
     // handle died with the old screen — close it properly (the runner's
@@ -6120,18 +6102,13 @@ export class TuiApp {
       this.refreshSchemeRegistrations()
     }
     this.events.onFullscreenChange?.(enabled)
-    // M8 (round-1 finding 2): still-open plugin overlay leases re-mount on
-    // the CURRENT active screen (their raw handles died with the old
-    // screen's teardown above). Phase 2: the ADVANCED interactive overlay
-    // leases follow the same migration. The old screen's raw history handle
-    // was removed above without disposing its remountable panel — reattach
-    // that same stateful panel on the new screen too.
-    this.historyOverlay = undefined
-    this.historyResponsiveFrame = undefined
-    // Replay in the ORIGINAL global mount order across every remountable
-    // kind (stable / advanced / unstable / history / model picker): grouping
-    // by kind rebuilds a mixed-type stack in the wrong order.
-    this.remountOverlaysInMountOrder(history, modelPicker)
+    // Re-create every remountable raw projection on the CURRENT active
+    // screen, back → front by the broker's CURRENT logical z-order (not the
+    // creation order, and never grouped by overlay kind).
+    for (const handle of this.overlayBroker.remountOrder()) {
+      this.overlayRemounts.get(handle)?.()
+    }
+    this.overlayBroker.restoreFocusAfterSwap()
     if (pending !== undefined) this.renderApprovalDialog(pending)
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
@@ -6236,12 +6213,29 @@ export class TuiApp {
     })
     panel.start()
     this.historyPanel = panel
-    this.historyOverlayOrdinal = ++this.overlayOrdinalSeq
     this.mountHistoryOverlay(panel)
   }
 
-  /** Mount an existing history panel on the current physical screen. */
+  /** Mount an existing history panel on the current physical screen (first
+   * mount) and register its fullscreen rebind. */
   private mountHistoryOverlay(panel: HistoryPanel): void {
+    const frame = this.createHistoryFrame(panel)
+    this.historyResponsiveFrame = frame
+    const handle = this.showOverlayOnHost(
+      frame,
+      { width: '100%', maxHeight: '100%' },
+      { remountable: true },
+    )
+    this.historyOverlay = handle
+    this.overlayRemounts.set(handle, () => {
+      if (this.historyPanel !== panel || this.historyOverlay !== handle) return
+      const next = this.createHistoryFrame(panel)
+      this.historyResponsiveFrame = next
+      this.rebindOverlayRaw(handle, next, { width: '100%', maxHeight: '100%' })
+    })
+  }
+
+  private createHistoryFrame(panel: HistoryPanel): ResponsiveOverlayFrame {
     const geometryOf = (): ResponsiveOverlayGeometry => {
       const geometry = historyOverlayGeometry(this.terminal.columns, this.terminal.rows)
       return {
@@ -6253,15 +6247,9 @@ export class TuiApp {
         key: `${this.terminal.columns}:${this.terminal.rows}:${geometry.width}:${geometry.maxHeight}:${geometry.panelRows}`,
       }
     }
-    const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
+    return new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
       panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
     })
-    this.historyResponsiveFrame = frame
-    this.historyOverlay = this.showOverlayOnHost(
-      frame,
-      { width: '100%', maxHeight: '100%' },
-      { remountable: true },
-    )
   }
 
   /** Close the history panel (Esc/Ctrl+C, accept, surface dispose). */
@@ -6271,6 +6259,7 @@ export class TuiApp {
     this.historyOverlay = undefined
     this.historyResponsiveFrame = undefined
     this.historyPanel = undefined
+    if (overlay !== undefined) this.overlayRemounts.delete(overlay)
     overlay?.hide()
     // Remountable history overlays intentionally opt out of disposeOnHide so
     // fullscreen migration can retain query/results/selection. The final
@@ -8125,7 +8114,7 @@ export class TuiApp {
     // Any OTHER CAPTURING overlay owns the press: no transcript / dock /
     // todo identity below is reachable (the click is inert behind it). A
     // nonCapturing notice is non-modal, so background clicks still resolve.
-    if (this.overlayBroker.hasVisibleCapturingOverlay()) {
+    if (this.overlayBroker.hasVisibleModalOverlay()) {
       this.fullscreenCellGesture = undefined
       return
     }
@@ -8249,7 +8238,7 @@ export class TuiApp {
     // todo/transcript gesture is dead (a cross-mode close before the
     // release must not resurrect it on the background surface). A
     // nonCapturing notice is non-modal and does not own the release.
-    if (this.overlayBroker.hasVisibleCapturingOverlay()) {
+    if (this.overlayBroker.hasVisibleModalOverlay()) {
       this.fullscreenCellGesture = undefined
       return
     }
@@ -9455,46 +9444,47 @@ export class TuiApp {
     // overlay must survive a fullscreen toggle, not become a stale handle
     // on the dead screen). The raw handle dies with the old screen; the
     // lease re-creates it after the swap.
-    let raw: OverlayHandle | undefined
-    let hiddenByLease = false
+    // The broker owns every logical state (visibility intent, focus intent,
+    // z-order); the lease only holds the STABLE managed handle, whose raw
+    // projection the broker rebinds after a screen swap.
+    let handle: OverlayHandle | undefined
     let closed = false
-    const mount = (): void => {
-      if (closed || raw !== undefined) return
+    const remount = (): void => {
+      if (closed || handle === undefined) return
       const compiled = compileView(view)
       const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
-      raw = this.showOverlayOnHost(component, mountOptions, { remountable: true })
-      if (hiddenByLease) raw.setHidden(true)
+      this.rebindOverlayRaw(handle, component, mountOptions)
+    }
+    const mount = (): void => {
+      if (closed || handle !== undefined) return
+      const compiled = compileView(view)
+      const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
+      handle = this.showOverlayOnHost(component, mountOptions, { remountable: true })
+      this.overlayRemounts.set(handle, remount)
     }
     mount()
-    const lease: import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void; _ordinal: number } = {
-      _ordinal: ++this.overlayOrdinalSeq,
+    const lease: import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void } = {
       close: () => {
         if (closed) return
         closed = true
         // Drop the lease from the owned set (round-1 finding 1: a closed
         // lease must not leak until dispose).
         this.extensionOverlayLeases.delete(lease)
-        raw?.hide()
-        raw = undefined
+        if (handle !== undefined) this.overlayRemounts.delete(handle)
+        handle?.hide()
+        handle = undefined
       },
       hide: () => {
         if (closed) return
-        hiddenByLease = true
-        raw?.setHidden(true)
+        handle?.setHidden(true)
       },
       show: () => {
         if (closed) return
-        hiddenByLease = false
-        raw?.setHidden(false)
+        handle?.setHidden(false)
       },
-      // Host-internal: re-create the raw handle on the CURRENT active
-      // screen after a fullscreen swap (the old raw handle died with the
-      // old screen). Idempotent (a live raw handle skips).
-      _remount: () => {
-        if (closed) return
-        raw = undefined
-        mount()
-      },
+      // Host-internal: re-create the raw projection on the CURRENT active
+      // screen after a fullscreen swap (the broker keeps the logical node).
+      _remount: remount,
     }
     // The surface's dispose closes every still-owned lease: track it.
     this.extensionOverlayLeases.add(lease)
@@ -9561,48 +9551,50 @@ export class TuiApp {
     // The lease KEEPS the component + options so a fullscreen screen swap
     // can RE-MOUNT it on the new active screen (the raw handle dies with
     // the old screen — same contract as the stable overlay lease).
+    // The broker owns visibility intent, focus intent and z-order; the lease
+    // only holds the STABLE managed handle plus the current host wrapper (the
+    // plugin's own component survives the screen swap untouched).
     let wrapper: import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent | undefined
-    let raw: OverlayHandle | undefined
-    let hiddenByLease = false
-    /** The lease's EXPLICIT focus intent. `blur()` releases the keyboard but
-     * keeps the overlay visible, so the intent must survive a fullscreen
-     * remount instead of being re-derived from the (freshly focused) mount. */
-    let desiredFocus = true
+    let handle: OverlayHandle | undefined
     let closed = false
-    const mount = (): void => {
-      if (closed || raw !== undefined) return
-      const created = new AdvancedOverlayComponent(
+    const createWrapper = (): import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent =>
+      new AdvancedOverlayComponent(
         component,
         () => this.advancedRenderContext(),
         (message: string) => this.notify(`advanced overlay: ${message}`, 'error'),
       )
+    const remount = (): void => {
+      if (closed || handle === undefined) return
+      if (wrapper !== undefined) this.advancedOverlayWrappers.delete(wrapper)
+      const created = createWrapper()
       wrapper = created
       this.advancedOverlayWrappers.add(created)
-      raw = this.showOverlayOnHost(created, mountOptions, { remountable: true })
-      if (hiddenByLease) raw.setHidden(true)
-      else if (!desiredFocus) raw.unfocus()
+      this.rebindOverlayRaw(handle, created, mountOptions)
+    }
+    const mount = (): void => {
+      if (closed || handle !== undefined) return
+      const created = createWrapper()
+      wrapper = created
+      this.advancedOverlayWrappers.add(created)
+      handle = this.showOverlayOnHost(created, mountOptions, { remountable: true })
+      this.overlayRemounts.set(handle, remount)
     }
     mount()
-    const lease: import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void; _ordinal: number } = {
+    const lease: import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void } = {
       id,
-      _ordinal: ++this.overlayOrdinalSeq,
       get active() {
         return !closed
       },
       get focused() {
-        return raw?.isFocused() ?? false
+        return handle?.isFocused() ?? false
       },
       focus: () => {
         if (closed) return
-        hiddenByLease = false
-        desiredFocus = true
-        raw?.setHidden(false)
-        raw?.focus()
+        handle?.focus()
       },
       blur: () => {
         if (closed) return
-        desiredFocus = false
-        raw?.unfocus()
+        handle?.unfocus()
       },
       invalidate: () => {
         if (closed) return
@@ -9620,36 +9612,22 @@ export class TuiApp {
           // overlay.
           wrapper.dispose()
         }
-        raw?.hide()
-        raw = undefined
+        if (handle !== undefined) this.overlayRemounts.delete(handle)
+        handle?.hide()
+        handle = undefined
         wrapper = undefined
       },
       hide: () => {
         if (closed) return
-        hiddenByLease = true
-        raw?.setHidden(true)
+        handle?.setHidden(true)
       },
       show: () => {
         if (closed) return
-        hiddenByLease = false
-        desiredFocus = true
-        raw?.setHidden(false)
+        handle?.setHidden(false)
       },
-      // Host-internal: re-create the raw handle on the CURRENT active
-      // screen after a fullscreen swap (the old raw handle died with the
-      // old screen). Idempotent (a live raw handle skips). The OLD wrapper
-      // is dropped from the live set WITHOUT disposing it — the plugin
-      // component must survive the screen migration (the lease stays
-      // live); the dead screen's overlay stack is the only remaining
-      // reference and dies with the screen.
-      _remount: () => {
-        if (closed) return
-        if (wrapper !== undefined) {
-          this.advancedOverlayWrappers.delete(wrapper)
-        }
-        raw = undefined
-        mount()
-      },
+      // Host-internal: re-create the raw projection on the CURRENT active
+      // screen after a fullscreen swap (the broker keeps the logical node).
+      _remount: remount,
       // Host-internal: recompile the plugin's render() output (terminal
       // resize — the plugin's render(ctx) must see the new geometry).
       _recompile: () => {
@@ -9794,45 +9772,45 @@ export class TuiApp {
     )
     const id = `unstable-mount-${++this.unstableMountCounter}`
     let adapter: import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter | undefined
-    let raw: OverlayHandle | undefined
-    let hiddenByLease = false
-    /** See the advanced lease: the EXPLICIT focus intent survives a
-     * fullscreen remount (blur() keeps the overlay visible but unfocused). */
-    let desiredFocus = true
+    let handle: OverlayHandle | undefined
     let closed = false
-    const mount = (): void => {
-      if (closed || raw !== undefined) return
-      const created = new UnstableMountedComponentAdapter(
+    const createAdapter = (): import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter =>
+      new UnstableMountedComponentAdapter(
         component,
         (message: string) => this.notify(`unstable mount: ${message}`, 'error'),
       )
+    const remount = (): void => {
+      if (closed || handle === undefined) return
+      if (adapter !== undefined) this.unstableMountAdapters.delete(adapter)
+      const created = createAdapter()
       adapter = created
       this.unstableMountAdapters.add(created)
-      raw = this.showOverlayOnHost(created, mountOptions, { remountable: true })
-      if (hiddenByLease) raw.setHidden(true)
-      else if (!desiredFocus) raw.unfocus()
+      this.rebindOverlayRaw(handle, created, mountOptions)
+    }
+    const mount = (): void => {
+      if (closed || handle !== undefined) return
+      const created = createAdapter()
+      adapter = created
+      this.unstableMountAdapters.add(created)
+      handle = this.showOverlayOnHost(created, mountOptions, { remountable: true })
+      this.overlayRemounts.set(handle, remount)
     }
     mount()
-    const lease: import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void; _ordinal: number } = {
+    const lease: import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void } = {
       id,
-      _ordinal: ++this.overlayOrdinalSeq,
       get active() {
         return !closed
       },
       get focused() {
-        return raw?.isFocused() ?? false
+        return handle?.isFocused() ?? false
       },
       focus: () => {
         if (closed) return
-        hiddenByLease = false
-        desiredFocus = true
-        raw?.setHidden(false)
-        raw?.focus()
+        handle?.focus()
       },
       blur: () => {
         if (closed) return
-        desiredFocus = false
-        raw?.unfocus()
+        handle?.unfocus()
       },
       invalidate: () => {
         if (closed) return
@@ -9846,68 +9824,25 @@ export class TuiApp {
           this.unstableMountAdapters.delete(adapter)
           adapter.dispose()
         }
-        raw?.hide()
-        raw = undefined
+        if (handle !== undefined) this.overlayRemounts.delete(handle)
+        handle?.hide()
+        handle = undefined
         adapter = undefined
       },
       hide: () => {
         if (closed) return
-        hiddenByLease = true
-        raw?.setHidden(true)
+        handle?.setHidden(true)
       },
       show: () => {
         if (closed) return
-        hiddenByLease = false
-        desiredFocus = true
-        raw?.setHidden(false)
+        handle?.setHidden(false)
       },
-      // Host-internal: re-create the raw handle on the CURRENT active
-      // screen after a fullscreen swap. The OLD adapter is dropped from
-      // the live set WITHOUT disposing it (the plugin component must
-      // survive the screen migration).
-      _remount: () => {
-        if (closed) return
-        if (adapter !== undefined) {
-          this.unstableMountAdapters.delete(adapter)
-        }
-        raw = undefined
-        mount()
-      },
+      // Host-internal: re-create the raw projection on the CURRENT active
+      // screen after a fullscreen swap (the broker keeps the logical node).
+      _remount: remount,
     }
     this.unstableMountLeases.add(lease)
     return lease
-  }
-
-  /**
-   * Re-mount every still-open remountable overlay on the CURRENT active
-   * screen, in their ORIGINAL global mount order (the {@link
-   * overlayOrdinalSeq} ordinal assigned when each lease/panel was created).
-   * Re-mounting grouped by kind rebuilds a mixed-type stack in the wrong
-   * order — reversing an advanced-below-stable stack, or re-hiding a
-   * nonCapturing HUD that the newer capturing overlay never hid.
-   */
-  private remountOverlaysInMountOrder(
-    history: HistoryPanel | undefined,
-    modelPicker: (Component & RowBudgetAware) | undefined,
-  ): void {
-    const jobs: Array<{ ordinal: number; remount: () => void }> = []
-    for (const lease of this.extensionOverlayLeases) {
-      jobs.push({ ordinal: lease._ordinal, remount: () => lease._remount() })
-    }
-    for (const lease of this.advancedOverlayLeases) {
-      jobs.push({ ordinal: lease._ordinal, remount: () => lease._remount() })
-    }
-    for (const lease of this.unstableMountLeases) {
-      jobs.push({ ordinal: lease._ordinal, remount: () => lease._remount() })
-    }
-    if (history !== undefined) {
-      jobs.push({ ordinal: this.historyOverlayOrdinal, remount: () => this.mountHistoryOverlay(history) })
-    }
-    if (modelPicker !== undefined) {
-      jobs.push({ ordinal: this.modelPickerOrdinal, remount: () => this.mountModelPickerOverlay(modelPicker) })
-    }
-    jobs.sort((a, b) => a.ordinal - b.ordinal)
-    for (const job of jobs) job.remount()
   }
 
   /** Phase 3 test hook: the number of still-owned UNSTABLE mount leases. */
@@ -9971,7 +9906,7 @@ export class TuiApp {
         // the seat — those flows restore their own focus and must never be
         // stolen. A nonCapturing or blurred overlay owns no keyboard.
         if (app.activeQuestions !== undefined || app.activeApproval !== undefined
-          || app.overlayBroker.hasFocusedCapturingOverlay()) return
+          || app.overlayBroker.hasFocusedOverlay()) return
         app.activeScreen.setFocus(app.seatEditor().component)
       },
     }
@@ -10389,7 +10324,7 @@ export class TuiApp {
     // has released the keyboard, so it must NOT fence the handoff.
     if (this.activeQuestions === undefined && this.activeApproval === undefined
       && this.activeSaveLocation === undefined
-      && !this.overlayBroker.hasFocusedCapturingOverlay()) {
+      && !this.overlayBroker.hasFocusedOverlay()) {
       this.activeScreen.setFocus(component)
     }
   }
@@ -10455,7 +10390,7 @@ export class TuiApp {
    */
   private taskBrowserAvailable(): boolean {
     return this.tasksActive
-      && !this.overlayBroker.hasFocusedCapturingOverlay()
+      && !this.overlayBroker.hasFocusedOverlay()
       && this.seatEditor().getText().trim() === ''
       && this.seatInputMode() === 'prompt'
   }
@@ -12653,7 +12588,7 @@ export class TuiApp {
     // that currently HOLDS focus reports 'overlay'. A nonCapturing notice
     // never takes focus, and a blurred/hidden entry has released it, so the
     // editor owns the seat then.
-    if (this.overlayBroker.hasFocusedCapturingOverlay()) {
+    if (this.overlayBroker.hasFocusedOverlay()) {
       this.setFocusSeat('overlay')
       return
     }
@@ -13460,11 +13395,11 @@ export class TuiApp {
   }
 
   /**
-   * Headless-test hook: current overlay tracking-graph sizes. The graph
-   * (overlayHandles / overlayDependents / the active question's suspension)
-   * is behaviorally invisible — stale entries only leak memory — so the
-   * headless suite asserts its sizes directly (e.g. the fullscreen teardown
-   * must leave it empty instead of retaining dead handles).
+   * Headless-test hook: current managed-overlay graph sizes. `handles` is the
+   * live logical node count, `dependents` the number of suppression edges and
+   * `suspended` the directly suspended roots under the active question. The
+   * LOGICAL graph survives a fullscreen swap (only the physical projections
+   * are rebound), so it is not cleared by the screen teardown.
    */
   overlayGraphState(): { handles: number; dependents: number; suspended: number } {
     return {
@@ -14588,7 +14523,6 @@ export class TuiApp {
   openModelPicker(component: Component & RowBudgetAware): () => void {
     if (this.modelPickerComponent !== undefined) this.closeModelPicker()
     this.modelPickerComponent = component
-    this.modelPickerOrdinal = ++this.overlayOrdinalSeq
     this.mountModelPickerOverlay(component)
     // The closer targets the CURRENT handle: a fullscreen screen swap
     // remounts the SAME component behind a fresh handle, and the user's
@@ -14597,11 +14531,27 @@ export class TuiApp {
   }
 
   /** Mount the `/model` picker frame around its (retained) component. The
-   *  overlay is REMOUNTABLE: a fullscreen screen swap hides it without
-   *  disposing the component, and `setFullscreen()` re-mounts the same
-   *  instance on the new screen so query/view/selection/effort cursor are
+   *  overlay is REMOUNTABLE: a fullscreen screen swap rebinds it without
+   *  disposing the component, so query/view/selection/effort cursor are
    *  preserved (plan §9.3/§19.6). */
   private mountModelPickerOverlay(component: Component & RowBudgetAware): void {
+    const frame = this.createModelPickerFrame(component)
+    this.modelPickerFrame = frame
+    const handle = this.showOverlayOnHost(
+      frame,
+      { width: 72, maxHeight: 28 },
+      { remountable: true },
+    )
+    this.modelPickerOverlay = handle
+    this.overlayRemounts.set(handle, () => {
+      if (this.modelPickerComponent !== component || this.modelPickerOverlay !== handle) return
+      const next = this.createModelPickerFrame(component)
+      this.modelPickerFrame = next
+      this.rebindOverlayRaw(handle, next, { width: 72, maxHeight: 28 })
+    })
+  }
+
+  private createModelPickerFrame(component: Component & RowBudgetAware): ResponsiveOverlayFrame {
     const configuredWidth = 72
     const configuredMaxHeight = 28
     const geometryOf = (): ResponsiveOverlayGeometry => {
@@ -14609,15 +14559,9 @@ export class TuiApp {
       const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
       return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
     }
-    const frame = new ResponsiveOverlayFrame(component, geometryOf, geometry => {
+    return new ResponsiveOverlayFrame(component, geometryOf, geometry => {
       component.setMaxRows?.(Math.max(1, geometry.maxHeight - 2))
     })
-    this.modelPickerFrame = frame
-    this.modelPickerOverlay = this.showOverlayOnHost(
-      frame,
-      { width: configuredWidth, maxHeight: configuredMaxHeight },
-      { remountable: true },
-    )
   }
 
   /** Close the /model picker for good: drop the handle and dispose the
@@ -14629,6 +14573,7 @@ export class TuiApp {
     this.modelPickerOverlay = undefined
     this.modelPickerFrame = undefined
     this.modelPickerComponent = undefined
+    if (overlay !== undefined) this.overlayRemounts.delete(overlay)
     overlay?.hide()
     component?.dispose?.()
   }
@@ -15345,15 +15290,10 @@ export class TuiApp {
     // the suspension bookkeeping branch on it.
     this.activeQuestions = state
     this.projectActivity()
-    // A question is a logical capturing modal: every visible overlay is
-    // suspended (hidden, state intact) until the flow settles — the same
-    // stacking rule showOverlayOnHost applies to a new overlay.
-    for (const handle of this.overlayBroker.handles()) {
-      if (!handle.isHidden()) {
-        handle.setHidden(true)
-        state.suspendedOverlays.add(handle)
-      }
-    }
+    // A question is a logical capturing modal: the broker directly suspends
+    // every visible logical ROOT (hidden, topology intact) until the flow
+    // settles. Child topology, focus intent and z-order stay in the broker.
+    this.overlayBroker.suspendVisibleRoots(state)
     const frame = new QuestionFrame(state.flow, () => this.terminal.rows)
     state.frame = frame
     // Re-vendor lifecycle follow-up P1: the flow only PROJECTS into the
@@ -15445,18 +15385,12 @@ export class TuiApp {
     this.mountSeatChild()
     const screen = this.fullscreen ?? this.tui
     // M9 (round-1 finding 5): focus the CURRENT seat occupant (the host
-    // default or the plugin editor's component) — never a hardcoded host
-    // editor.
+    // default or the plugin editor's component) as the fallback — a restored
+    // capturing overlay re-claims the keyboard through the broker restore.
     screen.setFocus(this.seatEditor().component)
-    for (const handle of state.suspendedOverlays) {
-      if (this.overlayBroker.isTracked(handle)) handle.setHidden(false)
-    }
-    state.suspendedOverlays.clear()
-    // The flow released the seat: re-derive it from the live focus AFTER
-    // the overlays were restored (a restored capturing overlay owns the
-    // seat again) (follow-up P1).
-    this.setFocusSeat('editor')
-    this.publishFocusSeat()
+    // The broker restores the directly suspended roots with their OWN focus
+    // intent; the previously focused one reclaims the keyboard.
+    this.overlayBroker.resumeSuspendedRoots(state)
     this.projectActivity()
     screen.requestRender()
     this.settle(state, answers)
@@ -15547,14 +15481,9 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     this.activeSaveLocation = state
     this.projectActivity()
-    // The prompt is a logical capturing modal: every visible overlay is
-    // suspended (hidden, state intact) until it settles.
-    for (const handle of this.overlayBroker.handles()) {
-      if (!handle.isHidden()) {
-        handle.setHidden(true)
-        state.suspendedOverlays.add(handle)
-      }
-    }
+    // The prompt is a logical capturing modal: the broker directly suspends
+    // every visible logical ROOT (topology intact) until it settles.
+    this.overlayBroker.suspendVisibleRoots(state)
     const frame = new SaveLocationFrame(state.prompt)
     state.frame = frame
     // The prompt only PROJECTS into the seat — the previous occupant (the
@@ -15615,12 +15544,7 @@ export class TuiApp {
     this.mountSeatChild()
     const screen = this.fullscreen ?? this.tui
     screen.setFocus(this.seatEditor().component)
-    for (const handle of state.suspendedOverlays) {
-      if (this.overlayBroker.isTracked(handle)) handle.setHidden(false)
-    }
-    state.suspendedOverlays.clear()
-    this.setFocusSeat('editor')
-    this.publishFocusSeat()
+    this.overlayBroker.resumeSuspendedRoots(state)
     this.projectActivity()
     screen.requestRender()
     state.resolve(result)

@@ -1,7 +1,8 @@
 /**
- * M8 tests (plan §13): the OverlayBroker extraction is behavior-identical
- * (the existing modal-stacking/suspension suite gates it) and the managed
- * overlay lease capability works end to end.
+ * The managed-overlay model (2026-09 revision): stable logical nodes with a
+ * single suppressor, explicit visibility intent separate from suppression,
+ * per-node focus intent, current logical z-order and physical rebinding across
+ * a fullscreen swap. The surface-level lease capability is covered here too.
  * @module @xmoon76/dsh-pi-tui/overlay-broker.test
  */
 
@@ -25,224 +26,291 @@ afterEach(() => {
   }
 })
 
-/** A fake overlay handle recording setHidden/hide/focus calls. */
-function fakeHandle(label: string): OverlayHandle & { label: string; hiddenLog: string[]; focusLog: string[] } {
+interface FakeHandle extends OverlayHandle {
+  label: string
+  hiddenLog: string[]
+  focusLog: string[]
+  isHandFocused(): boolean
+}
+
+/** A fake raw overlay handle recording setHidden/hide/focus calls and
+ * tracking its own physical focus (so the broker can rebind / restore). */
+function fakeHandle(label: string): FakeHandle {
   let hidden = false
-  const handle = {
+  let focused = false
+  const handle: FakeHandle = {
     label,
     hiddenLog: [] as string[],
     focusLog: [] as string[],
-    hide() { handle.hiddenLog.push('hide'); hidden = false },
+    isHandFocused: () => focused,
+    hide() { handle.hiddenLog.push('hide'); hidden = false; focused = false },
     setHidden(value: boolean) {
       handle.hiddenLog.push(value ? 'hide-temp' : 'show')
       hidden = value
+      if (value) focused = false
     },
     isHidden() { return hidden },
-    focus() { handle.focusLog.push('focus') },
-    unfocus() {},
-    isFocused() { return false },
+    focus() { handle.focusLog.push('focus'); focused = true },
+    unfocus() { focused = false },
+    isFocused() { return focused },
     getBounds() { return undefined },
   }
   return handle
 }
 
-test('OverlayBroker: a capturing overlay hides every other visible overlay and restores them on close (reverse order)', () => {
+/** Emulate the host's two-phase mount: prepare (snapshot), fork mount+focus,
+ * commit (bind + stacking). */
+function mountOverlay(
+  broker: OverlayBroker,
+  handle: OverlayHandle,
+  options: { nonCapturing?: boolean; remountable?: boolean } = {},
+): OverlayHandle {
+  const prepared = broker.prepareMount(options)
+  if (options.nonCapturing !== true) handle.focus()
+  return broker.commitMount(prepared, handle)
+}
+
+test('OverlayBroker: a capturing overlay suppresses visible roots and restores them (with focus) on close', () => {
   const broker = new OverlayBroker()
   const a = fakeHandle('a')
   const b = fakeHandle('b')
-  broker.track(a)
-  broker.track(b)
-  assert.equal(a.isHidden(), true, 'a is hidden beneath b')
-  // Close b: a is restored.
-  broker.closeForHost(b)
+  mountOverlay(broker, a)
+  assert.equal(a.isFocused(), true)
+  const bHandle = mountOverlay(broker, b)
+  assert.equal(a.isHidden(), true, 'a is suppressed beneath b')
+  assert.equal(broker.graphState().dependents, 1)
+  // Close b: a is restored AND re-focused (it owned the keyboard before).
+  broker.close(bHandle)
   assert.equal(a.isHidden(), false, 'a restored after b closes')
-  assert.deepEqual(a.hiddenLog, ['hide-temp', 'show'])
+  assert.equal(a.isFocused(), true, 'a reclaims the keyboard')
 })
 
-test('OverlayBroker: non-capturing overlays never hide others', () => {
+test('OverlayBroker: nonCapturing mounts neither suppress siblings nor steal focus', () => {
   const broker = new OverlayBroker()
   const a = fakeHandle('a')
-  const b = fakeHandle('b')
-  broker.track(a)
-  broker.track(b, { nonCapturing: true })
-  assert.equal(a.isHidden(), false, 'a stays visible under a non-capturing overlay')
+  const hud = fakeHandle('hud')
+  mountOverlay(broker, a)
+  mountOverlay(broker, hud, { nonCapturing: true })
+  assert.equal(a.isHidden(), false, 'a stays visible under a nonCapturing overlay')
+  assert.equal(a.isFocused(), true, 'a keeps the keyboard')
+  assert.equal(broker.graphState().dependents, 0)
 })
 
-test('OverlayBroker: a question suspension absorbs new overlays and restores on settle', () => {
+test('OverlayBroker: an explicit focus() makes a nonCapturing overlay the keyboard owner', () => {
+  const broker = new OverlayBroker()
+  const hud = fakeHandle('hud')
+  const wrapped = mountOverlay(broker, hud, { nonCapturing: true })
+  assert.equal(broker.hasFocusedOverlay(), false, 'a nonCapturing notice does not auto-focus')
+  wrapped.focus()
+  assert.equal(hud.isFocused(), true)
+  assert.equal(broker.hasFocusedOverlay(), true, 'an explicit focus() is a real keyboard owner')
+  assert.equal(broker.hasVisibleModalOverlay(), false, 'but it is still not a modal overlay')
+})
+
+test('OverlayBroker: Question suspends visible roots and the broker restores them', () => {
   const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
   const broker = new OverlayBroker({ question: () => suspension })
   const a = fakeHandle('a')
-  broker.track(a)
-  assert.equal(a.isHidden(), true, 'the overlay joins the suspension hidden')
-  assert.ok(suspension.suspendedOverlays.has(a), 'the suspension tracks the overlay')
-  // Settle the question: the suspended overlay is revealed by the host.
-  for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
-  suspension.suspendedOverlays.clear()
-  assert.equal(a.isHidden(), false)
-})
-
-test('OverlayBroker: a Save Location suspension absorbs new overlays and restores on settle', () => {
-  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
-  const broker = new OverlayBroker({ saveLocation: () => suspension })
-  const a = fakeHandle('a')
-  broker.track(a)
-  assert.equal(a.isHidden(), true, 'the overlay joins the suspension hidden')
-  assert.ok(suspension.suspendedOverlays.has(a), 'the suspension tracks the overlay')
-  // Settle the prompt: the suspended overlay is revealed by the host.
-  for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
-  suspension.suspendedOverlays.clear()
-  assert.equal(a.isHidden(), false)
-})
-
-test('OverlayBroker: closing a suspended overlay while Save Location is active keeps its dependents hidden', () => {
-  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
-  const broker = new OverlayBroker({ saveLocation: () => suspension })
-  const a = fakeHandle('a')
-  const b = fakeHandle('b')
-  // b hides a (a becomes b's dependent).
-  broker.track(a)
-  broker.track(b)
+  mountOverlay(broker, a)
+  broker.suspendVisibleRoots(suspension)
   assert.equal(a.isHidden(), true)
-  // The Save prompt mounts: it suspends every visible overlay (b; a is
-  // already hidden) into its suspension set.
-  for (const handle of broker.handles()) {
-    if (!handle.isHidden()) {
-      handle.setHidden(true)
-      suspension.suspendedOverlays.add(handle)
-    }
-  }
-  // Close b while the prompt is active: a must NOT flash back over the
-  // prompt — it stays hidden and joins the prompt's suspension.
-  broker.closeForHost(b)
-  assert.equal(a.isHidden(), true, 'the dependent stays hidden under the prompt')
-  assert.ok(suspension.suspendedOverlays.has(a), 'the dependent joins the prompt suspension')
-  // Settle the prompt: the suspended overlays are revealed.
-  for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
-  suspension.suspendedOverlays.clear()
+  assert.equal(suspension.suspendedOverlays.size, 1)
+  broker.resumeSuspendedRoots(suspension)
   assert.equal(a.isHidden(), false)
+  assert.equal(a.isFocused(), true, 'the previously focused root reclaims the keyboard')
 })
 
-test('OverlayBroker: a tracked close reconciles the live seat; a stale close does not', () => {
-  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
-  const seatCalls: string[] = []
-  let reconciles = 0
-  const broker = new OverlayBroker({
-    saveLocation: () => suspension,
-    setFocusSeat: (seat) => seatCalls.push(seat),
-    reconcileFocusSeat: () => { reconciles += 1 },
-  })
-  const a = fakeHandle('a')
-  broker.track(a)
-  broker.closeForHost(a)
-  // The close path re-derives the host's final seat from the LIVE surface:
-  // closing B can restore a dependent capturing overlay A, so the broker
-  // must NOT write a coarse 'editor' here.
-  assert.equal(reconciles, 1, 'a tracked close re-derives the live seat')
-  assert.deepEqual(seatCalls, ['overlay'], 'only the mount signal is coarse (never an editor close report)')
-  // A STALE close (already untracked, e.g. after a fullscreen teardown)
-  // must NOT republish the seat: the live state (an active Save prompt)
-  // is authoritative, and a dead handle's hide() requests no render to
-  // correct it later.
-  broker.closeForHost(a)
-  assert.equal(reconciles, 1, 'a stale close must not reconcile the seat')
-  assert.deepEqual(seatCalls, ['overlay'], 'a stale close must not republish the seat')
-})
-
-test('OverlayBroker: an explicit show of a suspended overlay is an ownership override (documented)', () => {
+test('OverlayBroker: Save Location suspension is symmetric', () => {
   const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
   const broker = new OverlayBroker({ saveLocation: () => suspension })
   const a = fakeHandle('a')
-  const wrapped = broker.track(a)
-  assert.equal(a.isHidden(), true, 'the overlay joins the suspension hidden')
-  assert.ok(suspension.suspendedOverlays.has(a), 'the suspension tracks the overlay')
-  // An EXPLICIT show is an ownership override: the caller takes
-  // responsibility for the modal consistency (the same forwarding
-  // contract as the question branch — documented, not guarded).
-  wrapped.setHidden(false)
-  assert.equal(a.isHidden(), false, 'the explicit show overrides the suspension')
-  // The prompt remains active and answerable; the settle still reveals the
-  // remaining suspended handles.
-  wrapped.setHidden(true)
-  for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
-  suspension.suspendedOverlays.clear()
+  mountOverlay(broker, a)
+  broker.suspendVisibleRoots(suspension)
+  assert.equal(a.isHidden(), true)
+  broker.resumeSuspendedRoots(suspension)
+  assert.equal(a.isHidden(), false)
+  assert.equal(a.isFocused(), true)
+})
+
+test('OverlayBroker: a new overlay mounted under a modal joins its DIRECT suspension (no topology copy)', () => {
+  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+  const broker = new OverlayBroker({ saveLocation: () => suspension })
+  const a = fakeHandle('a')
+  mountOverlay(broker, a)
+  broker.suspendVisibleRoots(suspension)
+  const c = fakeHandle('c')
+  mountOverlay(broker, c)
+  assert.equal(c.isHidden(), true, 'the new overlay is suspended, not shown over the modal')
+  assert.equal(suspension.suspendedOverlays.size, 2, 'both roots are DIRECTLY suspended')
+  assert.equal(broker.graphState().dependents, 0, 'no child topology is invented for the modal')
+})
+
+test('OverlayBroker: a hidden middle close reparents to its graph owner, never flattens into the modal', () => {
+  for (const modal of ['question', 'saveLocation'] as const) {
+    let suspension: { suspendedOverlays: Set<OverlayHandle> } | undefined
+    const broker = new OverlayBroker(
+      modal === 'question' ? { question: () => suspension } : { saveLocation: () => suspension },
+    )
+    const c = fakeHandle('c')
+    const a = fakeHandle('a')
+    const b = fakeHandle('b')
+    const cHandle = mountOverlay(broker, c)
+    const aHandle = mountOverlay(broker, a) // A suppresses C
+    const bHandle = mountOverlay(broker, b) // B suppresses A
+    assert.equal(broker.graphState().dependents, 2)
+
+    suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+    broker.suspendVisibleRoots(suspension)
+    assert.equal(suspension.suspendedOverlays.size, 1, `${modal}: only the visible front root is suspended`)
+
+    broker.close(aHandle)
+    assert.ok(!suspension.suspendedOverlays.has(cHandle), `${modal}: C must not flatten into the modal suspension`)
+    assert.equal(broker.graphState().dependents, 1, `${modal}: B now owns C`)
+    assert.equal(c.isHidden(), true, `${modal}: C stays hidden under B`)
+    broker.assertForest()
+
+    broker.resumeSuspendedRoots(suspension)
+    assert.equal(c.isHidden(), true, `${modal}: C stays hidden after the modal settles`)
+    // The modal is over: closing B finally reveals C.
+    suspension = undefined
+    broker.close(bHandle)
+    assert.equal(c.isHidden(), false, `${modal}: C is revealed when its graph owner closes`)
+  }
+})
+
+test('OverlayBroker: an explicit show() detaches a suppressed node (forest invariant)', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const b = fakeHandle('b')
+  const aHandle = mountOverlay(broker, a)
+  mountOverlay(broker, b) // B suppresses A
+  assert.equal(broker.graphState().dependents, 1)
+  aHandle.setHidden(false) // explicit visibility override
+  assert.equal(a.isHidden(), false)
+  assert.equal(broker.graphState().dependents, 0, 'A detached from B — no stale parent')
+  broker.assertForest()
+  // A subsequent close of B must not touch A.
+  const bHandle = [...broker.handles()].find(handle => handle !== aHandle)!
+  broker.close(bHandle)
   assert.equal(a.isHidden(), false)
 })
 
-test('OverlayBroker: close is question-aware — dependents re-join the suspension, never flash back', () => {
-  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
-  const broker = new OverlayBroker({ question: () => suspension })
-  const a = fakeHandle('a')
-  const b = fakeHandle('b')
-  broker.track(a)
-  // The question absorbs a; a new capturing overlay b takes the front.
-  broker.track(b)
-  assert.ok(suspension.suspendedOverlays.has(b))
-  // b closes while the question is up: a must NOT flash back — it re-joins
-  // the suspension.
-  broker.closeForHost(b)
-  assert.equal(a.isHidden(), true, 'a stays hidden while the question is up')
-  assert.ok(suspension.suspendedOverlays.has(a), 'a is directly owned by the question again')
-})
-
-test('OverlayBroker: close idempotent + stale handles are inert', () => {
+test('OverlayBroker: an explicit hide() survives its suppressor close (I3)', () => {
   const broker = new OverlayBroker()
   const a = fakeHandle('a')
-  broker.track(a)
-  broker.closeForHost(a)
-  broker.closeForHost(a) // no-op
+  const b = fakeHandle('b')
+  const aHandle = mountOverlay(broker, a)
+  const bHandle = mountOverlay(broker, b)
+  assert.equal(a.isHidden(), true)
+  aHandle.setHidden(true) // the caller explicitly hides A while suppressed
+  assert.equal(broker.graphState().dependents, 1, 'explicit hide keeps the suppression edge')
+  broker.close(bHandle)
+  assert.equal(a.isHidden(), true, 'the explicit hide must NOT be undone by the owner close')
+  aHandle.setHidden(false)
+  assert.equal(a.isHidden(), false, 'an explicit show reveals it')
+})
+
+test('OverlayBroker: a blur() while suppressed is honored when the owner closes (E)', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const b = fakeHandle('b')
+  const aHandle = mountOverlay(broker, a)
+  const bHandle = mountOverlay(broker, b)
+  const focusCount = a.focusLog.length
+  aHandle.unfocus() // the plugin blurs A while it is hidden
+  broker.close(bHandle)
+  assert.equal(a.isHidden(), false, 'A is revealed')
+  assert.equal(a.focusLog.length, focusCount, 'the blurred intent suppresses the restore focus')
+})
+
+test('OverlayBroker: closing a root releases its children with their saved intent (Case C)', () => {
+  const broker = new OverlayBroker()
+  const c = fakeHandle('c')
+  const a = fakeHandle('a')
+  const cHandle = mountOverlay(broker, c)
+  const aHandle = mountOverlay(broker, a) // A suppresses C
+  broker.close(aHandle)
+  assert.equal(c.isHidden(), false, 'C becomes a root')
+  assert.equal(c.isFocused(), true, 'C reclaims the keyboard (it was focused before A)')
+  assert.equal(broker.graphState().handles, 1)
+  assert.equal(broker.graphState().dependents, 0)
+  assert.ok(cHandle)
+})
+
+test('OverlayBroker: hasVisibleModalOverlay tracks policy, hasFocusedOverlay tracks focus', () => {
+  const broker = new OverlayBroker()
+  const hud = fakeHandle('hud')
+  const hudHandle = mountOverlay(broker, hud, { nonCapturing: true })
+  assert.equal(broker.hasVisibleModalOverlay(), false, 'a nonCapturing notice is not modal')
+  assert.equal(broker.hasFocusedOverlay(), false)
+  const a = fakeHandle('a')
+  const aHandle = mountOverlay(broker, a)
+  assert.equal(broker.hasVisibleModalOverlay(), true)
+  assert.equal(broker.hasFocusedOverlay(), true)
+  hudHandle.focus()
+  assert.equal(broker.hasFocusedOverlay(), true, 'the explicitly focused nonCapturing notice owns the keyboard')
+  assert.equal(broker.hasVisibleModalOverlay(), true)
+  broker.close(aHandle)
+  assert.equal(broker.hasVisibleModalOverlay(), false, 'only the (focused) nonCapturing notice remains')
+  assert.equal(broker.hasFocusedOverlay(), true)
+})
+
+test('OverlayBroker: close is idempotent and a closed handle is inert', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const aHandle = mountOverlay(broker, a)
+  broker.close(aHandle)
+  broker.close(aHandle) // no-op
   assert.equal(broker.graphState().handles, 0)
+  assert.equal(aHandle.isHidden(), true)
 })
 
-test('OverlayBroker: hasVisibleCapturingOverlay ignores nonCapturing and hidden entries', () => {
-  const broker = new OverlayBroker()
-  // A nonCapturing notice is visible but never a keyboard owner.
-  broker.track(fakeHandle('hud'), { nonCapturing: true })
-  assert.equal(broker.hasVisibleCapturingOverlay(), false,
-    'a nonCapturing notice must not count as a capturing owner')
-  const a = fakeHandle('a')
-  broker.track(a)
-  assert.equal(broker.hasVisibleCapturingOverlay(), true, 'a visible capturing overlay owns the keyboard')
-  a.setHidden(true)
-  assert.equal(broker.hasVisibleCapturingOverlay(), false,
-    'a hidden capturing overlay has released the keyboard')
-  a.setHidden(false)
-  assert.equal(broker.hasVisibleCapturingOverlay(), true)
-  broker.closeForHost(a)
-  assert.equal(broker.hasVisibleCapturingOverlay(), false, 'a closed capturing overlay is forgotten')
-})
-
-test('OverlayBroker: hideAll + clear (fullscreen migration / surface teardown)', () => {
+test('OverlayBroker: disposeAll physically unmounts every node without restoring', () => {
   const broker = new OverlayBroker()
   const a = fakeHandle('a')
   const b = fakeHandle('b')
-  broker.track(a)
-  broker.track(b)
-  broker.hideAll()
-  assert.equal(a.isHidden() && b.isHidden(), true)
-  broker.clear()
-  assert.equal(broker.graphState().handles, 0)
-  assert.equal(broker.isTracked(a), false)
-})
-
-test('OverlayBroker: disposeAll physically unmounts every tracked overlay WITHOUT restoring dependents (final teardown)', () => {
-  const broker = new OverlayBroker()
-  const a = fakeHandle('a')
-  const b = fakeHandle('b')
-  broker.track(a)
-  broker.track(b)
-  // b hides a; disposeAll must physically unmount BOTH and never restore
-  // a — the whole surface is dying, nothing may flash back (unlike
-  // closeForHost, which restores dependents).
+  mountOverlay(broker, a)
+  mountOverlay(broker, b)
   broker.disposeAll()
-  assert.deepEqual(a.hiddenLog, ['hide-temp', 'hide'], 'a is hidden by b, then physically unmounted')
+  assert.deepEqual(a.hiddenLog, ['hide-temp', 'hide'], 'a is suppressed then physically unmounted')
   assert.deepEqual(b.hiddenLog, ['hide'], 'b is physically unmounted')
   assert.equal(broker.graphState().handles, 0)
-  assert.equal(broker.isTracked(a), false)
-  assert.equal(broker.isTracked(b), false)
-  // Idempotent: a second disposeAll must not re-hide anything.
-  broker.disposeAll()
+  broker.disposeAll() // idempotent
   assert.deepEqual(a.hiddenLog, ['hide-temp', 'hide'])
-  assert.deepEqual(b.hiddenLog, ['hide'])
+})
+
+test('OverlayBroker: detach + rebind preserves topology, visibility, focus intent and z-order', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const b = fakeHandle('b')
+  const aHandle = mountOverlay(broker, a, { remountable: true })
+  mountOverlay(broker, b, { remountable: true })
+  broker.detachPhysical()
+  // Re-create the raw projections back → front by the CURRENT logical order.
+  const order = broker.remountOrder()
+  assert.equal(order.length, 2)
+  const nextA = fakeHandle('a2')
+  const nextB = fakeHandle('b2')
+  broker.rebind(aHandle, nextA)
+  broker.rebind(order[1]!, nextB)
+  assert.equal(nextA.isHidden(), true, 'A stays suppressed after the rebind')
+  assert.equal(nextB.isHidden(), false, 'B stays visible')
+  nextB.focus()
+  broker.restoreFocusAfterSwap()
+  assert.equal(nextB.isFocused(), true, 'the pre-swap keyboard owner is restored')
+  broker.close(aHandle)
+  assert.equal(broker.graphState().handles, 1)
+})
+
+test('OverlayBroker: detachPhysical closes non-remountable nodes', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const b = fakeHandle('b')
+  mountOverlay(broker, a) // non-remountable
+  mountOverlay(broker, b, { remountable: true })
+  broker.detachPhysical()
+  assert.equal(broker.graphState().handles, 1, 'only the remountable node survives')
+  assert.deepEqual(a.hiddenLog, ['hide-temp', 'hide'], 'the non-remountable overlay is closed')
 })
 
 // ── Surface-level: the managed overlay lease ───────────────────────────────
@@ -293,14 +361,8 @@ test('TuiApp: the surface dispose closes every still-owned plugin overlay lease'
   app.start()
   startedApps.add(app)
   await vt.waitForRender()
-  const lease = app.showExtensionOverlay({
-    kind: 'text',
-    spans: [{ text: 'lease overlay' }],
-  })
+  const lease = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'lease overlay' }] })
   await vt.waitForRender()
-  // After dispose every lease API must be INERT (round-1 finding 4: the
-  // lease was closed by the dispose path — hide/show/close cannot touch a
-  // dead surface).
   app.dispose()
   lease.show()
   lease.hide()
@@ -313,9 +375,6 @@ test('TuiApp: final dispose stops the output viewer refresh timer even without t
   const { mock } = await import('node:test')
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  // Deterministic timer control: only setInterval is mocked (the app's
-  // render scheduling and waitForRender use real setTimeout/nextTick), so
-  // a leaked 10ms interval would fire on tick() regardless of load.
   mock.timers.enable({ apis: ['setInterval'] })
   try {
     const vt = new VirtualTerminal(80, 24)
@@ -332,13 +391,9 @@ test('TuiApp: final dispose stops the output viewer refresh timer even without t
     })
     mock.timers.tick(10)
     assert.ok(refreshes >= 1, 'the viewer must refresh while open')
-    // FINAL dispose WITHOUT invoking the closer: the panel-owned interval
-    // must be cleared through the disposeOnHide chain (overlay hide →
-    // FocusForwardingFrame.dispose → OutputViewerPanel.dispose), so the
-    // refresh callback never fires into the disposed surface.
     app.dispose()
     const afterDispose = refreshes
-    mock.timers.tick(1000) // a leaked 10ms interval would fire 100 times
+    mock.timers.tick(1000)
     assert.equal(refreshes, afterDispose, 'the refresh timer must not fire after final dispose')
   } finally {
     mock.timers.reset()
@@ -380,15 +435,9 @@ test('TuiApp: final dispose leaves the terminal cursor VISIBLE (every overlay un
   app.start()
   startedApps.add(app)
   await vt.waitForRender()
-  // An open overlay whose physical hide() writes hideCursor when the
-  // last overlay leaves the stack.
   app.openOutputViewer({ title: 'job output', initial: '', refresh: () => 'tick' })
   await vt.waitForRender()
   app.dispose()
-  // Removing the last overlay writes \x1b[?25l; stop() ends with
-  // showCursor (\x1b[?25h). If any overlay unmount ran AFTER stop, the
-  // final sequence would be the hide — leaving the user's shell cursor
-  // hidden after exit.
   assert.equal(vt.cursorWrites.at(-1), '\x1b[?25h', 'the final cursor sequence must be SHOW')
 })
 
@@ -400,20 +449,15 @@ test('TuiApp: a plugin overlay lease survives a fullscreen toggle (round-1 findi
   app.start()
   startedApps.add(app)
   await vt.waitForRender()
-  const lease = app.showExtensionOverlay({
-    kind: 'text',
-    spans: [{ text: 'fs overlay' }],
-  })
+  const lease = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'fs overlay' }] })
   await vt.waitForRender()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
   let view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('fs overlay'), 'the overlay renders in regular mode')
-  // Enter fullscreen: the overlay must be re-mounted on the alt screen.
   app.setFullscreen(true)
   await vt.waitForRender()
   view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('fs overlay'), `the overlay must survive into fullscreen:\n${view}`)
-  // The lease still works in fullscreen.
   lease.hide()
   await vt.waitForRender()
   view = vt.getViewport().map(strip).join('\n')
@@ -422,12 +466,10 @@ test('TuiApp: a plugin overlay lease survives a fullscreen toggle (round-1 findi
   await vt.waitForRender()
   view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('fs overlay'), 'the lease show must restore it in fullscreen')
-  // Back to regular: the overlay re-mounts again.
   app.setFullscreen(false)
   await vt.waitForRender()
   view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('fs overlay'), `the overlay must survive back into regular:\n${view}`)
-  // Close removes it.
   lease.close()
   await vt.waitForRender()
   view = vt.getViewport().map(strip).join('\n')
@@ -444,13 +486,10 @@ test('TuiApp: a LATE showExtensionOverlay after dispose is inert — no new leas
   startedApps.add(app)
   await vt.waitForRender()
   app.dispose()
-  // The review repro: before dispose 0 owned leases; a late plugin call
-  // must NOT create a lease or mount on the dead surface.
   assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0, 'dispose leaves zero owned leases')
   const late = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'too late' }] })
   assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0, 'a late overlay must not mint a new lease')
   assert.equal(app.overlayGraphState().handles, 0, 'a late overlay must not revive the broker graph')
-  // Every lease method is inert (no throw, no dead-terminal touch).
   late.show()
   late.hide()
   late.close()
@@ -495,9 +534,6 @@ test('TuiApp: closing a capturing overlay restores the underlying overlay seat A
   assert.ok(view().includes('overlay B'), `B must be visible:\n${view()}`)
   assert.equal(app.focusSeatForTest(), 'overlay')
 
-  // Close B: A is restored and must own BOTH the derived seat and physical
-  // keyboard focus — the broker must not assume the close returned to the
-  // editor (the regression: A visible + focused but focusedSeat='editor').
   b.close?.()
   await vt.waitForRender()
   assert.ok(view().includes('overlay A'), `A must be restored:\n${view()}`)
@@ -507,7 +543,6 @@ test('TuiApp: closing a capturing overlay restores the underlying overlay seat A
     'the restored A holds physical focus, not the editor')
   assert.equal(app.overlayGraphState().handles, 1, 'only A remains tracked')
 
-  // Closing the last capturing overlay returns the seat to the editor.
   a.close?.()
   await vt.waitForRender()
   assert.equal(app.focusSeatForTest(), 'editor')
@@ -516,7 +551,6 @@ test('TuiApp: closing a capturing overlay restores the underlying overlay seat A
   assert.equal(app.overlayGraphState().handles, 0)
   app.stop()
 })
-
 
 test('TuiApp: a stable capturing overlay hide()/show() moves the keyboard seat', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
@@ -533,14 +567,12 @@ test('TuiApp: a stable capturing overlay hide()/show() moves the keyboard seat',
   assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
     'a capturing lease takes physical focus on mount')
 
-  // Temporary hide releases the keyboard WITHOUT closing the overlay.
   lease.hide()
   await vt.waitForRender()
   assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
     'hiding the lease returns physical focus to the editor')
   assert.equal(app.focusSeatForTest(), 'editor', 'a hidden capturing overlay must not own the seat')
 
-  // show() re-focuses and reclaims the seat.
   lease.show()
   await vt.waitForRender()
   assert.equal(app.focusSeatForTest(), 'overlay')
@@ -549,89 +581,34 @@ test('TuiApp: a stable capturing overlay hide()/show() moves the keyboard seat',
   app.stop()
 })
 
-test('OverlayBroker: a hidden middle close reparents to its graph owner, not the modal suspension', () => {
-  for (const modal of ['question', 'saveLocation'] as const) {
-    let suspension: { suspendedOverlays: Set<OverlayHandle> } | undefined
-    const broker = new OverlayBroker(
-      modal === 'question' ? { question: () => suspension } : { saveLocation: () => suspension },
-    )
-    const c = fakeHandle('c')
-    const a = fakeHandle('a')
-    const b = fakeHandle('b')
-    broker.track(c)
-    broker.track(a) // A hides C → A owns C
-    broker.track(b) // B hides A → B owns A
-    assert.equal(broker.graphState().dependents, 2)
-
-    // The modal opens and suspends the visible front B (A and C stay hidden
-    // beneath it).
-    suspension = { suspendedOverlays: new Set<OverlayHandle>() }
-    for (const handle of broker.handles()) {
-      if (!handle.isHidden()) {
-        handle.setHidden(true)
-        suspension.suspendedOverlays.add(handle)
-      }
-    }
-    assert.ok(suspension.suspendedOverlays.has(b), `${modal}: the front overlay is suspended`)
-
-    // The hidden middle node A closes: C must reparent under B, never flatten
-    // into the modal suspension (whose settle reveals everything at once).
-    broker.closeForHost(a)
-    assert.ok(!suspension.suspendedOverlays.has(c), `${modal}: C must not flatten into the modal suspension`)
-    assert.equal(broker.graphState().dependents, 1, `${modal}: B now owns C`)
-    assert.equal(c.isHidden(), true, `${modal}: C stays hidden under B`)
-
-    // The modal settles and restores B; C must remain hidden beneath it.
-    for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
-    suspension.suspendedOverlays.clear()
-    suspension = undefined
-    assert.equal(b.isHidden(), false)
-    assert.equal(c.isHidden(), true, `${modal}: C stays hidden after the modal settles`)
-
-    // Closing B finally reveals C.
-    broker.closeForHost(b)
-    assert.equal(c.isHidden(), false, `${modal}: C is revealed when its graph owner closes`)
-  }
-})
-
-test('OverlayBroker: modal adoption never marks a nonCapturing notice as the restore-focus owner', () => {
-  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
-  let modalActive = false
-  const broker = new OverlayBroker({ saveLocation: () => modalActive ? suspension : undefined })
-  const hud = fakeHandle('hud')
-  broker.track(hud, { nonCapturing: true })
-
-  // The prompt opens and suspends the visible HUD.
-  modalActive = true
-  hud.setHidden(true)
-  suspension.suspendedOverlays.add(hud)
-  // A capturing overlay mounts while the prompt is active: it adopts the HUD.
-  const c = fakeHandle('c')
-  broker.track(c)
-  assert.ok(!suspension.suspendedOverlays.has(hud), 'the HUD becomes C dependent')
-
-  // The prompt settles (C restored), then C closes: the HUD must be revealed
-  // but NEVER selected as the keyboard owner (it is nonCapturing).
-  for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
-  suspension.suspendedOverlays.clear()
-  modalActive = false
-  broker.closeForHost(c)
-  assert.equal(hud.isHidden(), false, 'the HUD is revealed')
-  assert.deepEqual(hud.focusLog, [], 'a nonCapturing notice must never be re-focused by the restore')
-})
-
-test('OverlayBroker: a lease blur() while hidden refreshes its restore intent', () => {
+test('OverlayBroker: an explicit focus() on a suppressed nonCapturing node detaches and focuses it (F)', () => {
   const broker = new OverlayBroker()
-  const a = fakeHandle('a')
+  const hud = fakeHandle('hud')
   const b = fakeHandle('b')
-  const wrappedA = broker.track(a)
-  broker.track(b) // B hides A → B owns A (wasFocused defaults true)
-  assert.equal(a.isHidden(), true)
+  const hudHandle = mountOverlay(broker, hud, { nonCapturing: true })
+  mountOverlay(broker, b) // B suppresses the HUD (it was a visible root)
+  assert.equal(hud.isHidden(), true)
+  assert.equal(broker.graphState().dependents, 1)
 
-  // The plugin blurs A while it is hidden beneath B: the recorded intent must
-  // follow (a later B close must NOT re-focus A).
-  wrappedA.unfocus()
-  broker.closeForHost(b)
-  assert.equal(a.isHidden(), false, 'A is revealed when B closes')
-  assert.deepEqual(a.focusLog, [], 'the blurred intent survives the restore')
+  hudHandle.focus()
+  assert.equal(hud.isHidden(), false, 'the explicit focus reveals it')
+  assert.equal(hud.isFocused(), true, 'a nonCapturing node can own the keyboard on request')
+  assert.equal(broker.graphState().dependents, 0, 'it detached from B')
+  assert.equal(broker.hasFocusedOverlay(), true)
+  broker.assertForest()
+})
+
+test('OverlayBroker: an explicit show() of a nonCapturing node does not fabricate focus (B)', () => {
+  const broker = new OverlayBroker()
+  const hud = fakeHandle('hud')
+  const b = fakeHandle('b')
+  const hudHandle = mountOverlay(broker, hud, { nonCapturing: true })
+  mountOverlay(broker, b) // B suppresses the HUD
+  assert.equal(hud.isHidden(), true)
+
+  hudHandle.setHidden(false)
+  assert.equal(hud.isHidden(), false, 'the explicit show reveals it')
+  assert.equal(hud.isFocused(), false, 'a nonCapturing show must not fabricate keyboard focus')
+  assert.equal(broker.graphState().dependents, 0, 'it detached from B')
+  assert.equal(b.isFocused(), true, 'B keeps the keyboard')
 })
