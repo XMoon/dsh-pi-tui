@@ -547,3 +547,48 @@ test('TuiApp: a stable capturing overlay hide()/show() moves the keyboard seat',
   lease.close()
   app.stop()
 })
+
+test('OverlayBroker: a hidden middle close reparents to its graph owner, not the modal suspension', () => {
+  for (const modal of ['question', 'saveLocation'] as const) {
+    let suspension: { suspendedOverlays: Set<OverlayHandle> } | undefined
+    const broker = new OverlayBroker(
+      modal === 'question' ? { question: () => suspension } : { saveLocation: () => suspension },
+    )
+    const c = fakeHandle('c')
+    const a = fakeHandle('a')
+    const b = fakeHandle('b')
+    broker.track(c)
+    broker.track(a) // A hides C → A owns C
+    broker.track(b) // B hides A → B owns A
+    assert.equal(broker.graphState().dependents, 2)
+
+    // The modal opens and suspends the visible front B (A and C stay hidden
+    // beneath it).
+    suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+    for (const handle of broker.handles()) {
+      if (!handle.isHidden()) {
+        handle.setHidden(true)
+        suspension.suspendedOverlays.add(handle)
+      }
+    }
+    assert.ok(suspension.suspendedOverlays.has(b), `${modal}: the front overlay is suspended`)
+
+    // The hidden middle node A closes: C must reparent under B, never flatten
+    // into the modal suspension (whose settle reveals everything at once).
+    broker.closeForHost(a)
+    assert.ok(!suspension.suspendedOverlays.has(c), `${modal}: C must not flatten into the modal suspension`)
+    assert.equal(broker.graphState().dependents, 1, `${modal}: B now owns C`)
+    assert.equal(c.isHidden(), true, `${modal}: C stays hidden under B`)
+
+    // The modal settles and restores B; C must remain hidden beneath it.
+    for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
+    suspension.suspendedOverlays.clear()
+    suspension = undefined
+    assert.equal(b.isHidden(), false)
+    assert.equal(c.isHidden(), true, `${modal}: C stays hidden after the modal settles`)
+
+    // Closing B finally reveals C.
+    broker.closeForHost(b)
+    assert.equal(c.isHidden(), false, `${modal}: C is revealed when its graph owner closes`)
+  }
+})

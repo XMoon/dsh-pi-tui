@@ -239,7 +239,18 @@ export class OverlayBroker {
     const owned = this.dependents.get(handle)
     if (owned !== undefined) {
       this.dependents.delete(handle)
-      if (question !== undefined) {
+      // GRAPH OWNERSHIP OUTRANKS MODAL SUSPENSION: a handle closed while it
+      // was hidden beneath a still-visible overlay reparents its own
+      // dependents to that overlay, even while a question/save-location
+      // suspension is active. Handing them to the modal would FLATTEN the
+      // stack (the modal's settle reveals every suspended handle at once,
+      // so a branch that belonged under the front overlay would pop up
+      // beside it and steal its focus). Only a ROOT close lets the modal
+      // adopt the released children.
+      if (upperOwner !== undefined) {
+        const upperDependents = this.dependents.get(upperOwner) ?? []
+        this.dependents.set(upperOwner, [...upperDependents, ...owned])
+      } else if (question !== undefined) {
         for (const dependent of owned) question.suspendedOverlays.add(dependent.handle)
       } else if (saveLocation !== undefined) {
         // The Save Location prompt owns the seat: the closed handle's
@@ -247,13 +258,6 @@ export class OverlayBroker {
         // by the prompt (they must not flash back over it — the same rule
         // as the question branch).
         for (const dependent of owned) saveLocation.suspendedOverlays.add(dependent.handle)
-      } else if (upperOwner !== undefined) {
-        // A HIDDEN middle node closed beneath a still-visible overlay: its
-        // own dependents stay hidden and are REPARENTED to the upper owner,
-        // so the front overlay keeps the keyboard and restores them when IT
-        // closes (a reveal here would flash a stale overlay over the front).
-        const upperDependents = this.dependents.get(upperOwner) ?? []
-        this.dependents.set(upperOwner, [...upperDependents, ...owned])
       }
     }
     const wasCapturing = this.capturing.has(handle)
