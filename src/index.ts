@@ -1574,6 +1574,10 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
         type: 'subagent',
         active: row.activity === 'running',
         canOpen: true,
+        // Only a continuable row with a LIVE running driver is Stop-capable
+        // (one-shot ids are accepted no-ops for the interrupt transport; an
+        // idle continuable has no driver to stop — the UI must not advertise
+        // a dead stop verb).
         canStop: isSubagentRowInterruptible(row),
         parentId: row.parentId === '' ? undefined : `agent:${row.parentId}`,
         parentLabel: row.parentId === '' ? undefined : labels.get(row.parentId),
@@ -1581,11 +1585,6 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
         hasChildren: row.hasChildren,
         mode: row.mode,
         access: viewerAccessHint(row.mode, viewerAccessOf(row)),
-        // Only a continuable row with a LIVE running driver is
-        // Stop-capable (one-shot ids are accepted no-ops for the
-        // interrupt transport; an idle continuable has no driver to
-        // stop — the UI must not advertise a dead stop verb).
-        interruptible: isSubagentRowInterruptible(row),
         // The durable descendant tree connector: indentation + branch
         // glyph from the catalog's `depth` (plan §6.7) — a fixed
         // region that never scrolls with the selected label.
@@ -7622,11 +7621,8 @@ export function apply(ctx: Context, config: Config): void {
         }
         openJobView(row.jobId)
       }
-      const actionRow = (value: string, action: 'stop' | 'interrupt'): void => {
+      const stopRow = (value: string): void => {
         if (cleanedUp) return
-        // `interrupt` is accepted only for pre-refactor embedders. The
-        // production panel emits `stop` after its confirmation dialog.
-        if (action !== 'stop' && action !== 'interrupt') return
         const row = taskBrowserRows.find(candidate => candidate.value === value)
         if (row === undefined) return
         const actionBrowserToken = activeTaskBrowserToken
@@ -7769,7 +7765,7 @@ export function apply(ctx: Context, config: Config): void {
             quickTaskState = state
             openTasksBrowser('full', state)
           },
-          onStop: value => actionRow(value, 'stop'),
+          onStop: stopRow,
           onViewportExpose: ids => { if (!cleanedUp) runtime?.acknowledge(ids) },
         },
       )

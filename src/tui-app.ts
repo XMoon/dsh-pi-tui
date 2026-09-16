@@ -10054,6 +10054,13 @@ export class TuiApp {
     return this.seatEditor()
   }
 
+  /** Focus test hook: the ACTUAL component holding physical keyboard focus
+   * (the component the next key dispatches to), independent of the derived
+   * seat. Probes the "overlay visible but editor focused" invariant. */
+  focusedComponentForTest(): Component | null {
+    return this.activeScreen.getFocusedComponent()
+  }
+
   /** P2-R5 test hook: the HIDDEN host editor's live text (probes that a
    * display-only replacement editor never silently routes typing into the
    * hidden host editor while the plugin seat is visible). */
@@ -14512,12 +14519,18 @@ export class TuiApp {
     pending.settled = true
     if (this.activeApproval === pending) {
       this.activeApproval = undefined
+      // Fallback: if nothing is restored beneath the approval, input returns
+      // to the editor.
+      this.activeScreen.setFocus(this.seatEditor().component)
+      // Closing the approval restores every overlay it hid (Quick, Settings,
+      // any capturing overlay). pi-tui focuses a restored capturing overlay
+      // on setHidden(false), overriding the editor fallback above.
       pending.handle?.hide()
       pending.responsiveFrame = undefined
-      this.activeScreen.setFocus(this.seatEditor().component)
-      // The approval dialog is gone: the seat is the editor again (or the
-      // next queued prompt's — showNextApproval re-derives it) (follow-up P1).
-      this.setFocusSeat('editor')
+      // Re-derive the seat from the ACTUAL live surface so a restored
+      // capturing overlay keeps keyboard ownership instead of being clobbered
+      // back to the editor (the overlay visible-but-unfocused bug).
+      this.publishFocusSeat()
       this.projectActivity()
     } else {
       const queued = this.approvalQueue.indexOf(pending)

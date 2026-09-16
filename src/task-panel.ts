@@ -347,7 +347,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   /**
    * Report attention rows that entered the open viewport for the first
    * time (deduped per row identity). Runs on every render — scrolling,
-   * paging, running-jump and row replacements all re-render — so a
+   * paging and row replacements all re-render — so a
    * failure "scrolled into view" after the panel opened is acknowledged
    * exactly once (the runtime's acknowledge is idempotent anyway).
    */
@@ -519,7 +519,7 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   private canStop(item: TaskPanelItem | undefined): boolean {
     if (item === undefined || item.kind === 'view-full') return false
-    return item.canStop ?? item.interruptible ?? false
+    return item.canStop ?? false
   }
 
   private openSelected(): void {
