@@ -221,6 +221,110 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("host-forces the jump-to-end indicator while the primary view already follows its end", async () => {
+		const terminal = new VirtualTerminal(30, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			scrollToEndIndicator: () => " ↓ Jump to end ",
+			shouldShowScrollToEndIndicator: () => true,
+		});
+		const transcript = new ScrollView(new Text("one\ntwo", 0, 0), { follow: "end", primary: true });
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: new Text("editor\nfooter", 0, 0), basis: "auto", minSize: 1 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+
+		// The content fits, so the local view already follows its end — only the
+		// host predicate can force the indicator.
+		assert.strictEqual(transcript.isFollowingEnd, true);
+		assert.ok(terminal.getViewport().some((line) => line.includes("Jump to end")));
+		tui.stop();
+	});
+
+	it("never host-forces the indicator for a primary view without follow-end", async () => {
+		const terminal = new VirtualTerminal(30, 3);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			scrollToEndIndicator: () => " ↓ Jump to end ",
+			shouldShowScrollToEndIndicator: () => true,
+		});
+		const transcript = new ScrollView(new Text("one\ntwo\nthree\nfour\nfive", 0, 0), { primary: true });
+		tui.setLayoutRoot(transcript);
+		tui.start();
+		await terminal.waitForRender();
+
+		assert.ok(!terminal.getViewport().some((line) => line.includes("Jump to end")));
+		tui.stop();
+	});
+
+	it("lets the host consume the jump-to-end click instead of scrolling locally", async () => {
+		const terminal = new VirtualTerminal(30, 6);
+		let handled = 0;
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			scrollToEndIndicator: () => " ↓ Jump to end ",
+			onScrollToEndIndicator: () => {
+				handled += 1;
+				return true;
+			},
+		});
+		const transcript = new ScrollView(
+			new Text(Array.from({ length: 8 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ follow: "end", primary: true },
+		);
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: new Text("editor\nfooter", 0, 0), basis: "auto", minSize: 1 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.isFollowingEnd, false);
+
+		terminal.sendInput("\x1b[<0;15;4M");
+		terminal.sendInput("\x1b[<0;15;4m");
+		await terminal.waitForRender();
+		assert.strictEqual(handled, 1);
+		// The host claimed the click: the local view must NOT scroll itself.
+		assert.strictEqual(transcript.isFollowingEnd, false);
+		tui.stop();
+	});
+
+	it("falls back to the local scroll when the host does not consume the jump-to-end click", async () => {
+		const terminal = new VirtualTerminal(30, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			scrollToEndIndicator: () => " ↓ Jump to end ",
+			onScrollToEndIndicator: () => false,
+		});
+		const transcript = new ScrollView(
+			new Text(Array.from({ length: 8 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ follow: "end", primary: true },
+		);
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: new Text("editor\nfooter", 0, 0), basis: "auto", minSize: 1 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.isFollowingEnd, false);
+
+		terminal.sendInput("\x1b[<0;15;4M");
+		terminal.sendInput("\x1b[<0;15;4m");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.isFollowingEnd, true);
+		tui.stop();
+	});
+
 	it("keeps an explicit dock fixed while the transcript scrolls", async () => {
 		const terminal = new VirtualTerminal(20, 6);
 		const tui = new TuiAltScreen(terminal);

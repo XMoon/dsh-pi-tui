@@ -181,6 +181,19 @@ export interface TuiAltScreenOptions {
 	 * primary scroll view while that view is scrolled away from its end.
 	 */
 	scrollToEndIndicator?: () => string;
+	/**
+	 * Force the jump-to-end label to show even when the primary scroll view already
+	 * follows its end — the host's virtual transcript window is not at the live tail.
+	 * Consulted only when {@link scrollToEndIndicator} is set and the primary view
+	 * supports follow-end. (dsh-pi-tui divergence X028.)
+	 */
+	shouldShowScrollToEndIndicator?: () => boolean;
+	/**
+	 * Handle a primary-button press on the jump-to-end label. Returning true consumes
+	 * the click (the host performed its own semantic jump); otherwise the fork falls
+	 * back to scrolling the local view to its end. (dsh-pi-tui divergence X028.)
+	 */
+	onScrollToEndIndicator?: () => boolean | void;
 	/** Open an OSC 8 hyperlink activated with a primary-button click. */
 	openUrl?: (url: string) => void;
 	/** Handle an unmodified secondary-button press for clipboard paste. Currently enabled on Windows only. */
@@ -315,6 +328,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly searchCurrentMatchStyle: (text: string) => string;
 	private readonly searchNavigationButtonStyle: (text: string, hovered: boolean) => string;
 	private readonly scrollToEndIndicator?: () => string;
+	private readonly shouldShowScrollToEndIndicator?: () => boolean;
+	private readonly onScrollToEndIndicator?: () => boolean | void;
 	private readonly openUrl?: (url: string) => void;
 	private readonly onRightClickPaste?: () => void;
 	private copyOnSelect: boolean;
@@ -348,6 +363,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
 		this.searchNavigationButtonStyle = options.searchNavigationButtonStyle ?? ((text) => text);
 		this.scrollToEndIndicator = options.scrollToEndIndicator;
+		this.shouldShowScrollToEndIndicator = options.shouldShowScrollToEndIndicator;
+		this.onScrollToEndIndicator = options.onScrollToEndIndicator;
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copyOnSelect = options.copyOnSelect ?? true;
@@ -1479,7 +1496,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const rect = this.scrollToEndIndicatorRect;
 		if (!rect || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
 		if (event.y !== rect.row || event.x < rect.column || event.x >= rect.column + rect.width) return false;
-		this.scrollToBottom();
+		const handled = this.onScrollToEndIndicator?.() === true;
+		if (!handled) this.scrollToBottom();
 		return true;
 	}
 
@@ -2155,7 +2173,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private compositeScrollToEndIndicator(screen: string[], layout: LayoutFrame, width: number): string[] {
 		this.scrollToEndIndicatorRect = undefined;
 		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
-		if (!this.scrollToEndIndicator || !scrollView.followEnd || scrollView.isFollowingEnd) return screen;
+		const hostNeedsIndicator = this.shouldShowScrollToEndIndicator?.() === true;
+		if (
+			!this.scrollToEndIndicator ||
+			!scrollView.followEnd ||
+			(scrollView.isFollowingEnd && !hostNeedsIndicator)
+		) {
+			return screen;
+		}
 		const box = getScrollViewBox(layout, scrollView);
 		const clip = box?.clip;
 		if (!clip || clip.width <= 0 || clip.height <= 0) return screen;
