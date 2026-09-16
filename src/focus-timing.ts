@@ -15,6 +15,10 @@
  * The store is keyed by the ACTIVITY OBJECT (a WeakMap), never by a bare
  * turn number: a session switch or a cold replay mints fresh activity
  * objects, so a new session can never inherit the previous one's segments.
+ * A bounded REGISTRY of currently-live activities keeps their pause/resume
+ * advancing on every phase change even when the presentation window shows
+ * history and no longer contains their turn (the user can browse old turns
+ * while the agent keeps running).
  *
  * A completed activity that was first seen only after it ended still freezes
  * from the retained LIVE windows (the delayed-publication race); only a
@@ -63,13 +67,22 @@ export class FocusTimingStore {
    * observed, and every wait must still be subtracted. The list is bounded
    * — only the recent windows can overlap an uninitialized activity. */
   private readonly pauseWindows: Array<{ from: number; until: number | undefined }> = []
+  /** The REGISTERED live activities: every non-completed activity ever
+   * observed gets a segment, and its future pause/resume must advance even
+   * when the presentation window no longer contains its turn (the user can
+   * browse history while the agent keeps running). The registry is bounded
+   * by the number of CONCURRENTLY live turns (0-1 in practice); completed
+   * activities are dropped, and a session boundary clears it. */
+  private readonly liveActivities = new Set<TurnActivity>()
 
   /**
    * Record the authoritative run phase at `now`, independent of any
    * activity. Entering a user-blocked phase from a KNOWN non-paused phase
    * opens a pause window; leaving it closes the window. With no earlier
    * phase evidence no window opens, so a cold resume can never fabricate an
-   * active span.
+   * active span. On a phase CHANGE every REGISTERED live activity is
+   * advanced too, so a live turn keeps freezing/resuming even while the
+   * transcript window shows history and never re-observes it.
    */
   notePhase(phase: RunPhase, now: number): void {
     const paused = focusTimerPaused(phase)
@@ -83,7 +96,32 @@ export class FocusTimingStore {
       const open = this.pauseWindows[this.pauseWindows.length - 1]
       if (open !== undefined && open.until === undefined) open.until = now
     }
+    if (phase !== this.phase) {
+      for (const activity of this.liveActivities) {
+        if (activity.completed) {
+          this.liveActivities.delete(activity)
+          continue
+        }
+        const segment = this.segments.get(activity)
+        if (segment !== undefined) this.applyPhase(segment, paused, now)
+      }
+    }
     this.phase = phase
+  }
+
+  /** Apply one authoritative phase to a segment: pause freezes the running
+   * span (an UNKNOWN baseline stays unknown), resume restarts it. */
+  private applyPhase(segment: TimingSegment, paused: boolean, now: number): void {
+    if (paused) {
+      if (segment.resumedAt !== undefined) {
+        if (segment.accumulated !== undefined) {
+          segment.accumulated += Math.max(0, now - segment.resumedAt)
+        }
+        segment.resumedAt = undefined
+      }
+    } else if (segment.resumedAt === undefined) {
+      segment.resumedAt = now
+    }
   }
 
   /** The user-blocked millis inside `[start, end]` across every retained
@@ -113,6 +151,7 @@ export class FocusTimingStore {
   resetSessionScope(): void {
     this.phase = undefined
     this.pauseWindows.length = 0
+    this.liveActivities.clear()
   }
 
   /**
@@ -129,23 +168,16 @@ export class FocusTimingStore {
     const paused = focusTimerPaused(phase)
     const segment = this.segments.get(activity)
     if (segment !== undefined) {
-      if (activity.completed) return
-      if (paused) {
-        if (segment.resumedAt !== undefined) {
-          // An UNKNOWN baseline (accumulated === undefined) must stay
-          // unknown: the pre-attach active span can never be recovered, so a
-          // later wait must not turn it into a fabricated number.
-          if (segment.accumulated !== undefined) {
-            segment.accumulated += Math.max(0, now - segment.resumedAt)
-          }
-          segment.resumedAt = undefined
-        }
-      } else if (segment.resumedAt === undefined) {
-        segment.resumedAt = now
+      if (activity.completed) {
+        this.liveActivities.delete(activity)
+        return
       }
+      this.liveActivities.add(activity)
+      this.applyPhase(segment, paused, now)
       return
     }
     if (activity.completed) {
+      this.liveActivities.delete(activity)
       // A completed turn first published only after it ended still freezes
       // from the retained LIVE pause evidence; only a replay with NO live
       // windows falls back to the raw event elapsed (never re-count a wait
@@ -158,7 +190,9 @@ export class FocusTimingStore {
       })
       return
     }
-    // First sighting of a LIVE turn.
+    // First sighting of a LIVE turn: register it so its future pause/resume
+    // advances independently of the presentation window.
+    this.liveActivities.add(activity)
     const openPause = this.pauseWindows[this.pauseWindows.length - 1]
     const pauseBoundary = openPause !== undefined && openPause.until === undefined ? openPause.from : undefined
     if (paused) {

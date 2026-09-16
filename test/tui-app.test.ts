@@ -3887,6 +3887,55 @@ test('the timer publication pass observes only windowed turns, never the full ac
   app.stop()
 })
 
+test('the live timer keeps freezing while the transcript window shows history', async () => {
+  // Review round-7 blocker: the timer must not be presentation-window-local.
+  // Once a live turn has a segment, its pause/resume advances even when the
+  // user browses history and the turn is no longer in `messages`.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 1_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt - 5_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', seq: 1, time: startedAt - 4_999, data: { id: MessageId('h0'), role: 'user', content: [{ type: 'text', text: 'old' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'turn/end', seq: 2, time: startedAt - 4_000, data: { turn: 0, reason: { kind: 'completed' } } } as SessionEvent,
+    { type: 'turn/start', seq: 3, time: startedAt, data: { turn: 1 } } as SessionEvent,
+    { type: 'user/message', seq: 4, time: startedAt + 1, data: { id: MessageId('live1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const activities = folder.turnActivities()
+  app.setTranscript(folder.messages(), activities)
+  await vt.waitForRender()
+  const live = folder.turnActivity(1)!
+  const initial = app.focusTimingForTest().activeMillis(live, 'working', Date.now())
+  assert.ok(initial !== undefined && initial >= 900, 'the live timer runs')
+  // Scroll to a history window that EXCLUDES the live turn.
+  const history = folder.messages().filter(message => !('turn' in message) || message.turn === 0)
+  app.setTranscript(history, activities)
+  await vt.waitForRender()
+  // Approval opens and resolves while the live turn is off-window.
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 600))
+  // A history repaint during the wait must not clear the live boundary.
+  app.setTranscript(history, activities)
+  await vt.waitForRender()
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  // Back to the latest window.
+  app.setTranscript(folder.messages(), activities)
+  await vt.waitForRender()
+  const active = app.focusTimingForTest().activeMillis(live, 'working', Date.now())
+  const wall = Date.now() - startedAt
+  assert.ok(active !== undefined && active >= 900, `the pre-wait span must survive: ${active}`)
+  assert.ok(active !== undefined && active < wall - 500, `the off-window wait must not count: active=${active} wall=${wall}`)
+  app.stop()
+})
+
 test('applyPluginPalette records the live plugin-theme selection (the unload-fallback source)', () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })

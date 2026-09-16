@@ -6041,9 +6041,10 @@ export class TuiApp {
     // at the phase it is actually in. The runner can open an approval/question
     // before this (delayed) repaint publishes the map, and the recorded pause
     // boundaries preserve the pre-wait active span (review P1). Clear the
-    // windows only AFTER a pass that actually seeded an activity: every
-    // activity first seen in the pass shares the same window snapshot, and an
-    // empty window must not drop a boundary the turn still needs.
+    // windows only AFTER a pass that seeded a LIVE activity: a history window
+    // full of completed turns must not drop a boundary a live turn still
+    // needs, and every live activity first seen in the pass shares the same
+    // window snapshot.
     if (this.observeFocusTiming()) this.focusTiming.clearPauseWindows()
     this.streamingToolPreviews = [...(streamingToolPreviews ?? [])]
     this.transcriptWindow = window
@@ -6071,7 +6072,7 @@ export class TuiApp {
     this.turnActivities = activities
     // See setTranscript: a newly published activity must be observed at the
     // current phase so the Focus timer keeps its pre-wait active span; the
-    // windows are cleared once the pass has seeded an activity.
+    // windows are cleared once the pass has seeded a live activity.
     if (this.observeFocusTiming()) this.focusTiming.clearPauseWindows()
     this.rebuildMessages()
   }
@@ -12380,15 +12381,16 @@ export class TuiApp {
    * Only the windowed turns can be on screen, and `turnActivities()` is
    * every known turn (O(total)): iterating it on every publication would
    * reintroduce an unbounded scan into the long-session repaint path. This
-   * walks the bounded windowed message list instead. Returns whether any
-   * activity was observed (the caller clears the pause windows only after a
-   * pass that actually seeded something).
+   * walks the bounded windowed message list instead. Returns whether a LIVE
+   * (non-completed) activity was observed: the caller clears the pause
+   * windows only after a pass that actually seeded live timing, never after
+   * a history window full of completed turns.
    */
   private observeFocusTiming(phase: RunPhase = this.statusStore.snapshot().activity.phase): boolean {
     const now = Date.now()
     this.focusTiming.notePhase(phase, now)
     const seen = new Set<number>()
-    let observed = false
+    let observedLive = false
     for (const message of this.messages) {
       const turn = 'turn' in message ? message.turn : undefined
       if (turn === undefined || seen.has(turn)) continue
@@ -12396,9 +12398,9 @@ export class TuiApp {
       const turnActivity = this.turnActivities.get(turn)
       if (turnActivity === undefined) continue
       this.focusTiming.observe(turnActivity, phase, now)
-      observed = true
+      if (!turnActivity.completed) observedLive = true
     }
-    return observed
+    return observedLive
   }
 
   /** M0: project the surface section (focusedSeat/fullscreen) from the

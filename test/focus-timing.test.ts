@@ -150,6 +150,31 @@ test('resetSessionScope drops the previous session phase and pause windows', () 
   assert.equal(store.activeMillis(asActivity(make(0)), 'working', 5_000), 5_000)
 })
 
+test('a registered live activity freezes across a phase change without being re-observed', () => {
+  // The presentation window can move away from the live turn (history
+  // browsing): once its segment exists, the phase transition must advance it
+  // directly instead of waiting for another observe().
+  const store = new FocusTimingStore()
+  const activity = make(0)
+  assert.equal(store.activeMillis(asActivity(activity), 'working', 10_000), 10_000)
+  // No observe() for the live activity during the whole wait.
+  store.notePhase('waiting-approval', 10_000)
+  assert.equal(store.activeMillis(asActivity(activity), 'waiting-approval', 30_000), 10_000, 'the off-window wait must not count')
+  store.notePhase('working', 30_000)
+  assert.equal(store.activeMillis(asActivity(activity), 'working', 35_000), 15_000)
+})
+
+test('resetSessionScope also drops the registered live activities', () => {
+  const store = new FocusTimingStore()
+  const activity = make(0)
+  assert.equal(store.activeMillis(asActivity(activity), 'working', 10_000), 10_000)
+  store.resetSessionScope()
+  // The old session's activity is no longer phase-tracked: a later wait must
+  // not freeze it (a switched-in session never displays it anyway).
+  store.notePhase('waiting-approval', 20_000)
+  assert.equal(store.activeMillis(asActivity(activity), 'working', 40_000), 40_000)
+})
+
 test('a completed turn first published after it ended still freezes from live pause windows', () => {
   // t=0 start, t=10 pause, t=20 resume, t=24 end, published only later.
   const store = new FocusTimingStore()
