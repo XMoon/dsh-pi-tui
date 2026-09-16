@@ -3708,3 +3708,122 @@ test('a failed jobs read never blanks the retained Task Browser parent', async (
   assert.ok(view().includes('build'),
     `the retained parent must keep its rows across a failed registry read:\n${view()}`)
 })
+
+test('a failed jobs read never blanks a coordinator-backed Task Browser', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-runtime-read-failure-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'task-runtime-read-failure-parent',
+    header: { id: 'task-runtime-read-failure-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  // A subagents service makes this the COORDINATOR-backed runtime path (the
+  // TaskBrowserRuntime.readJobs hook), not the jobs-only fallback browser.
+  const subagents = { listDescendants: async () => [] }
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(view().includes('build'), `the browser must show the job:\n${view()}`)
+
+  // A runtime refresh (jobs change → refreshAgents → TaskBrowserRuntime.apply)
+  // whose registry read fails must keep the retained Job rows.
+  jobs.setListFailure(new Error('registry unavailable'))
+  jobs.emit()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(view().includes('build'),
+    `the coordinator-backed browser must keep its rows across a failed registry read:\n${view()}`)
+})
+
+test('a session switch never inherits the previous session cached Job rows', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-cache-switch-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const sessionA: FakeSession = fakeSession({
+    id: 'cache-switch-a',
+    header: { id: 'cache-switch-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer a'),
+  })
+  const sessionB: FakeSession = fakeSession({
+    id: 'cache-switch-b',
+    header: { id: 'cache-switch-b', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer b'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  const subagents = { listDescendants: async () => [] }
+  const harness = makeHarness(home, [sessionA, sessionB], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(resumeHandler, 'the real runner must register the /resume alias')
+  const resume = resumeHandler as (invocation: { rawInput: string }) => unknown
+
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(view().includes('build'), `session A must show its job:\n${view()}`)
+
+  // Switch sessions while the registry read fails: the cached A rows belong to
+  // A's session identity and must not be committed into B.
+  jobs.setListFailure(new Error('registry unavailable'))
+  await resume({ rawInput: sessionB.id })
+  await settle()
+  await vt.waitForRender()
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(!view().includes('build'),
+    `session B must not inherit session A cached Job rows:\n${view()}`)
+})
