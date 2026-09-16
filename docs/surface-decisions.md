@@ -916,7 +916,10 @@ export, persistence, replay) keeps the full text.
 Disclosure reuses the existing per-message `expandedOverride`, never a second
 user-specific state map, and user messages are NOT added to
 `isFocusSecondaryDisclosure` (a user message is a turn foundation, not process
-detail). The owner of the expand affordance is surface-adaptive and is part of
+detail). A regular surface with NO effective `app.transcript.toggleExpand` key
+does not fold at all — compacting without an affordance would strand the prompt
+collapsed — while fullscreen keeps folding because the marker click always
+works. The owner of the expand affordance is surface-adaptive and is part of
 the component cache identity:
 
 - regular: the Ctrl+O recent-turn boundary (or a per-message search reveal);
@@ -937,15 +940,24 @@ bubble is explicitly expanded; in fullscreen Focus it also clears the
 long-user overrides (with the root-collapse pass, or alone when no Thought
 root is expanded). The override cleanup filters `kind === 'user'` only, so
 thinking/tool/system/compaction overrides and the Thought-root storage rule
-are untouched. A search reveal is not a permanent pin: the next explicit
-Ctrl+O collapse hides it again, and a later search jump reveals it afresh.
+are untouched. Both the search reveal and the Ctrl+O collapse predicate only
+treat a message as folded when it ACTUALLY compacts at the current width, so a
+short prompt never accumulates an invisible no-op override that would eat a
+Ctrl+O press. A search reveal is not a permanent pin: the next explicit Ctrl+O
+collapse hides it again, and a later search jump reveals it afresh.
 
 Only the marker row is a click target; every other row of the bubble has an
 inert hit identity so ordinary user text keeps selection/copy semantics. A
 search hit inside the collapsed middle expands the message on jump, including
-outside Focus mode, because the search corpus is the full text. A regular fold
-whose `app.transcript.toggleExpand` key is disabled drops the marker verb
-(rather than advertising `the expand key`), since regular has no click path.
+outside Focus mode, because the search corpus is the full text.
+
+**Known limitation (deferred):** the search match carries no intra-message
+offset, so the jump expands the message but does not reposition the viewport
+onto the exact matched row. For a bulk paste large enough that the hit sits
+far from the message's tail after expansion, the user may still need to scroll
+within the revealed message. Landing the viewport on the matched row needs a
+match-position contract across the search index and the runner jump path, and
+is tracked as a follow-up rather than part of this change.
 
 ## Fullscreen jump-to-latest is a Host semantic action behind a viewport affordance
 

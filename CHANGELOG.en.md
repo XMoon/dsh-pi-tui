@@ -31,12 +31,17 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   regular mode and in fullscreen outside Focus; in fullscreen a click on that
   marker row (or a search hit) expands the single message, and inside a
   fullscreen Focus `Ctrl+O` bulk-toggles the Thought roots and collapses an
-  already-expanded long user message. The decision
+  already-expanded long user message. In regular mode with no bound
+  `app.transcript.toggleExpand` key the whole prompt renders in full instead of
+  folding, so it can never be stranded collapsed. The decision
   uses the wrapped visual rows at the CURRENT width (CJK, emoji, and a single
   over-long JSON line all count their real screen space) and is recomputed after
   a resize. The canonical transcript text, search, export, session persistence,
   and replay keep the complete user content; mixed-content user messages with
-  attachments and the pending echo are unchanged.
+  attachments and the pending echo are unchanged. Known limitation: a search
+  jump expands the matched message but does not scroll the viewport onto the
+  exact matched row (matches carry no intra-message offset yet; tracked as a
+  follow-up).
 - **Fullscreen shows a clickable `↓ Latest` after leaving the live tail.** Once
   the fullscreen transcript is no longer at the live tail (the user scrolled up,
   or a history window is being browsed), the bottom of the viewport shows a
