@@ -933,14 +933,15 @@ test('task browser no-match state fits a short terminal without clipping the hin
     [{ value: 'job:1', label: 'bash · build', status: 'running', group: 'jobs' }],
     () => {},
     () => {},
-    { header: 'Tasks', enableSearch: true, noMatchText: 'no matching tasks' },
+    { mode: 'full', header: 'Tasks', enableSearch: true, noMatchText: 'no matching tasks' },
   )
   await vt.waitForRender()
+  vt.sendInput('/') // explicit search mode owns printable filtering
   for (const key of 'zzzz') vt.sendInput(key) // no match
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('no matching tasks'), `no-match message must survive:\n${view}`)
-  assert.ok(view.includes('esc close'), `no-match hint must survive:\n${view}`)
+  assert.ok(view.includes('Esc back'), `no-match hint must survive:\n${view}`)
   assert.ok(view.includes('╰'), `frame bottom must not be clipped:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -1009,7 +1010,7 @@ test('openTaskBrowser honors percentage width and maxHeight (fork sizing rules)'
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
     startedApps.add(app)
-    app.openTaskBrowser(items, () => {}, () => {}, { width: '50%' })
+    app.openTaskBrowser(items, () => {}, () => {}, { mode: 'full', width: '50%' })
     await vt.waitForRender()
     const lines = vt.getViewport().map(strip)
     const top = lines.findIndex(line => line.includes('╭'))
@@ -1023,7 +1024,7 @@ test('openTaskBrowser honors percentage width and maxHeight (fork sizing rules)'
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
     startedApps.add(app)
-    app.openTaskBrowser(items, () => {}, () => {}, { maxHeight: '70%' })
+    app.openTaskBrowser(items, () => {}, () => {}, { mode: 'full', maxHeight: '70%' })
     await vt.waitForRender()
     const lines = vt.getViewport().map(strip)
     const top = lines.findIndex(line => line.includes('╭'))
@@ -1072,7 +1073,7 @@ test('task browser keeps the selected row and hint visible after a height shrink
     })),
     () => {},
     () => {},
-    { header: 'Tasks', maxVisible: 10, enableSearch: true },
+    { mode: 'full', header: 'Tasks', maxVisible: 10, enableSearch: true },
   )
   await vt.waitForRender()
   for (let index = 0; index < 17; index += 1) vt.sendInput('\x1b[B')
@@ -1081,7 +1082,7 @@ test('task browser keeps the selected row and hint visible after a height shrink
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('task 17'), `selected task main row must remain visible after shrink:\n${view}`)
-  assert.ok(view.includes('esc close'), `task hint must remain visible after shrink:\n${view}`)
+  assert.ok(view.includes('Esc close'), `task hint must remain visible after shrink:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
 })
@@ -2248,7 +2249,7 @@ test('fixed-width overlays fill the declared width: no border-external mask regi
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
       () => {},
       () => {},
-      { header: 'tasks' },
+      { mode: 'quick', header: 'tasks' },
     )
     await vt.waitForRender()
     const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
@@ -2290,7 +2291,7 @@ test('a fixed-width overlay keeps its frame geometry across fullscreen, resize a
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
       () => {},
       () => {},
-      { header: 'tasks' },
+      { mode: 'quick', header: 'tasks' },
     )
   }
   const assertRightEdge = (label: string): void => {
@@ -3165,7 +3166,7 @@ test('openTaskBrowser renders status dots and live counts in the overlay', async
     ],
     () => {},
     () => {},
-    { header: 'tasks · subagents', enableSearch: true },
+    { mode: 'full', header: 'tasks · subagents', enableSearch: true },
   )
   await vt.waitForRender()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
@@ -3190,7 +3191,7 @@ test('openTaskBrowser: Enter selects the highlighted row; Esc closes', async () 
     ],
     (value) => { selected = value },
     () => { cancelled = true },
-    { header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
   )
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // move to the second row
@@ -3203,7 +3204,7 @@ test('openTaskBrowser: Enter selects the highlighted row; Esc closes', async () 
     [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
     () => {},
     () => { cancelled = true },
-    { header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
   )
   await vt.waitForRender()
   vt.sendInput('\x1b')
@@ -3218,7 +3219,7 @@ test('openTaskBrowser setItems replaces rows live', async () => {
     [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
     () => {},
     () => {},
-    { header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
   )
   await vt.waitForRender()
   handle.setItems([
@@ -3324,8 +3325,8 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
   // The runner's agent/status path: the TaskBrowserRuntime re-projects
   // the CACHED catalog from the Agent registry and commits through
   // handle.setItems — the open browser must flip the SAME row's status
-  // word to inactive WITHOUT closing (plan §6.2 Case A) and drop the
-  // interrupt verb with it (plan §I).
+  // word to inactive WITHOUT closing (plan §6.2 Case A), repainting the
+  // state glyph with it.
   const { vt, app } = startApp()
   const handle = app.openTaskBrowser(
     [{
@@ -3340,13 +3341,13 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
     }],
     () => {},
     () => {},
-    { header: 'tasks · subagents', enableSearch: true },
+    { mode: 'full', header: 'tasks · subagents', enableSearch: true },
   )
   await vt.waitForRender()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   let view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('running'), `running row missing:\n${view}`)
-  assert.ok(view.includes('i interrupt'), `a running continuable must advertise the stop verb:\n${view}`)
+  assert.ok(view.includes('●'), `a running row must paint the active glyph:\n${view}`)
   // The child's driver goes idle: the runtime-only commit re-projects
   // the row (SAME value, new status) — this is exactly what the runner's
   // commitRows hook does on agent/status.
@@ -3364,7 +3365,7 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
   view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('inactive'), `the row must repaint to inactive in place:\n${view}`)
   assert.ok(!view.includes('running'), `the old status word must be gone:\n${view}`)
-  assert.ok(!view.includes('i interrupt'), `an idle continuable must not advertise the stop verb:\n${view}`)
+  assert.ok(view.includes('○'), `an idle row must paint the settled glyph:\n${view}`)
   assert.ok(view.includes('tasks · subagents'), `the browser must stay open:\n${view}`)
   app.stop()
 })

@@ -202,7 +202,7 @@ function stubRunner(
         })),
         (value) => this.openJobView(value),
         () => {},
-        { header: 'tasks', enableSearch: true },
+        { mode: 'full', header: 'tasks', enableSearch: true },
       )
     },
     openRewindPicker: () => {},
