@@ -3805,6 +3805,11 @@ export function registerTuiCommands(
   // newer selection supersedes an older one's pending-marker clear and error
   // notice even on the SAME Session generation (v2 §0.2.5).
   let modelOperationToken = 0
+  // PRESENTATION ownership for `/model`: a newer invocation supersedes the
+  // previous (loading or loaded) panel. It is DISTINCT from
+  // modelOperationToken (which owns the WRITE): the surface token decides
+  // which picker is allowed to hydrate/repaint/close.
+  let modelSurfaceToken = 0
   commands.register({
     name: 'model',
     description: 'Switch the model (and reasoning effort) for this session',
@@ -3812,32 +3817,14 @@ export function registerTuiCommands(
       const selected = runner.selected
       const models = runner.catalog.models
       if (!models.available()) return { kind: 'error', text: 'model service unavailable' }
-      // One Host-generation directory read (official `session.modelCatalog`
-      // semantics): the whole provider/model/effort tree renders from this
-      // snapshot, never from N in-process registry calls.
       // The picker belongs to the Session that opened it: capture BOTH the
       // generation and the identity before the catalog read, then bail
-      // silently if either moved (v2 §0.2.5/§0.3.1) — never open the overlay
-      // onto a different Session.
+      // silently if either moved (v2 §0.2.5/§0.3.1) — never hydrate a picker
+      // with another Session's catalog.
       const readGeneration = runner.sessionGeneration
       const pickerSessionId = runner.liveAgent?.session.id
-      let directory
-      try {
-        directory = await models.loadDirectory(runner.signal)
-      } catch (error) {
-        // A superseded/aborted read no longer owns the surface: stay silent
-        // instead of surfacing a stale catalog failure (v2 §0.2.3/§0.3.1).
-        if (error instanceof SupersededReadError || runner.sessionGeneration !== readGeneration || runner.signal.aborted) {
-          return { kind: 'success' }
-        }
-        return { kind: 'error', text: `model catalog unavailable: ${safeErrorMessage(error)}` }
-      }
-      if (runner.sessionGeneration !== readGeneration || runner.liveAgent?.session.id !== pickerSessionId) {
-        return { kind: 'success' }
-      }
-      // An authoritative Host read reconciles a lingering UNRESOLVED sessionless
-      // default intent (v2 §0.3.2) — the read is the truth, no guessing.
-      runner.reconcileDefaultIntent(directory.default)
+      const ownerCurrent = (): boolean =>
+        runner.sessionGeneration === readGeneration && runner.liveAgent?.session.id === pickerSessionId
       /** Commit a selection (model, optional effort) and resolve with its
        *  semantic settlement so the picker stays truthful: a rejected write
        *  keeps the picker usable, a committed/indeterminate one dismisses. */
@@ -3961,36 +3948,25 @@ export function registerTuiCommands(
         runner.updateWelcomeCard()
         return outcome.kind
       }
-      if (directory.groups.length === 0 && directory.failures.length === 0) {
-        return { kind: 'error', text: 'no models are available' }
-      }
-      // `/model` opens ONE capturing picker overlay (ModelPicker): provider is
-      // a non-selectable group header, Enter applies the highlighted model
-      // directly, and Right drills into that model's effort view INSIDE the
-      // same overlay (never a nested openSettings/picker overlay — the
-      // ghost-overlay trap). The whole list comes from the ONE Host directory
-      // read above; a provider whose catalog failed renders as an inert
-      // failure row. The command layer keeps every semantic guard above
-      // (directory read, generation/identity fence, `apply()` write semantics).
-      const sessionless = runner.liveAgent?.session.id === undefined
+      // A newer `/model` owns the SURFACE: bump the presentation token and
+      // mount the loading panel IMMEDIATELY. The directory read runs as owned
+      // background work, so the user gets instant feedback and may type a
+      // query while it loads.
+      const surfaceToken = ++modelSurfaceToken
       // The picker's `close` closure needs the mounted overlay's closer; it is
       // assigned right after the picker is constructed and only ever invoked
       // later (a user Esc/settlement), never during construction.
       let closer: () => void = () => {}
       const picker = new ModelPicker({
-        directory,
-        // A live Session highlights its effective selection; a sessionless
-        // surface highlights the directory default and never fabricates a
-        // `current` model.
-        current: sessionless ? directory.default : selected.current,
-        sessionless,
         // The picker owns presentation only: brand the effort id here so the
         // official session/global-default write semantics stay untouched.
         apply: (next) => apply(next.reasoningEffort === undefined
           ? { provider: next.provider, model: next.model }
           : { provider: next.provider, model: next.model, reasoningEffort: ReasoningEffortId(next.reasoningEffort) }),
         requestRender: () => app.requestRender(),
-        close: () => closer(),
+        // Close only while this surface still owns the picker slot; a superseded
+        // panel must never tear down the newer one.
+        close: () => { if (surfaceToken === modelSurfaceToken) closer() },
         // The owned-task entry for the semantic write: runOwned with the
         // runner's diag pre-attached (AGENTS.md — never a bare void).
         runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
@@ -3998,6 +3974,60 @@ export function registerTuiCommands(
         },
       })
       closer = app.openModelPicker(picker)
+      // ONE owned Host-generation directory read hydrates the SAME already
+      // mounted picker IN PLACE (never a second overlay). openModelPicker
+      // supersedes any previous /model picker surface.
+      runOwned('model directory', () => models.loadDirectory(runner.signal), {
+        diag: runner.diag,
+        sessionId: () => runner.liveAgent?.session.id,
+        // An abort or a typed read supersession is a cancellation, not a
+        // failure: the port honors the signal / connection generation, so a
+        // rejection that races either must land in the debug channel, never an
+        // ERROR diagnostic.
+        isCancellation: (error) => picker.isDisposed()
+          || surfaceToken !== modelSurfaceToken
+          || runner.signal.aborted
+          || error instanceof SupersededReadError,
+        // A cancelled read (abort / typed supersession) leaves NO trustworthy
+        // catalog: close THIS loading panel silently rather than leaving it
+        // stuck on Loading… forever. Never close a newer surface (the token
+        // guard) and never a panel the user already closed.
+        onCancel: () => {
+          if (surfaceToken === modelSurfaceToken && !picker.isDisposed()) closer()
+        },
+        onResult: (directory) => {
+          // A newer `/model` owns the surface now.
+          if (surfaceToken !== modelSurfaceToken) return
+          if (!ownerCurrent()) {
+            // The Session moved while loading: this panel belongs to the old
+            // subject — close it silently (no hydrate, no notice).
+            if (!picker.isDisposed()) closer()
+            return
+          }
+          if (picker.isDisposed()) return
+          // An authoritative Host read reconciles a lingering UNRESOLVED
+          // sessionless default intent (v2 §0.3.2) — the read is the truth.
+          runner.reconcileDefaultIntent(directory.default)
+          const sessionless = runner.liveAgent?.session.id === undefined
+          picker.setDirectory({
+            directory,
+            // A live Session highlights its effective selection; a sessionless
+            // surface highlights the directory default and never fabricates a
+            // `current` model.
+            current: sessionless ? directory.default : selected.current,
+            sessionless,
+          })
+        },
+        onError: (error) => {
+          if (surfaceToken !== modelSurfaceToken) return
+          if (!ownerCurrent()) {
+            if (!picker.isDisposed()) closer()
+            return
+          }
+          if (picker.isDisposed()) return
+          picker.setLoadError(safeErrorMessage(error))
+        },
+      })
       return { kind: 'success' }
     },
   })

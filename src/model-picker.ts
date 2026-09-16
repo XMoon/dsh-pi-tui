@@ -1,17 +1,19 @@
 /**
- * `/model` picker: ONE capturing overlay with two internal views. The model
- * list is a provider-grouped flat command palette (no provider-first
- * navigation); `Right` drills into the highlighted model's reasoning-effort
- * list and `Left`/`Esc` returns to the model list with its query, selection
- * and scroll window intact. Model ↔ Effort is a VIEW SWAP inside the same
- * mounted component — never a nested `openSettings`/picker overlay, which
- * would leave a ghost panel and layered Esc ownership beneath it.
+ * `/model` inline-effort picker: ONE capturing overlay owning ONE
+ * SearchablePicker (the provider-grouped flat model list). Reasoning effort
+ * is a PER-MODEL, picker-local presentation value edited with `←`/`→` and
+ * rendered on the model's own primary row (`current · effort ‹high›`) — never
+ * a separate Effort view, so the list's physical height stays constant as the
+ * cursor moves. Model descriptions (and the model id) are deliberately NOT
+ * rendered, so a selection move can never change the frame height.
  *
- * The component owns presentation only. The directory read, session/
- * generation fences, the global-default vs Session write semantics, the
- * write classifier and the operation token stay in the command layer; the
- * injected `apply` resolves with the semantic settlement so a rejected /
- * cancelled / unsupported write keeps the picker usable.
+ * The panel opens IMMEDIATELY in a `loading` state and hydrates in place via
+ * {@link ModelPicker.setDirectory}; a failed directory read shows an in-panel
+ * error state ({@link ModelPicker.setLoadError}) instead of closing the
+ * overlay. The command layer owns the directory read, the session/generation
+ * fences, the global-default vs Session write semantics, the write classifier
+ * and the operation tokens; the injected `apply` resolves with the semantic
+ * settlement so a rejected/cancelled/unsupported write keeps the picker usable.
  *
  * @module @xmoon76/dsh-pi-tui/model-picker
  */
@@ -34,7 +36,7 @@ import { selectListTheme } from './theme.ts'
  *  usable; a committed/indeterminate settle dismisses it. */
 export type ModelApplyOutcome = 'committed' | 'rejected' | 'cancelled' | 'indeterminate' | 'unsupported' | 'superseded'
 
-/** The live/effective selection the picker highlights and badges. */
+/** The loaded/effective selection the picker highlights and badges. */
 export interface ModelPickerCurrent {
   readonly provider: string
   readonly model: string
@@ -43,32 +45,29 @@ export interface ModelPickerCurrent {
   readonly reasoningEffort?: string
 }
 
-/** One flattened model presentation row (Models view), identity-complete:
- *  provider/model are kept separately so duplicate model ids across providers
- *  never collapse into one logical row. */
+/** One flattened model presentation row, identity-complete: provider/model are
+ *  kept separately so duplicate model ids across providers never collapse. */
 export interface ModelPickerModelRow {
   readonly providerId: string
   readonly providerName: string
   readonly modelId: string
   readonly modelName: string
-  readonly description?: string
-  readonly efforts: readonly { readonly id: string; readonly name: string; readonly description?: string }[]
+  readonly efforts: readonly { readonly id: string; readonly name: string }[]
   readonly defaultEffort?: string
   readonly isCurrent: boolean
   readonly isDefault: boolean
-  /** The explicit effort of the CURRENT Session selection (badge only). */
+  /** The explicit effort of the CURRENT Session selection (fact badge only). */
   readonly currentEffort?: string
   /**
    * The explicit effort of the picker's CONFIGURED selection (the live Session
-   * selection, or — sessionless — the directory default). Drives the effort
-   * view's initial cursor WITHOUT implying a `current` badge, so opening
-   * `/model` sessionless and pressing Right lands on the already-configured
-   * effort instead of silently downgrading it to the model default.
+   * selection, or — sessionless — the directory default). Seeds the inline
+   * effort value WITHOUT implying a `current` badge, so a sessionless global
+   * default of high never silently downgrades to the model default.
    */
   readonly configuredEffort?: string
 }
 
-/** One provider whose catalog read failed; inert in the Models view. */
+/** One provider whose catalog read failed; inert in the list. */
 export interface ModelPickerFailureRow {
   readonly providerId: string
   readonly providerName: string
@@ -80,25 +79,25 @@ export interface ModelPickerProjection {
   readonly failures: readonly ModelPickerFailureRow[]
 }
 
-/** The picker's dependencies: a loaded directory snapshot plus the command
- *  layer's write/lifecycle seams. No Host service objects cross this seam. */
-export interface ModelPickerDeps {
+/** The hydration payload the command layer supplies once the directory read
+ *  settles (the panel may already be visible in its loading state). */
+export interface ModelPickerDirectory {
   readonly directory: ModelDirectoryDto
-  /** The effective selection to highlight (Session selection for a live
-   *  Session, the directory default for a sessionless surface). */
   readonly current: ModelPickerCurrent | undefined
-  /** A sessionless surface has no live "current" model: the directory default
-   *  is a `default` fact, never a fabricated `current`. */
   readonly sessionless: boolean
-  /** Commit a selection and resolve with its semantic settlement. The command
-   *  layer owns all validation/write semantics; this callback is the seam. */
+}
+
+/** The picker's dependencies: the command layer's write/lifecycle seams. The
+ *  directory arrives later through {@link ModelPicker.setDirectory}. */
+export interface ModelPickerDeps {
+  /** Commit a selection and resolve with its semantic settlement. */
   apply(selection: ModelSelectionDto): Promise<ModelApplyOutcome> | ModelApplyOutcome
-  /** Request a frame so a swapped-in view or the selecting state renders. */
+  /** Request a frame so a hydration/effort/selecting change renders. */
   requestRender(): void
   /** Close the whole overlay (settled commit, or the model view's Esc). */
   close(): void
-  /** The owned-task entry (runOwned shape, diag pre-wired by the runner):
-   *  the async write routes through it instead of a bare `void promise`. */
+  /** The owned-task entry (runOwned shape, diag pre-wired by the runner): the
+   *  async write routes through it instead of a bare `void promise`. */
   runOwned<T>(
     label: string,
     task: () => T | Promise<T>,
@@ -107,7 +106,7 @@ export interface ModelPickerDeps {
 }
 
 const IDENTITY_SEP = '\u0000'
-/** The synthetic `Provider default` effort row (submit with no effort id). */
+/** The synthetic `provider default` effort choice (submit without an effort). */
 const PROVIDER_DEFAULT = `${IDENTITY_SEP}provider-default`
 const FAILURE_PREFIX = `${IDENTITY_SEP}failure${IDENTITY_SEP}`
 /** One shared group key for EVERY failed provider, so all failures collapse
@@ -145,7 +144,6 @@ export function projectModelDirectory(
         providerName: group.name,
         modelId: model.id,
         modelName: model.name,
-        ...(model.description === undefined ? {} : { description: model.description }),
         efforts: model.reasoning?.efforts ?? [],
         ...(model.reasoning?.defaultEffort === undefined ? {} : { defaultEffort: model.reasoning.defaultEffort }),
         isCurrent: isCurrentModel,
@@ -155,7 +153,7 @@ export function projectModelDirectory(
         ...(isCurrentModel && current?.reasoningEffort !== undefined ? { currentEffort: current.reasoningEffort } : {}),
         // The configured selection's effort is independent of the `current`
         // badge: sessionless has no current model, yet its global default's
-        // effort must still seed the effort view's cursor.
+        // effort must still seed the inline effort value.
         ...(matchesConfigured && current?.reasoningEffort !== undefined ? { configuredEffort: current.reasoningEffort } : {}),
       })
     }
@@ -168,41 +166,46 @@ export function projectModelDirectory(
   return { models, failures }
 }
 
-/** The `current · default · high` badge for a model row (absent when neither
- *  fact holds). */
-function modelBadge(row: ModelPickerModelRow): string | undefined {
-  const parts: string[] = []
-  if (row.isCurrent) parts.push('current')
-  if (row.isDefault) parts.push('default')
-  if (row.currentEffort !== undefined) parts.push(row.currentEffort)
-  return parts.length === 0 ? undefined : parts.join(' · ')
+/** The picker-local effort CHOICES for one model, in cycle order. A model with
+ *  NO effort metadata has none — Left/Right must be a true no-op there. The
+ *  synthetic `provider default` joins the cycle only when the model declares
+ *  efforts but no concrete default. */
+function effortChoicesOf(row: ModelPickerModelRow): string[] {
+  if (row.efforts.length === 0) return []
+  return row.defaultEffort === undefined
+    ? [PROVIDER_DEFAULT, ...row.efforts.map(effort => effort.id)]
+    : row.efforts.map(effort => effort.id)
 }
 
-/** The selected-only detail: `id · description`, without repeating an id that
- *  already IS the display name. */
-function modelDetail(row: ModelPickerModelRow): string | undefined {
-  const parts: string[] = []
-  if (row.modelName !== row.modelId) parts.push(row.modelId)
-  if (row.description !== undefined && row.description !== '') parts.push(row.description)
-  return parts.length === 0 ? undefined : parts.join(' · ')
+/** The initial picker-local effort for one model: the configured/current
+ *  explicit effort when advertised, else the model default, else provider
+ *  default; `undefined` for a model with no effort metadata at all. */
+function initialEffortOf(row: ModelPickerModelRow): string | undefined {
+  if (row.efforts.length === 0) return undefined
+  if (row.configuredEffort !== undefined && row.efforts.some(effort => effort.id === row.configuredEffort)) {
+    return row.configuredEffort
+  }
+  return row.defaultEffort ?? PROVIDER_DEFAULT
+}
+
+/** The compact inline token for one effort choice (`high`, `provider default`). */
+function effortTokenOf(choice: string): string {
+  return choice === PROVIDER_DEFAULT ? 'provider default' : choice
 }
 
 /**
- * The `/model` picker component: a Models view (grouped flat list, search
- * over name/id/provider, selected-only detail) and an Efforts view for the
- * highlighted model. Mounted by the host as ONE capturing overlay.
+ * The `/model` picker: one SearchablePicker over a provider-grouped flat model
+ * list, with a per-model inline effort value. Mounted by the host as ONE
+ * capturing overlay; it starts in `loading` and hydrates in place.
  */
 export class ModelPicker implements Component, RowBudgetAware, Focusable {
   private readonly deps: ModelPickerDeps
   private readonly modelsList: SearchablePicker
-  private readonly modelRows: Map<string, ModelPickerModelRow>
-  private mode: { kind: 'models' } | { kind: 'efforts'; row: ModelPickerModelRow } = { kind: 'models' }
-  private effortsList: SearchablePicker | undefined
-  /** The inner that was ACTUALLY PAINTED last (mouse parity): a view swap
-   *  between paint and pointer event must not let the new view eat a click
-   *  aimed at the old screen. */
-  private paintedList: SearchablePicker
-  /** The last host row grant, re-applied to a view swapped in after a resize. */
+  private readonly modelRows = new Map<string, ModelPickerModelRow>()
+  /** Per-model picker-local effort value (`effort id` or PROVIDER_DEFAULT). */
+  private readonly effortChoices = new Map<string, string>()
+  private failures: readonly ModelPickerFailureRow[] = []
+  /** The last host row grant, re-applied on hydration and resize. */
   private rowGrant = Number.POSITIVE_INFINITY
   private _focused = false
   /** Whether a semantic selection is in flight (blocks a duplicate apply). */
@@ -216,188 +219,178 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
 
   set focused(value: boolean) {
     this._focused = value
-    this.applyFocused()
+    this.modelsList.focused = value
   }
 
   constructor(deps: ModelPickerDeps) {
     this.deps = deps
-    const projection = projectModelDirectory(deps.directory, deps.current, deps.sessionless)
-    this.modelRows = new Map(projection.models.map(row => [modelIdentity(row.providerId, row.modelId), row]))
-    const modelItems: SearchablePickerItem[] = projection.models.map((row) => {
-      const detail = modelDetail(row)
-      const badge = modelBadge(row)
-      return {
-        value: modelIdentity(row.providerId, row.modelId),
+    this.modelsList = new SearchablePicker([], 8, selectListTheme, {}, {
+      enableSearch: true,
+      showHint: true,
+      header: 'Models',
+      hint: '↑↓ model · ←→ effort · enter select · esc close',
+      noMatchText: '  Loading models…',
+      descriptionMode: 'selected-below',
+    })
+    this.modelsList.onSelect = (item) => { this.confirm(item.value) }
+    this.modelsList.onCancel = () => { this.deps.close() }
+    this.setMaxRows(this.rowGrant)
+  }
+
+  /** Whether this picker has been torn down (the command layer's stale-load
+   *  fence: a late directory settle must not hydrate a disposed surface). */
+  isDisposed(): boolean {
+    return this.disposed
+  }
+
+  /** Host row-budget seam: kept and forwarded to the list on hydration too. */
+  setMaxRows(rows: number): void {
+    this.rowGrant = rows
+    this.modelsList.setMaxRows(rows)
+  }
+
+  /** Hydrate the panel IN PLACE once the directory read settles: project the
+   *  rows, seed each model's inline effort, and preserve the query the user
+   *  may already have typed while loading (`setItems` re-applies the filter and
+   *  keeps a surviving selected value). A no-op on a disposed picker. */
+  setDirectory(input: ModelPickerDirectory): void {
+    if (this.disposed) return
+    const projection = projectModelDirectory(input.directory, input.current, input.sessionless)
+    this.modelRows.clear()
+    this.effortChoices.clear()
+    for (const row of projection.models) {
+      const identity = modelIdentity(row.providerId, row.modelId)
+      this.modelRows.set(identity, row)
+      const initial = initialEffortOf(row)
+      if (initial !== undefined) this.effortChoices.set(identity, initial)
+    }
+    this.failures = projection.failures
+    const items = this.buildItems()
+    // A settled-but-empty catalog is not a "no match" (nothing was filtered).
+    this.modelsList.setNoMatchText(items.length === 0 ? '  No models available' : '  No matching models')
+    this.modelsList.setItems(items)
+    // Identity-based initial selection: highlight the configured (provider,
+    // model). An unlisted selection matches nothing and the cursor stays on
+    // the first filtered row (never a same-id other provider).
+    if (input.current !== undefined) {
+      this.modelsList.setSelectedValue(modelIdentity(input.current.provider, input.current.model))
+    }
+    this.modelsList.setMaxRows(this.rowGrant)
+    this.deps.requestRender()
+  }
+
+  /** Replace the loading state with an in-panel error (never close + print in
+   *  the transcript). No retry; Esc still closes; Enter is inert. */
+  setLoadError(message: string): void {
+    if (this.disposed) return
+    this.modelRows.clear()
+    this.effortChoices.clear()
+    this.failures = []
+    this.modelsList.setItems([])
+    this.modelsList.setNoMatchText(message === ''
+      ? '  Model catalog unavailable'
+      : `  Model catalog unavailable: ${message}`)
+    this.deps.requestRender()
+  }
+
+  private buildItems(): SearchablePickerItem[] {
+    const items: SearchablePickerItem[] = []
+    for (const row of this.modelRows.values()) {
+      const identity = modelIdentity(row.providerId, row.modelId)
+      const badge = this.modelBadgeOf(row)
+      items.push({
+        value: identity,
         label: row.modelName,
-        ...(detail === undefined ? {} : { description: detail }),
         // The header shows the display name; the GROUP IDENTITY is the
         // provider id, so distinct providers that share a display name (or a
         // provider literally named "Unavailable") never merge into one group.
         group: row.providerName,
         groupKey: row.providerId,
         ...(badge === undefined ? {} : { badge }),
+        // Search covers provider/model NAME + ID only: the (hidden) model
+        // description and effort descriptions are deliberately NOT searchable.
         searchText: `${row.providerId} ${row.modelId} ${row.providerName} ${row.modelName}`,
-      }
-    })
-    const items: SearchablePickerItem[] = [
-      ...modelItems,
-      // A failed provider is an inert presentation row: it stays searchable
-      // (provider name/id) and shows its message as selected-only detail, but
-      // Enter/Right are no-ops so it can never submit a fake model.
-      ...projection.failures.map(row => ({
-        value: `${FAILURE_PREFIX}${row.providerId}`,
-        label: row.providerName,
-        description: row.message,
+      })
+    }
+    for (const failure of this.failures) {
+      items.push({
+        value: `${FAILURE_PREFIX}${failure.providerId}`,
+        label: failure.providerName,
+        description: failure.message,
         group: 'Unavailable',
-        // EVERY failure shares one group key: all failed providers form a
-        // single `Unavailable` section instead of one section per failure.
         groupKey: FAILURE_GROUP_KEY,
         badge: 'unavailable',
-        searchText: `${row.providerId} ${row.providerName}`,
-      })),
-    ]
-    this.modelsList = new SearchablePicker(items, 8, selectListTheme, {}, {
-      enableSearch: true,
-      showHint: true,
-      header: 'Models',
-      hint: '↑↓ move · enter select · → effort · esc close',
-      noMatchText: '  No matching models',
-      descriptionMode: 'selected-below',
-    })
-    this.modelsList.onSelect = (item) => { this.confirmModel(item.value) }
-    this.modelsList.onCancel = () => { this.deps.close() }
-    this.paintedList = this.modelsList
-    // Identity-based initial selection: highlight the current (provider,
-    // model). An unlisted current model matches nothing and the selection
-    // stays on the first catalog row (never a same-id other provider).
-    if (deps.current !== undefined) {
-      this.modelsList.setSelectedValue(modelIdentity(deps.current.provider, deps.current.model))
+        searchText: `${failure.providerId} ${failure.providerName}`,
+      })
     }
-    this.applyGrant()
+    return items
   }
 
-  /** Host row-budget seam: keep the grant and forward it to the active view,
-   *  so a view swapped in after a resize still reflows. */
-  setMaxRows(rows: number): void {
-    this.rowGrant = rows
-    this.applyGrant()
+  /** The right-aligned badge: factual state (`current`/`default`) plus the
+   *  picker-local `effort ‹…›` value. */
+  private modelBadgeOf(row: ModelPickerModelRow): string | undefined {
+    const parts: string[] = []
+    if (row.isCurrent) parts.push('current')
+    if (row.isDefault) parts.push('default')
+    const choice = this.effortChoices.get(modelIdentity(row.providerId, row.modelId))
+    if (choice !== undefined) parts.push(`effort ‹${effortTokenOf(choice)}›`)
+    return parts.length === 0 ? undefined : parts.join(' · ')
   }
 
-  private applyGrant(): void {
-    const list = this.activeList()
-    list.setMaxRows(this.rowGrant)
-  }
-
-  private applyFocused(): void {
-    this.activeList().focused = this._focused
-  }
-
-  private activeList(): SearchablePicker {
-    return this.mode.kind === 'models' ? this.modelsList : this.effortsList ?? this.modelsList
+  /** Cycle the highlighted model's inline effort. Failure rows and models
+   *  without effort metadata are a no-op (the key is still consumed). */
+  private adjustEffort(step: 1 | -1): void {
+    const item = this.modelsList.getSelectedItem()
+    if (item === null) return
+    const row = this.modelRows.get(item.value)
+    if (row === undefined) return
+    const choices = effortChoicesOf(row)
+    if (choices.length === 0) return
+    const current = this.effortChoices.get(item.value) ?? choices[0]!
+    const index = Math.max(0, choices.indexOf(current))
+    const next = choices[(index + step + choices.length) % choices.length]!
+    this.effortChoices.set(item.value, next)
+    // setItems preserves the selected row by VALUE, so the cursor stays put.
+    this.modelsList.setItems(this.buildItems())
+    this.deps.requestRender()
   }
 
   handleInput(data: string): void {
     if (this.disposed || this.selecting) return
-    if (this.mode.kind === 'models') {
-      // `Right` is the Effort drill-down (the footer advertises it): it is
-      // consumed even when the highlighted model has no effort choices, so it
-      // never doubles as a text-cursor move inside the search box. Search
-      // horizontal cursor movement stays on the Input's Ctrl+B/Ctrl+F.
-      if (matchesKey(data, 'right')) {
-        this.enterEfforts()
-        return
-      }
-      this.modelsList.handleInput(data)
+    // `←`/`→` are the effort keys in EVERY state: consumed here, so they never
+    // double as a text-cursor move inside the search box (search cursor
+    // movement stays on the Input's Ctrl+B/Ctrl+F). Before hydration — and for
+    // a model without effort metadata — `adjustEffort` is a no-op, so the key
+    // is simply inert (plan §20).
+    if (matchesKey(data, 'right')) {
+      this.adjustEffort(1)
       return
     }
-    // Efforts view: `Left` returns to the model view (the efforts list's own
-    // cancel path handles Esc/ctrl+c through onCancel). The whole overlay
-    // closes only from the model view's Esc.
     if (matchesKey(data, 'left')) {
-      this.showModels()
+      this.adjustEffort(-1)
       return
     }
-    this.activeList().handleInput(data)
+    // Everything else (Esc close, typing, ↑↓/PageUp/PageDown/Enter) goes to the
+    // list; before hydration the empty list already makes navigation and Enter
+    // inert while the search box still accepts typing.
+    this.modelsList.handleInput(data)
   }
 
-  /** Drill into the highlighted model's effort list. A no-op when the row is
-   *  a failure or has no effort choices (Right is still consumed). */
-  private enterEfforts(): boolean {
-    const item = this.modelsList.getSelectedItem()
-    if (item === null) return false
-    const row = this.modelRows.get(item.value)
-    if (row === undefined || row.efforts.length === 0) return false
-    this.mode = { kind: 'efforts', row }
-    this.effortsList = this.buildEffortsList(row)
-    this.applyGrant()
-    this.applyFocused()
-    this.deps.requestRender()
-    return true
-  }
-
-  private showModels(): void {
-    if (this.mode.kind !== 'models') {
-      this.mode = { kind: 'models' }
-      this.effortsList = undefined
-      this.applyGrant()
-      this.applyFocused()
-    }
-    // Always repaint: a failure settlement that arrives AFTER the `Selecting…`
-    // frame has painted must visibly restore the model view (clearing the
-    // latch alone leaves the stale frame on screen).
-    this.deps.requestRender()
-  }
-
-  /** The effort rows for one model, with the plan's cursor contract:
-   *  - the CONFIGURED selection's explicit effort (the live Session selection,
-   *    or the sessionless global default) → that row;
-   *  - otherwise the model's concrete `defaultEffort` (badged `default`);
-   *  - otherwise the synthetic `Provider default` (submit without effort).
-   *  A non-current model never carries a `current` badge. */
-  private buildEffortsList(row: ModelPickerModelRow): SearchablePicker {
-    const currentEffort = row.isCurrent ? row.currentEffort : undefined
-    const items: SearchablePickerItem[] = []
-    if (row.defaultEffort === undefined) {
-      items.push({ value: PROVIDER_DEFAULT, label: 'Provider default' })
-    }
-    for (const effort of row.efforts) {
-      const badges: string[] = []
-      if (currentEffort === effort.id) badges.push('current')
-      if (row.defaultEffort === effort.id) badges.push('default')
-      items.push({
-        value: effort.id,
-        label: effort.name,
-        // The official effort description rides the selected-only detail, so
-        // the list stays compact and only the cursor's row expands it.
-        ...(effort.description === undefined || effort.description === '' ? {} : { description: effort.description }),
-        ...(badges.length === 0 ? {} : { badge: badges.join(' · ') }),
-      })
-    }
-    const list = new SearchablePicker(items, 8, selectListTheme, {}, {
-      showHint: true,
-      header: `Models › ${row.modelName}`,
-      hint: '← model · enter select · esc back',
-      noMatchText: '  No efforts',
-      descriptionMode: 'selected-below',
-    })
-    list.onSelect = (item) => {
-      this.submit(row, item.value === PROVIDER_DEFAULT ? undefined : item.value)
-    }
-    list.onCancel = () => { this.showModels() }
-    // Cursor: the configured selection's explicit effort when advertised, else
-    // the model default, else Provider default.
-    const configured = row.configuredEffort
-    const cursor = configured !== undefined && row.efforts.some(effort => effort.id === configured)
-      ? configured
-      : row.defaultEffort ?? PROVIDER_DEFAULT
-    list.setSelectedValue(cursor)
-    return list
+  /** Confirm the highlighted row: submit the model together with its CURRENT
+   *  inline effort (or no effort for provider-default / no-effort models).
+   *  Failure rows are inert. */
+  private confirm(value: string): void {
+    if (this.disposed || this.selecting) return
+    const row = this.modelRows.get(value)
+    if (row === undefined) return
+    const choice = this.effortChoices.get(value)
+    this.submit(row, choice === undefined || choice === PROVIDER_DEFAULT ? undefined : choice)
   }
 
   /** Submit one selection: the semantic write owns the settlement, so the
    *  overlay shows a selecting state and only dismisses once the outcome is
-   *  known. A rejected/cancelled/unsupported write returns to the model view
-   *  (the picker stays usable); committed/indeterminate dismiss. */
+   *  known. A rejected/cancelled/unsupported/errored write clears the selecting
+   *  state and keeps the picker usable; committed/indeterminate dismiss. */
   private submit(row: ModelPickerModelRow, effortId: string | undefined): void {
     if (this.disposed || this.selecting) return
     this.selecting = true
@@ -414,10 +407,10 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
         // the surface, so the selecting state is left exactly as painted.
         if (outcome === 'superseded') return
         this.selecting = false
-        // A write that provably did not commit keeps the picker usable: walk
-        // back to the model view; the caller's notice explains the refusal.
+        // A write that provably did not commit keeps the picker usable; the
+        // caller's notice explains the refusal.
         if (outcome === 'rejected' || outcome === 'cancelled' || outcome === 'unsupported') {
-          this.showModels()
+          this.deps.requestRender()
           return
         }
         this.deps.close()
@@ -425,48 +418,35 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       onError: () => {
         if (this.disposed) return
         this.selecting = false
-        this.showModels()
+        this.deps.requestRender()
       },
     })
   }
 
-  /** Confirm the Models-view row: apply the model directly (no synthesized
-   *  effort). Failure rows are inert. */
-  private confirmModel(value: string): void {
-    if (this.disposed || this.selecting) return
-    const row = this.modelRows.get(value)
-    if (row === undefined) return
-    this.submit(row, undefined)
-  }
-
   /** Ownership-safe external disposal: the overlay's owning frame calls this
-   *  when the picker is removed or replaced (app teardown, overlay replacement
-   *  — NOT the picker's own Esc/selection). Teardown is ownership, not a user
-   *  choice: it never calls close/apply/navigation, and the disposed latch
-   *  fences a late settlement from repainting a dead surface. */
+   *  when the picker is removed or replaced (app teardown, overlay replacement,
+   *  a newer `/model` surface — NOT the picker's own Esc/selection). Teardown
+   *  is ownership, not a user choice: it never calls close/apply/navigation,
+   *  and the disposed latch fences a late settlement from repainting a dead
+   *  surface. */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
   }
 
-  /** Transparent mouse forwarding (mouse parity): the active view owns row
-   *  hit-testing and its own last-painted width map. A view swapped in but not
-   *  yet painted must not receive a click aimed at the previous screen. */
+  /** Transparent mouse forwarding: the list owns row hit-testing and its own
+   *  last-painted-geometry fence. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed || this.selecting) return undefined
-    const list = this.activeList()
-    if (list !== this.paintedList) return undefined
-    return list.handleMouse?.(event)
+    return this.modelsList.handleMouse?.(event)
   }
 
   invalidate(): void {
-    this.activeList().invalidate?.()
+    this.modelsList.invalidate()
   }
 
   render(width: number): string[] {
     if (this.selecting) return ['  Selecting…']
-    const list = this.activeList()
-    this.paintedList = list
-    return list.render(width)
+    return this.modelsList.render(width)
   }
 }
