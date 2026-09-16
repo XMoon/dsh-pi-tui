@@ -1,11 +1,22 @@
 /**
  * `/model` inline-effort picker: ONE capturing overlay owning ONE
- * SearchablePicker (the provider-grouped flat model list). Reasoning effort
- * is a PER-MODEL, picker-local presentation value edited with `←`/`→` and
- * rendered on the model's own primary row (`current · effort ‹high›`) — never
- * a separate Effort view, so the list's physical height stays constant as the
- * cursor moves. Model descriptions (and the model id) are deliberately NOT
- * rendered, so a selection move can never change the frame height.
+ * SearchablePicker (the provider-grouped flat model list) and a two-phase
+ * keyboard focus — never a second view/page.
+ *
+ * - MODEL mode (the default): `↑`/`↓` move the model, `←`/`→` are the Search
+ *   Input's text cursor, typing edits the query, and `Enter` either FOCUSES the
+ *   highlighted reasoning model's inline effort (no write) or commits a model
+ *   with no effort choice. `Esc` closes the overlay.
+ * - EFFORT mode (explicitly entered): the SAME row is focused, rendered as
+ *   `effort [ High ]` instead of `effort ‹High›`; `←`/`→` cycle that model's
+ *   effort, `Enter` commits the visible selection, `Esc` backs out to MODEL
+ *   mode, and every other key is consumed.
+ *
+ * The effort is a PER-MODEL, picker-local presentation value keyed by the full
+ * `(provider, model)` identity and rendered on the model's own primary row, so
+ * the list's physical height stays constant across selection, cycling and
+ * focus changes. Model descriptions (and the model id) are deliberately NOT
+ * rendered, so a selection move can never change the frame height either.
  *
  * The panel opens IMMEDIATELY in a `loading` state and hydrates in place via
  * {@link ModelPicker.setDirectory}; a failed directory read shows an in-panel
@@ -20,6 +31,7 @@
 
 import {
   matchesKey,
+  visibleWidth,
   type Component,
   type Focusable,
   type RowBudgetAware,
@@ -113,6 +125,11 @@ const FAILURE_PREFIX = `${IDENTITY_SEP}failure${IDENTITY_SEP}`
  *  into a single private `Unavailable` section (a real provider's own
  *  `groupKey` is its id and can never collide with this NUL-prefixed key). */
 const FAILURE_GROUP_KEY = `${IDENTITY_SEP}unavailable`
+/** Model-mode footer hint: Enter either focuses the inline effort (reasoning
+ *  model) or commits directly (no-effort model). */
+const MODEL_MODE_HINT = '↑↓ model · enter effort/select · esc close'
+/** Effort-mode footer hint: the same row, now editing its effort. */
+const EFFORT_MODE_HINT = '←→ effort · enter select · esc back'
 
 /** Full logical identity of a model row. Model ids are not globally unique. */
 export function modelIdentity(providerId: string, modelId: string): string {
@@ -166,31 +183,48 @@ export function projectModelDirectory(
   return { models, failures }
 }
 
+/** One picker-local effort candidate: the PROTOCOL `value` (effort id, or the
+ *  synthetic provider-default sentinel) plus the HUMAN-facing `label` the row
+ *  renders. State and write payloads use `value`; only the display uses the
+ *  label, so a renamed effort can never change what is submitted. */
+interface InlineEffortChoice {
+  readonly value: string
+  readonly label: string
+}
+
 /** The picker-local effort CHOICES for one model, in cycle order. A model with
- *  NO effort metadata has none — Left/Right must be a true no-op there. The
- *  synthetic `provider default` joins the cycle only when the model declares
- *  efforts but no concrete default. */
-function effortChoicesOf(row: ModelPickerModelRow): string[] {
+ *  NO effort metadata has none — the effort keys must be a true no-op there.
+ *  The synthetic `provider default` joins the cycle only when the model
+ *  declares efforts but no concrete default. */
+function effortChoicesOf(row: ModelPickerModelRow): readonly InlineEffortChoice[] {
   if (row.efforts.length === 0) return []
+  const efforts = row.efforts.map(effort => ({ value: effort.id, label: effort.name }))
   return row.defaultEffort === undefined
-    ? [PROVIDER_DEFAULT, ...row.efforts.map(effort => effort.id)]
-    : row.efforts.map(effort => effort.id)
+    ? [{ value: PROVIDER_DEFAULT, label: 'provider default' }, ...efforts]
+    : efforts
 }
 
-/** The initial picker-local effort for one model: the configured/current
- *  explicit effort when advertised, else the model default, else provider
- *  default; `undefined` for a model with no effort metadata at all. */
-function initialEffortOf(row: ModelPickerModelRow): string | undefined {
-  if (row.efforts.length === 0) return undefined
-  if (row.configuredEffort !== undefined && row.efforts.some(effort => effort.id === row.configuredEffort)) {
-    return row.configuredEffort
-  }
-  return row.defaultEffort ?? PROVIDER_DEFAULT
+/** The initial picker-local effort VALUE for one model: the configured/current
+ *  explicit effort when advertised, else the model default, else the first
+ *  candidate (provider default); `undefined` for a model with no effort
+ *  metadata at all. */
+function initialEffortOf(row: ModelPickerModelRow, choices: readonly InlineEffortChoice[]): string | undefined {
+  if (choices.length === 0) return undefined
+  const advertised = (value: string | undefined): string | undefined =>
+    value !== undefined && choices.some(choice => choice.value === value) ? value : undefined
+  return advertised(row.configuredEffort) ?? advertised(row.defaultEffort) ?? choices[0]!.value
 }
 
-/** The compact inline token for one effort choice (`high`, `provider default`). */
-function effortTokenOf(choice: string): string {
-  return choice === PROVIDER_DEFAULT ? 'provider default' : choice
+/** The human-facing label for one effort value within a row's candidates. */
+function effortLabelOf(choices: readonly InlineEffortChoice[], value: string): string | undefined {
+  return choices.find(choice => choice.value === value)?.label
+}
+
+/** The inline effort token: `effort ‹Name›` normally, `effort [ Name ]` while
+ *  the row owns the inline effort focus (a shape change, so it is legible
+ *  without color). */
+function effortTokenOf(label: string, active: boolean): string {
+  return active ? `effort [ ${label} ]` : `effort ‹${label}›`
 }
 
 /**
@@ -202,8 +236,10 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   private readonly deps: ModelPickerDeps
   private readonly modelsList: SearchablePicker
   private readonly modelRows = new Map<string, ModelPickerModelRow>()
-  /** Per-model picker-local effort value (`effort id` or PROVIDER_DEFAULT). */
+  /** Per-model picker-local effort VALUE (`effort id` or PROVIDER_DEFAULT). */
   private readonly effortChoices = new Map<string, string>()
+  /** Per-model effort candidates (value + human label), in cycle order. */
+  private readonly choicesByModel = new Map<string, readonly InlineEffortChoice[]>()
   private failures: readonly ModelPickerFailureRow[] = []
   /** The last host row grant, re-applied on hydration and resize. */
   private rowGrant = Number.POSITIVE_INFINITY
@@ -212,6 +248,17 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   private selecting = false
   /** Latched by every close/dispose path; late settlements must not act. */
   private disposed = false
+  /**
+   * Keyboard focus mode. `models` is the normal list; `effort` is the inline
+   * two-phase edit of ONE model's effort, BOUND to its full identity so an
+   * async refresh can never re-target it. This is a focus mode over the SAME
+   * SearchablePicker — never a second view/page.
+   */
+  private interactionMode: { kind: 'models' } | { kind: 'effort'; modelKey: string } = { kind: 'models' }
+  /** One-shot latch: a refresh that removed the effort-bound model already
+   *  released the focus, so the NEXT key is consumed instead of falling through
+   *  onto the replacement row. */
+  private swallowNextKey = false
 
   get focused(): boolean {
     return this._focused
@@ -228,11 +275,15 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       enableSearch: true,
       showHint: true,
       header: 'Models',
-      hint: '↑↓ model · ←→ effort · enter select · esc close',
+      hint: MODEL_MODE_HINT,
       noMatchText: '  Loading models…',
       descriptionMode: 'selected-below',
+      // Model identity must never be squeezed out by a long factual/effort
+      // badge: when label + badge cannot share the row, the badge wraps onto
+      // an inert second line.
+      badgeLayout: 'wrap-when-needed',
     })
-    this.modelsList.onSelect = (item) => { this.confirm(item.value) }
+    this.modelsList.onSelect = (item) => { this.activateModel(item.value) }
     this.modelsList.onCancel = () => { this.deps.close() }
     this.setMaxRows(this.rowGrant)
   }
@@ -255,24 +306,57 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  keeps a surviving selected value). A no-op on a disposed picker. */
   setDirectory(input: ModelPickerDirectory): void {
     if (this.disposed) return
+    // Every (re-)hydration starts from a clean latch: only THIS refresh may
+    // consume the next key, and only if it actually drops the bound model.
+    this.swallowNextKey = false
     const projection = projectModelDirectory(input.directory, input.current, input.sessionless)
+    // A refresh must NOT discard the user's picker-local effort edits: keep the
+    // previous value for every surviving identity while it is still advertised,
+    // and only (re-)anchor to configured/default/provider-default otherwise.
+    const previousChoices = new Map(this.effortChoices)
     this.modelRows.clear()
     this.effortChoices.clear()
+    this.choicesByModel.clear()
     for (const row of projection.models) {
       const identity = modelIdentity(row.providerId, row.modelId)
       this.modelRows.set(identity, row)
-      const initial = initialEffortOf(row)
+      const choices = effortChoicesOf(row)
+      this.choicesByModel.set(identity, choices)
+      const previous = previousChoices.get(identity)
+      const initial = previous !== undefined && choices.some(choice => choice.value === previous)
+        ? previous
+        : initialEffortOf(row, choices)
       if (initial !== undefined) this.effortChoices.set(identity, initial)
     }
     this.failures = projection.failures
+    // An effort focus is bound to a full identity: drop back to model mode when
+    // that exact model did not survive the (re-)hydration OR when it lost all
+    // reasoning metadata. A VANISHED model also consumes the next key: a
+    // refresh that yanks the model out from under the user must not let the
+    // very next Enter/Esc fall through onto the replacement row. A surviving
+    // no-effort model keeps the normal fast path (Enter commits it).
+    if (this.interactionMode.kind === 'effort') {
+      const modelKey = this.interactionMode.modelKey
+      const survives = this.modelRows.has(modelKey)
+      const hasChoices = survives && (this.choicesByModel.get(modelKey)?.length ?? 0) > 0
+      if (!survives || !hasChoices) {
+        this.interactionMode = { kind: 'models' }
+        this.modelsList.setHint(MODEL_MODE_HINT)
+        if (!survives) this.swallowNextKey = true
+      }
+    }
     const items = this.buildItems()
     // A settled-but-empty catalog is not a "no match" (nothing was filtered).
     this.modelsList.setNoMatchText(items.length === 0 ? '  No models available' : '  No matching models')
     this.modelsList.setItems(items)
-    // Identity-based initial selection: highlight the configured (provider,
-    // model). An unlisted selection matches nothing and the cursor stays on
-    // the first filtered row (never a same-id other provider).
-    if (input.current !== undefined) {
+    // Identity-based selection: a SURVIVING inline-effort focus keeps its own
+    // row selected (the focus and the cursor must never point at different
+    // rows); otherwise highlight the configured (provider, model). An unlisted
+    // value matches nothing and the cursor stays on the first filtered row
+    // (never a same-id other provider).
+    if (this.interactionMode.kind === 'effort') {
+      this.modelsList.setSelectedValue(this.interactionMode.modelKey)
+    } else if (input.current !== undefined) {
       this.modelsList.setSelectedValue(modelIdentity(input.current.provider, input.current.model))
     }
     this.modelsList.setMaxRows(this.rowGrant)
@@ -283,8 +367,14 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  the transcript). No retry; Esc still closes; Enter is inert. */
   setLoadError(message: string): void {
     if (this.disposed) return
+    // A lifecycle/error reset also clears the one-shot latch: a later
+    // re-hydration must not have its first key silently consumed.
+    this.swallowNextKey = false
     this.modelRows.clear()
     this.effortChoices.clear()
+    this.choicesByModel.clear()
+    this.interactionMode = { kind: 'models' }
+    this.modelsList.setHint(MODEL_MODE_HINT)
     this.failures = []
     this.modelsList.setItems([])
     this.modelsList.setNoMatchText(message === ''
@@ -298,6 +388,9 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     for (const row of this.modelRows.values()) {
       const identity = modelIdentity(row.providerId, row.modelId)
       const badge = this.modelBadgeOf(row)
+      // Layout measurement uses the WIDEST badge any effort value of this
+      // model could render, so cycling the effort never toggles one/two lines.
+      const badgeLayoutText = this.widestBadgeOf(row)
       items.push({
         value: identity,
         label: row.modelName,
@@ -307,6 +400,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
         group: row.providerName,
         groupKey: row.providerId,
         ...(badge === undefined ? {} : { badge }),
+        ...(badgeLayoutText === undefined ? {} : { badgeLayoutText }),
         // Search covers provider/model NAME + ID only: the (hidden) model
         // description and effort descriptions are deliberately NOT searchable.
         searchText: `${row.providerId} ${row.modelId} ${row.providerName} ${row.modelName}`,
@@ -327,58 +421,141 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   }
 
   /** The right-aligned badge: factual state (`current`/`default`) plus the
-   *  picker-local `effort ‹…›` value. */
+   *  picker-local effort token. The token is `[ Name ]` while THIS model owns
+   *  the inline effort focus and `‹Name›` otherwise, so the active state is
+   *  legible without relying on color. */
   private modelBadgeOf(row: ModelPickerModelRow): string | undefined {
     const parts: string[] = []
     if (row.isCurrent) parts.push('current')
     if (row.isDefault) parts.push('default')
-    const choice = this.effortChoices.get(modelIdentity(row.providerId, row.modelId))
-    if (choice !== undefined) parts.push(`effort ‹${effortTokenOf(choice)}›`)
+    const identity = modelIdentity(row.providerId, row.modelId)
+    const choice = this.effortChoices.get(identity)
+    if (choice !== undefined) {
+      const label = effortLabelOf(this.choicesByModel.get(identity) ?? [], choice)
+      if (label !== undefined) parts.push(effortTokenOf(label, this.isEffortFocused(identity)))
+    }
     return parts.length === 0 ? undefined : parts.join(' · ')
   }
 
-  /** Cycle the highlighted model's inline effort. Failure rows and models
-   *  without effort metadata are a no-op (the key is still consumed). */
-  private adjustEffort(step: 1 | -1): void {
-    const item = this.modelsList.getSelectedItem()
-    if (item === null) return
-    const row = this.modelRows.get(item.value)
+  /** The widest badge this row could ever render (the facts plus the longest
+   *  effort label in its WIDEST form), used only for the stable wrap
+   *  measurement so neither cycling nor entering/leaving effort focus can
+   *  change the physical row count. */
+  private widestBadgeOf(row: ModelPickerModelRow): string | undefined {
+    const parts: string[] = []
+    if (row.isCurrent) parts.push('current')
+    if (row.isDefault) parts.push('default')
+    const choices = this.choicesByModel.get(modelIdentity(row.providerId, row.modelId)) ?? []
+    if (choices.length > 0) {
+      let widest = choices[0]!
+      for (const choice of choices) {
+        if (visibleWidth(choice.label) > visibleWidth(widest.label)) widest = choice
+      }
+      parts.push(effortTokenOf(widest.label, true))
+    }
+    return parts.length === 0 ? undefined : parts.join(' · ')
+  }
+
+  /** Whether `identity` is the model currently owning the inline effort focus. */
+  private isEffortFocused(identity: string): boolean {
+    return this.interactionMode.kind === 'effort' && this.interactionMode.modelKey === identity
+  }
+
+  /** Cycle one model's inline effort. Models without effort metadata are a
+   *  no-op (the key is still consumed). */
+  private adjustEffort(modelKey: string, step: 1 | -1): void {
+    const row = this.modelRows.get(modelKey)
     if (row === undefined) return
-    const choices = effortChoicesOf(row)
+    const choices = this.choicesByModel.get(modelKey) ?? []
     if (choices.length === 0) return
-    const current = this.effortChoices.get(item.value) ?? choices[0]!
-    const index = Math.max(0, choices.indexOf(current))
-    const next = choices[(index + step + choices.length) % choices.length]!
-    this.effortChoices.set(item.value, next)
+    const current = this.effortChoices.get(modelKey) ?? choices[0]!.value
+    const index = Math.max(0, choices.findIndex(choice => choice.value === current))
+    const next = choices[(index + step + choices.length) % choices.length]!.value
+    this.effortChoices.set(modelKey, next)
     // setItems preserves the selected row by VALUE, so the cursor stays put.
+    this.modelsList.setItems(this.buildItems())
+    this.deps.requestRender()
+  }
+
+  /** Focus the inline effort of a row, or commit directly when the model has
+   *  no effort choice at all. Failure/unknown rows are inert. */
+  private activateModel(value: string): void {
+    if (this.disposed || this.selecting) return
+    const row = this.modelRows.get(value)
+    if (row === undefined) return
+    if ((this.choicesByModel.get(value) ?? []).length === 0) {
+      this.submit(row, undefined)
+      return
+    }
+    this.interactionMode = { kind: 'effort', modelKey: value }
+    this.modelsList.setHint(EFFORT_MODE_HINT)
+    // The effort token lives in the item's badge, so the focus change needs a
+    // rebuild (setItems preserves the selected value and the query).
+    this.modelsList.setItems(this.buildItems())
+    this.deps.requestRender()
+  }
+
+  /** Leave the inline effort focus without closing or changing anything else
+   *  (Esc from effort focus, or a settlement that did not commit). */
+  private leaveEffortMode(): void {
+    if (this.interactionMode.kind === 'models') return
+    this.interactionMode = { kind: 'models' }
+    this.modelsList.setHint(MODEL_MODE_HINT)
     this.modelsList.setItems(this.buildItems())
     this.deps.requestRender()
   }
 
   handleInput(data: string): void {
     if (this.disposed || this.selecting) return
-    // `←`/`→` are the effort keys in EVERY state: consumed here, so they never
-    // double as a text-cursor move inside the search box (search cursor
-    // movement stays on the Input's Ctrl+B/Ctrl+F). Before hydration — and for
-    // a model without effort metadata — `adjustEffort` is a no-op, so the key
-    // is simply inert (plan §20).
-    if (matchesKey(data, 'right')) {
-      this.adjustEffort(1)
+    // A refresh removed the effort-bound model: consume the triggering key.
+    if (this.swallowNextKey) {
+      this.swallowNextKey = false
       return
     }
-    if (matchesKey(data, 'left')) {
-      this.adjustEffort(-1)
+    if (this.interactionMode.kind === 'effort') {
+      const modelKey = this.interactionMode.modelKey
+      // The bound model can vanish after a directory re-hydration: fall back to
+      // model mode instead of re-targeting whatever now sits at that position.
+      // The triggering key is CONSUMED: it must not double as a Model-mode
+      // Enter that immediately re-focuses (or commits) the replacement row.
+      if (!this.modelRows.has(modelKey)) {
+        this.leaveEffortMode()
+        return
+      }
+      // Inline effort focus OWNS the keys: ←/→ cycle, Enter commits, Esc backs
+      // out, and every other key (navigation, typing) is consumed so the mode
+      // stays unambiguous.
+      if (matchesKey(data, 'right')) {
+        this.adjustEffort(modelKey, 1)
+        return
+      }
+      if (matchesKey(data, 'left')) {
+        this.adjustEffort(modelKey, -1)
+        return
+      }
+      if (matchesKey(data, 'enter')) {
+        this.confirm(modelKey)
+        return
+      }
+      if (matchesKey(data, 'escape')) {
+        this.leaveEffortMode()
+        return
+      }
       return
     }
-    // Everything else (Esc close, typing, ↑↓/PageUp/PageDown/Enter) goes to the
-    // list; before hydration the empty list already makes navigation and Enter
-    // inert while the search box still accepts typing.
+    // Model mode: Enter either focuses the inline effort (reasoning model) or
+    // commits directly (no-effort model); plain ←/→ and typing stay the Search
+    // Input's, and ↑↓/PageUp/PageDown/Esc stay the list's.
+    if (matchesKey(data, 'enter')) {
+      const item = this.modelsList.getSelectedItem()
+      if (item !== null) this.activateModel(item.value)
+      return
+    }
     this.modelsList.handleInput(data)
   }
 
-  /** Confirm the highlighted row: submit the model together with its CURRENT
-   *  inline effort (or no effort for provider-default / no-effort models).
-   *  Failure rows are inert. */
+  /** Commit a model with its CURRENT inline effort (or no effort for
+   *  provider-default / no-effort models). Failure rows are inert. */
   private confirm(value: string): void {
     if (this.disposed || this.selecting) return
     const row = this.modelRows.get(value)
@@ -408,8 +585,10 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
         if (outcome === 'superseded') return
         this.selecting = false
         // A write that provably did not commit keeps the picker usable; the
-        // caller's notice explains the refusal.
+        // caller's notice explains the refusal. A refused COMMIT returns to
+        // model mode: the user re-confirms before another focus transition.
         if (outcome === 'rejected' || outcome === 'cancelled' || outcome === 'unsupported') {
+          this.leaveEffortMode()
           this.deps.requestRender()
           return
         }
@@ -418,6 +597,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       onError: () => {
         if (this.disposed) return
         this.selecting = false
+        this.leaveEffortMode()
         this.deps.requestRender()
       },
     })

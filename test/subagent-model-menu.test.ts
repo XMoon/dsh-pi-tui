@@ -9,6 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import {
   SubagentModelAllowlistPicker,
   allowlistRouteKey,
@@ -583,4 +584,15 @@ test('an allowlist with no configured providers says so', async () => {
   await settle(harness, 0)
   assert.ok(menu.render(60).map(strip).join('\n').includes('no providers configured'),
     `a zero-provider catalog must say so:\n${menu.render(60).map(strip).join('\n')}`)
+})
+
+test('the allowlist keeps the default TRAILING badge layout (not right-aligned)', async () => {
+  const harness = rig({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }] })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  await settle(harness, 0)
+  const lines = menu.render(60).map(strip)
+  const row = lines.find(line => line.includes('m1') && line.includes('allowed'))
+  assert.ok(row !== undefined, lines.join('\n'))
+  assert.ok(row.includes('m1  allowed'), `the badge must trail the label:\n${row}`)
+  assert.ok(visibleWidth(row) < 60, `the default layout must not pad to the row edge:\n${JSON.stringify(row)}`)
 })

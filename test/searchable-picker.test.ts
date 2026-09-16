@@ -891,3 +891,46 @@ test('groupKey falls back to group so existing consumers keep identical grouping
   const rendered = picker.render(40)
   assert.equal(rendered.filter(line => line.includes('G · 2')).length, 1, rendered.join('\n'))
 })
+
+test('a long no-match message is clipped to the render width', () => {
+  const picker = new SearchablePicker([], 5, testTheme, {}, {
+    noMatchText: '  Model catalog unavailable: a very long transport message that would otherwise overflow',
+  })
+  for (const width of [20, 40]) {
+    for (const line of picker.render(width)) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)} (${visibleWidth(line)})`)
+    }
+  }
+})
+
+test('badgeLayout defaults to inline (a long badge still squeezes the label)', () => {
+  const items = [{ value: 'a', label: 'Long Model Name', badge: 'current · effort ‹Extraordinarily Long›' }]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, {})
+  const lines = picker.render(20)
+  assert.ok(lines.some(line => line.includes('current')), lines.join('\n'))
+  assert.ok(!lines.some(line => line.includes('Long Model Name')), `inline lets the badge win:\n${lines.join('\n')}`)
+})
+
+test('badgeLayout wrap-when-needed moves an un-fitting badge onto a second inert row', () => {
+  const items = [
+    { value: 'a', label: 'GPT-5.6 Sol', badge: 'current · effort ‹High›', badgeLayoutText: 'current · effort ‹Extraordinarily Long›' },
+    { value: 'b', label: 'Plain' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { badgeLayout: 'wrap-when-needed' })
+  const narrow = picker.render(30)
+  assert.ok(narrow.some(line => line.includes('GPT-5.6 Sol')), `identity must survive:\n${narrow.join('\n')}`)
+  assert.ok(narrow.some(line => line.includes('current · effort ‹High›')), narrow.join('\n'))
+  assert.ok(!narrow.some(line => line.includes('GPT-5.6 Sol') && line.includes('current')),
+    `the badge must wrap:\n${narrow.join('\n')}`)
+  const wide = picker.render(80)
+  assert.ok(wide.some(line => line.includes('GPT-5.6 Sol') && line.includes('current · effort ‹High›')),
+    `wide must be single-line:\n${wide.join('\n')}`)
+})
+
+test('the default badge layout keeps the badge TRAILING the label (no right-align)', () => {
+  const items = [{ value: 'a', label: 'Alpha', badge: 'allowed' }]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, {})
+  const line = picker.render(60).find(candidate => candidate.includes('Alpha'))!
+  assert.ok(line.includes('Alpha  allowed'), `the badge must trail the label:\n${JSON.stringify(line)}`)
+  assert.ok(visibleWidth(line) < 60, `the default layout must not pad to the row edge:\n${JSON.stringify(line)}`)
+})

@@ -28,11 +28,16 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   opens at once with `Loading models…` and fills the SAME overlay in place once
   the directory read settles (no reopen; a query typed while loading is kept);
   provider is a group only, and one search covers provider/model names and ids.
-  `↑↓` moves the model, `←→` adjusts the highlighted model's reasoning effort
-  inline on its own row (`effort ‹high›`), and `Enter` submits the selection the
-  panel shows. Model descriptions and ids no longer expand, so the list height
-  stays constant, and a fullscreen switch keeps the query and effort. DSH
-  session and global-default model semantics are unchanged.
+  `↑↓` moves the model and `←`/`→` edit the search box cursor; on a
+  reasoning-capable model `Enter` focuses the inline effort on the same row
+  (`effort ‹High›` becomes `effort [ High ]`, where `←`/`→` pick the effort,
+  `Enter` commits the selection the panel shows and `Esc` returns to the model
+  list, with a second `Esc` closing), while a no-effort model commits directly.
+  The effort is shown by official name and the effort id is still what is
+  submitted. Model descriptions and ids no longer expand; when a row cannot fit
+  its name and status, it wraps the right-aligned status onto a second line so
+  the model name is never squeezed out. DSH session and global-default model
+  semantics are unchanged.
 - **`/settings` "Subagent allowed models" now uses the same searchable grouped
   list.** Provider is a group only, `Enter` toggles an allowed route directly,
   and one search covers provider/model names and ids; the official
