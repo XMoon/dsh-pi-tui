@@ -3827,6 +3827,7 @@ export class TuiApp {
       // restored dependent capturing overlay keeps keyboard ownership; the
       // editor owns it only when no capturing overlay remains.
       reconcileFocusSeat: () => this.publishFocusSeat(),
+      focusSeatOwner: () => this.focusSeatOwner(),
     })
 
     this.tui = new TuiMainScreen(resizeAware)
@@ -12633,6 +12634,18 @@ export class TuiApp {
       return
     }
     this.setFocusSeat('editor')
+  }
+
+  /**
+   * Restore PHYSICAL keyboard focus to the CURRENT editor-seat occupant (the
+   * overlay broker's dependent-restore seam). The fork's own fallback is the
+   * per-overlay `preFocus` snapshot, which a mid-life editor-seat handoff
+   * leaves pointing at the replaced editor component — so the live seat
+   * owner, not that snapshot, must own the keyboard.
+   */
+  private focusSeatOwner(): void {
+    if (this.disposed) return
+    this.activeScreen.setFocus(this.seatEditor().component)
   }
 
   /** Set the current focus seat and schedule one coalesced snapshot publish

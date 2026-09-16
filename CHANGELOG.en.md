@@ -148,7 +148,8 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   focus, and the Host shortcuts beneath it (e.g. the empty-editor `↓` that opens
   Quick Tasks) still fire; a capturing overlay that is `blur`red or temporarily
   hidden likewise hands the keyboard and focused seat back to the editor and
-  reclaims both on focus/show.
+  reclaims both on focus/show, and a dependent restore always focuses the
+  CURRENT editor seat rather than a replaced pre-mount editor.
 - **The Job detail overlay has its own bottom action hint.** A running job shows
   `S stop · Esc back`; once the job settles the Stop hint disappears and its key
   becomes a no-op; `Esc back` stays visible under a long body, a short terminal

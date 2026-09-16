@@ -495,3 +495,114 @@ test('a blurred capturing overlay stays blurred through an approval round-trip',
   a.close()
   app.stop()
 })
+
+test('a blurred dependent restore focuses the CURRENT seat owner after a mid-overlay handoff', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const registry = new EditorRegistry()
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+
+  const component = interactiveComponent({ text: () => 'advanced A' })
+  const a = app.showAdvancedInteractiveOverlay(component)
+  await vt.waitForRender()
+  a.blur()
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'editor')
+
+  const b = app.openPicker([{ value: 'p', label: 'provider option' }], () => {}, () => {})
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the picker owns the keyboard')
+
+  // Mid-B editor-seat handoff: E1 → plugin E2. mountSeatChild() must NOT steal
+  // focus from the capturing picker.
+  let pluginText = ''
+  registry.register({
+    id: 'plugin-editor',
+    priority: 1,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: 'plugin editor' }] },
+      getText: () => pluginText,
+      setText: (text: string) => { pluginText = text },
+      getCursor: () => 0,
+      setCursor: () => {},
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  app.requestRender()
+  await vt.waitForRender()
+  assert.equal(app.seatEditorForTest().id, 'plugin-editor')
+
+  b.close?.()
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'the blurred dependent stays blurred')
+  assert.equal(app.focusSeatForTest(), 'editor')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'focus must return to the CURRENT seat owner, not the stale pre-mount editor')
+  // The advanced editor controls drive the VISIBLE seat: they must reach E2.
+  app.advancedEditorControlsForTest().setEditorText('typed into current seat')
+  assert.equal(pluginText, 'typed into current seat', 'edits must reach the CURRENT seat editor, not the replaced one')
+  a.close()
+  app.stop()
+})
+
+test('a blurred dependent restore focuses the CURRENT host editor after a plugin unload', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const registry = new EditorRegistry()
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  registry.register({
+    id: 'plugin-editor',
+    priority: 1,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: 'plugin editor' }] },
+      getText: () => '',
+      setText: () => {},
+      getCursor: () => 0,
+      setCursor: () => {},
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  app.requestRender()
+  await vt.waitForRender()
+  assert.equal(app.seatEditorForTest().id, 'plugin-editor')
+
+  const component = interactiveComponent({ text: () => 'advanced A' })
+  const a = app.showAdvancedInteractiveOverlay(component)
+  await vt.waitForRender()
+  a.blur()
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'editor')
+
+  const b = app.openPicker([{ value: 'p', label: 'provider option' }], () => {}, () => {})
+  await vt.waitForRender()
+  // Mid-B the plugin editor unloads: the seat falls back to the host editor.
+  registry.dispose('plugin-editor')
+  app.reconcileEditorNow()
+  app.requestRender()
+  await vt.waitForRender()
+  assert.equal(app.seatEditorForTest().id, 'host')
+
+  b.close?.()
+  await vt.waitForRender()
+  assert.equal(a.focused, false)
+  assert.equal(app.focusSeatForTest(), 'editor')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'focus must return to the CURRENT host editor')
+  vt.sendInput('q')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'q', 'typing must reach the CURRENT host editor')
+  a.close()
+  app.stop()
+})
