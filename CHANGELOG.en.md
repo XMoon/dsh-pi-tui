@@ -144,15 +144,18 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   directly (replacing the Task Center and keeping its own `Esc` semantics). After
   an overlay close, a restored **capturing** overlay underneath always regains
   keyboard focus and the focused seat, so "overlay visible but the editor still
-  owns focus" no longer happens; a nonCapturing notice overlay still never takes
-  focus, and the Host shortcuts beneath it (e.g. the empty-editor `↓` that opens
-  Quick Tasks) still fire; a capturing overlay that is `blur`red or temporarily
+  owns focus" no longer happens; a nonCapturing notice overlay does not
+  automatically take focus or suppress its siblings, and the Host shortcuts
+  beneath it (e.g. the empty-editor `↓` that opens Quick Tasks) still fire, but
+  an explicit `focus()` request from a focus-capable lease can still make it the
+  physical keyboard owner; a capturing overlay that is `blur`red or temporarily
   hidden likewise hands the keyboard and focused seat back to the editor and
-  reclaims both on focus/show (the intent survives a fullscreen swap), and a
-  dependent restore always focuses the CURRENT editor seat rather than a
-  replaced pre-mount editor; a fullscreen swap replays every remountable overlay
-  in its original mount order, so the hierarchy survives (including under a Save
-  Location prompt) and mixed overlay kinds are never reversed or wrongly hidden.
+  reclaims both on focus/show, and a dependent restore always focuses the CURRENT
+  editor seat rather than a replaced pre-mount editor; a fullscreen swap keeps
+  the CURRENT logical hierarchy, visibility intent, focus intent and front order
+  (only the physical handles are rebound), so the `blur` intent, an explicit
+  hide, the hierarchy under a Save Location prompt and mixed overlay kinds always
+  survive the swap.
 - **The Job detail overlay has its own bottom action hint.** A running job shows
   `S stop · Esc back`; once the job settles the Stop hint disappears and its key
   becomes a no-op; `Esc back` stays visible under a long body, a short terminal

@@ -1,26 +1,47 @@
 /**
- * The OverlayBroker (M8, plan §13): the overlay stacking graph extracted
- * from TuiApp. It owns the RULES — which overlays are hidden beneath a
- * newer capturing overlay, how the question-flow suspension set interacts
- * with the modal stack, reverse-restore order, and per-handle close — while
- * the TuiApp keeps the physical screen mount/unmount (the broker calls the
- * screen through a narrow seam, so rendering stays host-owned).
+ * The OverlayBroker (M8, plan §13): the managed-overlay model extracted from
+ * TuiApp. It owns the LOGICAL authority for every managed overlay — identity,
+ * suppression forest, explicit visibility intent, restore-focus intent and the
+ * logical front order — while the host owns the physical screen mount. The
+ * broker calls the screen through a narrow seam, so rendering stays
+ * host-owned.
  *
- * Contract (plan §13.1):
- * - the FIRST extraction is behavior-identical: the existing headless
- *   overlay tests (approval-over-settings modal hiding, question
- *   suspension graph, fullscreen migration) must pass unchanged;
- * - a capturing overlay hides every other visible capturing overlay and
- *   records them as its dependents (restored in reverse arrival order on
- *   close);
- * - while a question owns the editor seat, a NEW overlay joins the
- *   question's suspension set instead of appearing on top; the question's
- *   directly suspended handles become the new overlay's dependents; the
- *   overlay itself becomes the question's frontmost suspended handle;
- * - close is question-aware: a handle leaving the suspension set keeps its
- *   still-mounted dependents hidden and re-owns them directly under the
- *   question (they must not flash back while the question is up);
- * - close/fullscreen teardown is idempotent (a disposed handle is inert).
+ * MODEL (2026-09 revision). A raw pi-tui handle is only a PHYSICAL projection
+ * of a stable logical node:
+ *
+ * - one {@link ManagedOverlayNode} per managed overlay, returned to the host /
+ *   lease as a STABLE handle whose methods read the node's current raw binding
+ *   (so a fullscreen screen swap can replace the raw handle without the public
+ *   lease noticing);
+ * - a node has AT MOST ONE suppressor: another managed node (`parent`), the
+ *   active Question suspension, the active Save Location suspension, or none
+ *   (a logical root);
+ * - `explicitHidden` is the caller's temporary-hide intent and is independent
+ *   of suppression (I3): closing a suppressor must never reveal a node the
+ *   caller explicitly hid;
+ * - `resumeFocus` is the node's OWN keyboard intent — re-applied when the node
+ *   is revealed — never a snapshot frozen on a dependency edge; `focus()` /
+ *   `blur()` / an explicit `show()` update it live;
+ * - `zOrder` is the CURRENT logical front order (bumped only when the fork
+ *   actually promotes the node's visual order: mount, capturing show, focus),
+ *   never the original creation order;
+ * - `nonCapturing` is a MOUNT POLICY (no auto-focus, no modal suppression of
+ *   siblings). It is NOT a keyboard-capability fact: an explicit `focus()`
+ *   from a focus-capable lease can make a nonCapturing node the physical
+ *   keyboard owner.
+ *
+ * The two facts the host derives are therefore distinct:
+ * - {@link hasVisibleModalOverlay} — a visible auto-capturing overlay exists
+ *   (pointer / background-modal suppression);
+ * - {@link hasFocusedOverlay} — a managed node currently holds PHYSICAL
+ *   keyboard focus (keyboard routing, Host shortcut ladder, focused seat,
+ *   editor-seat handoff, task affordance).
+ *
+ * A fullscreen screen swap never rebuilds the graph: {@link detachPhysical}
+ * drops the raw bindings, the host re-creates them in {@link remountOrder},
+ * and {@link rebind} attaches each fresh projection; logical topology,
+ * visibility intent, focus intent and z-order all survive.
+ *
  * @module @xmoon76/dsh-pi-tui/overlay-broker
  */
 
@@ -33,9 +54,7 @@ export interface QuestionSuspension {
 }
 
 /** The broker's view of the active Save Location prompt suspension (owned
- * by TuiApp). Same shape as the question suspension: a new overlay mounting
- * while the prompt is active joins the prompt's suspension set instead of
- * appearing on top. */
+ * by TuiApp). Same shape as the question suspension. */
 export interface SaveLocationSuspension {
   readonly suspendedOverlays: Set<OverlayHandle>
 }
@@ -47,47 +66,58 @@ export interface OverlayBrokerDeps {
   /** The currently active Save Location prompt, or undefined. */
   saveLocation?: () => SaveLocationSuspension | undefined
   /** Report the focused seat (the host's setFocusSeat — broker reports
-   * 'overlay' on capturing mounts). Mount-time coarse signal only; the
-   * CLOSE path re-derives the final seat through {@link reconcileFocusSeat}
-   * because a restored dependent capturing overlay — not the editor — may
-   * own the seat. */
+   * 'overlay' on capturing mounts). Coarse mount-time signal; the host
+   * re-derives the final seat from physical focus. */
   setFocusSeat?: (seat: 'editor' | 'overlay' | 'editor-panel' | 'none') => void
-  /** Re-derive the host's final focused seat from the LIVE surface after a
-   * tracked close (the host's publishFocusSeat). The broker must never
-   * assume the close returns the seat to the editor: closing overlay B can
-   * restore dependent overlay A, which owns physical focus. */
+  /** Re-derive the host's final focused seat from the LIVE surface. */
   reconcileFocusSeat?: () => void
-  /** Restore PHYSICAL keyboard focus to the host's CURRENT seat owner. Used
-   * when a closed capturing overlay reveals dependents but NONE of them held
-   * the keyboard: the broker must not fall back to the fork's per-overlay
-   * `preFocus` snapshot, which a mid-life editor-seat handoff leaves pointing
-   * at the replaced editor component. */
+  /** Restore PHYSICAL keyboard focus to the host's CURRENT seat owner (used
+   * when no managed overlay should own the keyboard; never the fork's stale
+   * per-overlay `preFocus` snapshot). */
   focusSeatOwner?: () => void
 }
 
-/** One overlay hidden beneath a newer capturing overlay: the handle plus
- * the KEYBOARD intent it had when it was hidden. Restoring visibility must
- * not silently restore focus — pi-tui re-focuses a capturing overlay on
- * setHidden(false), which would undo an explicit `blur()`. */
-interface HiddenDependent {
-  readonly handle: OverlayHandle
-  readonly wasFocused: boolean
+/** A stable logical overlay node. */
+interface ManagedOverlayNode {
+  readonly id: number
+  /** The current physical projection (undefined while detached for a screen
+   * swap, or after close). */
+  raw: OverlayHandle | undefined
+  /** The stable handle returned to the host / lease. */
+  wrapper: OverlayHandle
+  readonly nonCapturing: boolean
+  readonly remountable: boolean
+  /** The overlay currently suppressing this node, if any. */
+  parent: ManagedOverlayNode | undefined
+  readonly children: ManagedOverlayNode[]
+  /** Caller temporary-hide intent (independent of suppression). */
+  explicitHidden: boolean
+  /** Whether this node should own the keyboard when revealed. */
+  resumeFocus: boolean
+  /** Current logical front order (higher = nearer the front). */
+  zOrder: number
+  closed: boolean
 }
 
-/**
- * The overlay stacking graph (M8). One instance per TuiApp; the host
- * delegates show/close through it. The broker NEVER renders — it only
- * tracks handles and their modal relationships.
- */
+/** A node suppressed by the new mount, with its pre-mount focus state. */
+interface PreparedSuppression {
+  readonly node: ManagedOverlayNode
+  readonly resumeFocus: boolean
+}
+
+/** The two-phase mount token returned by {@link OverlayBroker.prepareMount}. */
+export interface PreparedMount {
+  readonly node: ManagedOverlayNode
+  readonly suppress: readonly PreparedSuppression[]
+}
+
 export class OverlayBroker {
-  private readonly tracked = new Set<OverlayHandle>()
-  /** The CAPTURING subset of {@link tracked}: the only handles that can own
-   * the keyboard. A nonCapturing notice never takes focus and must not fence
-   * an editor-seat handoff. */
-  private readonly capturing = new Set<OverlayHandle>()
-  /** Capturing overlay → the overlays it hid (restored on its close),
-   * keeping each one's focus intent. */
-  private readonly dependents = new Map<OverlayHandle, HiddenDependent[]>()
+  private readonly nodes = new Map<OverlayHandle, ManagedOverlayNode>()
+  private readonly roots = new Set<ManagedOverlayNode>()
+  /** The node that owned the keyboard before a screen swap. */
+  private swapFocusOwner: ManagedOverlayNode | undefined
+  private zSequence = 0
+  private idSequence = 0
   private readonly deps: OverlayBrokerDeps
 
   constructor(deps: OverlayBrokerDeps = {}) {
@@ -95,329 +125,389 @@ export class OverlayBroker {
   }
 
   /**
-   * Register a NEWLY MOUNTED overlay handle and apply the stacking rules.
-   * The host mounts the overlay on the active screen FIRST, then calls
-   * this with the handle; the broker returns a question-aware close
-   * wrapper.
-   * @param handle - the screen-mounted handle.
-   * @param options - the mount options (nonCapturing skips the modal
-   *   stacking; previouslyFocused is the host's pre-mount keyboard-owner set,
-   *   so a hidden dependent's focus intent survives the restore).
-   * @returns the tracked close wrapper.
+   * Phase 1 of a mount: allocate the logical node and snapshot the CURRENT
+   * visible roots that a capturing overlay will suppress. The focus snapshot
+   * MUST happen here — the fork focuses the new overlay the moment it is
+   * mounted, so a post-mount read would always see the dependents unfocused.
    */
-  track(
-    handle: OverlayHandle,
-    options: { nonCapturing?: boolean; previouslyFocused?: ReadonlySet<OverlayHandle> } = {},
-  ): OverlayHandle {
-    this.tracked.add(handle)
-    if (options.nonCapturing !== true) {
-      this.capturing.add(handle)
-      this.deps.setFocusSeat?.('overlay')
+  prepareMount(options: { nonCapturing?: boolean; remountable?: boolean } = {}): PreparedMount {
+    const nonCapturing = options.nonCapturing === true
+    const suppress: PreparedSuppression[] = []
+    if (!nonCapturing) {
+      for (const node of this.roots) {
+        if (node.closed || !this.isVisible(node) || this.isSuppressed(node)) continue
+        suppress.push({ node, resumeFocus: node.raw?.isFocused() === true })
+      }
     }
+    const node: ManagedOverlayNode = {
+      id: ++this.idSequence,
+      raw: undefined,
+      wrapper: undefined as unknown as OverlayHandle,
+      nonCapturing,
+      remountable: options.remountable === true,
+      parent: undefined,
+      children: [],
+      explicitHidden: false,
+      resumeFocus: false,
+      zOrder: 0,
+      closed: false,
+    }
+    node.wrapper = this.wrap(node)
+    return { node, suppress }
+  }
+
+  /**
+   * Phase 2 of a mount: bind the freshly mounted raw handle and apply the
+   * stacking rules. Called AFTER the host mounts the component on the active
+   * screen (the fork has already focused it when capturing).
+   */
+  commitMount(prepared: PreparedMount, raw: OverlayHandle): OverlayHandle {
+    const node = prepared.node
+    node.raw = raw
+    node.zOrder = ++this.zSequence
+    this.nodes.set(node.wrapper, node)
+    // A logical modal (question / save location) owns the seat: the new
+    // overlay joins the modal's DIRECT suspension set instead of appearing on
+    // top. Existing suspension topology is untouched.
+    const suspension = this.activeSuspension()
+    if (suspension !== undefined) {
+      // A capturing overlay suspended under a modal is the modal's frontmost
+      // handle and reclaims the keyboard when the modal settles; a
+      // nonCapturing notice never does.
+      node.resumeFocus = !node.nonCapturing
+      raw.setHidden(true)
+      suspension.suspendedOverlays.add(node.wrapper)
+      return node.wrapper
+    }
+    if (node.nonCapturing) {
+      // Mount policy: no auto-focus and no suppression of siblings.
+      this.roots.add(node)
+      return node.wrapper
+    }
+    // Capturing: adopt the prepared VISIBLE ROOTS as this node's children
+    // (only roots — never every visible handle, which would allow a node to
+    // acquire a second suppressor).
+    for (const entry of prepared.suppress) {
+      const child = entry.node
+      this.roots.delete(child)
+      child.parent = node
+      child.resumeFocus = entry.resumeFocus
+      child.raw?.setHidden(true)
+      node.children.push(child)
+    }
+    this.roots.add(node)
+    this.deps.setFocusSeat?.('overlay')
+    return node.wrapper
+  }
+
+  /**
+   * Temporarily hide a node (the public lease's `hide()`): records the
+   * caller's explicit intent and hides the physical projection. Suppression
+   * topology is untouched, so closing a suppressor later must not reveal it.
+   */
+  setExplicitHidden(handle: OverlayHandle, hidden: boolean): void {
+    const node = this.nodes.get(handle)
+    if (node === undefined || node.closed) return
+    if (hidden) {
+      node.explicitHidden = true
+      node.raw?.setHidden(true)
+      this.deps.reconcileFocusSeat?.()
+      return
+    }
+    // An explicit show is a SUPPRESSION OVERRIDE (I2): detach from the current
+    // suppressor before revealing, so the graph stays a forest.
+    this.detach(node)
+    node.explicitHidden = false
+    node.raw?.setHidden(false)
+    node.resumeFocus = node.raw?.isFocused() === true
+    if (node.raw?.isFocused() === true) node.zOrder = ++this.zSequence
+    this.deps.reconcileFocusSeat?.()
+  }
+
+  /** Explicit focus request (including for a nonCapturing node): detaches any
+   * suppressor, reveals and promotes the node to the keyboard owner. */
+  focus(handle: OverlayHandle): void {
+    const node = this.nodes.get(handle)
+    if (node === undefined || node.closed) return
+    this.detach(node)
+    node.explicitHidden = false
+    node.raw?.setHidden(false)
+    node.raw?.focus()
+    node.resumeFocus = true
+    node.zOrder = ++this.zSequence
+    this.deps.reconcileFocusSeat?.()
+  }
+
+  /** Release focus (the public `blur()`): the intent is stored on the node,
+   * so it survives a suppression / fullscreen round-trip. */
+  unfocus(handle: OverlayHandle, options?: Parameters<OverlayHandle['unfocus']>[0]): void {
+    const node = this.nodes.get(handle)
+    if (node === undefined || node.closed) return
+    node.resumeFocus = false
+    node.raw?.unfocus(options)
+    this.deps.reconcileFocusSeat?.()
+  }
+
+  /** Close a node for good. The close contract is LOGICAL (ownership), never
+   * current visibility or capture policy. */
+  close(handle: OverlayHandle): void {
+    const node = this.nodes.get(handle)
+    if (node === undefined || node.closed) return
+    node.closed = true
+    this.nodes.delete(handle)
+    this.roots.delete(node)
+    const parent = node.parent
+    const children = [...node.children]
+    node.children.length = 0
+    node.parent = undefined
+    if (parent !== undefined) {
+      const index = parent.children.indexOf(node)
+      if (index !== -1) parent.children.splice(index, 1)
+    }
+    // The closing node leaves the modal suspensions it may belong to.
+    this.deps.question?.()?.suspendedOverlays.delete(handle)
+    this.deps.saveLocation?.()?.suspendedOverlays.delete(handle)
+    // Re-home the children under the SINGLE remaining suppressor:
+    // - an overlay parent (stay hidden, reparented);
+    // - the active modal (join its direct suspension, stay hidden);
+    // - otherwise they become logical roots (revealed below).
+    const suspension = this.activeSuspension()
+    for (const child of children) {
+      child.parent = undefined
+      if (parent !== undefined) {
+        parent.children.push(child)
+        child.parent = parent
+        continue
+      }
+      if (suspension !== undefined) {
+        suspension.suspendedOverlays.add(child.wrapper)
+        continue
+      }
+      this.roots.add(child)
+    }
+    node.raw?.hide()
+    node.raw = undefined
+    const revealed = children.filter(child => child.parent === undefined && !this.isSuppressed(child))
+    if (revealed.length > 0) this.reveal(revealed)
+    else if (this.currentlyFocused() === undefined) this.deps.focusSeatOwner?.()
+    this.deps.reconcileFocusSeat?.()
+  }
+
+  /** Directly suspend every visible logical ROOT under the given modal (the
+   * Question / Save Location primitive). Child topology is never copied. */
+  suspendVisibleRoots(suspension: QuestionSuspension | SaveLocationSuspension): void {
+    for (const node of [...this.roots]) {
+      if (node.closed || !this.isVisible(node) || node.explicitHidden) continue
+      node.resumeFocus = node.raw?.isFocused() === true
+      node.raw?.setHidden(true)
+      suspension.suspendedOverlays.add(node.wrapper)
+    }
+    this.deps.reconcileFocusSeat?.()
+  }
+
+  /** Restore the modal's directly suspended roots (Question / Save Location
+   * settle). Each root keeps its own focus intent; the previously focused one
+   * (frontmost) reclaims the keyboard, otherwise the current seat owner does. */
+  resumeSuspendedRoots(suspension: QuestionSuspension | SaveLocationSuspension): void {
+    const restored: ManagedOverlayNode[] = []
+    for (const handle of [...suspension.suspendedOverlays]) {
+      const node = this.nodes.get(handle)
+      if (node === undefined || node.closed) continue
+      restored.push(node)
+    }
+    suspension.suspendedOverlays.clear()
+    this.reveal(restored)
+  }
+
+  /** Whether a visible auto-capturing (modal) overlay exists — the POINTER /
+   * background-modal fact, not the keyboard fact. */
+  hasVisibleModalOverlay(): boolean {
+    for (const node of this.nodes.values()) {
+      if (!node.nonCapturing && this.isVisible(node) && !node.explicitHidden) return true
+    }
+    return false
+  }
+
+  /** Whether a managed overlay currently holds PHYSICAL keyboard focus — the
+   * keyboard-ownership fact (any policy). */
+  hasFocusedOverlay(): boolean {
+    return this.currentlyFocused() !== undefined
+  }
+
+  /**
+   * Prepare for a screen swap. REMOUNTABLE nodes keep their whole logical
+   * state (topology, visibility intent, focus intent, z-order, modal
+   * suspensions) and merely drop their raw binding — the host re-creates it.
+   * A non-remountable node cannot survive the swap, so it is closed logically
+   * (its raw handle dies with the old screen).
+   */
+  detachPhysical(): void {
+    this.swapFocusOwner = this.currentlyFocused()
+    for (const node of [...this.nodes.values()]) {
+      if (node.remountable) {
+        // Remove the old projection from the OLD screen without disposing the
+        // retained component (remountable overlays opt out of disposeOnHide);
+        // the host re-creates it after the swap.
+        node.raw?.hide()
+        node.raw = undefined
+        continue
+      }
+      this.close(node.wrapper)
+    }
+  }
+
+  /** The remountable stable handles, back → front by CURRENT logical order. */
+  remountOrder(): OverlayHandle[] {
+    return [...this.nodes.entries()]
+      .filter(([, node]) => node.remountable && !node.closed)
+      .sort((a, b) => a[1].zOrder - b[1].zOrder)
+      .map(([handle]) => handle)
+  }
+
+  /** Attach a fresh physical projection to an existing logical node. */
+  rebind(handle: OverlayHandle, raw: OverlayHandle): void {
+    const node = this.nodes.get(handle)
+    if (node === undefined) {
+      // A lease that closed during the swap: the fresh projection is orphaned.
+      raw.hide()
+      return
+    }
+    node.raw = raw
+    if (this.isSuppressed(node) || node.explicitHidden) raw.setHidden(true)
+  }
+
+  /** Re-apply the pre-swap keyboard owner (or the current seat owner) after
+   * every rebind. */
+  restoreFocusAfterSwap(): void {
+    const owner = this.swapFocusOwner
+    this.swapFocusOwner = undefined
+    if (owner !== undefined && !owner.closed && this.isVisible(owner) && owner.raw !== undefined) {
+      owner.raw.focus()
+    } else {
+      this.deps.focusSeatOwner?.()
+    }
+    this.deps.reconcileFocusSeat?.()
+  }
+
+  /** Physically unmount every node (final surface teardown) without restoring
+   * anything, then forget the graph. Idempotent. */
+  disposeAll(): void {
+    for (const node of this.nodes.values()) node.raw?.hide()
+    this.nodes.clear()
+    this.roots.clear()
+  }
+
+  /** Every stable managed handle (test / diagnostics). */
+  handles(): ReadonlySet<OverlayHandle> {
+    return new Set(this.nodes.keys())
+  }
+
+  /** The current graph sizes (headless assertions). `dependents` is the number
+   * of suppression EDGES; `suspended` the number of modal-suspended roots. */
+  graphState(): { handles: number; dependents: number; suspended: number } {
+    let dependents = 0
+    for (const node of this.nodes.values()) dependents += node.children.length
     const question = this.deps.question?.()
-    if (question !== undefined) {
-      // Sweep: any tracked overlay still visible joins the suspension.
-      for (const other of this.tracked) {
-        if (other !== handle && !other.isHidden()) {
-          other.setHidden(true)
-          question.suspendedOverlays.add(other)
-        }
-      }
-      if (options.nonCapturing !== true) {
-        // The new capturing overlay takes the modal front: the question's
-        // directly suspended handles become its dependents (kept hidden).
-        // Their focus intent comes from the broker's OWN capturing fact —
-        // the modal suspends every visible overlay, nonCapturing notices
-        // included, and a nonCapturing entry must never be selected as the
-        // restored keyboard owner (its focus() would set physical focus
-        // while the derived seat stays 'editor').
-        const dependents: HiddenDependent[] = []
-        for (const other of question.suspendedOverlays) {
-          dependents.push({ handle: other, wasFocused: this.capturing.has(other) })
-        }
-        if (dependents.length > 0) {
-          for (const dependent of dependents) question.suspendedOverlays.delete(dependent.handle)
-          this.dependents.set(handle, dependents)
-        }
-      }
-      handle.setHidden(true)
-      question.suspendedOverlays.add(handle)
-      return this.wrapClose(handle)
-    }
-    const saveLocation = this.deps.saveLocation?.()
-    if (saveLocation !== undefined) {
-      // A new overlay mounting while the Save Location prompt is active is
-      // SUSPENDED (hidden, state intact) until the prompt settles — the
-      // same stacking rule as the question flow. The prompt's settle
-      // restores it (the broker's isTracked guard skips dead handles after
-      // a fullscreen teardown). The prompt is never cancelled by a mount:
-      // it survives fullscreen/programmatic screen swaps. An EXPLICIT
-      // setHidden(false)/show() on a suspended handle is an ownership
-      // override (the caller takes responsibility for the modal
-      // consistency) — the same forwarding contract as the question
-      // branch.
-      if (options.nonCapturing !== true) {
-        // Symmetric with the question branch: a CAPTURING overlay takes the
-        // prompt's directly suspended handles as its OWN dependents (kept
-        // hidden), so the graph survives a fullscreen remount (which clears
-        // the broker graph and re-mounts every lease). Their focus intent is
-        // the broker's capturing fact, never a blanket true: the modal
-        // suspends nonCapturing notices too, and those must not be restored
-        // as the keyboard owner.
-        const dependents: HiddenDependent[] = []
-        for (const other of saveLocation.suspendedOverlays) {
-          dependents.push({ handle: other, wasFocused: this.capturing.has(other) })
-        }
-        if (dependents.length > 0) {
-          for (const dependent of dependents) saveLocation.suspendedOverlays.delete(dependent.handle)
-          this.dependents.set(handle, dependents)
-        }
-      }
-      handle.setHidden(true)
-      saveLocation.suspendedOverlays.add(handle)
-      return this.wrapClose(handle)
-    }
-    if (options.nonCapturing !== true) {
-      const hidden: HiddenDependent[] = []
-      for (const other of this.tracked) {
-        if (other !== handle && !other.isHidden()) {
-          // Capture the keyboard intent from the PRE-MOUNT set: the fork
-          // already focused the new overlay, so isFocused() here is always
-          // false for the dependents. Absent the set (direct broker use),
-          // preserve the historical restore-and-focus behavior.
-          const wasFocused = options.previouslyFocused === undefined ? true : options.previouslyFocused.has(other)
-          other.setHidden(true)
-          hidden.push({ handle: other, wasFocused })
-        }
-      }
-      if (hidden.length > 0) this.dependents.set(handle, hidden)
-    }
-    return this.wrapClose(handle)
+    const save = this.deps.saveLocation?.()
+    const suspended = (question?.suspendedOverlays.size ?? 0) + (save?.suspendedOverlays.size ?? 0)
+    return { handles: this.nodes.size, dependents, suspended }
   }
 
-  /**
-   * Update the recorded keyboard intent of a handle that is currently HIDDEN
-   * as another overlay's dependent. A lease's later focus()/blur() (or an
-   * explicit show()) must be reflected when that owner restores it — the
-   * intent recorded at hide time is a snapshot and would otherwise go stale.
-   */
-  private setRestoreIntent(handle: OverlayHandle, focused: boolean): void {
-    for (const [owner, dependents] of this.dependents) {
-      const index = dependents.findIndex(dependent => dependent.handle === handle)
-      if (index === -1) continue
-      if (dependents[index]!.wasFocused === focused) continue
-      const next = [...dependents]
-      next[index] = { handle, wasFocused: focused }
-      this.dependents.set(owner, next)
+  /** Assert the forest invariants (tests only): one parent per node, no
+   * cycles, no closed node in the graph. */
+  assertForest(): void {
+    const seen = new Set<number>()
+    for (const node of this.nodes.values()) {
+      if (node.closed) throw new Error(`closed node ${node.id} is still in the graph`)
+      if (seen.has(node.id)) throw new Error(`node ${node.id} has multiple parents`)
+      seen.add(node.id)
+      let current: ManagedOverlayNode | undefined = node
+      const chain = new Set<number>()
+      while (current !== undefined) {
+        if (chain.has(current.id)) throw new Error(`cycle at node ${current.id}`)
+        chain.add(current.id)
+        current = current.parent
+      }
     }
   }
 
-  /**
-   * The tracked wrapper for one handle. An EXPLICIT proxy (round-1 finding
-   * 3 — never a spread: the raw handle's methods are closures over private
-   * state and may gain non-enumerable members; the wrapper must forward
-   * every API surface verbatim). The differences from the raw handle:
-   * hide() becomes the tracked close (question-aware, graph-cleaning); every
-   * focus-changing operation (hide/setHidden/focus/unfocus) re-derives the
-   * host's focused seat; and focus()/unfocus()/show() also refresh the
-   * handle's LIVE restore intent while it is hidden beneath another overlay.
-   * Internal caller-free restores use the RAW handles and reconcile once at
-   * their own boundary.
-   */
-  private wrapClose(handle: OverlayHandle): OverlayHandle {
+  // ── internals ────────────────────────────────────────────────────────────
+
+  /** The stable handle for a node: every method reads the node's CURRENT raw
+   * binding, so a fullscreen rebind is invisible to the caller. */
+  private wrap(node: ManagedOverlayNode): OverlayHandle {
     const broker = this
     return {
-      hide: () => broker.closeForHost(handle),
-      setHidden: (hidden: boolean) => {
-        handle.setHidden(hidden)
-        // show() actively focuses a capturing overlay: record the intent.
-        if (!hidden) broker.setRestoreIntent(handle, true)
-        broker.deps.reconcileFocusSeat?.()
-      },
-      isHidden: () => handle.isHidden(),
-      focus: () => {
-        handle.focus()
-        broker.setRestoreIntent(handle, true)
-        broker.deps.reconcileFocusSeat?.()
-      },
-      unfocus: (options?: Parameters<OverlayHandle['unfocus']>[0]) => {
-        handle.unfocus(options)
-        broker.setRestoreIntent(handle, false)
-        broker.deps.reconcileFocusSeat?.()
-      },
-      isFocused: () => handle.isFocused(),
-      getBounds: () => handle.getBounds(),
+      hide: () => broker.close(node.wrapper),
+      setHidden: (hidden: boolean) => broker.setExplicitHidden(node.wrapper, hidden),
+      isHidden: () => node.raw === undefined || node.raw.isHidden(),
+      focus: () => broker.focus(node.wrapper),
+      unfocus: (options?: Parameters<OverlayHandle['unfocus']>[0]) => broker.unfocus(node.wrapper, options),
+      isFocused: () => node.raw?.isFocused() === true,
+      getBounds: () => node.raw?.getBounds(),
     }
   }
 
-  /**
-   * Question-aware close for one tracked handle. Without an active
-   * question this matches the historical behavior: the handle's dependents
-   * are unhidden, the graph is cleaned, the overlay is removed. While a
-   * question owns the seat, the handle leaves the suspension set, every
-   * dependency set drops it, and its still-mounted dependents remain
-   * hidden and become DIRECTLY owned by the question.
-   */
-  closeForHost(handle: OverlayHandle): void {
+  private activeSuspension(): QuestionSuspension | SaveLocationSuspension | undefined {
+    return this.deps.question?.() ?? this.deps.saveLocation?.()
+  }
+
+  private isSuppressed(node: ManagedOverlayNode): boolean {
+    if (node.parent !== undefined) return true
     const question = this.deps.question?.()
-    if (question !== undefined) question.suspendedOverlays.delete(handle)
-    const saveLocation = this.deps.saveLocation?.()
-    if (saveLocation !== undefined) saveLocation.suspendedOverlays.delete(handle)
-    // The overlay that currently hides this one (if any): a handle closes
-    // either as the VISIBLE front overlay or as a hidden dependent beneath a
-    // still-visible overlay. Find it BEFORE the graph cleanup.
-    let upperOwner: OverlayHandle | undefined
-    for (const [owner, dependents] of this.dependents) {
-      if (dependents.some(dependent => dependent.handle === handle)) {
-        upperOwner = owner
-        break
-      }
+    if (question?.suspendedOverlays.has(node.wrapper) === true) return true
+    const save = this.deps.saveLocation?.()
+    return save?.suspendedOverlays.has(node.wrapper) === true
+  }
+
+  private isVisible(node: ManagedOverlayNode): boolean {
+    return !node.closed && node.raw !== undefined && !node.raw.isHidden()
+  }
+
+  private currentlyFocused(): ManagedOverlayNode | undefined {
+    for (const node of this.nodes.values()) {
+      if (!node.closed && node.raw?.isFocused() === true) return node
     }
-    for (const [owner, dependents] of this.dependents) {
-      if (dependents.some(dependent => dependent.handle === handle)) {
-        this.dependents.set(owner, dependents.filter(dependent => dependent.handle !== handle))
-      }
+    return undefined
+  }
+
+  /** Remove a node from its current suppressor without revealing it: an
+   * explicit show()/focus() takes ownership away from the suppressor so the
+   * graph can never hold two owners for one node (I1/I2). */
+  private detach(node: ManagedOverlayNode): void {
+    if (node.parent !== undefined) {
+      const index = node.parent.children.indexOf(node)
+      if (index !== -1) node.parent.children.splice(index, 1)
+      node.parent = undefined
+      this.roots.add(node)
     }
-    const owned = this.dependents.get(handle)
-    if (owned !== undefined) {
-      this.dependents.delete(handle)
-      // GRAPH OWNERSHIP OUTRANKS MODAL SUSPENSION: a handle closed while it
-      // was hidden beneath a still-visible overlay reparents its own
-      // dependents to that overlay, even while a question/save-location
-      // suspension is active. Handing them to the modal would FLATTEN the
-      // stack (the modal's settle reveals every suspended handle at once,
-      // so a branch that belonged under the front overlay would pop up
-      // beside it and steal its focus). Only a ROOT close lets the modal
-      // adopt the released children.
-      if (upperOwner !== undefined) {
-        const upperDependents = this.dependents.get(upperOwner) ?? []
-        this.dependents.set(upperOwner, [...upperDependents, ...owned])
-      } else if (question !== undefined) {
-        for (const dependent of owned) question.suspendedOverlays.add(dependent.handle)
-      } else if (saveLocation !== undefined) {
-        // The Save Location prompt owns the seat: the closed handle's
-        // still-mounted dependents stay hidden and become DIRECTLY owned
-        // by the prompt (they must not flash back over it — the same rule
-        // as the question branch).
-        for (const dependent of owned) saveLocation.suspendedOverlays.add(dependent.handle)
-      }
+    this.deps.question?.()?.suspendedOverlays.delete(node.wrapper)
+    this.deps.saveLocation?.()?.suspendedOverlays.delete(node.wrapper)
+  }
+
+  /** Reveal a set of nodes (back → front), re-applying each node's saved focus
+   * intent: the frontmost node that asked for focus reclaims the keyboard;
+   * otherwise the CURRENT seat owner does. */
+  private reveal(nodes: readonly ManagedOverlayNode[]): void {
+    const ordered = [...nodes].sort((a, b) => a.zOrder - b.zOrder)
+    for (const node of ordered) {
+      if (node.closed || node.explicitHidden || node.raw === undefined) continue
+      node.raw.setHidden(false)
     }
-    const wasCapturing = this.capturing.has(handle)
-    const wasTracked = this.tracked.delete(handle)
-    this.capturing.delete(handle)
-    handle.hide()
-    // Reveal the dependents AFTER the closed overlay is gone (so the fork's
-    // focus fallback never lands on the closing entry), then RE-APPLY the
-    // focus intent captured when they were hidden: pi-tui focuses a
-    // capturing overlay on setHidden(false), which would silently undo an
-    // explicit blur() the plugin performed before the detail opened.
-    //
-    // The gate is STACK OWNERSHIP, never current visibility: a lease may be
-    // temporarily hidden (`hide()`) and still be the stack root — its
-    // permanent close must still release its dependents (or they become
-    // hidden orphans). Conversely a hidden dependent explicitly `show()`n is
-    // still owned by its upper overlay. Only a ROOT capturing close is a
-    // keyboard-owner transition; a dependent's close must NOT steal the
-    // keyboard from the overlay still on top (visibility override is not
-    // dependency-ownership override).
-    //
-    // When NO dependent held the keyboard, the CURRENT seat owner must take
-    // it back EXPLICITLY: the fork's own fallback is the per-overlay
-    // `preFocus` snapshot, which a mid-life editor-seat handoff leaves
-    // pointing at the replaced editor component. Only a CAPTURING close moves
-    // focus at all (a nonCapturing notice never took it). The
-    // question/save-location branches above own their own settle.
-    if (wasCapturing && upperOwner === undefined && question === undefined && saveLocation === undefined) {
-      if (owned !== undefined) {
-        for (const dependent of owned) dependent.handle.setHidden(false)
-      }
-      const focusedDependent = owned?.find(dependent => dependent.wasFocused)
-      if (focusedDependent !== undefined) {
-        focusedDependent.handle.focus()
-      } else {
-        this.deps.focusSeatOwner?.()
-      }
+    const candidates = ordered.filter(node =>
+      !node.closed && node.raw !== undefined && !node.explicitHidden && this.isVisible(node))
+    const focusTarget = candidates
+      .filter(node => node.resumeFocus && !node.nonCapturing)
+      .sort((a, b) => b.zOrder - a.zOrder)[0]
+    if (focusTarget !== undefined) {
+      focusTarget.raw?.focus()
+    } else {
+      // The fork auto-focused the last revealed capturing node, but NONE of
+      // them asked for the keyboard (they were blurred/nonCapturing): the
+      // CURRENT seat owner must own it again (never the stale preFocus
+      // snapshot).
+      this.deps.focusSeatOwner?.()
     }
-    // The final seat belongs to the LIVE surface, not to the close event:
-    // closing B restores dependent A (pi-tui re-focuses a restored capturing
-    // overlay), so a coarse 'editor' here would be a stale/wrong seat. The
-    // host re-derives it (see OverlayBrokerDeps.reconcileFocusSeat). A
-    // STALE close (an already-untracked handle, e.g. after a fullscreen
-    // teardown) must NOT republish the seat: the live state (an active
-    // Save prompt, question, or approval) is authoritative, and a dead
-    // handle's hide() requests no render to correct it later.
-    if (wasTracked) this.deps.reconcileFocusSeat?.()
-  }
-
-  /** Hide every tracked overlay (fullscreen migration — the host stops
-   * the old screen). Idempotent. */
-  hideAll(): void {
-    for (const handle of this.tracked) {
-      if (!handle.isHidden()) handle.setHidden(true)
-    }
-  }
-
-  /** Forget every handle WITHOUT unmounting (surface teardown — the
-   * screen is going away; the handles die with it). Idempotent. */
-  clear(): void {
-    this.tracked.clear()
-    this.capturing.clear()
-    this.dependents.clear()
-  }
-
-  /**
-   * FINAL surface teardown: physically unmount every tracked overlay
-   * (running disposeOnHide) WITHOUT restoring dependents — the whole
-   * surface is dying, nothing may flash back. Unlike closeForHost this
-   * bypasses the question-aware graph cleanup and the focus-seat report:
-   * the tracked set holds the RAW screen handles, so hide() runs the
-   * fork's physical unmount + disposeOnHide chain (the owning frame
-   * disposes the panel, which stops its timers exactly once). Idempotent.
-   */
-  disposeAll(): void {
-    for (const handle of this.tracked) handle.hide()
-    this.tracked.clear()
-    this.capturing.clear()
-    this.dependents.clear()
-  }
-
-  /** Whether a VISIBLE capturing overlay is mounted (modal/pointer
-   * presence). This is the STACKING/pointer fact, never the keyboard fact: a
-   * blurred interactive overlay is still visible and still intercepts
-   * pointer events in its own region. */
-  hasVisibleCapturingOverlay(): boolean {
-    for (const handle of this.capturing) {
-      if (!handle.isHidden()) return true
-    }
-    return false
-  }
-
-  /** Whether a capturing overlay currently HOLDS keyboard focus (visible,
-   * not hidden, and physically focused). This is the KEYBOARD-ownership
-   * fact: a `blur()`ed (or hidden) capturing overlay is visible but the
-   * editor owns the keyboard again, so the Host shortcut ladder must run. */
-  hasFocusedCapturingOverlay(): boolean {
-    for (const handle of this.capturing) {
-      if (!handle.isHidden() && handle.isFocused()) return true
-    }
-    return false
-  }
-
-  /** The current graph sizes (headless assertions — the graph is
-   * behaviorally invisible; stale entries only leak memory). */
-  graphState(): { handles: number; dependents: number } {
-    return { handles: this.tracked.size, dependents: this.dependents.size }
-  }
-
-  /** Every tracked handle (the host iterates for fullscreen migration and
-   * question suspension sweeps). */
-  handles(): ReadonlySet<OverlayHandle> {
-    return this.tracked
-  }
-
-  /** Whether a handle is still tracked (a stale handle from a previous
-   * generation must not be revived by the question settle). */
-  isTracked(handle: OverlayHandle): boolean {
-    return this.tracked.has(handle)
+    this.deps.reconcileFocusSeat?.()
   }
 }
