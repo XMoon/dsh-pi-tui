@@ -59,6 +59,15 @@ export interface OverlayBrokerDeps {
   reconcileFocusSeat?: () => void
 }
 
+/** One overlay hidden beneath a newer capturing overlay: the handle plus
+ * the KEYBOARD intent it had when it was hidden. Restoring visibility must
+ * not silently restore focus — pi-tui re-focuses a capturing overlay on
+ * setHidden(false), which would undo an explicit `blur()`. */
+interface HiddenDependent {
+  readonly handle: OverlayHandle
+  readonly wasFocused: boolean
+}
+
 /**
  * The overlay stacking graph (M8). One instance per TuiApp; the host
  * delegates show/close through it. The broker NEVER renders — it only
@@ -70,8 +79,9 @@ export class OverlayBroker {
    * the keyboard. A nonCapturing notice never takes focus and must not fence
    * an editor-seat handoff. */
   private readonly capturing = new Set<OverlayHandle>()
-  /** Capturing overlay → the overlays it hid (restored on its close). */
-  private readonly dependents = new Map<OverlayHandle, Set<OverlayHandle>>()
+  /** Capturing overlay → the overlays it hid (restored on its close),
+   * keeping each one's focus intent. */
+  private readonly dependents = new Map<OverlayHandle, HiddenDependent[]>()
   private readonly deps: OverlayBrokerDeps
 
   constructor(deps: OverlayBrokerDeps = {}) {
@@ -85,10 +95,14 @@ export class OverlayBroker {
    * wrapper.
    * @param handle - the screen-mounted handle.
    * @param options - the mount options (nonCapturing skips the modal
-   *   stacking).
+   *   stacking; previouslyFocused is the host's pre-mount keyboard-owner set,
+   *   so a hidden dependent's focus intent survives the restore).
    * @returns the tracked close wrapper.
    */
-  track(handle: OverlayHandle, options: { nonCapturing?: boolean } = {}): OverlayHandle {
+  track(
+    handle: OverlayHandle,
+    options: { nonCapturing?: boolean; previouslyFocused?: ReadonlySet<OverlayHandle> } = {},
+  ): OverlayHandle {
     this.tracked.add(handle)
     if (options.nonCapturing !== true) {
       this.capturing.add(handle)
@@ -106,10 +120,13 @@ export class OverlayBroker {
       if (options.nonCapturing !== true) {
         // The new capturing overlay takes the modal front: the question's
         // directly suspended handles become its dependents (kept hidden).
-        const dependents = new Set<OverlayHandle>()
-        for (const other of question.suspendedOverlays) dependents.add(other)
-        if (dependents.size > 0) {
-          for (const other of dependents) question.suspendedOverlays.delete(other)
+        // Those handles are re-owned by the question on close (never
+        // revealed by the broker), so their focus intent is the question's
+        // own restore contract (plan §7.6: restored AND focused).
+        const dependents: HiddenDependent[] = []
+        for (const other of question.suspendedOverlays) dependents.push({ handle: other, wasFocused: true })
+        if (dependents.length > 0) {
+          for (const dependent of dependents) question.suspendedOverlays.delete(dependent.handle)
           this.dependents.set(handle, dependents)
         }
       }
@@ -134,14 +151,19 @@ export class OverlayBroker {
       return this.wrapClose(handle)
     }
     if (options.nonCapturing !== true) {
-      const hidden = new Set<OverlayHandle>()
+      const hidden: HiddenDependent[] = []
       for (const other of this.tracked) {
         if (other !== handle && !other.isHidden()) {
+          // Capture the keyboard intent from the PRE-MOUNT set: the fork
+          // already focused the new overlay, so isFocused() here is always
+          // false for the dependents. Absent the set (direct broker use),
+          // preserve the historical restore-and-focus behavior.
+          const wasFocused = options.previouslyFocused === undefined ? true : options.previouslyFocused.has(other)
           other.setHidden(true)
-          hidden.add(other)
+          hidden.push({ handle: other, wasFocused })
         }
       }
-      if (hidden.size > 0) this.dependents.set(handle, hidden)
+      if (hidden.length > 0) this.dependents.set(handle, hidden)
     }
     return this.wrapClose(handle)
   }
@@ -193,25 +215,40 @@ export class OverlayBroker {
     if (question !== undefined) question.suspendedOverlays.delete(handle)
     const saveLocation = this.deps.saveLocation?.()
     if (saveLocation !== undefined) saveLocation.suspendedOverlays.delete(handle)
-    for (const dependents of this.dependents.values()) dependents.delete(handle)
+    for (const [owner, dependents] of this.dependents) {
+      if (dependents.some(dependent => dependent.handle === handle)) {
+        this.dependents.set(owner, dependents.filter(dependent => dependent.handle !== handle))
+      }
+    }
     const owned = this.dependents.get(handle)
     if (owned !== undefined) {
       this.dependents.delete(handle)
       if (question !== undefined) {
-        for (const dependent of owned) question.suspendedOverlays.add(dependent)
+        for (const dependent of owned) question.suspendedOverlays.add(dependent.handle)
       } else if (saveLocation !== undefined) {
         // The Save Location prompt owns the seat: the closed handle's
         // still-mounted dependents stay hidden and become DIRECTLY owned
         // by the prompt (they must not flash back over it — the same rule
         // as the question branch).
-        for (const dependent of owned) saveLocation.suspendedOverlays.add(dependent)
-      } else {
-        for (const dependent of owned) dependent.setHidden(false)
+        for (const dependent of owned) saveLocation.suspendedOverlays.add(dependent.handle)
       }
     }
     const wasTracked = this.tracked.delete(handle)
     this.capturing.delete(handle)
     handle.hide()
+    // Reveal the dependents AFTER the closed overlay is gone (so the fork's
+    // focus fallback never lands on the closing entry), then RE-APPLY the
+    // focus intent captured when they were hidden: pi-tui focuses a
+    // capturing overlay on setHidden(false), which would silently undo an
+    // explicit blur() the plugin performed before the detail opened. The
+    // question/save-location branches above own their own settle, so only
+    // the normal restore re-applies focus here.
+    if (owned !== undefined && question === undefined && saveLocation === undefined) {
+      for (const dependent of owned) dependent.handle.setHidden(false)
+      for (const dependent of owned) {
+        if (!dependent.wasFocused) dependent.handle.unfocus()
+      }
+    }
     // The final seat belongs to the LIVE surface, not to the close event:
     // closing B restores dependent A (pi-tui re-focuses a restored capturing
     // overlay), so a coarse 'editor' here would be a stale/wrong seat. The

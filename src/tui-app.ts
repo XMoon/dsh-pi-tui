@@ -5603,11 +5603,23 @@ export class TuiApp {
     const merged: OverlayOptions = ownership.remountable === true
       ? { ...options, disposeOnHide: false }
       : { disposeOnHide: true, ...options }
+    // Capture the CURRENT keyboard owners BEFORE the fork mounts+focusses the
+    // new overlay (showOverlay focuses immediately): the broker needs each
+    // hidden dependent's focus intent to restore it faithfully — pi-tui
+    // re-focuses a capturing overlay on setHidden(false), which would undo
+    // an explicit blur().
+    const previouslyFocused = new Set<OverlayHandle>()
+    for (const tracked of this.overlayBroker.handles()) {
+      if (tracked.isFocused()) previouslyFocused.add(tracked)
+    }
     const handle = this.activeScreen.showOverlay(component, merged)
     // M8: the stacking graph + suspension rules live in the broker (plan
     // §13 — behavior identical; the existing modal-stacking tests gate
     // the extraction).
-    return this.overlayBroker.track(handle, { nonCapturing: options?.nonCapturing === true })
+    return this.overlayBroker.track(handle, {
+      nonCapturing: options?.nonCapturing === true,
+      previouslyFocused,
+    })
   }
 
   /**
