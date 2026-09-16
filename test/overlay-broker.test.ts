@@ -30,11 +30,16 @@ interface FakeHandle extends OverlayHandle {
   label: string
   hiddenLog: string[]
   focusLog: string[]
+  /** The fork auto-focuses a hidden CAPTURING overlay when it is shown; those
+   * implicit focuses are recorded separately from explicit focus() calls. */
+  showFocusLog: string[]
+  autoFocusOnShow: boolean
   isHandFocused(): boolean
 }
 
 /** A fake raw overlay handle recording setHidden/hide/focus calls and
- * tracking its own physical focus (so the broker can rebind / restore). */
+ * tracking its own physical focus (so the broker can rebind / restore). It
+ * models the fork's `setHidden(false)` auto-focus for a capturing overlay. */
 function fakeHandle(label: string): FakeHandle {
   let hidden = false
   let focused = false
@@ -42,12 +47,22 @@ function fakeHandle(label: string): FakeHandle {
     label,
     hiddenLog: [] as string[],
     focusLog: [] as string[],
+    showFocusLog: [] as string[],
+    autoFocusOnShow: false,
     isHandFocused: () => focused,
     hide() { handle.hiddenLog.push('hide'); hidden = false; focused = false },
     setHidden(value: boolean) {
       handle.hiddenLog.push(value ? 'hide-temp' : 'show')
+      const wasHidden = hidden
       hidden = value
-      if (value) focused = false
+      if (value) {
+        focused = false
+        return
+      }
+      if (wasHidden && handle.autoFocusOnShow) {
+        handle.showFocusLog.push('focus')
+        focused = true
+      }
     },
     isHidden() { return hidden },
     focus() { handle.focusLog.push('focus'); focused = true },
@@ -65,6 +80,7 @@ function mountOverlay(
   handle: OverlayHandle,
   options: { nonCapturing?: boolean; remountable?: boolean } = {},
 ): OverlayHandle {
+  ;(handle as FakeHandle).autoFocusOnShow = options.nonCapturing !== true
   const prepared = broker.prepareMount(options)
   if (options.nonCapturing !== true) handle.focus()
   return broker.commitMount(prepared, handle)
@@ -711,4 +727,40 @@ test('OverlayBroker: closing a directly modal-suspended overlay never steals the
     assert.equal(broker.graphState().dependents, 0)
     assert.equal(a.isHidden(), true, `${modal}: the existing suspension is untouched`)
   }
+})
+
+test('OverlayBroker: closing a hidden root never steals a surviving front overlay keyboard (P1-1)', () => {
+  const broker = new OverlayBroker()
+  const c = fakeHandle('c')
+  const a = fakeHandle('a')
+  mountOverlay(broker, c, { remountable: true })
+  const aHandle = mountOverlay(broker, a, { remountable: true }) // A suppresses C
+  aHandle.setHidden(true) // A temporarily hidden while C stays under it
+  const b = fakeHandle('b')
+  const bHandle = mountOverlay(broker, b, { remountable: true }) // an independent, focused front root
+  assert.equal(b.isFocused(), true)
+  const cFocusCalls = c.focusLog.length
+
+  broker.close(aHandle)
+  assert.equal(c.isHidden(), false, 'C is revealed')
+  assert.equal(c.focusLog.length, cFocusCalls, 'the reveal must not focus C over the surviving B')
+  assert.equal(b.isFocused(), true, 'B keeps the keyboard')
+  const order = broker.remountOrder()
+  assert.ok(order[order.length - 1] === bHandle, 'B stays the current front')
+})
+
+test('OverlayBroker: reveal syncs the logical z-order with the capturing-show promotion (P2-3)', () => {
+  const broker = new OverlayBroker()
+  const c = fakeHandle('c')
+  const h = fakeHandle('h')
+  const cHandle = mountOverlay(broker, c, { remountable: true })
+  mountOverlay(broker, h, { nonCapturing: true, remountable: true })
+  cHandle.unfocus() // C blurred but still visible
+  const a = fakeHandle('a')
+  const aHandle = mountOverlay(broker, a, { remountable: true }) // A suppresses C and H
+  broker.close(aHandle) // reveals C (capturing) and H
+  const order = broker.remountOrder()
+  assert.equal(order.length, 2)
+  assert.ok(order[order.length - 1] === cHandle,
+    'the capturing show promoted C physically; the logical z must follow')
 })
