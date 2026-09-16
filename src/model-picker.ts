@@ -52,11 +52,20 @@ export interface ModelPickerModelRow {
   readonly modelId: string
   readonly modelName: string
   readonly description?: string
-  readonly efforts: readonly { readonly id: string; readonly name: string }[]
+  readonly efforts: readonly { readonly id: string; readonly name: string; readonly description?: string }[]
   readonly defaultEffort?: string
   readonly isCurrent: boolean
   readonly isDefault: boolean
+  /** The explicit effort of the CURRENT Session selection (badge only). */
   readonly currentEffort?: string
+  /**
+   * The explicit effort of the picker's CONFIGURED selection (the live Session
+   * selection, or — sessionless — the directory default). Drives the effort
+   * view's initial cursor WITHOUT implying a `current` badge, so opening
+   * `/model` sessionless and pressing Right lands on the already-configured
+   * effort instead of silently downgrading it to the model default.
+   */
+  readonly configuredEffort?: string
 }
 
 /** One provider whose catalog read failed; inert in the Models view. */
@@ -101,6 +110,10 @@ const IDENTITY_SEP = '\u0000'
 /** The synthetic `Provider default` effort row (submit with no effort id). */
 const PROVIDER_DEFAULT = `${IDENTITY_SEP}provider-default`
 const FAILURE_PREFIX = `${IDENTITY_SEP}failure${IDENTITY_SEP}`
+/** One shared group key for EVERY failed provider, so all failures collapse
+ *  into a single private `Unavailable` section (a real provider's own
+ *  `groupKey` is its id and can never collide with this NUL-prefixed key). */
+const FAILURE_GROUP_KEY = `${IDENTITY_SEP}unavailable`
 
 /** Full logical identity of a model row. Model ids are not globally unique. */
 export function modelIdentity(providerId: string, modelId: string): string {
@@ -122,10 +135,10 @@ export function projectModelDirectory(
     for (const model of group.models) {
       // Full (provider, model) identity: a same-id model under another
       // provider must never be marked current/default.
-      const isCurrentModel = !sessionless
-        && current !== undefined
+      const matchesConfigured = current !== undefined
         && current.provider === group.id
         && current.model === model.id
+      const isCurrentModel = !sessionless && matchesConfigured
       const isDefault = directory.default.provider === group.id && directory.default.model === model.id
       models.push({
         providerId: group.id,
@@ -140,6 +153,10 @@ export function projectModelDirectory(
         // Only the current model can carry a current effort; it must be the
         // EXPLICIT projection effort (an absent one stays absent).
         ...(isCurrentModel && current?.reasoningEffort !== undefined ? { currentEffort: current.reasoningEffort } : {}),
+        // The configured selection's effort is independent of the `current`
+        // badge: sessionless has no current model, yet its global default's
+        // effort must still seed the effort view's cursor.
+        ...(matchesConfigured && current?.reasoningEffort !== undefined ? { configuredEffort: current.reasoningEffort } : {}),
       })
     }
   }
@@ -232,9 +249,9 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
         label: row.providerName,
         description: row.message,
         group: 'Unavailable',
-        // A private key so a provider also named "Unavailable" keeps its own
-        // section/count instead of merging with the failure section.
-        groupKey: `${FAILURE_PREFIX}${row.providerId}`,
+        // EVERY failure shares one group key: all failed providers form a
+        // single `Unavailable` section instead of one section per failure.
+        groupKey: FAILURE_GROUP_KEY,
         badge: 'unavailable',
         searchText: `${row.providerId} ${row.providerName}`,
       })),
@@ -332,7 +349,8 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
   }
 
   /** The effort rows for one model, with the plan's cursor contract:
-   *  - current model with an explicit current effort → that row;
+   *  - the CONFIGURED selection's explicit effort (the live Session selection,
+   *    or the sessionless global default) → that row;
    *  - otherwise the model's concrete `defaultEffort` (badged `default`);
    *  - otherwise the synthetic `Provider default` (submit without effort).
    *  A non-current model never carries a `current` badge. */
@@ -349,6 +367,9 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       items.push({
         value: effort.id,
         label: effort.name,
+        // The official effort description rides the selected-only detail, so
+        // the list stays compact and only the cursor's row expands it.
+        ...(effort.description === undefined || effort.description === '' ? {} : { description: effort.description }),
         ...(badges.length === 0 ? {} : { badge: badges.join(' · ') }),
       })
     }
@@ -357,15 +378,17 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       header: `Models › ${row.modelName}`,
       hint: '← model · enter select · esc back',
       noMatchText: '  No efforts',
+      descriptionMode: 'selected-below',
     })
     list.onSelect = (item) => {
       this.submit(row, item.value === PROVIDER_DEFAULT ? undefined : item.value)
     }
     list.onCancel = () => { this.showModels() }
-    // Cursor: the current effective effort when the current model has one,
-    // else the model default, else Provider default.
-    const cursor = currentEffort !== undefined && row.efforts.some(effort => effort.id === currentEffort)
-      ? currentEffort
+    // Cursor: the configured selection's explicit effort when advertised, else
+    // the model default, else Provider default.
+    const configured = row.configuredEffort
+    const cursor = configured !== undefined && row.efforts.some(effort => effort.id === configured)
+      ? configured
       : row.defaultEffort ?? PROVIDER_DEFAULT
     list.setSelectedValue(cursor)
     return list
