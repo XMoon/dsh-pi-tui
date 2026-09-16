@@ -57,6 +57,12 @@ export interface OverlayBrokerDeps {
    * assume the close returns the seat to the editor: closing overlay B can
    * restore dependent overlay A, which owns physical focus. */
   reconcileFocusSeat?: () => void
+  /** Restore PHYSICAL keyboard focus to the host's CURRENT seat owner. Used
+   * when a closed capturing overlay reveals dependents but NONE of them held
+   * the keyboard: the broker must not fall back to the fork's per-overlay
+   * `preFocus` snapshot, which a mid-life editor-seat handoff leaves pointing
+   * at the replaced editor component. */
+  focusSeatOwner?: () => void
 }
 
 /** One overlay hidden beneath a newer capturing overlay: the handle plus
@@ -233,6 +239,7 @@ export class OverlayBroker {
         for (const dependent of owned) saveLocation.suspendedOverlays.add(dependent.handle)
       }
     }
+    const wasCapturing = this.capturing.has(handle)
     const wasTracked = this.tracked.delete(handle)
     this.capturing.delete(handle)
     handle.hide()
@@ -240,13 +247,23 @@ export class OverlayBroker {
     // focus fallback never lands on the closing entry), then RE-APPLY the
     // focus intent captured when they were hidden: pi-tui focuses a
     // capturing overlay on setHidden(false), which would silently undo an
-    // explicit blur() the plugin performed before the detail opened. The
-    // question/save-location branches above own their own settle, so only
-    // the normal restore re-applies focus here.
-    if (owned !== undefined && question === undefined && saveLocation === undefined) {
-      for (const dependent of owned) dependent.handle.setHidden(false)
-      for (const dependent of owned) {
-        if (!dependent.wasFocused) dependent.handle.unfocus()
+    // explicit blur() the plugin performed before the detail opened.
+    //
+    // When NO dependent held the keyboard, the CURRENT seat owner must take
+    // it back EXPLICITLY: the fork's own fallback is the per-overlay
+    // `preFocus` snapshot, which a mid-life editor-seat handoff leaves
+    // pointing at the replaced editor component. Only a CAPTURING close moves
+    // focus at all (a nonCapturing notice never took it). The
+    // question/save-location branches above own their own settle.
+    if (wasCapturing && question === undefined && saveLocation === undefined) {
+      if (owned !== undefined) {
+        for (const dependent of owned) dependent.handle.setHidden(false)
+      }
+      const focusedDependent = owned?.find(dependent => dependent.wasFocused)
+      if (focusedDependent !== undefined) {
+        focusedDependent.handle.focus()
+      } else {
+        this.deps.focusSeatOwner?.()
       }
     }
     // The final seat belongs to the LIVE surface, not to the close event:
