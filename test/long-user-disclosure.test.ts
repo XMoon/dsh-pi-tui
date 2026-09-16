@@ -432,14 +432,15 @@ test('fullscreen Focus: Ctrl+O collapses a search-revealed user bubble without o
   app.stop()
 })
 
-test('regular: a disabled toggleExpand key renders a count-only marker', async () => {
+test('regular: a disabled toggleExpand key renders the full prompt (never strands it)', async () => {
   const { vt, app } = startApp()
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': false }))
   app.setTranscript([user(lines(11))])
-  const view = (await viewRows(vt)).join('\n')
-  assert.ok(view.includes('rows compacted'), 'the marker stays')
-  assert.ok(!view.includes('the expand key'), `no dead hint when the key is disabled:\n${view}`)
-  assert.ok(!view.includes('to expand'), `the verb is dropped entirely:\n${view}`)
+  const rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 0, 'no fold without an expand affordance')
+  assert.ok(rows.some(row => row.includes('line5')), 'the full prompt must stay readable')
+  const view = rows.join('\n')
+  assert.ok(!view.includes('the expand key'), `no dead hint:\n${view}`)
   app.stop()
 })
 
@@ -451,5 +452,24 @@ test('fullscreen: a disabled toggleExpand key still advertises the working click
   const view = (await viewRows(vt)).join('\n')
   assert.ok(view.includes('click to expand'), `the click affordance must survive:\n${view}`)
   app.setFullscreen(false)
+  app.stop()
+})
+
+test('a search hit on a SHORT user prompt does not consume the next Ctrl+O', async () => {
+  const { vt, app } = startApp()
+  const longMessage = user(lines(11, 'long'), 0)
+  const shortMessage = user('just a short prompt', 1)
+  app.setTranscript([longMessage, shortMessage])
+  let rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'only the long prompt is folded')
+
+  app.revealSearchMatch(shortMessage)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'a short prompt needs no reveal override')
+
+  vt.sendInput('\x0f')
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('long5')), 'Ctrl+O must still expand the recent-turn master')
+  assert.equal(compactMarkerCount(rows), 0)
   app.stop()
 })
