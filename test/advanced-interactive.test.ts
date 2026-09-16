@@ -724,3 +724,41 @@ test('a shown hidden dependent is still owned by the overlay above it', async ()
   b.close?.()
   app.stop()
 })
+
+test('a hidden middle overlay reparents to its graph owner across a question round-trip', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const c = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced C' }))
+  await vt.waitForRender()
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const b = app.openPicker([{ value: 'p', label: 'provider option' }], () => {}, () => {})
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 3)
+  assert.equal(app.overlayGraphState().dependents, 2)
+
+  const questions = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+  await vt.waitForRender()
+  assert.ok(view().includes('proceed?'), `the question must be visible:\n${view()}`)
+  assert.ok(!view().includes('provider option'), `the question suspends the front picker:\n${view()}`)
+
+  // The hidden middle node A closes while the question is up: C must reparent
+  // under B instead of flattening into the question suspension.
+  a.close()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().dependents, 1, 'C is reparented under B')
+
+  vt.sendInput('\x1b') // cancel the question → B restored
+  await questions.catch(() => {})
+  await vt.waitForRender()
+  assert.ok(view().includes('provider option'), `B must be restored after the question:\n${view()}`)
+  assert.ok(!view().includes('advanced C'), `C must stay hidden under B:\n${view()}`)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+
+  b.close?.() // closing B finally reveals C
+  await vt.waitForRender()
+  assert.ok(view().includes('advanced C'), `C must be revealed when B closes:\n${view()}`)
+  c.close()
+  app.stop()
+})
