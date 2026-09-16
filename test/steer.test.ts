@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mergeDraft, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerAgentLike, type SteerDeps } from '../src/steer.ts'
+import { hasParkedSteering, mergeDraft, PARKED_STEERING_NOTICE, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerAgentLike, type SteerDeps } from '../src/steer.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
 import type { PendingInputReader } from '../src/runtime/pending-input-reader-port.ts'
 
@@ -344,6 +344,85 @@ test('idle empty-draft queue steering does not call the occurrence writer', asyn
   assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
   assert.equal(writes, 0, 'an idle empty-draft gesture stops before occurrence writes')
   assert.deepEqual(agent.state.nextTurn, [{ id: 'A' }])
+})
+
+// ── parked next-step steering: the empty-Ctrl+S recovery notice ──────────────
+
+test('hasParkedSteering requires idle AND a steering occurrence (context/queued never count)', () => {
+  const item = (placement: 'queued' | 'steering' | 'context'): { id: string; placement: 'queued' | 'steering' | 'context'; content: [] } =>
+    ({ id: placement, placement, content: [] })
+  assert.equal(hasParkedSteering({ running: false, items: [item('steering')] }), true)
+  assert.equal(hasParkedSteering({ running: true, items: [item('steering')] }), false, 'a running steer is active, not parked')
+  assert.equal(hasParkedSteering({ running: false, items: [item('context')] }), false, 'context never enters the pending USER surface')
+  assert.equal(hasParkedSteering({ running: false, items: [item('queued')] }), false, 'a queued occurrence is not parked steering')
+  assert.equal(hasParkedSteering({ running: false, items: [] }), false)
+})
+
+test('parked steering: an empty Ctrl+S explains the recovery and writes NOTHING', async () => {
+  const agent = fakeAgent([])
+  agent.status = 'idle'
+  agent.state.nextStep.push({ id: 'parked-a' })
+  const notices: string[] = []
+  const writes: string[] = []
+  const deps = makeDeps({ agent: () => agent, notices })
+  deps.writer = {
+    prompt: async () => { writes.push('prompt'); return { kind: 'committed' as const, value: undefined } },
+    updateQueue: async () => { writes.push('updateQueue'); return { kind: 'committed' as const, value: undefined } },
+  }
+  const outcome = await steerAll(deps, '', { draftHasPayload: false })
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(writes, [], 'the recovery notice must never reach the writer')
+  assert.deepEqual(agent.steered, [], 'the parked occurrence is never re-steered')
+  assert.deepEqual(agent.followed, [], 'the parked occurrence is never replayed as a followup')
+  assert.deepEqual(agent.state.nextStep, [{ id: 'parked-a' }], 'the parked occurrence stays in the inbox, identity unchanged')
+  assert.deepEqual(notices, [`info: ${PARKED_STEERING_NOTICE}`], 'exactly one info recovery notice')
+})
+
+test('parked steering + empty Ctrl+S is a CONTRACT: explain the recovery, never replay or fake-resume', async () => {
+  // A future maintainer reads THIS test as the rule: the empty Ctrl+S
+  // recovery is an explanation, not a remove/resend. Assert every write seam
+  // and the inbox removal count are untouched.
+  const agent = fakeAgent([])
+  agent.status = 'idle'
+  agent.state.nextStep.push({ id: 'parked-contract' })
+  let removals = 0
+  const originalRemove = agent.inbox.remove.bind(agent.inbox)
+  ;(agent.inbox as { remove: (id: string) => void }).remove = (id: string) => { removals += 1; originalRemove(id) }
+  let prompts = 0
+  let queueWrites = 0
+  const deps = makeDeps({ agent: () => agent })
+  deps.writer = {
+    prompt: async () => { prompts += 1; return { kind: 'committed' as const, value: undefined } },
+    updateQueue: async () => { queueWrites += 1; return { kind: 'committed' as const, value: undefined } },
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
+  assert.equal(prompts, 0, 'no prompt')
+  assert.equal(queueWrites, 0, 'no updateQueue')
+  assert.equal(removals, 0, 'no inbox remove')
+  assert.deepEqual(agent.steered, [], 'no re-steer')
+  assert.deepEqual(agent.followed, [], 'no followup')
+  assert.deepEqual(agent.state.nextStep, [{ id: 'parked-contract' }])
+})
+
+test('plain idle empty Ctrl+S stays silent: no notice without a parked steering occurrence', async () => {
+  const agent = fakeAgent([])
+  agent.status = 'idle'
+  const notices: string[] = []
+  const outcome = await steerAll(makeDeps({ agent: () => agent, notices }), '', { draftHasPayload: false })
+  assert.equal(outcome, 'ok')
+  assert.deepEqual(notices, [], 'an ordinary idle no-op must not add notice noise')
+})
+
+test('a context occurrence must not enter the parked-steering recovery surface', async () => {
+  const agent = fakeAgent([])
+  agent.status = 'idle'
+  const notices: string[] = []
+  const deps = makeDeps({ agent: () => agent, notices })
+  deps.pendingInputReader = {
+    snapshot: () => ({ running: false, items: [{ id: 'ctx', placement: 'context' as const, content: [] }] }),
+  }
+  assert.equal(await steerAll(deps, '', { draftHasPayload: false }), 'ok')
+  assert.deepEqual(notices, [])
 })
 
 test('whitespace-only no-payload queue steering restores on a non-commit', async () => {

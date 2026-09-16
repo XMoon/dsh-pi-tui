@@ -56,10 +56,14 @@ any other prompt (including `exit!` or `Exit`) still goes to the model.
 The queue pane consumes the same `PendingInputReader` projection as the shared
 runner. It renders every item with `placement === 'queued'`, in projection
 order, using only the occurrence id and content. `steering` and `context`
-placements remain outside queue gestures. The steer-all hint is shown only
+placements stay outside the QueuePane and the Ctrl+S steer-all gesture; the
+only queue-shaped gesture that touches `steering` is the main-surface Alt+Up
+recall, and only while that occurrence is parked (idle). The steer-all hint is
+shown only
 while the active subject reports `running`; idle rows remain visible and say
 that they are waiting for the current task to resume. On the main surface,
-Alt+Up is a TUI-only recall-all extension: it removes queued occurrences through
+Alt+Up is a TUI-only recall-all extension: it removes queued occurrences — plus
+parked (idle) steering occurrences — through
 `SessionWriter.updateQueue({ kind: 'remove' })` and stages their content in the
 editor, rather than performing the official in-place `edit` operation. Direct
 inbox collection names and message metadata are adapter-internal; the TUI has
@@ -85,7 +89,14 @@ accepted but has no authoritative representation yet:
   and client-local steering/transcript echoes. It is never inserted into
   `TranscriptFolder`, never durable, never searchable, and never in the queue
   pane. It appears while the turn/tool surface (Working, tool cards,
-  `job_output`) stays active.
+  `job_output`) stays active, and it REMAINS visible after that turn is
+  interrupted: the now-parked row keeps its `waiting for next turn…` label
+  until the next wake consumes it. Its status line is derived from the subject's
+  activity: a running subject reads `steering…`, while a subject whose turn was
+  interrupted (the Host keeps the steering occurrence parked until the next
+  wake) reads `waiting for next turn…`. The parked row stays visible and only
+  the label changes — the occurrence keeps its identity, and a later ordinary
+  prompt is what wakes the Agent and consumes it.
 - **Context** — `placement === 'context'` has no pending user surface; it
   presents through its normal conversation/context surface once materialized.
 - **Identity, never text** — each human submission mints a request id before its
@@ -127,7 +138,8 @@ accepted but has no authoritative representation yet:
 
 Per-occurrence QueueDock controls: the TUI intentionally does NOT expose a
 per-occurrence queue action UI. `Alt+Up` is recall-all over authoritative
-occurrences and `Ctrl+S` is FIFO steer-all; there is no row selection,
+queued occurrences plus parked (idle) steering occurrences and `Ctrl+S` is FIFO
+steer-all; there is no row selection,
 single-row edit/remove/steer, row action button/keybinding, per-row busy state,
 edit overlay, selection clamp, or edit-target-disappearance lifecycle. D2.2
 still keeps the queue-action SEMANTIC (`SessionWriter.updateQueue` `edit` /

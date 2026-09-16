@@ -533,6 +533,75 @@ test('the ephemeral pending-steering lane renders user content at the conversati
   assert.equal((view.match(/❯/g) ?? []).length, before + 1, `the lane must add exactly one user marker:\n${view}`)
 })
 
+test('an active steering row reads steering…; an interrupted (parked) one reads waiting for next turn…', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const parked = (running: boolean): void => {
+    app.setPendingInputPresentation({
+      queued: [],
+      steering: [{ id: 'occ-1', rpcId: 'occ-1', text: 'steer this now', status: 'steering' }],
+      running,
+    })
+  }
+  parked(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ steer this now'), `pending steering content missing:\n${view}`)
+  assert.ok(view.includes('steering…'), `an active steer must read steering…:\n${view}`)
+  assert.ok(!view.includes('waiting for next turn'), `an active steer must not read waiting:\n${view}`)
+
+  // The turn is Interrupted: the Host leaves the steering occurrence PARKED in
+  // the inbox until the next wake. The row STAYS visible and only its status
+  // line changes — the semantic placement is untouched.
+  parked(false)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ steer this now'), `the parked row must stay visible:\n${view}`)
+  assert.ok(view.includes('waiting for next turn…'), `a parked steer must read waiting:\n${view}`)
+  assert.ok(!view.includes('steering…'), `a parked steer must no longer read steering…:\n${view}`)
+})
+
+test('the parked waiting label follows the ACTIVE subject across a child viewer round trip', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'parent-occ', text: 'parent steer', status: 'steering' }],
+    running: true,
+  })
+  await vt.waitForRender()
+  app.setViewerMode({
+    parentSessionId: 'parent',
+    childSessionId: 'child',
+    label: 'child',
+    mode: 'continuable',
+    activity: 'inactive',
+    access: 'interactive-direct-child',
+  })
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'child-occ', text: 'child steer', status: 'steering' }],
+    running: false,
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ child steer'), `the child parked row must be visible:\n${view}`)
+  assert.ok(view.includes('waiting for next turn…'), `the child parked row must read waiting:\n${view}`)
+  assert.ok(!view.includes('parent steer'), `the parent row must not leak into the child viewer:\n${view}`)
+
+  app.setViewerMode(undefined)
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'parent-occ', text: 'parent steer', status: 'steering' }],
+    running: true,
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('child steer'), `the child parked row must not leak back into the parent:\n${view}`)
+  assert.ok(view.includes('parent steer'), `the parent row must return:\n${view}`)
+  assert.ok(view.includes('steering…'), `the parent active steer must read steering…:\n${view}`)
+})
+
 test('a narrow queue pane keeps a local sending suffix on the same row', async () => {
   const { vt, app } = startApp()
   vt.resize(24, 24)

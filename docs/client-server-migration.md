@@ -636,9 +636,13 @@ production backend change is part of this slice.
   otherwise `context`.
   Ctrl+S is runner-level FIFO best-effort orchestration over
   `updateQueue({ kind: 'steer' })`: payload-bearing Ctrl+S sends only the
-  draft; an empty-draft gesture requires a running subject. The main-surface
-  Alt+Up gesture is a TUI-only recall-all extension over
-  `updateQueue({ kind: 'remove' })`, not an in-place `edit`; both gestures stop
+  draft; an empty-draft gesture requires a running subject, and on an idle
+  subject with a parked steering occurrence it emits an explanation notice
+  instead of silently no-opping (it never synthesizes a write). The
+  main-surface Alt+Up gesture is a TUI-only recall-all extension over
+  `updateQueue({ kind: 'remove' })` covering every queued occurrence plus
+  every parked (idle) steering occurrence, not an in-place `edit`; both
+  gestures stop
   on the first genuine failure and never claim cross-occurrence atomicity. An
   empty accelerated submit in an interactive continuable child viewer applies
   the same queued-occurrence choreography to that child and never calls the
@@ -749,6 +753,41 @@ Per-occurrence QueueDock controls (Edit/Remove/Steer) are deliberately NOT part
 of the TUI product surface. D2.2 keeps the queue-action semantic fully aligned
 for both adapters while exposing only the bulk gestures; see the D2.2
 queue-action surface decision below.
+
+### D2.1 follow-up — interrupted parked-steering recovery
+
+The official Agent contract leaves a next-step steering occurrence PARKED in the
+inbox when the active turn is interrupted or a proposed step does not continue:
+a rejected step leaves steering parked until the next wake. That is not a lost
+message and not an error to replay — the next ordinary prompt wakes the Agent
+and the parked next-step input is consumed with that turn.
+
+- Parked steering is derived from semantic state alone: the coherent
+  `PendingInputReader` snapshot has `running === false` AND at least one
+  `placement === 'steering'` occurrence. No Session history reader is consulted,
+  and `placement` stays `steering` (there is no `parked` placement).
+- TUI presentation derives the lane label from `placement + running`:
+  `running=true` renders `steering…`, `running=false` renders
+  `waiting for next turn…`. Only the presentation label changes; the semantic
+  row, its id and its `rpcId` are untouched. The rule is subject-scoped, so a
+  continuable child viewer shows its own parked row and never leaks parent rows.
+- An empty Ctrl+S while parked steering exists emits exactly one info notice
+  (`pending steering is waiting for the next turn — send a message to continue`)
+  and performs NO write: no `prompt`, no `updateQueue`, no `agent.steer`, no
+  synthetic wake. An ordinary idle empty Ctrl+S with no parked steering stays
+  silent (no added noise).
+- Alt+Up recall is extended to parked steering as a TUI-only extension: it
+  removes the exact occurrence through `updateQueue({ kind: 'remove' })` and
+  stages the full text/image/file payload back in the editor. Recalled image and
+  file drafts reuse their already-durable attachment refs, so re-submitting
+  never re-uploads. The parked split is re-checked before each steering removal,
+  so a turn that starts running mid-gesture leaves its now-active occurrence to
+  the turn and only the confirmed prefix is recalled. An ACTIVE steering
+  occurrence (running turn) is never recalled, and the gesture stays disabled
+  inside every viewer.
+- Empty Ctrl+S never claims to resume steering. A true "continue parked
+  steering without a new message" capability requires an upstream Session
+  wake/resumePending verb; until it exists the TUI only explains and recalls.
 
 ## D2.2 status — experimental Remote ordinary writes
 

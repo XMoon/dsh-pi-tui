@@ -1370,16 +1370,29 @@ export class UserBubbleComponent implements Component {
  * `pendingUserComponent` is presentation-only and is never inserted into the
  * transcript folder.
  */
-function pendingUserComponent(row: PendingUserRow): Component {
+function pendingUserComponent(row: PendingUserRow, running: boolean): Component {
   const container = new Container()
   container.addChild(new UserBubbleComponent(
     new Text(row.text, 0, 0),
     `${color.roleUser('❯')} `,
     color.roleUserBg,
   ))
-  const status = row.status === 'sending' ? 'sending…' : 'steering…'
-  container.addChild(new Text(color.textDim(`  ${status}`), 0, 0))
+  container.addChild(new Text(color.textDim(`  ${pendingUserStatusText(row, running)}`), 0, 0))
   return container
+}
+
+/**
+ * The presentation-only pending status label. An accepted steer whose subject
+ * is RUNNING reads `steering…`. When the turn is no longer running (an
+ * Interrupted turn) the Host leaves the steering occurrence PARKED in the
+ * inbox until the next wake, so `steering…` would misreport an active turn:
+ * it reads `waiting for next turn…` instead. The semantic row itself is never
+ * modified — only this label.
+ */
+function pendingUserStatusText(row: PendingUserRow, running: boolean): string {
+  if (row.status === 'sending') return 'sending…'
+  if (row.status === 'steering' && !running) return 'waiting for next turn…'
+  return 'steering…'
 }
 
 /** Host-owned tail for explicit files delivered by the present tool. Paths
@@ -6725,7 +6738,7 @@ export class TuiApp {
         // The ephemeral pending user lane: user-bubble visual language plus a
         // dim pending status. Never cached with durable messages (it leaves
         // the presentation once its authoritative/durable counterpart lands).
-        component = pendingUserComponent(block.row)
+        component = pendingUserComponent(block.row, this.queueRunning)
         rendered = component.render(width)
       } else {
         // Persistent per-message components (stage J): unchanged messages

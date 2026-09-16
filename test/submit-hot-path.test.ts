@@ -115,6 +115,7 @@ function makeLiveSession(id: string, header: LiveSession['header'], events: read
 type FakeQueuedContent =
   | { type: 'text'; text: string }
   | { type: 'image'; attachment: { attachmentId: string; mediaType: 'image/png'; bytes: number; width: number; height: number } }
+  | { type: 'file'; attachment: { attachmentId: string; name: string; bytes: number } }
 
 type FakeQueuedMessage = {
   id: string
@@ -148,6 +149,13 @@ interface FakeAgentHost {
   steered: unknown[]
   /** The skill-body fallback injections (agent.inject), in call order. */
   injected: unknown[]
+  /** cancel() calls and the keepInbox argument the runner passed. */
+  cancelCalls: number
+  lastCancelKeepInbox: boolean | undefined
+  /** Test hook fired from the fake cancel (model the turn converging to idle). */
+  onCancel?: () => void
+  /** Test hook fired after a fake followup (model the next wake's claim). */
+  onFollowup?: () => void
 }
 
 function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent {
@@ -194,6 +202,8 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
       }
       if (host?.failFollowup === true) throw new Error('deliver boom')
       host?.followedUp.push(message)
+      // Model the Agent's next wake claiming parked next-step input.
+      host?.onFollowup?.()
     },
     steer: (message: unknown) => {
       if (host !== undefined) {
@@ -205,7 +215,14 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
       }
     },
     inject: (message: unknown) => { host?.injected.push(message) },
-    cancel: (_reason: unknown, _options: { keepInbox: boolean }) => { /* the interrupt transport */ },
+    cancel: (_reason: unknown, options: { keepInbox: boolean }) => {
+      if (host === undefined) return
+      host.cancelCalls += 1
+      host.lastCancelKeepInbox = options.keepInbox
+      // The interrupt transport: the test hook models the turn converging to
+      // idle (the real Agent drains the turn and keeps the inbox).
+      host.onCancel?.()
+    },
   } as unknown as Agent
 }
 
@@ -222,6 +239,22 @@ function queuedImage(id: string, text: string): FakeQueuedMessage {
       { type: 'image', attachment: { attachmentId: 'durable-image', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
     ],
     source: { kind: 'user' },
+  }
+}
+
+/** text + image + file: the FULL 0.1.6 prompt payload recall must restore.
+ * With `rpcId` set, a `remove` also retires the user prompt's file-upload
+ * receipts (the plan §12 lifecycle concern). */
+function queuedMixed(id: string, text: string, rpcId?: string): FakeQueuedMessage {
+  return {
+    id,
+    role: 'user',
+    content: [
+      { type: 'text', text },
+      { type: 'image', attachment: { attachmentId: 'durable-image', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      { type: 'file', attachment: { attachmentId: 'durable-file', name: 'notes.txt', bytes: 7 } },
+    ],
+    source: rpcId === undefined ? { kind: 'user' } : { kind: 'user', rpcId },
   }
 }
 
@@ -295,6 +328,8 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     followedUp: [],
     steered: [],
     injected: [],
+    cancelCalls: 0,
+    lastCancelKeepInbox: undefined,
   }
   const persisted = new Map<string, LiveSession>()
   const live = new Map<string, Agent>()
@@ -1188,6 +1223,9 @@ async function bootCommandHarness(
     /** Provide a recording fake `ctx.attachments` (image admission
      * observability: `imageSaves` records each `saveImages` batch). */
     attachments?: boolean
+    /** Provide a recording fake `ctx.fileUploads` (retirePrompt observability):
+     * required for a `remove` of a user-rpcId occurrence to commit. */
+    fileUploads?: boolean
     /** Extension command contributions to mount (owner metadata + the
      * plugin's own commands-service registration, like a real plugin). */
     extensionCommands?: readonly {
@@ -1223,6 +1261,9 @@ async function bootCommandHarness(
   imageSaves: readonly (readonly { mediaType: string; byteLength: number }[])[]
   /** The recorded FILE admissions (only with `attachments: true`). */
   fileSaves: readonly { name: string | undefined; byteLength: number }[]
+  /** The user rpcIds retired by `ctx.fileUploads.retirePrompt` (only with
+   * `fileUploads: true`). */
+  fileRetirements: readonly string[]
   /** Dispose one pre-registered `hostCommands` definition (a catalog name that
    * disappears — e.g. while a deferred session is being created). */
   disposeHostCommand(name: string): void
@@ -1245,6 +1286,12 @@ async function bootCommandHarness(
   life.defer(() => disposeContext(context))
   const imageSaves: { mediaType: string; byteLength: number }[][] = []
   const fileSaves: { name: string | undefined; byteLength: number }[] = []
+  const fileRetirements: string[] = []
+  if (options.fileUploads === true) {
+    context.provide('fileUploads', {
+      retirePrompt: (_agent: unknown, requestId: string) => { fileRetirements.push(requestId) },
+    } as never)
+  }
   if (options.attachments === true) {
     context.provide('attachments', {
       imageLimits: {
@@ -1399,6 +1446,7 @@ async function bootCommandHarness(
     registerContribution,
     imageSaves,
     fileSaves,
+    fileRetirements,
     disposeHostCommand: (name: string) => { hostCommandDisposers.get(name)?.() },
     extensionService: extensionService as {
       _ledger(): {
@@ -1669,6 +1717,215 @@ test('Alt+Up keeps a recalled image usable after an indeterminate removal', asyn
     { type: 'image', attachment: { attachmentId: 'durable-image', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
     { type: 'text', text: '\n\ntail' },
   ], 'the preserved draft expands back to the original durable image reference')
+})
+
+test('Alt+Up recalls a PARKED steering occurrence (text+image+file) losslessly through the official remove', async (t) => {
+  const { harness, mounted, imageSaves, fileSaves, fileRetirements } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    attachments: true,
+    fileUploads: true,
+  })
+  harness.host.nextStep.push(queuedMixed('parked-steer', 'parked with attachments', 'recalled-parked-rpc'))
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(await drainUntil(() => harness.host.removeCalls === 1 && mounted.app.getDraft() !== '', 1_000), true,
+    'the parked steering recall must remove the exact occurrence and restore the draft')
+  assert.deepEqual(harness.host.nextStep, [], 'the parked occurrence is recalled, not replayed')
+  assert.deepEqual(fileRetirements, ['recalled-parked-rpc'],
+    'the official remove retires the user prompt file-upload receipts')
+  const recalled = mounted.app.getDraft()
+  assert.match(recalled, /parked with attachments/, 'the text must be restored')
+  assert.match(recalled, /\[image #1 \(1×1\)\]/, 'the durable image must be represented')
+  assert.match(recalled, /\[file #1 \(7 B\)\]/, 'the durable file must be represented')
+  assert.deepEqual(imageSaves, [], 'staging a recalled image never re-uploads the bytes')
+  assert.deepEqual(fileSaves, [], 'staging a recalled file never re-uploads the bytes')
+  // Re-submit the recalled draft: the durable refs slot straight back in.
+  mounted.app.submitDraft()
+  await drainUntil(() => harness.host.followedUp.length === 1, 5_000)
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string; text?: string; attachment?: unknown }[] }
+  assert.deepEqual(delivered.content.filter(block => block.type !== 'text' || (block.text ?? '') !== ''), [
+    { type: 'text', text: 'parked with attachments' },
+    { type: 'image', attachment: { attachmentId: 'durable-image', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+    { type: 'file', attachment: { attachmentId: 'durable-file', name: 'notes.txt', bytes: 7 } },
+  ], 'a recalled parked-steering payload expands back to its exact durable refs')
+})
+
+test('an interrupted parked steering occurrence survives and is consumed by the next ordinary prompt, never replayed', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-parked-steer-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'parked-steer-session', events: sessionEvents('resumed answer') })
+  harness.host.status = 'running'
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'parked-steer-session' })
+  harness.host.status = 'running'
+
+  // Phase A — running: the user steers A and the Host parks it in nextStep.
+  mounted.app.setDraft('parked steer A')
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  await waitForDelivery(harness.host, 'parked steer A')
+  const steered = harness.host.steered[0] as { source: { rpcId?: string } }
+  const requestId = steered.source.rpcId
+  assert.ok(requestId !== undefined, 'the Direct user message must carry the minted request id')
+  harness.host.nextStep.push({
+    id: 'parked-steer-A',
+    role: 'user',
+    content: [{ type: 'text', text: 'parked steer A' }],
+    source: { kind: 'user', rpcId: requestId },
+  })
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-step',
+    start: 0,
+    inserted: [],
+  }, 950) as never)
+  await waitForRenderView(vt)
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ parked steer A'), `phase A: the accepted steer must be visible:\n${view}`)
+  assert.ok(view.includes('steering…'), `phase A: a running steer reads steering…:\n${view}`)
+
+  // Phase B — the turn is Interrupted through the REAL busy-Esc cancel path
+  // (SessionWriter.cancel with keepInbox): the Agent converges to idle while A
+  // stays parked in nextStep with its identity.
+  harness.host.onCancel = () => { harness.host.status = 'idle' }
+  mounted.app.setBusy(true)
+  vt.sendInput('\x1b')
+  assert.equal(await drainUntil(() => harness.host.cancelCalls === 1, 2_000), true,
+    'the busy Esc must reach agent.cancel through the runner interrupt path')
+  assert.equal(harness.host.lastCancelKeepInbox, true, 'the interrupt must preserve the pending inbox')
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-step',
+    start: 0,
+    inserted: [],
+  }, 951) as never)
+  await waitForRenderView(vt)
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ parked steer A'), `phase B: the parked row must survive the interrupt:\n${view}`)
+  assert.ok(view.includes('waiting for next turn…'), `phase B: an idle pending steer reads waiting:\n${view}`)
+  assert.ok(!view.includes('steering…'), `phase B: the parked row must no longer read steering…:\n${view}`)
+  const identityOf = (messages: readonly FakeQueuedMessage[]): { id: string; rpcId: string | undefined }[] =>
+    messages.map(message => ({ id: message.id, rpcId: (message.source as { rpcId?: string }).rpcId }))
+  assert.deepEqual(identityOf(harness.host.nextStep), [{ id: 'parked-steer-A', rpcId: requestId }],
+    'the parked occurrence keeps its id and rpcId across the interrupt')
+  assert.equal(harness.host.removeCalls, 0, 'a UI refresh never removes the parked occurrence')
+  const steeredBefore = harness.host.steerCalls
+
+  // Phase C — the user sends an ordinary prompt B: because the Agent is idle it
+  // takes the ordinary queue/wake path. The wake then CLAIMS the parked
+  // next-step occurrence (modeled by the harness followup hook); A is neither
+  // replayed nor removed.
+  harness.host.onFollowup = () => { harness.host.nextStep.length = 0 }
+  mounted.app.setDraft('ordinary B')
+  mounted.app.submitDraft()
+  assert.equal(await drainUntil(() => harness.host.followedUp.length === 1, 5_000), true,
+    'the ordinary prompt must reach followup')
+  const deliveredB = harness.host.followedUp[0] as { content: readonly { type: string; text?: string }[] }
+  assert.ok(deliveredB.content.some(block => block.text === 'ordinary B'), 'B is the delivered ordinary prompt')
+  assert.equal(harness.host.steerCalls, steeredBefore, 'the ordinary prompt must not re-steer A')
+  assert.equal(harness.host.removeCalls, 0, 'the ordinary prompt must not remove A')
+  assert.deepEqual(harness.host.nextStep, [], 'the next wake claims the parked occurrence — no second occurrence, no replay')
+
+  // The wake claims the parked next-step occurrence and its durable user
+  // message lands: the parked lane retires without a replay.
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-step',
+    start: 0,
+    inserted: [],
+  }, 952) as never)
+  context.emit('session/event', harness.session as never, event('user/message', {
+    id: MessageId('parked-steer-A-durable'),
+    role: 'user',
+    content: [{ type: 'text', text: 'parked steer A' }],
+    source: { kind: 'user', rpcId: requestId as never },
+  }, 953) as never)
+  await waitForRenderView(vt)
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('waiting for next turn…'), `phase C: the consumed occurrence retires the parked lane:\n${view}`)
+})
+
+test('an empty Ctrl+S with only parked steering explains the recovery, restores a whitespace draft, and writes nothing', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'idle' })
+  harness.host.nextStep.push(queuedText('parked-only', 'parked steering'))
+  let notices = 0
+  let lastNotice = ''
+  const originalNotify = mounted.app.notify.bind(mounted.app)
+  mounted.app.notify = (message: string, kind?: 'error' | 'info') => {
+    notices += 1
+    lastNotice = message
+    originalNotify(message, kind)
+  }
+  const steer = (): void => {
+    ;(mounted.app as unknown as {
+      actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+    }).actionDispatcher.dispatch('app.input.steer')
+  }
+
+  // An empty Ctrl+S: the parked occurrence is explained, never replayed.
+  mounted.app.setDraft('')
+  steer()
+  assert.equal(await drainUntil(() => notices === 1, 1_000), true,
+    'the parked-only empty Ctrl+S must explain the official recovery')
+  assert.match(lastNotice, /pending steering is waiting for the next turn/)
+  assert.equal(harness.host.removeCalls, 0, 'no occurrence removal')
+  assert.equal(harness.host.steered.length, 0, 'no steer')
+  assert.equal(harness.host.followedUp.length, 0, 'no followup')
+  assert.deepEqual(harness.host.nextStep.map(message => message.id), ['parked-only'],
+    'the parked occurrence stays pending, identity unchanged')
+
+  // A whitespace-only draft (non-payload) was already cleared by the gesture:
+  // the pre-flight explanation must restore it rather than swallow it.
+  mounted.app.setDraft('   ')
+  steer()
+  assert.equal(await drainUntil(() => notices === 2, 1_000), true, 'the whitespace gesture explains too')
+  assert.equal(mounted.app.getDraft(), '   ', 'the non-payload whitespace draft must come back')
+  assert.deepEqual(harness.host.nextStep.map(message => message.id), ['parked-only'])
+  assert.equal(harness.host.removeCalls, 0, 'the whitespace gesture writes nothing either')
+})
+
+test('Alt+Up never recalls a steering occurrence that became active mid-sweep', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'idle' })
+  harness.host.nextStep.push(queuedText('parked-1', 'parked one'), queuedText('parked-2', 'parked two'))
+  // The first removal races the turn starting: the re-check before the second
+  // steering removal must see the running subject and leave it alone.
+  harness.host.afterRemove = (id: string) => {
+    if (id === 'parked-1') harness.host.status = 'running'
+  }
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  assert.equal(await drainUntil(() => mounted.app.getDraft() !== '', 1_000), true,
+    'the confirmed prefix must still be recalled')
+  assert.equal(harness.host.removeCalls, 1, 'the now-active occurrence must never be removed')
+  assert.deepEqual(harness.host.nextStep.map(message => message.id), ['parked-2'],
+    'the active occurrence stays with the running turn')
+  assert.equal(mounted.app.getDraft(), 'parked one', 'only the confirmed prefix reaches the editor')
+  assert.equal(await drainUntil(() => /no longer parked — it was not recalled/.test(mounted.app.notifyTextForTest()), 1_000), true,
+    'the partial recall must be explained')
+})
+
+test('Alt+Up never recalls ACTIVE steering at the gesture: running=true excludes steering-only pending input', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running' })
+  harness.host.nextStep.push(queuedText('active-steer', 'active steering'))
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  for (let index = 0; index < 20; index += 1) await Promise.resolve()
+  assert.equal(harness.host.removeCalls, 0, 'an active steering occurrence is never removed')
+  assert.equal(mounted.app.getDraft(), '', 'nothing is recalled into the editor')
+  assert.deepEqual(harness.host.nextStep.map(message => message.id), ['active-steer'],
+    'the active occurrence stays with the running turn')
 })
 
 test('running + queue: /compact executes, never enters the ordinary queue (PR115-fix problem 1)', async (t) => {
