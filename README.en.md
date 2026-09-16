@@ -187,11 +187,16 @@ The browser distinguishes:
 * nested descendants
 * background Jobs
 
-The two views share the same runtime state: `A` toggles Active / All scope,
-`Tab` changes type filters, `/` enters search, `S` stops the selected task after
-confirmation, and `N` / `Shift+N` moves between running tasks. In Quick Tasks,
-`T` or the bottom “View all” row opens the full Task Center, and `Esc` returns
-one layer at a time.
+The Footer's `↓` opens Quick Tasks as a lightweight browsing view: it only
+supports arrow navigation, left/right expand/collapse, `Tab` type cycling,
+`Enter` open, and `Esc` close. The bottom “Open Task Center” row opens the full
+Task Center.
+
+The full Task Center additionally offers `A` to toggle Active / All, `/` search,
+`Tab` / `Shift+Tab` to cycle types in both directions, `S` to stop the selected
+task after confirmation, and `R` to refresh/retry. Quick Tasks consumes only the
+whitelist above; every other keystroke is a no-op that never enters search, stop
+confirmation, or management state, so `Esc` always closes it in one layer.
 
 Completed one-shot Subagents remain available for persisted Transcript inspection.
 

@@ -24,6 +24,12 @@ dsh --profile pi-tui
 
 ### 变更
 
+- **Quick Tasks 键盘交互收敛为纯导航，普通字符不再误入隐藏状态。** Footer `↓`
+  打开的 Quick Tasks 现在只响应方向键、`Tab`、`Enter` 和 `Esc`，其余按键一律
+  no-op；`S` / `/` / `T` 等字符不再触发停止确认、搜索或视图切换，`Esc` 始终一次
+  关闭 Quick 并把输入交回 editor。`N` / `Shift+N`（运行任务跳转）与 Quick 的 `T`
+  进入完整视图已移除，改由底部 “Open Task Center” 行 + `Enter` 进入；完整 Task
+  Center 新增 `Shift+Tab` 反向遍历类型过滤。
 - **被中断的 parked steering 现在被准确呈现并给出恢复路径。** 当前 turn 被
   Interrupted 后，仍留在 inbox 的 steering 行从 `steering…` 变为 `waiting for
   next turn…`，并在下一次普通消息唤醒 Agent 时按官方语义被消费；此时空的 Ctrl+S
