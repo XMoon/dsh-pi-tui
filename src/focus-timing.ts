@@ -16,9 +16,13 @@
  * turn number: a session switch or a cold replay mints fresh activity
  * objects, so a new session can never inherit the previous one's segments.
  *
- * A completed activity that has no live segment (cold replay, historical
- * turns) falls back to its event elapsed (`startedAt → endedAt`) — the plan
- * explicitly allows that fallback and forbids fabricating past waits.
+ * A completed activity that was first seen only after it ended still freezes
+ * from the retained LIVE windows (the delayed-publication race); only a
+ * replay with no live evidence at all falls back to its event elapsed
+ * (`startedAt → endedAt`) — the plan explicitly allows that fallback and
+ * forbids fabricating past waits. A live turn first observed while
+ * user-blocked with no pause-boundary evidence reports an UNKNOWN duration
+ * (never a fake `0s`).
  * @module @xmoon76/dsh-pi-tui/focus-timing
  */
 
@@ -36,7 +40,10 @@ export function focusTimerPaused(phase: RunPhase): boolean {
  * non-paused spans, `resumedAt` is the start of the currently running span
  * (undefined while paused). */
 interface TimingSegment {
-  accumulated: number
+  /** Active millis, or undefined when the baseline is UNKNOWABLE (the turn
+   * was first observed while user-blocked with no pause-boundary evidence):
+   * the caller renders no duration rather than a fake `0s`. */
+  accumulated: number | undefined
   resumedAt: number | undefined
 }
 
@@ -108,61 +115,87 @@ export class FocusTimingStore {
   observe(activity: TurnActivity, phase: RunPhase, now: number): void {
     this.notePhase(phase, now)
     const startedAt = activity.startedAt
-    if (startedAt === undefined || activity.completed) return
+    if (startedAt === undefined) return
     const paused = focusTimerPaused(phase)
-    let segment = this.segments.get(activity)
-    if (segment === undefined) {
-      // First sighting. Count the span from the turn's start to `now`, minus
-      // every retained user-blocked window it overlaps — the waits are never
-      // counted, even when a pause opened AND resolved before this activity
-      // was published. While paused, the span ends at the open pause
-      // boundary (0 when no boundary is known, never the fabricated wall
-      // time).
-      const openPause = this.pauseWindows[this.pauseWindows.length - 1]
-      const pauseBoundary = openPause !== undefined && openPause.until === undefined ? openPause.from : undefined
-      const activeEnd = paused ? Math.min(pauseBoundary ?? startedAt, now) : now
-      segment = {
-        accumulated: Math.max(0, activeEnd - startedAt - this.pauseOverlap(startedAt, activeEnd)),
-        resumedAt: paused ? undefined : now,
+    const segment = this.segments.get(activity)
+    if (segment !== undefined) {
+      if (activity.completed) return
+      if (paused) {
+        if (segment.resumedAt !== undefined) {
+          segment.accumulated = (segment.accumulated ?? 0) + Math.max(0, now - segment.resumedAt)
+          segment.resumedAt = undefined
+        }
+      } else if (segment.resumedAt === undefined) {
+        segment.resumedAt = now
       }
-      this.segments.set(activity, segment)
-      // NOTE: the windows are NOT cleared here. Every activity first seen in
-      // the same publication pass must be seeded from the SAME window
-      // snapshot (clearing per activity would give the second one wall time
-      // instead of overlap-subtracted time — review finding). The owner
-      // clears once after the pass via {@link clearPauseWindows}.
       return
     }
-    if (paused) {
-      if (segment.resumedAt !== undefined) {
-        segment.accumulated += Math.max(0, now - segment.resumedAt)
-        segment.resumedAt = undefined
-      }
-    } else if (segment.resumedAt === undefined) {
-      segment.resumedAt = now
+    if (activity.completed) {
+      // A completed turn first published only after it ended still freezes
+      // from the retained LIVE pause evidence; only a replay with NO live
+      // windows falls back to the raw event elapsed (never re-count a wait
+      // the surface actually observed — review finding).
+      if (this.pauseWindows.length === 0) return
+      const end = activity.endedAt ?? now
+      this.segments.set(activity, {
+        accumulated: Math.max(0, end - startedAt - this.pauseOverlap(startedAt, end)),
+        resumedAt: undefined,
+      })
+      return
     }
+    // First sighting of a LIVE turn.
+    const openPause = this.pauseWindows[this.pauseWindows.length - 1]
+    const pauseBoundary = openPause !== undefined && openPause.until === undefined ? openPause.from : undefined
+    if (paused) {
+      if (pauseBoundary === undefined) {
+        // User-blocked with no known boundary: the active baseline is
+        // UNKNOWABLE. Mark it unknown — never fabricate `0s` (the header
+        // then renders `Waiting for approval` without a duration).
+        this.segments.set(activity, { accumulated: undefined, resumedAt: undefined })
+        return
+      }
+      const activeEnd = Math.min(pauseBoundary, now)
+      this.segments.set(activity, {
+        accumulated: Math.max(0, activeEnd - startedAt - this.pauseOverlap(startedAt, activeEnd)),
+        resumedAt: undefined,
+      })
+      return
+    }
+    // Count the span from the turn's start to `now`, minus every retained
+    // user-blocked window it overlaps — the waits are never counted, even
+    // when a pause opened AND resolved before this activity was published.
+    this.segments.set(activity, {
+      accumulated: Math.max(0, now - startedAt - this.pauseOverlap(startedAt, now)),
+      resumedAt: now,
+    })
+    // NOTE: the windows are NOT cleared here. Every activity first seen in
+    // the same publication pass must be seeded from the SAME window
+    // snapshot (clearing per activity would give the second one wall time
+    // instead of overlap-subtracted time — review finding). The owner
+    // clears once after the pass via {@link clearPauseWindows}.
   }
 
   /**
    * The active (non-user-blocked) elapsed millis of one activity, or
-   * undefined when the turn has no reliable start (never a fake `0s`).
-   * Running turns read the live segment; a completed turn freezes at
-   * `endedAt`; a completed turn with no live segment uses the event elapsed
-   * fallback. A render also observes (idempotent — a paused segment stays
-   * frozen), so a surface repaint can never double-count a wait.
+   * undefined when the turn has no reliable start OR its active baseline is
+   * unknowable (never a fake `0s`). Running turns read the live segment; a
+   * completed turn freezes at `endedAt`; a completed turn with no live
+   * segment at all uses the event elapsed fallback. A render also observes
+   * (idempotent — a paused segment stays frozen), so a surface repaint can
+   * never double-count a wait.
    */
   activeMillis(activity: TurnActivity, phase: RunPhase, now: number): number | undefined {
     this.observe(activity, phase, now)
     const startedAt = activity.startedAt
     if (startedAt === undefined) return undefined
     const segment = this.segments.get(activity)
-    if (activity.completed) {
-      if (segment === undefined) return Math.max(0, (activity.endedAt ?? startedAt) - startedAt)
-      const end = activity.endedAt ?? now
-      return segment.accumulated + (segment.resumedAt === undefined ? 0 : Math.max(0, end - segment.resumedAt))
+    if (segment === undefined) {
+      if (activity.completed) return Math.max(0, (activity.endedAt ?? startedAt) - startedAt)
+      return Math.max(0, now - startedAt)
     }
-    if (segment === undefined) return Math.max(0, now - startedAt)
-    return segment.accumulated + (segment.resumedAt === undefined ? 0 : Math.max(0, now - segment.resumedAt))
+    if (segment.accumulated === undefined) return undefined
+    const end = activity.completed ? (activity.endedAt ?? now) : now
+    return segment.accumulated + (segment.resumedAt === undefined ? 0 : Math.max(0, end - segment.resumedAt))
   }
 }
 

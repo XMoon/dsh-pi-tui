@@ -584,8 +584,12 @@ export interface TurnActivity {
    * max-tokens/interrupted) — never an invented name. */
   readonly reason?: TurnEndReason
   /** The Think slot: the latest meaningful line of the bounded reasoning
-   * tail (compact preview only — never the raw reasoning stream). */
-  readonly think?: { readonly text: string }
+   * tail (compact preview only — never the raw reasoning stream), plus the
+   * authoritative reasoning lifecycle fact: `running` is true only while
+   * that step's reasoning entry still streams. A turn can keep running
+   * (tool execution, further model output) after reasoning settled, so the
+   * Focus follow-end gate reads THIS, never `completed`. */
+  readonly think?: { readonly text: string; readonly running: boolean }
   /** The Message slot: the bounded LATEST TAIL of the current candidate /
    * confirmed intermediate assistant text, kept MULTILINE (the Focus
    * renderer wraps it to the current width and shows the last three
@@ -633,8 +637,9 @@ interface MutableTurnActivity {
   reason?: TurnEndReason
   /** The rolling reasoning tail (preview only, bounded). */
   thinkingTail: string
-  /** The materialized Think slot (latest meaningful line). */
-  think?: { text: string }
+  /** The materialized Think slot (latest meaningful line) plus the live
+   * reasoning-running fact mirrored from its thinking entry. */
+  think?: { text: string; running: boolean }
   /** The step that currently owns the Focus reasoning preview. */
   thinkingStep?: number
   /** The streaming assistant text of the CURRENT step (bounded tail —
@@ -1689,7 +1694,25 @@ export class TranscriptFolder {
     // the renderer's job (a head cap here would drop the true tail before
     // the follow-end window ever sees it).
     const line = latestLine(activity.thinkingTail)
-    activity.think = line === '' ? undefined : { text: line }
+    activity.think = line === '' ? undefined : { text: line, running: this.thinkRunningFor(activity, step) }
+    activity.revision += 1
+  }
+
+  /** The authoritative reasoning-running fact for one activity's Think
+   * slot: true only while that step's reasoning entry still streams and the
+   * step has not settled. This is the follow-end gate — a turn can keep
+   * running after reasoning settled. */
+  private thinkRunningFor(activity: MutableTurnActivity, step: number): boolean {
+    if (activity.settledSteps.has(step)) return false
+    return this.thinkingEntries.get(stepKey(activity.turn, step))?.running === true
+  }
+
+  /** Mirror a reasoning entry's settlement onto an ALREADY materialized
+   * Think preview (the live attempt/turn ends without re-materializing the
+   * line). */
+  private markThinkSettled(activity: MutableTurnActivity, step: number): void {
+    if (activity.thinkingStep !== step || activity.think === undefined || activity.think.running === false) return
+    activity.think = { text: activity.think.text, running: false }
     activity.revision += 1
   }
 
@@ -1717,7 +1740,7 @@ export class TranscriptFolder {
     // Keep the latest line in full (see restoreThinkingPreview): the
     // renderer's follow-end window owns width clipping.
     const line = latestLine(activity.thinkingTail)
-    activity.think = line === '' ? undefined : { text: line }
+    activity.think = line === '' ? undefined : { text: line, running: this.thinkRunningFor(activity, step) }
     activity.revision += 1
   }
 
@@ -2462,6 +2485,11 @@ export class TranscriptFolder {
             for (const entry of open) entry.running = false
             this.openThinkingByTurn.delete(input.turn)
           }
+          // The turn may continue (tool execution, later model output): the
+          // Focus Think slot must return to a settled (head) preview now,
+          // not at turn/end (review finding).
+          const activity = this.activityByTurn.get(input.turn)
+          if (activity !== undefined) this.markThinkSettled(activity, input.step)
         }
         break
     }
@@ -3318,6 +3346,8 @@ export class TranscriptFolder {
     if (open === undefined) return
     for (const entry of open) entry.running = false
     this.openThinkingByTurn.delete(turn)
+    const activity = this.activityByTurn.get(turn)
+    if (activity?.thinkingStep !== undefined) this.markThinkSettled(activity, activity.thinkingStep)
   }
 
   /** The thinking entry object for one (turn, step), created on first reasoning. */
@@ -3560,6 +3590,7 @@ export class TranscriptFolder {
       this.syncUsage(activity)
       const thinking = this.thinkingEntries.get(key)
       if (thinking !== undefined && thinking.running) this.closeThinking(thinking)
+      this.markThinkSettled(activity, data.step)
       activity.revision += 1
       return
     }

@@ -1517,6 +1517,47 @@ test('the collapsed Think slot reads from the start once the turn settled', () =
   assert.ok(!think.endsWith('one.'), `a settled row must not follow the tail: ${JSON.stringify(think)}`)
 })
 
+test('the collapsed Think slot returns to the head when reasoning settles, even while the turn runs', () => {
+  // A turn routinely keeps running (tool execution, later model output)
+  // after its reasoning attempt ends. The follow-end gate must be the
+  // reasoning lifecycle fact, never `!activity.completed` (review finding).
+  const line = 'The final reasoning token is the important one.'
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: line } }, 1001, 1),
+  ])
+  let activity = folder.turnActivity(0)!
+  assert.equal(activity.completed, false)
+  assert.equal(activity.think?.running, true, 'live reasoning is running')
+  assert.ok(focusCollapsedBody(activity, 30, undefined)[0]!.endsWith('one.'), 'live reasoning follows the tail')
+  // The reasoning attempt settles, then a tool starts; no turn/end yet.
+  folder.applyLiveInput({ kind: 'end', sessionId: 'test', attemptId: 'attempt-1', turn: 0, step: 0, status: 'committed', settlement: 'attempt' })
+  folder.apply([eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c9'), name: 'bash', arguments: JSON.stringify({ command: 'ls' }) }, 1002, 2)])
+  activity = folder.turnActivity(0)!
+  assert.equal(activity.completed, false, 'the turn is still open')
+  assert.equal(activity.think?.running, false, 'reasoning settled')
+  const think = focusCollapsedBody(activity, 30, undefined)[0]!
+  assert.ok(think.includes('The final'), `settled reasoning reads from the head: ${JSON.stringify(think)}`)
+  assert.ok(!think.endsWith('one.'), `settled reasoning must not follow the tail: ${JSON.stringify(think)}`)
+})
+
+test('an unknown active baseline renders Waiting for approval without a fake 0s', () => {
+  // Attaching to a live turn already parked on an approval gives no pause
+  // boundary, so the duration is unknown — the header must omit it.
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [eventAt('turn/start', { turn: 0 }, 1000, 0)])
+  const component = new FocusActivityComponent({
+    activity: folder.turnActivity(0)!,
+    expanded: false,
+    phase: () => 'waiting-approval',
+    timing: new FocusTimingStore(),
+  })
+  const header = component.render(80).join('\n')
+  assert.ok(header.includes('Waiting for approval'), header)
+  assert.ok(!header.includes('· 0s'), `an unknown duration must not render as 0s: ${header}`)
+})
+
 test('the Focus Think projection keeps the reasoning tail beyond the old head cap', () => {
   const marker = 'TRUE-TAIL'
   const text = `${'H'.repeat(260)}${marker}`

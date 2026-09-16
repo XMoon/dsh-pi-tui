@@ -287,11 +287,13 @@ export function focusCollapsedBody(
 ): string[] {
   const lines: string[] = []
   if (activity.think !== undefined) {
-    // Running reasoning follows its tail (the latest token is visible);
-    // a settled turn reads from the start of its latest line.
-    lines.push(activity.completed
-      ? previewLine('Think:', activity.think.text, width)
-      : previewThinkLine(activity.think.text, width))
+    // Only LIVE reasoning follows its tail (the latest token is visible);
+    // once reasoning settles — even while the turn keeps running a tool or
+    // later output — the preview reads from the start of its line. The gate
+    // is the reasoning lifecycle fact, never `activity.completed`.
+    lines.push(activity.think.running
+      ? previewThinkLine(activity.think.text, width)
+      : previewLine('Think:', activity.think.text, width))
   }
   if (preparingDisplay !== undefined) {
     lines.push(previewLine('Tool:', preparingDisplay, width))

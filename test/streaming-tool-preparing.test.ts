@@ -401,7 +401,7 @@ test('preparing rows are inert in the fullscreen hit map', async () => {
   const activity: TurnActivity = {
     turn: 1,
     completed: false,
-    think: { text: 'still thinking' },
+    think: { text: 'still thinking', running: true },
     assistantMessages: 0,
     toolCalls: 0,
     tools: new Map(),
@@ -474,7 +474,7 @@ test('renders preparing rows with the selected icon style and no spinner state',
   const focusActivity: TurnActivity = {
     turn: 1,
     completed: false,
-    think: { text: 'still thinking' },
+    think: { text: 'still thinking', running: true },
     assistantMessages: 0,
     toolCalls: 0,
     tools: new Map(),

@@ -3787,6 +3787,40 @@ test('two live activities published together both keep the pre-wait span', async
   app.stop()
 })
 
+test('an approval resolved before turn/end and before the delayed publish still freezes the active time', async () => {
+  // Review round-5 race: the live pause window is observed, then the turn
+  // ends, and only THEN is the activity first published. A completed turn
+  // must still freeze from the live window instead of the raw wall elapsed.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 1_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('race3'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 600))
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  // The turn ends BEFORE its first transcript publication.
+  applyMixed(folder, [{ type: 'turn/end', seq: 2, time: Date.now(), data: { turn: 0, reason: { kind: 'completed' } } } as SessionEvent])
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const activity = folder.turnActivity(0)!
+  const active = app.focusTimingForTest().activeMillis(activity, 'idle', Date.now())
+  const wall = activity.endedAt! - activity.startedAt!
+  assert.ok(active !== undefined, 'the completed turn must freeze from live evidence')
+  assert.ok(active >= 700 && active < 1_300, `~1s of active time minus the ~600ms wait: ${active} (wall ${wall})`)
+  app.stop()
+})
+
 test('applyPluginPalette records the live plugin-theme selection (the unload-fallback source)', () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
