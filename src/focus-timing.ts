@@ -105,6 +105,16 @@ export class FocusTimingStore {
     this.pauseWindows.length = 0
   }
 
+  /** Reset the SURFACE-scoped phase/window timeline at a session boundary.
+   * Segments are keyed by the activity OBJECT, so a new session's freshly
+   * minted activities cannot collide and need no reset; the shared phase and
+   * pause windows would otherwise let the previous session's waits leak into
+   * the next session's first live turn. */
+  resetSessionScope(): void {
+    this.phase = undefined
+    this.pauseWindows.length = 0
+  }
+
   /**
    * Observe one activity under the current authoritative phase at `now`.
    * Called from the phase projection and from every activity-map
@@ -122,7 +132,12 @@ export class FocusTimingStore {
       if (activity.completed) return
       if (paused) {
         if (segment.resumedAt !== undefined) {
-          segment.accumulated = (segment.accumulated ?? 0) + Math.max(0, now - segment.resumedAt)
+          // An UNKNOWN baseline (accumulated === undefined) must stay
+          // unknown: the pre-attach active span can never be recovered, so a
+          // later wait must not turn it into a fabricated number.
+          if (segment.accumulated !== undefined) {
+            segment.accumulated += Math.max(0, now - segment.resumedAt)
+          }
           segment.resumedAt = undefined
         }
       } else if (segment.resumedAt === undefined) {

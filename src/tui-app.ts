@@ -6041,10 +6041,10 @@ export class TuiApp {
     // at the phase it is actually in. The runner can open an approval/question
     // before this (delayed) repaint publishes the map, and the recorded pause
     // boundaries preserve the pre-wait active span (review P1). Clear the
-    // windows only AFTER the whole pass: every activity first seen in this
-    // pass must share the same window snapshot.
-    this.observeFocusTiming()
-    this.focusTiming.clearPauseWindows()
+    // windows only AFTER a pass that actually seeded an activity: every
+    // activity first seen in the pass shares the same window snapshot, and an
+    // empty window must not drop a boundary the turn still needs.
+    if (this.observeFocusTiming()) this.focusTiming.clearPauseWindows()
     this.streamingToolPreviews = [...(streamingToolPreviews ?? [])]
     this.transcriptWindow = window
     this.refreshTranscriptWindowHint()
@@ -6071,9 +6071,8 @@ export class TuiApp {
     this.turnActivities = activities
     // See setTranscript: a newly published activity must be observed at the
     // current phase so the Focus timer keeps its pre-wait active span; the
-    // windows are cleared once the whole pass has seeded every activity.
-    this.observeFocusTiming()
-    this.focusTiming.clearPauseWindows()
+    // windows are cleared once the pass has seeded an activity.
+    if (this.observeFocusTiming()) this.focusTiming.clearPauseWindows()
     this.rebuildMessages()
   }
 
@@ -8417,6 +8416,11 @@ export class TuiApp {
     // then a no-op; see that method).
     this.focusExpandedTurns.clear()
     this.focusExpansionsStack.length = 0
+    // The live Focus timer's shared phase/pause timeline is session-scoped
+    // too: its per-activity segments are keyed by activity object (so a new
+    // session cannot collide), but a stale pause window from the old session
+    // must never be subtracted from the new session's first live turn.
+    this.focusTiming.resetSessionScope()
     // The attachment collapse toggles are session-scoped too: a switched-in
     // session's attachments start expanded (the click state must never leak).
     this.collapsedOccurrences.clear()
@@ -12365,20 +12369,36 @@ export class TuiApp {
   }
 
   /**
-   * Seed/advance the live Focus timer for every known activity under
+   * Seed/advance the live Focus timer for every WINDOWED activity under
    * `phase` (defaults to the current authoritative status phase). Called
    * from the phase projection AND from every activity-map publication:
    * `folder.apply` schedules a delayed repaint while an approval/question
    * can open synchronously first, so the map may be published only after
    * the phase is already user-blocked. Recording the phase boundary and
    * seeding here (at publication) keeps the pre-wait active span.
+   *
+   * Only the windowed turns can be on screen, and `turnActivities()` is
+   * every known turn (O(total)): iterating it on every publication would
+   * reintroduce an unbounded scan into the long-session repaint path. This
+   * walks the bounded windowed message list instead. Returns whether any
+   * activity was observed (the caller clears the pause windows only after a
+   * pass that actually seeded something).
    */
-  private observeFocusTiming(phase: RunPhase = this.statusStore.snapshot().activity.phase): void {
+  private observeFocusTiming(phase: RunPhase = this.statusStore.snapshot().activity.phase): boolean {
     const now = Date.now()
     this.focusTiming.notePhase(phase, now)
-    for (const turnActivity of this.turnActivities.values()) {
+    const seen = new Set<number>()
+    let observed = false
+    for (const message of this.messages) {
+      const turn = 'turn' in message ? message.turn : undefined
+      if (turn === undefined || seen.has(turn)) continue
+      seen.add(turn)
+      const turnActivity = this.turnActivities.get(turn)
+      if (turnActivity === undefined) continue
       this.focusTiming.observe(turnActivity, phase, now)
+      observed = true
     }
+    return observed
   }
 
   /** M0: project the surface section (focusedSeat/fullscreen) from the

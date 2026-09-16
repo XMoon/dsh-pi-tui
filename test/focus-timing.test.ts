@@ -125,6 +125,31 @@ test('a turn first observed while already waiting with no boundary reports UNKNO
   assert.equal(store.activeMillis(asActivity(activity), 'working', 50_000), undefined)
 })
 
+test('an unknown baseline stays unknown across a later wait', () => {
+  const store = new FocusTimingStore()
+  const activity = make(0)
+  // Attach while already waiting with no boundary → unknown.
+  store.observe(asActivity(activity), 'waiting-approval', 10_000)
+  assert.equal(store.activeMillis(asActivity(activity), 'waiting-approval', 12_000), undefined)
+  // Resume, work 5s, then a second wait: the pre-attach span is still
+  // unknowable, so the accumulated value must not become "known".
+  store.observe(asActivity(activity), 'working', 12_000)
+  store.observe(asActivity(activity), 'waiting-question', 17_000)
+  assert.equal(store.activeMillis(asActivity(activity), 'waiting-question', 30_000), undefined, 'the unknown baseline must not be materialized as a number')
+  store.observe(asActivity(activity), 'working', 30_000)
+  assert.equal(store.activeMillis(asActivity(activity), 'working', 35_000), undefined)
+})
+
+test('resetSessionScope drops the previous session phase and pause windows', () => {
+  const store = new FocusTimingStore()
+  store.notePhase('working', 0)
+  store.notePhase('waiting-approval', 1_000) // session A: pause window open
+  store.resetSessionScope()
+  // Session B: a live turn first seen while working must not subtract the
+  // previous session's wait.
+  assert.equal(store.activeMillis(asActivity(make(0)), 'working', 5_000), 5_000)
+})
+
 test('a completed turn first published after it ended still freezes from live pause windows', () => {
   // t=0 start, t=10 pause, t=20 resume, t=24 end, published only later.
   const store = new FocusTimingStore()

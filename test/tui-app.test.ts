@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { toolPresenterFrom } from '../src/present.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
-import type { TranscriptMessage } from '../src/transcript.ts'
+import type { TranscriptMessage, TurnActivity } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit } from '../src/tui-app.ts'
 import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
@@ -3818,6 +3818,72 @@ test('an approval resolved before turn/end and before the delayed publish still 
   const wall = activity.endedAt! - activity.startedAt!
   assert.ok(active !== undefined, 'the completed turn must freeze from live evidence')
   assert.ok(active >= 700 && active < 1_300, `~1s of active time minus the ~600ms wait: ${active} (wall ${wall})`)
+  app.stop()
+})
+
+test('a session switch resets the Focus timer phase and pause windows', async () => {
+  // Review round-6 finding: segments are keyed by activity object, but the
+  // shared phase/pause timeline must not let the old session's wait leak
+  // into the new session's first live turn.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 600))
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  // The session-switch boundary while the old pause window is still retained.
+  app.clearSessionOverrides()
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 1_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('sess2'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const activity = folder.turnActivity(0)!
+  const active = app.focusTimingForTest().activeMillis(activity, 'working', Date.now())
+  assert.ok(active !== undefined && active >= 900 && active < 1_300, `the old session wait must not be subtracted: ${active}`)
+  app.stop()
+})
+
+test('the timer publication pass observes only windowed turns, never the full activity map', async () => {
+  // Review round-6 perf finding: `turnActivities()` is every known turn, so
+  // iterating it on every publication would reintroduce an O(total) scan
+  // into the long-session repaint path.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 5_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('win1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  const activities = new Map<number, TurnActivity>()
+  for (let turn = 0; turn < 2_000; turn += 1) {
+    activities.set(turn, { turn, startedAt, endedAt: startedAt + 1, completed: true, assistantMessages: 0, toolCalls: 0, tools: new Map(), revision: 0 })
+  }
+  const store = app.focusTimingForTest()
+  const original = store.observe.bind(store)
+  let observed = 0
+  store.observe = (activity, phase, now) => { observed += 1; original(activity, phase, now) }
+  try {
+    app.setTranscript(folder.messages(), activities)
+    await vt.waitForRender()
+  } finally {
+    store.observe = original
+  }
+  assert.ok(observed > 0, 'the windowed turn must be observed')
+  assert.ok(observed < 50, `the pass must stay windowed, observed ${observed} activities`)
   app.stop()
 })
 
