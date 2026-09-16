@@ -4634,3 +4634,62 @@ test('question: Esc between press and release cannot re-enter the free-text edit
   answers.catch(() => {})
   app.stop()
 })
+
+test('a nonCapturing overlay does not suppress the Host shortcut ladder (↓ Quick Tasks)', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  let opened = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onOpenTasks: () => { opened += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  app.setTasks([{ id: 'job:1', label: 'build', status: 'running' }])
+  await vt.waitForRender()
+  // A nonCapturing notice owns no keyboard: the empty-editor ↓ affordance
+  // (focusedSeat 'editor' + tasksActive) must still reach the resolver.
+  app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'HUD notice' }] }, { nonCapturing: true })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // down
+  await vt.waitForRender()
+  assert.equal(opened, 1, '↓ must open Quick Tasks under a nonCapturing overlay')
+  app.stop()
+})
+
+test('a nonCapturing overlay keeps other Host shortcuts live (Ctrl+F search)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'HUD notice' }] }, { nonCapturing: true })
+  await vt.waitForRender()
+  const before = app.overlayGraphState().handles
+  assert.equal(before, 1, 'only the notice overlay is tracked')
+  vt.sendInput('\x06') // Ctrl+F → app.transcript.search
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, before + 1,
+    'the Host search shortcut must still fire under a nonCapturing overlay')
+  app.stop()
+})
+
+test('a narrow short terminal prefers Esc back over the Stop hint', async () => {
+  const { vt, app } = startApp()
+  // One content row AND a width too small for `S stop · Esc back`: the full
+  // hint word-wraps, and its first line is all Stop — the close/back verb
+  // must win instead.
+  vt.resize(20, 2)
+  await vt.waitForRender()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  app.openOutputViewer({
+    title: 'job detail',
+    initial: 'body',
+    refresh: () => 'body',
+    onStop: () => {},
+    canStop: () => true,
+    closeHint: 'back',
+  })
+  await vt.waitForRender()
+  assert.ok(view().includes('Esc back'), `the close/back verb must survive a narrow short terminal:\n${view()}`)
+  assert.ok(!view().includes('stop'), `Stop must degrade away first:\n${view()}`)
+  app.dispose()
+})

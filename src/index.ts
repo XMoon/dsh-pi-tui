@@ -8403,24 +8403,27 @@ export function apply(ctx: Context, config: Config): void {
     if (jobs !== undefined) {
       refreshTasks = (): void => {
         if (cleanedUp) return
-        let snapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
-        let tasks: { id: string; label: string; status: string; kind?: string; startedAt?: number; finishedAt?: number }[] = []
+        let snapshots: ReturnType<NonNullable<typeof jobs>['list']>
         try {
           // Keep terminal records in the catalog. Active/total separation is
           // a presentation fact; dropping completed/failed jobs here made
           // Full Task Center history and failure attention impossible.
           snapshots = jobs.list(liveAgent)
-          tasks = snapshots.map(job => ({
-            id: job.id,
-            label: job.label,
-            status: job.status,
-            kind: job.kind,
-            startedAt: job.startedAt,
-            finishedAt: job.finishedAt,
-          }))
         } catch {
-          // The registry read is best-effort; the dock line just stays stale.
+          // Best-effort: a failed registry read is NOT an authoritative empty
+          // catalog. Keeping the previous snapshot matters most for a Job
+          // detail's retained parent browser — the close-time refresh must not
+          // blank the rows/selection it is about to restore.
+          return
         }
+        const tasks = snapshots.map(job => ({
+          id: job.id,
+          label: job.label,
+          status: job.status,
+          kind: job.kind,
+          startedAt: job.startedAt,
+          finishedAt: job.finishedAt,
+        }))
         app.setTasks(tasks)
         // A jobs-only session has no catalog coordinator, so this is the ONLY
         // refresh channel for an OPEN browser. Keep it in step with the

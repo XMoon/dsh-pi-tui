@@ -3549,9 +3549,13 @@ function makeJobsFake(
 ) {
   type Entry = { id: string; kind: string; label: string; status: string; startedAt: number }
   let entries: Entry[] = initial.map(entry => ({ ...entry }))
+  let listFailure: Error | undefined
   const listeners: Array<() => void> = []
   return {
-    list: (): Entry[] => entries.map(entry => ({ ...entry })),
+    list: (): Entry[] => {
+      if (listFailure !== undefined) throw listFailure
+      return entries.map(entry => ({ ...entry }))
+    },
     get: (id: string): Entry => {
       const entry = entries.find(candidate => candidate.id === id)
       // A vanished job is the registry's own "not found" contract.
@@ -3564,6 +3568,7 @@ function makeJobsFake(
       return () => {}
     },
     setEntries: (next: readonly Entry[]): void => { entries = next.map(entry => ({ ...entry })) },
+    setListFailure: (error: Error | undefined): void => { listFailure = error },
     emit: (): void => { for (const listener of [...listeners]) listener() },
   }
 }
@@ -3641,4 +3646,65 @@ test('a Job detail opened from /tasks keeps its parent mounted and live-refreshe
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 1,
     'a vanished job must not dismiss the parent browser')
+})
+
+test('a failed jobs read never blanks the retained Task Browser parent', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-read-failure-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'task-read-failure-parent',
+    header: { id: 'task-read-failure-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' })
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'the Task Center must be the only overlay')
+  assert.ok(view().includes('build'), `the browser must show the job:\n${view()}`)
+
+  input('\r') // Job detail; the parent stays mounted but hidden
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 2)
+
+  // The close-time refresh hits a transient registry failure: that must NOT
+  // be interpreted as an authoritative empty catalog.
+  jobs.setListFailure(new Error('registry unavailable'))
+  input('\x1b') // close the Job detail → onClose → refreshTasks()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'Esc must close only the Job detail')
+  assert.ok(view().includes('build'),
+    `the retained parent must keep its rows across a failed registry read:\n${view()}`)
 })
