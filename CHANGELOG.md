@@ -24,11 +24,13 @@ dsh --profile pi-tui
 
 ### 变更
 
-- **`/model` 改为可搜索的模型命令面板。** 打开后直接按 provider 分组展示全部模型，
-  一次搜索覆盖 provider/model 的名称与 id；`Enter` 直接选择模型，`→` 在同一个
-  overlay 内进入 reasoning effort（不再先选 provider）；current 与 default 及 effort
-  状态分别标出，说明只在当前高亮行展开；fullscreen 切换后保留查询、选择与 effort
-  光标。DSH 的 Session/全局默认模型语义不变。
+- **`/model` 改为即时打开、可搜索的模型命令面板。** 输入 `/model` 后面板立即出现并先
+  显示 `Loading models…`，目录在后台加载、加载完成后同一 overlay 原地填充（不重开
+  面板，加载期间即可输入搜索且查询保留）；provider 仅作分组，一次搜索覆盖
+  provider/model 的名称与 id；`↑↓` 选模型，`←→` 在当前模型行上直接调整 reasoning
+  effort（`effort ‹high›`），`Enter` 提交当前显示的选择。模型 description 与 id
+  不再展开，列表行高稳定不跳动；fullscreen 切换后保留查询与 effort。DSH 的
+  Session/全局默认模型语义不变。
 - **`/settings` 的 “Subagent allowed models” 改为同一套可搜索分组列表。** provider
   仅作分组，模型行 `Enter` 直接增删允许路由，一次搜索覆盖 provider/model 的名称与
   id；官方整段写入、last-route 保护、写入串行与失败回滚语义不变，单个 provider

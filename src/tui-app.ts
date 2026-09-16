@@ -14022,12 +14022,18 @@ export class TuiApp {
 
   /**
    * Mount the `/model` picker as a root-owned responsive capturing overlay.
-   * A narrow seam: the component owns every picker view/state (`models` ↔
-   * `efforts` swaps inside the SAME mounted component — never a nested
-   * overlay); the host owns only the responsive frame, the row-budget grant
-   * and the OverlayBroker registration/ownership. Returns a closer.
+   * A narrow seam: the component owns every picker state (the single model list
+   * with its inline per-model effort); the host owns only the responsive frame,
+   * the row-budget grant and the OverlayBroker registration/ownership. Returns
+   * a closer.
+   *
+   * There is exactly ONE `/model` picker slot: mounting a new picker SUPERSEDES
+   * the previous one (close + dispose it) so a repeated `/model` can never leave
+   * an older loading/completed panel hidden beneath the new one waiting to
+   * reappear.
    */
   openModelPicker(component: Component & RowBudgetAware): () => void {
+    if (this.modelPickerComponent !== undefined) this.closeModelPicker()
     this.modelPickerComponent = component
     this.mountModelPickerOverlay(component)
     // The closer targets the CURRENT handle: a fullscreen screen swap

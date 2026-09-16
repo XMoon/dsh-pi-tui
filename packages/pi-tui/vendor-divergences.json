@@ -270,11 +270,11 @@
      "items": [
       "src/tui-app.ts openPicker and categorized picker rebuild (now Host SearchablePicker)",
       "src/commands.ts session picker via the TuiApp picker surface (PickerItem/PickerCategory; no direct SelectList import)",
-      "src/model-picker.ts /model ModelPicker (Models/Efforts views via the Host SearchablePicker)",
+      "src/model-picker.ts /model ModelPicker (provider-grouped inline-effort model list via the Host SearchablePicker)",
       "src/subagent-model-menu.ts SubagentModelAllowlistPicker (/settings allowlist flat list via the Host SearchablePicker)",
       "advanced ui.select picker adapter"
      ],
-     "notes": "The Host consumers exercise query, grouping, dynamic rows, and row budgets through TuiApp.openPicker/openCategorizedPicker, which now construct the Host SearchablePicker, and through src/model-picker.ts (which constructs SearchablePicker directly for the /model Models/Efforts views); the footer configurator remains a host-owned SettingsList/Input flow, not an X001 consumer. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics."
+     "notes": "The Host consumers exercise query, grouping, dynamic rows, and row budgets through TuiApp.openPicker/openCategorizedPicker, which now construct the Host SearchablePicker, and through src/model-picker.ts (which constructs SearchablePicker directly for the /model provider-grouped model list (with an inline per-model effort)); the footer configurator remains a host-owned SettingsList/Input flow, not an X001 consumer. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics."
     },
     "publicExtension": {
      "audited": true,
@@ -296,7 +296,7 @@
    },
    "tests": [
     "test/searchable-picker.test.ts: search, groups, paging, setFilter, and zero-match navigation",
-    "test/model-picker.test.ts: /model Models/Efforts views exercise SearchablePicker search, grouping, selected-only detail, identity selection, and row budget",
+    "test/model-picker.test.ts: /model model list exercises SearchablePicker search, grouping, identity selection, row budget, and the immediate loading/in-place hydration lifecycle",
     "test/subagent-model-menu.test.ts: /settings allowlist picker exercises SearchablePicker search, provider grouping, partial failure, row budget, and mouse/focus",
     "test/session-picker-loading.test.ts and picker integration coverage",
     "test/session-categories.test.ts: categorized picker query carry",

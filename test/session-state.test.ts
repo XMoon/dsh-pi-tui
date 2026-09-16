@@ -1761,8 +1761,14 @@ test('a superseded model-catalog read keeps the /model surface silent (no stale 
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   const result = await (modelDef!.handler as () => Promise<{ kind: string; text?: string }>)()
   assert.equal(result.text, undefined, 'a superseded read must not surface a catalog error')
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('model catalog unavailable'), `no stale catalog notice:\n${view}`)
+  assert.ok(!view.includes('Loading models…'),
+    `a superseded read must not leave the panel stuck on Loading…:\n${view}`)
+  assert.ok(!view.includes('Models'), `the superseded loading panel must close:\n${view}`)
   app.stop()
 })
 
@@ -1991,5 +1997,211 @@ test('a sessionless /model whose subject drifts to a same-generation live Sessio
   assert.equal(proxy.defaultIntentOutcome, 'unresolved', 'the business settlement still settles the tracker')
   assert.ok(!vt.getViewport().join('\n').includes('model default save'),
     'a stale (drifted) operation must not touch the UI surface')
+  app.stop()
+})
+
+// ── immediate-open / loading lifecycle (round 2) ─────────────────────────
+
+/** A catalog whose directory read is held until `releaseDirectory()` /
+ *  `failDirectory()` (the loading-state repro). */
+function gatedModelCatalog(modelId = 'm1', modelName = 'M1'): {
+  catalog: TuiCommandRunner['catalog']
+  releaseDirectory: () => void
+  failDirectory: (error: unknown) => void
+  directoryStarted: () => boolean
+} {
+  let release!: () => void
+  let fail!: (error: unknown) => void
+  const gate = new Promise<void>((resolve, reject) => { release = resolve; fail = reject })
+  let started = false
+  const catalog = {
+    models: {
+      available: () => true,
+      loadDirectory: async () => {
+        started = true
+        await gate
+        return {
+          default: { provider: 'p', model: modelId },
+          routableProviders: ['p'],
+          groups: [{ id: 'p', name: 'Provider P', models: [{ id: modelId, name: modelName }] }],
+          failures: [],
+        }
+      },
+      listProviders: () => [{ id: 'p', name: 'Provider P' }],
+      listModels: async () => [{ id: modelId }],
+      defaultSelection: () => ({ provider: 'p', model: modelId }),
+      saveDefaultSelection: async () => ({ kind: 'committed' as const, value: undefined }) as never,
+      sessionSelection: () => undefined,
+      selectSessionModel: (async () => ({
+        ownership: 'current',
+        outcome: { kind: 'committed', value: { provider: 'p', model: modelId } },
+      })) as TuiCommandRunner['catalog']['models']['selectSessionModel'],
+      discoverModels: async () => [],
+      listConfigurableProviders: () => [],
+    },
+    presets: {} as never,
+    skills: {} as never,
+  } as TuiCommandRunner['catalog']
+  return { catalog, releaseDirectory: release, failDirectory: fail, directoryStarted: () => started }
+}
+
+function modelRunner(state: { agent: ReturnType<typeof fakeAgent> | undefined; generation: number }, vt: VirtualTerminal, catalogFor: () => TuiCommandRunner['catalog']): {
+  app: TuiApp
+  handler: () => Promise<unknown>
+} {
+  const ctx = new Context()
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalogFor()
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  return { app, handler: modelDef!.handler as () => Promise<unknown> }
+}
+
+test('/model mounts the loading panel before the directory settles', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const gated = gatedModelCatalog()
+  const { app, handler } = modelRunner({ agent: fakeAgent('session-a'), generation: 1 }, vt, () => gated.catalog)
+  await handler()
+  await vt.waitForRender()
+  const loading = vt.getViewport().join('\n')
+  assert.ok(loading.includes('Loading models…'), `the panel must mount before the read settles:\n${loading}`)
+  assert.equal(gated.directoryStarted(), true, 'the background directory read must already have started')
+  gated.releaseDirectory()
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  const loaded = vt.getViewport().join('\n')
+  assert.ok(loaded.includes('M1'), `the panel must hydrate in place:\n${loaded}`)
+  assert.ok(!loaded.includes('Loading models…'), `the loading state must be replaced:\n${loaded}`)
+  app.stop()
+})
+
+test('a /model error while loading renders in the SAME panel', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const gated = gatedModelCatalog()
+  const { app, handler } = modelRunner({ agent: fakeAgent('session-a'), generation: 1 }, vt, () => gated.catalog)
+  await handler()
+  await vt.waitForRender()
+  gated.failDirectory(new Error('catalog exploded'))
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Model catalog unavailable'), `the error must render in-panel:\n${view}`)
+  app.stop()
+})
+
+test('a session switch while /model is loading silently closes the stale panel', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const gated = gatedModelCatalog()
+  const state = { agent: fakeAgent('session-a') as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const { app, handler } = modelRunner(state, vt, () => gated.catalog)
+  await handler()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Loading models…'))
+  state.agent = fakeAgent('session-b')
+  state.generation = 2
+  gated.releaseDirectory()
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('M1'), `a stale catalog must not hydrate the new Session:\n${view}`)
+  assert.ok(!view.includes('Loading models…'), `the stale panel must close silently:\n${view}`)
+  app.stop()
+})
+
+test('a repeated /model supersedes the previous loading panel', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const first = gatedModelCatalog('m1', 'First Model')
+  const second = gatedModelCatalog('m2', 'Second Model')
+  let active = first.catalog
+  const { app, handler } = modelRunner({ agent: fakeAgent('session-a'), generation: 1 }, vt, () => active)
+  await handler()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Loading models…'))
+  active = second.catalog
+  await handler() // a second /model supersedes the first surface
+  await vt.waitForRender()
+  first.releaseDirectory() // the FIRST read settles late
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('First Model'), `the superseded surface must not resurface:\n${view}`)
+  second.releaseDirectory()
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Second Model'), `the newest surface must hydrate:\n${view}`)
+  app.stop()
+})
+
+test('a lifecycle-aborted /model directory read is a cancellation diagnostic, not an error', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  // A read that rejects with a NON-abort-shaped error while the lifecycle
+  // signal is aborted: only the task-local predicate can recognize it as a
+  // cancellation.
+  const catalog = scriptedModelCatalog(async () => ({ kind: 'committed' }), undefined, 'current', new Error('transport closed'))
+  const lines: string[] = []
+  const diag = createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [{ write: (line: string) => { lines.push(line) } }] })
+  const runner = stubRunner(ctx, app, state, diag)
+  const controller = new AbortController()
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      if (prop === 'signal') return controller.signal
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommands(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  controller.abort()
+  await (modelDef!.handler as () => Promise<unknown>)()
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.ok(!lines.some(line => line.includes(' ERROR ')),
+    `an aborted read must be a cancellation (debug), not an ERROR:\n${lines.join('')}`)
+  app.stop()
+})
+
+test('Esc while /model is loading leaves a late directory settle inert', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const gated = gatedModelCatalog()
+  const { app, handler } = modelRunner({ agent: fakeAgent('session-a'), generation: 1 }, vt, () => gated.catalog)
+  await handler()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Loading models…'), vt.getViewport().join('\n'))
+  vt.sendInput('\x1b') // Esc closes the loading panel
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('Models'), `Esc must close the loading panel:\n${vt.getViewport().join('\n')}`)
+  gated.releaseDirectory() // the read settles AFTER the user left
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Models'), `a late settle must not resurrect the closed panel:\n${view}`)
+  assert.ok(!view.includes('Loading models…'), `the loading state must stay gone:\n${view}`)
   app.stop()
 })
