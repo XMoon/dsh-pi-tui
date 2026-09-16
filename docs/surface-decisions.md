@@ -922,7 +922,10 @@ collapsed — while fullscreen keeps folding because the marker click always
 works. The owner of the expand affordance is surface-adaptive and is part of
 the component cache identity:
 
-- regular: the Ctrl+O recent-turn boundary (or a per-message search reveal);
+- regular: the Ctrl+O recent-USER-turn boundary (its own threshold, computed
+  from user turns only — never the Thinking/System/Tool process boundary,
+  which can be sparse and would otherwise expand every prompt in a pure chat;
+  or a per-message search reveal);
 - fullscreen without Focus: the compact-marker click and the Ctrl+O master
   (`click / <key> to expand`);
 - fullscreen inside a Focus: the compact-marker click and a search reveal —
