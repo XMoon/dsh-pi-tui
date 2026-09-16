@@ -2015,8 +2015,16 @@ test('Focus compact Tool prefers the presenter description over the command (for
     result: () => undefined,
   }
   const display = focusToolDisplay({ name: 'bash', args: '{}' }, { presenter })
-  assert.equal(display, 'Show working tree status')
+  assert.equal(display, 'Bash · Show working tree status')
   assert.ok(!display.includes('git status'), 'the raw command must not surface in the compact row')
+})
+
+test('Focus compact Tool prefixes the human tool identity, not a hardcoded Bash', () => {
+  const presenter: ToolPresenter = {
+    call: () => ({ card: 'terminal', title: 'Get-Service', description: 'Check service state' }),
+    result: () => undefined,
+  }
+  assert.equal(focusToolDisplay({ name: 'pwsh', args: '{}' }, { presenter }), 'Pwsh · Check service state')
 })
 
 test('Focus compact Tool prefers the description content over the command (background generic execute)', () => {
@@ -2031,8 +2039,25 @@ test('Focus compact Tool prefers the description content over the command (backg
     result: () => undefined,
   }
   const display = focusToolDisplay({ name: 'bash', args: '{}' }, { presenter })
-  assert.equal(display, 'Build the bundle')
+  assert.equal(display, 'Bash · Build the bundle')
   assert.ok(!display.includes('npm run build'), 'the raw command must not surface in the compact row')
+})
+
+test('Focus compact Tool keeps a custom execute tool name instead of the generic Tool identity', () => {
+  const presenter: ToolPresenter = {
+    call: () => ({
+      card: 'generic',
+      kind: 'execute',
+      title: 'probe',
+      rawInput: 'probe',
+      content: [{ type: 'text', text: 'Inspect cache node' }],
+    }),
+    result: () => undefined,
+  }
+  assert.equal(
+    focusToolDisplay({ name: 'vendor_probe', args: '{}' }, { presenter }),
+    'vendor_probe · Inspect cache node',
+  )
 })
 
 test('Focus compact Tool falls back to the terminal title without a usable description', () => {
@@ -2048,12 +2073,17 @@ test('Focus compact Tool falls back to the terminal title without a usable descr
 
 test('Focus compact Tool never leaks a multiline command when the presenter offers a description', () => {
   const presenter: ToolPresenter = {
-    call: () => ({ card: 'terminal', title: MULTILINE_BASH_COMMAND, description: 'Rewrite commands.ts' }),
+    call: () => ({
+      card: 'terminal',
+      title: MULTILINE_BASH_COMMAND,
+      description: 'Rewrite commands.ts\nThen run tests',
+    }),
     result: () => undefined,
   }
   const display = focusToolDisplay({ name: 'bash', args: '{}' }, { presenter })
-  assert.equal(display, 'Rewrite commands.ts')
+  assert.equal(display, 'Bash · Rewrite commands.ts')
   assert.equal(display.includes('\n'), false)
+  assert.ok(!display.includes('Then run tests'), 'only the first logical description line may surface')
   assert.ok(!display.includes('PYEOF'), 'the heredoc body must never leak through the compact row')
 })
 
