@@ -4109,9 +4109,14 @@ export function apply(ctx: Context, config: Config): void {
       // group reflow after the query may have replaced the card object —
       // resolving by stable id fails soft (the turn jump above already
       // landed the window; only the exact-card reveal is skipped).
-      if (app.isFocusModeEnabled()) {
-        const message = folder.resolveSearchMatch(match)
-        if (message !== undefined) app.revealSearchMatch(message)
+      //
+      // A long text-only USER message is revealed REGARDLESS of Focus Mode:
+      // its compacted middle hides the canonical full text the search ran
+      // against, so a hidden hit must expand the bubble in any mode. The
+      // reveal is a no-op for non-user kinds outside Focus Mode.
+      const message = folder.resolveSearchMatch(match)
+      if (message !== undefined && (app.isFocusModeEnabled() || message.kind === 'user')) {
+        app.revealSearchMatch(message)
       }
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }

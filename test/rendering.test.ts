@@ -1941,7 +1941,7 @@ test('fullscreen suppresses the stale fork search key after host search is remap
   }
 })
 
-test('history hint uses the effective latest-jump keybinding', async () => {
+test('history window shows the location gutter plus the effective jump-latest indicator', async () => {
   const { vt, app } = startApp(100, 24)
   app.setTranscript([{ kind: 'user', turn: 40, text: 'history row' }], undefined, {
     mode: 'history',
@@ -1951,12 +1951,14 @@ test('history hint uses the effective latest-jump keybinding', async () => {
   })
   app.setFullscreen(true)
   let view = await viewport(vt)
-  assert.ok(view.includes('Ctrl+End latest'), `default history hint missing:\n${view}`)
+  assert.ok(view.includes('History · turn 31–40'), `history location gutter missing:\n${view}`)
+  assert.ok(!view.includes('Ctrl+End latest'), `the gutter must not repeat the jump key:\n${view}`)
+  assert.ok(view.includes('↓ Latest · Ctrl+End'), `default jump indicator missing:\n${view}`)
 
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.jumpLatest': 'ctrl+l' }))
   view = await viewport(vt)
-  assert.ok(view.includes('Ctrl+L latest'), `remapped history hint missing:\n${view}`)
-  assert.ok(!view.includes('Ctrl+End latest'), `stale history hint remains:\n${view}`)
+  assert.ok(view.includes('↓ Latest · Ctrl+L'), `remapped jump indicator missing:\n${view}`)
+  assert.ok(!view.includes('Ctrl+End'), `stale jump hint remains:\n${view}`)
   app.stop()
 })
 
