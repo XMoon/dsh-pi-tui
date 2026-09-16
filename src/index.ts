@@ -7315,9 +7315,12 @@ export function apply(ctx: Context, config: Config): void {
       // M5: a material width change refreshes the command surface (the
       // runner coalesces to its interval).
       onTerminalResize: () => footerCommandRunner?.requestRefresh(),
-      // Issue #7: the fullscreen drag selection copies through the SAME
-      // shared policy as /copy (tmux → platform helper → OSC 52) — a bare
-      // OSC 52 write is a silent lie under tmux `set-clipboard external`.
+      // Issue #7: the fullscreen drag selection and `/copy` are the SAME
+      // user copy intent and share ONE clipboard policy. That policy
+      // delivers through two independent legs (terminal-client OSC 52 +
+      // native/helper compatibility) and never lets a host helper success
+      // suppress the OSC 52 leg — otherwise a remote host helper would
+      // strand the copy in the remote clipboard.
       copySelection: (text) => copyToClipboard(text, runCopyCommand, copyEnv),
       // Fullscreen OSC 8 link clicks + the Windows right-click paste: the
       // alt screen's mouse capture swallows both native behaviors, so the
@@ -9130,7 +9133,8 @@ export function apply(ctx: Context, config: Config): void {
       cwd,
       imageStore: draftImages,
       fileStore: draftFiles,
-      // Issue #7: /copy shares the fullscreen selection's clipboard policy.
+      // Issue #7: `/copy` uses the SAME shared user-clipboard delivery
+      // policy as the fullscreen selection (see copySelection above).
       copyToClipboard: (text) => copyToClipboard(text, runCopyCommand, copyEnv),
       // The deployment image policy, re-read dynamically so a runtime
       // reconfiguration is picked up (plan §10.1: never a cached copy).

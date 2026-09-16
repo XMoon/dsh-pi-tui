@@ -152,6 +152,19 @@ safe full-Session-id convention. `src/client-artifact-save.ts` and
 `src/save-location.ts` are the Client-local temp/atomic-commit sink and the
 Save Location UI — zero Host coupling.
 
+Clipboard writes are CLIENT_LOCAL and share ONE app-level policy. The
+fullscreen drag selection and `/copy` are the same user copy intent and both
+call `copyToClipboard()`; it delivers through two INDEPENDENT legs — the
+terminal-client OSC 52 sequence and the native/platform compatibility helpers
+(`tmux load-buffer`, `pbcopy`, `wl-copy`, `xclip`, `xsel`, `clip`). A helper
+success must never suppress the terminal-client leg: on a remote host a helper
+that succeeds would otherwise short-circuit the copy and strand the text in the
+remote clipboard, which the user cannot paste from. The Direct/Remote backend
+mode does not determine clipboard locality (ORCA/xterm.js is remote transport
+with a Direct backend). The OSC 52 leg is best-effort by construction (no ACK),
+so an emitted sequence is never proof that the user's clipboard changed. No Host
+clipboard semantic port or Remote RPC exists for this.
+
 ### TEMPORARY_EXCEPTION
 
 | File | Coupling | Why it is allowed |

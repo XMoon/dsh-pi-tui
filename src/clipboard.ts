@@ -1,39 +1,36 @@
 /**
  * Reliable clipboard WRITE (issue #7).
  *
- * The fullscreen drag selection and the `/copy` command share ONE copy
- * policy, because a bare OSC 52 write is a silent lie in tmux
- * (`set-clipboard external`), SSH chains without passthrough, and
- * terminals that restrict OSC 52 (VTE, Terminal.app): the UI flashed
- * `Copied!` while the system clipboard never changed.
+ * ONE policy serves every copy intent: the fullscreen drag selection and
+ * the `/copy` command both call {@link copyToClipboard}. The clipboard
+ * belongs to the terminal client the user is actually interacting with —
+ * a local terminal, tmux, an SSH chain, a container, or a remote terminal
+ * transport (ORCA/xterm.js) — and the Direct/Remote BACKEND mode does NOT
+ * tell us which. So the policy delivers through two INDEPENDENT legs and
+ * never lets one suppress the other:
  *
- * The policy, in order:
+ * 1. **terminal-client leg** — the OSC 52 sequence written to stdout
+ *    (gated on a TTY; inside tmux the existing DCS passthrough form).
+ *    OSC 52 has no reliable ACK, so a successful write means "the sequence
+ *    was EMITTED", never "the user's clipboard changed": best-effort by
+ *    construction.
+ * 2. **native/helper leg** — tmux → platform helper (`pbcopy` macOS,
+ *    `wl-copy` Wayland, `xclip`/`xsel` X11, `clip` Windows). This is the
+ *    local-desktop compatibility path for terminals that restrict OSC 52.
+ *    A helper success is a local compatibility signal ONLY: it must never
+ *    stop the terminal-client leg. On a remote host a successful
+ *    `tmux load-buffer`/`wl-copy` would otherwise short-circuit the copy
+ *    and strand the text in the remote host clipboard, which the user
+ *    cannot paste from.
  *
- * 1. **tmux** (`$TMUX` set): `tmux load-buffer -w -` with the text on
- *    stdin. tmux owns the clipboard write — it works with
- *    `set-clipboard external` (tmux pushes to the terminal clipboard
- *    itself) and never depends on OSC 52 passthrough inside the pane.
- *    A non-zero exit falls through to the platform helpers.
- * 2. **Platform helper**: `pbcopy` (macOS), `wl-copy` (Wayland),
- *    `xclip -selection clipboard` then `xsel --clipboard --input`
- *    (X11), `clip` (Windows). Each helper is gated on its presence
- *    (PATH-aware) and its display environment, so a Wayland+XWayland
- *    session without wl-copy still reaches xclip.
- * 3. **OSC 52 fallback**: only when a TTY is present. OSC 52 has no
- *    reliable ACK, so this is BEST-EFFORT: returning `true` here means
- *    "the escape sequence was written", never "the system clipboard
- *    changed". The caller's `Copied!` flash is therefore only truthful
- *    for the tmux/platform paths; the fallback keeps upstream's
- *    optimistic feedback by design (documented in the plan §2.3.C).
- *    Inside tmux the sequence is wrapped in a DCS passthrough with
- *    doubled ESC bytes (the kimi-code `buildClipboardOSC52` convention),
- *    because tmux swallows bare OSC sequences — the passthrough lets the
- *    terminal emulator behind tmux receive the copy request.
+ * The overall result is the OR of the two legs — either delivery
+ * succeeding is a copy (a failed OSC 52 write must not fail a native
+ * success, and a failed native helper must not fail an emitted OSC 52).
  *
- * Every subprocess runs through an injected {@link CopyExecutor} and
- * every platform fact through a {@link CopyEnvironment}, so the decision
- * trees are exercised with mocks in CI (test/clipboard.test.ts) and the
- * runner wires the real execFile-backed executor once (src/index.ts).
+ * Every subprocess runs through an injected {@link CopyExecutor} and every
+ * platform fact through a {@link CopyEnvironment}, so the decision trees
+ * are exercised with mocks in CI (test/clipboard.test.ts) and the runner
+ * wires the real execFile-backed executor once (src/index.ts).
  * @module @xmoon76/dsh-pi-tui/clipboard
  */
 
@@ -53,9 +50,9 @@ export interface CopyEnvironment {
   readonly env: Record<string, string | undefined>
   /** PATH-aware helper detection (see commandOnPath in image/clipboard.ts). */
   readonly exists: (command: string) => boolean
-  /** Whether stdout is a TTY — the OSC 52 fallback needs a terminal. */
+  /** Whether stdout is a TTY — the OSC 52 leg needs a terminal. */
   readonly isTTY: () => boolean
-  /** Write the OSC 52 clipboard escape sequence (best-effort fallback). */
+  /** Write the OSC 52 clipboard escape sequence (inside tmux: passthrough). */
   readonly writeOsc52: (text: string) => void
 }
 
@@ -84,19 +81,34 @@ export function buildOsc52Sequence(text: string, insideTmux: boolean): string {
 }
 
 /**
- * Copy `text` to the system clipboard through the shared policy (tmux →
- * platform helper → OSC 52). Returns whether the copy is believed to have
- * succeeded; the OSC 52 path is best-effort (see the module doc).
+ * The terminal-client leg: emit the OSC 52 sequence when a TTY is present.
+ * Returns whether the sequence was WRITTEN (best-effort — no ACK exists).
+ * Deliberately synchronous and light: it must never wait on a host
+ * subprocess probe.
  */
-export async function copyToClipboard(text: string, run: CopyExecutor, env: CopyEnvironment): Promise<boolean> {
-  // A. tmux owns the clipboard when present: `load-buffer -w -` writes
-  // the tmux buffer AND pushes it to the terminal clipboard, so
-  // `set-clipboard external` works without any pane-side OSC 52
-  // passthrough. A failure falls through — never an error by itself.
+function emitTerminalClipboard(text: string, env: CopyEnvironment): boolean {
+  if (!env.isTTY()) return false
+  try {
+    env.writeOsc52(text)
+  } catch {
+    // A failing stdout write means the sequence never left the process.
+    return false
+  }
+  return true
+}
+
+/**
+ * The native/helper leg: the local-desktop compatibility chain. Returns
+ * whether one helper ACCEPTED the text (a local signal only — never proof
+ * that the user's terminal clipboard changed). This leg is independent of
+ * the terminal-client leg and cannot suppress it.
+ */
+async function tryNativeClipboard(text: string, run: CopyExecutor, env: CopyEnvironment): Promise<boolean> {
+  // tmux owns a local buffer when present: `load-buffer -w -` writes the
+  // tmux buffer AND pushes it to the terminal clipboard where supported.
   if (env.env.TMUX !== undefined) {
     if (await tryRun(run, 'tmux', ['load-buffer', '-w', '-'], text)) return true
   }
-  // B. Local platform helpers.
   if (env.platform === 'darwin') {
     if (await tryRun(run, 'pbcopy', [], text)) return true
   } else if (env.platform === 'win32') {
@@ -113,19 +125,17 @@ export async function copyToClipboard(text: string, run: CopyExecutor, env: Copy
       if (env.exists('xsel') && await tryRun(run, 'xsel', ['--clipboard', '--input'], text)) return true
     }
   }
-  // C. OSC 52 best-effort fallback: the sequence was WRITTEN, not
-  // acknowledged — the terminal may still drop it (tmux external without
-  // passthrough, restricted terminals). Kept as the last resort so remote
-  // sessions without local helpers still get the upstream behavior.
-  if (env.isTTY()) {
-    try {
-      env.writeOsc52(text)
-    } catch {
-      // A failing stdout write means the sequence never left the process:
-      // the copy did not even reach best-effort status (round-2 finding).
-      return false
-    }
-    return true
-  }
   return false
+}
+
+/**
+ * Copy `text` to the user's clipboard through the shared policy. Both legs
+ * are attempted where applicable (terminal-client first — it is cheap and
+ * must not wait on a helper probe), and the copy succeeds when EITHER leg
+ * does. See the module doc for the delivery model.
+ */
+export async function copyToClipboard(text: string, run: CopyExecutor, env: CopyEnvironment): Promise<boolean> {
+  const terminalEmitted = emitTerminalClipboard(text, env)
+  const nativeAccepted = await tryNativeClipboard(text, run, env)
+  return terminalEmitted || nativeAccepted
 }

@@ -44,6 +44,22 @@ dsh --profile pi-tui
   明确要求 TUI 界面。现在当启动提交就绪、但 `tui-app` 从未挂载（导入/apply 失败或
   依赖一直 pending）时，会打印明确错误并**以非零状态退出**，不再出现「告警 + 成功 +
   进程仍驻留」的假成功。
+- **Focus 头部改为真实执行状态，等待用户时计时暂停。** 未完成 turn 不再统一显示
+  `Thought`：正常执行显示 `Working`，权限确认显示 `Waiting for approval · 12s`，
+  用户问题显示 `Waiting for input · 12s`，完成后显示 `Completed`；等待 approval /
+  question 的时间不再计入运行时长，恢复执行后继续累计。
+- **Focus compact 的工具行显示官方 presenter 的人类描述，而不是具体命令。**
+  前台 Bash 命令显示其 `description`，后台执行卡片显示 content 中的描述；完整命令
+  仍保留在展开后的正式 tool card 中。
+- **折叠 Thinking 预览改为追随推理尾部。** 运行中的 compact Thinking 单行预览始终
+  显示最新 token，超宽时从左侧裁掉，且只由真实 reasoning delta 驱动（不做独立动画）；
+  Focus 折叠、Focus 展开次级卡片、非 Focus 三种 surface 一致，settled 仍从行首显示。
+- **全屏拖选与 `/copy` 统一到同一条 clipboard policy。** 二者现在都会同时尝试
+  terminal-client 的 OSC 52 与本机/平台 helper 两条独立通道，helper 成功不再阻断
+  OSC 52；修复了远端（如 ORCA/xterm.js）下全屏选择被复制到远端主机剪贴板、用户本地
+  粘贴不到的问题。
+- **短屏全屏下 Todo 首次展开为 3 项。** 终端行数 ≤16 时 compact Todo 面板显示 3 项，
+  普通终端仍为 5 项；缩放时按当前高度重新推导，不残留多余的 full 状态。
 
 ## [0.4.6] - 2026-09-13
 

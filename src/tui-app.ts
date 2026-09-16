@@ -79,7 +79,7 @@ import { ENABLE_FOCUS_REPORTING, isFocusReport } from './notification/terminal-f
 import { TaskBrowserPanel, type TaskBrowserViewState, type TaskPanelItem } from './task-panel.ts'
 import type { TaskBrowserSummary } from './task-browser-runtime.ts'
 import type { StatusStore } from './status/store.ts'
-import type { AccessStatus, CompositionStatus, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
+import type { AccessStatus, CompositionStatus, RunPhase, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
 import { deriveActivityStatus } from './status/derive-activity.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import { initialStatusSnapshot } from './status/snapshot.ts'
@@ -151,6 +151,8 @@ import {
 import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
+import { thinkingPreviewTail } from './thinking-preview.ts'
+import { FocusTimingStore } from './focus-timing.ts'
 import { WorkingIndicator, workingFramesFor } from './working.ts'
 import { iconFor, iconLead, iconPrefix, type IconStyle } from './icons.ts'
 import { indeterminateProgressFrames } from './progress.ts'
@@ -359,6 +361,20 @@ const COMPACTION_PROGRESS_FRAMES = indeterminateProgressFrames()
  * full lists are visually identical, so the state machine skips the
  * redundant full state entirely (summary ↔ list only). */
 export const TODO_COMPACT_LIMIT = 5
+/** The compact cap on a SHORT fullscreen: a 16-row terminal cannot afford
+ * the five-row list plus its surroundings, so the first click opens three. */
+export const TODO_SHORT_COMPACT_LIMIT = 3
+/** The short-screen boundary in terminal ROWS: at or below this the compact
+ * Todo panel uses {@link TODO_SHORT_COMPACT_LIMIT}. The policy is purely
+ * vertical — terminal width never changes the item count. */
+export const TODO_SHORT_SCREEN_MAX_ROWS = 16
+
+/** The effective compact Todo cap for a terminal `rows` tall (the single
+ * source of truth shared by the overflow check, the render slice and the
+ * click state machine). */
+export function todoCompactLimit(rows: number): number {
+  return rows <= TODO_SHORT_SCREEN_MAX_ROWS ? TODO_SHORT_COMPACT_LIMIT : TODO_COMPACT_LIMIT
+}
 /** The todo click-coalescing window: rapid clicks on the todo SEMANTIC
  * target (dock summary + panel rows) within this window are treated as
  * ONE gesture. The fullscreen layout MUTATES between the clicks — the
@@ -1254,7 +1270,10 @@ export class BulletedComponent implements Component {
  *   - a narrow → wide resize restores the full-width preview instead of
  *     freezing the old narrow truncation.
  * The EMPTY entry renders the bare title — never a fake "No reasoning"
- * row (plan §13.3). The output is REFERENCE-STABLE per width: the same
+ * row (plan §13.3). While the entry is RUNNING its preview is windowed at
+ * the reasoning tail (the newest token stays visible); a settled entry
+ * reads from the start of its latest line. The output is
+ * REFERENCE-STABLE per width: the same
  * component + same width returns the same array instance, so steady
  * frames keep the fork's per-frame processed-line reuse (DIVERGENCES.md
  * X035).
@@ -1295,9 +1314,17 @@ export class ThinkingCompactComponent implements Component {
       lines = [truncateToWidth(title, Math.max(1, width), '…')]
     } else {
       const hintVerb = this.hint || 'the expand key'
+      // The body budget excludes the fixed two-cell indent. While the row
+      // is RUNNING the reasoning body is windowed at its right edge (the
+      // latest token stays visible — dsh-web running collapsed parity); a
+      // settled row keeps head truncation.
+      const bodyBudget = Math.max(1, width - visibleWidth('  '))
+      const body = this.message.running === true
+        ? thinkingPreviewTail(previewLine, bodyBudget)
+        : truncateToWidth(previewLine, bodyBudget, '…')
       lines = [
         truncateToWidth(title, Math.max(1, width), '…'),
-        truncateToWidth(color.textDimItalic(`  ${previewLine}`), Math.max(1, width), '…'),
+        truncateToWidth(color.textDimItalic(`  ${body}`), Math.max(1, width), '…'),
         truncateToWidth(color.textDim(`  (${hintVerb} to expand)`), Math.max(1, width), '…'),
       ]
     }
@@ -2443,12 +2470,13 @@ export interface TuiAppOptions {
    */
   editorRegistry?: EditorRegistry
   /**
-   * Host-owned clipboard strategy for fullscreen drag-selection copy
-   * (issue #7). When wired, the alt screen's selection copy routes
-   * through this callback (the shared tmux → platform helper → OSC 52
-   * policy in src/clipboard.ts) instead of the vendor's raw OSC 52
-   * write; the returned boolean drives the `Copied!` / `Copy failed`
-   * flash. Optional — absent keeps the vendor's OSC 52 fallback.
+   * Client-local clipboard delivery for fullscreen drag-selection copy
+   * (issue #7). When wired, the alt screen's selection copy routes through
+   * this callback (the shared policy in src/clipboard.ts: an independent
+   * terminal-client OSC 52 leg plus an independent native/platform
+   * compatibility leg) instead of the vendor's raw OSC 52 write; the
+   * returned boolean drives the `Copied!` / `Copy failed` flash. Optional —
+   * absent keeps the vendor's OSC 52 fallback.
    */
   copySelection?: (text: string) => Promise<boolean>
   /**
@@ -2740,6 +2768,11 @@ export class TuiApp {
   /** The unified status projection store (M0): the footer's single input.
    * The runner's store when wired; an internal projection otherwise. */
   private readonly statusStore: StatusStore
+  /** The app-owned live Focus timer (presentation-only ephemeral state).
+   * Per-surface, never a process global: one app owns one run-phase
+   * timeline, and a fresh surface must not inherit another's pause
+   * windows. */
+  private readonly focusTiming = new FocusTimingStore()
   /** The store-notify render subscription (M0/M5): the unified footer
    * render path. Disposed with the surface so a long-lived EXTERNAL store
    * never retains a dead TuiApp's listener. */
@@ -3137,9 +3170,10 @@ export class TuiApp {
   private readonly renderers: RendererRegistry | undefined
   /** M9: the editor registry (optional). */
   private readonly editorRegistry: EditorRegistry | undefined
-  /** Issue #7: the host-owned clipboard strategy for fullscreen drag
-   * selection (tmux → platform helper → OSC 52); undefined keeps the
-   * vendor's raw OSC 52 write. */
+  /** Issue #7: the client-local clipboard delivery for fullscreen drag
+   * selection — the shared independent-legs policy (terminal-client OSC 52
+   * plus native/platform compatibility); undefined keeps the vendor's raw
+   * OSC 52 write. */
   private readonly copySelection: ((text: string) => Promise<boolean>) | undefined
   private readonly openExternalUrl: ((url: string) => void) | undefined
   private readonly readClipboardText: (() => Promise<string | undefined>) | undefined
@@ -5683,9 +5717,11 @@ export class TuiApp {
         onScrollBoundary: (direction, source) => direction < 0
           ? this.events.onTranscriptMoveOlder?.(source) === true
           : this.events.onTranscriptMoveNewer?.(source) === true,
-        // Issue #7: the host clipboard policy (tmux-aware, platform
-        // helpers, OSC 52 last) replaces the vendor's raw OSC 52 write —
-        // the alt screen never needs to understand tmux/SSH/Wayland/X11.
+        // Issue #7: the client-local shared clipboard policy — an
+        // independent terminal-client OSC 52 leg plus an independent
+        // native/platform compatibility leg — replaces the vendor's raw
+        // OSC 52 write; the alt screen never needs to understand
+        // tmux/SSH/Wayland/X11.
         copySelection: this.copySelection,
         // Fullscreen mouse capture also swallows native OSC 8 link
         // activation and (on Windows) the native right-click paste — the
@@ -6001,6 +6037,14 @@ export class TuiApp {
     }
     this.messages = messages
     if (activities !== undefined) this.turnActivities = activities
+    // An activity becomes known the moment its map is published — observe it
+    // at the phase it is actually in. The runner can open an approval/question
+    // before this (delayed) repaint publishes the map, and the recorded pause
+    // boundaries preserve the pre-wait active span (review P1). Clear the
+    // windows only AFTER the whole pass: every activity first seen in this
+    // pass must share the same window snapshot.
+    this.observeFocusTiming()
+    this.focusTiming.clearPauseWindows()
     this.streamingToolPreviews = [...(streamingToolPreviews ?? [])]
     this.transcriptWindow = window
     this.refreshTranscriptWindowHint()
@@ -6025,6 +6069,11 @@ export class TuiApp {
   setTurnActivities(activities: ReadonlyMap<number, TurnActivity>): void {
     this.clearFocusLiveHeightState()
     this.turnActivities = activities
+    // See setTranscript: a newly published activity must be observed at the
+    // current phase so the Focus timer keeps its pre-wait active span; the
+    // windows are cleared once the whole pass has seeded every activity.
+    this.observeFocusTiming()
+    this.focusTiming.clearPauseWindows()
     this.rebuildMessages()
   }
 
@@ -6680,9 +6729,14 @@ export class TuiApp {
     const component = new FocusActivityComponent({
       activity,
       expanded,
+      // The phase is a LIVE provider over the authoritative unified status:
+      // an approval/question opens without a component rebuild, so a baked
+      // phase would strand the header on `Working` (plan §5.5).
+      phase: () => this.statusStore.snapshot().activity.phase,
       toolDisplay,
       iconStyle: this.iconStyle,
       preparingSummary,
+      timing: this.focusTiming,
     })
     this.focusActivityComponents.set(activity.turn, {
       activity,
@@ -7409,6 +7463,12 @@ export class TuiApp {
    * internal set is never handed out. */
   focusExpandedTurnsForTest(): ReadonlySet<number> {
     return new Set(this.focusExpandedTurns)
+  }
+
+  /** Test hook: the app-owned Focus timer store (the live duration facts a
+   * headless test asserts without a rendered header). */
+  focusTimingForTest(): FocusTimingStore {
+    return this.focusTiming
   }
 
   /**
@@ -11914,6 +11974,13 @@ export class TuiApp {
         // components. Rebuild from their raw state before chrome measurement
         // so fullscreen hit-testing and footer budgets see the new geometry.
         this.rebuildQueuePane(width)
+      }
+      if (widthChanged || heightChanged) {
+        // The todo panel is width-baked AND height-sensitive: its compact cap
+        // is a function of terminal ROWS (a short fullscreen shows 3). A
+        // height change re-derives the effective cap and must drop a now
+        // redundant explicit full state (the plan's ghost-state rule).
+        if (this.todoExpanded && !this.hasTodoOverflow()) this.todoExpanded = false
         this.rebuildTodoPanel(width)
       }
       // M5: a material WIDTH change refreshes the command surface (the
@@ -12051,7 +12118,7 @@ export class TuiApp {
    * count and, when the list is non-empty, the first active item's text.
    * A list that shrank to the compact cap (or below) has no distinct full
    * state: the ghost `todoExpanded` is cleared so the panel never shows a
-   * visually identical "full" list (plan: >5 → ≤5 auto-normalizes).
+   * visually identical "full" list (plan: >cap → ≤cap auto-normalizes).
    * @param todos - the latest todo/write snapshot.
    */
   setTodoSummary(todos: readonly TodoItem[]): void {
@@ -12081,7 +12148,7 @@ export class TuiApp {
     return this.todoPanelVisible
   }
 
-  /** Toggle the todo panel between the compact five rows and the full list
+  /** Toggle the todo panel between the compact rows and the full list
    * (fullscreen click on the panel's area). Fail-closed: without overflow
    * the compact and full lists are visually identical, so the expansion
    * never enters a meaningless state (other callers cannot manufacture
@@ -12098,19 +12165,26 @@ export class TuiApp {
     return this.todoExpanded
   }
 
-  /** Whether the todo list exceeds the compact cap (the full state would
-   * actually differ from the compact list). All todos enter the ordered
-   * render list, so the raw length is the renderable count. */
+  /** Whether the todo list exceeds the effective compact cap (the full
+   * state would actually differ from the compact list). All todos enter the
+   * ordered render list, so the raw length is the renderable count. */
   private hasTodoOverflow(): boolean {
-    return this.todoItems.length > TODO_COMPACT_LIMIT
+    return this.todoItems.length > this.effectiveTodoCompactLimit()
   }
 
-  /** The fullscreen click loop over the todo panel's own rows: with ≤5
-   * items the panel is a two-state summary ↔ list (a second click closes
-   * it — never a visually identical intermediate full state); with >5
-   * items it keeps the three-state summary → compact → full → summary.
-   * The mouse thus opens AND closes the panel without Ctrl+T; the dock
-   * summary row itself opens it (handleFullscreenClick's dock region). */
+  /** The compact cap for the CURRENT terminal height: 3 on a short
+   * (≤ {@link TODO_SHORT_SCREEN_MAX_ROWS} rows) fullscreen, 5 otherwise. */
+  private effectiveTodoCompactLimit(): number {
+    return todoCompactLimit(this.terminal.rows)
+  }
+
+  /** The fullscreen click loop over the todo panel's own rows: with ≤ the
+   * effective compact cap (5 normally, 3 on a short screen) items the panel
+   * is a two-state summary ↔ list (a second click closes it — never a
+   * visually identical intermediate full state); above the cap it keeps the
+   * three-state summary → compact → full → summary. The mouse thus opens
+   * AND closes the panel without Ctrl+T; the dock summary row itself opens
+   * it (handleFullscreenClick's dock region). */
   private handleTodoPanelClick(): void {
     if (this.todoExpanded) {
       // full -> summary
@@ -12119,7 +12193,7 @@ export class TuiApp {
       // compact -> full, only when full actually differs
       this.toggleTodoExpanded()
     } else {
-      // <=5: list -> summary directly
+      // <= the effective compact cap: list -> summary directly
       this.toggleTodoPanel()
     }
   }
@@ -12136,9 +12210,10 @@ export class TuiApp {
 
   /**
    * Rebuild the todo panel text: a border rule + `Todo` title (both indented
-   * one cell) plus up to {@link TODO_COMPACT_LIMIT} rows by default
-   * (in_progress first, then pending, then completed (strikethrough)); the
-   * full list when expanded (fullscreen click on the panel toggles).
+   * one cell) plus up to the current compact cap (5 normally, 3 on a short
+   * screen) rows by default (in_progress first, then pending, then completed
+   * (strikethrough)); the full list when expanded (fullscreen click on the
+   * panel toggles).
    */
   private rebuildTodoPanel(width: number): void {
     if (!this.todoPanelVisible) {
@@ -12153,7 +12228,7 @@ export class TuiApp {
       ...this.todoItems.filter(todo => todo.status === 'pending'),
       ...this.todoItems.filter(todo => todo.status === 'completed'),
     ]
-    const shown = this.todoExpanded ? ordered : ordered.slice(0, TODO_COMPACT_LIMIT)
+    const shown = this.todoExpanded ? ordered : ordered.slice(0, this.effectiveTodoCompactLimit())
     const safeWidth = Math.max(1, Math.floor(width))
     const border = color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)
     // Title: bold, two-cell indent.
@@ -12260,29 +12335,50 @@ export class TuiApp {
    * (phase precedence lives in the pure derive — the app never re-derives
    * it in the footer). */
   private projectActivity(): void {
-    this.projectStatus({
-      activity: deriveActivityStatus(
-        {
-          working: this.workingActive,
-          compacting: this.compactionPhase === 'summarizing',
-          applyingCompaction: this.compactionPhase === 'applying',
-          approvalOpen: this.activeApproval !== undefined,
-          questionOpen: this.activeQuestions !== undefined,
-        },
-        this.busy,
-        {
-          queuedCount: this.queueItems.length,
-          taskCount: this.taskSummaryRich ? this.taskSummary.runningJobs : this.dockTasks.length,
-          childAgentCount: this.taskSummaryRich ? this.taskSummary.runningAgents : this.dockAgents.length,
-          ...(this.taskSummaryRich ? {
-            taskTotalCount: this.taskSummary.totalJobs,
-            childAgentTotalCount: this.taskSummary.totalAgents,
-            failedTaskCount: this.taskSummary.failedAttention,
-          } : {}),
-          todoCount: this.todoItems.length,
-        },
-      ),
-    })
+    const activity = deriveActivityStatus(
+      {
+        working: this.workingActive,
+        compacting: this.compactionPhase === 'summarizing',
+        applyingCompaction: this.compactionPhase === 'applying',
+        approvalOpen: this.activeApproval !== undefined,
+        questionOpen: this.activeQuestions !== undefined,
+      },
+      this.busy,
+      {
+        queuedCount: this.queueItems.length,
+        taskCount: this.taskSummaryRich ? this.taskSummary.runningJobs : this.dockTasks.length,
+        childAgentCount: this.taskSummaryRich ? this.taskSummary.runningAgents : this.dockAgents.length,
+        ...(this.taskSummaryRich ? {
+          taskTotalCount: this.taskSummary.totalJobs,
+          childAgentTotalCount: this.taskSummary.totalAgents,
+          failedTaskCount: this.taskSummary.failedAttention,
+        } : {}),
+        todoCount: this.todoItems.length,
+      },
+    )
+    this.projectStatus({ activity })
+    // Focus timer: observe the authoritative phase HERE, not only from the
+    // renderer. A capturing approval/question modal owns the screen and may
+    // paint the transcript rarely, so a render-driven freeze could miss the
+    // whole wait and over-count it (plan §5.3).
+    this.observeFocusTiming(activity.phase)
+  }
+
+  /**
+   * Seed/advance the live Focus timer for every known activity under
+   * `phase` (defaults to the current authoritative status phase). Called
+   * from the phase projection AND from every activity-map publication:
+   * `folder.apply` schedules a delayed repaint while an approval/question
+   * can open synchronously first, so the map may be published only after
+   * the phase is already user-blocked. Recording the phase boundary and
+   * seeding here (at publication) keeps the pre-wait active span.
+   */
+  private observeFocusTiming(phase: RunPhase = this.statusStore.snapshot().activity.phase): void {
+    const now = Date.now()
+    this.focusTiming.notePhase(phase, now)
+    for (const turnActivity of this.turnActivities.values()) {
+      this.focusTiming.observe(turnActivity, phase, now)
+    }
   }
 
   /** M0: project the surface section (focusedSeat/fullscreen) from the

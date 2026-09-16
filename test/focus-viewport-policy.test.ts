@@ -31,6 +31,7 @@ import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { findFocusHeaderRow, findLastFocusHeaderRow, hasFocusHeader } from './support/focus-header.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -200,7 +201,7 @@ test('settled Thought expansion preserves the historical viewport (plan §21.1)'
     assert.equal(before.isFollowingEnd, false, 'precondition: not following the end')
     // A settled Thought header is visible in the current band.
     const view = vt.getViewport()
-    const headerY = findRow(view, '🐋 Thought')
+    const headerY = findFocusHeaderRow(view, false)
     assert.ok(headerY >= 0, `Thought header missing:\n${view.join('\n')}`)
     click(vt, 3, headerY + 1)
     await vt.waitForRender()
@@ -208,7 +209,7 @@ test('settled Thought expansion preserves the historical viewport (plan §21.1)'
     assert.ok(after !== undefined)
     assert.equal(after.scrollTop, before.scrollTop, 'settled Thought expansion preserves scrollTop')
     assert.equal(after.isFollowingEnd, false, 'settled Thought expansion must disable follow-end')
-    assert.ok(vt.getViewport().join('\n').includes('🐳 Thought'), 'the root must actually expand')
+    assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), 'the root must actually expand')
   } finally {
     app.stop()
   }
@@ -229,7 +230,7 @@ test('a settled Thought keeps the viewport even while at the bottom (plan §21.2
     // The newest settled turn's header is visible at the bottom (the LAST
     // projected Thought header).
     const view = vt.getViewport()
-    const headerY = findLastRow(view, '🐋 Thought')
+    const headerY = findLastFocusHeaderRow(view, false)
     assert.ok(headerY >= 0, `Thought header missing:\n${view.join('\n')}`)
     click(vt, 3, headerY + 1)
     await vt.waitForRender()
@@ -240,7 +241,7 @@ test('a settled Thought keeps the viewport even while at the bottom (plan §21.2
     // content may raise maxScrollTop; the position only clamps DOWN, never
     // re-aims at the new bottom — plan §12).
     assert.equal(after.scrollTop, before.scrollTop, 'the preserved scrollTop equals the pre-click value')
-    assert.ok(vt.getViewport().join('\n').includes('🐳 Thought'), 'the root must expand')
+    assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), 'the root must expand')
   } finally {
     app.stop()
   }
@@ -266,7 +267,7 @@ test('running Thought + user following the end keeps following (plan §21.3)', a
     // The running Thought (turn 4) is the LAST projected block: its header
     // is the LAST '🐋 Thought' in the viewport.
     const view = vt.getViewport()
-    const headerY = findLastRow(view, '🐋 Thought')
+    const headerY = findLastFocusHeaderRow(view, false)
     assert.ok(headerY >= 0, `running Thought header missing:\n${view.join('\n')}`)
     assert.ok(view.join('\n').includes('prompt 4'), `the running turn must be the visible one:\n${view.join('\n')}`)
     click(vt, 3, headerY + 1)
@@ -275,7 +276,7 @@ test('running Thought + user following the end keeps following (plan §21.3)', a
     assert.ok(after !== undefined)
     assert.equal(after.isFollowingEnd, true, 'running + following must keep following')
     assert.equal(after.scrollTop, after.maxScrollTop, 'the viewport must sit at the end')
-    assert.ok(vt.getViewport().join('\n').includes('🐳 Thought'), 'the running root must expand')
+    assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), 'the running root must expand')
     // A new event streams in: the viewport must keep chasing the tail.
     const folder = new TranscriptFolder()
     for (let turn = 1; turn <= 3; turn += 1) applyMixed(folder, settledTurn(turn, turn * 100))
@@ -321,7 +322,7 @@ test('running Thought + user scrolled into history preserves the viewport (plan 
     assert.equal(before.isFollowingEnd, false, 'precondition: scrolled away from the end')
     // The running Thought (turn 1) is the FIRST projected block.
     const view = vt.getViewport()
-    const headerY = findRow(view, '🐋 Thought')
+    const headerY = findFocusHeaderRow(view, false)
     assert.ok(headerY >= 0, `running Thought header missing:\n${view.join('\n')}`)
     assert.ok(view.join('\n').includes('prompt 1'), `the running turn must be the visible one:\n${view.join('\n')}`)
     click(vt, 3, headerY + 1)
@@ -330,7 +331,7 @@ test('running Thought + user scrolled into history preserves the viewport (plan 
     assert.ok(after !== undefined)
     assert.equal(after.isFollowingEnd, false, 'running + scrolled-up must NOT follow')
     assert.equal(after.scrollTop, before.scrollTop, 'running + scrolled-up must preserve scrollTop')
-    assert.ok(vt.getViewport().join('\n').includes('🐳 Thought'), 'the running root must expand')
+    assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), 'the running root must expand')
   } finally {
     app.stop()
   }

@@ -1547,20 +1547,43 @@ export function focusToolDisplay(
   return focusToolFallbackDisplay(tool.name, tool.args, options.cwd)
 }
 
-/** The compact line from a tool-owned presentCall view: the title, plus
- * the rawInput when it is a string the title does not already carry (the
- * skill tool's title is `Load skill <name>` — appending its rawInput
- * again would duplicate). The terminal title is the FULL command, which
- * may contain real line breaks (heredoc / python / node -); the compact
- * Focus Tool slot is exactly ONE physical framebuffer row, so only its
- * FIRST line may surface here — the expanded tool card still renders the
- * full multiline command (ghost-row fix). */
+/** The compact line from a tool-owned presentCall view. The official shell
+ * presenters split the COMMAND (`title` / `rawInput`) from the human
+ * `description` that is "shown in the UI"; the Focus Tool slot is a
+ * description surface, so it prefers that description and never re-derives
+ * the command from args. Cards without one keep the previous title /
+ * rawInput behavior, and the terminal title's FULL command still renders in
+ * the expanded tool card — the compact row is exactly ONE physical
+ * framebuffer row, so only a first logical line may surface here. */
 function formatOwnedCallForCompactFocus(view: ToolCallView): string {
-  if (view.card === 'terminal') return firstLine(view.title.replace(/\r\n|\r/g, '\n'))
+  if (view.card === 'terminal') {
+    // Foreground shell: description above the card, command as the title.
+    const description = firstLine((view.description ?? '').replace(/\r\n|\r/g, '\n')).trim()
+    if (description !== '') return description
+    return firstLine(view.title.replace(/\r\n|\r/g, '\n'))
+  }
   if (view.card === 'diff') return firstLine(view.title.replace(/\r\n|\r/g, '\n'))
+  // Generic execute (background shell): the description rides in the
+  // presenter's content text while the rawInput is the command.
+  if (view.kind === 'execute') {
+    const description = firstContentText(view)
+    if (description !== undefined) return description
+  }
   const raw = typeof view.rawInput === 'string' ? view.rawInput.trim() : undefined
   if (raw === undefined || raw === '') return view.title
   return view.title.endsWith(raw) ? view.title : `${view.title} ${firstLine(raw)}`
+}
+
+/** The first meaningful text block of a call view's content as one logical
+ * line — the official Bash background presenter puts its human description
+ * in `content[0]`. Undefined when no non-blank text block exists. */
+function firstContentText(view: { content?: ContentBlock[] }): string | undefined {
+  for (const block of view.content ?? []) {
+    if (block.type !== 'text') continue
+    const line = firstLine(block.text.replace(/\r\n|\r/g, '\n')).trim()
+    if (line !== '') return line
+  }
+  return undefined
 }
 
 /** The compact line from the static Web row-model header (replay /
