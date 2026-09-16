@@ -25,19 +25,20 @@ afterEach(() => {
   }
 })
 
-/** A fake overlay handle recording setHidden/hide calls. */
-function fakeHandle(label: string): OverlayHandle & { label: string; hiddenLog: string[] } {
+/** A fake overlay handle recording setHidden/hide/focus calls. */
+function fakeHandle(label: string): OverlayHandle & { label: string; hiddenLog: string[]; focusLog: string[] } {
   let hidden = false
   const handle = {
     label,
     hiddenLog: [] as string[],
+    focusLog: [] as string[],
     hide() { handle.hiddenLog.push('hide'); hidden = false },
     setHidden(value: boolean) {
       handle.hiddenLog.push(value ? 'hide-temp' : 'show')
       hidden = value
     },
     isHidden() { return hidden },
-    focus() {},
+    focus() { handle.focusLog.push('focus') },
     unfocus() {},
     isFocused() { return false },
     getBounds() { return undefined },
@@ -591,4 +592,46 @@ test('OverlayBroker: a hidden middle close reparents to its graph owner, not the
     broker.closeForHost(b)
     assert.equal(c.isHidden(), false, `${modal}: C is revealed when its graph owner closes`)
   }
+})
+
+test('OverlayBroker: modal adoption never marks a nonCapturing notice as the restore-focus owner', () => {
+  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+  let modalActive = false
+  const broker = new OverlayBroker({ saveLocation: () => modalActive ? suspension : undefined })
+  const hud = fakeHandle('hud')
+  broker.track(hud, { nonCapturing: true })
+
+  // The prompt opens and suspends the visible HUD.
+  modalActive = true
+  hud.setHidden(true)
+  suspension.suspendedOverlays.add(hud)
+  // A capturing overlay mounts while the prompt is active: it adopts the HUD.
+  const c = fakeHandle('c')
+  broker.track(c)
+  assert.ok(!suspension.suspendedOverlays.has(hud), 'the HUD becomes C dependent')
+
+  // The prompt settles (C restored), then C closes: the HUD must be revealed
+  // but NEVER selected as the keyboard owner (it is nonCapturing).
+  for (const handle of suspension.suspendedOverlays) handle.setHidden(false)
+  suspension.suspendedOverlays.clear()
+  modalActive = false
+  broker.closeForHost(c)
+  assert.equal(hud.isHidden(), false, 'the HUD is revealed')
+  assert.deepEqual(hud.focusLog, [], 'a nonCapturing notice must never be re-focused by the restore')
+})
+
+test('OverlayBroker: a lease blur() while hidden refreshes its restore intent', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const b = fakeHandle('b')
+  const wrappedA = broker.track(a)
+  broker.track(b) // B hides A → B owns A (wasFocused defaults true)
+  assert.equal(a.isHidden(), true)
+
+  // The plugin blurs A while it is hidden beneath B: the recorded intent must
+  // follow (a later B close must NOT re-focus A).
+  wrappedA.unfocus()
+  broker.closeForHost(b)
+  assert.equal(a.isHidden(), false, 'A is revealed when B closes')
+  assert.deepEqual(a.focusLog, [], 'the blurred intent survives the restore')
 })

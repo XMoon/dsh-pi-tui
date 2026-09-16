@@ -3255,10 +3255,20 @@ export class TuiApp {
   private readonly keybindingEditorPanels = new Set<Component>()
   /** M8: still-owned plugin overlay leases (closed by the final dispose —
    * plan §13.3: leases are generation-scoped). */
-  private readonly extensionOverlayLeases = new Set<import('./extension/public-types.ts').TuiOverlayHandle>()
+  private readonly extensionOverlayLeases = new Set<import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void; _ordinal: number }>()
   /** Phase 2: still-owned ADVANCED interactive overlay leases (closed by
    * the final dispose; re-mounted across fullscreen screen swaps). */
-  private readonly advancedOverlayLeases = new Set<import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void }>()
+  private readonly advancedOverlayLeases = new Set<import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void; _ordinal: number }>()
+  /** A single MONOTONIC mount ordinal across EVERY remountable overlay kind
+   * (stable / advanced / unstable / history / model picker). A fullscreen
+   * swap clears the broker graph and re-mounts each lease, so they must be
+   * replayed in their ORIGINAL global order — remounting grouped by type
+   * would reverse a mixed-type stack (and silently re-hide a nonCapturing
+   * HUD mounted above a capturing overlay). */
+  private overlayOrdinalSeq = 0
+  /** The global mount ordinal of the retained history panel / model picker. */
+  private historyOverlayOrdinal = 0
+  private modelPickerOrdinal = 0
   /** Phase 2: the live ADVANCED overlay wrappers (recompiled on terminal
    * resize so the plugin's render(ctx) sees the new geometry). */
   private readonly advancedOverlayWrappers = new Set<import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent>()
@@ -3282,7 +3292,7 @@ export class TuiApp {
   private unstableEscPresses: { at: number; revision: number }[] = []
   /** Phase 3: still-owned UNSTABLE mount leases (closed by the final
    * dispose; re-mounted across fullscreen screen swaps). */
-  private readonly unstableMountLeases = new Set<import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void }>()
+  private readonly unstableMountLeases = new Set<import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void; _ordinal: number }>()
   /** Phase 3: the live UNSTABLE mount adapters (dropped on remount). */
   private readonly unstableMountAdapters = new Set<import('./extension/internal/unstable-mount.ts').UnstableMountedComponentAdapter>()
   /** Phase 3: the UNSTABLE mount lease id counter. */
@@ -6113,23 +6123,15 @@ export class TuiApp {
     // M8 (round-1 finding 2): still-open plugin overlay leases re-mount on
     // the CURRENT active screen (their raw handles died with the old
     // screen's teardown above). Phase 2: the ADVANCED interactive overlay
-    // leases follow the same migration.
-    this.remountExtensionOverlays()
-    this.remountAdvancedOverlays()
-    this.remountUnstableMounts()
-    // The old screen's raw history handle was removed above without
-    // disposing its remountable panel. Reattach that same stateful panel to
-    // the new screen before restoring any modal that sat above it.
+    // leases follow the same migration. The old screen's raw history handle
+    // was removed above without disposing its remountable panel — reattach
+    // that same stateful panel on the new screen too.
     this.historyOverlay = undefined
     this.historyResponsiveFrame = undefined
-    if (history !== undefined) this.mountHistoryOverlay(history)
-    // The /model picker is likewise remountable: its old handle died with the
-    // screen without disposing the retained component, so re-mount the SAME
-    // instance (query/view/selection/effort cursor survive). It is mounted
-    // BEFORE the rebuilt approval so a picker that was suspended beneath an
-    // approval keeps the same stack relationship (the approval re-suspends
-    // the fresh picker handle).
-    if (modelPicker !== undefined) this.mountModelPickerOverlay(modelPicker)
+    // Replay in the ORIGINAL global mount order across every remountable
+    // kind (stable / advanced / unstable / history / model picker): grouping
+    // by kind rebuilds a mixed-type stack in the wrong order.
+    this.remountOverlaysInMountOrder(history, modelPicker)
     if (pending !== undefined) this.renderApprovalDialog(pending)
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
@@ -6234,6 +6236,7 @@ export class TuiApp {
     })
     panel.start()
     this.historyPanel = panel
+    this.historyOverlayOrdinal = ++this.overlayOrdinalSeq
     this.mountHistoryOverlay(panel)
   }
 
@@ -9463,7 +9466,8 @@ export class TuiApp {
       if (hiddenByLease) raw.setHidden(true)
     }
     mount()
-    const lease: import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void } = {
+    const lease: import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void; _ordinal: number } = {
+      _ordinal: ++this.overlayOrdinalSeq,
       close: () => {
         if (closed) return
         closed = true
@@ -9510,18 +9514,6 @@ export class TuiApp {
       ...(options.col === undefined ? {} : { col: options.col }),
       ...(options.margin === undefined ? {} : { margin: options.margin }),
       nonCapturing: options.nonCapturing === true,
-    }
-  }
-
-  /**
-   * M8: re-mount every still-open plugin lease on the CURRENT active
-   * screen. Called by the host after a fullscreen toggle (the old screen's
-   * overlays died with it — plan §13.3: a managed lease survives the
-   * screen migration).
-   */
-  private remountExtensionOverlays(): void {
-    for (const lease of this.extensionOverlayLeases) {
-      ;(lease as unknown as { _remount(): void })._remount()
     }
   }
 
@@ -9591,8 +9583,9 @@ export class TuiApp {
       else if (!desiredFocus) raw.unfocus()
     }
     mount()
-    const lease: import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void } = {
+    const lease: import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void; _ordinal: number } = {
       id,
+      _ordinal: ++this.overlayOrdinalSeq,
       get active() {
         return !closed
       },
@@ -9667,15 +9660,6 @@ export class TuiApp {
     // The surface's dispose closes every still-owned lease: track it.
     this.advancedOverlayLeases.add(lease)
     return lease
-  }
-
-  /** Phase 2: re-mount every still-open ADVANCED lease on the CURRENT
-   * active screen (fullscreen toggle — the old screen's overlays died
-   * with it; a managed lease survives the screen migration). */
-  private remountAdvancedOverlays(): void {
-    for (const lease of this.advancedOverlayLeases) {
-      lease._remount()
-    }
   }
 
   /** Phase 2: recompile every live ADVANCED overlay wrapper (terminal
@@ -9829,8 +9813,9 @@ export class TuiApp {
       else if (!desiredFocus) raw.unfocus()
     }
     mount()
-    const lease: import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void } = {
+    const lease: import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void; _ordinal: number } = {
       id,
+      _ordinal: ++this.overlayOrdinalSeq,
       get active() {
         return !closed
       },
@@ -9893,12 +9878,36 @@ export class TuiApp {
     return lease
   }
 
-  /** Phase 3: re-mount every still-open UNSTABLE lease on the CURRENT
-   * active screen (fullscreen toggle). */
-  private remountUnstableMounts(): void {
-    for (const lease of this.unstableMountLeases) {
-      lease._remount()
+  /**
+   * Re-mount every still-open remountable overlay on the CURRENT active
+   * screen, in their ORIGINAL global mount order (the {@link
+   * overlayOrdinalSeq} ordinal assigned when each lease/panel was created).
+   * Re-mounting grouped by kind rebuilds a mixed-type stack in the wrong
+   * order — reversing an advanced-below-stable stack, or re-hiding a
+   * nonCapturing HUD that the newer capturing overlay never hid.
+   */
+  private remountOverlaysInMountOrder(
+    history: HistoryPanel | undefined,
+    modelPicker: (Component & RowBudgetAware) | undefined,
+  ): void {
+    const jobs: Array<{ ordinal: number; remount: () => void }> = []
+    for (const lease of this.extensionOverlayLeases) {
+      jobs.push({ ordinal: lease._ordinal, remount: () => lease._remount() })
     }
+    for (const lease of this.advancedOverlayLeases) {
+      jobs.push({ ordinal: lease._ordinal, remount: () => lease._remount() })
+    }
+    for (const lease of this.unstableMountLeases) {
+      jobs.push({ ordinal: lease._ordinal, remount: () => lease._remount() })
+    }
+    if (history !== undefined) {
+      jobs.push({ ordinal: this.historyOverlayOrdinal, remount: () => this.mountHistoryOverlay(history) })
+    }
+    if (modelPicker !== undefined) {
+      jobs.push({ ordinal: this.modelPickerOrdinal, remount: () => this.mountModelPickerOverlay(modelPicker) })
+    }
+    jobs.sort((a, b) => a.ordinal - b.ordinal)
+    for (const job of jobs) job.remount()
   }
 
   /** Phase 3 test hook: the number of still-owned UNSTABLE mount leases. */
@@ -14579,6 +14588,7 @@ export class TuiApp {
   openModelPicker(component: Component & RowBudgetAware): () => void {
     if (this.modelPickerComponent !== undefined) this.closeModelPicker()
     this.modelPickerComponent = component
+    this.modelPickerOrdinal = ++this.overlayOrdinalSeq
     this.mountModelPickerOverlay(component)
     // The closer targets the CURRENT handle: a fullscreen screen swap
     // remounts the SAME component behind a fresh handle, and the user's

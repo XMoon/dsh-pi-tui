@@ -150,8 +150,9 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   hidden likewise hands the keyboard and focused seat back to the editor and
   reclaims both on focus/show (the intent survives a fullscreen swap), and a
   dependent restore always focuses the CURRENT editor seat rather than a
-  replaced pre-mount editor; a Save Location prompt keeps its overlay hierarchy
-  across a fullscreen swap.
+  replaced pre-mount editor; a fullscreen swap replays every remountable overlay
+  in its original mount order, so the hierarchy survives (including under a Save
+  Location prompt) and mixed overlay kinds are never reversed or wrongly hidden.
 - **The Job detail overlay has its own bottom action hint.** A running job shows
   `S stop · Esc back`; once the job settles the Stop hint disappears and its key
   becomes a no-op; `Esc back` stays visible under a long body, a short terminal

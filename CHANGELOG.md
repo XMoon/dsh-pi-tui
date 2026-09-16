@@ -109,7 +109,9 @@ dsh --profile pi-tui
   其下方的 Host 快捷键（如空编辑器的 `↓` 打开 Quick Tasks）也照常生效；捕获型浮层被
   `blur` 或临时隐藏后同样把键盘与焦点席位交还编辑器，`focus`/显示后再取回（fullscreen
   切换后仍保持该意图），且浮层关闭恢复时始终聚焦**当前**的 editor seat（不会退回已被
-  替换的旧 editor）；Save Location 提示跨 fullscreen 切换后仍保留原有的浮层层级。
+  替换的旧 editor）；跨 fullscreen 切换后所有可重挂浮层按原挂载顺序恢复，保留原有层级
+  （含 Save Location 提示下的层级），混合类型（extension/advanced/unstable 等）也不会
+  被反转或误隐藏。
 - **Job 详情浮层有独立的底部操作提示。** 运行中的 Job 显示 `S stop · Esc back`；任务
   结束后 `Stop` 提示消失且该键失效；`Esc back` 在长内容、短终端（低至 2 行）或窄屏下始终
   可见，且宽度不足时优先保留关闭/返回而不是 `Stop`；非 Job 的独立提示面板（如登录通知）
