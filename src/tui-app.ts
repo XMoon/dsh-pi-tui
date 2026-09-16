@@ -258,6 +258,18 @@ function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
     || message.kind === 'compaction'
 }
 
+/** Whether a message is a TEXT-ONLY durable user message — the only kind
+ * eligible for the long-user-message disclosure. Mixed-content user bubbles
+ * (attachment/image/file blocks) keep their existing presentation. The
+ * width-dependent "long enough" decision stays in the render layer; this
+ * helper only classifies the message. User messages are deliberately NOT
+ * folded into {@link isFocusSecondaryDisclosure}: they are turn
+ * foundations, not process detail. */
+function isUserMessageDisclosureCandidate(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'user' }> {
+  return message.kind === 'user'
+    && !(message.content !== undefined && message.content.some(block => block.type !== 'text'))
+}
+
 /** The Workflow run header pill: the REAL status (plan §7.1 — the run's
  * state must be perceivable in the header). The old three-state
  * ok/error/running chrome is a generic-tool presentation; the Workflow card
@@ -1368,6 +1380,29 @@ export class ThinkingCompactComponent implements Component {
   }
 }
 
+/** Long user-message disclosure constants (code constants — no setting in
+ * the first version). The threshold and the kept head/tail are VISUAL ROWS
+ * at the current inner width, so terminal wrapping, CJK and wide cells are
+ * accounted for. */
+const USER_MESSAGE_COMPACT_THRESHOLD_ROWS = 10
+const USER_MESSAGE_HEAD_ROWS = 4
+const USER_MESSAGE_TAIL_ROWS = 3
+
+/** The collapsed long user bubble's marker builder. It receives the hidden
+ * visual-row count and the available inner width so a narrow bubble can fall
+ * back to the short form instead of wrapping the marker. */
+type UserBubbleCompactMarker = (hiddenRows: number, availableWidth: number) => string
+
+/** Options for the render-time visual-row compaction of one user bubble.
+ * Absent = render the full content (short messages, mixed-content bubbles and
+ * the ephemeral pending echo). */
+interface UserBubbleCompactOptions {
+  readonly thresholdRows: number
+  readonly headRows: number
+  readonly tailRows: number
+  readonly compactMarker: UserBubbleCompactMarker
+}
+
 /**
  * User-message bubble: the whole row is painted with the role background
  * (dsh-web `--dsw-specific-bubble` parity — user input is a floating
@@ -1386,15 +1421,23 @@ export class UserBubbleComponent implements Component {
   private readonly marker: string
   private readonly markerWidth: number
   private readonly bg: (text: string) => string
+  private readonly compactOptions: UserBubbleCompactOptions | undefined
   private lastChild: string[] | undefined
   private lastWidth = -1
   private cached: string[] | undefined
+  private lastCompactMarkerRow: number | undefined
 
-  constructor(child: Component, marker: string, bg: (text: string) => string) {
+  constructor(
+    child: Component,
+    marker: string,
+    bg: (text: string) => string,
+    compactOptions?: UserBubbleCompactOptions,
+  ) {
     this.child = child
     this.marker = marker
     this.markerWidth = visibleWidth(marker)
     this.bg = bg
+    this.compactOptions = compactOptions
   }
 
   invalidate(): void {
@@ -1403,6 +1446,14 @@ export class UserBubbleComponent implements Component {
 
   dispose(): void {
     this.child.dispose?.()
+  }
+
+  /** The row offset (within this component's rendered rows) of the collapsed
+   * compact marker, or undefined when the current render is not compacted.
+   * Set during the last render, so it always matches the painted rows at the
+   * current width (the fullscreen marker hit target). */
+  compactMarkerRow(): number | undefined {
+    return this.lastCompactMarkerRow
   }
 
   render(width: number): string[] {
@@ -1414,7 +1465,8 @@ export class UserBubbleComponent implements Component {
     this.lastChild = child
     this.lastWidth = width
     const indent = ' '.repeat(this.markerWidth)
-    this.cached = child.map((line, index) => {
+    const rows = this.compactRows(child, inner)
+    this.cached = rows.map((line, index) => {
       const prefix = index === 0 ? this.marker : indent
       // Pad to the full row so the bubble background covers the whole
       // line, wrapped continuation rows included.
@@ -1422,6 +1474,27 @@ export class UserBubbleComponent implements Component {
       return this.bg(prefix + line + pad)
     })
     return this.cached
+  }
+
+  /** Collapse the child's FULL visual rows to head + marker + tail when the
+   * row-count threshold is exceeded. The decision and the slice both run on
+   * the rows the current width actually produces, so a resize re-decides
+   * (no baked compact count/marker position). */
+  private compactRows(child: string[], inner: number): string[] {
+    this.lastCompactMarkerRow = undefined
+    const options = this.compactOptions
+    if (options === undefined || child.length <= options.thresholdRows) return child
+    const head = Math.min(options.headRows, child.length)
+    const tail = Math.min(options.tailRows, Math.max(0, child.length - head))
+    if (head + tail >= child.length) return child
+    const hidden = child.length - head - tail
+    const raw = options.compactMarker(hidden, inner)
+    // Final single-row guard: a narrow bubble never lets the marker wrap or
+    // overflow — it truncates instead (the builder may already have dropped
+    // its verb, but an extreme width still needs clipping).
+    const markerText = visibleWidth(raw) <= inner ? raw : truncateToWidth(raw, inner, '…')
+    this.lastCompactMarkerRow = head
+    return [...child.slice(0, head), markerText, ...child.slice(child.length - tail)]
   }
 }
 
@@ -2635,7 +2708,7 @@ function deepFreeze(value: unknown): unknown {
  * `undefined` — a card that is ALWAYS expanded (regular Focus
  * non-Thinking secondaries, no hint needed). Each disclosure has exactly
  * one bulk owner: Ctrl+O never touches Thinking. */
-type ExpandHint = 'click' | 'fold' | 'thinking' | undefined
+type ExpandHint = 'click' | 'click-fold' | 'fold' | 'thinking' | undefined
 
 /** One live-only transcript block containing preparing tool rows. It is
  * kept outside FocusProjectedBlock so no ephemeral row can enter the Focus
@@ -2767,6 +2840,10 @@ type FullscreenRowEntry = {
   collapseFocusOwnerOnClick?: number
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
   workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
+  /** The collapsed long-user bubble's compact marker row (entry-relative).
+   * Only the marker row is an expand target; every other row of the bubble
+   * stays inert so ordinary user text keeps selection/copy semantics. */
+  userDisclosureRow?: number
   hasTrailingSpacer: boolean
 }
 
@@ -2782,6 +2859,7 @@ type RenderedTranscriptBlock = {
   collapseFocusOwnerOnClick?: number
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
   workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
+  userDisclosureRow?: number
 }
 
 /** Presentation-only high-water for one running Focus turn. The activity
@@ -5152,16 +5230,37 @@ export class TuiApp {
         return true
       },
       toggleTranscriptExpand: () => {
-        // Fullscreen + Focus: Ctrl+O is the Thought-root bulk owner (plan
-        // §3) — no expanded root → expand the recent `EXPAND_RECENT_TURNS`
-        // eligible roots; any expanded root → Collapse All. Every other
-        // surface/Focus combination keeps the historical tool/system detail
-        // master (regular behavior untouched).
+        // Fullscreen + Focus: Ctrl+O owns the Thought-root bulk (plan §3) —
+        // any expanded root → Collapse All, none → expand the recent
+        // `EXPAND_RECENT_TURNS` eligible roots — AND it collapses an
+        // explicitly expanded long user bubble (plan §6.4/§21.7): a visible
+        // long-user override with no expanded root consumes the press as a
+        // user collapse, so the Thought roots are untouched. The root
+        // storage/expansion rule itself is unchanged.
         if (this.fullscreen !== undefined && this.focusModeEnabled) {
-          this.toggleFullscreenFocusRoots()
+          if (this.hasVisibleExpandedFocusRoots()) {
+            // Clear the user overrides BEFORE the single root-collapse
+            // rebuild so one pass paints both.
+            this.clearUserMessageDisclosureOverrides()
+            this.toggleFullscreenFocusRoots()
+          } else if (this.hasVisibleExpandedUserMessage()) {
+            this.clearUserMessageDisclosureOverrides()
+            this.rebuildMessages()
+          } else {
+            this.toggleFullscreenFocusRoots()
+          }
           return true
         }
-        this.toolOutputExpanded = !this.toolOutputExpanded
+        // Every other surface/Focus combination keeps the historical
+        // tool/system detail master. Ctrl+O collapses what it owns: the
+        // recent-turn master AND any explicit long-user expansion;
+        // otherwise it expands the recent turns.
+        if (this.toolOutputExpanded || this.hasVisibleExpandedUserMessage()) {
+          this.toolOutputExpanded = false
+          this.clearUserMessageDisclosureOverrides()
+        } else {
+          this.toolOutputExpanded = true
+        }
         this.rebuildMessages()
         return true
       },
@@ -6227,12 +6326,18 @@ export class TuiApp {
    * §28 — regular mode full-reveals the whole process anyway). A hit
    * inside Thinking full-reveals ONLY that block via its per-message
    * override — the thinkingExpanded bulk preference is never touched by
-   * search (plan §14). The search caller owns the jump target — no
-   * anchor. */
+   * search (plan §14). A hit inside a collapsed long USER message expands
+   * that message (the search corpus is the full text, so the hit may sit in
+   * the hidden middle) — this is the one reveal that also runs OUTSIDE
+   * Focus mode. The search caller owns the jump target — no anchor. */
   revealSearchMatch(message: TranscriptMessage): void {
     const turn = 'turn' in message ? message.turn : undefined
     if (turn !== undefined && this.focusModeEnabled) {
       this.setFocusTurnExpanded(turn, true)
+    }
+    if (isUserMessageDisclosureCandidate(message)) {
+      if (this.expandedOverride.get(message) !== true) this.clearFocusLiveHeightState()
+      this.expandedOverride.set(message, true)
     }
     if (isFocusSecondaryDisclosure(message)) {
       if (this.expandedOverride.get(message) !== true) this.clearFocusLiveHeightState()
@@ -6286,6 +6391,29 @@ export class TuiApp {
       if (this.focusExpandedTurns.has(turn)) return true
     }
     return false
+  }
+
+  /** Whether the CURRENT projection shows a long user message with an
+   * explicit expansion override (the Ctrl+O user-collapse target, plan
+   * §6.4/§21.7). Only VISIBLE messages count: a parked override on a
+   * windowed-away message must not consume the Ctrl+O press and wedge the
+   * toggle into a collapse that does nothing on screen. */
+  private hasVisibleExpandedUserMessage(): boolean {
+    for (const message of this.messages) {
+      if (!isUserMessageDisclosureCandidate(message)) continue
+      if (this.expandedOverride.get(message) === true) return true
+    }
+    return false
+  }
+
+  /** Clear every long-user disclosure override (the Ctrl+O user-collapse
+   * pass). It filters by the user-disclosure classification ONLY — thinking,
+   * tool, system and compaction overrides are never touched. */
+  private clearUserMessageDisclosureOverrides(): void {
+    for (const message of [...this.expandedOverride.keys()]) {
+      if (!isUserMessageDisclosureCandidate(message)) continue
+      this.expandedOverride.delete(message)
+    }
   }
 
   /** The eligible Focus roots for Ctrl+O bulk expansion: turns with a
@@ -6831,6 +6959,7 @@ export class TuiApp {
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
       let workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined
+      let userDisclosureRow: number | undefined
       const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
       if (block.kind === 'activity') {
         // The live Thought disclosure; the hidden process rows (if any)
@@ -6862,6 +6991,7 @@ export class TuiApp {
         rendered = component.render(width)
         truncatedMarker = block.truncated === true
         attachments = this.attachmentRangesOf(component, width)
+        if (component instanceof UserBubbleComponent) userDisclosureRow = component.compactMarkerRow()
         const subCallInfo = this.subCallHitsByMessage.get(block.message)
         subCallHits = subCallInfo === undefined
           ? undefined
@@ -6880,6 +7010,7 @@ export class TuiApp {
         ...(collapseFocusOwnerOnClick === undefined ? {} : { collapseFocusOwnerOnClick }),
         ...(subCallHits === undefined ? {} : { subCallHits }),
         ...(workflowHits === undefined ? {} : { workflowHits }),
+        ...(userDisclosureRow === undefined ? {} : { userDisclosureRow }),
       }
     })
   }
@@ -6901,6 +7032,9 @@ export class TuiApp {
         return { ...entry, rendered }
       }
       const attachments = this.attachmentRangesOf(entry.component, width)
+      const userDisclosureRow = entry.component instanceof UserBubbleComponent
+        ? entry.component.compactMarkerRow()
+        : undefined
       const subCallInfo = this.subCallHitsByMessage.get(entry.block.message)
       const subCallHits = subCallInfo === undefined
         ? undefined
@@ -6915,6 +7049,7 @@ export class TuiApp {
         attachments,
         ...(subCallHits === undefined ? { subCallHits: undefined } : { subCallHits }),
         ...(workflowHits === undefined ? { workflowHits: undefined } : { workflowHits }),
+        ...(userDisclosureRow === undefined ? { userDisclosureRow: undefined } : { userDisclosureRow }),
       }
     })
   }
@@ -7041,6 +7176,7 @@ export class TuiApp {
       attachments: entry.attachments,
       ...(entry.subCallHits === undefined ? {} : { subCallHits: entry.subCallHits }),
       ...(entry.workflowHits === undefined ? {} : { workflowHits: entry.workflowHits }),
+      ...(entry.userDisclosureRow === undefined ? {} : { userDisclosureRow: entry.userDisclosureRow }),
       hasTrailingSpacer,
     }
   }
@@ -7658,6 +7794,12 @@ export class TuiApp {
         return `attachment:${token}:${attachment.imageIndex}`
       }
     }
+    // Collapsed long-user bubble: only the compact marker row is an expand
+    // target; every other row is inert, so ordinary user text keeps
+    // selection/copy semantics and never becomes an implicit button.
+    if (entry.userDisclosureRow !== undefined) {
+      return inMessage === entry.userDisclosureRow ? `user:expand:${token}` : 'inert'
+    }
     // Focus owner-marked rows: a SECONDARY card toggles ITSELF (the
     // card-level identity); a NON-secondary process row collapses the
     // owner turn.
@@ -8100,6 +8242,13 @@ export class TuiApp {
         // optional message for the attachment/message toggles below.
         const message = entry.message
         if (message === undefined) return
+        // The collapsed long-user bubble's compact marker expands ONLY that
+        // user message — never a Focus/section toggle. Non-marker rows of the
+        // bubble have an inert hit identity and never reach this branch.
+        if (entry.userDisclosureRow !== undefined) {
+          if (inMessage === entry.userDisclosureRow) this.expandUserMessage(message)
+          return
+        }
         // PTC sub-call header rows win FIRST (their own disclosure is
         // independent of the root card): a click on a child header toggles
         // THAT child's body, never the parent card.
@@ -8180,6 +8329,17 @@ export class TuiApp {
     if (turn === undefined || !this.focusExpandedTurns.has(turn)) return undefined
     const nextTurn = next?.activity?.turn ?? next?.collapseFocusOwnerOnClick
     return nextTurn === turn ? turn : undefined
+  }
+
+  /** Expand one collapsed long user message (fullscreen compact-marker
+   * click). The marker only exists while collapsed, so this is expand-only;
+   * the override reuses the same per-message disclosure state as every other
+   * card, and the canonical `message.text` is never touched. */
+  private expandUserMessage(message: TranscriptMessage): void {
+    if (this.expandedOverride.get(message) === true) return
+    this.expandedOverride.set(message, true)
+    this.clearFocusLiveHeightState()
+    this.rebuildMessages()
   }
 
   /** Toggle one collapsible message's individual expansion (mouse click).
@@ -10226,6 +10386,20 @@ export class TuiApp {
     if (message.kind === 'thinking') {
       return this.effectiveThinkingExpanded(message)
     }
+    if (isUserMessageDisclosureCandidate(message)) {
+      // Long user disclosure follows the recent-turn boundary where Ctrl+O
+      // owns the expand master (regular AND fullscreen without Focus), with
+      // the per-message override (a fullscreen marker click or a search
+      // reveal) winning when set. Fullscreen Focus owns Ctrl+O as the
+      // Thought-root bulk, so the boundary must NOT apply there: a persisted
+      // `toolOutputExpanded` from an earlier surface would otherwise leak an
+      // expansion into a surface whose only expand affordance is the compact
+      // marker.
+      const override = this.expandedOverride.get(message)
+      if (override !== undefined) return override
+      if (this.fullscreen !== undefined && this.focusModeEnabled) return false
+      return message.turn >= boundary
+    }
     // Delivered files are an assistant turn-tail, but their capped/complete
     // disclosure follows the existing recent-turn Ctrl+O boundary rather than
     // introducing a second expansion state.
@@ -10303,9 +10477,20 @@ export class TuiApp {
     // EFFECTIVE key through the keymap).
     const expandHint: ExpandHint = message.kind === 'thinking'
       ? (this.fullscreen !== undefined ? 'click' : 'thinking')
-      : insideFocusSecondary
-        ? (this.fullscreen !== undefined ? 'click' : undefined)
-        : 'fold'
+      : isUserMessageDisclosureCandidate(message)
+        // Long user disclosure is a turn-foundation fold. The owner is part
+        // of the cache identity so the marker label follows the surface:
+        // regular is the Ctrl+O recent-turn master; fullscreen offers the
+        // compact-marker click AND (without Focus, where Ctrl+O is still the
+        // expand master) the effective key. Inside a fullscreen Focus,
+        // Ctrl+O owns the Thought-root bulk, so the label is click-only —
+        // never a dead key hint.
+        ? (this.fullscreen === undefined
+            ? 'fold'
+            : this.focusModeEnabled ? 'click' : 'click-fold')
+        : insideFocusSecondary
+          ? (this.fullscreen !== undefined ? 'click' : undefined)
+          : 'fold'
     // The FULL-REVEAL flag for tool bodies (large diffs): true for the
     // per-card override AND for any REGULAR Focus expanded root (the
     // surface contract — no mouse, so a capped diff would be unreadable);
@@ -10752,6 +10937,25 @@ export class TuiApp {
       // stays aligned inside one block.
       if (message.content !== undefined && message.content.some(block => block.type !== 'text')) {
         return this.renderUserBlocks(message.content, message)
+      }
+      // Long text-only prompts compact at the VISUAL-ROW level: the bubble
+      // renders head + marker + tail while collapsed. `expanded` (the
+      // surface-adaptive disclosure rule) comes from the render-cache
+      // identity, so Ctrl+O / a fullscreen marker click rebuilds this
+      // component from the canonical full text — the text is never mutated.
+      if (!expanded) {
+        const hint = expandHint
+        return new UserBubbleComponent(
+          new Text(message.text, 0, 0),
+          `${color.roleUser('❯')} `,
+          color.roleUserBg,
+          {
+            thresholdRows: USER_MESSAGE_COMPACT_THRESHOLD_ROWS,
+            headRows: USER_MESSAGE_HEAD_ROWS,
+            tailRows: USER_MESSAGE_TAIL_ROWS,
+            compactMarker: (hiddenRows, available) => this.userCompactMarker(hiddenRows, available, hint),
+          },
+        )
       }
       return new UserBubbleComponent(
         new Text(message.text, 0, 0),
@@ -13270,18 +13474,39 @@ export class TuiApp {
   }
 
   /** The fold-hint verb of one collapsible card: 'click' for the
-   * click-expandable owners, else the EFFECTIVE key of the owning action
-   * ('thinking' → the Thinking bulk owner, 'fold' → the expand master; a
-   * user remap updates every `to expand` hint; a disabled action falls
-   * back to a neutral phrase instead of a stale default). */
+   * click-only expandable owners, 'click-fold' for the long-user bubble in
+   * a fullscreen WITHOUT Focus (click AND the expand master), else the
+   * EFFECTIVE key of the owning action ('thinking' → the Thinking bulk
+   * owner, 'fold' → the expand master; a user remap updates every `to
+   * expand` hint; a disabled action falls back to a neutral phrase instead
+   * of a stale default). */
   private expandHint(hint: ExpandHint): string {
     if (hint === 'click') return 'click'
+    if (hint === 'click-fold') {
+      const clickFold = this.keybindings.keyHint('app.transcript.toggleExpand')
+      return clickFold === '' ? 'click' : `click / ${clickFold.toLowerCase()}`
+    }
     if (hint === 'thinking') {
       const thinking = this.keybindings.keyHint('app.transcript.toggleThinking')
       return thinking === '' ? 'the thinking key' : thinking.toLowerCase()
     }
     const expand = this.keybindings.keyHint('app.transcript.toggleExpand')
     return expand === '' ? 'the expand key' : expand.toLowerCase()
+  }
+
+  /** The collapsed long-user bubble's marker row. It names the count as
+   * VISUAL rows (never logical lines) and resolves the expand verb from the
+   * message's fold-hint owner: fullscreen is click-owned (with the effective
+   * key when Ctrl+O is still live there), regular is the Ctrl+O master (the
+   * effective key). A regular fold whose key is DISABLED has no usable
+   * affordance (regular has no click), so the marker drops the verb instead
+   * of advertising a dead key; narrow bubbles drop it too so it never wraps. */
+  private userCompactMarker(hiddenRows: number, availableWidth: number, hint: ExpandHint): string {
+    const disabledFold = hint === 'fold' && this.keybindings.keyHint('app.transcript.toggleExpand') === ''
+    const verb = disabledFold ? '' : this.expandHint(hint)
+    const full = `── ${hiddenRows} rows compacted${verb === '' ? '' : ` · ${verb} to expand`} ──`
+    if (visibleWidth(full) <= availableWidth) return color.textDim(full)
+    return color.textDim(`── ${hiddenRows} rows compacted ──`)
   }
 
   /**
