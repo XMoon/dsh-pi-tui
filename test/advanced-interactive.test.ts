@@ -669,3 +669,58 @@ test('closing a hidden middle overlay reparents its dependents to the front over
   c.close()
   app.stop()
 })
+
+test('a hidden root lease close still releases its dependents', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const c = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced C' }))
+  await vt.waitForRender()
+  assert.equal(c.focused, true)
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 2)
+  assert.equal(app.overlayGraphState().dependents, 1, 'A owns the hidden C')
+
+  a.hide() // temporary hide: A is still the stack root and still owns C
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().dependents, 1, 'temporary hide keeps the dependency graph')
+
+  a.close() // permanent close of the HIDDEN root must still release C
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'only C remains tracked')
+  assert.equal(app.overlayGraphState().dependents, 0, 'no orphaned dependency entry')
+  assert.ok(view().includes('advanced C'), `C must be revealed:\n${view()}`)
+  assert.equal(c.focused, true, 'C regains the keyboard')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  c.close()
+  app.stop()
+})
+
+test('a shown hidden dependent is still owned by the overlay above it', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const b = app.openPicker([{ value: 'p', label: 'provider option' }], () => {}, () => {})
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'A is hidden beneath B')
+
+  // Explicit VISIBILITY override: A shows (and the fork focuses it), but the
+  // dependency graph still owns A under B.
+  a.show()
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+
+  a.close() // visibility override is NOT dependency-ownership override
+  await vt.waitForRender()
+  assert.ok(view().includes('provider option'), `B must stay visible:\n${view()}`)
+  assert.equal(app.focusSeatForTest(), 'overlay', 'B must own the keyboard')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '', 'input must not reach the editor past B')
+  b.close?.()
+  app.stop()
+})
