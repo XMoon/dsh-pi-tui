@@ -2900,12 +2900,14 @@
     "src/tui-alt-screen.ts",
     "src/components/scroll-view.ts"
    ],
-   "why": "The host virtual transcript owns paging and search while the fork owns viewport mechanics. Boundary callbacks, pre-input interception, canScroll, and clearSearch let both owners cooperate without duplicating the scroll implementation.",
+   "why": "The host virtual transcript owns paging, search, and the jump-to-latest semantic action while the fork owns viewport mechanics. Boundary callbacks, pre-input interception, canScroll, clearSearch, and the virtual-history-aware jump-to-end indicator seams let both owners cooperate without duplicating the scroll implementation.",
    "changedSurface": [
     "onScrollBoundary for final unconsumed edge attempts",
     "onBeforeViewportInput before built-in Home/End/Page handling",
     "ScrollView.canScroll and host prompt-navigation fallthrough",
-    "clearSearch and previous/next prompt routing"
+    "clearSearch and previous/next prompt routing",
+    "shouldShowScrollToEndIndicator so a host virtual-history window keeps the jump-to-end label even while its local view follows the end",
+    "onScrollToEndIndicator so a host can consume the label click and run its own semantic jump-to-latest instead of the local scrollToBottom fallback"
    ],
    "dependencies": {
     "vendorInternal": {
@@ -2925,14 +2927,14 @@
     "host": {
      "audited": true,
      "items": [
-      "src/tui-app.ts wires onBeforeViewportInput and onScrollBoundary, owns virtual transcript paging/Home/End, and calls clearSearch for jumpLatest and prompt navigation"
+      "src/tui-app.ts wires onBeforeViewportInput and onScrollBoundary, owns virtual transcript paging/Home/End, calls clearSearch for jumpLatest and prompt navigation, and wires scrollToEndIndicator/shouldShowScrollToEndIndicator/onScrollToEndIndicator to the semantic TranscriptWindowController state"
      ],
      "notes": "Host wires the callbacks and clearSearch; ScrollView.canScroll is consumed internally by TuiAltScreen as fallback state, not called by the host."
     },
     "publicExtension": {
      "audited": true,
      "items": [
-      "TuiAltScreenOptions viewport callbacks and ScrollView.canScroll public component shape."
+      "TuiAltScreenOptions viewport callbacks, the scrollToEndIndicator/shouldShowScrollToEndIndicator/onScrollToEndIndicator options, and ScrollView.canScroll public component shape."
      ],
      "notes": "The seams are part of compatibility tests."
     },
@@ -2942,15 +2944,16 @@
       "only a primary viewport edge emits a boundary",
       "host pre-input can claim semantic keys before built-ins",
       "short transcripts let keys fall through to focused components",
-      "jump-latest resets built-in search"
+      "jump-latest resets built-in search",
+      "the jump-to-end label is host-forced for a virtual-history window and a host-consumed click skips the local scrollToBottom fallback"
      ],
      "notes": "Restoring upstream can silently consume navigation keys or bypass virtual transcript ownership."
     }
    },
    "tests": [
-    "packages/pi-tui/test/tui-alt-screen.test.ts: boundary, overscroll, page, scrollbar, and search reset",
+    "packages/pi-tui/test/tui-alt-screen.test.ts: boundary, overscroll, page, scrollbar, search reset, and host-forced/host-consumed jump-to-end indicator",
     "packages/pi-tui/test/tui-shrink.test.ts and ScrollView canScroll coverage",
-    "test/home-end-keys.test.ts: bundle Home/End ownership"
+    "test/home-end-keys.test.ts: bundle Home/End ownership and the fullscreen jump-to-latest indicator"
    ],
    "upstream": {
     "equivalence": "NO",
