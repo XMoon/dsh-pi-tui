@@ -836,6 +836,22 @@ export function subagentJobTranscriptId(snapshot: unknown): string | undefined {
   return typeof childSessionId === 'string' && childSessionId.trim() !== '' ? childSessionId : undefined
 }
 
+/**
+ * The Task Center row-selection disposition (plan §4.3/§4.4). A subagent
+ * transcript opens a session/viewer surface that REPLACES the browser; a
+ * Job row's detail keeps it mounted (the caller passes {@link openJobView}'s
+ * disposition). An UNKNOWN row — a stale panel selection after a live
+ * re-projection — also keeps the parent usable instead of dismissing it.
+ */
+export function taskRowSelectionDisposition(
+  row: { readonly kind: 'job' | 'subagent' } | undefined,
+  jobDetail: 'close' | 'keep-open',
+): 'close' | 'keep-open' {
+  if (row === undefined) return 'keep-open'
+  if (row.kind === 'subagent') return 'close'
+  return jobDetail
+}
+
 /** Viewer body for a subagent job with no uniquely matched child. */
 export function subagentJobViewHint(status: string, detail: string | undefined): string {
   const tail = status === 'running' || status === 'stopping'
@@ -7595,10 +7611,10 @@ export function apply(ctx: Context, config: Config): void {
       } else {
         taskBrowserRows = buildTaskRows(jobSnapshots, [])
       }
-      const selectRow = (value: string): void => {
-        if (cleanedUp) return
+      const selectRow = (value: string): 'close' | 'keep-open' => {
+        if (cleanedUp) return 'close'
         const row = taskBrowserRows.find(candidate => candidate.value === value)
-        if (row === undefined) return
+        if (row === undefined) return taskRowSelectionDisposition(undefined, 'keep-open')
         if (row.kind === 'subagent') {
           // The viewer target carries the row's OWN parent (plan §6.10:
           // childId + parentId + depth + mode + activity — never just
@@ -7606,7 +7622,7 @@ export function apply(ctx: Context, config: Config): void {
           // direct parent recorded by DSH; only a direct child falls back
           // to the browser root (the live main session).
           const parentSessionId = row.parentId !== '' ? row.parentId as SessionId : liveAgent?.session.id
-          if (parentSessionId === undefined) return
+          if (parentSessionId === undefined) return 'close'
           // The row carries the catalog MODE + projected activity + DEPTH:
           // the viewer target is pinned to them (continuable → interactive
           // editor only at depth 1, one-shot → read-only, depth > 1 →
@@ -7622,9 +7638,16 @@ export function apply(ctx: Context, config: Config): void {
               app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
             },
           })
-          return
+          // The subagent transcript is a session/viewer surface, not a
+          // child overlay of the browser: it REPLACES the Task Center and
+          // keeps its own Esc semantics.
+          return taskRowSelectionDisposition(row, 'keep-open')
         }
-        openJobView(row.jobId)
+        // A Job View is the selected row's DETAIL: it opens as a child
+        // overlay (hiding this browser, not destroying it) and returns to
+        // the exact browser state on Esc. A job that has already vanished
+        // simply opens nothing — the parent stays usable either way.
+        return taskRowSelectionDisposition(row, openJobView(row.jobId))
       }
       const stopRow = (value: string): void => {
         if (cleanedUp) return
@@ -7705,17 +7728,21 @@ export function apply(ctx: Context, config: Config): void {
         ?? taskBrowserRows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
       const handle = app.openTaskBrowser(
         taskPanelItems(taskBrowserRows),
-        // Selection closes the overlay (the app closes it before invoking the
-        // callback): drop the active-handle reference so a later runtime
-        // refresh cannot repaint a closed browser. The dataset scope resets
-        // with the close (PR2 plan §10.8 — the next ordinary Task Center
-        // must see the global dataset).
+        // Selection disposition decides whether the browser survives: a Job
+        // detail keeps it MOUNTED underneath (the overlay stack hides and
+        // restores the exact instance/state on Esc); a terminal navigation
+        // (subagent transcript, row left the dataset) drops the
+        // active-handle reference so a later runtime refresh cannot repaint
+        // a closed browser, and resets the dataset scope (PR2 plan §10.8 —
+        // the next ordinary Task Center must see the global dataset).
         (value) => {
-          if (cleanedUp) return
+          if (cleanedUp) return 'close'
+          const disposition = selectRow(value)
+          if (disposition === 'keep-open') return 'keep-open'
           activeTaskBrowser = undefined
           activeTaskBrowserToken = undefined
           resetTaskBrowserScope()
-          selectRow(value)
+          return 'close'
         },
         () => {
           if (cleanedUp) return
@@ -8376,12 +8403,14 @@ export function apply(ctx: Context, config: Config): void {
     if (jobs !== undefined) {
       refreshTasks = (): void => {
         if (cleanedUp) return
+        let snapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
         let tasks: { id: string; label: string; status: string; kind?: string; startedAt?: number; finishedAt?: number }[] = []
         try {
           // Keep terminal records in the catalog. Active/total separation is
           // a presentation fact; dropping completed/failed jobs here made
           // Full Task Center history and failure attention impossible.
-          tasks = jobs.list(liveAgent).map(job => ({
+          snapshots = jobs.list(liveAgent)
+          tasks = snapshots.map(job => ({
             id: job.id,
             label: job.label,
             status: job.status,
@@ -8393,6 +8422,14 @@ export function apply(ctx: Context, config: Config): void {
           // The registry read is best-effort; the dock line just stays stale.
         }
         app.setTasks(tasks)
+        // A jobs-only session has no catalog coordinator, so this is the ONLY
+        // refresh channel for an OPEN browser. Keep it in step with the
+        // registry, or a Job detail's hidden parent returns with stale status
+        // (the subagents path commits through TaskBrowserRuntime.commitRows).
+        if (taskRuntime === undefined && activeTaskBrowser !== undefined) {
+          taskBrowserRows = buildTaskRows(snapshots, [])
+          activeTaskBrowser.setItems(taskPanelItems(taskBrowserRows))
+        }
       }
       // A jobs change usually means a delegation settled; the subagent half
       // of the dock may have changed with it.
@@ -8506,15 +8543,19 @@ export function apply(ctx: Context, config: Config): void {
      * the task browser therefore never opens a transcript by guess.
      * `jobs` and `refreshTasks` are declared later in this closure; the
      * browser only fires on user input, by which time both are initialized.
+     * Returns the navigation disposition for the selecting browser: the
+     * transcript path REPLACES the Task Center (`'close'`); a Job detail is
+     * a child overlay of it (`'keep-open'`), as is a vanished job (the
+     * parent stays usable, nothing was opened).
      */
-    const openJobView = (jobId: string): void => {
-      if (jobs === undefined || liveAgent === undefined) return
+    const openJobView = (jobId: string): 'close' | 'keep-open' => {
+      if (jobs === undefined || liveAgent === undefined) return 'keep-open'
       const owner = liveAgent
       let snapshot: ReturnType<NonNullable<typeof jobs>['get']>
       try {
         snapshot = jobs.get(jobId as JobId, owner)
       } catch {
-        return
+        return 'keep-open'
       }
       if (snapshot.kind === 'subagent') {
         const childSessionId = subagentJobTranscriptId(snapshot)
@@ -8533,16 +8574,19 @@ export function apply(ctx: Context, config: Config): void {
               app.notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
             },
           })
-          return
+          // The transcript viewer is a session surface, not a Job child
+          // overlay: it keeps its own Esc semantics (browser closed).
+          return 'close'
         }
         // Current JobSnapshot has no stable child id. Use the reliable status
         // fallback and let /tasks (which owns child identities through
         // the merged browser) perform
         // transcript selection; never substitute label/order/time matching.
         openJobStatusViewer(jobId, `subagent ${snapshot.id} · ${snapshot.label}`, snapshot)
-        return
+        return 'keep-open'
       }
       openJobStatusViewer(jobId, `${snapshot.kind} ${snapshot.id} · ${snapshot.label}`, snapshot)
+      return 'keep-open'
     }
     /**
      * Status-only viewer for one job (never touches the read cursor). The
@@ -8586,6 +8630,21 @@ export function apply(ctx: Context, config: Config): void {
           }
           refreshTasks()
         },
+        // Live capability: the Stop hint and the Stop key both read the
+        // CURRENT registry record, so a job that settles while the viewer
+        // is open stops advertising/handling Stop.
+        canStop: () => {
+          if (jobs === undefined || liveAgent === undefined) return false
+          try {
+            return isActiveJobStatus(jobs.get(jobId as JobId, liveAgent).status)
+          } catch {
+            // The job left the registry: nothing can be stopped.
+            return false
+          }
+        },
+        // The viewer was opened from the Task Center browser: Esc returns
+        // to the parent browser, not to the editor.
+        closeHint: 'back',
         onClose: () => refreshTasks(),
       })
     }

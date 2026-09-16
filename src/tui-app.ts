@@ -163,6 +163,7 @@ import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceHost } from './extension/internal/surface-host.ts'
 import { InputRouter } from './input-router.ts'
 import { AppActionDispatcher, type AppActionHost } from './keybindings/action-dispatcher.ts'
+import { componentKeymap } from './keybindings/component-keymap.ts'
 import { deriveKeybindingContext } from './keybindings/context.ts'
 import { APP_KEYBINDINGS, VIEWER_BLOCKED_PARENT_ACTIONS } from './keybindings/definitions.ts'
 import { formatKeyId, formatLeaderSequence } from './keybindings/hints.ts'
@@ -1703,11 +1704,38 @@ class ApprovalDialogSurface implements Component {
   }
 }
 
-/** The live job-output viewer body: a title line + refreshable text panel. */
+/** The job-output viewer overlay width (cells) and max height (rows); the
+ * responsive shell and the fork overlay share these so the body row budget
+ * always matches the physically granted box. */
+const OUTPUT_VIEWER_WIDTH = 88
+const OUTPUT_VIEWER_MAX_HEIGHT = 24
+/** The chrome rows around the viewer body: one blank separator above and
+ * one below (the hint row itself is counted separately). */
+const OUTPUT_VIEWER_SEPARATOR_ROWS = 2
+// Supported-height floor (documented, not a fallback): the bordered viewer
+// needs one row above and one below its content, so the action-hint contract
+// holds while the terminal grants at least TWO rows (top border + the hint).
+// A ONE-row terminal cannot render any bordered-overlay content at all — the
+// fork keeps only the first `maxHeight` lines and the frame's top border is
+// always first. The panel still degrades to the hint alone (never overflows).
+
+/**
+ * The live job-output viewer: a title line, a refreshable body, and a
+ * fixed BOTTOM action hint. The hint is panel chrome (never appended to
+ * the body string). The fork keeps only the FIRST `maxHeight` rendered
+ * lines (`overlayLines.slice(0, maxHeight)`), dropping the tail, so the
+ * layout reserves the hint and title BEFORE the body: on a long body or a
+ * short terminal the body shrinks (to zero) rather than the hint vanishing.
+ */
 class OutputViewerPanel implements Component {
   private readonly title: Text
   private readonly body: Text
-  /** Key routing installed by openOutputViewer (Esc closes, `s` stops). */
+  private readonly hint: Text
+  /** The granted CONTENT row budget (set by the responsive shell: the
+   * overlay's clamped max height minus its top/bottom border rows). */
+  private maxRows = OUTPUT_VIEWER_MAX_HEIGHT - 2
+  /** Key routing installed by openOutputViewer (Esc closes, the stop
+   * semantic stops). */
   handleInput?: (data: string) => void
   /** The refresh interval. The PANEL owns it (X007 ownership): final
    * teardown (overlay disposeOnHide → FocusForwardingFrame.dispose →
@@ -1715,18 +1743,21 @@ class OutputViewerPanel implements Component {
    * closer — a ref'd interval must not outlive the surface. */
   private timer: NodeJS.Timeout | undefined
   private refresh: (() => string) | undefined
+  private liveHint: (() => string) | undefined
   private requestRender: (() => void) | undefined
   /** Latched by dispose(): an in-flight tick must not render. */
   private disposed = false
 
-  constructor(title: string, initial: string) {
+  constructor(title: string, initial: string, hint: string) {
     this.title = new Text(title, 0, 0)
     this.body = new Text(initial, 0, 0)
+    this.hint = new Text(hint, 0, 0)
   }
 
   invalidate(): void {
     this.title.invalidate()
     this.body.invalidate()
+    this.hint.invalidate()
   }
 
   /** Replace the output body (the caller refreshes it on a timer). */
@@ -1735,17 +1766,34 @@ class OutputViewerPanel implements Component {
     this.body.invalidate()
   }
 
+  /** Adopt the granted overlay row budget (resize-aware). */
+  setMaxRows(maxRows: number): void {
+    this.maxRows = Math.max(1, Math.floor(maxRows))
+  }
+
   /** Start the refresh timer (openOutputViewer wires the live callbacks).
    * The interval is unref'd so a viewer left open never blocks process
    * exit by itself, and owned by THIS panel so the dispose chain stops
-   * it exactly once. */
-  startRefreshing(refresh: () => string, requestRender: () => void, intervalMs: number): void {
+   * it exactly once. The optional `liveHint` re-evaluates the action hint
+   * on every tick, so a stop capability that expires while the viewer is
+   * open updates the chrome with the body. */
+  startRefreshing(
+    refresh: () => string,
+    requestRender: () => void,
+    intervalMs: number,
+    liveHint?: () => string,
+  ): void {
     this.refresh = refresh
     this.requestRender = requestRender
+    this.liveHint = liveHint
     this.timer = setInterval(() => {
       if (this.disposed) return
       this.body.setText(this.refresh!())
       this.body.invalidate()
+      if (this.liveHint !== undefined) {
+        this.hint.setText(this.liveHint())
+        this.hint.invalidate()
+      }
       this.requestRender!()
     }, intervalMs)
     this.timer.unref()
@@ -1761,7 +1809,29 @@ class OutputViewerPanel implements Component {
   }
 
   render(width: number): string[] {
-    return [...this.title.render(width), '', ...this.body.render(width)]
+    const maxRows = Math.max(1, this.maxRows)
+    const hintLines = this.hint.render(width)
+    // Assemble by PRIORITY: the hint is mandatory chrome, then the title,
+    // then the separators, then the body. The body absorbs the remainder
+    // (0 rows on a genuinely short box). Output length is <= maxRows in
+    // every branch, so the fork's first-`maxHeight`-lines clip can never
+    // reach the bottom hint.
+    const hint = hintLines.slice(0, maxRows)
+    let remaining = maxRows - hint.length
+    const titleLines = this.title.render(width)
+    const title = titleLines.slice(0, remaining)
+    remaining -= title.length
+    const bodyLines = this.body.render(width)
+    if (remaining <= 0) return [...title, ...hint]
+    if (remaining === 1) return [...title, ...bodyLines.slice(0, 1), ...hint]
+    if (remaining === 2) return [...title, '', ...bodyLines.slice(0, 1), ...hint]
+    return [
+      ...title,
+      '',
+      ...bodyLines.slice(0, remaining - OUTPUT_VIEWER_SEPARATOR_ROWS),
+      '',
+      ...hint,
+    ]
   }
 }
 
@@ -3740,6 +3810,10 @@ export class TuiApp {
       question: () => this.activeQuestions,
       saveLocation: () => this.activeSaveLocation,
       setFocusSeat: (seat) => this.setFocusSeat(seat),
+      // The close path re-derives the final seat from the LIVE surface: a
+      // restored dependent capturing overlay keeps keyboard ownership; the
+      // editor owns it only when no capturing overlay remains.
+      reconcileFocusSeat: () => this.publishFocusSeat(),
     })
 
     this.tui = new TuiMainScreen(resizeAware)
@@ -5511,25 +5585,6 @@ export class TuiApp {
     // §13 — behavior identical; the existing modal-stacking tests gate
     // the extraction).
     return this.overlayBroker.track(handle, { nonCapturing: options?.nonCapturing === true })
-  }
-
-  /**
-   * Question-aware close for one tracked overlay handle (the wrapper's
-   * hide). Without an active question this matches the historical behavior:
-   * the handle's dependents are unhidden, the graph is cleaned, and the
-   * overlay is removed. While a question owns the seat, the handle leaves
-   * the question's suspension set, every dependency set drops it (no parent
-   * retains a dead child), and its still-mounted dependents remain hidden
-   * and become DIRECTLY owned by the question — they must not flash back
-   * while the question is still up.
-   */
-  private closeOverlayHandle(handle: OverlayHandle): void {
-    // M8: the broker owns the graph + question-aware close; the host
-    // recomputes the focused seat from the live state after (follow-up
-    // P1 — the broker's editor-seat report is a coarse signal, the host
-    // re-derives the truth).
-    this.overlayBroker.closeForHost(handle)
-    this.publishFocusSeat()
   }
 
   /**
@@ -10245,8 +10300,10 @@ export class TuiApp {
    * the editor seat currently owns input — after a handoff the plugin
    * editor's component must actually receive keys (typing, arrows), not
    * leave the old host Editor focused. Focus transfer is skipped while a
-   * capturing flow (question/approval) owns the seat — those flows
-   * restore their own focus.
+   * capturing owner (question/approval/save-location or a visible CAPTURING
+   * overlay) holds the seat — those owners restore their own focus. A
+   * nonCapturing notice never takes focus and therefore never fences the
+   * handoff.
    */
   private mountSeatChild(): void {
     // Re-vendor lifecycle follow-up P1: the CAPTURE FENCE — while a
@@ -10261,12 +10318,16 @@ export class TuiApp {
     const component = this.seatEditor().component
     this.editorSeat.replace(component)
     // Focus follows the occupant: if the seat owns input right now (no
-    // question/approval/overlay is capturing), the NEW component must be
-    // the focused component — otherwise every key after a handoff still
-    // targets the old host Editor (P1-06 probe would see the WRONG
-    // focused component and plugin bindings would steal editor keys).
+    // question/approval/save-location and no CAPTURING overlay), the NEW
+    // component must be the focused component — otherwise every key after a
+    // handoff still targets the old host Editor (P1-06 probe would see the
+    // WRONG focused component and plugin bindings would steal editor keys).
+    // A nonCapturing notice never takes focus, so it must NOT fence the
+    // handoff (the seat would report 'overlay' while the host editor is
+    // physically focused).
     if (this.activeQuestions === undefined && this.activeApproval === undefined
-      && !this.activeScreen.hasOverlayEntries) {
+      && this.activeSaveLocation === undefined
+      && !this.overlayBroker.hasVisibleCapturingOverlay()) {
       this.activeScreen.setFocus(component)
     }
   }
@@ -10386,6 +10447,14 @@ export class TuiApp {
    * seat. Probes the "overlay visible but editor focused" invariant. */
   focusedComponentForTest(): Component | null {
     return this.activeScreen.getFocusedComponent()
+  }
+
+  /** Focus test hook: the DERIVED focused seat (the surface projection's
+   * truth). Probes the shared overlay-close reconciliation without needing
+   * an attached extension host (whose render mirror would mask a stale
+   * seat). */
+  focusSeatForTest(): 'editor' | 'overlay' | 'editor-panel' | 'none' {
+    return this.focusSeat
   }
 
   /** P2-R5 test hook: the HIDDEN host editor's live text (probes that a
@@ -12450,9 +12519,9 @@ export class TuiApp {
       if (host !== undefined) {
         const current = host.state().surface
         // focusedSeat derives from the actual focus state (follow-up P1): the
-        // seat tracker is updated by showOverlayOnHost/closeOverlayHandle/
-        // question/approval/fullscreen entry; the requestRender mirror only
-        // publishes it here (plus the stale-frame safety net below). The LIVE
+        // seat tracker is updated by showOverlayOnHost/the OverlayBroker close
+        // reconciliation/question/approval/fullscreen entry; the requestRender
+        // mirror only publishes it here (plus the stale-frame safety net below). The LIVE
         // focusSeat (not the microtask-published copy) is authoritative — a
         // publish that changed nothing must still mirror the real seat.
         this.publishFocusSeat()
@@ -12519,7 +12588,12 @@ export class TuiApp {
       return
     }
     const screen = this.activeScreen
-    if (!this.disposed && screen.hasOverlayEntries && screen.getFocusedComponent() !== null) {
+    // The seat reflects the ACTUAL keyboard owner: an overlay entry alone is
+    // NOT enough. A nonCapturing overlay never takes focus, and a hidden
+    // entry owns nothing, so the physically focused component must be an
+    // overlay (never the seat editor) for the seat to report 'overlay'.
+    const focused = this.disposed ? null : screen.getFocusedComponent()
+    if (screen.hasOverlayEntries && focused !== null && focused !== this.seatEditor().component) {
       this.setFocusSeat('overlay')
       return
     }
@@ -14283,10 +14357,15 @@ export class TuiApp {
    * `/tasks` Full Task Center). Unlike the generic {@link openPicker}, rows carry a
    * status word + start timestamp so the panel can render status dots,
    * right-aligned status/elapsed columns, live counts, and a 1s elapsed
-   * tick. Selection calls `onSelect` with the row value and closes; Esc
-   * calls `onCancel`.
+   * tick. Selection calls `onSelect` with the row value and then acts on its
+   * disposition: `'close'` dismisses the browser, `'keep-open'` keeps it
+   * mounted underneath a child detail overlay (the Job View). Esc calls
+   * `onCancel`.
    * @param items - task rows (see TaskPanelItem).
-   * @param onSelect - confirmed row value.
+   * @param onSelect - confirmed row value → navigation disposition. A child
+   *   detail overlay opened by the callback (e.g. the Job View) hides the
+   *   browser through the overlay stack; `'keep-open'` preserves the exact
+   *   browser instance/state for the detail's Esc.
    * @param onCancel - dismissed without a choice.
    * @param options - header/search/sizing configuration.
    * @returns a handle to close the browser or replace its rows (e.g. when
@@ -14294,7 +14373,7 @@ export class TuiApp {
    */
   openTaskBrowser(
     items: readonly TaskPanelItem[],
-    onSelect: (value: string) => void,
+    onSelect: (value: string) => 'close' | 'keep-open',
     onCancel: () => void,
     options: TaskBrowserOptions,
   ): TaskBrowserHandle {
@@ -14343,8 +14422,13 @@ export class TuiApp {
         groupLabels: options.groupLabels,
       },
       (value) => {
-        close()
-        onSelect(value)
+        // Run the selection FIRST: a child-detail selection opens its
+        // overlay (which hides this browser through the stacking graph)
+        // and only then reports its disposition. Closing before the
+        // callback would destroy the parent state that `keep-open`
+        // exists to preserve.
+        const disposition = onSelect(value)
+        if (disposition === 'close') close()
       },
       () => {
         close()
@@ -14673,17 +14757,30 @@ export class TuiApp {
   }
 
   /**
-   * Open the live job-output viewer: a titled text panel refreshed by a
-   * timer while open (the caller returns the accumulated output each tick;
-   * a terminal job's final read is idempotent). Esc closes, `s` fires
-   * onStop. Returns a closer (also invoked on Esc).
+   * Open the live output viewer: a titled text panel with a fixed bottom
+   * action hint, refreshed by a timer while open (the caller returns the
+   * accumulated output each tick; a terminal job's final read is
+   * idempotent). Esc closes; the `tasks.stop` semantic key fires `onStop`
+   * while `canStop()` is live (a settled job stops advertising/handling
+   * Stop). Returns a closer (also invoked on Esc).
+   *
+   * Height contract: the body absorbs the row budget and shrinks (to zero)
+   * before the bottom hint, so `Esc back/close` survives a long body or a
+   * short terminal — down to a TWO-row terminal (top border + hint). A
+   * ONE-row terminal is below the bordered-overlay floor and can only paint
+   * the frame's top border (see the OutputViewerPanel notes).
    * @param options - title, initial body, refresh callback, stop/close hooks.
+   *   `closeHint: 'back'` renders `Esc back` for a viewer that returns to a
+   *   parent overlay (Job View); the default `'close'` is for standalone
+   *   notices (e.g. the authorization notice).
    */
   openOutputViewer(options: {
     title: string
     initial: string
     refresh: () => string
     onStop?: () => void
+    canStop?: () => boolean
+    closeHint?: 'back' | 'close'
     onClose?: () => void
     intervalMs?: number
   }): () => void {
@@ -14691,7 +14788,19 @@ export class TuiApp {
     // inert overlay handle would never dispose the panel, so the unref'd
     // interval would keep calling options.refresh() forever.
     if (this.disposed) return () => {}
-    const panel = new OutputViewerPanel(options.title, options.initial)
+    // ONE live capability source for both the hint and the key handler: a
+    // job that settles (or leaves the registry) while the viewer is open
+    // stops offering Stop on the next tick and its key becomes a no-op.
+    const stopAvailable = (): boolean => options.onStop !== undefined && (options.canStop?.() ?? true)
+    const hintOf = (): string => {
+      const close = options.closeHint === 'back' ? 'Esc back' : 'Esc close'
+      if (!stopAvailable()) return color.textDim(close)
+      // The stop label comes from the SAME app keybinding definition the
+      // handler matches (tasks.stop) — never a hard-coded 's'.
+      const key = this.keybindings.keyHint('tasks.stop')
+      return color.textDim(`${key} stop · ${close}`)
+    }
+    const panel = new OutputViewerPanel(options.title, options.initial, hintOf())
     let closed = false
     const close = (): void => {
       if (closed) return
@@ -14706,12 +14815,32 @@ export class TuiApp {
     panel.handleInput = (data: string): void => {
       if (matchesKey(data, 'escape')) {
         close()
-      } else if (matchesKey(data, 's')) {
-        options.onStop?.()
+        return
       }
+      // The tasks.* actions are CAPTURING-scope component actions: the host
+      // keymap excludes them, so the semantic match goes through the
+      // component keymap (the same seam TaskBrowserPanel uses).
+      if (componentKeymap.matches(data, 'tasks.stop') && stopAvailable()) options.onStop?.()
     }
-    const handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), { width: 88, maxHeight: 24 })
-    panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000)
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, OUTPUT_VIEWER_WIDTH))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, OUTPUT_VIEWER_MAX_HEIGHT))
+      // Raw terminal dims keep the key resize-sensitive once the viewer's
+      // caps are reached (the shared last-painted-geometry mouse fence).
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
+    }
+    // The responsive shell mirrors the fork's clamped overlay budget into
+    // the panel, so the body row budget (and the bottom hint) match the
+    // physically granted box on resize and short terminals. The -2 drops
+    // the frame's own top/bottom border rows (the panel budgets its
+    // CONTENT, exactly like the picker/task-browser shells).
+    const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry =>
+      panel.setMaxRows(Math.max(1, geometry.maxHeight - 2)))
+    const handle = this.showOverlayOnHost(frame, {
+      width: OUTPUT_VIEWER_WIDTH,
+      maxHeight: OUTPUT_VIEWER_MAX_HEIGHT,
+    })
+    panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000, hintOf)
     return close
   }
 
@@ -15046,13 +15175,11 @@ export class TuiApp {
       this.activeScreen.setFocus(this.seatEditor().component)
       // Closing the approval restores every overlay it hid (Quick, Settings,
       // any capturing overlay). pi-tui focuses a restored capturing overlay
-      // on setHidden(false), overriding the editor fallback above.
+      // on setHidden(false), overriding the editor fallback above, and the
+      // broker's tracked close re-derives the final seat from that live
+      // surface (the shared close contract — no approval-specific publish).
       pending.handle?.hide()
       pending.responsiveFrame = undefined
-      // Re-derive the seat from the ACTUAL live surface so a restored
-      // capturing overlay keeps keyboard ownership instead of being clobbered
-      // back to the editor (the overlay visible-but-unfocused bug).
-      this.publishFocusSeat()
       this.projectActivity()
     } else {
       const queued = this.approvalQueue.indexOf(pending)

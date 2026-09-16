@@ -21,6 +21,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { Text } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
+import { EditorRegistry } from '../src/editor-registry.ts'
 import type { SaveLocationDeps } from '../src/save-location.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
@@ -305,7 +306,7 @@ const viewOf = (vt: VirtualTerminal): string => vt.getViewport().map(stripAnsi).
 function openQuick(app: TuiApp): void {
   app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' }],
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
   )
@@ -488,5 +489,277 @@ test('cancelling an approval over Quick also restores Quick focus', async () => 
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.ok(!viewOf(vt).includes('Open Task Center'), `one Esc must close Quick:\n${viewOf(vt)}`)
+  app.stop()
+})
+
+// ── Shared close reconciliation across surface kinds ───────────────────────
+
+test('the shared close reconciliation also protects an extension overlay stack (A → B → A)', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+
+  const a = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'plugin overlay A' }] })
+  await vt.waitForRender()
+  await settle()
+  const b = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'plugin overlay B' }] })
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('plugin overlay B'), `B must be visible:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('plugin overlay A'), `A must be hidden beneath B:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay')
+
+  b.close()
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('plugin overlay A'), `A must be restored:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('plugin overlay B'), `B must be gone:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay', 'the restored extension overlay owns the seat')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the restored extension overlay holds physical focus')
+
+  a.close()
+  await vt.waitForRender()
+  await settle()
+  assert.equal(seatOf(host), 'editor')
+  app.stop()
+})
+
+test('an authorization-style OutputViewer restored from a nested picker keeps focus (one Esc closes it)', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+
+  // No onStop: the standalone notice (same shape as the Sign in notice).
+  app.openOutputViewer({ title: 'Sign in', initial: 'device code ABCD', refresh: () => 'device code ABCD' })
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('device code ABCD'), `the notice must be visible:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay')
+
+  // The notice's provider prompt opens a picker on top.
+  const picker = app.openPicker([{ value: 'p', label: 'provider option' }], () => {}, () => {})
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('provider option'), `the picker must be visible:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('device code ABCD'), `the notice must be hidden beneath the picker:\n${viewOf(vt)}`)
+
+  picker.close?.()
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('device code ABCD'), `the notice must be restored:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay', 'the restored notice owns the seat')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the restored notice holds physical focus')
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  await settle()
+  assert.ok(!viewOf(vt).includes('device code ABCD'), `one Esc must close the restored notice:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'editor')
+  app.stop()
+})
+
+test('Quick → Job → Approval settles one layer at a time back to the editor', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+  app.setEditorText('draft')
+
+  // The runner's contract: a Job selection opens the Job detail overlay and
+  // reports 'keep-open', so the exact Quick instance survives underneath.
+  app.openTaskBrowser(
+    [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' }],
+    (value) => {
+      app.openOutputViewer({
+        title: 'job detail',
+        initial: `selected ${value}`,
+        refresh: () => `selected ${value}`,
+        onStop: () => {},
+        canStop: () => true,
+        closeHint: 'back',
+      })
+      return 'keep-open'
+    },
+    () => {},
+    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+  )
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('Open Task Center'), `Quick must be visible:\n${viewOf(vt)}`)
+
+  vt.sendInput('\r') // open the Job detail
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('job detail'), `the Job View must be visible:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('Open Task Center'), `Quick must be hidden beneath the Job View:\n${viewOf(vt)}`)
+  assert.equal(app.overlayGraphState().handles, 2, 'Quick stays mounted beneath the Job View')
+  assert.equal(seatOf(host), 'overlay')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the Job View holds physical focus')
+
+  // The approval takes the top of the stack over the Job View.
+  void app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('Approve bash?'), `the approval must be visible:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('job detail'), `the Job View must be hidden beneath the approval:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay')
+
+  vt.sendInput('y') // settle the approval → the Job View returns
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('job detail'), `the Job View must be restored:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('Open Task Center'), `Quick stays hidden beneath the Job View:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay', 'the restored Job View owns the seat')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the restored Job View holds physical focus')
+
+  // ONE Esc closes only the Job View, restoring the exact Quick browser.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  await settle()
+  assert.ok(!viewOf(vt).includes('job detail'), `Esc must close the Job View:\n${viewOf(vt)}`)
+  assert.ok(viewOf(vt).includes('Open Task Center'), `Quick must be restored:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay', 'the restored Quick owns the seat')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the restored Quick holds physical focus')
+
+  // The next Esc closes Quick and returns input to the editor.
+  vt.sendInput('X') // must be consumed by Quick, never leak into the draft
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draft', 'the restored Quick must own input')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  await settle()
+  assert.ok(!viewOf(vt).includes('Open Task Center'), `the second Esc must close Quick:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'editor')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the editor regains physical focus')
+  vt.sendInput('Z')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draftZ')
+  app.stop()
+})
+
+// ── The seat follows PHYSICAL keyboard ownership ───────────────────────────
+//
+// An overlay ENTRY alone must not promote the focused seat: a nonCapturing
+// overlay never takes focus, and a manually hidden entry owns nothing. The
+// shared close reconciliation must therefore re-derive from the live focus.
+
+test('a nonCapturing overlay restored beneath a closed picker never owns the seat', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+
+  // A plugin HUD is visible but must not take keyboard ownership.
+  app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'plugin HUD' }] }, { nonCapturing: true })
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('plugin HUD'), `the HUD must be visible:\n${viewOf(vt)}`)
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'a nonCapturing overlay must not take physical focus')
+  assert.equal(seatOf(host), 'editor', 'a nonCapturing overlay must not own the seat')
+
+  const picker = app.openPicker([{ value: 'p', label: 'provider option' }], () => {}, () => {})
+  await vt.waitForRender()
+  await settle()
+  assert.equal(seatOf(host), 'overlay', 'the capturing picker owns the seat')
+
+  picker.close?.()
+  await vt.waitForRender()
+  await settle()
+  // The HUD is restored (hidden beneath the capturing picker) but the editor
+  // still owns the keyboard: the restored nonCapturing overlay must NOT
+  // promote the seat back to 'overlay'.
+  assert.ok(viewOf(vt).includes('plugin HUD'), `the HUD must be restored:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('provider option'), `the picker must be gone:\n${viewOf(vt)}`)
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the editor keeps physical focus under a nonCapturing overlay')
+  assert.equal(seatOf(host), 'editor', 'a restored nonCapturing overlay must not own the seat')
+  app.stop()
+})
+
+test('a manually hidden tracked overlay does not own the seat after a later close', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+
+  const hidden = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'hidden overlay' }] })
+  await vt.waitForRender()
+  await settle()
+  hidden.hide() // lease-hidden: still TRACKED, but not visible and not focused
+  await vt.waitForRender()
+  await settle()
+
+  const picker = app.openPicker([{ value: 'p', label: 'provider option' }], () => {}, () => {})
+  await vt.waitForRender()
+  await settle()
+  assert.equal(seatOf(host), 'overlay')
+  picker.close?.()
+  await vt.waitForRender()
+  await settle()
+  // The hidden handle is still tracked, but it must not resurrect the seat
+  // once the capturing picker above it closes.
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  assert.equal(seatOf(host), 'editor', 'a hidden tracked overlay must not own the seat after a close')
+  app.stop()
+})
+
+test('a plugin-editor seat handoff under a nonCapturing overlay keeps the editor seat', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const vt = new VirtualTerminal(80, 24)
+  const registry = new EditorRegistry()
+  let app: TuiApp
+  const host = new SurfaceHost(ledger, () => app.requestRender())
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host, editorRegistry: registry })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+
+  // A nonCapturing notice is visible: it owns no keyboard, so it must NOT
+  // fence the editor-seat handoff.
+  app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'notice HUD' }] }, { nonCapturing: true })
+  await vt.waitForRender()
+  await settle()
+  assert.equal(seatOf(host), 'editor')
+
+  registry.register({
+    id: 'plugin-editor',
+    priority: 1,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: 'plugin editor' }] },
+      getText: () => 'draft',
+      setText: () => {},
+      getCursor: () => 0,
+      setCursor: () => {},
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  app.reconcileEditorNow()
+  app.requestRender()
+  await vt.waitForRender()
+  await settle()
+
+  assert.equal(app.seatEditorForTest().id, 'plugin-editor')
+  // Focus follows the new occupant: the nonCapturing notice must not leave
+  // the stale host editor physically focused (which made publishFocusSeat
+  // report 'overlay').
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the plugin editor must hold physical focus under a nonCapturing overlay')
+  assert.equal(seatOf(host), 'editor', 'a nonCapturing overlay must not own the seat after a handoff')
   app.stop()
 })

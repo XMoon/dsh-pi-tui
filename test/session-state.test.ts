@@ -200,7 +200,7 @@ function stubRunner(
           startedAt: job.startedAt,
           group: 'jobs',
         })),
-        (value) => this.openJobView(value),
+        (value) => { this.openJobView(value); return 'close' },
         () => {},
         { mode: 'full', header: 'tasks', enableSearch: true },
       )

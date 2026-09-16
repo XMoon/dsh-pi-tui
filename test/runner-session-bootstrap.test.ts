@@ -223,6 +223,8 @@ interface RunnerHarness {
   readonly createdSessions: FakeSession[]
   readonly commands: unknown
   readonly subagents?: unknown
+  /** An optional jobs registry service (the Task Center's jobs half). */
+  jobs?: unknown
   /** Retirement-phase records (`cancel:<id>` / `idle:<id>` / `drain:<id>` /
    * `flush:<id>` / `dispose:<id>`) in call order — the Direct
    * owned-session retirement assertions. */
@@ -602,6 +604,7 @@ async function mountRunner(
   ctx.provide('llm', harness.llm as never)
   ctx.provide('commands', harness.commands as never)
   if (harness.subagents !== undefined) ctx.provide('subagents', harness.subagents as never)
+  if (harness.jobs !== undefined) ctx.provide('jobs', harness.jobs as never)
   ctx.provide('loader', { await: async () => {} } as never)
   const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, config))
   await fiber
@@ -1770,7 +1773,13 @@ test('an inactive child completion during observeSession is replayed by the view
   await tasksHandler()
   await settle()
   await vt.waitForRender()
+  // A subagent row opens the child TRANSCRIPT (a session/viewer surface):
+  // the disposition is 'close', so the Task Center must be gone — unlike a
+  // Job status detail, which stays mounted underneath (see the jobs-only
+  // test below).
+  assert.equal(app.overlayGraphState().handles, 1, 'the Task Center must be open before the selection')
   input('\r')
+  assert.equal(app.overlayGraphState().handles, 0, 'a subagent transcript must replace the browser')
   await observationStartedPromise
 
   const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
@@ -1888,7 +1897,13 @@ test('an inactive child cold-resume replays its opening prefix and running activ
   await tasksHandler()
   await settle()
   await vt.waitForRender()
+  // A subagent row opens the child TRANSCRIPT (a session/viewer surface):
+  // the disposition is 'close', so the Task Center must be gone — unlike a
+  // Job status detail, which stays mounted underneath (see the jobs-only
+  // test below).
+  assert.equal(app.overlayGraphState().handles, 1, 'the Task Center must be open before the selection')
   input('\r')
+  assert.equal(app.overlayGraphState().handles, 0, 'a subagent transcript must replace the browser')
   await observationStartedPromise
 
   const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
@@ -3526,4 +3541,104 @@ test('the interactive child viewer projects its own authoritative steering and n
     'the closed child pending row must not leak to the parent surface')
   assert.ok(restored.steering.some(row => row.text === 'PARENT-STEER'),
     'the parent subject is re-projected after the viewer closes')
+})
+
+/** A mutable jobs-registry fake for the Task Center runner paths. */
+function makeJobsFake(
+  initial: readonly { id: string; kind: string; label: string; status: string; startedAt: number }[],
+) {
+  type Entry = { id: string; kind: string; label: string; status: string; startedAt: number }
+  let entries: Entry[] = initial.map(entry => ({ ...entry }))
+  const listeners: Array<() => void> = []
+  return {
+    list: (): Entry[] => entries.map(entry => ({ ...entry })),
+    get: (id: string): Entry => {
+      const entry = entries.find(candidate => candidate.id === id)
+      // A vanished job is the registry's own "not found" contract.
+      if (entry === undefined) throw new Error(`unknown job ${id}`)
+      return { ...entry }
+    },
+    kill: (): string => 'accepted',
+    onJobsChanged: (listener: () => void): (() => void) => {
+      listeners.push(listener)
+      return () => {}
+    },
+    setEntries: (next: readonly Entry[]): void => { entries = next.map(entry => ({ ...entry })) },
+    emit: (): void => { for (const listener of [...listeners]) listener() },
+  }
+}
+
+test('a Job detail opened from /tasks keeps its parent mounted and live-refreshes it (jobs-only)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-disposition-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'task-disposition-parent',
+    header: { id: 'task-disposition-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  // NO subagents service: this is the jobs-only path (the fallback browser).
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' })
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'the Task Center must be the only overlay')
+
+  input('\r') // open the selected running job's status detail
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 2, 'the Job detail must keep the parent browser mounted')
+
+  // The job settles WHILE the parent is hidden. In a jobs-only session the
+  // only channel is jobs.onJobsChanged → refreshTasks, which must repaint the
+  // open (hidden) browser, not just the dock badge.
+  jobs.setEntries([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'completed', startedAt: 1 }])
+  jobs.emit()
+  await settle()
+  await vt.waitForRender()
+
+  input('\x1b') // Esc closes ONLY the Job detail
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'Esc must close only the Job detail')
+  assert.ok(view().includes('completed'),
+    `the restored parent must show the live-refreshed job status:\n${view()}`)
+
+  // A vanished job must leave the parent usable: the registry lookup throws,
+  // so openJobView opens nothing and reports keep-open.
+  jobs.setEntries([])
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1,
+    'a vanished job must not dismiss the parent browser')
 })
