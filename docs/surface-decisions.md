@@ -945,9 +945,13 @@ treat a message as folded when it ACTUALLY compacts at the current width, so a
 short prompt never accumulates an invisible no-op override that would eat a
 Ctrl+O press. A regular surface with no expand key never folds at all, so
 entering fullscreen from it drops every long-user override — a stale reveal
-from that surface must not hide the Focus marker. A search reveal is not a
-permanent pin: the next explicit Ctrl+O collapse hides it again, and a later
-search jump reveals it afresh.
+from that surface must not hide the Focus marker. That clear is deliberately
+GLOBAL for the transition (overrides carry no source tag and no parallel
+state may be added), so an earlier fullscreen expansion does not survive a
+trip through such a non-folding regular surface: re-entry re-derives folded.
+A regular surface WITH the key keeps its reveal across the swap. A search
+reveal is not a permanent pin: the next explicit Ctrl+O collapse hides it
+again, and a later search jump reveals it afresh.
 
 Only the marker row is a click target; every other row of the bubble has an
 inert hit identity so ordinary user text keeps selection/copy semantics. A

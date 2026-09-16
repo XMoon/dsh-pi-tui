@@ -5779,10 +5779,14 @@ export class TuiApp {
     const active = this.fullscreen !== undefined
     if (enabled === active) return
     // Entering fullscreen from a regular surface with NO effective expand key:
-    // that surface never folded, so any per-message long-user override it
-    // carries is stale and must not leak a full render into fullscreen Focus,
-    // whose only long-user affordance is the compact marker. A regular surface
-    // WITH the key keeps its search reveal across the swap.
+    // that surface never folded, so it cannot hold long-user disclosure state.
+    // The clear is deliberately GLOBAL for the transition (the override map
+    // has no source tag and the plan forbids a parallel state): a stale
+    // regular search reveal must not leak a full render into fullscreen Focus,
+    // whose only long-user affordance is the compact marker — and, as a
+    // consequence, an earlier fullscreen expansion does not survive a trip
+    // through such a regular surface (re-entry re-derives folded). A regular
+    // surface WITH the key keeps its search reveal across the swap.
     if (enabled && !this.userDisclosureAffordanceAvailable()) {
       this.clearUserMessageDisclosureOverrides()
     }
