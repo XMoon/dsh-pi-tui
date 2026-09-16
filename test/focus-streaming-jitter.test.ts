@@ -720,7 +720,11 @@ test('fullscreen re-entry after stop/start ignores an unconsumed historical inte
     await vt.waitForRender()
     const fresh = frame(app)
     assert.equal(fresh[3], true, `a fresh fullscreen surface must follow the end (frame ${JSON.stringify(fresh)})`)
-    assert.equal(fresh[2], fresh[0] - fresh[1], `a fresh fullscreen surface must start at the tail (frame ${JSON.stringify(fresh)})`)
+    // "At the tail" means scrollTop sits at the clamp: the fresh surface no
+    // longer inherits the live high-water floor, and the long user prompt now
+    // renders compact, so the fresh content can be shorter than the viewport
+    // (scrollTop 0) instead of exactly contentHeight - viewportHeight.
+    assert.equal(fresh[2], Math.max(0, fresh[0] - fresh[1]), `a fresh fullscreen surface must start at the tail (frame ${JSON.stringify(fresh)})`)
   } finally {
     app.dispose()
     startedApps.delete(app)
