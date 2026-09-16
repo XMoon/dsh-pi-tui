@@ -561,6 +561,23 @@ test('an active steering row reads steering…; an interrupted (parked) one read
   assert.ok(!view.includes('steering…'), `a parked steer must no longer read steering…:\n${view}`)
 })
 
+test('a client-local steering echo never renders waiting: only an authoritative row can be parked', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  // A local echo has no Host occurrence yet, so an idle subject must NOT turn
+  // it into a parked row while its submission is still in flight.
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'echo-1', rpcId: 'echo-1', text: 'local steer echo', local: true, status: 'steering' }],
+    running: false,
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ local steer echo'), `the local echo must stay visible:\n${view}`)
+  assert.ok(view.includes('steering…'), `a local steering echo keeps steering…:\n${view}`)
+  assert.ok(!view.includes('waiting for next turn'), `a local echo is never parked:\n${view}`)
+})
+
 test('the parked waiting label follows the ACTIVE subject across a child viewer round trip', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()

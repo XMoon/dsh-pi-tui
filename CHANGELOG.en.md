@@ -29,8 +29,7 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   the inbox changes from `steering…` to `waiting for next turn…` and is consumed
   by the official next-wake semantics on the next ordinary prompt; an empty
   Ctrl+S then explains the recovery instead of silently no-opping, and never
-  synthesizes a wake or replays the message. Alt+Up now also recalls parked
-  steering losslessly into the editor alongside queued input.
+  synthesizes a wake or replays the message.
 - **Preset-selection visibility follows the deployment policy.** When a
   deployment sets `modeSelectionEnabled` to `false`, `/preset` no longer
   appears in the slash candidates or `/help`, while typing `/preset` still

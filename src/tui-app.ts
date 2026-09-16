@@ -1383,15 +1383,17 @@ function pendingUserComponent(row: PendingUserRow, running: boolean): Component 
 
 /**
  * The presentation-only pending status label. An accepted steer whose subject
- * is RUNNING reads `steering…`. When the turn is no longer running (an
- * Interrupted turn) the Host leaves the steering occurrence PARKED in the
- * inbox until the next wake, so `steering…` would misreport an active turn:
- * it reads `waiting for next turn…` instead. The semantic row itself is never
- * modified — only this label.
+ * is RUNNING reads `steering…`. When an AUTHORITATIVE steering occurrence's
+ * turn is no longer running (an Interrupted turn) the Host leaves it PARKED in
+ * the inbox until the next wake, so `steering…` would misreport an active
+ * turn: it reads `waiting for next turn…` instead. A client-local steering
+ * echo is never parked — it has no Host occurrence yet — so it keeps
+ * `steering…` while its submission is in flight. The semantic row itself is
+ * never modified — only this label.
  */
 function pendingUserStatusText(row: PendingUserRow, running: boolean): string {
   if (row.status === 'sending') return 'sending…'
-  if (row.status === 'steering' && !running) return 'waiting for next turn…'
+  if (!row.local && row.status === 'steering' && !running) return 'waiting for next turn…'
   return 'steering…'
 }
 

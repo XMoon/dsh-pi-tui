@@ -640,9 +640,8 @@ production backend change is part of this slice.
   subject with a parked steering occurrence it emits an explanation notice
   instead of silently no-opping (it never synthesizes a write). The
   main-surface Alt+Up gesture is a TUI-only recall-all extension over
-  `updateQueue({ kind: 'remove' })` covering every queued occurrence plus
-  every parked (idle) steering occurrence, not an in-place `edit`; both
-  gestures stop
+  `updateQueue({ kind: 'remove' })` for queued occurrences, not an in-place
+  `edit`; both gestures stop
   on the first genuine failure and never claim cross-occurrence atomicity. An
   empty accelerated submit in an interactive continuable child viewer applies
   the same queued-occurrence choreography to that child and never calls the
@@ -776,18 +775,19 @@ and the parked next-step input is consumed with that turn.
   and performs NO write: no `prompt`, no `updateQueue`, no `agent.steer`, no
   synthetic wake. An ordinary idle empty Ctrl+S with no parked steering stays
   silent (no added noise).
-- Alt+Up recall is extended to parked steering as a TUI-only extension: it
-  removes the exact occurrence through `updateQueue({ kind: 'remove' })` and
-  stages the full text/image/file payload back in the editor. Recalled image and
-  file drafts reuse their already-durable attachment refs, so re-submitting
-  never re-uploads. The parked split is re-checked before each steering removal,
-  so a turn that starts running mid-gesture leaves its now-active occurrence to
-  the turn and only the confirmed prefix is recalled. An ACTIVE steering
-  occurrence (running turn) is never recalled, and the gesture stays disabled
-  inside every viewer.
+- Alt+Up recall deliberately stays queued-only; recalling a parked steering
+  occurrence is deferred. The official `updateQueue({ kind: 'remove' })` has no
+  placement/running precondition for a next-step occurrence, so a
+  transport-independent "remove only while parked" cannot be expressed through
+  the semantic port: the experimental Remote writer performs an asynchronous
+  RPC, and the occurrence can become active between the client's idle snapshot
+  and the Host's removal. A future Host conditional mutation (an expected
+  placement/status/revision, or a `removeIfStillParked` shape) is the right
+  seam; the TUI does not add a Direct-only branch for this optional UX.
 - Empty Ctrl+S never claims to resume steering. A true "continue parked
   steering without a new message" capability requires an upstream Session
-  wake/resumePending verb; until it exists the TUI only explains and recalls.
+  wake/resumePending verb; until it exists the TUI only explains the recovery
+  and Alt+Up recall stays queued-only.
 
 ## D2.2 status — experimental Remote ordinary writes
 
