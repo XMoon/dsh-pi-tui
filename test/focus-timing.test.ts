@@ -115,11 +115,32 @@ test('a missing startedAt never fabricates a 0s timer', () => {
   assert.equal(store.activeMillis(asActivity(make(undefined)), 'waiting-approval', 50_000), undefined)
 })
 
-test('a turn first observed while already waiting seeds no active span', () => {
+test('a turn first observed while already waiting with no boundary reports UNKNOWN, never 0s', () => {
   const store = new FocusTimingStore()
   const activity = make(0)
   store.observe(asActivity(activity), 'waiting-approval', 10_000)
-  assert.equal(store.activeMillis(asActivity(activity), 'waiting-approval', 30_000), 0, 'no known active span → 0, never the fabricated wall time')
+  assert.equal(store.activeMillis(asActivity(activity), 'waiting-approval', 30_000), undefined, 'no boundary evidence → unknown duration, never a fake 0s')
+  // Resuming cannot recover the pre-wait span: the baseline stays unknown.
+  store.observe(asActivity(activity), 'working', 40_000)
+  assert.equal(store.activeMillis(asActivity(activity), 'working', 50_000), undefined)
+})
+
+test('a completed turn first published after it ended still freezes from live pause windows', () => {
+  // t=0 start, t=10 pause, t=20 resume, t=24 end, published only later.
+  const store = new FocusTimingStore()
+  store.notePhase('working', 0)
+  store.notePhase('waiting-approval', 10_000)
+  store.notePhase('working', 20_000)
+  const activity = make(0)
+  activity.completed = true
+  activity.endedAt = 24_000
+  assert.equal(store.activeMillis(asActivity(activity), 'idle', 100_000), 14_000, '24s wall - 10s wait = 14s')
+})
+
+test('a completed turn with no live pause evidence keeps the event-elapsed fallback', () => {
+  const store = new FocusTimingStore()
+  const historical = { startedAt: 1_000, endedAt: 35_000, completed: true }
+  assert.equal(store.activeMillis(asActivity(historical), 'idle', 999_999), 34_000)
 })
 
 test('a live turn first observed during a pause counts up to the recorded pause boundary', () => {
