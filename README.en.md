@@ -114,9 +114,10 @@ dsh --profile pi-tui --session <session-id>
 * Todo / Goal status
 * Human-readable terminal window titles
 * Bounded long-session windows with stable paging and live-follow position
+* Long user prompts collapse to head + marker + tail; `Ctrl+O` expands and collapses them in regular mode and in fullscreen outside Focus
 * No duplicate ghost Tool Cards after compaction / pruning
 
-`Ctrl+O` controls Tool and System details — and in fullscreen Focus it bulk-expands the recent Thought roots or collapses them all. `Alt+T` controls Thinking separately.
+`Ctrl+O` controls Tool and System details and expands/collapses long user prompts in regular mode and in fullscreen outside Focus — in fullscreen Focus it bulk-expands the recent Thought roots or collapses them all, while long user prompts are expanded by clicking the marker (or by a search hit) and collapsed with `Ctrl+O`. `Alt+T` controls Thinking separately.
 
 ### Focus Mode
 
@@ -310,8 +311,8 @@ For the full `/footer` workflow, Custom Text / Command items, YAML reference, se
 | `Ctrl+T`      | Toggle the todo panel                               |
 | `Ctrl+R`      | Search input history                                |
 | `Ctrl+F`      | Search Transcript                                   |
-| `Ctrl+End`    | Jump to the latest Transcript output in fullscreen  |
-| `Ctrl+O`      | Expand / collapse Tool and System details; in fullscreen Focus, bulk-toggle the Thought roots |
+| `Ctrl+End`    | Jump to the latest Transcript output in fullscreen; a clickable `↓ Latest` appears after leaving the live tail |
+| `Ctrl+O`      | Expand / collapse Tool and System details and long user prompts in regular/fullscreen-non-Focus; in fullscreen Focus, bulk-toggle the Thought roots (expand long user prompts by clicking the marker) |
 | `Alt+T`       | Expand / collapse Thinking                          |
 | `Ctrl+G`      | Edit current input in `$VISUAL`/`$EDITOR`           |
 | `Ctrl+V`      | Paste image                                         |

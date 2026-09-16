@@ -901,3 +901,63 @@ row is opened; until then the footer keeps a failure marker and the ↓ affordan
 The stop action is a confirmed, capability-gated dispatch: continuable running
 children use their durable direct parent authority, while running jobs use the
 public job kill API. The browser never reads job output.
+
+## Long user messages collapse at the presentation layer only
+
+A text-only durable user message whose render-time visual row count exceeds
+10 collapses to head (4 rows) + one marker + tail (3 rows). The decision and
+the slice both run on the wrapped rows the CURRENT width produces, so a
+resize re-decides and CJK/emoji/single-overlong-line wrapping is counted by
+real screen space rather than string length. The canonical
+`TranscriptMessage.text` is never rewritten: the fold lives entirely in
+`UserBubbleComponent` and every non-presentation consumer (search corpus,
+export, persistence, replay) keeps the full text.
+
+Disclosure reuses the existing per-message `expandedOverride`, never a second
+user-specific state map, and user messages are NOT added to
+`isFocusSecondaryDisclosure` (a user message is a turn foundation, not process
+detail). The owner of the expand affordance is surface-adaptive and is part of
+the component cache identity:
+
+- regular: the Ctrl+O recent-turn boundary (or a per-message search reveal);
+- fullscreen without Focus: the compact-marker click and the Ctrl+O master
+  (`click / <key> to expand`);
+- fullscreen inside a Focus: the compact-marker click and a search reveal —
+  the recent-turn boundary is deliberately NOT consulted there, because a
+  persisted `toolOutputExpanded` from an earlier surface must not leak an
+  expansion into a surface whose marker says `click to expand`. Ctrl+O there
+  belongs to the Thought-root bulk, so the marker never advertises a dead key.
+
+Because the marker exists only while collapsed, the expanded state has no
+collapse affordance of its own; Ctrl+O is that owner. The Ctrl+O press
+collapses what it owns and otherwise keeps its existing expand action: in
+regular/fullscreen-non-Focus it turns the recent-turn master off and clears
+the true long-user overrides when either the master is on or a VISIBLE user
+bubble is explicitly expanded; in fullscreen Focus it also clears the
+long-user overrides (with the root-collapse pass, or alone when no Thought
+root is expanded). The override cleanup filters `kind === 'user'` only, so
+thinking/tool/system/compaction overrides and the Thought-root storage rule
+are untouched. A search reveal is not a permanent pin: the next explicit
+Ctrl+O collapse hides it again, and a later search jump reveals it afresh.
+
+Only the marker row is a click target; every other row of the bubble has an
+inert hit identity so ordinary user text keeps selection/copy semantics. A
+search hit inside the collapsed middle expands the message on jump, including
+outside Focus mode, because the search corpus is the full text. A regular fold
+whose `app.transcript.toggleExpand` key is disabled drops the marker verb
+(rather than advertising `the expand key`), since regular has no click path.
+
+## Fullscreen jump-to-latest is a Host semantic action behind a viewport affordance
+
+`TuiAltScreen` owns only the viewport affordance: it draws a bottom-centered
+`↓ Latest` label whenever the primary follow-end view has left its end, plus
+`shouldShowScrollToEndIndicator` (the Host's virtual-history window is not at
+the live tail, so a history window keeps the label even when its local view
+follows its end) and `onScrollToEndIndicator` (the Host consumes the click;
+the fork's local `scrollToBottom` remains the fallback when no Host claims
+it). The Host wires the label text from the effective `app.transcript.jumpLatest`
+keybinding, the show predicate from `transcriptWindow.mode`, and the click to
+the existing `onTranscriptJumpLatest` semantic action — so a history click
+returns to the GLOBAL latest window instead of stopping at the current history
+window's bottom. The history location gutter now says only where the window
+is; the floating label says how to get back. This vendor seam extends X028.

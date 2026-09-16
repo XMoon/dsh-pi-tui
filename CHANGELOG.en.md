@@ -24,6 +24,27 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
 
 ### Changed
 
+- **Long user messages collapse by default.** A text-only user prompt longer than
+  10 terminal visual rows renders only its first 4 rows, one
+  `── N rows compacted · … to expand ──` marker, and its last 3 rows, so a
+  trailing instruction stays visible. `Ctrl+O` expands and collapses it in
+  regular mode and in fullscreen outside Focus; in fullscreen a click on that
+  marker row (or a search hit) expands the single message, and inside a
+  fullscreen Focus `Ctrl+O` bulk-toggles the Thought roots and collapses an
+  already-expanded long user message. The decision
+  uses the wrapped visual rows at the CURRENT width (CJK, emoji, and a single
+  over-long JSON line all count their real screen space) and is recomputed after
+  a resize. The canonical transcript text, search, export, session persistence,
+  and replay keep the complete user content; mixed-content user messages with
+  attachments and the pending echo are unchanged.
+- **Fullscreen shows a clickable `↓ Latest` after leaving the live tail.** Once
+  the fullscreen transcript is no longer at the live tail (the user scrolled up,
+  or a history window is being browsed), the bottom of the viewport shows a
+  clickable `↓ Latest · <key>` (the key follows the effective keymap). A history
+  window shows it even when scrolled to its own bottom, and a click takes the
+  same semantic path as `Ctrl+End` — back to the GLOBAL latest, never just to
+  the current history window's bottom. The label disappears again at the live
+  tail, and the history location gutter no longer repeats the jump key.
 - **`/model` is now an immediate, searchable model command palette.** The panel
   opens at once with `Loading models…` and fills the SAME overlay in place once
   the directory read settles (no reopen; a query typed while loading is kept);

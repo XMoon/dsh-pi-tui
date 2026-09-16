@@ -108,9 +108,10 @@ dsh --profile pi-tui --session <session-id>
 * Todo / Goal 状态展示
 * 可读的终端窗口标题
 * 长会话按有界窗口浏览，并保留翻页与实时跟随位置
+* 超长用户 Prompt 默认折叠为 head + marker + tail；普通与全屏非 Focus 下 `Ctrl+O` 展开、收回
 * Compaction / prune 后不会出现重复的幽灵 Tool Card
 
-`Ctrl+O` 控制工具和系统详情;在全屏 Focus 下它整体展开最近几个 Thought root,或全部收起。`Alt+T` 单独控制 Thinking。
+`Ctrl+O` 控制工具和系统详情，并在普通模式与全屏非 Focus 下展开/收起超长用户 Prompt;全屏 Focus 下它整体展开最近几个 Thought root 或全部收起，超长用户 Prompt 改用点击提示行（或搜索命中）展开、`Ctrl+O` 收回。`Alt+T` 单独控制 Thinking。
 
 ### Focus Mode
 
@@ -293,8 +294,8 @@ TUI 使用 DSH 提供的模型和设置服务。
 | `Ctrl+T`      | 切换 Todo 面板              |
 | `Ctrl+R`      | 搜索输入历史                 |
 | `Ctrl+F`      | 搜索 Transcript          |
-| `Ctrl+End`    | 全屏时跳到最新 Transcript 输出 |
-| `Ctrl+O`      | 展开 / 折叠工具和系统详情;全屏 Focus 下整体切换 Thought root |
+| `Ctrl+End`    | 全屏时跳到最新 Transcript 输出；离开 live tail 时底部显示可点击的 `↓ Latest` |
+| `Ctrl+O`      | 展开 / 折叠工具和系统详情；普通与全屏非 Focus 下展开/收起超长用户 Prompt；全屏 Focus 下整体切换 Thought root（超长用户 Prompt 用点击/搜索展开） |
 | `Alt+T`       | 展开 / 折叠 Thinking       |
 | `Ctrl+G`      | 使用 `$VISUAL`/`$EDITOR` 编辑输入 |
 | `Ctrl+V`      | 粘贴图片                   |
