@@ -612,3 +612,103 @@ test('OverlayBroker: an explicit show() of a nonCapturing node does not fabricat
   assert.equal(broker.graphState().dependents, 0, 'it detached from B')
   assert.equal(b.isFocused(), true, 'B keeps the keyboard')
 })
+
+test('OverlayBroker: a node mounted under a modal becomes a root when the modal settles (reviewer P1)', () => {
+  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+  let modalActive = true
+  const broker = new OverlayBroker({ saveLocation: () => modalActive ? suspension : undefined })
+  const a = fakeHandle('a')
+  mountOverlay(broker, a)
+  broker.suspendVisibleRoots(suspension)
+  const b = fakeHandle('b')
+  mountOverlay(broker, b) // mounted while the modal owns the seat
+  assert.equal(b.isHidden(), true)
+
+  broker.resumeSuspendedRoots(suspension)
+  assert.equal(a.isHidden(), false)
+  assert.equal(b.isHidden(), false, 'the node mounted under the modal is revealed')
+  modalActive = false
+
+  const c = fakeHandle('c')
+  mountOverlay(broker, c) // a new capturing overlay must suppress BOTH resumed roots
+  assert.equal(a.isHidden(), true)
+  assert.equal(b.isHidden(), true, 'the resumed node must participate in suppression')
+  assert.equal(broker.graphState().dependents, 2)
+  broker.assertForest()
+})
+
+test('OverlayBroker: children re-homed into a modal suspension still become roots (reviewer P1)', () => {
+  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+  let modalActive = true
+  const broker = new OverlayBroker({ question: () => modalActive ? suspension : undefined })
+  const b = fakeHandle('b')
+  const a = fakeHandle('a')
+  mountOverlay(broker, b) // root B
+  const aHandle = mountOverlay(broker, a) // A suppresses B
+  broker.suspendVisibleRoots(suspension) // suspends the visible front root A only
+  broker.close(aHandle) // B is re-homed into the modal suspension
+  broker.resumeSuspendedRoots(suspension)
+  assert.equal(b.isHidden(), false, 'the re-homed child is revealed')
+  modalActive = false
+
+  const c = fakeHandle('c')
+  mountOverlay(broker, c)
+  assert.equal(b.isHidden(), true, 'the re-homed child must participate in suppression')
+  assert.equal(broker.graphState().dependents, 1)
+  broker.assertForest()
+})
+
+test('OverlayBroker: an explicitly focused nonCapturing node keeps focus across an overlay suppression (reviewer P1-2)', () => {
+  const broker = new OverlayBroker()
+  const hud = fakeHandle('hud')
+  const hudHandle = mountOverlay(broker, hud, { nonCapturing: true })
+  hudHandle.focus()
+  assert.equal(hud.isFocused(), true)
+
+  const b = fakeHandle('b')
+  const bHandle = mountOverlay(broker, b) // suppresses the focused HUD
+  assert.equal(hud.isHidden(), true)
+  broker.close(bHandle)
+  assert.equal(hud.isHidden(), false)
+  assert.equal(hud.isFocused(), true, 'the explicit focus intent survives the suppression')
+  assert.equal(broker.hasFocusedOverlay(), true)
+})
+
+test('OverlayBroker: an explicitly focused nonCapturing node keeps focus across a modal suspension (reviewer P1-2)', () => {
+  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+  let modalActive = true
+  const broker = new OverlayBroker({ saveLocation: () => modalActive ? suspension : undefined })
+  const hud = fakeHandle('hud')
+  const hudHandle = mountOverlay(broker, hud, { nonCapturing: true })
+  hudHandle.focus()
+  broker.suspendVisibleRoots(suspension)
+  assert.equal(hud.isHidden(), true)
+  modalActive = false
+  broker.resumeSuspendedRoots(suspension)
+  assert.equal(hud.isHidden(), false)
+  assert.equal(hud.isFocused(), true, 'the saved focus intent must not be vetoed by the mount policy')
+  assert.equal(broker.hasFocusedOverlay(), true)
+})
+
+test('OverlayBroker: closing a directly modal-suspended overlay never steals the modal seat (reviewer P1-3)', () => {
+  for (const modal of ['question', 'saveLocation'] as const) {
+    const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+    let calls = 0
+    const broker = new OverlayBroker({
+      ...(modal === 'question'
+        ? { question: () => suspension }
+        : { saveLocation: () => suspension }),
+      focusSeatOwner: () => { calls += 1 },
+    })
+    const a = fakeHandle('a')
+    mountOverlay(broker, a)
+    broker.suspendVisibleRoots(suspension)
+    const b = fakeHandle('b')
+    const bHandle = mountOverlay(broker, b) // direct-suspended under the active modal
+    calls = 0
+    broker.close(bHandle)
+    assert.equal(calls, 0, `${modal}: the modal frame keeps physical focus`)
+    assert.equal(broker.graphState().dependents, 0)
+    assert.equal(a.isHidden(), true, `${modal}: the existing suspension is untouched`)
+  }
+})

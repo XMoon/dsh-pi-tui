@@ -8462,6 +8462,10 @@ export function apply(ctx: Context, config: Config): void {
     //   permanently armed.
     const subagents = ctx.get('subagents')
     if (subagents !== undefined) {
+      // The last SUCCESSFUL jobs read, FENCED to the session identity: a
+      // transient registry failure must keep the retained Job rows, but a
+      // switched-in session must never inherit the old session's rows.
+      let jobSnapshot: { key: string; rows: ReturnType<NonNullable<typeof jobs>['list']> } | undefined
       taskRuntime = new TaskBrowserRuntime({
         // The session fence key: generation + session id, captured when a
         // refresh starts and re-checked after the async listing.
@@ -8474,11 +8478,19 @@ export function apply(ctx: Context, config: Config): void {
         // commit, so a job settlement repaints an open browser too.
         readJobs: () => {
           if (jobs === undefined || liveAgent === undefined) return []
+          const key = `${sessionGeneration}:${liveAgent.session.id}`
           try {
-            return jobs.list(liveAgent)
+            const rows = jobs.list(liveAgent)
+            jobSnapshot = { key, rows }
+            return rows
           } catch {
-            // The registry read is best-effort; the jobs half stays empty.
-            return []
+            // The registry read is best-effort: a failed read is NOT an
+            // authoritative empty catalog. Returning the last successful
+            // snapshot preserves the retained Job rows (and the totals /
+            // selection derived from them) across a transient failure — but
+            // ONLY for the same session identity, so a switched-in session
+            // never inherits the old session's rows.
+            return jobSnapshot?.key === key ? jobSnapshot.rows : []
           }
         },
         // The LIVE runtime fact, read at COMMIT time: the Agent registry,

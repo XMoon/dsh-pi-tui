@@ -173,9 +173,12 @@ export class OverlayBroker {
     if (suspension !== undefined) {
       // A capturing overlay suspended under a modal is the modal's frontmost
       // handle and reclaims the keyboard when the modal settles; a
-      // nonCapturing notice never does.
+      // nonCapturing notice never does. It is still a logical ROOT (only
+      // hidden), so it must join `roots` — resumeSuspendedRoots() reveals it
+      // without re-registering, and a later capturing mount must suppress it.
       node.resumeFocus = !node.nonCapturing
       raw.setHidden(true)
+      this.roots.add(node)
       suspension.suspendedOverlays.add(node.wrapper)
       return node.wrapper
     }
@@ -280,6 +283,9 @@ export class OverlayBroker {
         continue
       }
       if (suspension !== undefined) {
+        // The child is still a logical ROOT, merely hidden by the modal: it
+        // must join `roots` so a later resume/suppression sees it.
+        this.roots.add(child)
         suspension.suspendedOverlays.add(child.wrapper)
         continue
       }
@@ -288,8 +294,14 @@ export class OverlayBroker {
     node.raw?.hide()
     node.raw = undefined
     const revealed = children.filter(child => child.parent === undefined && !this.isSuppressed(child))
-    if (revealed.length > 0) this.reveal(revealed)
-    else if (this.currentlyFocused() === undefined) this.deps.focusSeatOwner?.()
+    if (revealed.length > 0) {
+      this.reveal(revealed)
+    } else if (this.activeSuspension() === undefined && this.currentlyFocused() === undefined) {
+      // An active Question / Save Location owns the seat through its editor-seat
+      // frame (not a managed node): the fallback must not steal its physical
+      // focus when a directly suspended overlay closes (Case B).
+      this.deps.focusSeatOwner?.()
+    }
     this.deps.reconcileFocusSeat?.()
   }
 
@@ -496,16 +508,19 @@ export class OverlayBroker {
     }
     const candidates = ordered.filter(node =>
       !node.closed && node.raw !== undefined && !node.explicitHidden && this.isVisible(node))
+    // `nonCapturing` is only a MOUNT policy (I4): it must NOT veto an explicit
+    // focus() intent that was saved on the node, or a focus-capable lease that
+    // focused a notice would silently lose the keyboard on reveal.
     const focusTarget = candidates
-      .filter(node => node.resumeFocus && !node.nonCapturing)
+      .filter(node => node.resumeFocus)
       .sort((a, b) => b.zOrder - a.zOrder)[0]
     if (focusTarget !== undefined) {
       focusTarget.raw?.focus()
-    } else {
+    } else if (this.activeSuspension() === undefined) {
       // The fork auto-focused the last revealed capturing node, but NONE of
       // them asked for the keyboard (they were blurred/nonCapturing): the
       // CURRENT seat owner must own it again (never the stale preFocus
-      // snapshot).
+      // snapshot). An active Question / Save Location frame keeps the seat.
       this.deps.focusSeatOwner?.()
     }
     this.deps.reconcileFocusSeat?.()

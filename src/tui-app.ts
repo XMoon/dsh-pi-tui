@@ -4356,6 +4356,9 @@ export class TuiApp {
     for (const lease of this.unstableMountLeases) lease.close()
     this.unstableMountLeases.clear()
     this.unstableMountAdapters.clear()
+    // Every lease close drops its own remount callback; drop any straggler
+    // (history / model picker) so no disposed surface keeps a callback.
+    this.overlayRemounts.clear()
     // Phase 4: settle every still-open imperative broker promise (select/
     // custom) — the picker/overlay dies with the surface; the promises
     // must not hang.
