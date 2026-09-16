@@ -24,6 +24,11 @@ dsh --profile pi-tui
 
 ### 变更
 
+- **被中断的 parked steering 现在被准确呈现并给出恢复路径。** 当前 turn 被
+  Interrupted 后，仍留在 inbox 的 steering 行从 `steering…` 变为 `waiting for
+  next turn…`，并在下一次普通消息唤醒 Agent 时按官方语义被消费；此时空的 Ctrl+S
+  会给出提示而不是静默无操作，且不会伪造唤醒或重放。Alt+Up 现在也会把 parked
+  steering 连同 queued 输入一起无损拉回编辑器。
 - **preset 选择可见性跟随部署策略。** 当部署把 `modeSelectionEnabled` 设为
   `false` 时，`/preset` 不再出现在斜杠候选与 `/help` 中，直接输入 `/preset`
   仍按官方策略拒绝；roster 不可用时保持原展示，不做推测。

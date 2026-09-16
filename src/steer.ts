@@ -20,7 +20,7 @@
 import { SessionOperationBarrier, TransitionInProgressError } from './session-operation-barrier.ts'
 import { cancellationError } from './detached.ts'
 import type { SessionWriter, WriteOutcome } from './runtime/session-writer-port.ts'
-import type { PendingInputReader } from './runtime/pending-input-reader-port.ts'
+import type { PendingInputReader, PendingInputSnapshot } from './runtime/pending-input-reader-port.ts'
 
 /** The minimal agent surface the steer needs (the runner's live agent).
  * Pending queue state belongs to {@link PendingInputReader}, not this
@@ -80,6 +80,20 @@ export interface SteerDeps {
 export const TRANSITION_FENCE_NOTICE = 'a session transition is in progress — try again in a moment'
 /** The notice when the fence refusal had to MERGE the draft with newer input. */
 export const TRANSITION_FENCE_MERGED_NOTICE = 'the draft changed while transitioning — review it before submitting again'
+/** The empty-Ctrl+S recovery notice when a next-step steering occurrence is
+ * PARKED because its turn is no longer running (the official contract leaves
+ * it in the inbox until the next wake). The TUI explains the official
+ * recovery — the next ordinary prompt — and never synthesizes that wake. */
+export const PARKED_STEERING_NOTICE = 'pending steering is waiting for the next turn — send a message to continue'
+
+/** Whether a coherent pending snapshot holds a PARKED next-step steering
+ * occurrence: `placement: 'steering'` while the subject is not running. Only
+ * this semantic state is consulted — never session history. A parked
+ * occurrence is not lost: the next ordinary prompt wakes the Agent and the
+ * occurrence is consumed then. */
+export function hasParkedSteering(pending: PendingInputSnapshot): boolean {
+  return !pending.running && pending.items.some(item => item.placement === 'steering')
+}
 
 /**
  * The refusal action for the session-transition write fence: restore the
@@ -290,7 +304,12 @@ async function steerAllCore(deps: SteerDeps, text: string, options: SteerAllOpti
   }
   // An empty draft cannot steer a turn that is not running; do not issue an
   // occurrence write merely to receive the expected unavailable settlement.
+  // A parked next-step steering occurrence is NOT lost — the official contract
+  // leaves it in the inbox until the next wake — so the empty gesture must not
+  // synthesize that wake (no prompt, no updateQueue, no agent.steer). It
+  // explains the recovery instead; a plain idle no-op stays silent.
   if (!draftHasPayload && !pending.running) {
+    if (hasParkedSteering(pending)) deps.notify(PARKED_STEERING_NOTICE, 'info')
     if (text !== '') deps.restoreDraft(text)
     return 'ok'
   }

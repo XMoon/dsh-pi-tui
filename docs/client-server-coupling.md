@@ -133,7 +133,12 @@ state, local shell card display, question/approval *presentation* (the
 authority stays Host-owned), and session transition coordination
 (`src/transition-gate.ts`, `src/transition.ts`,
 `src/session-operation-barrier.ts` — the process-local single-writer
-transition rules; zero Host coupling). Representative files:
+transition rules; zero Host coupling). Pending-input presentation is
+Client-local policy over the semantic projection: the ephemeral steering lane's
+`steering…` / `waiting for next turn…` label derives from the subject's
+`placement + running` state in `src/tui-app.ts`, and the parked-steering
+recovery notice in `src/steer.ts` explains the official next-wake path while
+performing no Host write. Representative files:
 `src/tui-app.ts`, `src/tui-editor.ts`, `src/theme.ts`, `src/present.ts`
 (rendering half), `src/clipboard.ts`, `src/history.ts`, `src/search.ts`,
 `src/overlay-broker.ts`, `src/keybinding-registry.ts`,
