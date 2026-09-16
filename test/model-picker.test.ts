@@ -477,11 +477,11 @@ test('a model without a concrete default shows provider default', async () => {
     default: { provider: 'p1', model: 'nodefault' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'nodefault' } })
-  assert.ok(rowLine(h.vt, 'No Default')?.includes('effort ‹provider default›'), viewOf(h.vt))
+  assert.ok(rowLine(h.vt, 'No Default')?.includes('effort ‹Default›'), viewOf(h.vt))
   h.vt.sendInput(ENTER) // focus: provider default is a real candidate
   await h.vt.waitForRender()
   assert.deepEqual(h.applied, [], 'focusing must not write')
-  assert.ok(rowLine(h.vt, 'No Default')?.includes('effort [ provider default ]'), viewOf(h.vt))
+  assert.ok(rowLine(h.vt, 'No Default')?.includes('effort [ Default ]'), viewOf(h.vt))
   h.vt.sendInput(ENTER) // commit
   await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'nodefault' }], 'provider default must omit reasoningEffort')
@@ -1293,16 +1293,16 @@ test('provider default cycles to the first and last advertised effort', async ()
     default: { provider: 'p1', model: 'm' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'm' } })
-  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort ‹provider default›'), viewOf(h.vt))
+  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort ‹Default›'), viewOf(h.vt))
   h.vt.sendInput(ENTER) // focus
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ provider default ]'), viewOf(h.vt))
+  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ Default ]'), viewOf(h.vt))
   h.vt.sendInput(RIGHT)
   await h.vt.waitForRender()
   assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ Low ]'), `→ first effort:\n${viewOf(h.vt)}`)
   h.vt.sendInput(LEFT)
   await h.vt.waitForRender()
-  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ provider default ]'), `← provider default:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ Default ]'), `← provider default:\n${viewOf(h.vt)}`)
   h.vt.sendInput(LEFT)
   await h.vt.waitForRender()
   assert.ok(rowLine(h.vt, 'Zed')?.includes('effort [ High ]'), `← wraps to the last effort:\n${viewOf(h.vt)}`)
