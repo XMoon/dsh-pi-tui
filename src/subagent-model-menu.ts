@@ -132,6 +132,10 @@ export function allowlistRouteKey(providerId: string, modelId: string): string {
 }
 
 const FAILURE_PREFIX = '\u0000unavailable\u0000'
+/** One shared group key for EVERY failed provider, so all failures collapse
+ *  into a single private `Unavailable` section (a real provider's own
+ *  `groupKey` is its id and can never collide with this NUL-prefixed key). */
+const FAILURE_GROUP_KEY = '\u0000unavailable'
 
 /**
  * Project the discovered catalog into identity-complete presentation rows in
@@ -293,13 +297,23 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
         label: failure.providerName,
         description: failure.message,
         group: 'Unavailable',
-        groupKey: `${FAILURE_PREFIX}${failure.providerId}`,
+        // ALL failures share one private group key → a single `Unavailable`
+        // section (a real provider named "Unavailable" keeps its own id key).
+        groupKey: FAILURE_GROUP_KEY,
         badge: 'unavailable',
         searchText: `${failure.providerId} ${failure.providerName}`,
       })
     }
     this.picker.setItems(items)
     this.picker.setMaxRows(this.rowGrant)
+    // The empty state depends on the LOAD state, not just on the filter: a
+    // still-loading progressive fill, a settled-but-empty catalog, and a
+    // zero-match search are three different messages.
+    this.picker.setNoMatchText(this.providers.length === 0
+      ? '  no providers configured'
+      : this.pendingLoads > 0 && items.length === 0
+        ? '  Loading models…'
+        : items.length === 0 ? '  no models available' : '  No matching models')
     // Initial cursor (plan §12): once every load has settled and before ANY
     // real interaction, prefer the first allowed route in catalog order, else
     // the first model row. Never lands on a failure/loading row.

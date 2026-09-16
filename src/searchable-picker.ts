@@ -247,6 +247,12 @@ export class SearchablePicker implements Component, Focusable {
     this.recomputeVisibleBudget()
   }
 
+  /** Update the empty-state message while the picker is open (e.g. to tell a
+   *  still-loading progressive fill apart from a settled empty catalog). */
+  setNoMatchText(text: string): void {
+    this.options.noMatchText = text
+  }
+
   /** Reserve the list chrome before deriving the item count. */
   private recomputeVisibleBudget(): void {
     const prefix = (this.options.header === undefined ? 0 : 2) + (this.searchEnabled ? 2 : 0)

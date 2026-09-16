@@ -544,3 +544,43 @@ test('a mouse press on the already-selected row latches against a late provider 
   assert.ok(selectedLine(menu, 60)?.includes('m1'),
     `the press must latch against the late load:\n${menu.render(60).map(strip).join('\n')}`)
 })
+
+test('the allowlist empty state separates loading, a settled empty catalog, and a zero-match search', async () => {
+  // Still loading.
+  const pending = rig({ enabled: false, allowedModels: [] }, { providers: [{ id: 'p', name: 'P' }], defer: true })
+  const pendingMenu = new SubagentModelAllowlistPicker(pending.deps)
+  assert.ok(pendingMenu.render(60).map(strip).join('\n').includes('Loading models…'),
+    `a pending load must say Loading:\n${pendingMenu.render(60).map(strip).join('\n')}`)
+  pending.resolveProvider('p', []) // settles with an EMPTY catalog
+  await flush()
+  assert.ok(pendingMenu.render(60).map(strip).join('\n').includes('no models available'),
+    `a settled empty catalog must not keep saying Loading:\n${pendingMenu.render(60).map(strip).join('\n')}`)
+  // Settled with catalog, then a zero-match query.
+  const full = rig({ enabled: false, allowedModels: [] })
+  const fullMenu = new SubagentModelAllowlistPicker(full.deps)
+  await settle(full, 0)
+  fullMenu.handleInput('zzzz')
+  await flush()
+  assert.ok(fullMenu.render(60).map(strip).join('\n').includes('No matching models'),
+    `a zero-match query must say No matching models:\n${fullMenu.render(60).map(strip).join('\n')}`)
+})
+
+test('multiple provider failures collapse into one Unavailable section', async () => {
+  const harness = rig({ enabled: false, allowedModels: [] }, {
+    providers: [{ id: 'ga', name: 'Gateway A' }, { id: 'gb', name: 'Gateway B' }],
+    failing: ['ga', 'gb'],
+  })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  await settle(harness, 0)
+  const lines = menu.render(60).map(strip)
+  assert.equal(lines.filter(line => line.includes('Unavailable · 2')).length, 1,
+    `two failures must form ONE section:\n${lines.join('\n')}`)
+})
+
+test('an allowlist with no configured providers says so', async () => {
+  const harness = rig({ enabled: false, allowedModels: [] }, { providers: [] })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  await settle(harness, 0)
+  assert.ok(menu.render(60).map(strip).join('\n').includes('no providers configured'),
+    `a zero-provider catalog must say so:\n${menu.render(60).map(strip).join('\n')}`)
+})

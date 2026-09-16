@@ -957,3 +957,65 @@ test('focus reaches the active search Input and is re-applied across the view sw
     'focus must be re-applied to the search Input after the view swap')
   h.app.stop()
 })
+
+test('a sessionless picker seeds the effort cursor from the global default effort, not the model default', async () => {
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: 'Sol', efforts: [
+      { id: 'low', name: 'Low' },
+      { id: 'medium', name: 'Medium' },
+      { id: 'high', name: 'High' },
+    ], defaultEffort: 'medium' })] }],
+    default: { provider: 'p1', model: 'sol', reasoningEffort: 'high' },
+  })
+  const h = await openPicker({
+    directory,
+    current: { provider: 'p1', model: 'sol', reasoningEffort: 'high' },
+    sessionless: true,
+  })
+  assert.ok(!viewOf(h.vt).includes('current'), `a sessionless surface must not badge a current model:\n${viewOf(h.vt)}`)
+  h.vt.sendInput('\x1b[C') // Right into the effort view
+  await h.vt.waitForRender()
+  assert.ok(selectedRow(h.vt)?.includes('High'),
+    `the cursor must start on the configured global-default effort (High), not the model default (Medium):\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
+
+test('an official effort description rides the selected-only detail', async () => {
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: 'Sol', efforts: [
+      { id: 'low', name: 'Low', description: 'fast and cheap' },
+      { id: 'high', name: 'High', description: 'deep reasoning' },
+    ], defaultEffort: 'low' })] }],
+    default: { provider: 'p1', model: 'sol' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
+  h.vt.sendInput('\x1b[C')
+  await h.vt.waitForRender()
+  let view = viewOf(h.vt)
+  assert.ok(view.includes('fast and cheap'), `the selected effort's description must render:\n${view}`)
+  assert.ok(!view.includes('deep reasoning'), `an unselected effort's description must stay collapsed:\n${view}`)
+  h.vt.sendInput('\x1b[B') // Low -> High
+  await h.vt.waitForRender()
+  view = viewOf(h.vt)
+  assert.ok(view.includes('deep reasoning'), `the new selected effort's description must render:\n${view}`)
+  assert.ok(!view.includes('fast and cheap'), `the old effort's description must collapse:\n${view}`)
+  h.app.stop()
+})
+
+test('multiple provider failures collapse into one Unavailable section', async () => {
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [model('m1', { name: 'Sol' })] }],
+    failures: [
+      { id: 'ga', name: 'Gateway A', message: 'a down' },
+      { id: 'gb', name: 'Gateway B', message: 'b down' },
+    ],
+    default: { provider: 'p1', model: 'm1' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'm1' } })
+  const lines = linesOf(h.vt)
+  assert.equal(lines.filter(line => line.includes('Unavailable · 2')).length, 1,
+    `two failures must form ONE section:\n${viewOf(h.vt)}`)
+  assert.equal(lines.filter(line => line.includes('Unavailable · 1')).length, 0,
+    `no per-failure sections:\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
