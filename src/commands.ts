@@ -552,9 +552,9 @@ export interface TuiCommandRunner {
   imageStore: import('./image/draft-store.ts').DraftImageStore
   /** The per-TUI metadata-only generic file draft registry. */
   readonly fileStore?: import('./attachment/file-draft.ts').DraftFileStore
-  /** The shared clipboard WRITE policy (issue #7): tmux → platform helper
-   * → OSC 52 best-effort. Used by /copy; the fullscreen drag selection
-   * routes through the same policy via the app's copySelection option. */
+  /** The shared user-clipboard WRITE policy (issue #7). Delivers through
+   * two independent legs — terminal-client OSC 52 and native/platform
+   * helpers — and is the SAME policy the fullscreen drag selection uses. */
   copyToClipboard(text: string): Promise<boolean>
   /** The deployment image policy (`ctx.attachments.imageLimits`), re-read
    * dynamically; undefined when the attachment service is unavailable. */
@@ -4612,10 +4612,10 @@ export function registerTuiCommands(
         .map(block => block.text)
         .join('')
       if (text === '') return { kind: 'error', text: 'last assistant message has no text' }
-      // Issue #7: the SAME policy as the fullscreen drag selection (tmux →
-      // platform helper → OSC 52 best-effort) — a bare OSC 52 write is a
-      // silent lie under tmux `set-clipboard external` / restricted
-      // terminals.
+      // Issue #7: the SAME client-local shared user-clipboard policy as the
+      // fullscreen drag selection (src/clipboard.ts): an independent
+      // terminal-client OSC 52 leg plus an independent native/platform
+      // compatibility leg. A helper success never suppresses the OSC 52 leg.
       const ok = await runner.copyToClipboard(text)
       return ok
         ? { kind: 'success', text: 'copied last assistant message' }

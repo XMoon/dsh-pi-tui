@@ -1,7 +1,9 @@
 /**
- * Issue #7 tests: the shared clipboard WRITE policy (tmux → platform
- * helper → OSC 52 best-effort), driven by injected command mocks — the
- * decision trees never execute real host commands in CI.
+ * Issue #7 tests: the UNIFIED clipboard WRITE policy. The fullscreen drag
+ * selection and `/copy` share one `copyToClipboard()` that delivers through
+ * two INDEPENDENT legs — terminal-client OSC 52 and native/platform
+ * helpers — driven by injected command mocks (the decision trees never
+ * execute real host commands in CI).
  * @module @xmoon76/dsh-pi-tui/clipboard.test
  */
 
@@ -33,11 +35,21 @@ function envOf(overrides: Partial<CopyEnvironment> = {}): CopyEnvironment {
   }
 }
 
-test('tmux: $TMUX set prefers `tmux load-buffer -w -` with the text on stdin', async () => {
+/** An env whose OSC 52 write is recorded (the terminal-client leg). */
+function osc52Env(overrides: Partial<CopyEnvironment> = {}): { env: CopyEnvironment; written: string[] } {
+  const written: string[] = []
+  return { written, env: envOf({ writeOsc52: (text) => written.push(text), ...overrides }) }
+}
+
+// --- native/helper leg -----------------------------------------------------
+
+test('tmux: $TMUX runs `tmux load-buffer -w -` with the text on stdin (and OSC 52 still fires)', async () => {
   const { run, calls } = scriptedRun({ 'tmux load-buffer -w -': 0 })
-  const ok = await copyToClipboard('hello', run, envOf({ env: { TMUX: '/tmp/tmux-1000/default,1234,0' } }))
+  const { env, written } = osc52Env({ env: { TMUX: '/tmp/tmux-1000/default,1234,0' } })
+  const ok = await copyToClipboard('hello', run, env)
   assert.equal(ok, true)
   assert.deepEqual(calls, [{ command: 'tmux', args: ['load-buffer', '-w', '-'], input: 'hello' }])
+  assert.deepEqual(written, ['hello'], 'a successful tmux helper must NOT suppress the terminal-client leg')
 })
 
 test('tmux: a failing tmux falls through to the platform helper', async () => {
@@ -58,11 +70,13 @@ test('tmux: a throwing executor falls through, never rejects', async () => {
   assert.equal(ok, false)
 })
 
-test('Wayland: wl-copy receives the text on stdin', async () => {
+test('Wayland: wl-copy receives the text on stdin (and OSC 52 still fires)', async () => {
   const { run, calls } = scriptedRun({ 'wl-copy': 0 })
-  const ok = await copyToClipboard('hello', run, envOf({ env: { WAYLAND_DISPLAY: 'wayland-0' } }))
+  const { env, written } = osc52Env({ env: { WAYLAND_DISPLAY: 'wayland-0' } })
+  const ok = await copyToClipboard('hello', run, env)
   assert.equal(ok, true)
   assert.deepEqual(calls, [{ command: 'wl-copy', args: [], input: 'hello' }])
+  assert.deepEqual(written, ['hello'], 'native helper success must not suppress terminal-client delivery')
 })
 
 test('Wayland without wl-copy falls through to X11 xclip when DISPLAY is set', async () => {
@@ -109,35 +123,49 @@ test('Windows: clip receives the text on stdin', async () => {
   assert.deepEqual(calls, [{ command: 'clip', args: [], input: 'hello' }])
 })
 
-test('all helpers fail: OSC 52 fallback writes the sequence and returns true (best-effort)', async () => {
-  let osc52 = ''
+// --- terminal-client leg ---------------------------------------------------
+
+test('all helpers fail: the OSC 52 leg still emits and the copy succeeds (best-effort)', async () => {
   const { run } = scriptedRun({})
-  const ok = await copyToClipboard('hello', run, envOf({
-    env: { DISPLAY: ':0' },
-    writeOsc52: (text) => { osc52 = text },
-  }))
-  assert.equal(ok, true, 'the OSC 52 fallback is best-effort success (the sequence was written)')
-  assert.equal(osc52, 'hello')
+  const { env, written } = osc52Env({ env: { DISPLAY: ':0' } })
+  const ok = await copyToClipboard('hello', run, env)
+  assert.equal(ok, true, 'the OSC 52 leg is best-effort success (the sequence was written)')
+  assert.deepEqual(written, ['hello'])
 })
 
 test('no helper and no TTY: returns false without writing anything', async () => {
-  let osc52 = ''
   const { run, calls } = scriptedRun({})
   const ok = await copyToClipboard('hello', run, envOf({
     isTTY: () => false,
-    writeOsc52: (text) => { osc52 = text },
+    writeOsc52: () => { throw new Error('must not be called') },
   }))
   assert.equal(ok, false)
-  assert.equal(osc52, '')
   assert.deepEqual(calls, [])
 })
 
-test('a throwing OSC 52 writer returns false instead of rejecting (round-2 finding)', async () => {
+test('no TTY + a successful native helper still copies locally', async () => {
+  const { run } = scriptedRun({ 'tmux load-buffer -w -': 0 })
+  const { env, written } = osc52Env({ env: { TMUX: 'x' }, isTTY: () => false })
+  const ok = await copyToClipboard('hello', run, env)
+  assert.equal(ok, true, 'a local helper must not need a TTY to succeed')
+  assert.deepEqual(written, [], 'no TTY means no OSC 52 leg')
+})
+
+test('a throwing OSC 52 writer with every helper failing returns false instead of rejecting', async () => {
   const { run } = scriptedRun({})
   const ok = await copyToClipboard('hello', run, envOf({
     writeOsc52: () => { throw new Error('stdout write failed') },
   }))
-  assert.equal(ok, false, 'a failed best-effort write must resolve false, never reject')
+  assert.equal(ok, false, 'a failed terminal leg must resolve false, never reject')
+})
+
+test('a throwing OSC 52 writer does NOT fail an accepted native helper', async () => {
+  const { run } = scriptedRun({ 'tmux load-buffer -w -': 0 })
+  const ok = await copyToClipboard('hello', run, envOf({
+    env: { TMUX: 'x' },
+    writeOsc52: () => { throw new Error('stdout write failed') },
+  }))
+  assert.equal(ok, true, 'the two legs are independent: native success survives a terminal-leg failure')
 })
 
 test('large text passes through the tmux path unchanged', async () => {
@@ -154,6 +182,43 @@ test('empty text still runs the policy (the caller filters empty selections)', a
   assert.equal(ok, true)
   assert.equal(calls[0]!.input, '')
 })
+
+// --- Remote-like locality (ORCA) -------------------------------------------
+
+test('Remote-like copy stays terminal-client-local even when host clipboard helpers succeed', async () => {
+  // ORCA/xterm.js shape: the TUI runs on a remote host where tmux + Wayland
+  // + X11 helpers all exist and exit 0, and NO SSH_* env is set (so an
+  // SSH-based locality guess cannot detect it). The host helper succeeds,
+  // and the terminal-client leg must STILL emit OSC 52 — otherwise the copy
+  // is stranded in the remote host's clipboard.
+  const { run, calls } = scriptedRun({
+    'tmux load-buffer -w -': 0,
+    'wl-copy': 0,
+    'xclip -selection clipboard': 0,
+  })
+  const { env, written } = osc52Env({
+    env: { TMUX: '/tmp/tmux-1000/default,1,0', WAYLAND_DISPLAY: 'wayland-0', DISPLAY: ':0' },
+  })
+  const ok = await copyToClipboard('picked text', run, env)
+  assert.equal(ok, true)
+  assert.ok(calls.length > 0, 'the native compatibility leg still runs')
+  assert.deepEqual(written, ['picked text'], 'the terminal-client leg must emit regardless of remote helper success')
+})
+
+test('fullscreen selection and /copy share the exact same routing (one policy)', async () => {
+  // Both entries call the same `copyToClipboard`; this pins the routing
+  // (helper invocation + OSC 52 emission) as identical for the same input.
+  const first = scriptedRun({ 'tmux load-buffer -w -': 0 })
+  const firstOsc = osc52Env({ env: { TMUX: 'x' } })
+  assert.equal(await copyToClipboard('selection', first.run, firstOsc.env), true)
+  const second = scriptedRun({ 'tmux load-buffer -w -': 0 })
+  const secondOsc = osc52Env({ env: { TMUX: 'x' } })
+  assert.equal(await copyToClipboard('selection', second.run, secondOsc.env), true)
+  assert.deepEqual(second.calls, first.calls, 'the same policy must produce the same helper routing')
+  assert.deepEqual(secondOsc.written, firstOsc.written, 'the same policy must produce the same OSC 52 emission')
+})
+
+// --- the real execFile runner ----------------------------------------------
 
 test('the real execFile runner pipes the input payload to the child stdin (issue #7 wiring)', async () => {
   // The production wiring (src/index.ts) runs the copy policy through
@@ -196,6 +261,8 @@ test('the real execFile runner survives an early-exiting child while piping a la
   assert.equal(result.code, 1)
 })
 
+// --- OSC 52 sequence -------------------------------------------------------
+
 test('buildOsc52Sequence: a bare OSC 52 sequence outside tmux', () => {
   const sequence = buildOsc52Sequence('hello', false)
   assert.equal(sequence, `\x1b]52;c;${Buffer.from('hello', 'utf8').toString('base64')}\x07`)
@@ -212,4 +279,18 @@ test('buildOsc52Sequence: inside tmux the sequence rides a DCS passthrough with 
   // Every inner ESC is doubled: the OSC start appears only as `\x1b\x1b]52;c;`.
   assert.ok(sequence.includes('\x1b\x1b]52;c;'), 'the OSC start must ride the doubled ESC')
   assert.ok(!sequence.includes('\x1bPtmux;\x1b]52;c;'), 'a bare (undoubled) OSC start must never follow the passthrough open')
+})
+
+test('the terminal-client leg uses the tmux passthrough sequence when $TMUX is set', async () => {
+  // The production sink builds `buildOsc52Sequence(text, insideTmux)`; this
+  // pins the tmux passthrough choice the unified policy's OSC 52 leg makes.
+  const written: string[] = []
+  const { run } = scriptedRun({ 'tmux load-buffer -w -': 0 })
+  await copyToClipboard('hello', run, envOf({
+    env: { TMUX: 'x' },
+    writeOsc52: (text) => written.push(buildOsc52Sequence(text, true)),
+  }))
+  assert.equal(written.length, 1)
+  assert.ok(written[0]!.startsWith('\x1bPtmux;'), 'inside tmux the OSC 52 leg must use the passthrough')
+  assert.equal(written[0], buildOsc52Sequence('hello', true))
 })

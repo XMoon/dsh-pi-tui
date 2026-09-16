@@ -24,6 +24,7 @@ import { TranscriptFolder, type TranscriptMessage, type TurnActivity, type Workf
 import { TranscriptWindowController } from '../src/transcript-window.ts'
 import { Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { hasFocusHeader } from './support/focus-header.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -2029,7 +2030,7 @@ test('viewport anchors distinguish duplicate messages and cloned Focus activitie
   scroll = app.fullscreenScrollForTest()
   assert.ok(scroll !== undefined && scroll.scrollTop > 0, 'the cloned activity anchor must land below the same-turn user row')
   view = await viewport(vt)
-  assert.ok(view.includes('Thought'), `the cloned activity anchor selected the same-turn message row:\n${view}`)
+  assert.ok(hasFocusHeader(view), `the cloned activity anchor selected the same-turn message row:\n${view}`)
   assert.ok(!view.includes('focus user'), `the cloned activity anchor left the user row at the viewport top:\n${view}`)
   app.stop()
 })
@@ -3034,13 +3035,13 @@ test('fullscreen cards and the Focus disclosure repaint across an icon style swi
   app.setFullscreen(true)
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🐋 Thought'), `emoji collapsed disclosure missing in fullscreen:\n${view}`)
+  assert.ok(hasFocusHeader(view, false), `emoji collapsed disclosure missing in fullscreen:\n${view}`)
   // Open the Thought: the fullscreen secondaries default compact, so the
   // tool/context headers are visible in the same frame.
   app.toggleFocusTurn(0)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🐳 Thought'), `emoji expanded disclosure missing in fullscreen:\n${view}`)
+  assert.ok(hasFocusHeader(view, true), `emoji expanded disclosure missing in fullscreen:\n${view}`)
   assert.ok(view.includes('📖  Read /ws/src/foo.ts'), `emoji read icon missing in fullscreen:\n${view}`)
   assert.ok(view.includes('📄  Context injection AGENTS.md'), `emoji context icon missing in fullscreen:\n${view}`)
   // Symbols: the SAME fullscreen session repaints with the new palette —
@@ -3048,7 +3049,7 @@ test('fullscreen cards and the Focus disclosure repaint across an icon style swi
   app.setIconStyle('symbols')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('▾ Thought'), `symbols disclosure missing after fullscreen switch:\n${view}`)
+  assert.ok(hasFocusHeader(view, true), `symbols disclosure missing after fullscreen switch:\n${view}`)
   assert.ok(view.includes('≣  Read /ws/src/foo.ts'), `symbols read icon missing after fullscreen switch:\n${view}`)
   assert.ok(view.includes('≣  Context injection AGENTS.md'), `symbols context icon missing after fullscreen switch:\n${view}`)
   // Minimal: decorative icons vanish (no dangling space), the disclosure
@@ -3058,7 +3059,7 @@ test('fullscreen cards and the Focus disclosure repaint across an icon style swi
   view = vt.getViewport().join('\n')
   const lines = view.split('\n').map(stripTerminalSequences)
   assert.ok(lines.some(line => line.startsWith('Read /ws/src/foo.ts')), `minimal read header missing in fullscreen:\n${view}`)
-  assert.ok(view.includes('▾ Thought'), `minimal disclosure must survive in fullscreen:\n${view}`)
+  assert.ok(hasFocusHeader(view, true), `minimal disclosure must survive in fullscreen:\n${view}`)
 })
 
 

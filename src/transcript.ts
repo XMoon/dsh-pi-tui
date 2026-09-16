@@ -1445,8 +1445,6 @@ export class TranscriptFolder {
   private static readonly THINKING_TAIL_CAP = 400
   /** The bounded message candidate tail cap (streaming assistant text). */
   private static readonly MESSAGE_TAIL_CAP = 400
-  /** The bounded preview cap (the card truncates to width too). */
-  private static readonly NARRATIVE_PREVIEW_CAP = 200
 
   /** One turn's Focus activity, created on its first event (defensive:
    * a turn/start-less log fragment still aggregates). */
@@ -1687,7 +1685,10 @@ export class TranscriptFolder {
     if (step < (activity.lastAssistantStep ?? step)) return
     activity.thinkingStep = step
     activity.thinkingTail = text.slice(-TranscriptFolder.THINKING_TAIL_CAP)
-    const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
+    // The preview keeps the tail's latest line in full: width clipping is
+    // the renderer's job (a head cap here would drop the true tail before
+    // the follow-end window ever sees it).
+    const line = latestLine(activity.thinkingTail)
     activity.think = line === '' ? undefined : { text: line }
     activity.revision += 1
   }
@@ -1713,7 +1714,9 @@ export class TranscriptFolder {
     if (activity.completed || step < (activity.lastAssistantStep ?? step)) return
     activity.thinkingStep = step
     activity.thinkingTail = (activity.thinkingTail + delta).slice(-TranscriptFolder.THINKING_TAIL_CAP)
-    const line = latestLine(activity.thinkingTail).slice(0, TranscriptFolder.NARRATIVE_PREVIEW_CAP)
+    // Keep the latest line in full (see restoreThinkingPreview): the
+    // renderer's follow-end window owns width clipping.
+    const line = latestLine(activity.thinkingTail)
     activity.think = line === '' ? undefined : { text: line }
     activity.revision += 1
   }

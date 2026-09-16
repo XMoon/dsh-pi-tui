@@ -27,6 +27,7 @@ import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { findFocusHeaderRow, hasFocusHeader } from './support/focus-header.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
@@ -310,7 +311,7 @@ test('C1/C2: Focus collapsed — the Think: preview stays; Alt+T changes only th
   app.toggleThinkingExpanded()
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🐋 Thought'), 'the root stays collapsed')
+  assert.ok(hasFocusHeader(view, false), 'the root stays collapsed')
   assert.ok(!view.includes('🌊 Thinking'), 'no process leak under a collapsed root')
   assert.equal(app.isThinkingExpanded(), true, 'the bulk preference changed')
   app.setFullscreen(false)
@@ -329,7 +330,7 @@ test('D1: regular Focus expanded root — Thinking compact (never absent), Tool 
   app.expandFocusTurn(1)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🐳 Thought'), 'the root must expand')
+  assert.ok(hasFocusHeader(view, true), 'the root must expand')
   assert.ok(view.includes('Read src/transcript.ts [running]'), 'the non-Thinking process is full (regular)')
   assert.ok(view.includes('locating the transcript path'), 'Thinking is present — compact preview')
   assert.ok(view.includes('(alt+t to expand)'), 'the compact Thinking card carries the Alt+T hint')
@@ -371,7 +372,7 @@ test('E1: Focus ON fullscreen expanded root — Thinking compact, Tool compact',
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  const y = findRow(vt.getViewport(), '🐋 Thought')
+  const y = findFocusHeaderRow(vt.getViewport(), false)
   click(vt, 3, y + 1)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
@@ -391,7 +392,7 @@ test('E2–E5: per-card clicks layer over the bulk preference; Alt+T resets them
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  const rootY = findRow(vt.getViewport(), '🐋 Thought')
+  const rootY = findFocusHeaderRow(vt.getViewport(), false)
   click(vt, 3, rootY + 1)
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
@@ -515,7 +516,7 @@ test('H2: Focus collapsed search hit opens the owner Thought with the matched Th
   app.revealSearchMatch(alpha)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('🐳 Thought'), `the owner root must open:\n${view}`)
+  assert.ok(hasFocusHeader(view, true), `the owner root must open:\n${view}`)
   assert.ok(view.includes('\n  alpha reasoning'), `the matched reasoning must be full:\n${view}`)
   assert.ok(view.includes('beta latest'), 'the unmatched card stays compact (preview)')
   assert.equal(app.isThinkingExpanded(), false, 'search never touches the bulk preference')

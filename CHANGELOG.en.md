@@ -52,6 +52,30 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   mounted (import/apply failure or a dependency left pending), the bundle now
   prints an actionable error and **exits nonzero** — never a warning-plus-success
   or a lingering process.
+- **The Focus header now shows the real run state and pauses the timer while
+  waiting on the user.** An open turn no longer reads `Thought`: it shows
+  `Working`, `Waiting for approval · 12s`, or `Waiting for input · 12s`, and a
+  settled turn shows `Completed`. Time spent waiting on an approval or a
+  question no longer counts toward the run duration and resumes accumulating
+  once the run continues.
+- **The Focus compact Tool row shows the official presenter's human
+  description instead of the concrete command.** A foreground Bash call shows
+  its `description` and a background execute card shows the description from
+  its content block; the full command stays in the expanded tool card.
+- **The collapsed Thinking preview now follows the reasoning tail.** While
+  reasoning streams, the one-line compact preview always shows the newest
+  token, clipping overflow from the left, and moves only with real reasoning
+  deltas (no independent animation); the Focus collapsed, Focus expanded
+  secondary, and non-Focus surfaces behave identically, while a settled row
+  still reads from the start of its line.
+- **Fullscreen drag selection and `/copy` now share one clipboard policy.**
+  Both attempt the terminal-client OSC 52 leg and the native/platform helper
+  leg independently, and a helper success no longer suppresses OSC 52. This
+  fixes remote setups (e.g. ORCA/xterm.js) where a fullscreen selection was
+  copied to the remote host's clipboard and could not be pasted locally.
+- **A short fullscreen opens the Todo panel with 3 rows.** On terminals with
+  at most 16 rows the compact Todo panel shows 3 items (5 otherwise); a resize
+  re-derives the cap from the current height and drops a redundant full state.
 
 ## [0.4.6] - 2026-09-13
 

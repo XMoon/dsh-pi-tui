@@ -17,13 +17,15 @@ import { join } from 'node:path'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { toolPresenterFrom } from '../src/present.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
+import type { TranscriptMessage } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
-import { TuiApp } from '../src/tui-app.ts'
+import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit } from '../src/tui-app.ts'
 import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { APP_KEYBINDINGS } from '../src/keybindings/definitions.ts'
+import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../src/clipboard.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -58,6 +60,36 @@ function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; ge
  * deliberate second todo click must be a NEW gesture, never coalesced. */
 function sleepBeyondTodoCoalesce(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 550))
+}
+
+/** Start an app on a terminal of the given height (the Todo short-screen
+ * policy is vertical, so only rows vary here). */
+function startRows(rows: number): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(80, rows)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  return { vt, app }
+}
+
+/** Todo items in a mixed status pattern: `in_progress, pending, completed`
+ * repeating, so the ordered render (`in_progress → pending → completed`) is
+ * never the input order. */
+function todoItems(count: number): Array<{ id: string; content: string; status: 'in_progress' | 'pending' | 'completed' }> {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `t-${i}`,
+    content: `todo item ${i}`,
+    status: i % 3 === 0 ? 'in_progress' as const : i % 3 === 1 ? 'pending' as const : 'completed' as const,
+  }))
+}
+
+/** Click the currently rendered row carrying `needle` (the fullscreen todo
+ * panel is only reachable through real mouse coordinates). */
+function clickTodoRow(vt: VirtualTerminal, needle: string): void {
+  const row = vt.getViewport().findIndex(line => line.includes(needle))
+  assert.ok(row >= 0, `the todo row must be rendered before clicking: ${needle}`)
+  vt.sendInput(`\x1b[<0;20;${row + 1}M`)
+  vt.sendInput(`\x1b[<0;20;${row + 1}m`)
 }
 
 /** One Session v2 live chunk input (the transient plane replaces durable
@@ -1255,6 +1287,142 @@ test('fullscreen click on the todo panel toggles its compact/full expansion', as
   assert.ok(!app.isTodoPanelExpanded(), 'closing resets the expansion')
   assert.ok(!vt.getViewport().join('\n').includes('todo item 8'), 'closed panel must hide later rows')
   app.setFullscreen(false)
+})
+
+test('todoCompactLimit is purely vertical: 5 normally, 3 at or below 16 rows', () => {
+  assert.equal(TODO_COMPACT_LIMIT, 5)
+  assert.equal(TODO_SHORT_COMPACT_LIMIT, 3)
+  assert.equal(TODO_SHORT_SCREEN_MAX_ROWS, 16)
+  assert.equal(todoCompactLimit(24), 5)
+  assert.equal(todoCompactLimit(17), 5)
+  assert.equal(todoCompactLimit(16), 3)
+  assert.equal(todoCompactLimit(10), 3)
+})
+
+test('a 24-row fullscreen keeps the 5-row compact Todo first open (plan §8)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(8))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const compact = vt.getViewport().join('\n')
+  assert.ok(compact.includes('todo item 4'), `the fifth compact row must show:\n${compact}`)
+  assert.ok(!compact.includes('todo item 5'), `the sixth row must stay hidden:\n${compact}`)
+  assert.equal(app.isTodoPanelExpanded(), false, 'the first open is compact')
+  app.toggleTodoExpanded()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('todo item 5'), 'the full state must reveal the hidden row')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a 16-row fullscreen opens the Todo panel with 3 rows and expands to full', async () => {
+  const { vt, app } = startRows(16)
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(8))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const compact = vt.getViewport().join('\n')
+  assert.ok(compact.includes('todo item 6'), `the third compact row must show:\n${compact}`)
+  assert.ok(!compact.includes('todo item 1'), `the fourth row must stay hidden on a short screen:\n${compact}`)
+  assert.equal(app.isTodoPanelExpanded(), false, 'the short first open is compact')
+  app.toggleTodoExpanded()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('todo item 1'), 'the full state must reveal the fourth row')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a short fullscreen with 3 items has no redundant full Todo state', async () => {
+  const { vt, app } = startRows(16)
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(3))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.equal(app.toggleTodoExpanded(), false, '3 items fit the short compact cap: no full state')
+  assert.equal(app.isTodoPanelExpanded(), false)
+  // The click loop's next step closes the panel instead of a no-op full.
+  clickTodoRow(vt, 'todo item 0')
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelVisible(), false, 'the second gesture must close the panel')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a short fullscreen with 4 items keeps the full Todo state', async () => {
+  const { vt, app } = startRows(16)
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(4))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('todo item 2'), 'the fourth ordered row starts hidden')
+  assert.equal(app.toggleTodoExpanded(), true, '4 items exceed the short compact cap')
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('todo item 2'))
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('shrinking the terminal re-derives the compact Todo cap and stays compact', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(8))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('todo item 4'), '24 rows start with 5 compact rows')
+  vt.resize(80, 16)
+  await vt.waitForRender()
+  const short = vt.getViewport().join('\n')
+  assert.ok(short.includes('todo item 6'), `the third row survives:\n${short}`)
+  assert.ok(!short.includes('todo item 1'), `the fourth row must hide after the shrink:\n${short}`)
+  assert.equal(app.isTodoPanelExpanded(), false, 'a compact panel stays compact across the shrink')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('growing the terminal re-derives the compact Todo cap up to 5', async () => {
+  const { vt, app } = startRows(16)
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(8))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('todo item 1'), '16 rows start with 3 compact rows')
+  vt.resize(80, 24)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('todo item 1'), '24 rows restore the fourth row')
+  assert.equal(app.isTodoPanelExpanded(), false)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('an explicit full Todo survives a shrink but normalizes on a grow past the cap', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setTodoSummary(todoItems(8))
+  app.toggleTodoPanel()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.toggleTodoExpanded()
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelExpanded(), true)
+  // Shrinking keeps the user's explicit full state (8 > 3 still overflows).
+  vt.resize(80, 16)
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelExpanded(), true, 'an explicit full survives the shrink')
+  // Growing past the cap for a 4-item list normalizes the ghost state.
+  app.setTodoSummary(todoItems(4))
+  vt.resize(80, 24)
+  await vt.waitForRender()
+  assert.equal(app.isTodoPanelExpanded(), false, 'a full state identical to compact must be cleared')
+  assert.ok(vt.getViewport().join('\n').includes('todo item 2'), 'all 4 items still render')
+  app.setFullscreen(false)
+  app.stop()
 })
 
 test('fullscreen click on the todo summary dock row opens the todo panel', async () => {
@@ -3333,6 +3501,55 @@ test('fullscreen drag selection copies through the host copySelection policy (is
   app.stop()
 })
 
+test('fullscreen drag selection reaches the shared clipboard policy (Remote ORCA regression)', async () => {
+  // The selection seam end-to-end: the app's copySelection callback is
+  // wired to the REAL unified copy policy, so a mouse drag must run the
+  // native compatibility leg AND still emit OSC 52 — the ORCA/xterm.js
+  // remote case has no SSH_* env and a host helper that succeeds, yet the
+  // terminal client is the only clipboard the user can paste from.
+  const vt = new VirtualTerminal(80, 24)
+  const emitted: string[] = []
+  const sequences: string[] = []
+  const helperCalls: string[] = []
+  const run: CopyExecutor = async (command, args) => {
+    helperCalls.push(`${command} ${args.join(' ')}`)
+    return { code: 0 }
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    copySelection: (text) => copyToClipboard(text, run, {
+      platform: 'linux',
+      env: { TMUX: '/tmp/tmux-1000/default,1,0', WAYLAND_DISPLAY: 'wayland-0' },
+      exists: () => true,
+      isTTY: () => true,
+      writeOsc52: (value) => {
+        emitted.push(value)
+        sequences.push(buildOsc52Sequence(value, true))
+      },
+    }),
+  })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('s1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'assistant/message', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, message: { id: MessageId('s2'), role: 'assistant', content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  vt.sendInput('\x1b[<0;1;1M')
+  vt.sendInput('\x1b[<32;10;5M')
+  vt.sendInput('\x1b[<0;10;5m')
+  await vt.waitForRender()
+
+  assert.ok(helperCalls.length > 0, 'the selection shares the native compatibility leg')
+  assert.equal(emitted.length, 1, `the drag selection must also reach the terminal-client writer:\n${vt.getViewport().join('\n')}`)
+  assert.ok(emitted[0]!.includes('alpha') && emitted[0]!.includes('beta'), `the OSC 52 payload must carry the selection: ${JSON.stringify(emitted[0])}`)
+  assert.ok(sequences[0]!.startsWith('\x1bPtmux;'), 'inside tmux the terminal leg rides the existing passthrough')
+  app.stop()
+})
+
 test('an interrupted assistant message keeps its body and renders a separate marker', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
@@ -3397,6 +3614,176 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
   const between = view.slice(thinkingRow + 1, bashRow)
   const blankCount = between.filter(line => line.trim() === '').length
   assert.equal(blankCount, 1, `exactly one blank row between cards:\n${view.join('\n')}`)
+  app.stop()
+})
+
+test('a running compact Thinking row follows its reasoning tail (Focus off)', async () => {
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const reasoning = `HEAD-TOKEN ${'x'.repeat(80)} TAIL-TOKEN`
+  applyMixed(folder, [
+    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('t1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'assistant/chunk', seq: SessionSeq(1), time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: reasoning } } },
+  ])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  assert.ok(view.some(line => line.includes('TAIL-TOKEN')), `the running tail must be visible:\n${view.join('\n')}`)
+  assert.ok(!view.some(line => line.includes('HEAD-TOKEN')), `the head must be clipped once the line overflows:\n${view.join('\n')}`)
+  app.stop()
+})
+
+test('ThinkingCompactComponent re-windows the running preview on resize', () => {
+  const message = {
+    kind: 'thinking',
+    turn: 0,
+    text: `HEAD-TOKEN ${'x'.repeat(120)} TAIL-TOKEN`,
+    running: true,
+  } as Extract<TranscriptMessage, { kind: 'thinking' }>
+  const component = new ThinkingCompactComponent(message, 'alt+t')
+  const narrow = component.render(30).join('\n')
+  assert.ok(narrow.includes('TAIL-TOKEN'), `narrow must follow the tail: ${JSON.stringify(narrow)}`)
+  assert.ok(!narrow.includes('HEAD-TOKEN'), `narrow must clip the head: ${JSON.stringify(narrow)}`)
+  const wide = component.render(200).join('\n')
+  assert.ok(wide.includes('HEAD-TOKEN') && wide.includes('TAIL-TOKEN'), `wide must restore the head: ${JSON.stringify(wide)}`)
+  // A settled row keeps head truncation at every width.
+  const settled = new ThinkingCompactComponent({ ...message, running: false }, 'alt+t')
+  const settledRow = settled.render(30).join('\n')
+  assert.ok(settledRow.includes('HEAD-TOKEN'), `settled keeps the head: ${JSON.stringify(settledRow)}`)
+  assert.ok(!settledRow.includes('TAIL-TOKEN'), `settled must not follow the tail: ${JSON.stringify(settledRow)}`)
+})
+
+test('opening an approval freezes the live Focus timer through the app projection', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 5_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('f1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const activity = folder.turnActivity(0)!
+  const before = app.focusTimingForTest().activeMillis(activity, 'working', Date.now())
+  assert.ok(before !== undefined && before >= 5_000, `the live timer must be running: ${before}`)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  decision.catch(() => {})
+  await vt.waitForRender()
+  const frozen = app.focusTimingForTest().activeMillis(activity, 'waiting-approval', Date.now())
+  assert.ok(frozen !== undefined && frozen < 30_000, `the wait must freeze the live value: ${frozen}`)
+  assert.equal(
+    app.focusTimingForTest().activeMillis(activity, 'waiting-approval', Date.now() + 60_000),
+    frozen,
+    'a 60s approval wait must not grow the active timer',
+  )
+  app.stop()
+})
+
+test('an approval that opens before the delayed transcript repaint keeps the pre-wait active time', async () => {
+  // The production race (review P1): `folder.apply` schedules a delayed
+  // repaint, while the approval can open synchronously first. The activity
+  // map is therefore published only AFTER the phase is already
+  // waiting-approval — the timer must still count the span from the turn
+  // start to the pause boundary instead of reporting 0s.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 5_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('race1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  decision.catch(() => {})
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const activity = folder.turnActivity(0)!
+  const frozen = app.focusTimingForTest().activeMillis(activity, 'waiting-approval', Date.now())
+  assert.ok(frozen !== undefined && frozen >= 5_000, `the pre-approval active span must survive the publication race: ${frozen}`)
+  const later = app.focusTimingForTest().activeMillis(activity, 'waiting-approval', Date.now() + 60_000)
+  assert.ok(later !== undefined && later < 30_000, `the wait itself must never count: ${later}`)
+  app.stop()
+})
+
+test('an approval that opens AND resolves before the delayed transcript repaint keeps the pre-wait active time', async () => {
+  // Review round-2 race: the approval is resolved inside the delayed-repaint
+  // gap, so the activity is first published after the pause already closed.
+  // The retained pause window must still be subtracted from the active span
+  // (the ~600ms hold is measurable: without the subtraction the reported
+  // active time would include it).
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 3_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('race2'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 600))
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  // The activity is published only now, after the pause resolved.
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const activity = folder.turnActivity(0)!
+  const active = app.focusTimingForTest().activeMillis(activity, 'working', Date.now())
+  assert.ok(active !== undefined && active >= 2_400, `the pre-approval active span must survive the fast-resolution race: ${active}`)
+  assert.ok(active < 3_300, `the approval wait must be subtracted: ${active}`)
+  app.stop()
+})
+
+test('two live activities published together both keep the pre-wait span', async () => {
+  // Review round-3 finding: the publication pass observes every activity in
+  // one loop. Clearing the pause windows per-activity would give the second
+  // activity wall time without the subtraction.
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  const startedAt = Date.now() - 3_000
+  applyMixed(folder, [
+    { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
+    { type: 'turn/start', seq: 1, time: startedAt + 1, data: { turn: 1 } } as SessionEvent,
+  ])
+  app.setFocusMode(true)
+  app.setWorking(true)
+  const decision = app.showApprovalPrompt({ toolName: 'bash' })
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 600))
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const timing = app.focusTimingForTest()
+  const first = timing.activeMillis(folder.turnActivity(0)!, 'working', Date.now())
+  const second = timing.activeMillis(folder.turnActivity(1)!, 'working', Date.now())
+  assert.ok(first !== undefined && first >= 2_400 && first < 3_300, `first: ${first}`)
+  assert.ok(second !== undefined && second >= 2_400 && second < 3_300, `second: ${second}`)
+  assert.ok(Math.abs(first - second) < 100, `both activities must share the window snapshot: ${first} vs ${second}`)
   app.stop()
 })
 

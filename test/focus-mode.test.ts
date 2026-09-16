@@ -37,6 +37,8 @@ import {
 } from '../src/focus-activity.ts'
 import { focusToolDisplay, toolPresenterFrom, type ToolPresenter } from '../src/present.ts'
 import { formatTokens, totalTokens } from '../src/token-usage.ts'
+import { FocusTimingStore } from '../src/focus-timing.ts'
+import type { RunPhase } from '../src/status/types.ts'
 
 /** Build an event with an EXPLICIT time (Focus timing tests need control). */
 function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
@@ -1239,7 +1241,7 @@ test('no usage fact → no token segment (never a fake 0 tok)', () => {
   const activity = folder.turnActivity(0)!
   assert.equal(activity.usage, undefined)
   assert.equal(activity.totalTokens, undefined)
-  const header = formatFocusHeaderLine(activity, false, () => 35000, 120)
+  const header = formatFocusHeaderLine(activity, false, 'working', '6s', 120)
   assert.ok(!header.includes('tok'), `no usage → no token segment:\n${header}`)
 })
 
@@ -1285,32 +1287,71 @@ test('formatFocusDuration renders seconds and minutes', () => {
   assert.equal(formatFocusDuration(-5), '0s')
 })
 
-test('the header label names failures; durations only when known', () => {
+test('the header label names the live phase and failures; durations only when known', () => {
   const running = activityOf(0, [eventAt('turn/start', { turn: 0 }, 1000, 0)])
-  assert.equal(focusStatusLabel(running!, '16s'), 'Thought 16s')
-  assert.equal(focusStatusLabel(running!, undefined), 'Thought')
+  assert.equal(focusStatusLabel(running!, 'working', '16s'), 'Working 16s')
+  assert.equal(focusStatusLabel(running!, 'working', undefined), 'Working')
+  assert.equal(focusStatusLabel(running!, 'idle', '16s'), 'Working 16s', 'an open turn is never idle-labelled')
+  assert.equal(focusStatusLabel(running!, 'waiting-approval', '10s'), 'Waiting for approval · 10s')
+  assert.equal(focusStatusLabel(running!, 'waiting-approval', undefined), 'Waiting for approval')
+  assert.equal(focusStatusLabel(running!, 'waiting-question', '10s'), 'Waiting for input · 10s')
+  assert.equal(focusStatusLabel(running!, 'waiting-question', undefined), 'Waiting for input')
+  assert.equal(focusStatusLabel(running!, 'compacting', '3s'), 'Working 3s')
   const done = activityOf(0, completedTurn(0, 0, 1000))
-  assert.equal(focusStatusLabel(done!, '34s'), 'Thought 34s')
+  assert.equal(focusStatusLabel(done!, 'idle', '34s'), 'Completed 34s')
+  assert.equal(focusStatusLabel(done!, 'working', '34s'), 'Completed 34s', 'a settled turn ignores the run phase')
   const failed = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'X', message: 'boom' } } }, 18000, 1),
   ])
-  assert.equal(focusStatusLabel(failed!, '17s'), 'Failed after 17s')
+  assert.equal(focusStatusLabel(failed!, 'idle', '17s'), 'Failed after 17s')
   const aborted = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('turn/end', { turn: 0, reason: { kind: 'aborted' } }, 10000, 1),
   ])
-  assert.equal(focusStatusLabel(aborted!, '9s'), 'Interrupted 9s')
+  assert.equal(focusStatusLabel(aborted!, 'idle', '9s'), 'Interrupted 9s')
   const blocked = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('turn/end', { turn: 0, reason: { kind: 'blocked' } }, 5000, 1),
   ])
-  assert.equal(focusStatusLabel(blocked!, '4s'), 'Blocked 4s')
+  assert.equal(focusStatusLabel(blocked!, 'idle', '4s'), 'Blocked 4s')
   const tokens = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('turn/end', { turn: 0, reason: { kind: 'max-tokens' } }, 42000, 1),
   ])
-  assert.equal(focusStatusLabel(tokens!, '41s'), 'Max tokens 41s')
+  assert.equal(focusStatusLabel(tokens!, 'idle', '41s'), 'Max tokens 41s')
+})
+
+test('FocusActivityComponent reads the live phase without a rebuild and freezes the timer', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [eventAt('turn/start', { turn: 0 }, 1000, 0)])
+  const activity = folder.turnActivity(0)!
+  let phase: RunPhase = 'working'
+  const component = new FocusActivityComponent({
+    activity,
+    expanded: false,
+    now: () => 35_000,
+    phase: () => phase,
+    timing: new FocusTimingStore(),
+  })
+  assert.ok(component.render(80).some(line => line.includes('Working 34s')), component.render(80).join('\n'))
+  // The approval opens without minting a new component: the same instance
+  // must reflect the new phase on its next render.
+  phase = 'waiting-approval'
+  const frozen = component.render(80).join('\n')
+  assert.ok(frozen.includes('Waiting for approval · 34s'), frozen)
+  phase = 'waiting-question'
+  assert.ok(component.render(80).join('\n').includes('Waiting for input · 34s'), 'the same frozen value carries to the question label')
+  phase = 'working'
+  assert.ok(component.render(80).some(line => line.includes('Working 34s')), 'resume keeps accumulating from the frozen value')
+})
+
+test('a completed Focus turn renders Completed instead of Thought', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, completedTurn(0, 0, 1000))
+  const header = new FocusActivityComponent({ activity: folder.turnActivity(0)!, expanded: false, now: () => 35_000 }).render(80).join('\n')
+  assert.ok(header.includes('Completed 6s'), header)
+  assert.ok(!header.includes('Thought'), `the live label must not read Thought: ${header}`)
 })
 
 test('the whale icon encodes ONLY the disclosure state (plan §2/§39)', () => {
@@ -1333,7 +1374,7 @@ test('the whale icon encodes ONLY the disclosure state (plan §2/§39)', () => {
     assert.equal(focusDisclosureIcon(true), '🐳', 'expanded is ALWAYS 🐳')
   }
   // The old mixed symbols are gone from the header line.
-  const header = formatFocusHeaderLine(failed!, false, () => 3000, 120)
+  const header = formatFocusHeaderLine(failed!, false, 'idle', '1s', 120)
   assert.ok(header.includes('🐋 Failed after 1s'), header)
   assert.ok(!header.includes('◐') && !header.includes('▸') && !header.includes('▾') && !header.includes('⚠'), header)
 })
@@ -1346,13 +1387,13 @@ test('the disclosure resolves per icon style and is NEVER hidden under minimal (
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'E', message: 'boom' } } }, 2000, 1),
   ])!
-  assert.equal(formatFocusHeaderLine(failed, false, () => 3000, 120, 'emoji'), '🐋 Failed after 1s')
-  assert.equal(formatFocusHeaderLine(failed, true, () => 3000, 120, 'emoji'), '🐳 Failed after 1s')
-  assert.equal(formatFocusHeaderLine(failed, false, () => 3000, 120, 'symbols'), '▸ Failed after 1s')
-  assert.equal(formatFocusHeaderLine(failed, true, () => 3000, 120, 'symbols'), '▾ Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, false, 'idle', '1s', 120, 'emoji'), '🐋 Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, true, 'idle', '1s', 120, 'emoji'), '🐳 Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, false, 'idle', '1s', 120, 'symbols'), '▸ Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, true, 'idle', '1s', 120, 'symbols'), '▾ Failed after 1s')
   // Minimal is an interaction affordance, never a decorative icon.
-  assert.equal(formatFocusHeaderLine(failed, false, () => 3000, 120, 'minimal'), '▸ Failed after 1s')
-  assert.equal(formatFocusHeaderLine(failed, true, () => 3000, 120, 'minimal'), '▾ Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, false, 'idle', '1s', 120, 'minimal'), '▸ Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, true, 'idle', '1s', 120, 'minimal'), '▾ Failed after 1s')
 })
 
 test('tool stats sort count-desc/name-asc, cap at 3 types, +N counts TYPES', () => {
@@ -1368,15 +1409,15 @@ test('the header drops the token/tool tail progressively on narrow widths (plan 
   const done = activityOf(0, completedTurn(0, 0, 1000))
   const tools = new Map<string, number>([['read', 7], ['search', 4], ['bash', 3], ['z', 2]])
   const rich = { ...done!, tools, toolCalls: 16, usage: { inputTokens: 62_000, outputTokens: 800, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 62_800 }
-  const wide = formatFocusHeaderLine(rich, false, () => 35000, 120)
-  assert.ok(wide.includes('🐋 Thought 6s · 63k tok · 16 tools · read ×7 · search ×4 · bash ×3 · +1'), wide)
-  const medium = formatFocusHeaderLine(rich, false, () => 35000, 50)
+  const wide = formatFocusHeaderLine(rich, false, 'idle', '6s', 120)
+  assert.ok(wide.includes('🐋 Completed 6s · 63k tok · 16 tools · read ×7 · search ×4 · bash ×3 · +1'), wide)
+  const medium = formatFocusHeaderLine(rich, false, 'idle', '6s', 50)
   assert.ok(medium.includes('· 63k tok · 16 tools') && !medium.includes('read ×7'), `medium drops the types:\n${medium}`)
-  const narrow = formatFocusHeaderLine(rich, false, () => 35000, 30)
-  assert.equal(narrow, '🐋 Thought 6s · 63k tok', `narrow keeps token + label:\n${narrow}`)
-  const tiny = formatFocusHeaderLine(rich, false, () => 35000, 16)
-  assert.equal(tiny, '🐋 Thought 6s', `tiny keeps the bare label:\n${tiny}`)
-  const minuscule = formatFocusHeaderLine(rich, false, () => 35000, 4)
+  const narrow = formatFocusHeaderLine(rich, false, 'idle', '6s', 30)
+  assert.equal(narrow, '🐋 Completed 6s · 63k tok', `narrow keeps token + label:\n${narrow}`)
+  const tiny = formatFocusHeaderLine(rich, false, 'idle', '6s', 16)
+  assert.equal(tiny, '🐋 Completed 6s', `tiny keeps the bare label:\n${tiny}`)
+  const minuscule = formatFocusHeaderLine(rich, false, 'idle', '6s', 4)
   assert.ok(visibleWidth(minuscule) <= 4, `hard truncate as the last resort:\n${minuscule}`)
 })
 
@@ -1384,7 +1425,7 @@ test('the header never wraps: every candidate fits its width', () => {
   const done = activityOf(0, completedTurn(0, 0, 1000))
   const rich = { ...done!, tools: new Map([['read', 3], ['bash', 2], ['skill', 1]]), toolCalls: 6, usage: { inputTokens: 34_000, outputTokens: 700, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 34_700 }
   for (const width of [8, 12, 20, 30, 40, 60, 80, 120]) {
-    const line = formatFocusHeaderLine(rich, false, () => 35000, width)
+    const line = formatFocusHeaderLine(rich, false, 'idle', '6s', width)
     assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)} (${visibleWidth(line)})`)
   }
 })
@@ -1444,6 +1485,50 @@ test('the collapsed body renders the three slots in fixed order — Think, Tool,
   for (const line of body) {
     assert.ok(visibleWidth(line) <= 60, `line exceeds width: ${JSON.stringify(line)}`)
   }
+})
+
+test('the collapsed Think slot follows the running reasoning tail (dsh-web running parity)', () => {
+  const line = 'The final reasoning token is the important one.'
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: line } }, 1001, 1),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.completed, false)
+  const think = focusCollapsedBody(activity, 30, undefined)[0]!
+  assert.ok(think.startsWith('Think:   '), think)
+  assert.ok(think.endsWith('one.'), `the final character must survive the window: ${JSON.stringify(think)}`)
+  assert.ok(visibleWidth(think) <= 30, `the row must fit the width: ${JSON.stringify(think)}`)
+})
+
+test('the collapsed Think slot reads from the start once the turn settled', () => {
+  const line = 'The final reasoning token is the important one.'
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: line } }, 1001, 1),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1002, 2),
+  ])
+  const activity = folder.turnActivity(0)!
+  assert.equal(activity.completed, true)
+  const think = focusCollapsedBody(activity, 30, undefined)[0]!
+  assert.ok(think.includes('The final'), `a settled row keeps the head: ${JSON.stringify(think)}`)
+  assert.ok(!think.endsWith('one.'), `a settled row must not follow the tail: ${JSON.stringify(think)}`)
+})
+
+test('the Focus Think projection keeps the reasoning tail beyond the old head cap', () => {
+  const marker = 'TRUE-TAIL'
+  const text = `${'H'.repeat(260)}${marker}`
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text } }, 1001, 1),
+  ])
+  const think = folder.turnActivity(0)!.think
+  assert.ok(think !== undefined)
+  assert.ok(think.text.endsWith(marker), `the true tail must survive the projection: ${JSON.stringify(think.text.slice(-32))}`)
+  assert.equal(think.text.length, text.length, 'the latest line must not be head-capped before the renderer sees it')
 })
 
 // ── PTC active-child projection (supplement plan §5-§6) ─────────────────
@@ -1782,15 +1867,15 @@ test('the component renders an indented muted card and refreshes duration live',
   const activity = folder.turnActivity(0)!
   const component = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
   const lines = component.render(80)
-  assert.ok(lines[0]!.includes('🐋 Thought 6s · 1 tool · read ×1'), lines[0])
+  assert.ok(lines[0]!.includes('🐋 Completed 6s · 1 tool · read ×1'), lines[0])
   assert.ok(lines[0]!.startsWith('  '), 'the card is indented')
   // Running turns re-read `now` per render: a later frame shows the new
   // duration (the WorkingIndicator heartbeat drives the repaint).
   const running = activityOf(0, [eventAt('turn/start', { turn: 0 }, 1000, 0)])!
   const live = new FocusActivityComponent({ activity: running, expanded: false, now: () => 12000 })
-  assert.ok(live.render(80)[0]!.includes('🐋 Thought 11s'))
+  assert.ok(live.render(80)[0]!.includes('🐋 Working 11s'))
   const later = new FocusActivityComponent({ activity: running, expanded: false, now: () => 14000 })
-  assert.ok(later.render(80)[0]!.includes('🐋 Thought 13s'))
+  assert.ok(later.render(80)[0]!.includes('🐋 Working 13s'))
 })
 
 test('the symbols/minimal disclosure keeps every narrow width inside the terminal', () => {
@@ -1881,6 +1966,68 @@ test('focusToolDisplay keeps a multiline terminal title to ONE line (ghost-row f
     // the heredoc continuation.
     assert.equal(display, "python3 - <<'PYEOF'", JSON.stringify(display))
   }
+})
+
+test('Focus compact Tool prefers the presenter description over the command (foreground terminal)', () => {
+  const presenter: ToolPresenter = {
+    call: () => ({ card: 'terminal', title: 'git status', description: 'Show working tree status' }),
+    result: () => undefined,
+  }
+  const display = focusToolDisplay({ name: 'bash', args: '{}' }, { presenter })
+  assert.equal(display, 'Show working tree status')
+  assert.ok(!display.includes('git status'), 'the raw command must not surface in the compact row')
+})
+
+test('Focus compact Tool prefers the description content over the command (background generic execute)', () => {
+  const presenter: ToolPresenter = {
+    call: () => ({
+      card: 'generic',
+      kind: 'execute',
+      title: 'npm run build',
+      rawInput: 'npm run build',
+      content: [{ type: 'text', text: 'Build the bundle' }],
+    }),
+    result: () => undefined,
+  }
+  const display = focusToolDisplay({ name: 'bash', args: '{}' }, { presenter })
+  assert.equal(display, 'Build the bundle')
+  assert.ok(!display.includes('npm run build'), 'the raw command must not surface in the compact row')
+})
+
+test('Focus compact Tool falls back to the terminal title without a usable description', () => {
+  const presenter: ToolPresenter = {
+    call: (_name, argsRaw) => argsRaw === '{"blank":true}'
+      ? { card: 'terminal', title: 'git status', description: '   ' }
+      : { card: 'terminal', title: 'git status' },
+    result: () => undefined,
+  }
+  assert.equal(focusToolDisplay({ name: 'bash', args: '{}' }, { presenter }), 'git status')
+  assert.equal(focusToolDisplay({ name: 'bash', args: '{"blank":true}' }, { presenter }), 'git status', 'a blank description is not a description')
+})
+
+test('Focus compact Tool never leaks a multiline command when the presenter offers a description', () => {
+  const presenter: ToolPresenter = {
+    call: () => ({ card: 'terminal', title: MULTILINE_BASH_COMMAND, description: 'Rewrite commands.ts' }),
+    result: () => undefined,
+  }
+  const display = focusToolDisplay({ name: 'bash', args: '{}' }, { presenter })
+  assert.equal(display, 'Rewrite commands.ts')
+  assert.equal(display.includes('\n'), false)
+  assert.ok(!display.includes('PYEOF'), 'the heredoc body must never leak through the compact row')
+})
+
+test('Focus compact Tool keeps the generic title/rawInput summary for a non-execute card', () => {
+  const presenter: ToolPresenter = {
+    call: () => ({
+      card: 'generic',
+      kind: 'read',
+      title: 'Load skill session-review',
+      rawInput: 'session-review',
+      content: [{ type: 'text', text: 'a description that must not replace the generic summary' }],
+    }),
+    result: () => undefined,
+  }
+  assert.equal(focusToolDisplay({ name: 'skill', args: '{}' }, { presenter }), 'Load skill session-review')
 })
 
 test('focusCollapsedBody keeps a multiline Tool slot on ONE physical row (ghost-row fix)', () => {

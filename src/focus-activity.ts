@@ -15,8 +15,10 @@
  * per-card disclosure (the secondary-disclosure supplement).
  *
  * The whale icon encodes ONLY the disclosure state (🐋 collapsed / 🐳
- * expanded); the execution outcome is carried by the header label
- * (Thought / Failed after / Interrupted / Blocked / Max tokens) — two
+ * expanded); the execution state is carried by the header label — an open
+ * turn reads `Working` or, while parked on the user, `Waiting for
+ * approval` / `Waiting for input`; a settled turn reads `Completed` /
+ * `Failed after` / `Interrupted` / `Blocked` / `Max tokens` — two
  * orthogonal dimensions, never merged into one symbol (plan §2.2).
  * @module @xmoon76/dsh-pi-tui/focus-activity
  */
@@ -28,6 +30,9 @@ import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import { toolTitle } from './present.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
 import { displayFailureText } from './failure-presentation.ts'
+import { thinkingPreviewTail } from './thinking-preview.ts'
+import { focusTiming, type FocusTimingStore } from './focus-timing.ts'
+import type { RunPhase } from './status/types.ts'
 
 /** The max tool-type names the header stats show before the `+N` tail
  * (plan §10.4). */
@@ -49,12 +54,25 @@ export function focusDisclosureIcon(expanded: boolean): '🐋' | '🐳' {
   return expanded ? '🐳' : '🐋'
 }
 
-/** The header's base label WITHOUT the stats tail (plan §14.1): a failure
- * names its reason instead of "Thought". The duration is omitted entirely
- * when the turn has no reliable start (plan §10.2 — never a fake `0s`). */
-export function focusStatusLabel(activity: TurnActivity, duration: string | undefined): string {
+/** The header's base label WITHOUT the stats tail (plan §14.1): an open
+ * turn names its REAL phase (`Working` / `Waiting for approval` /
+ * `Waiting for input`), so a turn parked on the user never reads as
+ * progress; a settled failure names its reason instead of "Completed". The
+ * duration is omitted entirely when the turn has no reliable start
+ * (plan §10.2 — never a fake `0s`). The phase comes from the authoritative
+ * unified status — this formatter never re-derives approval/question state. */
+export function focusStatusLabel(activity: TurnActivity, phase: RunPhase, duration: string | undefined): string {
   const time = duration === undefined ? '' : ` ${duration}`
-  if (!activity.completed) return `Thought${time}`
+  if (!activity.completed) {
+    switch (phase) {
+      case 'waiting-approval':
+        return duration === undefined ? 'Waiting for approval' : `Waiting for approval · ${duration}`
+      case 'waiting-question':
+        return duration === undefined ? 'Waiting for input' : `Waiting for input · ${duration}`
+      default:
+        return `Working${time}`
+    }
+  }
   switch (activity.reason?.kind) {
     case 'error':
       // A legacy/corrupt log without turn/start must not read
@@ -68,7 +86,7 @@ export function focusStatusLabel(activity: TurnActivity, duration: string | unde
     case 'max-tokens':
       return `Max tokens${time}`
     default:
-      return `Thought${time}`
+      return `Completed${time}`
   }
 }
 
@@ -100,11 +118,15 @@ export function focusToolStatParts(tools: ReadonlyMap<string, number>, toolCalls
   return parts
 }
 
-/** The effective duration text for one activity at `now`. */
-export function focusDurationText(activity: TurnActivity, now: () => number): string | undefined {
-  if (activity.startedAt === undefined) return undefined
-  const end = activity.completed ? (activity.endedAt ?? now()) : now()
-  return formatFocusDuration(Math.max(0, end - activity.startedAt))
+/** The effective duration text for one activity at `now`: the ACTIVE elapsed
+ * time (user-blocked waits excluded — see focus-timing.ts), formatted. */
+export function focusDurationText(
+  activity: TurnActivity,
+  phase: RunPhase,
+  now: () => number,
+  timing: FocusTimingStore = focusTiming,
+): string | undefined {
+  return formatFocusDuration(timing.activeMillis(activity, phase, now()))
 }
 
 /** The presentation-only shape needed to summarize one live Preparing row.
@@ -142,16 +164,17 @@ export function focusPreparingSummary(
  * no usage fact (never a fake `0 tok` — plan §13.3). The disclosure glyph
  * resolves against the CURRENT icon style (the disclosure is an
  * interaction affordance and is never hidden — not even under minimal,
- * plan §34.7); the single-space lead keeps the historical `🐋 Thought`
+ * plan §34.7); the single-space lead keeps the historical `🐋 Working`
  * layout. */
 export function formatFocusHeaderLine(
   activity: TurnActivity,
   expanded: boolean,
-  now: () => number,
+  phase: RunPhase,
+  duration: string | undefined,
   width: number,
   iconStyle: IconStyle = 'emoji',
 ): string {
-  const label = focusStatusLabel(activity, focusDurationText(activity, now))
+  const label = focusStatusLabel(activity, phase, duration)
   const head = `${iconFor(focusDisclosureSemantic(expanded), iconStyle)} ${label}`
   const token = activity.totalTokens === undefined ? undefined : `${formatTokens(activity.totalTokens)} tok`
   const tail = focusToolStatParts(activity.tools, activity.toolCalls)
@@ -209,6 +232,18 @@ function previewLine(label: string, text: string, width: number): string {
   return truncateToWidth(`${lead}${body}`, Math.max(1, width), '…')
 }
 
+/** The RUNNING Think slot line: the same one-row geometry as
+ * {@link previewLine}, but the reasoning body is windowed at its RIGHT edge
+ * so the latest token stays visible (dsh-web running collapsed-reasoning
+ * parity). The fixed `Think:` lead is never part of the scrollable body. */
+function previewThinkLine(text: string, width: number): string {
+  const singleLine = compactSingleLine(text)
+  const lead = `Think:${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth('Think:')))}`
+  const bodyBudget = width - visibleWidth(lead)
+  const body = bodyBudget > 0 ? thinkingPreviewTail(singleLine, bodyBudget) : ''
+  return truncateToWidth(`${lead}${body}`, Math.max(1, width), '…')
+}
+
 /**
  * The collapsed Message slot: the bounded message tail wrapped to the
  * CURRENT width and cut to its LAST `maxRows` visual rows (plan: Message
@@ -237,12 +272,13 @@ function previewTailLines(label: string, text: string, width: number, maxRows: n
 
 /** The collapsed card body: the three process slots in FIXED order —
  * Think, Tool, Message — then the error reason (plan §24). Think and
- * Tool are at most ONE visual row; Message is the third process slot and
- * shows the latest up to {@link FOCUS_MESSAGE_MAX_ROWS} visual rows of
- * its bounded tail. Only existing slots render. A live Preparing display,
- * when supplied, temporarily owns the Tool slot over the formal Tool display.
- * The formal Tool line's status prefix follows plan §10: none while running,
- * ✓ settled ok, ✗ settled error. */
+ * Tool are at most ONE visual row (a RUNNING Think follows its reasoning
+ * tail, a settled one reads from the start); Message is the third process
+ * slot and shows the latest up to {@link FOCUS_MESSAGE_MAX_ROWS} visual
+ * rows of its bounded tail. Only existing slots render. A live Preparing
+ * display, when supplied, temporarily owns the Tool slot over the formal
+ * Tool display. The formal Tool line's status prefix follows plan §10:
+ * none while running, ✓ settled ok, ✗ settled error. */
 export function focusCollapsedBody(
   activity: TurnActivity,
   width: number,
@@ -251,7 +287,11 @@ export function focusCollapsedBody(
 ): string[] {
   const lines: string[] = []
   if (activity.think !== undefined) {
-    lines.push(previewLine('Think:', activity.think.text, width))
+    // Running reasoning follows its tail (the latest token is visible);
+    // a settled turn reads from the start of its latest line.
+    lines.push(activity.completed
+      ? previewLine('Think:', activity.think.text, width)
+      : previewThinkLine(activity.think.text, width))
   }
   if (preparingDisplay !== undefined) {
     lines.push(previewLine('Tool:', preparingDisplay, width))
@@ -317,12 +357,15 @@ function toolLineWithActive(
  * the WorkingIndicator's 500ms repaint heartbeat refreshes the running
  * duration without a second timer (plan §3.2); the TuiApp component cache
  * (keyed on the activity revision + expansion + theme + tool display +
- * icon style) keeps that cheap. The component never mutates Focus state —
- * clicks route through the app's hit map to toggleFocusTurn (plan §17).
- * The Tool line's display text is PRECOMPUTED by the app (presenter-first,
- * plan §38) — the component stays a pure renderer. A collapsed Preparing
- * summary is presentation input only; expanded rows are composed by TuiApp
- * after the projected process tail.
+ * icon style) keeps that cheap. The phase is a LIVE provider over the
+ * authoritative unified status, never a value baked at construction: an
+ * approval/question opens without minting a new component, so a captured
+ * phase would freeze the header (and the timer) on the old state. The
+ * component never mutates Focus state — clicks route through the app's hit
+ * map to toggleFocusTurn (plan §17). The Tool line's display text is
+ * PRECOMPUTED by the app (presenter-first, plan §38) — the component stays a
+ * pure renderer. A collapsed Preparing summary is presentation input only;
+ * expanded rows are composed by TuiApp after the projected process tail.
  */
 export class FocusActivityComponent {
   private readonly activity: TurnActivity
@@ -331,21 +374,27 @@ export class FocusActivityComponent {
   private readonly toolDisplay: string | undefined
   private readonly iconStyle: IconStyle
   private readonly preparingSummary: string | undefined
+  private readonly phase: () => RunPhase
+  private readonly timing: FocusTimingStore
 
   constructor(options: {
     activity: TurnActivity
     expanded: boolean
+    phase?: () => RunPhase
     now?: () => number
     toolDisplay?: string
     iconStyle?: IconStyle
     preparingSummary?: string
+    timing?: FocusTimingStore
   }) {
     this.activity = options.activity
     this.expanded = options.expanded
+    this.phase = options.phase ?? (() => 'working')
     this.now = options.now ?? (() => Date.now())
     this.toolDisplay = options.toolDisplay
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.preparingSummary = options.preparingSummary
+    this.timing = options.timing ?? focusTiming
   }
 
   /** The Component interface requires invalidate(); the component keeps no
@@ -359,13 +408,15 @@ export class FocusActivityComponent {
     // finding).
     const indent = width >= 4 ? '  ' : ''
     const contentWidth = Math.max(1, width - visibleWidth(indent))
+    const phase = this.phase()
     // The header formatter budgets the CONTENT width (the indent is added
     // after), so a header that fits never wraps past the terminal — the
     // fullscreen row hit-map depends on that (review fix).
     lines.push(`${indent}${color.textDim(formatFocusHeaderLine(
       this.activity,
       this.expanded,
-      this.now,
+      phase,
+      focusDurationText(this.activity, phase, this.now, this.timing),
       contentWidth,
       this.iconStyle,
     ))}`)
