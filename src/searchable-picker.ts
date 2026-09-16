@@ -40,10 +40,13 @@ type PickerMouseHit =
 
 /** Painted-row importance for the degenerate tiny-grant fit (lower survives,
  * plan §17): the search row and the SELECTED item's primary row outrank
- * plain items, nav chrome, detail, group headers, header chrome, spacers. */
+ * plain items, nav chrome, detail, group headers, header chrome, spacers.
+ * A wrapped badge row ties with the selected primary row so the selected
+ * model's identity AND state survive before any neighbouring model. */
 const ROW_PRIORITY = {
   search: 0,
   selectedItem: 0,
+  wrappedBadge: 0,
   noMatch: 1,
   item: 1,
   indicator: 2,
@@ -86,10 +89,21 @@ export interface SearchablePickerItem {
    */
   groupKey?: string
   /**
-   * Right-aligned status text on the primary row (e.g. `current · high`).
-   * Optional and additive: a row without a badge renders exactly as before.
+   * Optional status text on the primary row (e.g. `current · high`). The
+   * default `inline` layout renders it TRAILING the label; the opt-in
+   * `wrap-when-needed` layout right-aligns it (see `badgeLayout`). A row
+   * without a badge renders exactly as before.
    */
   badge?: string
+  /**
+   * LAYOUT-ONLY measurement for `badge` (defaults to `badge` when absent). A
+   * caller that can change the rendered badge text while the row stays put
+   * (e.g. cycling a value) passes the WIDEST badge the row can ever show here,
+   * so the wrap decision — and therefore the physical row count — stays stable
+   * as the visible badge changes. Only read when `badgeLayout` is
+   * `wrap-when-needed`.
+   */
+  badgeLayoutText?: string
   /**
    * Extra lowercased-match aliases merged into the search index (e.g. a
    * provider id whose display name differs from the group header). Optional
@@ -154,6 +168,17 @@ export interface SearchablePickerOptions {
    * omit this and keep the column behavior byte-for-byte.
    */
   descriptionMode?: 'column' | 'selected-below'
+  /**
+   * How a row's `badge` shares space with its label. `inline` (default) keeps
+   * the historical behavior (the label yields width, the badge TRAILS it, and
+   * a too-long badge may squeeze the label out entirely). `wrap-when-needed`
+   * is the opt-in ADVANCED layout: the badge is RIGHT-ALIGNED against the row
+   * edge, and whenever the item's `badgeLayoutText` does not fit beside the
+   * FULL label it moves onto a right-aligned, INERT second physical line, so
+   * the primary identity can never be squeezed out. Existing consumers omit
+   * this and keep the inline/trailing behavior.
+   */
+  badgeLayout?: 'inline' | 'wrap-when-needed'
 }
 
 export class SearchablePicker implements Component, Focusable {
@@ -251,6 +276,12 @@ export class SearchablePicker implements Component, Focusable {
    *  still-loading progressive fill apart from a settled empty catalog). */
   setNoMatchText(text: string): void {
     this.options.noMatchText = text
+  }
+
+  /** Update the footer hint while the picker is open (e.g. an owner that
+   *  switches interaction modes on the same list). */
+  setHint(text: string): void {
+    this.options.hint = text
   }
 
   /** Reserve the list chrome before deriving the item count. */
@@ -364,7 +395,11 @@ export class SearchablePicker implements Component, Focusable {
 
     // If no items match filter, show message
     if (this.filteredItems.length === 0) {
-      push(this.theme.noMatch(this.options.noMatchText ?? '  No matching commands'), { kind: 'inert' }, ROW_PRIORITY.noMatch)
+      // The empty/error message is untrusted-length (a catalog failure can
+      // carry an arbitrary transport message): clip it to the grant so the
+      // overlay can never be widened by its own status text.
+      const noMatch = truncateToWidth(this.options.noMatchText ?? '  No matching commands', width, '')
+      push(this.theme.noMatch(noMatch), { kind: 'inert' }, ROW_PRIORITY.noMatch)
       if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, hits, priorities, width)
       const result = this.finalizeEmpty(lines, hits)
       this.hitMap = result.hits
@@ -497,12 +532,33 @@ export class SearchablePicker implements Component, Focusable {
 
       const isSelected = i === this.selectedIndex
       const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined
-      lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth))
-      hits.push({ kind: 'item', value: item.value, index: i })
-      priorities.push(isSelected ? ROW_PRIORITY.selectedItem : ROW_PRIORITY.item)
+      const itemPriority = isSelected ? ROW_PRIORITY.selectedItem : ROW_PRIORITY.item
+      // wrap-when-needed: when the item's badge cannot share the primary row
+      // with the FULL label, the badge moves to an inert second physical row.
+      // The decision depends only on the item content and the width (never on
+      // `isSelected`, both prefixes are 2 cells) and is measured from
+      // `badgeLayoutText`, so a caller that cycles the visible badge keeps the
+      // physical row count stable.
+      if (this.shouldWrapBadge(item, width)) {
+        const prefix = isSelected ? '→ ' : '  '
+        const prefixWidth = visibleWidth(prefix)
+        const label = truncateToWidth(this.getDisplayValue(item), Math.max(1, width - prefixWidth), '')
+        lines.push(isSelected ? this.theme.selectedText(`${prefix}${label}`) : `${prefix}${label}`)
+        hits.push({ kind: 'item', value: item.value, index: i })
+        priorities.push(itemPriority)
+        const badge = normalizeToSingleLine(item.badge!)
+        lines.push(this.theme.description(this.wrappedBadgeLine(badge, width)))
+        hits.push({ kind: 'inert' })
+        priorities.push(ROW_PRIORITY.wrappedBadge)
+      } else {
+        lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth))
+        hits.push({ kind: 'item', value: item.value, index: i })
+        priorities.push(itemPriority)
+      }
       // selected-below: the selected item's detail is a real physical row
       // (inert in the hit map, so a pointer event on it can never activate a
-      // neighbour), counted by the row-budget fit loop above.
+      // neighbour), counted by the row-budget fit loop above. A wrapped badge
+      // does not suppress it (a failure row keeps its diagnostic detail).
       if (this.descriptionMode === 'selected-below' && isSelected && descriptionSingleLine !== undefined) {
         lines.push(this.theme.description(truncateToWidth(`    ${descriptionSingleLine}`, width, '')))
         hits.push({ kind: 'inert' })
@@ -798,6 +854,38 @@ export class SearchablePicker implements Component, Focusable {
     return prefix + truncatedValue
   }
 
+  /** The wrapped badge line, right-aligned against the row edge. When the
+   *  badge is itself wider than the grant it drops from the LEFT (keeping the
+   *  most specific TAIL, e.g. `/model`'s effort token) rather than truncating
+   *  the tail away, so an ultra-narrow row never loses the value the user is
+   *  actively editing. */
+  private wrappedBadgeLine(badge: string, width: number): string {
+    const text = visibleWidth(badge) <= width
+      ? badge
+      : `…${this.tailToWidth(badge, Math.max(1, width - 1))}`
+    return ' '.repeat(Math.max(0, width - visibleWidth(text))) + text
+  }
+
+  /** The longest SUFFIX of `text` whose visible width does not exceed `width`. */
+  private tailToWidth(text: string, width: number): string {
+    const chars = Array.from(text)
+    let start = 0
+    while (start < chars.length && visibleWidth(chars.slice(start).join('')) > width) start += 1
+    return chars.slice(start).join('')
+  }
+
+  /** `wrap-when-needed`: move this item's badge to a second physical row when
+   *  the FULL label plus the LAYOUT badge (2-cell prefix + 2-cell gap) cannot
+   *  fit the grant. Selection-independent, so moving the cursor never changes
+   *  an item's own physical height. */
+  private shouldWrapBadge(item: SearchablePickerItem, width: number): boolean {
+    if (this.options.badgeLayout !== 'wrap-when-needed') return false
+    if (item.badge === undefined || item.badge === '') return false
+    const measure = normalizeToSingleLine(item.badgeLayoutText ?? item.badge)
+    const needed = 2 + visibleWidth(this.getDisplayValue(item)) + 2 + visibleWidth(measure)
+    return needed > width
+  }
+
   /** One primary row with an optional right-aligned badge. The label yields
    * width to the badge (the badge is the status fact, the label the value);
    * on a row too narrow for both, the status wins and is itself clipped. */
@@ -817,11 +905,22 @@ export class SearchablePicker implements Component, Focusable {
       return isSelected ? this.theme.selectedText(text) : this.theme.description(text)
     }
     const label = truncateToWidth(this.getDisplayValue(item), labelBudget, '')
-    if (isSelected) {
-      return this.theme.selectedText(truncateToWidth(`${prefix}${label}${badgeSuffix}`, width, ''))
+    if (badgeSuffix === '') return isSelected ? this.theme.selectedText(`${prefix}${label}`) : prefix + label
+    // Only the OPT-IN advanced badge layout (wrap-when-needed, used by /model)
+    // also RIGHT-ALIGNS the badge against the row edge. The default `inline`
+    // layout keeps the historical TRAILING badge byte-for-byte for every other
+    // consumer (e.g. the /settings allowlist's allowed/unavailable badges).
+    if (this.options.badgeLayout !== 'wrap-when-needed') {
+      if (isSelected) {
+        return this.theme.selectedText(truncateToWidth(`${prefix}${label}${badgeSuffix}`, width, ''))
+      }
+      return prefix + label + this.theme.description(badgeSuffix)
     }
-    if (badgeSuffix === '') return prefix + label
-    return prefix + label + this.theme.description(badgeSuffix)
+    const pad = ' '.repeat(Math.max(0, labelBudget - visibleWidth(label)))
+    if (isSelected) {
+      return this.theme.selectedText(truncateToWidth(`${prefix}${label}${pad}${badgeSuffix}`, width, ''))
+    }
+    return `${prefix}${label}${pad}` + this.theme.description(badgeSuffix)
   }
 
   private getPrimaryColumnWidth(): number {
