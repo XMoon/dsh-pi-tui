@@ -943,8 +943,11 @@ thinking/tool/system/compaction overrides and the Thought-root storage rule
 are untouched. Both the search reveal and the Ctrl+O collapse predicate only
 treat a message as folded when it ACTUALLY compacts at the current width, so a
 short prompt never accumulates an invisible no-op override that would eat a
-Ctrl+O press. A search reveal is not a permanent pin: the next explicit Ctrl+O
-collapse hides it again, and a later search jump reveals it afresh.
+Ctrl+O press. A regular surface with no expand key never folds at all, so
+entering fullscreen from it drops every long-user override — a stale reveal
+from that surface must not hide the Focus marker. A search reveal is not a
+permanent pin: the next explicit Ctrl+O collapse hides it again, and a later
+search jump reveals it afresh.
 
 Only the marker row is a click target; every other row of the bubble has an
 inert hit identity so ordinary user text keeps selection/copy semantics. A

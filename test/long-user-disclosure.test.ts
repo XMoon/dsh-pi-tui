@@ -473,3 +473,49 @@ test('a search hit on a SHORT user prompt does not consume the next Ctrl+O', asy
   assert.equal(compactMarkerCount(rows), 0)
   app.stop()
 })
+
+test('disabled regular search reveal does not leak an expansion into fullscreen Focus', async () => {
+  const { vt, app } = startApp()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': false }))
+  const message = user(lines(11))
+  app.setTranscript([message])
+  let rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 0, 'regular with no key renders the prompt in full')
+
+  app.revealSearchMatch(message)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 0, 'the reveal must not write an override for a non-folded bubble')
+
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'fullscreen Focus must fold and offer the click marker')
+  assert.ok(!rows.some(row => row.includes('line5')), 'no stale expansion may hide the marker')
+  assert.ok(rows.some(row => row.includes('click to expand')))
+  app.setFullscreen(false)
+  app.setFocusMode(false)
+  app.stop()
+})
+
+test('disabling the expand key then entering fullscreen Focus drops a stale search expansion', async () => {
+  const { vt, app } = startApp()
+  const message = user(lines(11))
+  app.setTranscript([message])
+  // The reveal legitimately expands while the key is still bound.
+  app.revealSearchMatch(message)
+  let rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('line5')), 'the reveal expands under the bound key')
+
+  // Disable the key, then enter fullscreen Focus: the override is now stale
+  // and must not hide the Focus marker.
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': false }))
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'the stale override must be dropped on the transition')
+  assert.ok(!rows.some(row => row.includes('line5')))
+  assert.ok(rows.some(row => row.includes('click to expand')))
+  app.setFullscreen(false)
+  app.setFocusMode(false)
+  app.stop()
+})
