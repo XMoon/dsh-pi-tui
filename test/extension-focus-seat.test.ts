@@ -291,3 +291,202 @@ test('disposing the CURRENT host still restores a no-op sink (idempotent)', asyn
   await settle()
   app.stop()
 })
+
+// ── Approval → underlying capturing overlay focus restoration ──────────────
+//
+// Closing an approval restores every overlay it hid. A restored CAPTURING
+// overlay must own physical keyboard focus — never "overlay visible, editor
+// focused" (the bug that left Esc unable to reach the restored overlay).
+
+const stripAnsi = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+const viewOf = (vt: VirtualTerminal): string => vt.getViewport().map(stripAnsi).join('\n')
+
+/** Open the footer ↓ Quick Tasks surface over the editor. */
+function openQuick(app: TuiApp): void {
+  app.openTaskBrowser(
+    [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' }],
+    () => {},
+    () => {},
+    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+  )
+}
+
+test('an approval over Quick restores Quick focus so one Esc closes it', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+  app.setEditorText('draft')
+  openQuick(app)
+  await vt.waitForRender()
+  assert.ok(viewOf(vt).includes('Open Task Center'), `Quick must be visible:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay')
+
+  void app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('Approve bash?'), `approval must be visible:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('Open Task Center'), `Quick must be hidden beneath the approval:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay')
+
+  vt.sendInput('y') // settle the approval
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('Open Task Center'), `Quick must be restored:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay', 'the restored Quick must own the overlay seat')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the restored Quick must hold PHYSICAL focus, not the editor')
+
+  // The physical-focus proof: a printable while Quick is restored must be
+  // consumed by Quick, never leak into the editor draft.
+  vt.sendInput('X')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draft', 'the restored Quick must own input (no editor leak)')
+
+  // The critical regression: ONE Esc closes Quick — the editor must not hold
+  // physical focus behind the visible overlay.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!viewOf(vt).includes('Open Task Center'), `one Esc must close Quick:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'editor')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'closing Quick returns physical focus to the editor')
+  vt.sendInput('Z')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draftZ', 'the editor regains ownership after Quick closes')
+  app.stop()
+})
+
+test('an approval over Settings restores Settings focus so Esc closes it', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+  app.openSettings(
+    [{ id: 'a', label: 'Plugin setting', currentValue: 'on', values: ['on', 'off'] }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  assert.ok(viewOf(vt).includes('Plugin setting'), `settings must be visible:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay')
+
+  void app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('Approve bash?'), `approval must be visible:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay')
+
+  vt.sendInput('y')
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('Plugin setting'), `settings must be restored:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay', 'the restored Settings must own the overlay seat')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the restored Settings must hold PHYSICAL focus, not the editor')
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!viewOf(vt).includes('Plugin setting'), `one Esc must close settings:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'editor')
+  app.stop()
+})
+
+test('a standalone approval settles back to the editor and typing reaches it', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+  app.setEditorText('draft')
+  void app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  await settle()
+  assert.equal(seatOf(host), 'overlay')
+  assert.ok(viewOf(vt).includes('Approve bash?'), `approval must be visible:\n${viewOf(vt)}`)
+
+  vt.sendInput('y')
+  await vt.waitForRender()
+  await settle()
+  assert.equal(seatOf(host), 'editor', 'with nothing restored, the editor owns the seat')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the editor must hold physical focus when no overlay remains')
+  vt.sendInput('Z')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draftZ', 'normal typing must reach the editor')
+  app.stop()
+})
+
+test('a queued approval keeps ownership until it settles, then Quick is restored', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+  app.setEditorText('draft')
+  openQuick(app)
+  await vt.waitForRender()
+
+  const first = app.showApprovalPrompt({ toolName: 'bash', reason: 'first' })
+  await vt.waitForRender()
+  await settle()
+  const second = app.showApprovalPrompt({ toolName: 'fs', reason: 'second' })
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('Approve bash?'), `approval A must be visible:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('Open Task Center'), `Quick must stay hidden:\n${viewOf(vt)}`)
+
+  vt.sendInput('y') // settle A → B takes the screen
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('Approve fs?'), `queued approval B must take the screen:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('Open Task Center'), `Quick stays hidden behind B:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the queued approval B must hold physical focus')
+
+  vt.sendInput('y') // settle B → Quick restored
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('Open Task Center'), `Quick must be restored after B:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the restored Quick must hold physical focus after the whole approval chain')
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!viewOf(vt).includes('Open Task Center'), `one Esc must close Quick:\n${viewOf(vt)}`)
+  vt.sendInput('Z')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draftZ')
+  await first.catch(() => {})
+  await second.catch(() => {})
+  app.stop()
+})
+
+test('cancelling an approval over Quick also restores Quick focus', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+  openQuick(app)
+  await vt.waitForRender()
+  void app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  await settle()
+
+  vt.sendInput('\x1b') // cancel the approval
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('Open Task Center'), `Quick must be restored after a cancel:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay', 'a cancelled approval must still restore the underlying focus')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'a cancelled approval must still restore the underlying physical focus')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!viewOf(vt).includes('Open Task Center'), `one Esc must close Quick:\n${viewOf(vt)}`)
+  app.stop()
+})

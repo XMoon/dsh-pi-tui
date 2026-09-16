@@ -3336,7 +3336,7 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
       status: 'running',
       group: 'subagents',
       treePrefix: '├─ ',
-      interruptible: true,
+      canStop: true,
       type: 'subagent',
     }],
     () => {},
@@ -3358,7 +3358,7 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
     status: 'inactive',
     group: 'subagents',
     treePrefix: '├─ ',
-    interruptible: false,
+    canStop: false,
     type: 'subagent',
   }])
   await vt.waitForRender()

@@ -487,7 +487,7 @@ test('openTasksBrowser seeds the FIRST FRAME from the cached runtime and gates i
 })
 
 test('Task Center dispatch re-validates session, driver and job state at confirm time (PR review P1)', () => {
-  const marker = 'const actionRow = (value: string, action: \'stop\' | \'interrupt\'): void => {'
+  const marker = 'const stopRow = (value: string): void => {'
   const start = indexSource.indexOf(marker)
   const handler = indexSource.slice(start, start + 4000)
   // The STALE-CONFIRM fence must compare against values captured when the
