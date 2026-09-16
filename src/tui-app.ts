@@ -2229,8 +2229,8 @@ export interface TaskBrowserOptions {
   maxHeight?: number | `${number}%`
   /** Rows visible before the list scrolls (default 10). */
   maxVisible?: number
-  /** Quick or full presentation mode. Omit for legacy picker behavior. */
-  mode?: 'quick' | 'full'
+  /** Quick (navigation-only) or full (management) presentation mode. */
+  mode: 'quick' | 'full'
   /** Whether Esc from full should return to a Quick Tasks parent. */
   openedFrom?: 'quick' | 'command'
   scope?: 'active' | 'all'
@@ -2249,9 +2249,6 @@ export interface TaskBrowserOptions {
   onRefresh?: () => void
   /** Quick Tasks → full Task Center transition. */
   onViewFull?: (state: TaskBrowserViewState) => void
-  /** Legacy row-level action (`i` interrupt) for mode-less direct callers;
-   * the signature is unchanged so typed old embedders keep compiling. */
-  onAction?: (value: string, action: 'interrupt') => void
   /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
   onStop?: (value: string) => void
   /** First-time viewport exposure of attention rows (the ack signal). */
@@ -13835,14 +13832,14 @@ export class TuiApp {
     items: readonly TaskPanelItem[],
     onSelect: (value: string) => void,
     onCancel: () => void,
-    options: TaskBrowserOptions = {},
+    options: TaskBrowserOptions,
   ): TaskBrowserHandle {
     // A finally-disposed surface must not mint the panel's 1s elapsed
     // tick: the inert overlay handle would never dispose the panel, so
     // the unref'd interval would keep firing into the dead panel.
     if (this.disposed) {
       return { close: () => {}, setItems: () => {}, setRefreshState: () => {}, getViewState: () => ({
-        mode: options.mode ?? 'full',
+        mode: options.mode,
         openedFrom: options.openedFrom ?? 'command',
         scope: options.scope ?? (options.mode === 'quick' ? 'active' : 'all'),
         typeFilter: options.typeFilter ?? null,
@@ -13862,7 +13859,6 @@ export class TuiApp {
         enableSearch: options.enableSearch,
         initialQuery: options.initialQuery,
         initialSearchMode: options.initialSearchMode,
-        onAction: options.onAction,
         onStop: options.onStop,
         onViewportExpose: options.onViewportExpose,
         onRefresh: options.onRefresh,

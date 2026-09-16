@@ -7537,7 +7537,7 @@ export function apply(ctx: Context, config: Config): void {
     // row-level `S` = confirmed Stop on capable rows (the old /subagents
     // SettingsList submenu is gone).
     const openTasksBrowser = (
-      viewMode: 'quick' | 'full' = 'full',
+      viewMode: 'quick' | 'full',
       restoreState?: TaskBrowserViewState,
       scope?: TaskBrowserDatasetScope,
       header?: string,
@@ -9198,7 +9198,9 @@ export function apply(ctx: Context, config: Config): void {
       refreshStatus: refreshStatusCheap,
       updateWelcomeCard,
       openJobView,
-      openTasksBrowser,
+      // The zero-arg runner callback (commands.ts) is the `/tasks` surface:
+      // it opens the FULL browser explicitly.
+      openTasksBrowser: () => openTasksBrowser('full'),
       openRewindPicker,
       // The transition write fence: agent-write entry points (plain
       // submits, steers, skill invocations, shell submits) refuse while a

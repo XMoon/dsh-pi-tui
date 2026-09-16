@@ -530,15 +530,3 @@ test('Quick Tasks stale banner does not advertise the Full-only R retry', () => 
   assert.ok(fullView.includes('catalog failed · R retry'), `Full must keep the retry verb:\n${fullView}`)
   full.dispose()
 })
-
-test('legacy mode-less panels keep Shift+Tab inert (no reverse type action)', () => {
-  // Mode-less direct callers keep their historical behavior: the new
-  // Shift+Tab reverse type action belongs to the explicit Full surface only,
-  // so a legacy panel must not silently change its type filter on it.
-  const panel = new TaskBrowserPanel([job('job:a'), agentRow('agent:c')], 10,
-    { header: 'tasks' }, () => {}, () => {}, () => {})
-  assert.equal(panel.getViewState().typeFilter, null)
-  panel.handleInput('\x1b[Z')
-  assert.equal(panel.getViewState().typeFilter, null, 'legacy Shift+Tab must stay inert')
-  panel.dispose()
-})
