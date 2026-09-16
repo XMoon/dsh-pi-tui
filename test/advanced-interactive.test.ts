@@ -606,3 +606,66 @@ test('a blurred dependent restore focuses the CURRENT host editor after a plugin
   a.close()
   app.stop()
 })
+
+test('closing a hidden capturing lease does not steal focus from the front overlay', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+
+  const b = app.openPicker([{ value: 'p', label: 'provider option' }], () => {}, () => {})
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'A is hidden beneath the picker')
+  assert.equal(app.overlayGraphState().handles, 2)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+
+  // The extension owner unloads the HIDDEN lease while the picker is on top.
+  a.close()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1, 'only the picker remains mounted')
+  assert.ok(view().includes('provider option'), `the picker must stay visible:\n${view()}`)
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the visible picker must keep the keyboard')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), '', 'input must not leak past the front overlay to the editor')
+  b.close?.()
+  app.stop()
+})
+
+test('closing a hidden middle overlay reparents its dependents to the front overlay', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const c = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced C' }))
+  await vt.waitForRender()
+  assert.equal(c.focused, true)
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+  assert.equal(c.focused, false, 'C is hidden beneath A')
+  const b = app.openPicker([{ value: 'p', label: 'provider option' }], () => {}, () => {})
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 3)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+
+  // A is hidden beneath B and still owns C: closing A must REPARENT C under
+  // B (kept hidden) instead of flashing it over the front picker.
+  a.close()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 2)
+  assert.ok(!view().includes('advanced C'), `C must stay hidden beneath the picker:\n${view()}`)
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the picker keeps the keyboard')
+
+  // Closing the front overlay restores C with its surviving focus intent.
+  b.close?.()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 1)
+  assert.ok(view().includes('advanced C'), `C must be restored after the front overlay closes:\n${view()}`)
+  assert.equal(c.focused, true, 'C regains the keyboard')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  c.close()
+  app.stop()
+})

@@ -221,6 +221,16 @@ export class OverlayBroker {
     if (question !== undefined) question.suspendedOverlays.delete(handle)
     const saveLocation = this.deps.saveLocation?.()
     if (saveLocation !== undefined) saveLocation.suspendedOverlays.delete(handle)
+    // The overlay that currently hides this one (if any): a handle closes
+    // either as the VISIBLE front overlay or as a hidden dependent beneath a
+    // still-visible overlay. Find it BEFORE the graph cleanup.
+    let upperOwner: OverlayHandle | undefined
+    for (const [owner, dependents] of this.dependents) {
+      if (dependents.some(dependent => dependent.handle === handle)) {
+        upperOwner = owner
+        break
+      }
+    }
     for (const [owner, dependents] of this.dependents) {
       if (dependents.some(dependent => dependent.handle === handle)) {
         this.dependents.set(owner, dependents.filter(dependent => dependent.handle !== handle))
@@ -237,8 +247,16 @@ export class OverlayBroker {
         // by the prompt (they must not flash back over it — the same rule
         // as the question branch).
         for (const dependent of owned) saveLocation.suspendedOverlays.add(dependent.handle)
+      } else if (upperOwner !== undefined) {
+        // A HIDDEN middle node closed beneath a still-visible overlay: its
+        // own dependents stay hidden and are REPARENTED to the upper owner,
+        // so the front overlay keeps the keyboard and restores them when IT
+        // closes (a reveal here would flash a stale overlay over the front).
+        const upperDependents = this.dependents.get(upperOwner) ?? []
+        this.dependents.set(upperOwner, [...upperDependents, ...owned])
       }
     }
+    const wasHidden = handle.isHidden()
     const wasCapturing = this.capturing.has(handle)
     const wasTracked = this.tracked.delete(handle)
     this.capturing.delete(handle)
@@ -249,13 +267,18 @@ export class OverlayBroker {
     // capturing overlay on setHidden(false), which would silently undo an
     // explicit blur() the plugin performed before the detail opened.
     //
+    // Only a VISIBLE (front) capturing close is a keyboard-owner transition.
+    // A hidden dependent's programmatic close (e.g. an extension owner
+    // unloading a lease that is suspended beneath a picker) must NOT steal
+    // the keyboard from the overlay still on top.
+    //
     // When NO dependent held the keyboard, the CURRENT seat owner must take
     // it back EXPLICITLY: the fork's own fallback is the per-overlay
     // `preFocus` snapshot, which a mid-life editor-seat handoff leaves
     // pointing at the replaced editor component. Only a CAPTURING close moves
     // focus at all (a nonCapturing notice never took it). The
     // question/save-location branches above own their own settle.
-    if (wasCapturing && question === undefined && saveLocation === undefined) {
+    if (wasCapturing && !wasHidden && question === undefined && saveLocation === undefined) {
       if (owned !== undefined) {
         for (const dependent of owned) dependent.handle.setHidden(false)
       }
