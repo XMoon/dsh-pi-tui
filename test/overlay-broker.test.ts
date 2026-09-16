@@ -121,23 +121,30 @@ test('OverlayBroker: closing a suspended overlay while Save Location is active k
   assert.equal(a.isHidden(), false)
 })
 
-test('OverlayBroker: a stale close while Save Location is active does not republish the seat', () => {
+test('OverlayBroker: a tracked close reconciles the live seat; a stale close does not', () => {
   const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
   const seatCalls: string[] = []
+  let reconciles = 0
   const broker = new OverlayBroker({
     saveLocation: () => suspension,
     setFocusSeat: (seat) => seatCalls.push(seat),
+    reconcileFocusSeat: () => { reconciles += 1 },
   })
   const a = fakeHandle('a')
   broker.track(a)
   broker.closeForHost(a)
-  assert.deepEqual(seatCalls, ['overlay', 'editor'], 'a tracked close republishes the seat')
+  // The close path re-derives the host's final seat from the LIVE surface:
+  // closing B can restore a dependent capturing overlay A, so the broker
+  // must NOT write a coarse 'editor' here.
+  assert.equal(reconciles, 1, 'a tracked close re-derives the live seat')
+  assert.deepEqual(seatCalls, ['overlay'], 'only the mount signal is coarse (never an editor close report)')
   // A STALE close (already untracked, e.g. after a fullscreen teardown)
   // must NOT republish the seat: the live state (an active Save prompt)
   // is authoritative, and a dead handle's hide() requests no render to
   // correct it later.
   broker.closeForHost(a)
-  assert.deepEqual(seatCalls, ['overlay', 'editor'], 'a stale close must not republish the seat')
+  assert.equal(reconciles, 1, 'a stale close must not reconcile the seat')
+  assert.deepEqual(seatCalls, ['overlay'], 'a stale close must not republish the seat')
 })
 
 test('OverlayBroker: an explicit show of a suspended overlay is an ownership override (documented)', () => {
@@ -183,6 +190,24 @@ test('OverlayBroker: close idempotent + stale handles are inert', () => {
   broker.closeForHost(a)
   broker.closeForHost(a) // no-op
   assert.equal(broker.graphState().handles, 0)
+})
+
+test('OverlayBroker: hasVisibleCapturingOverlay ignores nonCapturing and hidden entries', () => {
+  const broker = new OverlayBroker()
+  // A nonCapturing notice is visible but never a keyboard owner.
+  broker.track(fakeHandle('hud'), { nonCapturing: true })
+  assert.equal(broker.hasVisibleCapturingOverlay(), false,
+    'a nonCapturing notice must not count as a capturing owner')
+  const a = fakeHandle('a')
+  broker.track(a)
+  assert.equal(broker.hasVisibleCapturingOverlay(), true, 'a visible capturing overlay owns the keyboard')
+  a.setHidden(true)
+  assert.equal(broker.hasVisibleCapturingOverlay(), false,
+    'a hidden capturing overlay has released the keyboard')
+  a.setHidden(false)
+  assert.equal(broker.hasVisibleCapturingOverlay(), true)
+  broker.closeForHost(a)
+  assert.equal(broker.hasVisibleCapturingOverlay(), false, 'a closed capturing overlay is forgotten')
 })
 
 test('OverlayBroker: hideAll + clear (fullscreen migration / surface teardown)', () => {
@@ -448,6 +473,46 @@ test('TuiApp: an explicitly closed lease is dropped from the owned set (round-1 
   assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0, 'a closed lease must not leak until dispose')
   lease.close() // idempotent
   assert.equal(app.ownedExtensionOverlayLeasesForTest(), 0)
+  app.stop()
+})
+
+test('TuiApp: closing a capturing overlay restores the underlying overlay seat AND physical focus (shared close invariant)', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+
+  const a = app.openPicker([{ value: 'a', label: 'overlay A' }], () => {}, () => {})
+  await vt.waitForRender()
+  const b = app.openPicker([{ value: 'b', label: 'overlay B' }], () => {}, () => {})
+  await vt.waitForRender()
+  assert.ok(view().includes('overlay B'), `B must be visible:\n${view()}`)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+
+  // Close B: A is restored and must own BOTH the derived seat and physical
+  // keyboard focus — the broker must not assume the close returned to the
+  // editor (the regression: A visible + focused but focusedSeat='editor').
+  b.close?.()
+  await vt.waitForRender()
+  assert.ok(view().includes('overlay A'), `A must be restored:\n${view()}`)
+  assert.ok(!view().includes('overlay B'), `B must be gone:\n${view()}`)
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the restored A owns the derived seat')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the restored A holds physical focus, not the editor')
+  assert.equal(app.overlayGraphState().handles, 1, 'only A remains tracked')
+
+  // Closing the last capturing overlay returns the seat to the editor.
+  a.close?.()
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'editor')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the editor regains physical focus when the stack empties')
+  assert.equal(app.overlayGraphState().handles, 0)
   app.stop()
 })
 

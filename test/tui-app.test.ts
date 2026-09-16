@@ -977,7 +977,7 @@ test('task browser no-match state fits a short terminal without clipping the hin
   await vt.waitForRender()
   app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', group: 'jobs' }],
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'full', header: 'Tasks', enableSearch: true, noMatchText: 'no matching tasks' },
   )
@@ -1004,7 +1004,7 @@ test('Task Center full mode keeps the selected task on a very short terminal', a
       status: 'running',
       group: 'jobs',
     })),
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'full', header: 'Tasks', maxVisible: 10 },
   )
@@ -1032,7 +1032,7 @@ test('Task Center full mode keeps search input and the selected task at 10 rows'
       status: 'running',
       group: 'jobs',
     })),
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'full', header: 'Tasks', maxVisible: 10, initialSearchMode: true },
   )
@@ -1056,7 +1056,7 @@ test('openTaskBrowser honors percentage width and maxHeight (fork sizing rules)'
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
     startedApps.add(app)
-    app.openTaskBrowser(items, () => {}, () => {}, { mode: 'full', width: '50%' })
+    app.openTaskBrowser(items, () => 'close', () => {}, { mode: 'full', width: '50%' })
     await vt.waitForRender()
     const lines = vt.getViewport().map(strip)
     const top = lines.findIndex(line => line.includes('╭'))
@@ -1070,7 +1070,7 @@ test('openTaskBrowser honors percentage width and maxHeight (fork sizing rules)'
     const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
     app.start()
     startedApps.add(app)
-    app.openTaskBrowser(items, () => {}, () => {}, { mode: 'full', maxHeight: '70%' })
+    app.openTaskBrowser(items, () => 'close', () => {}, { mode: 'full', maxHeight: '70%' })
     await vt.waitForRender()
     const lines = vt.getViewport().map(strip)
     const top = lines.findIndex(line => line.includes('╭'))
@@ -1090,7 +1090,7 @@ test('openTaskBrowser full mode honors explicit numeric width and maxHeight', as
   startedApps.add(app)
   // Explicit options always win, even in full mode: 100 wide / 20 tall
   // (clamped by the margin-inset available area, never forced to 100%).
-  app.openTaskBrowser(items, () => {}, () => {}, { mode: 'full', width: 100, maxHeight: 20 })
+  app.openTaskBrowser(items, () => 'close', () => {}, { mode: 'full', width: 100, maxHeight: 20 })
   await vt.waitForRender()
   const lines = vt.getViewport().map(strip)
   const top = lines.findIndex(line => line.includes('╭'))
@@ -1117,7 +1117,7 @@ test('task browser keeps the selected row and hint visible after a height shrink
       // fallback must keep the SELECTED MAIN row, not its detail tail.
       detail: `detail line ${index}`,
     })),
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'full', header: 'Tasks', maxVisible: 10, enableSearch: true },
   )
@@ -2151,6 +2151,259 @@ test('the output viewer refreshes on a timer, stops on s, and closes on esc', as
   app.stop()
 })
 
+test('the output viewer shows a bottom action hint and stops through the tasks.stop semantic', async () => {
+  const { vt, app } = startApp()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  const stopped: string[] = []
+  app.openOutputViewer({
+    title: 'job detail',
+    initial: 'job-running',
+    refresh: () => 'job-running',
+    onStop: () => { stopped.push('stop') },
+    canStop: () => true,
+    closeHint: 'back',
+    intervalMs: 10,
+  })
+  await vt.waitForRender()
+  assert.ok(view().includes('job detail'), `viewer title missing:\n${view()}`)
+  assert.ok(view().includes('job-running'), `viewer body missing:\n${view()}`)
+  // The action hint is SEPARATE chrome: it never rides in the body string.
+  assert.ok(view().includes('S stop · Esc back'), `action hint missing:\n${view()}`)
+  assert.ok(!view().includes('job-runningS stop'), `the hint must not be appended to the body:\n${view()}`)
+  // The semantic stop key fires onStop (the same definition the hint shows).
+  vt.sendInput('s')
+  assert.deepEqual(stopped, ['stop'])
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!view().includes('job detail'), `Esc must close the viewer:\n${view()}`)
+  app.stop()
+})
+
+test('a settled job drops the Stop hint and makes the stop key a no-op', async () => {
+  const { vt, app } = startApp()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  const stopped: string[] = []
+  let canStop = true
+  app.openOutputViewer({
+    title: 'job detail',
+    initial: 'job-running',
+    refresh: () => 'job-running',
+    onStop: () => { stopped.push('stop') },
+    canStop: () => canStop,
+    closeHint: 'back',
+    intervalMs: 10,
+  })
+  await vt.waitForRender()
+  assert.ok(view().includes('S stop · Esc back'), `the running hint must offer Stop:\n${view()}`)
+
+  canStop = false
+  await new Promise(resolve => setTimeout(resolve, 40))
+  await vt.waitForRender()
+  assert.ok(view().includes('Esc back'), `Esc back must survive the settle:\n${view()}`)
+  assert.ok(!view().includes('stop'), `the Stop hint must disappear once settled:\n${view()}`)
+  vt.sendInput('s')
+  assert.deepEqual(stopped, [], 'the stop key must be a no-op once settled')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!view().includes('job detail'), `Esc must still close the viewer:\n${view()}`)
+  app.stop()
+})
+
+test('a long body keeps the Esc back hint on genuinely short terminals (rows 8..2)', async () => {
+  const longBody = Array.from({ length: 200 }, (_, index) => `body line ${index}`).join('\n')
+  for (const rows of [8, 6, 5, 4, 3, 2]) {
+    const { vt, app } = startApp()
+    vt.resize(80, rows)
+    await vt.waitForRender()
+    const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+    app.openOutputViewer({
+      title: 'job detail',
+      initial: longBody,
+      refresh: () => longBody,
+      onStop: () => {},
+      canStop: () => true,
+      closeHint: 'back',
+    })
+    await vt.waitForRender()
+    // The granted box is (rows - 2 frame borders) CONTENT rows; the hint must
+    // always survive even when that leaves no room for the body. At rows=2
+    // the fork keeps the top border + the hint.
+    assert.ok(view().includes('Esc back'), `rows=${rows}: the Esc back hint must survive:\n${view()}`)
+    assert.ok(!view().includes('body line 199'), `rows=${rows}: the body must be budgeted:\n${view()}`)
+    if (rows >= 5) assert.ok(view().includes('body line 0'), `rows=${rows}: the body should still start:\n${view()}`)
+    app.dispose()
+  }
+})
+
+test('a one-row terminal is below the bordered viewer floor (documented physical limit)', async () => {
+  const { vt, app } = startApp()
+  vt.resize(80, 1)
+  await vt.waitForRender()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  assert.equal(app.overlayGraphState().handles, 0)
+  app.openOutputViewer({
+    title: 'job detail',
+    initial: 'body',
+    refresh: () => 'body',
+    onStop: () => {},
+    canStop: () => true,
+    closeHint: 'back',
+  })
+  await vt.waitForRender()
+  // The viewer mounts and never throws, but the fork keeps only the FIRST
+  // `maxHeight` (=1) line of the bordered box: the top border. No bordered
+  // overlay can render content at one row — this is the documented floor, so
+  // the hint contract starts at two rows.
+  assert.equal(app.overlayGraphState().handles, 1, 'the viewer still mounts at one row')
+  assert.ok(view().includes('╭'), `the documented floor is the frame border:\n${view()}`)
+  app.dispose()
+})
+
+test('a standalone output viewer (no onStop) shows Esc close and never offers Stop', async () => {
+  const { vt, app } = startApp()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  app.openOutputViewer({
+    title: 'Sign in',
+    initial: 'device code ABCD',
+    refresh: () => 'device code ABCD',
+  })
+  await vt.waitForRender()
+  assert.ok(view().includes('Esc close'), `a standalone notice must say Esc close:\n${view()}`)
+  assert.ok(!view().includes('stop'), `a standalone notice must never offer Stop:\n${view()}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!view().includes('Sign in'), `Esc must close the notice:\n${view()}`)
+  app.stop()
+})
+
+test('a Job View opened from Quick returns to the exact parent browser state on Esc', async () => {
+  const { vt, app } = startApp()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  app.setEditorText('draft')
+  const handle = app.openTaskBrowser(
+    [
+      { value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' },
+      { value: 'job:2', label: 'bash · lint', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' },
+    ],
+    (value) => {
+      app.openOutputViewer({
+        title: 'job detail',
+        initial: `selected ${value}`,
+        refresh: () => `selected ${value}`,
+        onStop: () => {},
+        canStop: () => true,
+        closeHint: 'back',
+      })
+      return 'keep-open'
+    },
+    () => {},
+    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+  )
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // move to the second row
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view().includes('job detail') && view().includes('selected job:2'),
+    `the Job View must open for the selected row:\n${view()}`)
+  assert.ok(!view().includes('Open Task Center'), `Quick must be hidden beneath it:\n${view()}`)
+  assert.equal(app.overlayGraphState().handles, 2, 'Quick stays mounted beneath the Job View')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the Job View holds physical focus')
+  vt.sendInput('X') // must be consumed by the Job View, never leak into the draft
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draft', 'printables must not reach the editor')
+
+  // A live refresh lands on the HIDDEN parent (the runtime's commit path):
+  // the same mounted instance must show the update after it is restored —
+  // this proves the parent is preserved by the overlay stack, not rebuilt
+  // from a saved snapshot.
+  handle.setItems([
+    { value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' },
+    { value: 'job:2', label: 'bash · lint (updated)', status: 'completed', active: true, source: 'job', type: 'bash', canStop: false, startedAt: Date.now(), group: 'jobs' },
+  ])
+
+  vt.sendInput('\x1b') // close only the Job View
+  await vt.waitForRender()
+  assert.ok(!view().includes('job detail'), `Esc must close the Job View:\n${view()}`)
+  assert.ok(view().includes('Open Task Center'), `Quick must be restored:\n${view()}`)
+  assert.ok(view().includes('bash · lint (updated)'), `the hidden parent must have absorbed the live refresh:\n${view()}`)
+  assert.equal(app.overlayGraphState().handles, 1, 'only Quick remains tracked')
+  assert.equal(handle.getViewState!().selectedId, 'job:2', 'the parent selection must be preserved')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the restored Quick holds physical focus')
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!view().includes('Open Task Center'), `the second Esc must close Quick:\n${view()}`)
+  assert.equal(app.focusSeatForTest(), 'editor')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  vt.sendInput('Z')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draftZ')
+  app.stop()
+})
+
+test('a Job View opened from Full returns to the exact Full state (type filter, tree disclosure, search, selection)', async () => {
+  const { vt, app } = startApp()
+  const view = (): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+  const handle = app.openTaskBrowser(
+    [
+      { value: 'agent:parent', label: 'subagent · parent', status: 'completed', active: false, source: 'subagent', type: 'subagent', hasChildren: true, group: 'subagents' },
+      { value: 'agent:child', label: 'subagent · child', status: 'completed', active: false, source: 'subagent', type: 'subagent', parentId: 'agent:parent', group: 'subagents' },
+      { value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' },
+    ],
+    (value) => {
+      app.openOutputViewer({
+        title: 'job detail',
+        initial: `selected ${value}`,
+        refresh: () => `selected ${value}`,
+        onStop: () => {},
+        canStop: () => true,
+        closeHint: 'back',
+      })
+      return 'keep-open'
+    },
+    () => {},
+    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 18 },
+  )
+  await vt.waitForRender()
+  // Establish a non-default TYPE FILTER (first cycle: the first item type).
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.equal(handle.getViewState!().typeFilter, 'subagent', 'Tab must set the type filter')
+  // Establish non-default TREE DISCLOSURE on the selected parent row.
+  vt.sendInput('\x1b[C') // right arrow: expand
+  await vt.waitForRender()
+  assert.ok(handle.getViewState!().expandedIds.has('agent:parent'), 'right arrow must expand the parent')
+  // Establish SEARCH state.
+  vt.sendInput('/')
+  for (const key of 'parent') vt.sendInput(key)
+  await vt.waitForRender()
+  const before = handle.getViewState!()
+  assert.equal(before.searchMode, true)
+  assert.equal(before.searchQuery, 'parent')
+  assert.equal(before.typeFilter, 'subagent')
+  assert.ok(before.expandedIds.has('agent:parent'))
+
+  vt.sendInput('\r') // Enter selects the matching parent row
+  await vt.waitForRender()
+  assert.ok(view().includes('job detail') && view().includes('selected agent:parent'),
+    `the Job View must open for the filtered row:\n${view()}`)
+  assert.ok(!view().includes('Open Task Center'), `the parent browser must be hidden beneath it:\n${view()}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const after = handle.getViewState!()
+  assert.equal(after.searchMode, true, 'Full search mode must survive the Job View')
+  assert.equal(after.searchQuery, 'parent', 'the Full search query must survive the Job View')
+  assert.equal(after.typeFilter, 'subagent', 'the Full type filter must survive the Job View')
+  assert.ok(after.expandedIds.has('agent:parent'), 'the Full tree disclosure must survive the Job View')
+  assert.equal(after.selectedId, 'agent:parent', 'the Full selection must survive the Job View')
+  app.stop()
+})
+
 test('alt+up with no overlay reaches the dequeue host', async () => {
   const vt = new VirtualTerminal(80, 24)
   let dequeued = 0
@@ -2293,7 +2546,7 @@ test('fixed-width overlays fill the declared width: no border-external mask regi
     startedApps.add(app)
     app.openTaskBrowser(
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
-      () => {},
+      () => 'close',
       () => {},
       { mode: 'quick', header: 'tasks' },
     )
@@ -2335,7 +2588,7 @@ test('a fixed-width overlay keeps its frame geometry across fullscreen, resize a
   const openBrowser = (): void => {
     app.openTaskBrowser(
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
-      () => {},
+      () => 'close',
       () => {},
       { mode: 'quick', header: 'tasks' },
     )
@@ -3210,7 +3463,7 @@ test('openTaskBrowser renders status dots and live counts in the overlay', async
       { value: 'job:2', label: 'bash · lint', status: 'completed', startedAt: Date.now() - 60_000, group: 'jobs' },
       { value: 'agent:1', label: 'subagent · research', status: 'running', group: 'subagents' },
     ],
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'full', header: 'tasks · subagents', enableSearch: true },
   )
@@ -3235,7 +3488,7 @@ test('openTaskBrowser: Enter selects the highlighted row; Esc closes', async () 
       { value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' },
       { value: 'job:2', label: 'bash · lint', status: 'completed', startedAt: Date.now(), group: 'jobs' },
     ],
-    (value) => { selected = value },
+(value) => { selected = value; return 'close' },
     () => { cancelled = true },
     { mode: 'full', header: 'tasks' },
   )
@@ -3248,7 +3501,7 @@ test('openTaskBrowser: Enter selects the highlighted row; Esc closes', async () 
   // Re-open and cancel.
   app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
-    () => {},
+    () => 'close',
     () => { cancelled = true },
     { mode: 'full', header: 'tasks' },
   )
@@ -3263,7 +3516,7 @@ test('openTaskBrowser setItems replaces rows live', async () => {
   const { vt, app } = startApp()
   const handle = app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'full', header: 'tasks' },
   )
@@ -3293,7 +3546,7 @@ test('Quick Tasks overlay consumes non-whitelisted printable input (no editor le
       { value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' },
       { value: 'job:2', label: 'bash · lint', status: 'completed', active: false, source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs' },
     ],
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
   )
@@ -3323,7 +3576,7 @@ test('Quick Tasks: S then a single Esc returns to the editor (original regressio
   await vt.waitForRender()
   app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' }],
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
   )
@@ -3352,7 +3605,7 @@ test('Quick Tasks overlay drops a query restored from the full Task Center (Full
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs' }],
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8, initialQuery: 'no-match', initialSearchMode: false },
   )
@@ -3385,7 +3638,7 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
       canStop: true,
       type: 'subagent',
     }],
-    () => {},
+    () => 'close',
     () => {},
     { mode: 'full', header: 'tasks · subagents', enableSearch: true },
   )

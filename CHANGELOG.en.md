@@ -134,6 +134,23 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
 - **A short fullscreen opens the Todo panel with 3 rows.** On terminals with
   at most 16 rows the compact Todo panel shows 3 items (5 otherwise); a resize
   re-derives the cap from the current height and drops a redundant full state.
+- **A job status detail opened from the Task Center now returns one level, and
+  capturing-overlay focus restoration is unified.** After opening a Job's
+  **status detail** from Quick Tasks or the full Task Center with `Enter` (a bash
+  job, or a subagent job whose child session cannot be located), `Esc` returns to
+  the same Task Center instance (selected row, scroll, filter, search, and
+  disclosure state preserved) and a second `Esc` returns to the editor; a
+  subagent job that resolves to a child session still opens the child transcript
+  directly (replacing the Task Center and keeping its own `Esc` semantics). After
+  an overlay close, a restored **capturing** overlay underneath always regains
+  keyboard focus and the focused seat, so "overlay visible but the editor still
+  owns focus" no longer happens; a nonCapturing notice overlay still never takes
+  focus.
+- **The Job detail overlay has its own bottom action hint.** A running job shows
+  `S stop · Esc back`; once the job settles the Stop hint disappears and its key
+  becomes a no-op; `Esc back` stays visible under a long body or a short
+  terminal (down to two rows); non-job notices (e.g. the sign-in notice) show
+  `Esc close` and never offer Stop.
 
 ## [0.4.6] - 2026-09-13
 

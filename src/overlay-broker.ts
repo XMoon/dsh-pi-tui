@@ -47,8 +47,16 @@ export interface OverlayBrokerDeps {
   /** The currently active Save Location prompt, or undefined. */
   saveLocation?: () => SaveLocationSuspension | undefined
   /** Report the focused seat (the host's setFocusSeat — broker reports
-   * 'overlay' on capturing mounts). */
+   * 'overlay' on capturing mounts). Mount-time coarse signal only; the
+   * CLOSE path re-derives the final seat through {@link reconcileFocusSeat}
+   * because a restored dependent capturing overlay — not the editor — may
+   * own the seat. */
   setFocusSeat?: (seat: 'editor' | 'overlay' | 'editor-panel' | 'none') => void
+  /** Re-derive the host's final focused seat from the LIVE surface after a
+   * tracked close (the host's publishFocusSeat). The broker must never
+   * assume the close returns the seat to the editor: closing overlay B can
+   * restore dependent overlay A, which owns physical focus. */
+  reconcileFocusSeat?: () => void
 }
 
 /**
@@ -58,6 +66,10 @@ export interface OverlayBrokerDeps {
  */
 export class OverlayBroker {
   private readonly tracked = new Set<OverlayHandle>()
+  /** The CAPTURING subset of {@link tracked}: the only handles that can own
+   * the keyboard. A nonCapturing notice never takes focus and must not fence
+   * an editor-seat handoff. */
+  private readonly capturing = new Set<OverlayHandle>()
   /** Capturing overlay → the overlays it hid (restored on its close). */
   private readonly dependents = new Map<OverlayHandle, Set<OverlayHandle>>()
   private readonly deps: OverlayBrokerDeps
@@ -79,6 +91,7 @@ export class OverlayBroker {
   track(handle: OverlayHandle, options: { nonCapturing?: boolean } = {}): OverlayHandle {
     this.tracked.add(handle)
     if (options.nonCapturing !== true) {
+      this.capturing.add(handle)
       this.deps.setFocusSeat?.('overlay')
     }
     const question = this.deps.question?.()
@@ -184,14 +197,17 @@ export class OverlayBroker {
       }
     }
     const wasTracked = this.tracked.delete(handle)
+    this.capturing.delete(handle)
     handle.hide()
-    // The seat may have returned to the editor (or to another capturing
-    // overlay restored underneath); the host recomputes from live state.
-    // A STALE close (an already-untracked handle, e.g. after a fullscreen
+    // The final seat belongs to the LIVE surface, not to the close event:
+    // closing B restores dependent A (pi-tui re-focuses a restored capturing
+    // overlay), so a coarse 'editor' here would be a stale/wrong seat. The
+    // host re-derives it (see OverlayBrokerDeps.reconcileFocusSeat). A
+    // STALE close (an already-untracked handle, e.g. after a fullscreen
     // teardown) must NOT republish the seat: the live state (an active
     // Save prompt, question, or approval) is authoritative, and a dead
     // handle's hide() requests no render to correct it later.
-    if (wasTracked) this.deps.setFocusSeat?.('editor')
+    if (wasTracked) this.deps.reconcileFocusSeat?.()
   }
 
   /** Hide every tracked overlay (fullscreen migration — the host stops
@@ -206,6 +222,7 @@ export class OverlayBroker {
    * screen is going away; the handles die with it). Idempotent. */
   clear(): void {
     this.tracked.clear()
+    this.capturing.clear()
     this.dependents.clear()
   }
 
@@ -221,7 +238,18 @@ export class OverlayBroker {
   disposeAll(): void {
     for (const handle of this.tracked) handle.hide()
     this.tracked.clear()
+    this.capturing.clear()
     this.dependents.clear()
+  }
+
+  /** Whether a VISIBLE capturing overlay currently owns the keyboard. A
+   * nonCapturing notice never takes focus, and a hidden capturing entry has
+   * released it, so neither may fence an editor-seat focus handoff. */
+  hasVisibleCapturingOverlay(): boolean {
+    for (const handle of this.capturing) {
+      if (!handle.isHidden()) return true
+    }
+    return false
   }
 
   /** The current graph sizes (headless assertions — the graph is

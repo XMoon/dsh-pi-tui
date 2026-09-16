@@ -99,6 +99,16 @@ dsh --profile pi-tui
   粘贴不到的问题。
 - **短屏全屏下 Todo 首次展开为 3 项。** 终端行数 ≤16 时 compact Todo 面板显示 3 项，
   普通终端仍为 5 项；缩放时按当前高度重新推导，不残留多余的 full 状态。
+- **Task Center 打开的任务状态详情按层级返回，捕获型浮层的焦点恢复也统一了。**
+  从 Quick Tasks 或完整 Task Center 按 `Enter` 打开 Job 的**状态详情**（bash 作业，
+  或无法定位子会话的 subagent 作业）后，`Esc` 返回同一个 Task Center 实例（保留选中
+  行、滚动、过滤、搜索与展开状态），再按一次 `Esc` 才回到编辑器；能定位子会话的
+  subagent 作业仍像以前一样直接打开子会话 transcript（替换 Task Center，保持自身
+  `Esc` 语义）。`Esc` 或浮层关闭后，被恢复的下层**捕获型**浮层始终重新取得键盘焦点与
+  焦点席位，不再出现「浮层可见但焦点仍在编辑器」；nonCapturing 提示浮层照旧不夺取焦点。
+- **Job 详情浮层有独立的底部操作提示。** 运行中的 Job 显示 `S stop · Esc back`；任务
+  结束后 `Stop` 提示消失且该键失效；`Esc back` 在长内容或短终端（低至 2 行）下始终
+  可见；非 Job 的独立提示面板（如登录通知）显示 `Esc close`，不会出现 `Stop`。
 
 ## [0.4.6] - 2026-09-13
 
