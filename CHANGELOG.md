@@ -24,6 +24,19 @@ dsh --profile pi-tui
 
 ### 变更
 
+- **超长用户消息默认折叠显示。** 纯文本用户 Prompt 超过 10 个终端视觉行时，Transcript
+  默认只显示开头 4 行、中间一条 `── N rows compacted · … to expand ──` 提示和结尾 3
+  行，尾部补充说明默认可见；普通模式与全屏非 Focus 下 `Ctrl+O` 展开、收回，全屏下点击
+  该提示行（或搜索命中）展开单条消息，全屏 Focus 里 `Ctrl+O` 负责整体切换 Thought root
+  并收回已展开的超长用户消息。
+  折叠判断基于当前宽度换行后的视觉行（CJK / emoji / 单行超长 JSON 都按真实屏幕占用
+  计算），resize 后自动重新判断。Transcript 原文、搜索、导出、Session 持久化与回放
+  仍使用完整用户内容；带附件的混合内容用户消息和 pending 回显保持原样。
+- **全屏离开 live tail 时提供可点击的 `↓ Latest`。** 全屏 Transcript 一旦不在实时尾部
+  （手动向上滚动，或正在浏览 history 窗口），viewport 底部显示可点击的
+  `↓ Latest · <快捷键>`（快捷键按实际 keymap 显示）；history 窗口即使已滚到底也会显示，
+  点击与 `Ctrl+End` 走同一语义、直接回到全局 latest 而不是当前 history 窗口底部。
+  回到 live tail 后提示自动消失；history 位置提示不再重复跳转快捷键。
 - **`/model` 改为即时打开、可搜索的模型命令面板。** 输入 `/model` 后面板立即出现并先
   显示 `Loading models…`，目录在后台加载、加载完成后同一 overlay 原地填充（不重开
   面板，加载期间即可输入搜索且查询保留）；provider 仅作分组，一次搜索覆盖
