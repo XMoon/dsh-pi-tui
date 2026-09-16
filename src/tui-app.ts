@@ -4726,7 +4726,7 @@ export class TuiApp {
     //   parent-owned lifecycle key is consumed here, BEFORE the host
     //   ladder, so the viewer can never steer/queue/recall-all the parent
     //   session or exit the TUI from inside the child view.
-    if (this.viewerMode !== undefined && !this.overlayBroker.hasVisibleCapturingOverlay()) {
+    if (this.viewerMode !== undefined && !this.overlayBroker.hasFocusedCapturingOverlay()) {
       // A viewer owns this input stage; no parent keyboard exit request can
       // be confirmed from inside it. Treat the viewer event as fresh input
       // and discard any stale parent confirmation.
@@ -4834,12 +4834,13 @@ export class TuiApp {
     }
     // A managed non-search overlay owns the focused component. App-level
     // lifecycle handlers must not consume its keys before pi-tui dispatches
-    // them to that component. Only a CAPTURING overlay is a keyboard owner:
-    // a nonCapturing notice never takes focus, so the Host shortcut ladder
-    // (and the editor) must keep working beneath it. Discard any stale exit
-    // confirmation before letting the focused component process this fresh
-    // interaction.
-    if (this.overlayBroker.hasVisibleCapturingOverlay()) {
+    // them to that component. Only a capturing overlay that HOLDS keyboard
+    // focus is an owner: a nonCapturing notice never takes focus, and a
+    // blurred interactive overlay has released it, so the Host shortcut
+    // ladder (and the editor) must keep working in both cases. Discard any
+    // stale exit confirmation before letting the focused component process
+    // this fresh interaction.
+    if (this.overlayBroker.hasFocusedCapturingOverlay()) {
       this.clearExitConfirmation()
       return undefined
     }
@@ -5181,7 +5182,7 @@ export class TuiApp {
     }
     // Overlays (pickers, settings) own Esc while they are up. A nonCapturing
     // notice is not a keyboard owner, so Esc still belongs to the editor.
-    if (this.overlayBroker.hasVisibleCapturingOverlay()) return undefined
+    if (this.overlayBroker.hasFocusedCapturingOverlay()) return undefined
     // Autocomplete owns Esc while the dropdown is open: let the editor
     // close it (TuiEditor intercepts; kimi parity). Without this the
     // app-level consume swallows Esc and the dropdown cannot close.
@@ -5456,18 +5457,18 @@ export class TuiApp {
    * the live editor is only read when a rule predicate actually needs it
    * (the input path must not add a draft read per keystroke). */
   private keybindingContext(): KeybindingContext {
-    // The keyboard-ownership fact: a VISIBLE CAPTURING overlay, never a
-    // nonCapturing notice (which owns no keyboard).
-    const capturingOverlay = this.overlayBroker.hasVisibleCapturingOverlay()
+    // The keyboard-ownership fact: a capturing overlay that HOLDS focus —
+    // never a nonCapturing notice, nor a blurred/hidden entry.
+    const keyboardOwner = this.overlayBroker.hasFocusedCapturingOverlay()
     return deriveKeybindingContext({
-      focusedSeat: capturingOverlay ? 'overlay' : 'editor',
+      focusedSeat: keyboardOwner ? 'overlay' : 'editor',
       questionActive: this.activeQuestions !== undefined,
       approvalActive: this.activeApproval !== undefined,
-      viewerMode: this.viewerMode === undefined || capturingOverlay
+      viewerMode: this.viewerMode === undefined || keyboardOwner
         ? 'none'
         : isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access)) ? 'continuable' : 'readonly',
       searchActive: this.searchOverlay !== undefined,
-      overlayActive: capturingOverlay,
+      overlayActive: keyboardOwner,
       agentRunning: this.busy,
       editorEmpty: () => this.seatEditor().getText().trim() === '',
       // LAZY like editorEmpty: the VISIBLE seat editor's input mode decides
@@ -5480,7 +5481,7 @@ export class TuiApp {
 
   /** The live surface context the InputRouter reads (M6). */
   private inputRouterContext(): Parameters<InputRouter['route']>[1] {
-    const capturingOverlay = this.overlayBroker.hasVisibleCapturingOverlay()
+    const keyboardOwner = this.overlayBroker.hasFocusedCapturingOverlay()
     return {
       questionActive: this.activeQuestions !== undefined,
       approvalActive: this.activeApproval !== undefined,
@@ -5489,10 +5490,10 @@ export class TuiApp {
       // keeps it live (the HOST guard already consumed the parent-owned
       // chords before the router is consulted). A nonCapturing notice does
       // not change the viewer's input mode.
-      viewerInputMode: this.viewerMode === undefined || capturingOverlay
+      viewerInputMode: this.viewerMode === undefined || keyboardOwner
         ? 'none'
         : isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access)) ? 'continuable' : 'readonly',
-      hasOverlay: capturingOverlay,
+      hasOverlay: keyboardOwner,
       searchActive: this.searchOverlay !== undefined,
       // The router's physical-key seams (the read-only viewer fold
       // pass-through, the search overlay ownership) consult the EFFECTIVE
@@ -9928,12 +9929,12 @@ export class TuiApp {
       },
       requestEditorFocus: () => {
         if (app.disposed) return
-        // Best-effort: focus the seat component only when no capturing
-        // flow (question/approval/CAPTURING overlay) owns the seat — those
-        // flows restore their own focus and must never be stolen. A
-        // nonCapturing notice owns no keyboard and never fences this.
+        // Best-effort: focus the seat component only when no capturing flow
+        // (question/approval, or a capturing overlay that HOLDS focus) owns
+        // the seat — those flows restore their own focus and must never be
+        // stolen. A nonCapturing or blurred overlay owns no keyboard.
         if (app.activeQuestions !== undefined || app.activeApproval !== undefined
-          || app.overlayBroker.hasVisibleCapturingOverlay()) return
+          || app.overlayBroker.hasFocusedCapturingOverlay()) return
         app.activeScreen.setFocus(app.seatEditor().component)
       },
     }
@@ -10325,10 +10326,10 @@ export class TuiApp {
    * the editor seat currently owns input — after a handoff the plugin
    * editor's component must actually receive keys (typing, arrows), not
    * leave the old host Editor focused. Focus transfer is skipped while a
-   * capturing owner (question/approval/save-location or a visible CAPTURING
-   * overlay) holds the seat — those owners restore their own focus. A
-   * nonCapturing notice never takes focus and therefore never fences the
-   * handoff.
+   * capturing owner (question/approval/save-location or a capturing overlay
+   * that HOLDS keyboard focus) holds the seat — those owners restore their
+   * own focus. A nonCapturing or blurred overlay has released the keyboard
+   * and therefore never fences the handoff.
    */
   private mountSeatChild(): void {
     // Re-vendor lifecycle follow-up P1: the CAPTURE FENCE — while a
@@ -10343,16 +10344,15 @@ export class TuiApp {
     const component = this.seatEditor().component
     this.editorSeat.replace(component)
     // Focus follows the occupant: if the seat owns input right now (no
-    // question/approval/save-location and no CAPTURING overlay), the NEW
-    // component must be the focused component — otherwise every key after a
-    // handoff still targets the old host Editor (P1-06 probe would see the
-    // WRONG focused component and plugin bindings would steal editor keys).
-    // A nonCapturing notice never takes focus, so it must NOT fence the
-    // handoff (the seat would report 'overlay' while the host editor is
-    // physically focused).
+    // question/approval/save-location and no capturing overlay that HOLDS
+    // keyboard focus), the NEW component must be the focused component —
+    // otherwise every key after a handoff still targets the old host Editor
+    // (P1-06 probe would see the WRONG focused component and plugin bindings
+    // would steal editor keys). A nonCapturing or blurred capturing overlay
+    // has released the keyboard, so it must NOT fence the handoff.
     if (this.activeQuestions === undefined && this.activeApproval === undefined
       && this.activeSaveLocation === undefined
-      && !this.overlayBroker.hasVisibleCapturingOverlay()) {
+      && !this.overlayBroker.hasFocusedCapturingOverlay()) {
       this.activeScreen.setFocus(component)
     }
   }
@@ -10418,7 +10418,7 @@ export class TuiApp {
    */
   private taskBrowserAvailable(): boolean {
     return this.tasksActive
-      && !this.overlayBroker.hasVisibleCapturingOverlay()
+      && !this.overlayBroker.hasFocusedCapturingOverlay()
       && this.seatEditor().getText().trim() === ''
       && this.seatInputMode() === 'prompt'
   }
@@ -12612,13 +12612,11 @@ export class TuiApp {
       this.setFocusSeat('overlay')
       return
     }
-    const screen = this.activeScreen
-    // The seat reflects the ACTUAL keyboard owner: a VISIBLE CAPTURING
-    // overlay must exist AND the physically focused component must not be the
-    // seat editor. A nonCapturing notice never takes focus, and a hidden
-    // entry owns nothing, so neither may report 'overlay'.
-    const focused = this.disposed ? null : screen.getFocusedComponent()
-    if (this.overlayBroker.hasVisibleCapturingOverlay() && focused !== null && focused !== this.seatEditor().component) {
+    // The seat reflects the ACTUAL keyboard owner: only a capturing overlay
+    // that currently HOLDS focus reports 'overlay'. A nonCapturing notice
+    // never takes focus, and a blurred/hidden entry has released it, so the
+    // editor owns the seat then.
+    if (this.overlayBroker.hasFocusedCapturingOverlay()) {
       this.setFocusSeat('overlay')
       return
     }
