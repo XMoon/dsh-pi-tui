@@ -256,7 +256,6 @@ export class OverlayBroker {
         this.dependents.set(upperOwner, [...upperDependents, ...owned])
       }
     }
-    const wasHidden = handle.isHidden()
     const wasCapturing = this.capturing.has(handle)
     const wasTracked = this.tracked.delete(handle)
     this.capturing.delete(handle)
@@ -267,10 +266,14 @@ export class OverlayBroker {
     // capturing overlay on setHidden(false), which would silently undo an
     // explicit blur() the plugin performed before the detail opened.
     //
-    // Only a VISIBLE (front) capturing close is a keyboard-owner transition.
-    // A hidden dependent's programmatic close (e.g. an extension owner
-    // unloading a lease that is suspended beneath a picker) must NOT steal
-    // the keyboard from the overlay still on top.
+    // The gate is STACK OWNERSHIP, never current visibility: a lease may be
+    // temporarily hidden (`hide()`) and still be the stack root — its
+    // permanent close must still release its dependents (or they become
+    // hidden orphans). Conversely a hidden dependent explicitly `show()`n is
+    // still owned by its upper overlay. Only a ROOT capturing close is a
+    // keyboard-owner transition; a dependent's close must NOT steal the
+    // keyboard from the overlay still on top (visibility override is not
+    // dependency-ownership override).
     //
     // When NO dependent held the keyboard, the CURRENT seat owner must take
     // it back EXPLICITLY: the fork's own fallback is the per-overlay
@@ -278,7 +281,7 @@ export class OverlayBroker {
     // pointing at the replaced editor component. Only a CAPTURING close moves
     // focus at all (a nonCapturing notice never took it). The
     // question/save-location branches above own their own settle.
-    if (wasCapturing && !wasHidden && question === undefined && saveLocation === undefined) {
+    if (wasCapturing && upperOwner === undefined && question === undefined && saveLocation === undefined) {
       if (owned !== undefined) {
         for (const dependent of owned) dependent.handle.setHidden(false)
       }
