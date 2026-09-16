@@ -2218,9 +2218,10 @@ export interface TaskBrowserOptions {
   header?: string
   /** Text shown when no row matches the filter. */
   noMatchText?: string
-  /** Pre-fill the search input. */
+  /** Pre-fill the search input. Ignored in Quick mode, which owns no search state. */
   initialQuery?: string
-  /** Preserve explicit search-mode state during Quick/Full transitions. */
+  /** Preserve explicit search-mode state during Quick/Full transitions.
+   * Ignored (forced off) in Quick mode, which owns no search state. */
   initialSearchMode?: boolean
   /** Overlay width in cells, or a terminal-width percentage. */
   width?: number | `${number}%`

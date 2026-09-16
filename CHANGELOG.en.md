@@ -24,6 +24,15 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
 
 ### Changed
 
+- **Quick Tasks keyboard interaction is now navigation-only, so ordinary
+  printable input can no longer enter hidden states.** The Footer `↓` Quick
+  Tasks view responds only to the arrow keys, `Tab`, `Enter`, and `Esc`; every
+  other key is a no-op, so `S`/`/`/`T` can no longer arm a stop confirmation,
+  enter search, or switch views, and `Esc` always closes Quick in one layer and
+  returns input to the editor. `N` / `Shift+N` (running-task jump) and Quick's
+  `T` shortcut into the full view were removed in favor of the bottom “Open Task
+  Center” row plus `Enter`; the full Task Center gains `Shift+Tab` reverse type
+  cycling.
 - **Interrupted parked steering is now presented accurately with its recovery
   path.** After the active turn is interrupted, a steering row still parked in
   the inbox changes from `steering…` to `waiting for next turn…` and is consumed

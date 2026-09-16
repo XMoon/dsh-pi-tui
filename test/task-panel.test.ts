@@ -1090,7 +1090,7 @@ test('task panel: a mouse press that changes selection cancels a pending stop co
   const panel = new TaskBrowserPanel(
     [runningJob({ value: 'job:a', label: 'first', canStop: true }), runningJob({ value: 'job:b', label: 'second', canStop: true })],
     24,
-    { header: 'tasks', enableSearch: false, mode: 'quick', onStop: value => stopped.push(value) },
+    { header: 'tasks', enableSearch: false, mode: 'full', onStop: value => stopped.push(value) },
     () => {},
     () => {},
     () => {},
@@ -1114,7 +1114,7 @@ test('task panel: a click cannot bypass a pending stop confirmation (mouse parit
   const panel = new TaskBrowserPanel(
     [runningJob({ value: 'job:a', label: 'first', canStop: true }), runningJob({ value: 'job:b', label: 'second', canStop: true })],
     24,
-    { header: 'tasks', enableSearch: false, mode: 'quick' },
+    { header: 'tasks', enableSearch: false, mode: 'full' },
     value => selected.push(value),
     () => {},
     () => {},

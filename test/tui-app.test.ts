@@ -3233,6 +3233,93 @@ test('openTaskBrowser setItems replaces rows live', async () => {
   app.stop()
 })
 
+test('Quick Tasks overlay consumes non-whitelisted printable input (no editor leak, single-Esc close)', async () => {
+  // The real Host/overlay input path (not a direct panel call): opening the
+  // Quick overlay via the same `openTaskBrowser` the footer ↓ trigger uses,
+  // then driving the VirtualTerminal exactly like a TTY. Every printable
+  // must be a consumed no-op — neither a Quick action nor an editor edit.
+  const { vt, app } = startApp()
+  app.setEditorText('keep-this-draft')
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    [
+      { value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' },
+      { value: 'job:2', label: 'bash · lint', status: 'completed', active: false, source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs' },
+    ],
+    () => {},
+    () => {},
+    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+  )
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  for (const key of ['s', '/', 't', 'a', 'r', 'n', 'x', 'S', 'N', 'T']) vt.sendInput(key)
+  await vt.waitForRender()
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Open Task Center'), `Quick must stay open:\n${view}`)
+  assert.ok(!view.includes('confirm stop'), `no hidden stop confirmation:\n${view}`)
+  assert.ok(!view.includes('type to filter'), `no hidden search mode:\n${view}`)
+  assert.equal(app.seatTextForTest(), 'keep-this-draft', 'printables must not reach the editor')
+  // A single Esc closes Quick; the editor regains input ownership.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('Open Task Center'), `one Esc must close Quick:\n${view}`)
+  vt.sendInput('Z')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'keep-this-draftZ', 'the editor owns input again after the single Esc')
+  app.stop()
+})
+
+test('Quick Tasks: S then a single Esc returns to the editor (original regression)', async () => {
+  const { vt, app } = startApp()
+  app.setEditorText('draft')
+  await vt.waitForRender()
+  app.openTaskBrowser(
+    [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' }],
+    () => {},
+    () => {},
+    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+  )
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  vt.sendInput('S')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('confirm stop'),
+    'S must not arm a stop confirmation in Quick')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Open Task Center'),
+    'one Esc must close Quick')
+  vt.sendInput('Z')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'draftZ', 'the editor owns input again after Esc')
+  app.stop()
+})
+
+test('Quick Tasks overlay drops a query restored from the full Task Center (Full→Quick regression)', async () => {
+  // index.ts reopens Quick with the full view's current state after
+  // Full → Esc → Esc, which can carry the query typed in Full. Quick owns
+  // no search, so the overlay must drop it instead of stranding the user in
+  // a filtered view with no pseudo-row (and therefore no way back to Full).
+  const { vt, app } = startApp()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  app.openTaskBrowser(
+    [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs' }],
+    () => {},
+    () => {},
+    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8, initialQuery: 'no-match', initialSearchMode: false },
+  )
+  await vt.waitForRender()
+  const view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Open Task Center'), `the pseudo-row must survive a restored query:\n${view}`)
+  assert.ok(!view.includes('no-match'), `the restored query must be dropped in Quick:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Open Task Center'),
+    'one Esc must still close Quick')
+  app.stop()
+})
+
 test('openTaskBrowser repaints a subagent row in place on runtime re-projection (running -> inactive)', async () => {
   // The runner's agent/status path: the TaskBrowserRuntime re-projects
   // the CACHED catalog from the Agent registry and commits through

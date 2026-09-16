@@ -887,7 +887,14 @@ Quick Tasks is the footer-triggered, Active-scope view; `/tasks` opens the full
 Task Center in All scope. Both surfaces consume the same durable preorder and
 runtime projection. Scope, type, search, selection, and disclosure are
 presentation state, so promoting Quick to Full never reorders or deduplicates
-rows and Esc can restore the prior context. Active scope retains every ancestor
+rows and Esc can restore the prior context. Their keyboard ownership is
+deliberately asymmetric: Quick is navigation-only (arrows, `←`/`→` tree,
+`Tab` type, `Enter` open, `Esc` close) and consumes every other key as a no-op,
+so no printable can arm a hidden search/stop/action state and `Esc` is always
+exactly one layer; the full Task Center owns search, scope, stop, refresh,
+paging and reverse (`Shift+Tab`) type cycling. The only keyboard path from
+Quick to Full is the `Open Task Center` pseudo-row plus `Enter`. Active scope
+retains every ancestor
 needed to explain an active descendant but does not promote that descendant to a
 root. Terminal job failures are acknowledged only when a visible Task Center
 row is opened; until then the footer keeps a failure marker and the ↓ affordance.

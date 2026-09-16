@@ -180,7 +180,9 @@ main
 * nested descendant
 * 后台 Job
 
-两个视图共享同一份运行时状态：`A` 切换 Active / All scope，`Tab` 切换类型过滤，`/` 进入搜索，`S`（确认后）停止所选任务，`N` / `Shift+N` 在运行中的任务间跳转，Quick 内 `T` 或底部 "View all" 行进入完整 Task Center，`Esc` 逐层返回。
+Footer `↓` 打开的 Quick Tasks 是轻量浏览视图，只提供方向键导航、左右展开/折叠、`Tab` 类型过滤、`Enter` 打开和 `Esc` 关闭。底部 “Open Task Center” 行可进入完整 Task Center。
+
+完整 Task Center 额外提供 `A` 切换 Active / All、`/` 搜索、`Tab` / `Shift+Tab` 双向切换类型、`S`（确认后）停止所选任务以及 `R` 刷新 / 重试。Quick Tasks 只消费上述白名单按键，其余输入一律 no-op，不会进入搜索、停止确认或任务管理状态，因此 `Esc` 始终一层关闭。
 
 已经结束的 one-shot Subagent 仍可以打开并查看持久化 Transcript。
 
