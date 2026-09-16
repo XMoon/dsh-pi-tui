@@ -67,10 +67,12 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   settled turn shows `Completed`. Time spent waiting on an approval or a
   question no longer counts toward the run duration and resumes accumulating
   once the run continues.
-- **The Focus compact Tool row shows the official presenter's human
-  description instead of the concrete command.** A foreground Bash call shows
-  its `description` and a background execute card shows the description from
-  its content block; the full command stays in the expanded tool card.
+- **The Focus compact Tool row replaces the concrete command with the tool
+  identity plus the official presenter's human description.** A foreground Bash
+  call shows `Bash · <description>` and a background execute card shows
+  `<tool name> · <content description>` (e.g. `Pwsh · Check service state`); an
+  unknown custom tool keeps its raw name instead of degrading to `Tool · …`;
+  the full command stays in the expanded tool card.
 - **The collapsed Thinking preview now follows the reasoning tail.** While
   reasoning streams, the one-line compact preview always shows the newest
   token, clipping overflow from the left, and moves only with real reasoning

@@ -54,9 +54,11 @@ dsh --profile pi-tui
   `Thought`：正常执行显示 `Working`，权限确认显示 `Waiting for approval · 12s`，
   用户问题显示 `Waiting for input · 12s`，完成后显示 `Completed`；等待 approval /
   question 的时间不再计入运行时长，恢复执行后继续累计。
-- **Focus compact 的工具行显示官方 presenter 的人类描述，而不是具体命令。**
-  前台 Bash 命令显示其 `description`，后台执行卡片显示 content 中的描述；完整命令
-  仍保留在展开后的正式 tool card 中。
+- **Focus compact 的工具行以工具身份 + 官方 presenter 的人类描述取代具体命令。**
+  前台 Bash 命令显示 `Bash · <description>`，后台执行卡片显示
+  `<工具名> · <content 描述>`（如 `Pwsh · Check service state`）；未知的自定义
+  工具保留其原始名字而不是退化为 `Tool · …`；完整命令仍保留在展开后的正式 tool
+  card 中。
 - **折叠 Thinking 预览改为追随推理尾部。** 运行中的 compact Thinking 单行预览始终
   显示最新 token，超宽时从左侧裁掉，且只由真实 reasoning delta 驱动（不做独立动画）；
   Focus 折叠、Focus 展开次级卡片、非 Focus 三种 surface 一致，settled 仍从行首显示。
