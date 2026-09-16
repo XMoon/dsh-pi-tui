@@ -126,11 +126,15 @@ export class OverlayBroker {
       if (options.nonCapturing !== true) {
         // The new capturing overlay takes the modal front: the question's
         // directly suspended handles become its dependents (kept hidden).
-        // Those handles are re-owned by the question on close (never
-        // revealed by the broker), so their focus intent is the question's
-        // own restore contract (plan §7.6: restored AND focused).
+        // Their focus intent comes from the broker's OWN capturing fact —
+        // the modal suspends every visible overlay, nonCapturing notices
+        // included, and a nonCapturing entry must never be selected as the
+        // restored keyboard owner (its focus() would set physical focus
+        // while the derived seat stays 'editor').
         const dependents: HiddenDependent[] = []
-        for (const other of question.suspendedOverlays) dependents.push({ handle: other, wasFocused: true })
+        for (const other of question.suspendedOverlays) {
+          dependents.push({ handle: other, wasFocused: this.capturing.has(other) })
+        }
         if (dependents.length > 0) {
           for (const dependent of dependents) question.suspendedOverlays.delete(dependent.handle)
           this.dependents.set(handle, dependents)
@@ -156,11 +160,14 @@ export class OverlayBroker {
         // Symmetric with the question branch: a CAPTURING overlay takes the
         // prompt's directly suspended handles as its OWN dependents (kept
         // hidden), so the graph survives a fullscreen remount (which clears
-        // the broker graph and re-mounts every lease). Without this the
-        // remount flattens the stack into a single suspension level and the
-        // prompt's settle reveals every branch at once.
+        // the broker graph and re-mounts every lease). Their focus intent is
+        // the broker's capturing fact, never a blanket true: the modal
+        // suspends nonCapturing notices too, and those must not be restored
+        // as the keyboard owner.
         const dependents: HiddenDependent[] = []
-        for (const other of saveLocation.suspendedOverlays) dependents.push({ handle: other, wasFocused: true })
+        for (const other of saveLocation.suspendedOverlays) {
+          dependents.push({ handle: other, wasFocused: this.capturing.has(other) })
+        }
         if (dependents.length > 0) {
           for (const dependent of dependents) saveLocation.suspendedOverlays.delete(dependent.handle)
           this.dependents.set(handle, dependents)
@@ -189,16 +196,33 @@ export class OverlayBroker {
   }
 
   /**
+   * Update the recorded keyboard intent of a handle that is currently HIDDEN
+   * as another overlay's dependent. A lease's later focus()/blur() (or an
+   * explicit show()) must be reflected when that owner restores it — the
+   * intent recorded at hide time is a snapshot and would otherwise go stale.
+   */
+  private setRestoreIntent(handle: OverlayHandle, focused: boolean): void {
+    for (const [owner, dependents] of this.dependents) {
+      const index = dependents.findIndex(dependent => dependent.handle === handle)
+      if (index === -1) continue
+      if (dependents[index]!.wasFocused === focused) continue
+      const next = [...dependents]
+      next[index] = { handle, wasFocused: focused }
+      this.dependents.set(owner, next)
+    }
+  }
+
+  /**
    * The tracked wrapper for one handle. An EXPLICIT proxy (round-1 finding
    * 3 — never a spread: the raw handle's methods are closures over private
    * state and may gain non-enumerable members; the wrapper must forward
    * every API surface verbatim). The differences from the raw handle:
-   * hide() becomes the tracked close (question-aware, graph-cleaning), and
-   * EVERY focus-changing operation (hide/setHidden/focus/unfocus)
-   * re-derives the host's focused seat — the host's physical owner may have
-   * moved, and the invariant must hold for blur/show/hide too, not only for
-   * close. Internal caller-free restores use the RAW handles and reconcile
-   * once at their own boundary.
+   * hide() becomes the tracked close (question-aware, graph-cleaning); every
+   * focus-changing operation (hide/setHidden/focus/unfocus) re-derives the
+   * host's focused seat; and focus()/unfocus()/show() also refresh the
+   * handle's LIVE restore intent while it is hidden beneath another overlay.
+   * Internal caller-free restores use the RAW handles and reconcile once at
+   * their own boundary.
    */
   private wrapClose(handle: OverlayHandle): OverlayHandle {
     const broker = this
@@ -206,15 +230,19 @@ export class OverlayBroker {
       hide: () => broker.closeForHost(handle),
       setHidden: (hidden: boolean) => {
         handle.setHidden(hidden)
+        // show() actively focuses a capturing overlay: record the intent.
+        if (!hidden) broker.setRestoreIntent(handle, true)
         broker.deps.reconcileFocusSeat?.()
       },
       isHidden: () => handle.isHidden(),
       focus: () => {
         handle.focus()
+        broker.setRestoreIntent(handle, true)
         broker.deps.reconcileFocusSeat?.()
       },
       unfocus: (options?: Parameters<OverlayHandle['unfocus']>[0]) => {
         handle.unfocus(options)
+        broker.setRestoreIntent(handle, false)
         broker.deps.reconcileFocusSeat?.()
       },
       isFocused: () => handle.isFocused(),

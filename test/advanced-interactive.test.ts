@@ -786,3 +786,81 @@ test('an advanced overlay blur() intent survives a fullscreen swap', async () =>
   a.close()
   app.stop()
 })
+
+test('a fullscreen swap preserves a mixed-type stack (advanced below stable)', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const b = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'overlay B' }] })
+  await vt.waitForRender()
+  assert.ok(view().includes('overlay B') && !view().includes('advanced A'), `B must be on top:\n${view()}`)
+  assert.equal(app.overlayGraphState().dependents, 1)
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+
+  assert.ok(view().includes('overlay B'), `B must remain on top after the swap:\n${view()}`)
+  assert.ok(!view().includes('advanced A'), `A must stay hidden beneath B after the swap:\n${view()}`)
+  assert.equal(app.overlayGraphState().dependents, 1, 'the stack order must survive the swap')
+  assert.equal(a.focused, false)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  a.close()
+  b.close()
+  app.stop()
+})
+
+test('a fullscreen swap preserves a mixed-type stack (stable below advanced)', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const a = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'overlay A' }] })
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+  assert.ok(view().includes('advanced B') && !view().includes('overlay A'), `B must be on top:\n${view()}`)
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+
+  assert.ok(view().includes('advanced B'), `B must remain on top after the swap:\n${view()}`)
+  assert.ok(!view().includes('overlay A'), `A must stay hidden beneath B after the swap:\n${view()}`)
+  assert.equal(app.overlayGraphState().dependents, 1, 'the stack order must survive the swap')
+  assert.equal(b.focused, true)
+  b.close()
+  a.close()
+  app.stop()
+})
+
+test('a fullscreen swap keeps a nonCapturing HUD above a capturing overlay', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const hud = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'notice HUD' }] }, { nonCapturing: true })
+  await vt.waitForRender()
+  // The nonCapturing HUD neither hides nor unfocuses the capturing overlay.
+  assert.equal(app.overlayGraphState().handles, 2)
+  assert.equal(app.overlayGraphState().dependents, 0, 'a nonCapturing HUD never hides a capturing overlay')
+  assert.equal(a.focused, true, 'the capturing overlay owns the keyboard')
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+
+  // Re-mounting in global order (A before the HUD) preserves the pair; a
+  // type-grouped remount would mount the HUD first and let A hide it.
+  assert.equal(app.overlayGraphState().handles, 2, 'both overlays survive the swap')
+  assert.equal(app.overlayGraphState().dependents, 0, 'the HUD must NOT be hidden by the remount')
+  assert.equal(a.focused, true, 'A keeps the keyboard after the swap')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  assert.equal(app.ownedExtensionOverlayLeasesForTest(), 1, 'the HUD lease survives')
+  a.close()
+  hud.close()
+  app.stop()
+})
