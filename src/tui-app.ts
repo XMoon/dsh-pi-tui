@@ -5864,6 +5864,20 @@ export class TuiApp {
         onScrollBoundary: (direction, source) => direction < 0
           ? this.events.onTranscriptMoveOlder?.(source) === true
           : this.events.onTranscriptMoveNewer?.(source) === true,
+        // The fullscreen jump-to-latest affordance (X028): a bottom-centered,
+        // clickable label shown whenever the user has left the live tail. The
+        // label resolves the EFFECTIVE jump-latest key (never a hard-coded
+        // Ctrl+End); the show predicate reads the Host's virtual-window mode,
+        // so a history window keeps the label even when its local view already
+        // follows its end; the click reuses the existing semantic jumpLatest
+        // action — the fork never scrolls a stale history view to its own
+        // bottom instead of returning to the global latest.
+        scrollToEndIndicator: () => {
+          const key = this.keybindings.keyHint('app.transcript.jumpLatest')
+          return color.textDim(key === '' ? '↓ Latest' : `↓ Latest · ${key}`)
+        },
+        shouldShowScrollToEndIndicator: () => this.transcriptWindow?.mode === 'history',
+        onScrollToEndIndicator: () => this.events.onTranscriptJumpLatest?.() === true,
         // Issue #7: the client-local shared clipboard policy — an
         // independent terminal-client OSC 52 leg plus an independent
         // native/platform compatibility leg — replaces the vendor's raw
@@ -6153,12 +6167,14 @@ export class TuiApp {
     return this.searchOverlay !== undefined
   }
 
-  /** Rebuild the history hint from the current effective keymap. */
+  /** Rebuild the history LOCATION hint. The gutter only says where the
+   * window is; how to get back to the live tail is the fullscreen
+   * jump-to-latest affordance's job (the floating `↓ Latest · key` label),
+   * so the gutter no longer repeats the key. */
   private refreshTranscriptWindowHint(): void {
     const window = this.transcriptWindow
-    const latestHint = this.keybindings.keyHint('app.transcript.jumpLatest')
     this.transcriptWindowHint = window?.mode === 'history' && window.firstTurn !== undefined && window.lastTurn !== undefined
-      ? `History · turn ${window.firstTurn}–${window.lastTurn}${latestHint === '' ? '' : ` · ${latestHint} latest`}`
+      ? `History · turn ${window.firstTurn}–${window.lastTurn}`
       : ''
   }
 

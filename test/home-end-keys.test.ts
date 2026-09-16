@@ -50,9 +50,16 @@ function resetKeybindings(): void {
  * carries the bullet prefix (`🐋  line 1`), so the match is a trimmed
  * endsWith. The v0.85.1 full-track scrollbar paints `│`/`┃`/`█` on the
  * last column of every scroll-pane row, so the trailing scrollbar char is
- * stripped before the match. */
+ * stripped before the match. The fullscreen jump-to-latest indicator
+ * composites over the viewport's last row, so it too is stripped — the
+ * assertion must read the underlying transcript row. */
 function viewportHasLine(vt: VirtualTerminal, text: string): boolean {
-  return vt.getViewport().some(line => line.replace(/[│┃█]$/, '').trim().endsWith(text))
+  return vt.getViewport().some(line => line
+    .replace(/\x1b\[[0-9;]*m/g, '')
+    .replace(/↓ Latest.*$/, '')
+    .replace(/[│┃█]$/, '')
+    .trim()
+    .endsWith(text))
 }
 
 // ── the preset itself ────────────────────────────────────────────────────
@@ -722,4 +729,97 @@ test('the Home/End keys row toggle applies the preset immediately and persists',
   const last = t.settings.writes[t.settings.writes.length - 1]
   assert.equal(last?.homeEndKeys, 'input', `wrote: ${JSON.stringify(last)}`)
   t.app.stop()
+})
+
+// ── Fullscreen jump-to-latest indicator ─────────────────────────────────
+
+/** The plain text of the current viewport (ANSI + scrollbar stripped). */
+function indicatorViewport(vt: VirtualTerminal): string[] {
+  return vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/[│┃█]$/, '').trimEnd())
+}
+
+/** SGR primary-button press+release at a 0-based viewport cell. */
+function clickIndicator(vt: VirtualTerminal, x: number, y: number): void {
+  vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+}
+
+test('jump-to-latest indicator: hidden at the live tail, shown after scrolling away', async () => {
+  resetKeybindings()
+  const { vt, app } = startFullscreenApp()
+  await vt.waitForRender()
+  assert.ok(!indicatorViewport(vt).some(line => line.includes('↓ Latest')), 'no indicator while following the live tail')
+
+  app.scrollToTop({ disableFollow: true })
+  await vt.waitForRender()
+  assert.ok(indicatorViewport(vt).some(line => line.includes('↓ Latest · Ctrl+End')),
+    `the indicator must appear after scrolling up:\n${indicatorViewport(vt).join('\n')}`)
+  app.dispose()
+})
+
+test('jump-to-latest indicator: a click returns to the live tail (vendor fallback scroll)', async () => {
+  resetKeybindings()
+  const { vt, app } = startFullscreenApp()
+  await vt.waitForRender()
+  app.scrollToTop({ disableFollow: true })
+  await vt.waitForRender()
+  assert.equal(app.fullscreenScrollForTest()?.isFollowingEnd, false)
+
+  const rows = indicatorViewport(vt)
+  const y = rows.findIndex(line => line.includes('↓ Latest'))
+  assert.ok(y >= 0)
+  clickIndicator(vt, rows[y]!.indexOf('↓'), y)
+  await vt.waitForRender()
+  assert.equal(app.fullscreenScrollForTest()?.isFollowingEnd, true, 'the click must resume follow-end')
+  app.dispose()
+})
+
+test('jump-to-latest indicator: a history window shows it even at its own end', async () => {
+  resetKeybindings()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'short history' }], undefined, {
+    mode: 'history', endTurn: 0, firstTurn: 0, lastTurn: 0,
+  })
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.equal(app.fullscreenScrollForTest()?.isFollowingEnd, true, 'short history content follows its own end')
+  assert.ok(indicatorViewport(vt).some(line => line.includes('↓ Latest')),
+    `a history window must still offer the way back:\n${indicatorViewport(vt).join('\n')}`)
+  app.dispose()
+})
+
+test('jump-to-latest indicator: a history click runs the host semantic jump back to latest', async () => {
+  resetKeybindings()
+  const vt = new VirtualTerminal(80, 24)
+  let jumpCalls = 0
+  let app!: TuiApp
+  app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onTranscriptJumpLatest: () => {
+      jumpCalls += 1
+      app.setTranscript([{ kind: 'assistant', turn: 0, text: 'latest tail' }], undefined, { mode: 'latest' })
+      app.scrollToBottom()
+      return true
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'old history window' }], undefined, {
+    mode: 'history', endTurn: 0, firstTurn: 0, lastTurn: 0,
+  })
+  app.setFullscreen(true)
+  await vt.waitForRender()
+
+  const rows = indicatorViewport(vt)
+  const y = rows.findIndex(line => line.includes('↓ Latest'))
+  assert.ok(y >= 0, `history indicator missing:\n${rows.join('\n')}`)
+  clickIndicator(vt, rows[y]!.indexOf('↓'), y)
+  await vt.waitForRender()
+  assert.equal(jumpCalls, 1, 'the semantic host action must run')
+  assert.ok(!indicatorViewport(vt).some(line => line.includes('↓ Latest')), 'the indicator disappears at latest')
+  app.dispose()
 })
