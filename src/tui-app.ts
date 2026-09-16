@@ -5778,6 +5778,14 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     const active = this.fullscreen !== undefined
     if (enabled === active) return
+    // Entering fullscreen from a regular surface with NO effective expand key:
+    // that surface never folded, so any per-message long-user override it
+    // carries is stale and must not leak a full render into fullscreen Focus,
+    // whose only long-user affordance is the compact marker. A regular surface
+    // WITH the key keeps its search reveal across the swap.
+    if (enabled && !this.userDisclosureAffordanceAvailable()) {
+      this.clearUserMessageDisclosureOverrides()
+    }
     this.clearFocusLiveHeightState()
     const pending = this.activeApproval
     const history = this.historyPanel
@@ -6351,10 +6359,14 @@ export class TuiApp {
     if (turn !== undefined && this.focusModeEnabled) {
       this.setFocusTurnExpanded(turn, true)
     }
-    if (isUserMessageDisclosureCandidate(message) && this.userMessageCompactsAtCurrentWidth(message)) {
-      // Only a bubble that is actually collapsed needs the override: writing
-      // one for a short prompt would be an invisible no-op that later consumes
-      // a Ctrl+O collapse.
+    if (isUserMessageDisclosureCandidate(message)
+      && this.userDisclosureAffordanceAvailable()
+      && this.userMessageCompactsAtCurrentWidth(message)) {
+      // Only a bubble the CURRENT surface actually folds needs the override:
+      // a short prompt, or a regular surface with no expand key (which renders
+      // the prompt in full), would otherwise accumulate an invisible override
+      // that later consumes a Ctrl+O collapse or leaks a full render into a
+      // fullscreen Focus whose only affordance is the compact marker.
       if (this.expandedOverride.get(message) !== true) this.clearFocusLiveHeightState()
       this.expandedOverride.set(message, true)
     }
