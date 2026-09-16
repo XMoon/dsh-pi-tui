@@ -2173,12 +2173,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private compositeScrollToEndIndicator(screen: string[], layout: LayoutFrame, width: number): string[] {
 		this.scrollToEndIndicatorRect = undefined;
 		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
+		// The host predicate is part of the documented contract only when an
+		// indicator is configured AND the primary view supports follow-end:
+		// short-circuit those prerequisites before consulting it.
+		if (!this.scrollToEndIndicator || !scrollView.followEnd) return screen;
 		const hostNeedsIndicator = this.shouldShowScrollToEndIndicator?.() === true;
-		if (
-			!this.scrollToEndIndicator ||
-			!scrollView.followEnd ||
-			(scrollView.isFollowingEnd && !hostNeedsIndicator)
-		) {
+		if (scrollView.isFollowingEnd && !hostNeedsIndicator) {
 			return screen;
 		}
 		const box = getScrollViewBox(layout, scrollView);

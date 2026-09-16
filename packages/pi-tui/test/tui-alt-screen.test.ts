@@ -259,6 +259,44 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("does not consult the host indicator predicate without a configured indicator", async () => {
+		const terminal = new VirtualTerminal(30, 3);
+		let calls = 0;
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			shouldShowScrollToEndIndicator: () => {
+				calls += 1;
+				return true;
+			},
+		});
+		const transcript = new ScrollView(new Text("one\ntwo\nthree\nfour\nfive", 0, 0), { primary: true });
+		tui.setLayoutRoot(transcript);
+		tui.start();
+		await terminal.waitForRender();
+
+		assert.strictEqual(calls, 0, "no indicator configured: the predicate must not be consulted");
+		tui.stop();
+	});
+
+	it("does not consult the host indicator predicate for a primary view without follow-end", async () => {
+		const terminal = new VirtualTerminal(30, 3);
+		let calls = 0;
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			scrollToEndIndicator: () => " ↓ Jump to end ",
+			shouldShowScrollToEndIndicator: () => {
+				calls += 1;
+				return true;
+			},
+		});
+		const transcript = new ScrollView(new Text("one\ntwo\nthree\nfour\nfive", 0, 0), { primary: true });
+		tui.setLayoutRoot(transcript);
+		tui.start();
+		await terminal.waitForRender();
+
+		assert.strictEqual(calls, 0, "follow-end unsupported: the predicate must not be consulted");
+		assert.ok(!terminal.getViewport().some((line) => line.includes("Jump to end")));
+		tui.stop();
+	});
+
 	it("lets the host consume the jump-to-end click instead of scrolling locally", async () => {
 		const terminal = new VirtualTerminal(30, 6);
 		let handled = 0;
