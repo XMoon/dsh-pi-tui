@@ -147,21 +147,34 @@ export class OverlayBroker {
   }
 
   /**
-   * The tracked close wrapper for one handle. An EXPLICIT proxy (round-1
-   * finding 3 — never a spread: the raw handle's methods are closures over
-   * private state and may gain non-enumerable members; the wrapper must
-   * forward every API surface verbatim). The ONLY difference from the raw
-   * handle: hide() becomes the tracked close (question-aware, graph-
-   * cleaning), while setHidden/isHidden/focus/unfocus/isFocused forward.
+   * The tracked wrapper for one handle. An EXPLICIT proxy (round-1 finding
+   * 3 — never a spread: the raw handle's methods are closures over private
+   * state and may gain non-enumerable members; the wrapper must forward
+   * every API surface verbatim). The differences from the raw handle:
+   * hide() becomes the tracked close (question-aware, graph-cleaning), and
+   * EVERY focus-changing operation (hide/setHidden/focus/unfocus)
+   * re-derives the host's focused seat — the host's physical owner may have
+   * moved, and the invariant must hold for blur/show/hide too, not only for
+   * close. Internal caller-free restores use the RAW handles and reconcile
+   * once at their own boundary.
    */
   private wrapClose(handle: OverlayHandle): OverlayHandle {
     const broker = this
     return {
       hide: () => broker.closeForHost(handle),
-      setHidden: (hidden: boolean) => handle.setHidden(hidden),
+      setHidden: (hidden: boolean) => {
+        handle.setHidden(hidden)
+        broker.deps.reconcileFocusSeat?.()
+      },
       isHidden: () => handle.isHidden(),
-      focus: () => handle.focus(),
-      unfocus: (options?: Parameters<OverlayHandle['unfocus']>[0]) => handle.unfocus(options),
+      focus: () => {
+        handle.focus()
+        broker.deps.reconcileFocusSeat?.()
+      },
+      unfocus: (options?: Parameters<OverlayHandle['unfocus']>[0]) => {
+        handle.unfocus(options)
+        broker.deps.reconcileFocusSeat?.()
+      },
       isFocused: () => handle.isFocused(),
       getBounds: () => handle.getBounds(),
     }
@@ -242,12 +255,24 @@ export class OverlayBroker {
     this.dependents.clear()
   }
 
-  /** Whether a VISIBLE capturing overlay currently owns the keyboard. A
-   * nonCapturing notice never takes focus, and a hidden capturing entry has
-   * released it, so neither may fence an editor-seat focus handoff. */
+  /** Whether a VISIBLE capturing overlay is mounted (modal/pointer
+   * presence). This is the STACKING/pointer fact, never the keyboard fact: a
+   * blurred interactive overlay is still visible and still intercepts
+   * pointer events in its own region. */
   hasVisibleCapturingOverlay(): boolean {
     for (const handle of this.capturing) {
       if (!handle.isHidden()) return true
+    }
+    return false
+  }
+
+  /** Whether a capturing overlay currently HOLDS keyboard focus (visible,
+   * not hidden, and physically focused). This is the KEYBOARD-ownership
+   * fact: a `blur()`ed (or hidden) capturing overlay is visible but the
+   * editor owns the keyboard again, so the Host shortcut ladder must run. */
+  hasFocusedCapturingOverlay(): boolean {
+    for (const handle of this.capturing) {
+      if (!handle.isHidden() && handle.isFocused()) return true
     }
     return false
   }

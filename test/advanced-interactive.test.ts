@@ -326,3 +326,96 @@ test('advanced input route: a throwing capture fails open (the editor still rece
   assert.equal(app.seatTextForTest(), 'q', 'a throwing capture never stalls the editor')
   app.stop()
 })
+
+/** A TuiApp whose empty-editor ↓ affordance is observable (Host shortcut probe). */
+async function appWithTasksTrigger() {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  let opened = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onOpenTasks: () => { opened += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  app.setTasks([{ id: 'job:1', label: 'build', status: 'running' }])
+  await vt.waitForRender()
+  return { vt, app, opened: () => opened }
+}
+
+test('an advanced overlay blur() releases the keyboard seat; focus() reclaims it', async () => {
+  const { vt, app, opened } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const component = interactiveComponent({ text: () => 'advanced overlay' })
+  const lease = app.showAdvancedInteractiveOverlay(component)
+  await vt.waitForRender()
+
+  assert.equal(lease.focused, true)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  vt.sendInput('\x1b[B') // ↓ Quick Tasks
+  await vt.waitForRender()
+  assert.equal(opened(), 0, 'a FOCUSED capturing overlay fences the Host shortcut ladder')
+
+  // blur() releases focus: the overlay stays VISIBLE but the editor owns the
+  // keyboard again — the keybinding/input facts must follow, not the mere
+  // presence of a visible capturing entry.
+  lease.blur()
+  await vt.waitForRender()
+  assert.ok(view().includes('advanced overlay'), `the blurred overlay must stay visible:\n${view()}`)
+  assert.equal(lease.focused, false, 'the lease reports the released focus')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'physical focus returns to the editor')
+  assert.equal(app.focusSeatForTest(), 'editor', 'a blurred capturing overlay must not own the seat')
+
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened(), 1, '↓ must work while the capturing overlay is blurred')
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'x', 'typing reaches the editor while the overlay is blurred')
+
+  // focus() reclaims the keyboard.
+  lease.focus()
+  await vt.waitForRender()
+  assert.equal(lease.focused, true)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened(), 1, 'the Host shortcut is fenced again while the overlay holds focus')
+  lease.close()
+  app.stop()
+})
+
+test('an advanced overlay hide()/show() moves the keyboard owner', async () => {
+  const { vt, app, opened } = await appWithTasksTrigger()
+  const component = interactiveComponent({ text: () => 'advanced overlay' })
+  const lease = app.showAdvancedInteractiveOverlay(component)
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'overlay')
+
+  lease.hide()
+  await vt.waitForRender()
+  assert.equal(lease.focused, false)
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  assert.equal(app.focusSeatForTest(), 'editor', 'a hidden capturing overlay must not own the seat')
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened(), 1, '↓ must work while the capturing overlay is hidden')
+
+  lease.show()
+  await vt.waitForRender()
+  assert.equal(lease.focused, true)
+  assert.equal(app.focusSeatForTest(), 'overlay', 'showing a capturing overlay reclaims the seat')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened(), 1, 'the Host shortcut is fenced again after show()')
+  lease.close()
+  app.stop()
+})

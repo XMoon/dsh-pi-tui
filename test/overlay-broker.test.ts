@@ -516,3 +516,34 @@ test('TuiApp: closing a capturing overlay restores the underlying overlay seat A
   app.stop()
 })
 
+
+test('TuiApp: a stable capturing overlay hide()/show() moves the keyboard seat', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+
+  const lease = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'stable overlay' }] })
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'a capturing lease takes physical focus on mount')
+
+  // Temporary hide releases the keyboard WITHOUT closing the overlay.
+  lease.hide()
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'hiding the lease returns physical focus to the editor')
+  assert.equal(app.focusSeatForTest(), 'editor', 'a hidden capturing overlay must not own the seat')
+
+  // show() re-focuses and reclaims the seat.
+  lease.show()
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  lease.close()
+  app.stop()
+})
