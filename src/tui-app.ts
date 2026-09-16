@@ -10592,8 +10592,14 @@ export class TuiApp {
     // registry revision comparison is the CHEAP gate (plan §23): renderer
     // functions run only inside buildMessage, never for unchanged content.
     const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.snapshot().revision
+    // The user boundary is read ONLY by the long-user fold: comparing it for
+    // every kind would rebuild every assistant/tool/system/plugin component
+    // (and re-run extension renderers) whenever a new user turn shifts the
+    // window. Scope the comparison to the long-user candidates that consume it.
+    const userBoundaryChanged = isUserMessageDisclosureCandidate(message)
+      && entry.userBoundary !== userBoundary
     if (entry.boundary !== boundary
-      || entry.userBoundary !== userBoundary
+      || userBoundaryChanged
       || (entry.builtWidth !== undefined && entry.builtWidth !== width)
       || entry.themeRev !== this.themeRevision
       || entry.iconStyle !== this.iconStyle
