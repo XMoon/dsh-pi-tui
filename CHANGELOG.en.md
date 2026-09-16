@@ -24,6 +24,19 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
 
 ### Changed
 
+- **`/model` is now a searchable model command palette.** It opens straight onto
+  every model grouped by provider, with one search across provider/model names
+  and ids; `Enter` selects the model directly and `→` opens reasoning effort
+  inside the SAME overlay (no provider-first step); current vs default and the
+  effort state are labelled separately, the description expands only on the
+  highlighted row, and a fullscreen switch keeps the query, selection, and
+  effort cursor. DSH session and global-default model semantics are unchanged.
+- **`/settings` "Subagent allowed models" now uses the same searchable grouped
+  list.** Provider is a group only, `Enter` toggles an allowed route directly,
+  and one search covers provider/model names and ids; the official
+  whole-section write, last-route guard, serialized writes, and failure
+  rollback are unchanged, and one provider's load failure never blocks the
+  others.
 - **Quick Tasks keyboard interaction is now navigation-only, so ordinary
   printable input can no longer enter hidden states.** The Footer `↓` Quick
   Tasks view responds only to the arrow keys, `Tab`, `Enter`, and `Esc`; every

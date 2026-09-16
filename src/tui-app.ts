@@ -44,6 +44,7 @@ import {
   isFocusable,
   type OverlayHandle,
   type OverlayOptions,
+  type RowBudgetAware,
   type SettingItem,
   type SlashCommand,
   type Terminal,
@@ -667,17 +668,35 @@ interface ResponsiveOverlayGeometry {
 class ResponsiveOverlayFrame extends FocusForwardingFrame {
   private readonly geometryOf: () => ResponsiveOverlayGeometry
   private readonly onGeometry: ((geometry: ResponsiveOverlayGeometry) => void) | undefined
+  /** Teardown notification: fired exactly once when the overlay is hidden and
+   *  this frame is disposed — the ONLY hide-independent signal (Esc, the
+   *  returned closer, and a fullscreen screen swap all dispose the entry). */
+  private readonly onDispose: (() => void) | undefined
+  private disposeNotified = false
   private lastGeometryKey = ''
+  /** Geometry key of the last PAINTED frame (empty before the first paint). */
+  private lastPaintGeometryKey = ''
 
   constructor(
     child: Component,
     geometryOf: () => ResponsiveOverlayGeometry,
     onGeometry?: (geometry: ResponsiveOverlayGeometry) => void,
+    onDispose?: () => void,
   ) {
     super(child, true)
     this.geometryOf = geometryOf
     this.onGeometry = onGeometry
+    this.onDispose = onDispose
     this.syncGeometry()
+  }
+
+  /** Notify a teardown observer exactly once, whatever hide path removed the
+   *  overlay (the frame is the owner disposed by disposeOnHide). */
+  dispose(): void {
+    super.dispose()
+    if (this.disposeNotified) return
+    this.disposeNotified = true
+    this.onDispose?.()
   }
 
   /** Re-run the geometry callback without scheduling a frame. */
@@ -690,11 +709,27 @@ class ResponsiveOverlayFrame extends FocusForwardingFrame {
     return geometry
   }
 
+  /**
+   * Last-painted-geometry fence (plan §16.7): a terminal resize changes the
+   * overlay's clamped geometry and centering, but until the next frame the
+   * frame's child offset/width and the child's hit map still describe the
+   * PREVIOUS screen. A pointer event in that window must be rejected rather
+   * than resolved against stale geometry.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
+    if (this.geometryOf().key !== this.lastPaintGeometryKey) return undefined
+    return super.handleMouse(event)
+  }
+
   render(width: number): string[] {
     const geometry = this.syncGeometry()
     const availableWidth = Math.max(1, Math.floor(width))
     const frameWidth = Math.max(1, Math.min(availableWidth, Math.floor(geometry.width)))
     const lines = super.render(frameWidth)
+    // Only a COMPLETED composition counts as a paint: if the child render
+    // throws, the offsets/hit map are still the previous frame's, so the key
+    // must stay old and keep the fence closed.
+    this.lastPaintGeometryKey = geometry.key
     if (frameWidth === availableWidth) return lines
     const left = Math.max(0, Math.floor((availableWidth - frameWidth) / 2))
     // The centered frame shifts the child content box right by `left`
@@ -3014,6 +3049,14 @@ export class TuiApp {
   private historyOverlay: OverlayHandle | undefined
   /** The responsive shell survives a resize and a fullscreen screen swap. */
   private historyResponsiveFrame: ResponsiveOverlayFrame | undefined
+  /** The `/model` picker component while one is open: retained across a
+   *  fullscreen screen swap (the remountable overlay opts out of
+   *  disposeOnHide, so the SAME component keeps its query/view/selection). */
+  private modelPickerComponent: (Component & RowBudgetAware) | undefined
+  /** The live overlay handle of the /model picker (hide() closes it). */
+  private modelPickerOverlay: OverlayHandle | undefined
+  /** The live responsive frame of the /model picker. */
+  private modelPickerFrame: ResponsiveOverlayFrame | undefined
   /** Footer configurators own paste timers outside the generic overlay
    * disposal path; final surface disposal closes every still-open one. */
   private readonly footerConfiguratorClosers = new Set<() => void>()
@@ -4163,6 +4206,12 @@ export class TuiApp {
     this.historyPanel?.dispose()
     this.historyPanel = undefined
     this.historyOverlay = undefined
+    // The /model picker component dies with the surface too: a remountable
+    // overlay opts out of disposeOnHide, so final teardown owns it explicitly.
+    this.modelPickerComponent?.dispose?.()
+    this.modelPickerComponent = undefined
+    this.modelPickerOverlay = undefined
+    this.modelPickerFrame = undefined
     this.status = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
     // Detach the extension surface host: its subscriptions and capability
     // set die with the surface (M2 stale-generation contract).
@@ -5633,6 +5682,7 @@ export class TuiApp {
     this.clearFocusLiveHeightState()
     const pending = this.activeApproval
     const history = this.historyPanel
+    const modelPicker = this.modelPickerComponent
     pending?.handle?.hide()
     this.disposeTrackedKeybindingEditors()
     // overlayHandles holds RAW handles (showOverlayOnHost stores them before
@@ -5841,6 +5891,13 @@ export class TuiApp {
     this.historyOverlay = undefined
     this.historyResponsiveFrame = undefined
     if (history !== undefined) this.mountHistoryOverlay(history)
+    // The /model picker is likewise remountable: its old handle died with the
+    // screen without disposing the retained component, so re-mount the SAME
+    // instance (query/view/selection/effort cursor survive). It is mounted
+    // BEFORE the rebuilt approval so a picker that was suspended beneath an
+    // approval keeps the same stack relationship (the approval re-suspends
+    // the fresh picker handle).
+    if (modelPicker !== undefined) this.mountModelPickerOverlay(modelPicker)
     if (pending !== undefined) this.renderApprovalDialog(pending)
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
@@ -5955,7 +6012,10 @@ export class TuiApp {
       return {
         width: geometry.width,
         maxHeight: geometry.maxHeight,
-        key: `${geometry.width}:${geometry.maxHeight}:${geometry.panelRows}`,
+        // The raw terminal dims are part of the identity: once the history
+        // geometry caps are reached a pure resize would otherwise leave the
+        // key unchanged and defeat the last-painted-geometry mouse fence.
+        key: `${this.terminal.columns}:${this.terminal.rows}:${geometry.width}:${geometry.maxHeight}:${geometry.panelRows}`,
       }
     }
     const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
@@ -13448,7 +13508,7 @@ export class TuiApp {
     const geometryOf = (): ResponsiveOverlayGeometry => {
       const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
       const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
-      return { width, maxHeight, key: `${width}:${maxHeight}` }
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
     }
     const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
       list.setMaxRows(Math.max(1, geometry.maxHeight - 2))
@@ -13719,7 +13779,7 @@ export class TuiApp {
       const geometryOf = (): ResponsiveOverlayGeometry => {
         const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
         const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
-        return { width, maxHeight, key: `${width}:${maxHeight}` }
+        return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
       }
       const frame = new ResponsiveOverlayFrame(mounted, geometryOf, geometry => {
         // The externally-filtered composite renders the search Input +
@@ -13923,7 +13983,7 @@ export class TuiApp {
       const availHeight = Math.max(1, this.terminal.rows - marginInset)
       const width = resolveSize(overlayWidth, this.terminal.columns, availWidth)
       const maxHeight = resolveSize(overlayMaxHeight, this.terminal.rows, availHeight)
-      return { width, maxHeight, key: `${width}:${maxHeight}` }
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
     }
     const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
       panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
@@ -13961,6 +14021,59 @@ export class TuiApp {
   }
 
   /**
+   * Mount the `/model` picker as a root-owned responsive capturing overlay.
+   * A narrow seam: the component owns every picker view/state (`models` ↔
+   * `efforts` swaps inside the SAME mounted component — never a nested
+   * overlay); the host owns only the responsive frame, the row-budget grant
+   * and the OverlayBroker registration/ownership. Returns a closer.
+   */
+  openModelPicker(component: Component & RowBudgetAware): () => void {
+    this.modelPickerComponent = component
+    this.mountModelPickerOverlay(component)
+    // The closer targets the CURRENT handle: a fullscreen screen swap
+    // remounts the SAME component behind a fresh handle, and the user's
+    // close must still reach it.
+    return () => this.closeModelPicker()
+  }
+
+  /** Mount the `/model` picker frame around its (retained) component. The
+   *  overlay is REMOUNTABLE: a fullscreen screen swap hides it without
+   *  disposing the component, and `setFullscreen()` re-mounts the same
+   *  instance on the new screen so query/view/selection/effort cursor are
+   *  preserved (plan §9.3/§19.6). */
+  private mountModelPickerOverlay(component: Component & RowBudgetAware): void {
+    const configuredWidth = 72
+    const configuredMaxHeight = 28
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
+    }
+    const frame = new ResponsiveOverlayFrame(component, geometryOf, geometry => {
+      component.setMaxRows?.(Math.max(1, geometry.maxHeight - 2))
+    })
+    this.modelPickerFrame = frame
+    this.modelPickerOverlay = this.showOverlayOnHost(
+      frame,
+      { width: configuredWidth, maxHeight: configuredMaxHeight },
+      { remountable: true },
+    )
+  }
+
+  /** Close the /model picker for good: drop the handle and dispose the
+   *  retained component explicitly (a remountable overlay opts out of
+   *  disposeOnHide, so the final close owns the component lifecycle). */
+  private closeModelPicker(): void {
+    const overlay = this.modelPickerOverlay
+    const component = this.modelPickerComponent
+    this.modelPickerOverlay = undefined
+    this.modelPickerFrame = undefined
+    this.modelPickerComponent = undefined
+    overlay?.hide()
+    component?.dispose?.()
+  }
+
+  /**
    * Open the settings overlay as a SettingsList. The runner supplies the
    * items and reacts to changes/cancellation. Returns a CLOSER so an
    * action-style list (e.g. /subagents' View transcript / Interrupt) can
@@ -13986,6 +14099,10 @@ export class TuiApp {
       navigate?: (targetId: string) => void,
     ) => void,
     onCancel: () => void,
+    /** Fired once when the overlay is torn down by ANY hide path (Esc, the
+     *  returned closer, a fullscreen screen swap) — the teardown-aware hook
+     *  a caller needs to stop touching a surface that no longer exists. */
+    onHidden?: () => void,
   ): () => void {
     // SettingsList fires onCancel on Esc/ctrl+c; the overlay must close too,
     // so the cancel callback closes the handle captured after mounting.
@@ -14015,11 +14132,11 @@ export class TuiApp {
     const geometryOf = (): ResponsiveOverlayGeometry => {
       const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
       const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
-      return { width, maxHeight, key: `${width}:${maxHeight}` }
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
     }
     const frame = new ResponsiveOverlayFrame(settings, geometryOf, geometry => {
       settings.setMaxRows(Math.max(1, geometry.maxHeight - 2))
-    })
+    }, onHidden)
     handle = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
     return () => handle?.hide()
   }
@@ -14438,7 +14555,9 @@ export class TuiApp {
       return {
         width: geometry.width,
         maxHeight: geometry.maxHeight,
-        key: `${geometry.width}:${geometry.maxHeight}:${geometry.contentWidth}`,
+        // Raw terminal dims keep the key resize-sensitive once the approval
+        // geometry caps are reached (last-painted-geometry mouse fence).
+        key: `${this.terminal.columns}:${this.terminal.rows}:${geometry.width}:${geometry.maxHeight}:${geometry.contentWidth}`,
       }
     })
     pending.responsiveFrame = frame

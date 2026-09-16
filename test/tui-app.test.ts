@@ -925,6 +925,52 @@ test('history overlay reflows geometry without restarting its search state', asy
   await vt.waitForRender()
 })
 
+test('a history-overlay click before the post-resize repaint is rejected at capped geometry', async () => {
+  const rows = [
+    { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
+    { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
+  ]
+  const source: import('../src/history-search.ts').HistorySearchSource = {
+    search: async () => ({ results: rows, exhausted: true }),
+  }
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true) // only the alt screen dispatches overlay mouse events
+  app.openHistorySearch()
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 100))
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const rowY = vt.getViewport().map(strip).findIndex(line => line.includes('entry alpha'))
+  assert.ok(rowY >= 0, `history rows must be painted:\n${vt.getViewport().map(strip).join('\n')}`)
+  // SGR x is 1-based; the item content starts two cells right of the frame's
+  // left border (`│` + one padding cell).
+  const leftBorder = vt.getViewport().map(strip)[rowY]?.indexOf('│') ?? -1
+  assert.ok(leftBorder >= 0, 'history frame left border missing')
+  const clickX = leftBorder + 3
+  // 40 -> 41 keeps the history maxHeight clamped at 30, so only the RAW
+  // terminal dimensions change; the fence must still reject the stale click.
+  vt.resize(120, 41)
+  vt.sendInput(`\x1b[<0;${clickX};${rowY + 1}M`)
+  vt.sendInput(`\x1b[<0;${clickX};${rowY + 1}m`)
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.ok(vt.getViewport().map(strip).some(line => line.includes('entry alpha')),
+    `a stale-geometry click must not accept a history row:\n${vt.getViewport().map(strip).join('\n')}`)
+  assert.equal(app.seatTextForTest(), '', 'the editor draft must be untouched by the stale click')
+  // After the repaint adopts the new geometry, the click accepts.
+  await vt.waitForRender()
+  const repaintedY = vt.getViewport().map(strip).findIndex(line => line.includes('entry alpha'))
+  assert.ok(repaintedY >= 0)
+  const repaintedX = (vt.getViewport().map(strip)[repaintedY]?.indexOf('│') ?? -1) + 3
+  vt.sendInput(`\x1b[<0;${repaintedX};${repaintedY + 1}M`)
+  vt.sendInput(`\x1b[<0;${repaintedX};${repaintedY + 1}m`)
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(app.seatTextForTest(), 'entry alpha', 'a fresh post-resize click must accept the entry')
+  app.stop()
+})
+
 test('task browser no-match state fits a short terminal without clipping the hint', async () => {
   const { vt, app } = startApp()
   vt.resize(80, 8)

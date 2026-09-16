@@ -657,9 +657,6 @@ test('a failed live default save after a session switch never mutates any Sessio
     assert.ok(modelDef?.handler !== undefined, '/model handler missing')
     await (modelDef!.handler as () => Promise<unknown>)()
     await vt.waitForRender()
-    vt.sendInput('\r') // provider -> model list
-    await vt.waitForRender()
-    await Promise.resolve()
     vt.sendInput('\r') // select the first model → apply → save hangs
     await saveStarted.promise
     const saveM1 = gates.get('m1')
@@ -732,10 +729,7 @@ test('a stale live /model settle never repaints the new Session (no sessionless-
     await vt.waitForRender()
     const saveStartedM1 = deferred<void>()
     saveStarted.set('m1', saveStartedM1.resolve)
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    await Promise.resolve()
-    vt.sendInput('\r')
+    vt.sendInput('\r') // select m1 -> apply -> save hangs
     await saveStartedM1.promise
     assert.equal(proxy.defaultIntent, undefined, 'a live Session write never enters the default-intent tracker')
     // The surface switches to Session B before the write settles.
@@ -794,9 +788,6 @@ test('a sessionless /model pick awaits its default save and reports the committe
     assert.ok(modelDef?.handler !== undefined, '/model handler missing')
     await (modelDef!.handler as () => Promise<unknown>)()
     await vt.waitForRender()
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    await Promise.resolve()
     vt.sendInput('\r') // pick m1 -> the picker awaits the global-default save
     await saveStarted.promise
     await vt.waitForRender()
@@ -852,9 +843,6 @@ test('an AMBIGUOUS sessionless default save keeps an explicit UNRESOLVED intent,
     assert.ok(modelDef?.handler !== undefined, '/model handler missing')
     await (modelDef!.handler as () => Promise<unknown>)()
     await vt.waitForRender()
-    vt.sendInput('\r')
-    await vt.waitForRender()
-    await Promise.resolve()
     vt.sendInput('\r') // pick m1 -> the save FAILS
     await saveStarted.promise
     await vt.waitForRender()
@@ -1522,13 +1510,10 @@ function scriptedModelCatalog(
   }
 }
 
-/** Drive /model → provider → model so `apply` runs exactly once. */
+/** Drive /model to select the first listed model so `apply` runs exactly once. */
 async function pickFirstModel(vt: VirtualTerminal, handler: () => Promise<unknown>): Promise<void> {
   await handler()
   await vt.waitForRender()
-  vt.sendInput('\r') // provider -> model list
-  await vt.waitForRender()
-  await Promise.resolve()
   vt.sendInput('\r') // select m1 -> apply
   await vt.waitForRender()
   await Promise.resolve()
@@ -1889,10 +1874,8 @@ test('a /model picker opened on S1 cannot apply to S2 after a session switch (su
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await (modelDef!.handler as () => Promise<unknown>)()
   await vt.waitForRender()
-  vt.sendInput('\r') // provider -> model list (the overlay is now open on S1)
-  await vt.waitForRender()
   // Prove the overlay actually opened (not a vacuous early return).
-  assert.match(vt.getViewport().join('\n'), /Type to search/, 'the model picker must open before the switch')
+  assert.match(vt.getViewport().join('\n'), /Models/, 'the model picker must open before the switch')
   // A Session switch lands AFTER the overlay opened.
   state.agent = fakeAgent('session-b')
   state.generation = 2
@@ -1943,9 +1926,7 @@ test('a sessionless /model picker cannot write a Session that appeared in the sa
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await (modelDef!.handler as () => Promise<unknown>)()
   await vt.waitForRender()
-  vt.sendInput('\r') // provider -> model list (sessionless picker opened)
-  await vt.waitForRender()
-  assert.match(vt.getViewport().join('\n'), /Type to search/, 'the sessionless picker must open before the create')
+  assert.match(vt.getViewport().join('\n'), /Models/, 'the sessionless picker must open before the create')
   // A first create publishes a live Agent BEFORE the generation bump.
   state.agent = fakeAgent('session-new')
   vt.sendInput('\r') // submit the stale sessionless overlay

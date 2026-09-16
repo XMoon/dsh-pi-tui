@@ -176,8 +176,10 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 **Host**
 - src/tui-app.ts openPicker and categorized picker rebuild (now Host SearchablePicker)
 - src/commands.ts session picker via the TuiApp picker surface (PickerItem/PickerCategory; no direct SelectList import)
+- src/model-picker.ts /model ModelPicker (Models/Efforts views via the Host SearchablePicker)
+- src/subagent-model-menu.ts SubagentModelAllowlistPicker (/settings allowlist flat list via the Host SearchablePicker)
 - advanced ui.select picker adapter
-- Audit note: The Host consumers exercise query, grouping, dynamic rows, and row budgets through TuiApp.openPicker/openCategorizedPicker, which now construct the Host SearchablePicker; the model picker in src/model-menu.ts and footer/configurator.ts are host-owned SettingsList/Input flows, not X001 consumers. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics.
+- Audit note: The Host consumers exercise query, grouping, dynamic rows, and row budgets through TuiApp.openPicker/openCategorizedPicker, which now construct the Host SearchablePicker, and through src/model-picker.ts (which constructs SearchablePicker directly for the /model Models/Efforts views); the footer configurator remains a host-owned SettingsList/Input flow, not an X001 consumer. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics.
 
 **Public / extension**
 - Advanced ui.select and picker adapter contracts expose the searchable picker behavior to host-owned integrations.
@@ -193,6 +195,8 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 #### Guarding tests
 
 - test/searchable-picker.test.ts: search, groups, paging, setFilter, and zero-match navigation
+- test/model-picker.test.ts: /model Models/Efforts views exercise SearchablePicker search, grouping, selected-only detail, identity selection, and row budget
+- test/subagent-model-menu.test.ts: /settings allowlist picker exercises SearchablePicker search, provider grouping, partial failure, row budget, and mouse/focus
 - test/session-picker-loading.test.ts and picker integration coverage
 - test/session-categories.test.ts: categorized picker query carry
 - test/sessions.test.ts: PickerHandle.setItems and initialQuery
@@ -723,8 +727,9 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - src/tui-app.ts OverlayBroker.disposeAll and overlay leases
 - editor seat, panels, timers, and fullscreen surface teardown
 - test/pi-component-compat.test.ts public component compatibility
-- src/model-menu.ts ModelSubmenu/EffortSubmenu ownership-safe external dispose (latch/abort owned async work, dispose owned inner exactly once, never done/apply/navigation on teardown)
-- Audit note: Host final teardown relies on exactly-once release. Post-v0.85.1 audit: ModelSubmenu and EffortSubmenu now implement ownership-safe external dispose so the SettingsList's submenuComponent.dispose() chain (owner → ModelSubmenu → inner SettingsList → nested EffortSubmenu) latches/aborts every owned async workflow; late resolves cannot repaint or apply after teardown (regressions in test/model-menu.test.ts).
+- src/model-picker.ts ModelPicker ownership-safe external dispose (idempotent disposed latch; teardown never closes/applies/navigates, and a late write settlement cannot act on a dead surface)
+- src/subagent-model-menu.ts SubagentModelAllowlistPicker ownership-safe external dispose (idempotent disposed latch; a late allowlist settle cannot repaint or toast after the submenu closed)
+- Audit note: Host final teardown relies on exactly-once release. Post-v0.85.1 audit: the SettingsList submenu consumer (theme-menu) and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) implement ownership-safe external dispose so a late async settle cannot repaint or apply after teardown (regressions in test/model-picker.test.ts and test/subagent-model-menu.test.ts).
 
 **Public / extension**
 - Stable/Advanced/Unstable extension mounts and public component leases
@@ -745,7 +750,8 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - packages/pi-tui/test/layout.test.ts: Stack entries and disposed layout behavior
 - packages/pi-tui/test/overlay-options.test.ts: disposeOnHide ownership
 - packages/pi-tui/test/dispose-lifecycle.test.ts: MouseRegion dispose forwarding — owned child disposed exactly once, wrapped Loader timer cleared
-- test/model-menu.test.ts: ModelSubmenu/EffortSubmenu ownership-safe external dispose — dispose latches/aborts pending work without done/apply/navigation, and the owner → ModelSubmenu → inner SettingsList → nested EffortSubmenu chain terminates a late effort resolve
+- test/model-picker.test.ts: ModelPicker ownership-safe external dispose — dispose latches without close/apply/navigation, and a late write settlement after teardown makes no close/open decision
+- test/subagent-model-menu.test.ts: SubagentModelAllowlistPicker ownership-safe external dispose — dispose latches, and a write settling after the submenu closed converges the outer row through the summarize seam without a late toast
 
 #### Upstream comparison
 
@@ -3477,13 +3483,15 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 **Inheritance / structural**
 - SettingsList implements Focusable; SettingsList forwards only when a submenu structurally exposes focused.
-- Audit note: The conditional optional-method edge is real; post-v0.85.1 audit: ALL four Host submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps), so the SettingsList propagateFocus() edge reaches every submenu's focus-sensitive child.
+- Audit note: The conditional optional-method edge is real; post-v0.85.1 audit: the Host SettingsList submenu wrapper ThemeSubmenu implements Focusable and forwards the focused flag to its inner SettingsList, and the two SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) forward the focused flag to their ACTIVE SearchablePicker (which forwards to its search Input), so the focus edge reaches every focus-sensitive child.
 
 **Host**
 - src/tui-app.ts FocusForwardingFrame and settings overlays
-- src/theme-menu.ts, src/model-menu.ts, and src/subagent-model-menu.ts submenu wrappers
-- test/theme-picker.test.ts and test/model-menu.test.ts CURSOR_MARKER regressions
-- Audit note: Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. Post-v0.85.1 audit: all four submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) forward Focusable state to their inner SettingsList/Input, including ModelSubmenu's async inner replacement (the swapped-in searchable list receives the already-active focus and emits CURSOR_MARKER); the non-searchable wrappers (EffortSubmenu, SubagentModelAllowlistSubmenu) forward the flag too, so no IME/cursor path is lost at any wrapper boundary.
+- src/theme-menu.ts SettingsList submenu wrapper
+- src/subagent-model-menu.ts SubagentModelAllowlistPicker forwards focus to its SearchablePicker
+- src/model-picker.ts ModelPicker forwards focus to its active SearchablePicker
+- test/theme-picker.test.ts and test/model-picker.test.ts CURSOR_MARKER regressions
+- Audit note: Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. Post-v0.85.1 audit: ThemeSubmenu forwards Focusable state to its inner SettingsList, and the /settings SubagentModelAllowlistPicker and the /model ModelPicker forward the active view's focused flag through to their SearchablePicker search Input so the IME cursor marker survives submenu/view transitions.
 
 **Public / extension**
 - Focusable component interface and row-budget-aware submenu public shape.
@@ -3494,17 +3502,19 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 - IME candidate window follows top-level search focus
 - submenu receives focus only when it implements Focusable
 - selection/description tail remains within budget
-- Audit note: Post-v0.85.1 audit: ALL four Host submenu wrappers implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps), so the SettingsList propagateFocus() edge reaches every submenu's focus-sensitive child; no follow-up gap remains.
+- Audit note: Post-v0.85.1 audit: the Host SettingsList submenu wrappers implement Focusable and forward the focused flag to their inner SettingsList, and the /model ModelPicker forwards focus to its active SearchablePicker, so the focus edge reaches every focus-sensitive child; no follow-up gap remains.
 
 #### Guarding tests
 
 - packages/pi-tui/test/settings-list.test.ts: focus/row-budget behavior
 - test/extension-focus-seat.test.ts: SurfaceSnapshot.focusedSeat state only (not SettingsList or IME)
 - test/theme-picker.test.ts: ThemeSubmenu forwards focused state to the search Input (CURSOR_MARKER present when focused, absent when not)
-- test/model-menu.test.ts: ModelSubmenu retains focus across the async inner swap (CURSOR_MARKER on the swapped-in searchable list only when focused)
+- test/model-picker.test.ts: ModelPicker keeps the active search Input focused (CURSOR_MARKER present) and restores physical focus after an approval covers it
+- test/subagent-model-menu.test.ts: SubagentModelAllowlistPicker forwards focus to its search Input (CURSOR_MARKER) and keeps a partial-failure row inert
 - packages/pi-tui/test/settings-list.test.ts: description-shrink click identity (Case A), search+shrink row offset (Case B), inert chrome (Case C)
 - packages/pi-tui/test/settings-list.test.ts: a main-list press cannot transfer into a newly-created submenu — the press-time submenu generation fences the release/click (a submenu opened by keyboard after the press never receives a fresh-looking activation)
 - packages/pi-tui/test/settings-list.test.ts: a fresh press+click on a live-but-unpainted submenu is rejected; after the submenu is painted, a fresh press+click activates
+- packages/pi-tui/test/settings-list.test.ts: after a submenu CLOSE without a repaint, a main-list click is rejected while the submenu is still painted (stale main hit map fenced); after the repaint the main row is clickable again, and a pre-close press is consumed so it cannot activate after the close repaint
 
 #### Upstream comparison
 
@@ -3537,7 +3547,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam. Re-audited after the v0.85.1 mouse-parity pass: ALL four Host submenu wrappers (ThemeSubmenu, ModelSubmenu, EffortSubmenu, SubagentModelAllowlistSubmenu) implement Focusable and forward the focused flag to their inner SettingsList (re-applied after async inner swaps); CURSOR_MARKER regressions cover the searchable wrappers, and the non-searchable wrappers forward the flag too, so no IME/cursor path is lost at any wrapper boundary.
+- Notes: The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam. Re-audited after the v0.85.1 mouse-parity pass: the Host SettingsList submenu wrapper ThemeSubmenu implements Focusable and forwards the focused flag to its inner SettingsList, and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) forward focus to their active SearchablePicker (which forwards to its search Input), so the focus edge reaches every focus-sensitive child; CURSOR_MARKER regressions cover ThemeSubmenu and ModelPicker, and no IME/cursor path is lost at any wrapper boundary.
 
 ### X043 — Deferred viewport input listener registration
 

@@ -118,9 +118,10 @@ async function settle(harness: ReturnType<typeof makeHarness>, expectedWrites: n
   for (let i = 0; i < 4; i += 1) await Promise.resolve()
 }
 
-function makeHarness(initial: SettingsDoc): {
+function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean } = {}): {
   runner: TuiCommandRunner
   app: TuiApp
+  vt: VirtualTerminal
   settings: ReturnType<typeof settingsService>
   defs: Array<{ name: string; handler?: unknown }>
   settingsChange: Parameters<TuiApp['openSettings']>[1] | undefined
@@ -153,12 +154,24 @@ function makeHarness(initial: SettingsDoc): {
   let settingsChange: Parameters<TuiApp['openSettings']>[1] | undefined
   let settingsItems: Parameters<TuiApp['openSettings']>[0] | undefined
   let onCancel: (() => void) | undefined
-  app.openSettings = ((...args: Parameters<TuiApp['openSettings']>) => {
-    settingsItems = args[0]
-    settingsChange = args[1]
-    onCancel = args[2]
-    return () => {}
-  }) as TuiApp['openSettings']
+  if (options.realSettings === true) {
+    // Keep the REAL SettingsList mount (the fork generation guard is part of
+    // the behavior under test) while still capturing the panel arguments.
+    const original = app.openSettings.bind(app)
+    app.openSettings = ((...args: Parameters<TuiApp['openSettings']>) => {
+      settingsItems = args[0]
+      settingsChange = args[1]
+      onCancel = args[2]
+      return original(...args)
+    }) as TuiApp['openSettings']
+  } else {
+    app.openSettings = ((...args: Parameters<TuiApp['openSettings']>) => {
+      settingsItems = args[0]
+      settingsChange = args[1]
+      onCancel = args[2]
+      return () => {}
+    }) as TuiApp['openSettings']
+  }
   const runner: TuiCommandRunner = {
     ctx,
     app,
@@ -230,6 +243,7 @@ function makeHarness(initial: SettingsDoc): {
   return {
     runner,
     app,
+    vt,
     settings,
     defs,
     get settingsChange() { return settingsChange },
@@ -325,23 +339,22 @@ test('enabling with a NON-EMPTY allowlist writes the whole official section', as
 
 test('first-time setup happy path: add an allowed route, then enable selection', async () => {
   // The complete first-configuration flow: 0 routes + off → open the
-  // allowlist submenu → pick provider p / model m1 → back to the settings
-  // list → toggle selection ON. The whole section must commit with the
-  // route the user just granted.
+  // allowlist submenu (flat, provider-grouped: NO provider navigation step)
+  // → Enter toggles the highlighted model → ONE Esc returns to the settings
+  // list → toggle selection ON. The whole section must commit with the route
+  // the user just granted.
   const harness = makeHarness({ enabled: false, allowedModels: [] })
   await openSettingsPanel(harness)
   const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
   assert.ok(allowlistRow?.submenu !== undefined, 'the allowlist row must carry the submenu')
   const dones: Array<string | undefined> = []
   const menu = allowlistRow.submenu!('0 routes', (selected) => { dones.push(selected) }) as { handleInput(data: string): void }
-  menu.handleInput(ENTER) // open provider p's models
-  for (let i = 0; i < 8; i += 1) await Promise.resolve()
-  menu.handleInput(ENTER) // toggle m1 ON — commits the first route
+  for (let i = 0; i < 8; i += 1) await Promise.resolve() // let provider discovery settle
+  menu.handleInput(ENTER) // toggle the highlighted model ON directly — no provider step
   await settle(harness, 1)
   assert.deepEqual(harness.settings.doc.allowedModels, [{ provider: 'p', model: 'm1' }], 'the first route commits')
-  menu.handleInput('\x1b') // Esc: model list -> provider list
-  menu.handleInput('\x1b') // Esc: provider list -> close, report the summary
-  assert.deepEqual(dones.at(-1), '1 route', 'the outer row shows the fresh route count')
+  menu.handleInput('\x1b') // ONE Esc returns to /settings and reports the summary
+  assert.deepEqual(dones, ['1 route'], 'a single Esc closes and the outer row shows the fresh route count')
   // Now the toggle may be enabled: the gate must NOT block a non-empty
   // allowlist, and the write carries the committed routes.
   const change = harness.settingsChange!
@@ -357,26 +370,92 @@ test('first-time setup happy path: add an allowed route, then enable selection',
 })
 
 test('closing the WHOLE settings panel disposes the allowlist submenu (no late toast, row converges)', async () => {
-  // The review's outer-teardown scenario: the allowlist submenu is open
-  // with a write pending, and the user closes the ENTIRE /settings panel
-  // (Esc -> the panel's onCancel). The submenu must be disposed with the
-  // panel: the pending write settling afterwards neither toasts nor
-  // repaints, and the outer row still converges to the committed summary.
+  // The outer-teardown scenario: the allowlist submenu is open with a write
+  // pending, and the user closes the ENTIRE /settings panel. The submenu must
+  // be disposed with the panel: the pending write settling afterwards neither
+  // toasts nor repaints, and the captured row's displayed summary converges to
+  // the COMMITTED state through `summarize` (the fork would reject a late
+  // `done`).
   const harness = makeHarness({ enabled: false, allowedModels: [] })
   await openSettingsPanel(harness)
   const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
   assert.ok(allowlistRow?.submenu !== undefined, 'the allowlist row must carry the submenu')
-  const dones: Array<string | undefined> = []
-  const menu = allowlistRow.submenu!('0 routes', (selected) => { dones.push(selected) }) as { handleInput(data: string): void }
-  menu.handleInput(ENTER) // open the provider's models
-  for (let i = 0; i < 8; i += 1) await Promise.resolve()
+  const menu = allowlistRow.submenu!('0 routes', () => {}) as { handleInput(data: string): void }
+  for (let i = 0; i < 8; i += 1) await Promise.resolve() // let provider discovery settle
   harness.settings.failNextWrite()
-  menu.handleInput(ENTER) // toggle m1 ON — this write will FAIL
+  menu.handleInput(ENTER) // toggle the highlighted model ON — this write will FAIL
   // Close the whole panel while the write is still pending.
   const cancel = harness.onCancel
   assert.ok(cancel !== undefined, 'the panel onCancel must be captured')
   cancel()
+  // Count repaints scheduled by the LATE settle only (after the panel closed).
+  let renders = 0
+  const originalRender = harness.app.requestRender.bind(harness.app)
+  harness.app.requestRender = () => { renders += 1; originalRender() }
   await settle(harness, 1)
   assert.equal(harness.notices.length, 0, 'a failure settling after the panel closed stays silent')
-  assert.deepEqual(dones.at(-1), '0 routes', 'the outer row converges to the COMMITTED summary')
+  assert.equal(renders, 0, 'a settle after the WHOLE panel closed must not schedule a repaint')
+  assert.equal(allowlistRow.currentValue, '0 routes',
+    'the outer row still converges to the COMMITTED summary through the summarize seam')
+})
+
+test('a real SettingsList converges the outer row after Esc + a late rejected write', async () => {
+  // The fork SettingsList invalidates a submenu callback once the submenu
+  // closed (its submenu generation guard), so the post-close convergence MUST
+  // go through `summarize`. This drives the REAL SettingsList mount end to
+  // end: open the allowlist submenu via the outer list, toggle with a
+  // deferred rejected write, Esc back to the list, then let the write settle.
+  const harness = makeHarness({ enabled: false, allowedModels: [] }, { realSettings: true })
+  await openSettingsPanel(harness)
+  await harness.vt.waitForRender()
+  // Filter the outer list to the allowlist row, then open its submenu.
+  harness.vt.sendInput('allowed models')
+  await harness.vt.waitForRender()
+  harness.vt.sendInput(ENTER)
+  await harness.vt.waitForRender()
+  for (let i = 0; i < 8; i += 1) await Promise.resolve() // provider discovery settles
+  const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlistRow !== undefined, 'the allowlist row must exist')
+  harness.settings.failNextWrite()
+  harness.vt.sendInput(ENTER) // toggle the highlighted model ON — this write FAILS
+  harness.vt.sendInput('\x1b') // Esc closes the SUBMENU through the real SettingsList
+  await harness.vt.waitForRender()
+  await settle(harness, 1)
+  assert.equal(harness.notices.length, 0, 'a failure settling after the submenu closed stays silent')
+  assert.equal(allowlistRow.currentValue, '0 routes',
+    'the real SettingsList row must converge to the COMMITTED summary after the late rejection')
+  await harness.vt.waitForRender()
+  assert.ok(harness.vt.getViewport().join('\n').includes('0 routes'),
+    `the OUTER rendered row must show the committed summary:\n${harness.vt.getViewport().join('\n')}`)
+})
+
+test('a fullscreen teardown suppresses the late allowlist settle repaint', async () => {
+  // A fullscreen screen swap removes the whole /settings overlay WITHOUT
+  // invoking its onCancel. The teardown-aware `onHidden` hook must flip the
+  // mounted state so a late allowlist write settle does not schedule a
+  // repaint of the removed surface.
+  const harness = makeHarness({ enabled: false, allowedModels: [] }, { realSettings: true })
+  await openSettingsPanel(harness)
+  await harness.vt.waitForRender()
+  harness.vt.sendInput('allowed models')
+  await harness.vt.waitForRender()
+  harness.vt.sendInput(ENTER) // open the submenu
+  await harness.vt.waitForRender()
+  for (let i = 0; i < 8; i += 1) await Promise.resolve() // provider discovery settles
+  const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlistRow !== undefined, 'the allowlist row must exist')
+  const gate = harness.settings.gateNextWrite() // hold the allowlist write pending
+  harness.vt.sendInput(ENTER) // toggle the highlighted model ON — the write is held
+  harness.app.setFullscreen(true) // tears the settings overlay down without onCancel
+  await harness.vt.waitForRender()
+  let renders = 0
+  const originalRender = harness.app.requestRender.bind(harness.app)
+  harness.app.requestRender = () => { renders += 1; originalRender() }
+  gate.release() // the held write settles only after the teardown
+  await settle(harness, 1)
+  assert.equal(harness.notices.length, 0, 'a settle after a fullscreen teardown stays silent')
+  assert.equal(renders, 0, 'a settle after a fullscreen teardown must not schedule a repaint')
+  assert.equal(allowlistRow.currentValue, '1 route', 'the detached row still converges for bookkeeping')
+  harness.app.setFullscreen(false)
+  await harness.vt.waitForRender()
 })

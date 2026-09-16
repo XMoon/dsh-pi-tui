@@ -619,8 +619,6 @@ async function pickSecondModel(app: TuiApp, harness: RunnerHarness): Promise<voi
     const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
     tui.handleTerminalInput(data)
   }
-  input('\r') // provider -> model list
-  await settle()
   input('\x1b[B') // choose m2 instead of the first listed model
   input('\r')
   await settle()
@@ -714,8 +712,6 @@ test('the real runner hydrates resume, deferred create, and switch exactly once 
     const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
     tui.handleTerminalInput(data)
   }
-  await settle()
-  input('\r') // provider -> model list
   await settle()
   input('\x1b[B') // choose m2 instead of the first listed model
   input('\r')

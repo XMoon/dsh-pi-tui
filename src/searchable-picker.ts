@@ -31,12 +31,45 @@ const clamp = (value: number, min: number, max: number): number => Math.max(min,
 
 /** One physical row of the last painted picker frame (mouse hit-testing).
  * The map is built from the EXACT final rows render() returns (including
- * the tiny-budget slicing paths), so a click can only ever act on
+ * the tiny-budget fitting paths), so a click can only ever act on
  * last-painted geometry. (Mouse parity.) */
 type PickerMouseHit =
   | { kind: 'search'; width: number }
   | { kind: 'item'; value: string; index: number }
   | { kind: 'inert' }
+
+/** Painted-row importance for the degenerate tiny-grant fit (lower survives,
+ * plan §17): the search row and the SELECTED item's primary row outrank
+ * plain items, nav chrome, detail, group headers, header chrome, spacers. */
+const ROW_PRIORITY = {
+  search: 0,
+  selectedItem: 0,
+  noMatch: 1,
+  item: 1,
+  indicator: 2,
+  hint: 2,
+  detail: 3,
+  groupHeader: 4,
+  header: 5,
+  spacer: 6,
+} as const
+
+/** The original row indexes to keep when a tiny grant cannot fit the whole
+ * frame: drop the highest priority NUMBER first (least important), and among
+ * equal priorities the later row first, preserving the surviving rows' order. */
+function pickKeptRowIndexes(priorities: readonly number[], limit: number): number[] {
+  const dropped = new Set<number>()
+  const order = priorities.map((_, index) => index).sort((a, b) => priorities[b]! - priorities[a]! || b - a)
+  for (const index of order) {
+    if (priorities.length - dropped.size <= limit) break
+    dropped.add(index)
+  }
+  const kept: number[] = []
+  for (let index = 0; index < priorities.length; index += 1) {
+    if (!dropped.has(index)) kept.push(index)
+  }
+  return kept
+}
 
 /** One picker row; `group` renders a workspace-style header before the group. */
 export interface SearchablePickerItem {
@@ -44,6 +77,25 @@ export interface SearchablePickerItem {
   label: string
   description?: string
   group?: string
+  /**
+   * Stable GROUP IDENTITY for header transitions/counts when it must differ
+   * from the rendered `group` label (e.g. two providers sharing a display
+   * name, or a display section name colliding with another). Defaults to
+   * `group`, so existing consumers keep byte-identical grouping. The header
+   * still renders the `group` text (falling back to the key when absent).
+   */
+  groupKey?: string
+  /**
+   * Right-aligned status text on the primary row (e.g. `current · high`).
+   * Optional and additive: a row without a badge renders exactly as before.
+   */
+  badge?: string
+  /**
+   * Extra lowercased-match aliases merged into the search index (e.g. a
+   * provider id whose display name differs from the group header). Optional
+   * and additive: a row without aliases searches exactly as before.
+   */
+  searchText?: string
 }
 
 /** The upstream SelectList palette plus the Host group-header style. */
@@ -69,7 +121,8 @@ export interface SearchablePickerLayoutOptions {
 export interface SearchablePickerOptions {
   /**
    * Show a search input above the list. Typing filters items by a
-   * case-insensitive substring over value, label, and description.
+   * case-insensitive substring over value, label, description, the group
+   * label/`groupKey`, and any `searchText` aliases.
    */
   enableSearch?: boolean
   /**
@@ -85,9 +138,22 @@ export interface SearchablePickerOptions {
    */
   showHint?: boolean
   /**
+   * Override the footer hint text. Defaults to the generic picker hint;
+   * existing consumers omit it and keep the default wording.
+   */
+  hint?: string
+  /**
    * Pre-fill the search box when the picker opens (e.g. `/sessions <query>`).
    */
   initialQuery?: string
+  /**
+   * How an item's `description` renders. `column` (default) keeps the
+   * historical right-column layout for every row; `selected-below` renders
+   * the description on its own physical row under the SELECTED item only
+   * (command-palette detail), keeping the list dense. Existing consumers
+   * omit this and keep the column behavior byte-for-byte.
+   */
+  descriptionMode?: 'column' | 'selected-below'
 }
 
 export class SearchablePicker implements Component, Focusable {
@@ -103,7 +169,8 @@ export class SearchablePicker implements Component, Focusable {
    * (Moved from fork divergence X041; upstream has no search at all.)
    */
   private filterQuery = ''
-  /** Lowercased value+label+description per item, rebuilt on setItems. */
+  /** Lowercased searchable text per item (value + label + description +
+   *  group/groupKey + `searchText` aliases), rebuilt on setItems. */
   private searchTexts = new Map<SearchablePickerItem, string>()
   private selectedIndex: number = 0
   /** Caller-configured item cap; the host may lower it for a short frame. */
@@ -116,6 +183,7 @@ export class SearchablePicker implements Component, Focusable {
   private options: SearchablePickerOptions
   private searchInput?: Input
   private searchEnabled: boolean
+  private descriptionMode: 'column' | 'selected-below'
   /** Physical row → hit entry from the LAST render (mouse parity). */
   private hitMap: PickerMouseHit[] = []
   /** The width the hit map was painted at; a stale-width event is rejected. */
@@ -162,6 +230,7 @@ export class SearchablePicker implements Component, Focusable {
     this.layout = layout
     this.options = options
     this.searchEnabled = options.enableSearch ?? false
+    this.descriptionMode = options.descriptionMode ?? 'column'
     if (this.searchEnabled) {
       this.searchInput = new Input()
       const initial = options.initialQuery ?? ''
@@ -183,10 +252,15 @@ export class SearchablePicker implements Component, Focusable {
     const prefix = (this.options.header === undefined ? 0 : 2) + (this.searchEnabled ? 2 : 0)
     const hint = this.options.showHint === true || this.searchEnabled ? 2 : 0
     const indicator = this.filteredItems.length > 1 ? 1 : 0
-    const group = this.filteredItems.some(item => item.group !== undefined) ? 1 : 0
+    const group = this.filteredItems.some(item => this.groupKeyOf(item) !== '') ? 1 : 0
+    // selected-below: the selected row's detail is a real physical row, so
+    // reserve it against the item budget (a later selection move reuses the
+    // same slot). Rows without a description keep the full grant.
+    const detail = this.descriptionMode === 'selected-below'
+      && this.filteredItems[this.selectedIndex]?.description !== undefined ? 1 : 0
     const budget = this.maxRows === Number.POSITIVE_INFINITY
       ? this.configuredMaxVisible
-      : this.maxRows - prefix - hint - indicator - group
+      : this.maxRows - prefix - hint - indicator - group - detail
     this.maxVisible = Math.max(1, Math.min(this.configuredMaxVisible, budget))
   }
 
@@ -228,6 +302,19 @@ export class SearchablePicker implements Component, Focusable {
   }
 
   /**
+   * Select by logical VALUE within the FILTERED list (identity-based initial
+   * selection for a picker opened onto a known row). An unmatched value is a
+   * no-op — the caller's default selection stands — so a caller can never
+   * accidentally select a same-id row from a different group. The value
+   * survives a later `setItems()` through the existing value-preserving
+   * refresh.
+   */
+  setSelectedValue(value: string): void {
+    const index = this.filteredItems.findIndex(item => item.value === value)
+    if (index !== -1) this.selectedIndex = index
+  }
+
+  /**
    * The current selection index within the FILTERED list.
    *
    * Deliberate Host contract expansion (PR1 plan §8/§10.1): the zero-match
@@ -249,28 +336,30 @@ export class SearchablePicker implements Component, Focusable {
   render(width: number): string[] {
     const lines: string[] = []
     const hits: PickerMouseHit[] = []
-    const push = (line: string, hit: PickerMouseHit): void => {
+    const priorities: number[] = []
+    const push = (line: string, hit: PickerMouseHit, priority: number): void => {
       lines.push(line)
       hits.push(hit)
+      priorities.push(priority)
     }
 
     if (this.options.header !== undefined) {
       const countSuffix = this.searchEnabled ? `  ${this.filteredItems.length}/${this.items.length}` : ''
       const headerText = truncateToWidth(`${this.options.header}${countSuffix}`, width, '')
-      push((this.theme.groupHeader ?? this.theme.description)(headerText), { kind: 'inert' })
-      push('', { kind: 'inert' })
+      push((this.theme.groupHeader ?? this.theme.description)(headerText), { kind: 'inert' }, ROW_PRIORITY.header)
+      push('', { kind: 'inert' }, ROW_PRIORITY.spacer)
     }
 
     if (this.searchEnabled && this.searchInput) {
       const searchLine = this.searchInput.render(width)[0] ?? ''
-      push(searchLine, { kind: 'search', width })
-      push('', { kind: 'inert' })
+      push(searchLine, { kind: 'search', width }, ROW_PRIORITY.search)
+      push('', { kind: 'inert' }, ROW_PRIORITY.spacer)
     }
 
     // If no items match filter, show message
     if (this.filteredItems.length === 0) {
-      push(this.theme.noMatch(this.options.noMatchText ?? '  No matching commands'), { kind: 'inert' })
-      if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, hits, width)
+      push(this.theme.noMatch(this.options.noMatchText ?? '  No matching commands'), { kind: 'inert' }, ROW_PRIORITY.noMatch)
+      if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, hits, priorities, width)
       const result = this.finalizeEmpty(lines, hits)
       this.hitMap = result.hits
       this.lastRenderWidth = width
@@ -287,8 +376,7 @@ export class SearchablePicker implements Component, Focusable {
     // Group headers consume physical rows beyond the reserved one: a
     // window spanning k groups renders k headers, so the assembled list
     // can exceed the host-granted row budget. Shrink the WINDOW (still
-    // selection-centered) until the whole list fits; the hint is the
-    // non-negotiable tail (setMaxRows contract). Only the local
+    // selection-centered) until the whole list fits. Only the local
     // `visibleCount` shrinks — `maxVisible` stays the budget-derived
     // baseline, so a later selection move can use the full grant again
     // (a render-time ratchet would permanently shrink PageUp/PageDown).
@@ -299,17 +387,19 @@ export class SearchablePicker implements Component, Focusable {
       window = this.renderItemWindow(width, primaryColumnWidth, visibleCount)
     }
     for (let index = 0; index < window.lines.length; index += 1) {
-      push(window.lines[index]!, window.hits[index]!)
+      push(window.lines[index]!, window.hits[index]!, window.priorities[index]!)
     }
-    if (showHint) this.addHintLine(lines, hits, width)
+    if (showHint) this.addHintLine(lines, hits, priorities, width)
     if (Number.isFinite(this.maxRows) && lines.length > this.maxRows) {
-      // Degenerate tiny grants: keep the tail (the hint plus as many
-      // trailing rows as fit) instead of letting the compositor slice
-      // the hint away. The hit map is sliced identically.
-      const sliced = lines.slice(lines.length - this.maxRows)
-      this.hitMap = hits.slice(hits.length - this.maxRows)
+      // Degenerate tiny grants: yield the LEAST important rows first instead
+      // of tail-slicing, which would keep the hint/spacers and could drop the
+      // selected item's primary row. Priority follows plan §17 (search and the
+      // selected primary outrank detail, group headers, header chrome,
+      // spacers and the hint); the hit map is transformed identically.
+      const kept = pickKeptRowIndexes(priorities, limit)
+      this.hitMap = kept.map(index => hits[index]!)
       this.lastRenderWidth = width
-      return sliced
+      return kept.map(index => lines[index]!)
     }
     this.hitMap = hits
     this.lastRenderWidth = width
@@ -355,9 +445,10 @@ export class SearchablePicker implements Component, Focusable {
     width: number,
     primaryColumnWidth: number,
     visibleCount: number,
-  ): { lines: string[]; hits: PickerMouseHit[] } {
+  ): { lines: string[]; hits: PickerMouseHit[]; priorities: number[] } {
     const lines: string[] = []
     const hits: PickerMouseHit[] = []
+    const priorities: number[] = []
 
     // Calculate visible range with scrolling
     const startIndex = Math.max(
@@ -367,11 +458,14 @@ export class SearchablePicker implements Component, Focusable {
     const endIndex = Math.min(startIndex + visibleCount, this.filteredItems.length)
 
     // Group counts over the full (filtered) sequence, so a header inside
-    // the visible window can show how many items its group holds.
+    // the visible window can show how many items its group holds. The key is
+    // the identity (`groupKey`) so distinct providers that share a display
+    // name never merge; the rendered header still uses the display label.
     const groupCounts = new Map<string, number>()
     for (const item of this.filteredItems) {
-      if (item.group === undefined) continue
-      groupCounts.set(item.group, (groupCounts.get(item.group) ?? 0) + 1)
+      const key = this.groupKeyOf(item)
+      if (key === '') continue
+      groupCounts.set(key, (groupCounts.get(key) ?? 0) + 1)
     }
 
     // Render visible items, emitting a header row whenever the group of
@@ -382,21 +476,32 @@ export class SearchablePicker implements Component, Focusable {
       const item = this.filteredItems[i]
       if (!item) continue
 
-      const group = item.group ?? ''
-      if (group !== lastGroup) {
-        if (group !== '') {
-          const count = groupCounts.get(group) ?? 0
-          const headerText = truncateToWidth(`  ${group} · ${count}`, width, '')
+      const groupKey = this.groupKeyOf(item)
+      if (groupKey !== lastGroup) {
+        if (groupKey !== '') {
+          const count = groupCounts.get(groupKey) ?? 0
+          const label = item.group ?? groupKey
+          const headerText = truncateToWidth(`  ${label} · ${count}`, width, '')
           lines.push((this.theme.groupHeader ?? this.theme.description)(headerText))
           hits.push({ kind: 'inert' })
+          priorities.push(ROW_PRIORITY.groupHeader)
         }
-        lastGroup = group
+        lastGroup = groupKey
       }
 
       const isSelected = i === this.selectedIndex
       const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined
       lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth))
       hits.push({ kind: 'item', value: item.value, index: i })
+      priorities.push(isSelected ? ROW_PRIORITY.selectedItem : ROW_PRIORITY.item)
+      // selected-below: the selected item's detail is a real physical row
+      // (inert in the hit map, so a pointer event on it can never activate a
+      // neighbour), counted by the row-budget fit loop above.
+      if (this.descriptionMode === 'selected-below' && isSelected && descriptionSingleLine !== undefined) {
+        lines.push(this.theme.description(truncateToWidth(`    ${descriptionSingleLine}`, width, '')))
+        hits.push({ kind: 'inert' })
+        priorities.push(ROW_PRIORITY.detail)
+      }
     }
 
     // Add scroll indicators if needed
@@ -405,9 +510,10 @@ export class SearchablePicker implements Component, Focusable {
       // Truncate if too long for terminal
       lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, '')))
       hits.push({ kind: 'inert' })
+      priorities.push(ROW_PRIORITY.indicator)
     }
 
-    return { lines, hits }
+    return { lines, hits, priorities }
   }
 
   handleInput(keyData: string): void {
@@ -464,10 +570,15 @@ export class SearchablePicker implements Component, Focusable {
         this.onCancel()
       }
     }
-    // Any other key edits the search box when search is enabled
+    // Any other key edits the search box when search is enabled. Only a
+    // VALUE change re-derives the filtered list (which resets the selection
+    // to the top): a cursor move (left/right/ctrl+…) or a key the Input
+    // ignores must not throw away the user's current row.
     else if (this.searchEnabled && this.searchInput) {
+      const before = this.searchInput.getValue()
       this.searchInput.handleInput(keyData)
-      this.applyFilter(this.searchInput.getValue())
+      const after = this.searchInput.getValue()
+      if (after !== before) this.applyFilter(after)
     }
   }
 
@@ -585,7 +696,7 @@ export class SearchablePicker implements Component, Focusable {
         // no longer re-lowercases every field on every keystroke.
         const searchable = this.searchTexts.get(item)
         return searchable === undefined
-          ? `${item.value}\n${item.label}\n${item.description ?? ''}`.toLowerCase().includes(needle)
+          ? this.searchableTextOf(item).includes(needle)
           : searchable.includes(needle)
       })
     }
@@ -600,22 +711,39 @@ export class SearchablePicker implements Component, Focusable {
     this.selectedIndex = 0
   }
 
-  /** Lowercased value+label+description per item, for fast filtering. */
+  /** Lowercased value+label+description+group+aliases per item, for fast
+   * filtering. The group is searchable so a provider name/id finds its
+   * models; `searchText` carries aliases the display row does not show. */
   private buildSearchTexts(items: SearchablePickerItem[]): Map<SearchablePickerItem, string> {
-    return new Map(items.map(item => [
-      item,
-      `${item.value}\n${item.label}\n${item.description ?? ''}`.toLowerCase(),
-    ]))
+    return new Map(items.map(item => [item, this.searchableTextOf(item)]))
   }
 
-  private addHintLine(lines: string[], hits: PickerMouseHit[], width: number): void {
-    const hint = this.searchEnabled
+  /** The stable group identity: `groupKey` when set, else the `group` label. */
+  private groupKeyOf(item: SearchablePickerItem): string {
+    return item.groupKey ?? item.group ?? ''
+  }
+
+  private searchableTextOf(item: SearchablePickerItem): string {
+    return [
+      item.value,
+      item.label,
+      item.description ?? '',
+      item.group ?? '',
+      item.groupKey ?? '',
+      item.searchText ?? '',
+    ].join('\n').toLowerCase()
+  }
+
+  private addHintLine(lines: string[], hits: PickerMouseHit[], priorities: number[], width: number): void {
+    const hint = this.options.hint ?? (this.searchEnabled
       ? 'type to filter · ↑↓ navigate · enter select · esc close'
-      : '↑↓ navigate · enter select · esc close'
+      : '↑↓ navigate · enter select · esc close')
     lines.push('')
     hits.push({ kind: 'inert' })
+    priorities.push(ROW_PRIORITY.spacer)
     lines.push(this.theme.scrollInfo(truncateToWidth(`  ${hint}`, width - 2, '')))
     hits.push({ kind: 'inert' })
+    priorities.push(ROW_PRIORITY.hint)
   }
 
   private renderItem(
@@ -627,6 +755,13 @@ export class SearchablePicker implements Component, Focusable {
   ): string {
     const prefix = isSelected ? '→ ' : '  '
     const prefixWidth = visibleWidth(prefix)
+
+    // selected-below (command-palette detail) and any row carrying a badge
+    // render a single primary line; the description column below is skipped
+    // (selected-below shows it on its own row; a badge row has no column).
+    if (this.descriptionMode === 'selected-below' || item.badge !== undefined) {
+      return this.renderPrimaryLine(item, prefix, prefixWidth, width, isSelected)
+    }
 
     if (descriptionSingleLine && width > 40) {
       const effectivePrimaryColumnWidth = Math.max(1, Math.min(primaryColumnWidth, width - prefixWidth - 4))
@@ -655,6 +790,32 @@ export class SearchablePicker implements Component, Focusable {
     }
 
     return prefix + truncatedValue
+  }
+
+  /** One primary row with an optional right-aligned badge. The label yields
+   * width to the badge (the badge is the status fact, the label the value);
+   * on a row too narrow for both, the status wins and is itself clipped. */
+  private renderPrimaryLine(
+    item: SearchablePickerItem,
+    prefix: string,
+    prefixWidth: number,
+    width: number,
+    isSelected: boolean,
+  ): string {
+    const badge = item.badge === undefined ? undefined : normalizeToSingleLine(item.badge)
+    const badgeSuffix = badge === undefined || badge === '' ? '' : `  ${badge}`
+    const badgeWidth = visibleWidth(badgeSuffix)
+    const labelBudget = width - prefixWidth - badgeWidth
+    if (labelBudget < 1) {
+      const text = truncateToWidth(`${prefix}${badge ?? ''}`, width, '')
+      return isSelected ? this.theme.selectedText(text) : this.theme.description(text)
+    }
+    const label = truncateToWidth(this.getDisplayValue(item), labelBudget, '')
+    if (isSelected) {
+      return this.theme.selectedText(truncateToWidth(`${prefix}${label}${badgeSuffix}`, width, ''))
+    }
+    if (badgeSuffix === '') return prefix + label
+    return prefix + label + this.theme.description(badgeSuffix)
   }
 
   private getPrimaryColumnWidth(): number {
@@ -703,6 +864,9 @@ export class SearchablePicker implements Component, Focusable {
   }
 
   private notifySelectionChange(): void {
+    // selected-below: the detail row of the NEW selection changes the row
+    // budget, so re-derive the item grant after the move.
+    if (this.descriptionMode === 'selected-below') this.recomputeVisibleBudget()
     const selectedItem = this.filteredItems[this.selectedIndex]
     if (selectedItem && this.onSelectionChange) {
       this.onSelectionChange(selectedItem)

@@ -24,6 +24,15 @@ dsh --profile pi-tui
 
 ### 变更
 
+- **`/model` 改为可搜索的模型命令面板。** 打开后直接按 provider 分组展示全部模型，
+  一次搜索覆盖 provider/model 的名称与 id；`Enter` 直接选择模型，`→` 在同一个
+  overlay 内进入 reasoning effort（不再先选 provider）；current 与 default 及 effort
+  状态分别标出，说明只在当前高亮行展开；fullscreen 切换后保留查询、选择与 effort
+  光标。DSH 的 Session/全局默认模型语义不变。
+- **`/settings` 的 “Subagent allowed models” 改为同一套可搜索分组列表。** provider
+  仅作分组，模型行 `Enter` 直接增删允许路由，一次搜索覆盖 provider/model 的名称与
+  id；官方整段写入、last-route 保护、写入串行与失败回滚语义不变，单个 provider
+  加载失败不影响其他 provider。
 - **Quick Tasks 键盘交互收敛为纯导航，普通字符不再误入隐藏状态。** Footer `↓`
   打开的 Quick Tasks 现在只响应方向键、`Tab`、`Enter` 和 `Esc`，其余按键一律
   no-op；`S` / `/` / `T` 等字符不再触发停止确认、搜索或视图切换，`Esc` 始终一次
