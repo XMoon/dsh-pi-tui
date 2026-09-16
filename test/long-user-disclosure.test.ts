@@ -605,3 +605,29 @@ test('a newer user turn shifts the Ctrl+O window and re-collapses the dropped pr
   assert.equal(compactMarkerCount(await viewRows(vt)), 3, 'turns 1, 2 and 3 stay folded')
   app.stop()
 })
+
+test('a new user turn does not rebuild unchanged non-user components', async () => {
+  const { vt, app } = startApp(100, 200)
+  const assistant: TranscriptMessage = { kind: 'assistant', turn: 1, text: 'answer' }
+  const tool: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: JSON.stringify({ path: 'a' }), result: 'ok', status: 'ok' }
+  const before: TranscriptMessage[] = [
+    user(lines(11, 'u1-'), 1), assistant, tool,
+    user(lines(11, 'u2-'), 2), user(lines(11, 'u3-'), 3), user(lines(11, 'u4-'), 4),
+  ]
+  app.setTranscript(before)
+  vt.sendInput('\x0f') // master on so the user boundary is finite
+  await viewRows(vt)
+  const assistantComponent = app.messageCacheEntryForTest(assistant)?.component
+  const toolComponent = app.messageCacheEntryForTest(tool)?.component
+  assert.ok(assistantComponent !== undefined && toolComponent !== undefined)
+
+  // A newer user turn shifts the user boundary (2 -> 3), but no non-user
+  // component's render depends on it.
+  app.setTranscript([...before, user(lines(11, 'u5-'), 5)])
+  await viewRows(vt)
+  assert.equal(app.messageCacheEntryForTest(assistant)?.component, assistantComponent,
+    'the assistant component must be reused across a user-boundary shift')
+  assert.equal(app.messageCacheEntryForTest(tool)?.component, toolComponent,
+    'the tool component must be reused across a user-boundary shift')
+  app.stop()
+})
