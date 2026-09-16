@@ -519,3 +519,26 @@ test('disabling the expand key then entering fullscreen Focus drops a stale sear
   app.setFocusMode(false)
   app.stop()
 })
+
+test('re-entering fullscreen through a non-folding regular surface resets disclosure (by design)', async () => {
+  const { vt, app } = startApp(100, 40)
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': false }))
+  app.setTranscript([user(lines(11))])
+  app.setFullscreen(true)
+  let rows = await viewRows(vt)
+  const markerY = rows.findIndex(row => row.includes('rows compacted'))
+  assert.ok(markerY >= 0, `fullscreen must fold without the key:\n${rows.join('\n')}`)
+  clickCell(vt, 10, markerY)
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('line5')), 'the marker click expands in fullscreen')
+
+  // A regular surface with no expand key cannot hold the disclosure: re-entry
+  // re-derives folded (documented global transition clear, not source-scoped).
+  app.setFullscreen(false)
+  app.setFullscreen(true)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'by design: the expansion does not survive the non-folding interlude')
+  assert.ok(!rows.some(row => row.includes('line5')))
+  app.setFullscreen(false)
+  app.stop()
+})
