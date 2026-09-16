@@ -2729,6 +2729,11 @@ interface MessageComponentEntry {
   component: Component
   /** The fold boundary the component was built at (Ctrl+O / windowing). */
   boundary: number
+  /** The long-user fold boundary the component was built at. It is derived
+   * from USER turns only, so a change in the user turn set that does not move
+   * the process boundary (e.g. a newer user prompt arriving) must still
+   * rebuild the affected user bubbles — hence its own cache-identity slot. */
+  userBoundary: number
   /** The transcript content width a width-BAKING build truncated its
    * folded rows at — set ONLY when the host build bakes width into the
    * component (folded system/compaction/tool cards; see
@@ -6989,6 +6994,9 @@ export class TuiApp {
     width: number,
   ): RenderedTranscriptBlock[] {
     const boundary = this.expandBoundary()
+    // Computed ONCE per render pass (never per user component): the process
+    // and long-user folds have independent recent-turn boundaries.
+    const userBoundary = this.userExpandBoundary()
     return this.transcriptBlocks(projectionExpanded).map(block => {
       let component: Component
       let rendered: string[]
@@ -7024,7 +7032,7 @@ export class TuiApp {
         // Persistent per-message components (stage J): unchanged messages
         // reuse their component, so the fork's text-identity render caches
         // actually hit — markdown is not re-parsed for unchanged content.
-        component = this.componentForMessage(block.message, boundary, width)
+        component = this.componentForMessage(block.message, boundary, width, userBoundary)
         rendered = component.render(width)
         truncatedMarker = block.truncated === true
         attachments = this.attachmentRangesOf(component, width)
@@ -9218,10 +9226,21 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
-  /** The turn threshold at or above which collapsible entries expand. */
+  /** The turn threshold at or above which collapsible PROCESS entries
+   * (thinking/system/tool) expand under the Ctrl+O master. */
   private expandBoundary(): number {
     if (!this.toolOutputExpanded || EXPAND_RECENT_TURNS <= 0) return Number.POSITIVE_INFINITY
     return recentTurnThreshold(this.messages, EXPAND_RECENT_TURNS, ['thinking', 'system', 'tool'])
+  }
+
+  /** The turn threshold at or above which long USER prompts expand under the
+   * Ctrl+O master. It measures USER turns only — reusing the process boundary
+   * would let a sparse Thinking/System/Tool distribution decide the user fold,
+   * and in a pure-chat transcript (no process turns) that threshold collapses
+   * to 0 and expands EVERY prompt, defeating the fold's whole purpose. */
+  private userExpandBoundary(): number {
+    if (!this.toolOutputExpanded || EXPAND_RECENT_TURNS <= 0) return Number.POSITIVE_INFINITY
+    return recentTurnThreshold(this.messages, EXPAND_RECENT_TURNS, ['user'])
   }
 
 
@@ -10419,14 +10438,14 @@ export class TuiApp {
    * Ctrl+O-derived or manually revealed — full-reveals its non-Thinking
    * process (no mouse, so no dead compact affordances). Every other
    * context keeps the existing rule. */
-  private effectiveMessageExpanded(message: TranscriptMessage, boundary: number): boolean {
+  private effectiveMessageExpanded(message: TranscriptMessage, boundary: number, userBoundary: number): boolean {
     if (message.kind === 'thinking') {
       return this.effectiveThinkingExpanded(message)
     }
     if (isUserMessageDisclosureCandidate(message)) {
-      // Long user disclosure follows the recent-turn boundary where Ctrl+O
-      // owns the expand master (regular AND fullscreen without Focus), with
-      // the per-message override (a fullscreen marker click or a search
+      // Long user disclosure follows its OWN recent-USER-turn boundary where
+      // Ctrl+O owns the expand master (regular AND fullscreen without Focus),
+      // with the per-message override (a fullscreen marker click or a search
       // reveal) winning when set. Fullscreen Focus owns Ctrl+O as the
       // Thought-root bulk, so the boundary must NOT apply there: a persisted
       // `toolOutputExpanded` from an earlier surface would otherwise leak an
@@ -10435,7 +10454,7 @@ export class TuiApp {
       const override = this.expandedOverride.get(message)
       if (override !== undefined) return override
       if (this.fullscreen !== undefined && this.focusModeEnabled) return false
-      return message.turn >= boundary
+      return message.turn >= userBoundary
     }
     // Delivered files are an assistant turn-tail, but their capped/complete
     // disclosure follows the existing recent-turn Ctrl+O boundary rather than
@@ -10501,8 +10520,9 @@ export class TuiApp {
   private messageRenderState(
     message: TranscriptMessage,
     boundary: number,
+    userBoundary: number,
   ): { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint } {
-    const expanded = this.effectiveMessageExpanded(message, boundary)
+    const expanded = this.effectiveMessageExpanded(message, boundary, userBoundary)
     const insideFocusSecondary = 'turn' in message
       && this.isInsideExpandedFocus(message, boundary)
       && isFocusSecondaryDisclosure(message)
@@ -10537,7 +10557,12 @@ export class TuiApp {
     return { expanded, fullReveal, expandHint }
   }
 
-  private componentForMessage(message: TranscriptMessage, boundary: number, width = this.transcriptRenderWidth()): Component {
+  private componentForMessage(
+    message: TranscriptMessage,
+    boundary: number,
+    width = this.transcriptRenderWidth(),
+    userBoundary = this.userExpandBoundary(),
+  ): Component {
     // Focus-expanded turns reveal their process TIMELINE (plan §15.1 +
     // the secondary-disclosure supplement): in FULLSCREEN the foldable
     // process cards default COMPACT inside an open Thought and only the
@@ -10545,14 +10570,14 @@ export class TuiApp {
     // full-reveals (no mouse, no dead compact cards). Collapsed Focus
     // turns never reach this method: their process rows are absent from
     // the projection.
-    const state = this.messageRenderState(message, boundary)
+    const state = this.messageRenderState(message, boundary, userBoundary)
 
     // M7 (plan §12.1): the cache identity embeds the RENDERER id + the
     // registry revision — a renderer registering/unloading rebuilds the
     // affected components (an HMR must never hit an old component).
     const entry = this.messageComponents.get(message)
     if (entry === undefined) {
-      const built = this.buildMessage(message, boundary, state, width)
+      const built = this.buildMessage(message, boundary, userBoundary, state, width)
       this.captureComponentState(built, message)
       this.messageComponents.set(message, built)
       return built.component
@@ -10568,6 +10593,7 @@ export class TuiApp {
     // functions run only inside buildMessage, never for unchanged content.
     const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.snapshot().revision
     if (entry.boundary !== boundary
+      || entry.userBoundary !== userBoundary
       || (entry.builtWidth !== undefined && entry.builtWidth !== width)
       || entry.themeRev !== this.themeRevision
       || entry.iconStyle !== this.iconStyle
@@ -10587,9 +10613,10 @@ export class TuiApp {
           // Best effort: a cached component's dispose must not break a paint.
         }
       }
-      const rebuilt = this.buildMessage(message, boundary, state, width)
+      const rebuilt = this.buildMessage(message, boundary, userBoundary, state, width)
       entry.component = rebuilt.component
       entry.boundary = rebuilt.boundary
+      entry.userBoundary = rebuilt.userBoundary
       entry.builtWidth = rebuilt.builtWidth
       entry.themeRev = rebuilt.themeRev
       entry.iconStyle = rebuilt.iconStyle
@@ -10644,6 +10671,7 @@ export class TuiApp {
   private buildMessage(
     message: TranscriptMessage,
     boundary: number,
+    userBoundary: number,
     state: { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint },
     width: number,
   ): MessageComponentEntry {
@@ -10680,6 +10708,7 @@ export class TuiApp {
         ? this.renderMessage(message, state.expanded, state.expandHint, state.fullReveal, width)
         : this.withDeliveredFiles(rendered.component, message, state.expanded),
       boundary,
+      userBoundary,
       builtWidth: hostBuilt && this.bakesFoldedWidth(message, state.expanded) ? width : undefined,
       themeRev: this.themeRevision,
       iconStyle: this.iconStyle,

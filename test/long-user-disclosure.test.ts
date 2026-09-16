@@ -542,3 +542,66 @@ test('re-entering fullscreen through a non-folding regular surface resets disclo
   app.setFullscreen(false)
   app.stop()
 })
+
+// ── Ctrl+O recent-turn range uses USER turns, not process turns ──────────
+
+test('Ctrl+O expands only the most recent 3 long user prompts in a pure chat', async () => {
+  const { vt, app } = startApp(100, 200)
+  const messages: TranscriptMessage[] = []
+  for (let turn = 1; turn <= 5; turn += 1) {
+    messages.push(user(lines(11, `u${turn}-`), turn))
+    messages.push({ kind: 'assistant', turn, text: `answer ${turn}` })
+  }
+  app.setTranscript(messages)
+  assert.equal(compactMarkerCount(await viewRows(vt)), 5, 'all five prompts start folded')
+
+  vt.sendInput('\x0f')
+  const rows = await viewRows(vt)
+  const view = rows.join('\n')
+  assert.equal(compactMarkerCount(rows), 2, 'only turns 1 and 2 stay folded')
+  assert.ok(!view.includes('u1-5') && !view.includes('u2-5'), 'the two oldest stay compact')
+  assert.ok(view.includes('u3-5') && view.includes('u4-5') && view.includes('u5-5'),
+    `the most recent three must be full:\n${view}`)
+  app.stop()
+})
+
+test('a sparse process turn does not widen the long-user Ctrl+O range', async () => {
+  const { vt, app } = startApp(100, 200)
+  const messages: TranscriptMessage[] = [
+    user(lines(11, 'u1-'), 1),
+    { kind: 'tool', turn: 1, name: 'read', args: JSON.stringify({ path: 'a' }), result: 'ok', status: 'ok' },
+    user(lines(11, 'u2-'), 2),
+    user(lines(11, 'u3-'), 3),
+    user(lines(11, 'u4-'), 4),
+    user(lines(11, 'u5-'), 5),
+  ]
+  app.setTranscript(messages)
+  assert.equal(compactMarkerCount(await viewRows(vt)), 5, 'all five prompts start folded')
+
+  vt.sendInput('\x0f')
+  const rows = await viewRows(vt)
+  const view = rows.join('\n')
+  assert.equal(compactMarkerCount(rows), 2, 'the process boundary must not decide the user range')
+  assert.ok(!view.includes('u1-5') && !view.includes('u2-5'), 'the two oldest stay compact')
+  assert.ok(view.includes('u3-5') && view.includes('u4-5') && view.includes('u5-5'),
+    `the most recent three must be full:\n${view}`)
+  app.stop()
+})
+
+test('a newer user turn shifts the Ctrl+O window and re-collapses the dropped prompt', async () => {
+  const { vt, app } = startApp(100, 240)
+  const build = (count: number): TranscriptMessage[] =>
+    Array.from({ length: count }, (_, index) => user(lines(11, `u${index + 1}-`), index + 1))
+  app.setTranscript(build(5))
+  vt.sendInput('\x0f')
+  let view = (await viewRows(vt)).join('\n')
+  assert.ok(view.includes('u3-5'), 'turn 3 starts inside the recent window')
+
+  app.setTranscript(build(6))
+  view = (await viewRows(vt)).join('\n')
+  assert.ok(!view.includes('u3-5'), 'turn 3 must collapse once it leaves the recent window')
+  assert.ok(view.includes('u4-5') && view.includes('u5-5') && view.includes('u6-5'),
+    `the new recent three must be full:\n${view}`)
+  assert.equal(compactMarkerCount(await viewRows(vt)), 3, 'turns 1, 2 and 3 stay folded')
+  app.stop()
+})

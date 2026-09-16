@@ -26,10 +26,11 @@ dsh --profile pi-tui
 
 - **超长用户消息默认折叠显示。** 纯文本用户 Prompt 超过 10 个终端视觉行时，Transcript
   默认只显示开头 4 行、中间一条 `── N rows compacted · … to expand ──` 提示和结尾 3
-  行，尾部补充说明默认可见；普通模式与全屏非 Focus 下 `Ctrl+O` 展开、收回，全屏下点击
-  该提示行（或搜索命中）展开单条消息，全屏 Focus 里 `Ctrl+O` 负责整体切换 Thought root
-  并收回已展开的超长用户消息。普通模式若未绑定 `Ctrl+O`（`app.transcript.toggleExpand`
-  被禁用），则整条 Prompt 完整显示、不折叠，避免无法展开。
+  行，尾部补充说明默认可见；普通模式与全屏非 Focus 下 `Ctrl+O` 展开最近 3 个用户回合内的
+  超长 Prompt、再按一次收回，全屏下点击该提示行（或搜索命中）展开单条消息，全屏 Focus 里
+  `Ctrl+O` 负责整体切换 Thought root 并收回已展开的超长用户消息。普通模式若未绑定
+  `Ctrl+O`（`app.transcript.toggleExpand` 被禁用），则整条 Prompt 完整显示、不折叠，
+  避免无法展开。
   折叠判断基于当前宽度换行后的视觉行（CJK / emoji / 单行超长 JSON 都按真实屏幕占用
   计算），resize 后自动重新判断。Transcript 原文、搜索、导出、Session 持久化与回放
   仍使用完整用户内容；带附件的混合内容用户消息和 pending 回显保持原样。已知限制：搜索

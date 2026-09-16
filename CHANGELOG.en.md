@@ -27,8 +27,9 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
 - **Long user messages collapse by default.** A text-only user prompt longer than
   10 terminal visual rows renders only its first 4 rows, one
   `── N rows compacted · … to expand ──` marker, and its last 3 rows, so a
-  trailing instruction stays visible. `Ctrl+O` expands and collapses it in
-  regular mode and in fullscreen outside Focus; in fullscreen a click on that
+  trailing instruction stays visible. `Ctrl+O` expands the long prompts within
+  the most recent 3 USER turns and a second press collapses them, in regular
+  mode and in fullscreen outside Focus; in fullscreen a click on that
   marker row (or a search hit) expands the single message, and inside a
   fullscreen Focus `Ctrl+O` bulk-toggles the Thought roots and collapses an
   already-expanded long user message. In regular mode with no bound
