@@ -200,7 +200,7 @@ function effortChoicesOf(row: ModelPickerModelRow): readonly InlineEffortChoice[
   if (row.efforts.length === 0) return []
   const efforts = row.efforts.map(effort => ({ value: effort.id, label: effort.name }))
   return row.defaultEffort === undefined
-    ? [{ value: PROVIDER_DEFAULT, label: 'provider default' }, ...efforts]
+    ? [{ value: PROVIDER_DEFAULT, label: 'Default' }, ...efforts]
     : efforts
 }
 
