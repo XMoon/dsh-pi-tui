@@ -1387,6 +1387,10 @@ export class ThinkingCompactComponent implements Component {
 const USER_MESSAGE_COMPACT_THRESHOLD_ROWS = 10
 const USER_MESSAGE_HEAD_ROWS = 4
 const USER_MESSAGE_TAIL_ROWS = 3
+/** Bounded reconcile attempts when a message's renderer-selection revision is
+ * stale: a renderer may mutate the registry re-entrantly inside `render()`, so
+ * one rebuild can still leave a stale entry. */
+const USER_DISCLOSURE_RECONCILE_ATTEMPTS = 3
 
 /** The collapsed long user bubble's marker builder. It receives the hidden
  * visual-row count and the available inner width so a narrow bubble can fall
@@ -6447,18 +6451,28 @@ export class TuiApp {
    * The registry batches its invalidation, so a just-registered/unloaded
    * renderer is not reflected in the cached entry until the deferred rebuild.
    * When the entry's `rendererRevision` is stale, reconcile synchronously
-   * through the normal build path and trust only the fresh entry — deciding on
-   * the stale one would write a Host override that a plugin then mounts over
-   * (or skip the reveal a returning Host bubble legitimately needs). */
+   * through the normal build path and trust only an entry whose selection
+   * revision is CURRENT — deciding on a stale one would write a Host override
+   * that a plugin then mounts over (or skip the reveal a returning Host bubble
+   * legitimately needs). Because a renderer may itself mutate the registry
+   * re-entrantly inside `render()`, one reconcile can still leave a stale
+   * entry: keep reconciling until stable, bounded so a pathological renderer
+   * cannot stall the surface. If the bound is reached with the entry still
+   * stale, fail CLOSED (report not-Host-owned) rather than trust an entry whose
+   * revision is not current — the next ordinary rebuild reconciles again. */
   private isHostUserDisclosure(message: TranscriptMessage): boolean {
-    const entry = this.messageComponents.get(message)
+    let entry = this.messageComponents.get(message)
     if (entry === undefined) return false
     const registry = this.renderers
-    if (registry !== undefined && entry.rendererRevision !== registry.revisionOf()) {
+    if (registry === undefined) return entry.rendererId === undefined
+    for (let attempt = 0; ; attempt += 1) {
+      if (entry.rendererRevision === registry.revisionOf()) break
+      if (attempt >= USER_DISCLOSURE_RECONCILE_ATTEMPTS) return false
       this.componentForMessage(message, this.expandBoundary(), this.transcriptRenderWidth(), this.userExpandBoundary())
+      entry = this.messageComponents.get(message)
+      if (entry === undefined) return false
     }
-    const fresh = this.messageComponents.get(message)
-    return fresh !== undefined && fresh.rendererId === undefined
+    return entry.rendererId === undefined
   }
 
   /** Whether the CURRENT projection shows a long user message that is

@@ -800,3 +800,72 @@ test('a just-unloaded user renderer still accepts the search reveal for the retu
   assert.ok(rows.some(row => row.includes('x-5')), 'the hidden middle is visible after the reveal')
   app.stop()
 })
+
+test('a re-entrantly self-disposing renderer still yields the Host reveal decision', async () => {
+  const vt = new VirtualTerminal(100, 200)
+  const registry = new RendererRegistry()
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+
+  const message = user(lines(11, 'x-'), 0)
+  app.setTranscript([message])
+  await viewRows(vt) // Host bubble: no renderer registered yet
+
+  let handle: { dispose: () => void } | undefined
+  handle = registry.registerMessageRenderer({
+    id: 'self-dispose-user',
+    order: 1,
+    render: (snapshot) => {
+      if (snapshot.kind !== 'user') return undefined
+      handle?.dispose()
+      return textView('SELF DISPOSED')
+    },
+  }, 'test')
+
+  // Synchronous reveal inside the deferred-invalidation window: the reconcile
+  // builds the self-disposing renderer, which mutates the registry again. The
+  // helper must keep reconciling until the selection revision is current, so
+  // the FINAL Host owner still receives the reveal.
+  app.revealSearchMatch(message)
+  app.setTranscript([message])
+  const rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 0, 'the returning Host bubble must be revealed')
+  assert.ok(rows.some(row => row.includes('x-5')), 'the hidden middle is visible after the reveal')
+  app.stop()
+})
+
+test('a pathological always-mutating renderer fails closed instead of trusting a stale entry', async () => {
+  const vt = new VirtualTerminal(100, 200)
+  const registry = new RendererRegistry()
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+
+  const message = user(lines(11, 'x-'), 0)
+  app.setTranscript([message])
+  await viewRows(vt) // Host bubble
+
+  // A renderer that keeps registering a NEW abdicating renderer on every
+  // render, so the registry revision never stabilises within the bound; it
+  // stops mutating after a few calls so the surface can settle.
+  let registrations = 0
+  registry.registerMessageRenderer({
+    id: 'churn',
+    order: 1,
+    render: () => {
+      if (registrations < 5) {
+        registrations += 1
+        registry.registerMessageRenderer({ id: `churn-${registrations}`, order: 5, render: () => undefined }, 'test')
+      }
+      return undefined
+    },
+  }, 'test')
+
+  app.revealSearchMatch(message)
+  app.setTranscript([message])
+  const rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'a stale entry must not leave a phantom Host expansion')
+  assert.ok(!rows.some(row => row.includes('x-5')), 'the Host bubble must stay folded')
+  app.stop()
+})
