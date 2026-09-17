@@ -4670,6 +4670,8 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - test/overlay-broker.test.ts: an explicit focus whose show callback mounts a nested capture keeps the front order
 - test/overlay-broker.test.ts: a blur inside the focus callback keeps the released intent
 - test/advanced-interactive.test.ts: a blur inside the focus callback keeps the overlay released
+- test/overlay-broker.test.ts: a hidden capturing focus whose show mounts a nonCapturing HUD keeps the HUD in front
+- test/advanced-interactive.test.ts: a hidden capturing focus whose onFocus mounts a nonCapturing HUD keeps the HUD in front
 
 #### Upstream comparison
 

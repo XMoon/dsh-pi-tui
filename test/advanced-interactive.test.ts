@@ -1559,3 +1559,45 @@ test('a blur inside the focus callback keeps the overlay released', async () => 
   a.close()
   app.stop()
 })
+
+test('a hidden capturing focus whose onFocus mounts a nonCapturing HUD keeps the HUD in front', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  let hud: ReturnType<typeof app.showExtensionOverlay> | undefined
+  let arm = false
+  const aComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'AAAAAAA' }] }),
+    handleInput: () => false,
+    onFocus: () => {
+      if (arm && hud === undefined) {
+        hud = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'HHHHHHH' }] }, { nonCapturing: true })
+      }
+    },
+    dispose: () => {},
+  }
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  await vt.waitForRender()
+  a.hide()
+  await vt.waitForRender()
+  assert.equal(a.focused, false)
+
+  arm = true
+  a.focus() // hidden capturing show → focus → onFocus mounts the HUD
+  await vt.waitForRender()
+  assert.ok(hud !== undefined, 'the nested HUD mounted')
+  assert.equal(a.focused, true, 'A owns the keyboard')
+  assert.ok(view().includes('HHHHHHH'), `the HUD is the visual front:\n${view()}`)
+  assert.ok(!view().includes('AAAAAAA'), `A sits behind the HUD:\n${view()}`)
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'A keeps the keyboard after the swap')
+  assert.ok(view().includes('HHHHHHH'), `the HUD stays above after the swap:\n${view()}`)
+  assert.ok(!view().includes('AAAAAAA'), `A must not flip to the front:\n${view()}`)
+  a.close()
+  hud?.close()
+  app.stop()
+})
