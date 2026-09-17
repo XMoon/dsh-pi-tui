@@ -949,7 +949,11 @@ treat a message as folded when the HOST bubble owns its current presentation
 `expanded` state and renders no compact marker, so the Host never writes or
 counts disclosure state for it) AND it ACTUALLY compacts at the current width
 — so neither a plugin-owned nor a short prompt accumulates an invisible no-op
-override that would eat a Ctrl+O press. A regular surface with no expand key
+override that would eat a Ctrl+O press. A plugin-owned user entry is likewise
+exempt from the Host long-user cache fields (boundary / expanded / hint): a
+user-boundary shift or a surface swap never re-runs its extension renderer
+(the renderer-registry revision still handles Host↔plugin ownership changes).
+A regular surface with no expand key
 never folds at all, so
 entering fullscreen from it drops every long-user override — a stale reveal
 from that surface must not hide the Focus marker. That clear is deliberately
