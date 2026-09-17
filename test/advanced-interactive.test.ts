@@ -1227,3 +1227,39 @@ test('an internal restore never fabricates focus transitions (question / save / 
   fsOverlay.close()
   app.stop()
 })
+
+test('an approval-preserving fullscreen swap never fabricates focus transitions on the overlay beneath it', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const component = interactiveComponent({ text: () => 'advanced A' })
+  const a = app.showAdvancedInteractiveOverlay(component)
+  await vt.waitForRender()
+  assert.equal(component.focusCount, 1, 'the mount focuses A once')
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  assert.equal(component.focusCount, 1, 'the approval must not re-focus A')
+  assert.equal(component.blurCount, 1, 'the approval blurs A exactly once')
+  assert.equal(app.ownedApprovalFramesForTest(), 1, 'one live approval frame')
+
+  for (let i = 0; i < 2; i += 1) {
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    app.setFullscreen(false)
+    await vt.waitForRender()
+    assert.deepEqual(
+      { focus: component.focusCount, blur: component.blurCount },
+      { focus: 1, blur: 1 },
+      'an approval-preserving fullscreen swap must not fabricate focus transitions on A',
+    )
+    assert.equal(app.ownedApprovalFramesForTest(), 1,
+      'each swap replaces, never accumulates, the approval frame')
+  }
+
+  vt.sendInput('\x1b')
+  await approval.catch(() => {})
+  await vt.waitForRender()
+  assert.equal(app.ownedApprovalFramesForTest(), 0, 'settling the approval disposes its frame')
+  assert.equal(a.focused, true, 'A is restored after the approval is cancelled')
+  a.close()
+  app.stop()
+})
