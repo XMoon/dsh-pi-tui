@@ -672,3 +672,59 @@ test('a kind:user extension renderer does not pollute the Host long-user disclos
     'Ctrl+O must toggle the master, not clear a phantom plugin-user override')
   app.stop()
 })
+
+test('a user-boundary shift does not rebuild a plugin-owned user component', async () => {
+  const vt = new VirtualTerminal(100, 200)
+  const registry = new RendererRegistry()
+  let renders = 0
+  registry.registerMessageRenderer({
+    id: 'plugin-user',
+    order: 1,
+    render: (snapshot) => {
+      if (snapshot.kind === 'user' && (snapshot.text ?? '').startsWith('p-')) {
+        renders += 1
+        return textView('PLUGIN USER')
+      }
+      return undefined
+    },
+  }, 'test')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+
+  // The plugin-owned prompt sits INSIDE the recent window, so the boundary
+  // shift flips its Host `expanded` state (2 -> 3): that Host-only state must
+  // not invalidate the plugin presentation.
+  const pluginOwned = user(lines(11, 'p-'), 2)
+  const before: TranscriptMessage[] = [
+    user(lines(11, 'a-'), 1),
+    pluginOwned,
+    user(lines(11, 'c-'), 3),
+    user(lines(11, 'd-'), 4),
+  ]
+  app.setTranscript(before)
+  vt.sendInput('\x0f') // master on so the user boundary is finite
+  await viewRows(vt)
+  assert.ok(renders >= 1, 'the plugin rendered the owned user at least once')
+  const rendersBeforeShift = renders
+  const componentBefore = app.messageCacheEntryForTest(pluginOwned)?.component
+  assert.ok(componentBefore !== undefined)
+
+  // A newer user turn shifts the user boundary (2 -> 3) and flips the Host
+  // expanded state of the plugin-owned message; neither may rebuild it.
+  app.setTranscript([...before, user(lines(11, 'e-'), 5)])
+  await viewRows(vt)
+  assert.equal(app.messageCacheEntryForTest(pluginOwned)?.component, componentBefore,
+    'the plugin-owned user component must be reused across a user-boundary shift')
+  assert.equal(renders, rendersBeforeShift, 'the extension renderer must not re-run on the shift')
+
+  // A surface swap changes the Host hint owner but the plugin consumes none
+  // of that state either.
+  app.setFullscreen(true)
+  await viewRows(vt)
+  assert.equal(app.messageCacheEntryForTest(pluginOwned)?.component, componentBefore,
+    'the plugin-owned user component must be reused across a surface swap')
+  assert.equal(renders, rendersBeforeShift, 'the extension renderer must not re-run on the swap')
+  app.setFullscreen(false)
+  app.stop()
+})

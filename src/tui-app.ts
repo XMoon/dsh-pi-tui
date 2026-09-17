@@ -10606,20 +10606,25 @@ export class TuiApp {
     // registry revision comparison is the CHEAP gate (plan §23): renderer
     // functions run only inside buildMessage, never for unchanged content.
     const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.snapshot().revision
-    // The user boundary is read ONLY by the long-user fold: comparing it for
-    // every kind would rebuild every assistant/tool/system/plugin component
-    // (and re-run extension renderers) whenever a new user turn shifts the
-    // window. Scope the comparison to the long-user candidates that consume it.
-    const userBoundaryChanged = isUserMessageDisclosureCandidate(message)
-      && entry.userBoundary !== userBoundary
+    // The user boundary / expansion / hint are read ONLY by the HOST long-user
+    // bubble. A plugin-owned kind:'user' presentation consumes none of that
+    // state (its snapshot carries no expanded field and the Host draws no
+    // marker), so comparing it would rebuild unrelated components and re-run
+    // extension renderers on every user-boundary shift or surface swap. Scope
+    // the Host long-user state to the entries that actually consume it; the
+    // renderer revision still handles Host↔plugin ownership changes.
+    const userCandidate = isUserMessageDisclosureCandidate(message)
+    const hostUserBubble = userCandidate && entry.component instanceof UserBubbleComponent
+    const pluginOwnedUser = userCandidate && !hostUserBubble
+    const userBoundaryChanged = hostUserBubble && entry.userBoundary !== userBoundary
     if (entry.boundary !== boundary
       || userBoundaryChanged
       || (entry.builtWidth !== undefined && entry.builtWidth !== width)
       || entry.themeRev !== this.themeRevision
       || entry.iconStyle !== this.iconStyle
-      || entry.expanded !== state.expanded
-      || entry.fullReveal !== state.fullReveal
-      || entry.expandHint !== state.expandHint
+      || (!pluginOwnedUser && (entry.expanded !== state.expanded
+          || entry.fullReveal !== state.fullReveal
+          || entry.expandHint !== state.expandHint))
       || entry.keymapRev !== this.keybindings.revision()
       || rendererRevisionChanged
       || this.componentStale(entry, message)) {
