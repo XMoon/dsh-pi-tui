@@ -879,3 +879,32 @@ test('OverlayBroker: a blur inside the focus callback keeps the released intent'
   assert.equal(a.isFocused(), false, 'the released intent must win over the stale focus request')
   assert.equal(broker.hasFocusedOverlay(), false)
 })
+
+test('OverlayBroker: a blur inside an explicit focus callback keeps the node unfocused', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const aHandle = mountOverlay(broker, a)
+  // A is hidden; its explicit show focuses it and the plugin's onFocus blurs it
+  // again (A stays visible, but the released intent must win).
+  let reenter = false
+  const baseSetHidden = a.setHidden.bind(a)
+  a.setHidden = (value: boolean, options?: { preserveOrder?: boolean; preserveFocus?: boolean }) => {
+    baseSetHidden(value, options)
+    if (value === false && reenter) {
+      reenter = false
+      broker.unfocus(aHandle)
+    }
+  }
+  aHandle.setHidden(true)
+  assert.equal(a.isHidden(), true)
+  reenter = true
+  aHandle.focus()
+  assert.equal(a.isFocused(), false, 'the callback blur must win over the explicit focus')
+
+  // A nonCapturing sibling does not re-derive A's intent, so nothing may
+  // resurrect the released A afterwards.
+  const bHandle = mountOverlay(broker, fakeHandle('b'), { nonCapturing: true })
+  bHandle.focus()
+  broker.close(bHandle)
+  assert.equal(a.isFocused(), false, 'the released intent must survive the sibling close')
+})
