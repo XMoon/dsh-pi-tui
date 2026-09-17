@@ -734,3 +734,69 @@ test('boundary shifts and surface swaps never re-run a plugin-owned user rendere
   app.setFullscreen(false)
   app.stop()
 })
+
+test('a just-registered user renderer is reconciled before the Host reveal decision', async () => {
+  const vt = new VirtualTerminal(100, 200)
+  const registry = new RendererRegistry()
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+
+  const message = user(lines(11, 'x-'), 0)
+  app.setTranscript([message])
+  await viewRows(vt) // Host bubble: no renderer registered yet
+
+  // Register a user renderer: the registry revision moves, but the app's cache
+  // still holds the Host build (the runner would rebuild on the batched notify).
+  const handle = registry.registerMessageRenderer({
+    id: 'plugin-user',
+    order: 1,
+    render: (snapshot) => snapshot.kind === 'user' ? textView('PLUGIN USER') : undefined,
+  }, 'test')
+
+  // Synchronous reveal BEFORE any rebuild: ownership must be decided against
+  // the LIVE registry, so no Host override is written.
+  app.revealSearchMatch(message)
+
+  app.setTranscript([message])
+  let rows = await viewRows(vt)
+  assert.ok(rows.join('\n').includes('PLUGIN USER'), 'the plugin owns the user presentation')
+
+  // Unload the plugin: the Host returns. A stale Host override would render it
+  // expanded with no marker.
+  handle.dispose()
+  app.setTranscript([message])
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'the Host bubble must be folded after the plugin unload')
+  assert.ok(!rows.some(row => row.includes('x-5')), 'no stale Host override may survive the plugin unload')
+  app.stop()
+})
+
+test('a just-unloaded user renderer still accepts the search reveal for the returning Host bubble', async () => {
+  const vt = new VirtualTerminal(100, 200)
+  const registry = new RendererRegistry()
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+
+  const message = user(lines(11, 'x-'), 0)
+  const handle = registry.registerMessageRenderer({
+    id: 'plugin-user',
+    order: 1,
+    render: (snapshot) => snapshot.kind === 'user' ? textView('PLUGIN USER') : undefined,
+  }, 'test')
+  app.setTranscript([message])
+  await viewRows(vt)
+  assert.ok((await viewRows(vt)).join('\n').includes('PLUGIN USER'))
+
+  // Unload + synchronous reveal before the deferred rebuild: the returning Host
+  // bubble must still receive the reveal (a fail-closed ownership check would
+  // silently drop it).
+  handle.dispose()
+  app.revealSearchMatch(message)
+  app.setTranscript([message])
+  const rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 0, 'the returning Host bubble is revealed')
+  assert.ok(rows.some(row => row.includes('x-5')), 'the hidden middle is visible after the reveal')
+  app.stop()
+})

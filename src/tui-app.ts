@@ -6442,10 +6442,23 @@ export class TuiApp {
    * snapshot carries no `expanded` state and the Host renders no compact
    * marker), so the Host long-user disclosure state must neither be written
    * nor counted for it — an invisible override would otherwise consume the
-   * next Ctrl+O. */
+   * next Ctrl+O.
+   *
+   * The registry batches its invalidation, so a just-registered/unloaded
+   * renderer is not reflected in the cached entry until the deferred rebuild.
+   * When the entry's `rendererRevision` is stale, reconcile synchronously
+   * through the normal build path and trust only the fresh entry — deciding on
+   * the stale one would write a Host override that a plugin then mounts over
+   * (or skip the reveal a returning Host bubble legitimately needs). */
   private isHostUserDisclosure(message: TranscriptMessage): boolean {
     const entry = this.messageComponents.get(message)
-    return entry !== undefined && entry.rendererId === undefined
+    if (entry === undefined) return false
+    const registry = this.renderers
+    if (registry !== undefined && entry.rendererRevision !== registry.snapshot().revision) {
+      this.componentForMessage(message, this.expandBoundary(), this.transcriptRenderWidth(), this.userExpandBoundary())
+    }
+    const fresh = this.messageComponents.get(message)
+    return fresh !== undefined && fresh.rendererId === undefined
   }
 
   /** Whether the CURRENT projection shows a long user message that is
