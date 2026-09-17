@@ -157,7 +157,10 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   restore itself never re-promotes an overlay to the front), so the `blur`
   intent, an explicit hide, the hierarchy after a close or a modal settle, and
   mixed overlay kinds always survive — including a nonCapturing HUD that sits
-  visually above the focused overlay across a Question / Save round-trip.
+  visually above the focused overlay across a Question / Save round-trip. An
+  internal restore also never fabricates a focus transition: a deliberately
+  `blur`red overlay is not wrongly re-activated when a child closes, a modal
+  settles, or the screen is swapped (no spurious `onFocus`/`onBlur`).
 - **The Job detail overlay has its own bottom action hint.** A running job shows
   `S stop · Esc back`; once the job settles the Stop hint disappears and its key
   becomes a no-op; `Esc back` stays visible under a long body, a short terminal

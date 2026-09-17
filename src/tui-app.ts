@@ -5626,7 +5626,10 @@ export class TuiApp {
   /** Mount a fresh PHYSICAL projection for an existing logical node during a
    * fullscreen rebind (no topology / suppression side effects). */
   private rebindOverlayRaw(handle: OverlayHandle, component: Component, options: OverlayOptions): void {
-    const raw = this.activeScreen.showOverlay(component, { ...options, disposeOnHide: false })
+    // X056: a rebind must not auto-focus a capturing entry — the broker
+    // restores the real keyboard owner afterwards, so an automatic focus here
+    // would emit a spurious onFocus/onBlur pair on every screen swap.
+    const raw = this.activeScreen.showOverlay(component, { ...options, disposeOnHide: false, initialFocus: false })
     this.overlayBroker.rebind(handle, raw)
   }
 

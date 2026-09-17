@@ -114,7 +114,8 @@ dsh --profile pi-tui
   焦点意图与前置顺序（恢复本身不会把某个浮层重新提到最前），因此 `blur` 意图、显式隐藏、
   浮层关闭/模态结束后的层级，以及混合类型（extension/advanced/unstable 等）的顺序都不会
   丢失或被反转；nonCapturing HUD 在 focused 浮层之上的视觉位置在 Question/Save 往返后也
-  保持不变。
+  保持不变。内部恢复同样不会制造多余的焦点切换：被 `blur` 的浮层不会在子浮层关闭、模态
+  结束或 fullscreen 往返时被错误地重新激活（插件不会收到假的 `onFocus`/`onBlur`）。
 - **Job 详情浮层有独立的底部操作提示。** 运行中的 Job 显示 `S stop · Esc back`；任务
   结束后 `Stop` 提示消失且该键失效；`Esc back` 在长内容、短终端（低至 2 行）或窄屏下始终
   可见，且宽度不足时优先保留关闭/返回而不是 `Stop`；非 Job 的独立提示面板（如登录通知）

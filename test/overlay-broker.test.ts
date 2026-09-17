@@ -54,7 +54,7 @@ function fakeHandle(label: string): FakeHandle {
     autoFocusOnShow: false,
     isHandFocused: () => focused,
     hide() { handle.hiddenLog.push('hide'); hidden = false; focused = false },
-    setHidden(value: boolean) {
+    setHidden(value: boolean, options?: { preserveOrder?: boolean; preserveFocus?: boolean }) {
       handle.hiddenLog.push(value ? 'hide-temp' : 'show')
       const wasHidden = hidden
       hidden = value
@@ -62,7 +62,9 @@ function fakeHandle(label: string): FakeHandle {
         focused = false
         return
       }
-      if (wasHidden && handle.autoFocusOnShow) {
+      // The fork auto-focuses a shown capturing overlay unless the internal
+      // restore asks it not to (X056 preserveFocus).
+      if (wasHidden && handle.autoFocusOnShow && options?.preserveFocus !== true) {
         handle.showFocusLog.push('focus')
         focused = true
       }

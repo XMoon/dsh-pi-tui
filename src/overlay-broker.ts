@@ -189,7 +189,9 @@ export class OverlayBroker {
     }
     // Capturing: adopt the prepared VISIBLE ROOTS as this node's children
     // (only roots — never every visible handle, which would allow a node to
-    // acquire a second suppressor).
+    // acquire a second suppressor). The mount itself focuses the new node
+    // (the fork does), so it owns the keyboard intent as a logical root.
+    node.resumeFocus = true
     for (const entry of prepared.suppress) {
       const child = entry.node
       this.roots.delete(child)
@@ -294,21 +296,38 @@ export class OverlayBroker {
       }
       this.roots.add(child)
     }
-    node.raw?.hide()
-    node.raw = undefined
     const revealed = children.filter(child => child.parent === undefined && !this.isSuppressed(child))
-    if (revealed.length > 0) {
-      const keepFocus = priorFocus !== undefined && priorFocus !== node && !priorFocus.closed
-        && priorFocus.raw !== undefined && this.isVisible(priorFocus)
-        ? priorFocus
-        : undefined
-      this.reveal(revealed, keepFocus)
-    } else if (this.activeSuspension() === undefined && this.currentlyFocused() === undefined) {
-      // An active Question / Save Location owns the seat through its editor-seat
-      // frame (not a managed node): the fallback must not steal its physical
-      // focus when a directly suspended overlay closes (Case B).
+    // 1. Visibility first, WITHOUT any keyboard side effect: a revealed child
+    //    must not auto-focus (that would emit a spurious onFocus/onBlur on an
+    //    overlay that was deliberately blurred). An explicitly hidden child
+    //    stays hidden.
+    for (const child of revealed) {
+      if (child.explicitHidden) continue
+      this.showPhysical(child, { preserveOrder: true, preserveFocus: true })
+    }
+    // 2. Decide the next logical keyboard owner BEFORE hiding the closing
+    //    node: the fork's permanent hide() hands focus to another visible
+    //    capturing overlay, which could wrongly re-activate a blurred sibling.
+    const keepFocus = priorFocus !== undefined && priorFocus !== node && !priorFocus.closed
+      && priorFocus.raw !== undefined && this.isVisible(priorFocus)
+      ? priorFocus
+      : undefined
+    const nextOwner = keepFocus
+      ?? this.frontmostFocusable(revealed)
+      ?? this.frontmostFocusable([...this.roots])
+    if (nextOwner !== undefined) {
+      if (nextOwner.raw?.isFocused() !== true) this.focusPhysical(nextOwner, { preserveOrder: true })
+    } else if (this.activeSuspension() === undefined) {
+      // No overlay should own the keyboard. An active Question / Save Location
+      // owns the seat through its editor-seat frame (not a managed node) and
+      // must keep it (Case B); otherwise hand it to the current editor seat.
+      // Retargeting BEFORE hide() stops the fork's own focus fallback.
       this.deps.focusSeatOwner?.()
     }
+    // 3. Now hide the closing node: it no longer owns the keyboard, so the
+    //    fork restores nobody.
+    node.raw?.hide()
+    node.raw = undefined
     this.deps.reconcileFocusSeat?.()
   }
 
@@ -504,11 +523,15 @@ export class OverlayBroker {
 
   /**
    * Show a node's physical projection. An EXPLICIT show mirrors the fork's
-   * visual-order mutation (a hidden CAPTURING overlay auto-focuses and is
-   * promoted) so the logical z follows; an INTERNAL restore passes
-   * `preserveOrder` and reproduces the pre-suppression stacking instead.
+   * mutations (a hidden CAPTURING overlay auto-focuses and is promoted) so the
+   * logical z follows; an INTERNAL restore passes `preserveOrder` /
+   * `preserveFocus` and reproduces the pre-suppression stacking and keyboard
+   * ownership instead (the caller then focuses exactly ONE owner).
    */
-  private showPhysical(node: ManagedOverlayNode, options?: { preserveOrder?: boolean }): void {
+  private showPhysical(
+    node: ManagedOverlayNode,
+    options?: { preserveOrder?: boolean; preserveFocus?: boolean },
+  ): void {
     if (node.raw === undefined) return
     const wasHidden = node.raw.isHidden() === true
     node.raw.setHidden(false, options)
@@ -524,6 +547,15 @@ export class OverlayBroker {
     if (node.raw === undefined) return
     node.raw.focus(options)
     if (options?.preserveOrder !== true) node.zOrder = ++this.zSequence
+  }
+
+  /** The frontmost visible node that asked for the keyboard (`resumeFocus`).
+   * `nonCapturing` is only a MOUNT policy (I4) and does not veto it. */
+  private frontmostFocusable(nodes: readonly ManagedOverlayNode[]): ManagedOverlayNode | undefined {
+    return nodes
+      .filter(node =>
+        !node.closed && node.raw !== undefined && !node.explicitHidden && node.resumeFocus && this.isVisible(node))
+      .sort((a, b) => b.zOrder - a.zOrder)[0]
   }
 
   private currentlyFocused(): ManagedOverlayNode | undefined {
@@ -549,45 +581,33 @@ export class OverlayBroker {
 
   /**
    * INTERNAL restore of a set of nodes (back → front) after a suppression
-   * (a close releasing its children, or a Question / Save Location settle).
-   * This is NOT an explicit user show/focus: it reproduces the
-   * pre-suppression visibility, stacking and keyboard ownership, so it never
-   * promotes the logical z (see the fork's X056 preserveOrder seam).
+   * (a Question / Save Location settle). This is NOT an explicit user
+   * show/focus: it reproduces the pre-suppression visibility, stacking and
+   * keyboard ownership — no z promotion and NO implicit focus transition —
+   * then focuses exactly ONE owner (see the fork's X056 seam).
    *
    * `keepFocus` is a SURVIVING overlay that held the keyboard before the
-   * change: when present it must keep it, whatever the revealed children's
-   * own intents are. Otherwise the frontmost node that asked for focus
-   * reclaims the keyboard; if none did, the CURRENT seat owner does.
+   * change: when present it must keep it, whatever the revealed nodes' own
+   * intents are. Otherwise the frontmost node that asked for focus reclaims
+   * the keyboard; if none did, the CURRENT seat owner does.
    */
   private reveal(nodes: readonly ManagedOverlayNode[], keepFocus?: ManagedOverlayNode): void {
     const ordered = [...nodes].sort((a, b) => a.zOrder - b.zOrder)
-    const restore = { preserveOrder: true } as const
+    const restore = { preserveOrder: true, preserveFocus: true } as const
     for (const node of ordered) {
       if (node.closed || node.explicitHidden || node.raw === undefined) continue
       this.showPhysical(node, restore)
     }
-    if (keepFocus !== undefined && !keepFocus.closed && keepFocus.raw !== undefined && this.isVisible(keepFocus)) {
-      // A revealed capturing child auto-focused itself (without promoting);
-      // restoring the surviving owner takes the keyboard back.
-      if (keepFocus.raw.isFocused() !== true) this.focusPhysical(keepFocus, restore)
-      this.deps.reconcileFocusSeat?.()
-      return
-    }
-    const candidates = ordered.filter(node =>
-      !node.closed && node.raw !== undefined && !node.explicitHidden && this.isVisible(node))
-    // `nonCapturing` is only a MOUNT policy (I4): it must NOT veto an explicit
-    // focus() intent that was saved on the node, or a focus-capable lease that
-    // focused a notice would silently lose the keyboard on reveal.
-    const focusTarget = candidates
-      .filter(node => node.resumeFocus)
-      .sort((a, b) => b.zOrder - a.zOrder)[0]
-    if (focusTarget !== undefined) {
-      this.focusPhysical(focusTarget, restore)
+    const owner = keepFocus !== undefined && !keepFocus.closed && keepFocus.raw !== undefined && this.isVisible(keepFocus)
+      ? keepFocus
+      : this.frontmostFocusable(ordered)
+    if (owner !== undefined) {
+      if (owner.raw?.isFocused() !== true) this.focusPhysical(owner, { preserveOrder: true })
     } else if (this.activeSuspension() === undefined) {
-      // The fork auto-focused the last revealed capturing node, but NONE of
-      // them asked for the keyboard (they were blurred/nonCapturing): the
-      // CURRENT seat owner must own it again (never the stale preFocus
-      // snapshot). An active Question / Save Location frame keeps the seat.
+      // NONE of the restored nodes asked for the keyboard (they were
+      // blurred/nonCapturing): the CURRENT seat owner must own it again
+      // (never the stale preFocus snapshot). An active Question / Save
+      // Location frame keeps the seat.
       this.deps.focusSeatOwner?.()
     }
     this.deps.reconcileFocusSeat?.()
