@@ -7,166 +7,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7-alpha.1] - 2026-09-17
+
 ### Installation and version pairing
 
 This release moves the `next` npm line's DSH compatibility target to
-`0.1.6-alpha.1`: the minimum is DSH `0.1.6-alpha.1`, with a peer floor of
-`>=0.1.6-alpha.1`. Its native install scripts must be explicitly allowed:
+`0.1.6-alpha.1` (peer floor `>=0.1.6-alpha.1`). Its native install scripts must
+be explicitly allowed:
 
 ```sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.1
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.7-alpha.1
 dsh --profile pi-tui
 ```
 
-Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
-`@xmoon76/dsh-pi-tui@0.4.6`.
+To stay on the older DSH `0.1.5-rc.1`/`0.1.5-rc.2`, keep the stable
+`@xmoon76/dsh-pi-tui@0.4.6`; for the older DSH `0.1.1-rc.1`/`rc.2` use
+`@xmoon76/dsh-pi-tui@0.3`.
 
-### Changed
+### Added
 
-- **Long user messages collapse by default.** A text-only user prompt longer than
-  10 terminal visual rows renders only its first 4 rows, one
+- **Long user messages collapse by default.** A text-only prompt longer than 10
+  terminal visual rows renders its first 4 rows, one
   `── N rows compacted · … to expand ──` marker, and its last 3 rows, so a
-  trailing instruction stays visible. `Ctrl+O` expands the long prompts within
-  the most recent 3 USER turns and a second press collapses them, in regular
-  mode and in fullscreen outside Focus; in fullscreen a click on that
-  marker row (or a search hit) expands the single message, and inside a
-  fullscreen Focus `Ctrl+O` bulk-toggles the Thought roots and collapses an
-  already-expanded long user message. In regular mode with no bound
-  `app.transcript.toggleExpand` key the whole prompt renders in full instead of
-  folding, so it can never be stranded collapsed. The decision
-  uses the wrapped visual rows at the CURRENT width (CJK, emoji, and a single
-  over-long JSON line all count their real screen space) and is recomputed after
-  a resize. The canonical transcript text, search, export, session persistence,
-  and replay keep the complete user content; mixed-content user messages with
-  attachments and the pending echo are unchanged. Known limitation: a search
-  jump expands the matched message but does not scroll the viewport onto the
-  exact matched row (matches carry no intra-message offset yet; tracked as a
-  follow-up).
-- **Fullscreen shows a clickable `↓ Latest` after leaving the live tail.** Once
-  the fullscreen transcript is no longer at the live tail (the user scrolled up,
-  or a history window is being browsed), the bottom of the viewport shows a
-  clickable `↓ Latest · <key>` (the key follows the effective keymap). A history
-  window shows it even when scrolled to its own bottom, and a click takes the
-  same semantic path as `Ctrl+End` — back to the GLOBAL latest, never just to
-  the current history window's bottom. The label disappears again at the live
-  tail, and the history location gutter no longer repeats the jump key.
-- **`/model` is now an immediate, searchable model command palette.** The panel
-  opens at once with `Loading models…` and fills the SAME overlay in place once
-  the directory read settles (no reopen; a query typed while loading is kept);
-  provider is a group only, and one search covers provider/model names and ids.
-  `↑↓` moves the model and `←`/`→` edit the search box cursor; on a
-  reasoning-capable model `Enter` focuses the inline effort on the same row
-  (`effort ‹High›` becomes `effort [ High ]`, where `←`/`→` pick the effort,
-  `Enter` commits the selection the panel shows and `Esc` returns to the model
-  list, with a second `Esc` closing), while a no-effort model commits directly.
-  The effort is shown by official name and the effort id is still what is
-  submitted. Model descriptions and ids no longer expand; when a row cannot fit
-  its name and status, it wraps the right-aligned status onto a second line so
-  the model name is never squeezed out. DSH session and global-default model
-  semantics are unchanged.
-- **`/settings` "Subagent allowed models" now uses the same searchable grouped
-  list.** Provider is a group only, `Enter` toggles an allowed route directly,
-  and one search covers provider/model names and ids; the official
-  whole-section write, last-route guard, serialized writes, and failure
-  rollback are unchanged, and one provider's load failure never blocks the
-  others.
-- **Quick Tasks keyboard interaction is now navigation-only, so ordinary
-  printable input can no longer enter hidden states.** The Footer `↓` Quick
-  Tasks view responds only to the arrow keys, `Tab`, `Enter`, and `Esc`; every
-  other key is a no-op, so `S`/`/`/`T` can no longer arm a stop confirmation,
-  enter search, or switch views, and `Esc` always closes Quick in one layer and
-  returns input to the editor. `N` / `Shift+N` (running-task jump) and Quick's
-  `T` shortcut into the full view were removed in favor of the bottom “Open Task
-  Center” row plus `Enter`; the full Task Center gains `Shift+Tab` reverse type
-  cycling.
-- **Interrupted parked steering is now presented accurately with its recovery
-  path.** After the active turn is interrupted, a steering row still parked in
-  the inbox changes from `steering…` to `waiting for next turn…` and is consumed
-  by the official next-wake semantics on the next ordinary prompt; an empty
-  Ctrl+S then explains the recovery instead of silently no-opping, and never
-  synthesizes a wake or replays the message.
-- **Preset-selection visibility follows the deployment policy.** When a
-  deployment sets `modeSelectionEnabled` to `false`, `/preset` no longer
-  appears in the slash candidates or `/help`, while typing `/preset` still
-  fails closed under the official policy; an unavailable roster keeps the
-  current presentation instead of inferring a value.
-- **PTC/workflow runtime aligned with the official 0.1.6 composition.** The
-  `ptc` preset now receives its PTC runtime from the official `ptc-runtime`
-  row; the TUI no longer inserts the retired `code-runtime-worker-thread` row
-  and its host-plane workflow row is aligned to the official `workflow-ptc`.
-- **File edit/write diff cards follow DSH 0.1.6's bounded contextual diff.**
-  Shared context lines are no longer misreported as additions or deletions;
-  sparse edits in large files stay exact; only a fragment past the official
-  bounded edit search (256 edits) degrades to a coarse whole-fragment
-  replacement, and the folded `+N/-M` totals come from the same derivation as
-  the expanded body.
-- **A failed TUI startup is no longer silently treated as an optional plugin
-  failure.** DSH 0.1.6 app-boot fails fast only for its own required rows and
-  merely warns about inactive/failed ones, while `--profile pi-tui` explicitly
-  asks for the TUI surface. When startup commits but the `tui-app` row never
-  mounted (import/apply failure or a dependency left pending), the bundle now
-  prints an actionable error and **exits nonzero** — never a warning-plus-success
-  or a lingering process.
-- **The Focus header now shows the real run state and pauses the timer while
-  waiting on the user.** An open turn no longer reads `Thought`: it shows
-  `Working`, `Waiting for approval · 12s`, or `Waiting for input · 12s`, and a
-  settled turn shows `Completed`. Time spent waiting on an approval or a
-  question no longer counts toward the run duration and resumes accumulating
-  once the run continues.
-- **The Focus compact Tool row replaces the concrete command with the tool
-  identity plus the official presenter's human description.** A foreground Bash
-  call shows `Bash · <description>` and a background execute card shows
-  `<tool name> · <content description>` (e.g. `Pwsh · Check service state`); an
-  unknown custom tool keeps its raw name instead of degrading to `Tool · …`;
-  the full command stays in the expanded tool card.
-- **The collapsed Thinking preview now follows the reasoning tail.** While
-  reasoning streams, the one-line compact preview always shows the newest
-  token, clipping overflow from the left, and moves only with real reasoning
-  deltas (no independent animation); the Focus collapsed, Focus expanded
-  secondary, and non-Focus surfaces behave identically, while a settled row
-  still reads from the start of its line.
-- **Fullscreen drag selection and `/copy` now share one clipboard policy.**
-  Both attempt the terminal-client OSC 52 leg and the native/platform helper
-  leg independently, and a helper success no longer suppresses OSC 52. This
-  fixes remote setups (e.g. ORCA/xterm.js) where a fullscreen selection was
-  copied to the remote host's clipboard and could not be pasted locally.
-- **A short fullscreen opens the Todo panel with 3 rows.** On terminals with
-  at most 16 rows the compact Todo panel shows 3 items (5 otherwise); a resize
-  re-derives the cap from the current height and drops a redundant full state.
-- **A job status detail opened from the Task Center now returns one level, and
-  capturing-overlay focus restoration is unified.** After opening a Job's
-  **status detail** from Quick Tasks or the full Task Center with `Enter` (a bash
-  job, or a subagent job whose child session cannot be located), `Esc` returns to
-  the same Task Center instance (selected row, scroll, filter, search, and
-  disclosure state preserved) and a second `Esc` returns to the editor; a
-  subagent job that resolves to a child session still opens the child transcript
-  directly (replacing the Task Center and keeping its own `Esc` semantics). After
-  an overlay close, a restored **capturing** overlay underneath always regains
-  keyboard focus and the focused seat, so "overlay visible but the editor still
-  owns focus" no longer happens; a nonCapturing notice overlay does not
-  automatically take focus or suppress its siblings, and the Host shortcuts
-  beneath it (e.g. the empty-editor `↓` that opens Quick Tasks) still fire, but
-  an explicit `focus()` request from a focus-capable lease can still make it the
-  physical keyboard owner; a capturing overlay that is `blur`red or temporarily
-  hidden likewise hands the keyboard and focused seat back to the editor and
-  reclaims both on focus/show, and a dependent restore always focuses the CURRENT
-  editor seat rather than a replaced pre-mount editor; a Question / Save Location
-  settle and a fullscreen swap are INTERNAL restores that keep the CURRENT
-  logical hierarchy, visibility intent, focus intent and front order (the
-  restore itself never re-promotes an overlay to the front), so the `blur`
-  intent, an explicit hide, the hierarchy after a close or a modal settle, and
-  mixed overlay kinds always survive — including a nonCapturing HUD that sits
-  visually above the focused overlay across a Question / Save round-trip. An
-  internal restore also never fabricates a focus transition: a deliberately
-  `blur`red overlay is not wrongly re-activated when a child closes, a modal
-  settles, or the screen is swapped (no spurious `onFocus`/`onBlur`).
+  trailing instruction stays visible; `Ctrl+O` expands and collapses the long
+  prompts within the most recent 3 USER turns, and fullscreen can expand a single
+  message by clicking that marker row or a search hit. The decision uses the
+  wrapped visual rows at the current width (CJK and emoji count their real cells)
+  and is recomputed after a resize. Known limitation: a search jump expands the
+  matched message but does not scroll onto the exact matched row.
+- **A fullscreen `↓ Latest` hint.** Once the fullscreen transcript leaves the live
+  tail (manual scroll-up or a browsed history window), the bottom shows a
+  clickable `↓ Latest · <key>`; it takes the same path as `Ctrl+End` straight back
+  to the GLOBAL latest and disappears again at the tail.
+- **`/model` is now an immediate, searchable palette.** The panel opens at once
+  with `Loading models…` and fills in place when the directory read settles;
+  provider is a group only, one search covers provider/model names and ids, and
+  `Enter` on a reasoning model focuses the inline effort on the same row
+  (`←`/`→` pick, `Enter` commits, `Esc` returns). DSH session and global-default
+  model semantics are unchanged.
+- **`/settings` "Subagent allowed models" uses the same searchable grouped
+  list.** `Enter` toggles an allowed route directly; the official whole-section
+  write, last-route guard, serialized writes, and failure rollback are unchanged.
 - **The Job detail overlay has its own bottom action hint.** A running job shows
   `S stop · Esc back`; once the job settles the Stop hint disappears and its key
-  becomes a no-op; `Esc back` stays visible under a long body, a short terminal
-  (down to two rows) or a narrow width, and degrades to the close/back verb
-  before Stop when the width cannot fit both; non-job notices (e.g. the sign-in
-  notice) show `Esc close` and never offer Stop.
+  becomes a no-op, while `Esc back` stays visible under a long body, a short
+  terminal, or a narrow width.
+- **Accepted but not yet landed input stays visible.** A submitted steering or
+  queued prompt shows a client-local echo in the queue pane or the conversation
+  tail until its authoritative transcript lands; the echo is correlated with the
+  authoritative message by request id, never by text.
+
+### Improved
+
+- **Quick Tasks is now navigation-only.** The Footer `↓` Quick Tasks view
+  responds only to the arrows, `Tab`, `Enter`, and `Esc`; every other key is a
+  no-op (`S`/`/`/`T` no longer arm a stop, enter search, or switch views), `N` /
+  `Shift+N` and Quick's `T` shortcut into the full view became the bottom "Open
+  Task Center" row plus `Enter`, and the full Task Center gains `Shift+Tab`
+  reverse type cycling.
+- **Interrupted parked steering is presented accurately with its recovery path.**
+  After the active turn is interrupted, a steering row still parked in the inbox
+  reads `waiting for next turn…` and is consumed by the official next-wake
+  semantics on the next ordinary prompt; an empty Ctrl+S then explains the
+  recovery instead of silently no-opping.
+- **The Focus header shows the real run state.** An open turn reads `Working`,
+  `Waiting for approval · 12s`, or `Waiting for input · 12s`, and settles on
+  `Completed`; time spent waiting on the user no longer counts toward the run
+  duration.
+- **The Focus compact Tool row uses the tool identity plus the official
+  description.** A foreground Bash call shows `Bash · <description>` and a
+  background card shows `<tool name> · <content description>`; an unknown custom
+  tool keeps its raw name, and the full command stays in the expanded tool card.
+- **The collapsed Thinking preview follows the reasoning tail.** While reasoning
+  streams, the one-line compact preview always shows the newest token, clipping
+  overflow from the left, driven only by real reasoning deltas; a settled row
+  still reads from the start of its line.
+- **A short fullscreen opens the Todo panel with 3 rows.** On terminals with at
+  most 16 rows the compact Todo panel shows 3 items (5 otherwise), re-derived
+  from the current height on resize.
+- **Fullscreen drag selection and `/copy` share one clipboard policy.** Both
+  attempt the terminal OSC 52 leg and the native helper leg independently, and a
+  helper success no longer suppresses OSC 52; this fixes remote setups (e.g.
+  ORCA/xterm.js) where a selection was copied to the remote host's clipboard.
+- **File edit/write diff cards follow DSH 0.1.6's bounded contextual diff.**
+  Shared context lines are no longer misreported as additions or deletions and
+  sparse edits in large files stay exact; only a fragment past the official
+  bounded edit search (256 edits) degrades to a coarse replacement, with the
+  folded `+N/-M` totals derived from the same source as the expanded body.
+- **A Task Center Job detail returns one level, and capturing-overlay focus
+  restoration is unified.** Opening a Job **status detail** from Quick Tasks or
+  the full Task Center returns with `Esc` to the same Task Center instance
+  (selected row, scroll, filter, search, and disclosure preserved) before a
+  second `Esc` returns to the editor; a subagent job that resolves to a child
+  session still opens that transcript directly. After a close, a restored
+  **capturing** overlay regains keyboard focus and the focused seat, a
+  nonCapturing notice does not take focus or suppress its siblings, and a
+  Question / Save Location settle or a fullscreen swap is an internal restore
+  that keeps the current logical hierarchy, visibility and focus intent, and
+  front order.
+
+### Fixed
+
+- **A failed TUI startup is no longer silently treated as an optional plugin
+  failure.** When startup commits but the `tui-app` row never mounted, the bundle
+  prints an actionable error and **exits nonzero**, never a warning-plus-success
+  with a lingering process.
+- **Preset-selection visibility follows the deployment policy.** With
+  `modeSelectionEnabled` set to `false`, `/preset` no longer appears in the slash
+  candidates or `/help` while typing it still fails closed under the official
+  policy; an unavailable roster keeps the current presentation.
+- **Fullscreen historical scroll position is no longer pulled back to the tail.**
+  When the queue pane, other chrome, or a terminal resize changes the viewport
+  height, a view that had scrolled away from the live tail keeps its position;
+  only an explicit scroll to the end resumes following.
+
+### Compatibility
+
+- **PTC/workflow runtime aligned with the official 0.1.6 composition.** The `ptc`
+  preset receives its PTC runtime from the official `ptc-runtime` row, the TUI no
+  longer inserts the retired `code-runtime-worker-thread` row, and the host-plane
+  workflow row is aligned to the official `workflow-ptc`.
+
+> **Known limitation:** The production default backend remains Direct; remote attach is not supported.
 
 ## [0.4.6] - 2026-09-13
 
@@ -1268,7 +1231,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...HEAD
+[0.4.7-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.3-alpha.2...next-v0.4.7-alpha.1
 [0.4.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...v0.4.5
 [0.4.3-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...next-v0.4.3-alpha.2

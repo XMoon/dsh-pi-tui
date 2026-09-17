@@ -187,6 +187,14 @@ test('0.4.3-alpha.2 prerelease guidance pins the published 0.1.3-alpha.2 family'
   assert.equal(result.status, 0, result.stderr)
 })
 
+test('0.4.7-alpha.1 prerelease guidance pins the published 0.1.6-alpha.1 family', (t) => {
+  const life = testLifecycle(t)
+  const guidance = '\n- @deepseek-ai/dsh@0.1.6-alpha.1\n- @xmoon76/dsh-pi-tui@0.4.7-alpha.1\n- @xmoon76/dsh-pi-tui@0.3'
+  const next = createFixture(life, { version: '0.4.7-alpha.1', guidance, channel: 'next' })
+  const result = run(next, 'next-v0.4.7-alpha.1')
+  assert.equal(result.status, 0, result.stderr)
+})
+
 test('release-notes guidance matching rejects near-miss package versions', (t) => {
   const life = testLifecycle(t)
   const fixture = createFixture(life, {

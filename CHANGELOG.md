@@ -7,119 +7,97 @@
 
 ## [Unreleased]
 
+## [0.4.7-alpha.1] - 2026-09-17
+
 ### 安装与版本对应
 
-本版本把 `next` npm 线的 DSH 兼容目标推进到 `0.1.6-alpha.1`：最低兼容 DSH
-`0.1.6-alpha.1`，peer floor 为 `>=0.1.6-alpha.1`。安装 DSH 时需要显式允许其
-原生安装脚本：
+本版本把 `next` npm 线的 DSH 兼容目标推进到 `0.1.6-alpha.1`（peer floor
+`>=0.1.6-alpha.1`）；安装 DSH 时需要显式允许其原生安装脚本：
 
 ```sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.1
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.7-alpha.1
 dsh --profile pi-tui
 ```
 
-旧版 DSH `0.1.5-rc.1`/`0.1.5-rc.2` 继续使用稳定版
-`@xmoon76/dsh-pi-tui@0.4.6`。
+继续使用旧版 DSH `0.1.5-rc.1`/`0.1.5-rc.2` 的用户请留在稳定版
+`@xmoon76/dsh-pi-tui@0.4.6`；更旧的 DSH `0.1.1-rc.1`/`rc.2` 使用
+`@xmoon76/dsh-pi-tui@0.3`。
 
-### 变更
+### 新增
 
-- **超长用户消息默认折叠显示。** 纯文本用户 Prompt 超过 10 个终端视觉行时，Transcript
-  默认只显示开头 4 行、中间一条 `── N rows compacted · … to expand ──` 提示和结尾 3
-  行，尾部补充说明默认可见；普通模式与全屏非 Focus 下 `Ctrl+O` 展开最近 3 个用户回合内的
-  超长 Prompt、再按一次收回，全屏下点击该提示行（或搜索命中）展开单条消息，全屏 Focus 里
-  `Ctrl+O` 负责整体切换 Thought root 并收回已展开的超长用户消息。普通模式若未绑定
-  `Ctrl+O`（`app.transcript.toggleExpand` 被禁用），则整条 Prompt 完整显示、不折叠，
-  避免无法展开。
-  折叠判断基于当前宽度换行后的视觉行（CJK / emoji / 单行超长 JSON 都按真实屏幕占用
-  计算），resize 后自动重新判断。Transcript 原文、搜索、导出、Session 持久化与回放
-  仍使用完整用户内容；带附件的混合内容用户消息和 pending 回显保持原样。已知限制：搜索
-  跳转只保证展开命中所在的整条消息，不会把 viewport 精确定位到命中那一行（匹配暂无
-  消息内偏移量，列为后续项）。
-- **全屏离开 live tail 时提供可点击的 `↓ Latest`。** 全屏 Transcript 一旦不在实时尾部
-  （手动向上滚动，或正在浏览 history 窗口），viewport 底部显示可点击的
-  `↓ Latest · <快捷键>`（快捷键按实际 keymap 显示）；history 窗口即使已滚到底也会显示，
-  点击与 `Ctrl+End` 走同一语义、直接回到全局 latest 而不是当前 history 窗口底部。
-  回到 live tail 后提示自动消失；history 位置提示不再重复跳转快捷键。
-- **`/model` 改为即时打开、可搜索的模型命令面板。** 输入 `/model` 后面板立即出现并先
-  显示 `Loading models…`，目录在后台加载、加载完成后同一 overlay 原地填充（不重开
-  面板，加载期间即可输入搜索且查询保留）；provider 仅作分组，一次搜索覆盖
-  provider/model 的名称与 id；`↑↓` 选模型、`←→` 编辑搜索框光标；对支持 reasoning 的
-  模型按 `Enter` 进入行内 reasoning effort 编辑（同一个模型行上 `effort ‹High›` 变为
-  `effort [ High ]`，此时 `←→` 调整 effort、`Enter` 提交当前显示的选择、`Esc` 返回
-  模型列表，再按 `Esc` 关闭），无 effort 的模型直接提交。effort 按官方 name 显示、
-  提交仍用 effort id。模型 description 与 id 不再展开；窄屏放不下名称与状态时该行
-  自动折成两行（状态右对齐），模型名永远优先显示。DSH 的 Session/全局默认模型
-  语义不变。
-- **`/settings` 的 “Subagent allowed models” 改为同一套可搜索分组列表。** provider
-  仅作分组，模型行 `Enter` 直接增删允许路由，一次搜索覆盖 provider/model 的名称与
-  id；官方整段写入、last-route 保护、写入串行与失败回滚语义不变，单个 provider
-  加载失败不影响其他 provider。
-- **Quick Tasks 键盘交互收敛为纯导航，普通字符不再误入隐藏状态。** Footer `↓`
-  打开的 Quick Tasks 现在只响应方向键、`Tab`、`Enter` 和 `Esc`，其余按键一律
-  no-op；`S` / `/` / `T` 等字符不再触发停止确认、搜索或视图切换，`Esc` 始终一次
-  关闭 Quick 并把输入交回 editor。`N` / `Shift+N`（运行任务跳转）与 Quick 的 `T`
-  进入完整视图已移除，改由底部 “Open Task Center” 行 + `Enter` 进入；完整 Task
-  Center 新增 `Shift+Tab` 反向遍历类型过滤。
-- **被中断的 parked steering 现在被准确呈现并给出恢复路径。** 当前 turn 被
-  Interrupted 后，仍留在 inbox 的 steering 行从 `steering…` 变为 `waiting for
-  next turn…`，并在下一次普通消息唤醒 Agent 时按官方语义被消费；此时空的 Ctrl+S
-  会给出提示而不是静默无操作，且不会伪造唤醒或重放。
-- **preset 选择可见性跟随部署策略。** 当部署把 `modeSelectionEnabled` 设为
-  `false` 时，`/preset` 不再出现在斜杠候选与 `/help` 中，直接输入 `/preset`
-  仍按官方策略拒绝；roster 不可用时保持原展示，不做推测。
-- **PTC / workflow runtime 对齐官方 0.1.6 组合。** `ptc` preset 现在通过官方
-  `ptc-runtime` 行获得 PTC 运行时；TUI 不再自行插入已退休的
-  `code-runtime-worker-thread` 行，host 平面的 workflow 行也对齐到官方
-  `workflow-ptc`。
-- **文件 edit/write diff 卡片对齐 DSH 0.1.6 的边界化上下文 diff。** 共享的上下文
-  行不再被误报为增删；大文件中的稀疏改动保持精确显示；只有超出官方边界化 edit
-  search（每个 fragment 256 次 edit）才退化为整段粗粒度替换，且折叠处的 `+N/-M`
-  与展开内容由同一推导产生。
-- **TUI 启动失败不再被静默当作可选插件失败。** DSH 0.1.6 的 app-boot 只对官方
-  required 行 fail-fast，其余未激活/失败的行只告警并继续；而 `--profile pi-tui`
-  明确要求 TUI 界面。现在当启动提交就绪、但 `tui-app` 从未挂载（导入/apply 失败或
-  依赖一直 pending）时，会打印明确错误并**以非零状态退出**，不再出现「告警 + 成功 +
-  进程仍驻留」的假成功。
-- **Focus 头部改为真实执行状态，等待用户时计时暂停。** 未完成 turn 不再统一显示
-  `Thought`：正常执行显示 `Working`，权限确认显示 `Waiting for approval · 12s`，
-  用户问题显示 `Waiting for input · 12s`，完成后显示 `Completed`；等待 approval /
-  question 的时间不再计入运行时长，恢复执行后继续累计。
-- **Focus compact 的工具行以工具身份 + 官方 presenter 的人类描述取代具体命令。**
-  前台 Bash 命令显示 `Bash · <description>`，后台执行卡片显示
-  `<工具名> · <content 描述>`（如 `Pwsh · Check service state`）；未知的自定义
-  工具保留其原始名字而不是退化为 `Tool · …`；完整命令仍保留在展开后的正式 tool
-  card 中。
-- **折叠 Thinking 预览改为追随推理尾部。** 运行中的 compact Thinking 单行预览始终
-  显示最新 token，超宽时从左侧裁掉，且只由真实 reasoning delta 驱动（不做独立动画）；
-  Focus 折叠、Focus 展开次级卡片、非 Focus 三种 surface 一致，settled 仍从行首显示。
-- **全屏拖选与 `/copy` 统一到同一条 clipboard policy。** 二者现在都会同时尝试
-  terminal-client 的 OSC 52 与本机/平台 helper 两条独立通道，helper 成功不再阻断
-  OSC 52；修复了远端（如 ORCA/xterm.js）下全屏选择被复制到远端主机剪贴板、用户本地
-  粘贴不到的问题。
-- **短屏全屏下 Todo 首次展开为 3 项。** 终端行数 ≤16 时 compact Todo 面板显示 3 项，
-  普通终端仍为 5 项；缩放时按当前高度重新推导，不残留多余的 full 状态。
-- **Task Center 打开的任务状态详情按层级返回，捕获型浮层的焦点恢复也统一了。**
-  从 Quick Tasks 或完整 Task Center 按 `Enter` 打开 Job 的**状态详情**（bash 作业，
-  或无法定位子会话的 subagent 作业）后，`Esc` 返回同一个 Task Center 实例（保留选中
-  行、滚动、过滤、搜索与展开状态），再按一次 `Esc` 才回到编辑器；能定位子会话的
-  subagent 作业仍像以前一样直接打开子会话 transcript（替换 Task Center，保持自身
-  `Esc` 语义）。`Esc` 或浮层关闭后，被恢复的下层**捕获型**浮层始终重新取得键盘焦点与
-  焦点席位，不再出现「浮层可见但焦点仍在编辑器」；`nonCapturing` 提示浮层默认不自动
-  夺取焦点、也不压住同级浮层，其下方的 Host 快捷键（如空编辑器的 `↓` 打开 Quick Tasks）
-  照常生效，但显式 `focus()` 请求仍可让它取得物理键盘焦点与焦点席位；捕获型浮层被
-  `blur` 或临时隐藏后把键盘与焦点席位交还编辑器，`focus`/显示后再取回，且浮层关闭
-  恢复时始终聚焦**当前**的 editor seat（不会退回已被替换的旧 editor）。Question / Save
-  Location 结束与 fullscreen 切换都只是**内部恢复**：保留**当前**的逻辑层级、可见性意图、
-  焦点意图与前置顺序（恢复本身不会把某个浮层重新提到最前），因此 `blur` 意图、显式隐藏、
-  浮层关闭/模态结束后的层级，以及混合类型（extension/advanced/unstable 等）的顺序都不会
-  丢失或被反转；nonCapturing HUD 在 focused 浮层之上的视觉位置在 Question/Save 往返后也
-  保持不变。内部恢复同样不会制造多余的焦点切换：被 `blur` 的浮层不会在子浮层关闭、模态
-  结束或 fullscreen 往返时被错误地重新激活（插件不会收到假的 `onFocus`/`onBlur`）。
-- **Job 详情浮层有独立的底部操作提示。** 运行中的 Job 显示 `S stop · Esc back`；任务
-  结束后 `Stop` 提示消失且该键失效；`Esc back` 在长内容、短终端（低至 2 行）或窄屏下始终
-  可见，且宽度不足时优先保留关闭/返回而不是 `Stop`；非 Job 的独立提示面板（如登录通知）
-  显示 `Esc close`，不会出现 `Stop`。
+- **超长用户消息默认折叠。** 纯文本 Prompt 超过 10 个终端视觉行时，只显示开头 4 行、
+  一条 `── N rows compacted · … to expand ──` 提示和结尾 3 行，让尾部说明保持可见；
+  `Ctrl+O` 展开并收回最近 3 个用户回合内的超长 Prompt，全屏下也可点击提示行或搜索
+  命中展开单条。折叠按当前宽度换行后的视觉行判断（CJK / emoji 按真实占位），resize
+  后重新计算。已知限制：搜索跳转只展开命中所在的整条消息，不会把视口定位到命中那
+  一行。
+- **全屏 `↓ Latest` 提示。** 全屏 Transcript 一旦离开实时尾部（手动上滚或浏览
+  history 窗口），底部出现可点击的 `↓ Latest · <快捷键>`；点击与 `Ctrl+End` 语义
+  相同，直接回到全局 latest，回到尾部后提示自动消失。
+- **`/model` 改为即时打开的可搜索模型面板。** 输入 `/model` 后立即显示
+  `Loading models…`，目录加载完成后原地填充；provider 仅作分组，一次搜索覆盖
+  provider/model 的名称与 id；reasoning 模型按 `Enter` 进入同一行的行内 effort 编辑
+  （`←→` 调整、`Enter` 提交、`Esc` 返回）。DSH 的 session / 全局默认模型语义不变。
+- **`/settings` 的 “Subagent allowed models” 改为可搜索分组列表。** `Enter` 直接
+  增删允许路由；官方整段写入、last-route 保护、写入串行与失败回滚语义不变。
+- **Job 详情浮层有独立的底部操作提示。** 运行中的 Job 显示 `S stop · Esc back`；
+  任务结束后 Stop 提示消失且该键失效；`Esc back` 在长内容、短终端或窄屏下始终可见。
+- **已接受但未落地的输入保持可见。** 提交的 steering / 排队输入在 queue pane 或会话
+  尾部显示本地回显，直到权威 transcript 落地才退场；回显与权威消息按请求 id 关联，
+  不依赖文本匹配。
+
+### 改进
+
+- **Quick Tasks 收敛为纯导航。** Footer `↓` 打开的 Quick Tasks 只响应方向键、`Tab`、
+  `Enter` 和 `Esc`，其余按键一律 no-op（`S` / `/` / `T` 不再触发停止确认、搜索或
+  视图切换）；`N` / `Shift+N` 与 Quick 的 `T` 进入完整视图已改为底部 “Open Task
+  Center” 行 + `Enter`，完整 Task Center 新增 `Shift+Tab` 反向遍历类型过滤。
+- **被中断的 parked steering 准确呈现并给出恢复路径。** turn 被 Interrupted 后，仍在
+  inbox 的 steering 行显示 `waiting for next turn…`，并在下一次普通消息唤醒时按官方
+  语义消费；此时空的 Ctrl+S 会给出提示而不是静默无操作。
+- **Focus 头部显示真实执行状态。** 未完成 turn 显示 `Working`、
+  `Waiting for approval · 12s` 或 `Waiting for input · 12s`，完成后显示 `Completed`；
+  等待用户的时间不计入运行时长。
+- **Focus compact 工具行改为工具身份 + 官方描述。** 前台 Bash 显示
+  `Bash · <description>`，后台卡片显示 `<工具名> · <content 描述>`；未知的自定义工具
+  保留原始名字，完整命令仍保留在展开后的 tool card 中。
+- **折叠 Thinking 预览追随推理尾部。** 运行中的 compact Thinking 单行始终显示最新
+  token（超宽时从左侧裁掉），只由真实 reasoning delta 驱动；settled 仍从行首显示。
+- **短屏全屏下 Todo 首次展开 3 项。** 终端行数 ≤16 时 compact Todo 面板显示 3 项
+  （普通终端仍为 5 项），缩放时按当前高度重新推导。
+- **全屏拖选与 `/copy` 统一 clipboard policy。** 二者同时尝试 terminal OSC 52 与本机
+  helper 两条通道，helper 成功不再阻断 OSC 52；修复远端（如 ORCA/xterm.js）下选择被
+  复制到远端主机剪贴板、本地粘贴不到的问题。
+- **文件 edit/write diff 卡片对齐 DSH 0.1.6 的边界化上下文 diff。** 共享上下文行不再
+  被误报为增删，大文件中的稀疏改动保持精确；只有超出官方边界化 edit search（每个
+  fragment 256 次 edit）才退化为粗粒度替换，折叠处的 `+N/-M` 与展开内容同源。
+- **Task Center 的 Job 详情按层级返回，捕获型浮层的焦点恢复统一。** 从 Quick Tasks 或
+  完整 Task Center 打开 Job **状态详情**后，`Esc` 返回同一个 Task Center 实例（保留
+  选中行、滚动、过滤、搜索与展开状态），再按一次才回到编辑器；能定位子会话的 subagent
+  作业仍直接打开子会话 transcript。浮层关闭后被恢复的下层捕获型浮层重新取得键盘焦点
+  与焦点席位，`nonCapturing` 提示浮层不自动夺焦也不压住同级浮层；Question / Save
+  Location 结束与 fullscreen 切换只做内部恢复，保留当前逻辑层级、可见性与焦点意图
+  以及前置顺序。
+
+### 修复
+
+- **TUI 启动失败不再被静默当作可选插件失败。** 启动提交就绪但 `tui-app` 从未挂载时，
+  打印明确错误并**以非零状态退出**，不再出现「告警 + 成功 + 进程仍驻留」的假成功。
+- **preset 选择可见性跟随部署策略。** 部署把 `modeSelectionEnabled` 设为 `false` 时，
+  `/preset` 不再出现在斜杠候选与 `/help` 中，直接输入仍按官方策略拒绝；roster 不可用
+  时保持原展示。
+- **全屏历史滚动位置不再被拉回尾部。** 队列面板增删、其他 chrome 变化或终端 resize
+  改变 viewport 高度时，已经滚离实时尾部的视图保持原位置；只有显式回到底部才恢复
+  跟随。
+
+### 兼容性
+
+- **PTC / workflow runtime 对齐官方 0.1.6 组合。** `ptc` preset 通过官方 `ptc-runtime`
+  行获得 PTC 运行时，TUI 不再插入已退休的 `code-runtime-worker-thread` 行，host 平面
+  的 workflow 行也对齐到官方 `workflow-ptc`。
+
+> **已知限制：** 当前生产默认后端仍为 Direct；remote attach 暂不支持。
 
 ## [0.4.6] - 2026-09-13
 
@@ -997,7 +975,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...HEAD
+[0.4.7-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.3-alpha.2...next-v0.4.7-alpha.1
 [0.4.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...v0.4.5
 [0.4.3-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...next-v0.4.3-alpha.2
