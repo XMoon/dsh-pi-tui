@@ -6369,13 +6369,15 @@ export class TuiApp {
       this.setFocusTurnExpanded(turn, true)
     }
     if (isUserMessageDisclosureCandidate(message)
+      && this.isHostUserDisclosure(message)
       && this.userDisclosureAffordanceAvailable()
       && this.userMessageCompactsAtCurrentWidth(message)) {
       // Only a bubble the CURRENT surface actually folds needs the override:
-      // a short prompt, or a regular surface with no expand key (which renders
-      // the prompt in full), would otherwise accumulate an invisible override
-      // that later consumes a Ctrl+O collapse or leaks a full render into a
-      // fullscreen Focus whose only affordance is the compact marker.
+      // a plugin-owned presentation, a short prompt, or a regular surface with
+      // no expand key (which renders the prompt in full) would otherwise
+      // accumulate an invisible override that later consumes a Ctrl+O
+      // collapse or leaks a full render into a fullscreen Focus whose only
+      // affordance is the compact marker.
       if (this.expandedOverride.get(message) !== true) this.clearFocusLiveHeightState()
       this.expandedOverride.set(message, true)
     }
@@ -6433,16 +6435,28 @@ export class TuiApp {
     return false
   }
 
+  /** Whether the CURRENT rendered presentation of one user message is the
+   * HOST long-user bubble. An extension message renderer that owns
+   * `kind: 'user'` presents the message itself (its snapshot carries no
+   * `expanded` state and the Host renders no compact marker), so the Host
+   * long-user disclosure state must neither be written nor counted for it —
+   * an invisible override would otherwise consume the next Ctrl+O. */
+  private isHostUserDisclosure(message: TranscriptMessage): boolean {
+    return this.messageComponents.get(message)?.component instanceof UserBubbleComponent
+  }
+
   /** Whether the CURRENT projection shows a long user message that is
    * ACTUALLY compacted and explicitly expanded (the Ctrl+O user-collapse
-   * target, plan §6.4/§21.7). Only VISIBLE, compact-capable messages count: a
-   * parked override on a windowed-away message, or a stale override on a
-   * short/resized-short bubble with no visible effect, must not consume the
-   * Ctrl+O press and wedge the toggle into a no-op. */
+   * target, plan §6.4/§21.7). Only VISIBLE, HOST-rendered, compact-capable
+   * messages count: a parked override on a windowed-away message, a stale
+   * override on a short/resized-short bubble with no visible effect, or an
+   * override on a plugin-owned presentation must not consume the Ctrl+O
+   * press and wedge the toggle into a no-op. */
   private hasVisibleExpandedUserMessage(): boolean {
     for (const message of this.messages) {
       if (!isUserMessageDisclosureCandidate(message)) continue
       if (this.expandedOverride.get(message) !== true) continue
+      if (!this.isHostUserDisclosure(message)) continue
       if (this.userMessageCompactsAtCurrentWidth(message)) return true
     }
     return false

@@ -944,9 +944,13 @@ long-user overrides (with the root-collapse pass, or alone when no Thought
 root is expanded). The override cleanup filters `kind === 'user'` only, so
 thinking/tool/system/compaction overrides and the Thought-root storage rule
 are untouched. Both the search reveal and the Ctrl+O collapse predicate only
-treat a message as folded when it ACTUALLY compacts at the current width, so a
-short prompt never accumulates an invisible no-op override that would eat a
-Ctrl+O press. A regular surface with no expand key never folds at all, so
+treat a message as folded when the HOST bubble owns its current presentation
+(an extension message renderer that takes over `kind: 'user'` receives no
+`expanded` state and renders no compact marker, so the Host never writes or
+counts disclosure state for it) AND it ACTUALLY compacts at the current width
+— so neither a plugin-owned nor a short prompt accumulates an invisible no-op
+override that would eat a Ctrl+O press. A regular surface with no expand key
+never folds at all, so
 entering fullscreen from it drops every long-user override — a stale reveal
 from that surface must not hide the Focus marker. That clear is deliberately
 GLOBAL for the transition (overrides carry no source tag and no parallel
