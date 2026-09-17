@@ -964,7 +964,8 @@
     "packages/pi-tui/test/overlay-options.test.ts: disposeOnHide ownership",
     "packages/pi-tui/test/dispose-lifecycle.test.ts: MouseRegion dispose forwarding — owned child disposed exactly once, wrapped Loader timer cleared",
     "test/model-picker.test.ts: ModelPicker ownership-safe external dispose — dispose latches without close/apply/navigation, and a late write settlement after teardown makes no close/open decision",
-    "test/subagent-model-menu.test.ts: SubagentModelAllowlistPicker ownership-safe external dispose — dispose latches, and a write settling after the submenu closed converges the outer row through the summarize seam without a late toast"
+    "test/subagent-model-menu.test.ts: SubagentModelAllowlistPicker ownership-safe external dispose — dispose latches, and a write settling after the submenu closed converges the outer row through the summarize seam without a late toast",
+    "test/advanced-interactive.test.ts: an approval-preserving fullscreen swap replaces (and disposes) the replaced approval frame — ownedApprovalFramesForTest stays 1 per swap and returns 0 after settle"
    ],
    "upstream": {
     "equivalence": "NO",
@@ -5611,9 +5612,12 @@
     "vendorInternal": {
      "audited": true,
      "items": [
-      "The option only gates the `entry.focusOrder = ++this.focusOrderCounter` promotion inside the showOverlay handle closures."
+      "setHidden(false, { preserveOrder }) gates the `entry.focusOrder = ++this.focusOrderCounter` promotion inside the showOverlay handle closure.",
+      "setHidden(false, { preserveFocus }) gates the `this.setFocus(component)` call inside the same closure.",
+      "focus({ preserveOrder }) gates the promotion inside the focus closure (focus always takes the keyboard).",
+      "showOverlay(component, { initialFocus: false }) gates the mount-time `this.setFocus(component)` outside the handle closures."
      ],
-     "notes": "Visibility, focus, and render behavior are otherwise unchanged; hide() and unfocus() are untouched."
+     "notes": "Three additive gates over upstream behavior — focusOrder promotion, show-time focus, and mount-time focus — plus the order gate on focus(); hide() and unfocus() are untouched."
     },
     "inheritanceStructural": {
      "audited": true,
@@ -5625,9 +5629,11 @@
     "host": {
      "audited": true,
      "items": [
-      "src/overlay-broker.ts showPhysical()/focusPhysical() pass preserveOrder for INTERNAL restores (reveal from a close or a modal settle)."
+      "src/overlay-broker.ts showPhysical()/focusPhysical() pass preserveOrder (and preserveFocus on show) for INTERNAL restores: close-released children, a Question / Save Location settle, and the fullscreen rebind owner restore.",
+      "src/tui-app.ts rebindOverlayRaw() mounts every fullscreen rebind with initialFocus: false so a capturing entry does not auto-focus during the swap.",
+      "src/tui-app.ts renderApprovalDialog() mounts the approval as a remountable managed node and registers a rebind callback that re-creates the surface for the same logical node (the replaced frame is disposed)."
      ],
-     "notes": "Explicit user show()/focus() keep the upstream promoting behavior."
+     "notes": "Explicit user show()/focus() keep the upstream promoting behavior; the host passes the preserve options only from its internal restore / rebind paths."
     },
     "publicExtension": {
      "audited": true,
@@ -5642,7 +5648,8 @@
       "A capturing overlay restored with preserveOrder/preserveFocus keeps its previous focusOrder and does NOT take focus on show; the host focuses exactly ONE owner afterwards.",
       "A nonCapturing HUD restored with preserveOrder keeps its position above the focused overlay.",
       "A rebind with initialFocus:false never auto-focuses, so a blurred overlay records no extra onFocus/onBlur across a screen swap.",
-      "Default (no options) setHidden(false)/focus() and showOverlay keep the upstream promoting + auto-focusing behavior."
+      "Default (no options) setHidden(false)/focus() and showOverlay keep the upstream promoting + auto-focusing behavior.",
+      "An approval is a REMOUNTABLE managed node: a fullscreen swap rebinds the same logical node (fresh surface) so its suppressed children are never revealed/focused, and the replaced approval frame is disposed. Guarded by the approval focus-count + ownedApprovalFramesForTest regression."
      ],
      "notes": "Guarded by packages/pi-tui/test/overlay-non-capturing.test.ts (the fork seam) plus the broker / advanced-interactive / extension-focus-seat host regressions."
     }
@@ -5658,7 +5665,8 @@
     "test/advanced-interactive.test.ts: closing the focused overlay does not re-activate a blurred sibling",
     "test/advanced-interactive.test.ts: an internal restore never fabricates focus transitions (child close)",
     "test/advanced-interactive.test.ts: an internal restore never fabricates focus transitions (question / save / fullscreen)",
-    "packages/pi-tui/test/overlay-non-capturing.test.ts: initialFocus and preserveFocus suppress the implicit keyboard transitions (X056)"
+    "packages/pi-tui/test/overlay-non-capturing.test.ts: initialFocus and preserveFocus suppress the implicit keyboard transitions (X056)",
+    "test/advanced-interactive.test.ts: an approval-preserving fullscreen swap never fabricates focus transitions on the overlay beneath it (focus/blur counts + one live approval frame per swap)"
    ],
    "upstream": {
     "equivalence": "NO",

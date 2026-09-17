@@ -3264,6 +3264,10 @@ export class TuiApp {
    * comes from the broker's CURRENT logical z-order, never a creation
    * ordinal. */
   private readonly overlayRemounts = new Map<OverlayHandle, () => void>()
+  /** Live approval frames: a fullscreen rebind REPLACES the frame for the
+   * same logical node, and the replaced one is disposed explicitly (the
+   * approval opts out of disposeOnHide). */
+  private readonly approvalFrames = new Set<ResponsiveOverlayFrame>()
   /** Phase 2: the live ADVANCED overlay wrappers (recompiled on terminal
    * resize so the plugin's render(ctx) sees the new geometry). */
   private readonly advancedOverlayWrappers = new Set<import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent>()
@@ -5908,13 +5912,12 @@ export class TuiApp {
       this.clearUserMessageDisclosureOverrides()
     }
     this.clearFocusLiveHeightState()
-    const pending = this.activeApproval
-    pending?.handle?.hide()
     this.disposeTrackedKeybindingEditors()
     // The LOGICAL broker graph, the Question/Save suspensions, visibility
     // intent, focus intent and z-order all SURVIVE the swap: only the raw
     // physical projections die with the old screen (detachPhysical). The
-    // remount callbacks re-create them for the same logical nodes.
+    // remount callbacks re-create them for the same logical nodes (including
+    // the approval, whose logical node keeps its suppressed children hidden).
     for (const close of [...this.footerConfiguratorClosers]) close()
     this.footerConfiguratorClosers.clear()
     this.overlayBroker.detachPhysical()
@@ -6115,13 +6118,10 @@ export class TuiApp {
       this.overlayRemounts.get(handle)?.()
     }
     this.overlayBroker.restoreFocusAfterSwap()
-    if (pending !== undefined) this.renderApprovalDialog(pending)
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
-    // screen — the flow's input routing is screen-agnostic. The old screen's
-    // overlay handles are dead and were dropped from the tracking graph
-    // above; the rebuilt approval (if any) is suspended afresh on the new
-    // screen.
+    // screen — the flow's input routing is screen-agnostic. The approval (if
+    // any) was rebind-restored above as the same logical node.
     const question = this.activeQuestions
     if (question?.frame !== undefined) {
       (this.fullscreen ?? this.tui).setFocus(question.frame)
@@ -15101,6 +15101,34 @@ export class TuiApp {
 
   /** Build and mount the approval dialog for one prompt on the active screen. */
   private renderApprovalDialog(pending: PendingApproval): void {
+    const frame = this.createApprovalFrame(pending)
+    pending.responsiveFrame = frame
+    // The approval is REMOUNTABLE like every other managed overlay: a
+    // fullscreen swap rebinds the SAME logical node (with a fresh surface), so
+    // the overlays it suppresses stay suppressed and never get revealed/
+    // focused/re-hidden (no fabricated focus transition).
+    const handle = this.showOverlayOnHost(
+      frame,
+      { width: '100%', maxHeight: '100%' },
+      { remountable: true },
+    )
+    pending.handle = handle
+    this.overlayRemounts.set(handle, () => {
+      if (this.activeApproval !== pending) return
+      const previous = pending.responsiveFrame
+      const next = this.createApprovalFrame(pending)
+      pending.responsiveFrame = next
+      this.rebindOverlayRaw(handle, next, { width: '100%', maxHeight: '100%' })
+      // The old frame's raw projection was detached with the old screen and
+      // the overlay opted out of disposeOnHide: dispose it explicitly so a
+      // repeated swap never leaks approval frames/surfaces.
+      previous?.dispose()
+    })
+  }
+
+  /** Build the responsive approval frame (surface + geometry) without mounting
+   * it, so a fullscreen rebind can re-create it for the same logical node. */
+  private createApprovalFrame(pending: PendingApproval): ResponsiveOverlayFrame {
     const geometryOf = (): ApprovalOverlayGeometry => approvalOverlayGeometry(
       this.terminal.columns,
       this.terminal.rows,
@@ -15110,7 +15138,7 @@ export class TuiApp {
       geometryOf,
       (request, geometry) => this.buildApprovalDialog(request, geometry),
     )
-    const frame = new ResponsiveOverlayFrame(surface, () => {
+    const frame: ResponsiveOverlayFrame = new ResponsiveOverlayFrame(surface, () => {
       const geometry = geometryOf()
       return {
         width: geometry.width,
@@ -15119,9 +15147,15 @@ export class TuiApp {
         // geometry caps are reached (last-painted-geometry mouse fence).
         key: `${this.terminal.columns}:${this.terminal.rows}:${geometry.width}:${geometry.maxHeight}:${geometry.contentWidth}`,
       }
-    })
-    pending.responsiveFrame = frame
-    pending.handle = this.showOverlayOnHost(frame, { width: '100%', maxHeight: '100%' })
+    }, undefined, () => this.approvalFrames.delete(frame))
+    this.approvalFrames.add(frame)
+    return frame
+  }
+
+  /** Headless-test hook: the number of live approval frames (a fullscreen
+   * swap must replace, not accumulate, them). */
+  ownedApprovalFramesForTest(): number {
+    return this.approvalFrames.size
   }
 
   /** Build approval content for the current geometry without mounting it. */
@@ -15206,7 +15240,11 @@ export class TuiApp {
       // on setHidden(false), overriding the editor fallback above, and the
       // broker's tracked close re-derives the final seat from that live
       // surface (the shared close contract — no approval-specific publish).
+      if (pending.handle !== undefined) this.overlayRemounts.delete(pending.handle)
       pending.handle?.hide()
+      // A remountable overlay opts out of disposeOnHide: the final close owns
+      // the frame/surface lifecycle explicitly.
+      pending.responsiveFrame?.dispose()
       pending.responsiveFrame = undefined
       this.projectActivity()
     } else {
