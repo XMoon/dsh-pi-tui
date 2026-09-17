@@ -3827,3 +3827,70 @@ test('a session switch never inherits the previous session cached Job rows', asy
   assert.ok(!view().includes('build'),
     `session B must not inherit session A cached Job rows:\n${view()}`)
 })
+
+test('switching sessions tears down the Job status viewer with its Task Browser', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-job-viewer-switch-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const sessionA: FakeSession = fakeSession({
+    id: 'job-viewer-switch-a',
+    header: { id: 'job-viewer-switch-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer a'),
+  })
+  const sessionB: FakeSession = fakeSession({
+    id: 'job-viewer-switch-b',
+    header: { id: 'job-viewer-switch-b', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer b'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  const harness = makeHarness(home, [sessionA, sessionB], { provider: 'p', model: 'm' })
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(resumeHandler, 'the real runner must register the /resume alias')
+  const resume = resumeHandler as (invocation: { rawInput: string }) => unknown
+
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  assert.ok(view().includes('build'), `the browser must show the job:\n${view()}`)
+
+  input('\r') // open the Job status detail (a child overlay of the browser)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 2, 'browser + Job detail')
+  assert.ok(view().includes('Esc back'), `the Job detail shows Esc back:\n${view()}`)
+
+  await resume({ rawInput: sessionB.id })
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 0, 'the whole Task Center stack is torn down')
+  assert.ok(!view().includes('Esc back'), `the old Job View must not survive the switch:\n${view()}`)
+  assert.ok(!view().includes('build'), `the old browser must not survive the switch:\n${view()}`)
+  assert.equal(app.focusSeatForTest(), 'editor', 'the new-session editor owns the keyboard')
+})

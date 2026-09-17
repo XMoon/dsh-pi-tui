@@ -109,10 +109,6 @@ interface PreparedSuppression {
 export interface PreparedMount {
   readonly node: ManagedOverlayNode
   readonly suppress: readonly PreparedSuppression[]
-  /** True when a Question / Save Location owns the seat at mount time: the
-   * host mounts with `initialFocus:false` so the new overlay never takes (and
-   * immediately loses) the keyboard. */
-  readonly suspendedAtMount: boolean
 }
 
 export class OverlayBroker {
@@ -157,15 +153,20 @@ export class OverlayBroker {
       closed: false,
     }
     node.wrapper = this.wrap(node)
-    // A mount while a modal owns the seat must not take the keyboard first and
-    // lose it on commit: the host passes initialFocus:false for this mount.
-    return { node, suppress, suspendedAtMount: this.activeSuspension() !== undefined }
+    return { node, suppress }
   }
 
   /**
    * Phase 2 of a mount: bind the freshly mounted raw handle and apply the
-   * stacking rules. Called AFTER the host mounts the component on the active
-   * screen (the fork has already focused it when capturing).
+   * stacking rules.
+   *
+   * ORDER MATTERS: the host mounts every overlay with `initialFocus:false`, so
+   * the fork fires NO focus callback here. The LOGICAL graph (registration,
+   * roots, parent/children, resumeFocus, zOrder) commits FIRST; only then does
+   * the physical transition run (hide the suppressed children, focus the new
+   * owner exactly once). A plugin that mounts another overlay inside its
+   * `onFocus` therefore sees the COMPLETE committed graph — it can never
+   * re-adopt a child whose ownership this commit has already assigned.
    */
   commitMount(prepared: PreparedMount, raw: OverlayHandle): OverlayHandle {
     const node = prepared.node
@@ -180,12 +181,12 @@ export class OverlayBroker {
       // A capturing overlay suspended under a modal is the modal's frontmost
       // handle and reclaims the keyboard when the modal settles; a
       // nonCapturing notice never does. It is still a logical ROOT (only
-      // hidden), so it must join `roots` — resumeSuspendedRoots() reveals it
-      // without re-registering, and a later capturing mount must suppress it.
+      // hidden), so it must join `roots`.
       node.resumeFocus = !node.nonCapturing
-      raw.setHidden(true)
       this.roots.add(node)
       suspension.suspendedOverlays.add(node.wrapper)
+      // Physical transition (no focus involved: the raw was never focused).
+      raw.setHidden(true)
       return node.wrapper
     }
     if (node.nonCapturing) {
@@ -195,18 +196,23 @@ export class OverlayBroker {
     }
     // Capturing: adopt the prepared VISIBLE ROOTS as this node's children
     // (only roots — never every visible handle, which would allow a node to
-    // acquire a second suppressor). The mount itself focuses the new node
-    // (the fork does), so it owns the keyboard intent as a logical root.
+    // acquire a second suppressor). The new node owns the keyboard intent as
+    // a logical root.
     node.resumeFocus = true
     for (const entry of prepared.suppress) {
       const child = entry.node
       this.roots.delete(child)
       child.parent = node
       child.resumeFocus = entry.resumeFocus
-      child.raw?.setHidden(true)
       node.children.push(child)
     }
     this.roots.add(node)
+    // LOGICAL COMMIT COMPLETE. Physical transition: take the keyboard first
+    // (this may re-enter through a plugin onFocus, which now sees the full
+    // graph), then hide the suppressed children (no longer focused → the
+    // fork's hide fallback cannot fire).
+    this.focusPhysical(node)
+    for (const child of node.children) child.raw?.setHidden(true)
     this.deps.setFocusSeat?.('overlay')
     return node.wrapper
   }

@@ -3200,6 +3200,11 @@ export function apply(ctx: Context, config: Config): void {
     // surface and its delayed action token before the app is disposed.
     let activeTaskBrowser: TaskBrowserHandle | undefined
     let activeTaskBrowserToken: object | undefined
+    // The Job status viewer is a CHILD overlay of the Task Browser: its closer
+    // must be tracked so a session transition can tear the whole Task Center
+    // stack down (closing the hidden parent alone would leave the child
+    // alive).
+    let activeJobViewerClose: (() => void) | undefined
     // M5: the footer command lifecycle slots. Hoisted here for TWO TDZ
     // guards: cleanup releases them, and — unlike the two slots above —
     // `onTerminalResize` (captured by startProcessTui below) READS
@@ -3282,6 +3287,7 @@ export function apply(ctx: Context, config: Config): void {
       // callbacks. Invalidate the browser handle and token first so an action
       // already waiting on Direct/Host work cannot notify or repaint the dead
       // surface after this teardown.
+      activeJobViewerClose = undefined
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
       app?.dispose()
@@ -4031,6 +4037,11 @@ export function apply(ctx: Context, config: Config): void {
       // `agent/status` flips find no membership and the next refresh
       // reads the new root. The coordinator is re-populated by
       // initLiveSession → refreshAgents.
+      // The Job status viewer is a CHILD overlay of the browser: close it
+      // FIRST, so closing the hidden parent cannot leave the child alive (the
+      // child closer clears its own reference through onClose).
+      activeJobViewerClose?.()
+      activeJobViewerClose = undefined
       activeTaskBrowser?.close()
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
@@ -8619,15 +8630,23 @@ export function apply(ctx: Context, config: Config): void {
         readonly detail?: string
       },
     ): void => {
-      app.openOutputViewer({
+      // One viewer at a time, and a fresh selection replaces the previous.
+      activeJobViewerClose?.()
+      // The viewer belongs to the session it was OPENED for: capture that
+      // owner so a leaked viewer can never refresh/stop a same-id job in a
+      // different session (defense in depth on top of the close-on-transition
+      // below).
+      const owner = liveAgent
+      if (owner === undefined) return
+      activeJobViewerClose = app.openOutputViewer({
         title,
         initial: snapshot.kind === 'subagent'
           ? subagentJobViewHint(snapshot.status, snapshot.detail)
           : jobStatusHint(snapshot.status, snapshot.detail),
         refresh: () => {
-          if (jobs === undefined || liveAgent === undefined) return ''
+          if (jobs === undefined) return ''
           try {
-            const current = jobs.get(jobId as JobId, liveAgent)
+            const current = jobs.get(jobId as JobId, owner)
             return current.kind === 'subagent'
               ? subagentJobViewHint(current.status, current.detail)
               : jobStatusHint(current.status, current.detail)
@@ -8637,9 +8656,9 @@ export function apply(ctx: Context, config: Config): void {
           }
         },
         onStop: () => {
-          if (jobs === undefined || liveAgent === undefined) return
+          if (jobs === undefined) return
           try {
-            jobs.kill(jobId as JobId, liveAgent, 'stopped from the task browser')
+            jobs.kill(jobId as JobId, owner, 'stopped from the task browser')
           } catch {
             // Already finished: nothing to stop.
           }
@@ -8649,9 +8668,9 @@ export function apply(ctx: Context, config: Config): void {
         // CURRENT registry record, so a job that settles while the viewer
         // is open stops advertising/handling Stop.
         canStop: () => {
-          if (jobs === undefined || liveAgent === undefined) return false
+          if (jobs === undefined) return false
           try {
-            return isActiveJobStatus(jobs.get(jobId as JobId, liveAgent).status)
+            return isActiveJobStatus(jobs.get(jobId as JobId, owner).status)
           } catch {
             // The job left the registry: nothing can be stopped.
             return false
@@ -8660,7 +8679,10 @@ export function apply(ctx: Context, config: Config): void {
         // The viewer was opened from the Task Center browser: Esc returns
         // to the parent browser, not to the editor.
         closeHint: 'back',
-        onClose: () => refreshTasks(),
+        onClose: () => {
+          activeJobViewerClose = undefined
+          refreshTasks()
+        },
       })
     }
     /** One-line viewer hint for a job state (never touches the read cursor). */
