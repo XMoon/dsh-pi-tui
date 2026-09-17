@@ -565,6 +565,11 @@ export class OverlayBroker {
    * logical z follows; an INTERNAL restore passes `preserveOrder` /
    * `preserveFocus` and reproduces the pre-suppression stacking and keyboard
    * ownership instead (the caller then focuses exactly ONE owner).
+   *
+   * The logical promotion happens BEFORE the fork call: `setHidden(false)` can
+   * synchronously focus and fire a plugin onFocus that mounts a nested
+   * overlay, and that nested overlay must end up ahead of this one (it mounted
+   * later) rather than being overtaken when this call returns.
    */
   private showPhysical(
     node: ManagedOverlayNode,
@@ -572,19 +577,26 @@ export class OverlayBroker {
   ): void {
     if (node.raw === undefined) return
     const wasHidden = node.raw.isHidden() === true
-    node.raw.setHidden(false, options)
     if (wasHidden && !node.nonCapturing && options?.preserveOrder !== true) {
       node.zOrder = ++this.zSequence
     }
+    node.raw.setHidden(false, options)
   }
 
-  /** Focus a node's physical projection. An EXPLICIT focus mirrors the fork's
+  /**
+   * Focus a node's physical projection. An EXPLICIT focus mirrors the fork's
    * promotion; an INTERNAL restore passes `preserveOrder` and only takes the
-   * keyboard. */
+   * keyboard.
+   *
+   * The logical promotion happens BEFORE `raw.focus()`: the fork fires the
+   * plugin's onFocus synchronously, so a nested mount must be able to take a
+   * HIGHER z than this node (matching its later physical mount) instead of
+   * being overtaken when this call returns.
+   */
   private focusPhysical(node: ManagedOverlayNode, options?: { preserveOrder?: boolean }): void {
     if (node.raw === undefined) return
-    node.raw.focus(options)
     if (options?.preserveOrder !== true) node.zOrder = ++this.zSequence
+    node.raw.focus(options)
   }
 
   /** The frontmost visible node that asked for the keyboard (`resumeFocus`).

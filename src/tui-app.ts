@@ -9998,8 +9998,15 @@ export class TuiApp {
       // The surface's dispose settles the prompt (the picker overlay dies
       // with the surface; the promise must not hang). Guarded: an
       // already-aborted signal settles synchronously inside openPicker —
-      // the entry must not be added afterwards.
-      if (!settled) this.pendingBrokerSettles.add(brokerSettle)
+      // the entry must not be added afterwards. If the MOUNT itself settled
+      // (e.g. a component that settles from its focus callback), close the
+      // just-mounted picker instead of leaking it alongside a stale settle.
+      if (settled) {
+        handle.close?.()
+        handle = undefined
+      } else {
+        this.pendingBrokerSettles.add(brokerSettle)
+      }
     })
   }
 
@@ -10100,9 +10107,18 @@ export class TuiApp {
       // returns early on `settled`).
       if (!settled) {
         lease = this.showAdvancedInteractiveOverlay(component, options)
-        // The surface's dispose settles the promise (the overlay dies with
-        // the surface).
-        this.pendingBrokerSettles.add(brokerSettle)
+        if (settled) {
+          // The MOUNT itself settled synchronously: the atomic commit focuses
+          // the new overlay only after registering its node, so a component
+          // onFocus can call host.done() before this call returns. Close the
+          // just-mounted overlay and do NOT register the stale settle.
+          lease.close()
+          lease = undefined
+        } else {
+          // The surface's dispose settles the promise (the overlay dies with
+          // the surface).
+          this.pendingBrokerSettles.add(brokerSettle)
+        }
       }
     })
   }

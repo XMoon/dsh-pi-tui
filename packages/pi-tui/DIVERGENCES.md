@@ -4623,7 +4623,7 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - setHidden(false, { preserveFocus }) gates the `this.setFocus(component)` call inside the same closure.
 - focus({ preserveOrder }) gates the promotion inside the focus closure (focus always takes the keyboard).
 - showOverlay(component, { initialFocus: false }) gates the mount-time `this.setFocus(component)` outside the handle closures.
-- Audit note: Three additive gates over upstream behavior — focusOrder promotion, show-time focus, and mount-time focus — plus the order gate on focus(); hide() and unfocus() are untouched.
+- Audit note: Three additive gates over upstream behavior — focusOrder promotion, show-time focus, and mount-time focus — plus the order gate on focus(); hide() and unfocus() are untouched. The logical z promotion in showPhysical()/focusPhysical() runs BEFORE the fork call, so a nested mount triggered by the synchronous focus/show callback takes a HIGHER z (matching its later physical mount).
 
 **Inheritance / structural**
 - The handle is a closure over OverlayStackEntry; no subclass or structural edge is involved.
@@ -4663,6 +4663,9 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - packages/pi-tui/test/overlay-non-capturing.test.ts: initialFocus and preserveFocus suppress the implicit keyboard transitions (X056)
 - test/advanced-interactive.test.ts: an approval-preserving fullscreen swap never fabricates focus transitions on the overlay beneath it (focus/blur counts + one live approval frame per swap)
 - test/advanced-interactive.test.ts: a plugin onFocus that mounts another overlay cannot double-adopt a child (forest invariant)
+- test/overlay-broker.test.ts: a nested mount during the mount focus keeps the logical front order
+- test/advanced-interactive.test.ts: a nested nonCapturing HUD mounted from onFocus keeps the logical front order
+- test/advanced-broker.test.ts: a component that settles from onFocus never leaks the mounted overlay
 
 #### Upstream comparison
 

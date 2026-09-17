@@ -801,3 +801,24 @@ test('OverlayBroker: a rebind restore focuses the surviving owner without promot
   assert.ok(after[after.length - 1] === hHandle,
     'the rebind restore must NOT promote the owner above the higher-z HUD')
 })
+
+test('OverlayBroker: a nested mount during the mount focus keeps the logical front order', () => {
+  const broker = new OverlayBroker()
+  let cHandle: OverlayHandle | undefined
+  const b = fakeHandle('b')
+  const baseFocus = b.focus.bind(b)
+  // B's focus callback mounts a nested nonCapturing HUD (the atomic commit
+  // focuses AFTER registering the graph, so this runs inside commitMount).
+  b.focus = (options?: Parameters<OverlayHandle['focus']>[0]) => {
+    baseFocus(options)
+    if (cHandle === undefined) {
+      cHandle = mountOverlay(broker, fakeHandle('c'), { nonCapturing: true, remountable: true })
+    }
+  }
+  mountOverlay(broker, b, { remountable: true })
+  const order = broker.remountOrder()
+  assert.equal(order.length, 2)
+  assert.ok(order[order.length - 1] === cHandle,
+    'the nested HUD mounted later and must stay the logical front')
+  assert.ok(order[0] !== cHandle)
+})
