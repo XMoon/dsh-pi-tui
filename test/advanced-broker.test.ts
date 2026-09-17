@@ -279,3 +279,23 @@ test('the surface dispose settles every still-open broker promise', async () => 
   assert.equal(await select, undefined, 'dispose settles the pending select')
   assert.equal(await custom, undefined, 'dispose settles the pending custom')
 })
+
+test('custom: a component that settles from onFocus never leaks the mounted overlay', async () => {
+  const { vt, app } = await appWithBroker()
+  const broker = app.advancedUiBroker()
+  // The atomic mount commits the logical graph and only THEN focuses the new
+  // overlay, so the component's onFocus runs BEFORE custom() receives the
+  // lease. Settling there must not leave a live overlay + stale settle.
+  const promise = broker.custom((host) => ({
+    render: () => ({ kind: 'text', spans: [{ text: 'focus-settled' }] }),
+    onFocus: () => { host.done('focus-result') },
+  }))
+  assert.equal(await promise, 'focus-result')
+  await vt.waitForRender()
+  assert.equal(app.pendingBrokerSettlesForTest(), 0, 'no stale settle entry')
+  assert.equal(app.ownedAdvancedOverlayLeasesForTest(), 0, 'the just-mounted overlay is closed')
+  assert.equal(app.overlayGraphState().handles, 0, 'no leaked overlay node')
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('focus-settled'), 'the overlay is gone')
+  app.stop()
+})
