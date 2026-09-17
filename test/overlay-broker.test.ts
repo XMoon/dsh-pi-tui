@@ -908,3 +908,30 @@ test('OverlayBroker: a blur inside an explicit focus callback keeps the node unf
   broker.close(bHandle)
   assert.equal(a.isFocused(), false, 'the released intent must survive the sibling close')
 })
+
+test('OverlayBroker: a hidden capturing focus whose show mounts a nonCapturing HUD keeps the HUD in front', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const aHandle = mountOverlay(broker, a, { remountable: true })
+  let hudHandle: OverlayHandle | undefined
+  const baseSetHidden = a.setHidden.bind(a)
+  a.setHidden = (value: boolean, options?: { preserveOrder?: boolean; preserveFocus?: boolean }) => {
+    baseSetHidden(value, options)
+    // The capturing show focuses A; its onFocus then mounts a nonCapturing HUD
+    // that must keep the higher z (it mounted later).
+    if (value === false && hudHandle === undefined) {
+      hudHandle = mountOverlay(broker, fakeHandle('h'), { nonCapturing: true, remountable: true })
+    }
+  }
+  aHandle.setHidden(true) // A is a hidden capturing root
+  assert.equal(a.isHidden(), true)
+
+  aHandle.focus() // show already focuses A → onFocus mounts H
+  assert.ok(hudHandle !== undefined, 'the nested HUD mounted from onFocus')
+  assert.equal(a.isFocused(), true, 'A owns the keyboard')
+  const order = broker.remountOrder()
+  assert.equal(order.length, 2)
+  assert.ok(order[order.length - 1] === hudHandle,
+    'the later nonCapturing HUD must keep the logical front')
+  assert.ok(order[0] === aHandle)
+})

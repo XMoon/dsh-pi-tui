@@ -255,13 +255,21 @@ export class OverlayBroker {
     this.detach(node)
     node.explicitHidden = false
     node.resumeFocus = true
+    // Showing a HIDDEN capturing overlay already focuses and promotes it (the
+    // fork's setHidden(false) contract), and its onFocus may have mounted a
+    // newer overlay that must keep the higher z. Complete the explicit focus
+    // only when the show did NOT already take it, and only while the node is
+    // still live, visible and logically requesting focus (a nested capturing
+    // owner hides it; a callback blur() clears the intent).
+    const showWillTakeFocus = node.raw !== undefined && node.raw.isHidden() === true && !node.nonCapturing
     this.showPhysical(node)
-    // Only complete the explicit focus when the show callback did not release
-    // it again: a nested CAPTURING overlay can suppress/hide the node, and the
-    // plugin's own onFocus can call blur() (which clears resumeFocus while the
-    // node stays visible). In either case a second focusPhysical would leave
-    // the physical keyboard ahead of the released logical intent.
-    if (!node.closed && node.raw !== undefined && !node.raw.isHidden() && node.resumeFocus === true) {
+    if (
+      !showWillTakeFocus
+      && !node.closed
+      && node.raw !== undefined
+      && !node.raw.isHidden()
+      && node.resumeFocus === true
+    ) {
       this.focusPhysical(node)
     }
     this.deps.reconcileFocusSeat?.()
