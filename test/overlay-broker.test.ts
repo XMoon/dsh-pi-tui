@@ -1072,3 +1072,25 @@ test('OverlayBroker: a newer focus during the modal release wins on settle', () 
   assert.equal(b.isFocused(), true, 'the newer B wins on settle')
   assert.equal(a.isFocused(), false, 'A is not re-focused over the newer owner')
 })
+
+test('OverlayBroker: an explicit unfocus target set from onFocus is not overridden', () => {
+  let seatCalls = 0
+  const broker = new OverlayBroker({ focusSeatOwner: () => { seatCalls += 1 } })
+  const b = fakeHandle('b')
+  let bHandle: OverlayHandle | undefined
+  let arm = false
+  const baseFocus = b.focus.bind(b)
+  b.focus = (options?: Parameters<OverlayHandle['focus']>[0]) => {
+    baseFocus(options)
+    if (arm) {
+      arm = false
+      bHandle?.unfocus({ target: null })
+    }
+  }
+  bHandle = mountOverlay(broker, b)
+  bHandle.unfocus()
+  seatCalls = 0
+  arm = true
+  bHandle.focus() // onFocus forwards an explicit unfocus target
+  assert.equal(seatCalls, 0, 'the caller-supplied target must not be overridden by the seat fallback')
+})

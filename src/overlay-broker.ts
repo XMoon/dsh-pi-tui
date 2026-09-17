@@ -94,6 +94,9 @@ interface ManagedOverlayNode {
   explicitHidden: boolean
   /** Whether this node should own the keyboard when revealed. */
   resumeFocus: boolean
+  /** A caller-supplied unfocus target was forwarded during the current
+   * explicit focus(); the post-check must not override it. */
+  explicitTargetForwarded: boolean
   /** Current logical front order (higher = nearer the front). */
   zOrder: number
   closed: boolean
@@ -149,6 +152,7 @@ export class OverlayBroker {
       children: [],
       explicitHidden: false,
       resumeFocus: false,
+      explicitTargetForwarded: false,
       zOrder: 0,
       closed: false,
     }
@@ -260,6 +264,7 @@ export class OverlayBroker {
     this.detach(node)
     node.explicitHidden = false
     node.resumeFocus = true
+    node.explicitTargetForwarded = false
     // Showing a HIDDEN capturing overlay already focuses and promotes it (the
     // fork's setHidden(false) contract), and its onFocus may have mounted a
     // newer overlay that must keep the higher z. Complete the explicit focus
@@ -281,7 +286,9 @@ export class OverlayBroker {
     // during focusPhysical (the previous owner's onBlur called blur()/hide()
     // on it). Re-derive the logical owner when the explicit intent no longer
     // stands instead of leaving it focused.
-    if (!node.closed && node.raw !== undefined && (node.resumeFocus !== true || node.explicitHidden)) {
+    if (node.explicitTargetForwarded) {
+      node.explicitTargetForwarded = false
+    } else if (!node.closed && node.raw !== undefined && (node.resumeFocus !== true || node.explicitHidden)) {
       const next = this.frontmostFocusable([...this.roots])
       if (next !== undefined && next !== node) {
         if (next.raw?.isFocused() !== true) this.focusPhysical(next, { preserveOrder: true })
@@ -299,7 +306,9 @@ export class OverlayBroker {
     if (node === undefined || node.closed) return
     node.resumeFocus = false
     if (options?.target !== undefined) {
-      // A caller-supplied target is explicit: forward it verbatim.
+      // A caller-supplied target is explicit: forward it verbatim and make
+      // sure an in-flight focus() post-check does not override it.
+      node.explicitTargetForwarded = true
       node.raw?.unfocus(options)
       this.deps.reconcileFocusSeat?.()
       return
