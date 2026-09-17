@@ -1199,5 +1199,41 @@ describe("TUI overlay non-capturing", () => {
 				tui.stop();
 			}
 		});
+
+		it("preserveOrder restores a suppressed pair without changing the visual order (X056)", async () => {
+			const terminal = new VirtualTerminal(20, 6);
+			const tui: TUI = new TuiMainScreen(terminal);
+			tui.addChild(new EmptyContent());
+			tui.start();
+			try {
+				const capturing = new FocusableOverlay(["A"]);
+				const hud = new FocusableOverlay(["H"]);
+				const capturingHandle = tui.showOverlay(capturing, { row: 0, col: 0, width: 1 });
+				const hudHandle = tui.showOverlay(hud, { row: 0, col: 0, width: 1, nonCapturing: true });
+				await renderAndFlush(tui, terminal);
+				// The capturing overlay owns the keyboard; the later nonCapturing
+				// HUD is the visual front.
+				assert.strictEqual(terminal.getViewport()[0]?.charAt(0), "H");
+				assert.strictEqual(capturingHandle.isFocused(), true);
+
+				capturingHandle.setHidden(true);
+				hudHandle.setHidden(true);
+				// INTERNAL restore (X056): visibility + keyboard WITHOUT promotion.
+				capturingHandle.setHidden(false, { preserveOrder: true });
+				hudHandle.setHidden(false, { preserveOrder: true });
+				capturingHandle.focus({ preserveOrder: true });
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(terminal.getViewport()[0]?.charAt(0), "H",
+					"the HUD must keep the visual front after the order-preserving restore");
+				assert.strictEqual(capturingHandle.isFocused(), true);
+
+				// The default (promoting) focus still brings the overlay forward.
+				capturingHandle.focus();
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(terminal.getViewport()[0]?.charAt(0), "A");
+			} finally {
+				tui.stop();
+			}
+		});
 	});
 });

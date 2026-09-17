@@ -821,3 +821,48 @@ test('Save Location keeps the overlay dependency stack across a fullscreen swap'
   a.close()
   app.stop()
 })
+
+test('a Save Location round-trip keeps a nonCapturing HUD visually above the focused overlay', async () => {
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  await vt.waitForRender()
+  attach(host)
+  await settle()
+
+  const a = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'AAAAAAAA' }] })
+  await vt.waitForRender()
+  await settle()
+  const hud = app.showExtensionOverlay(
+    { kind: 'text', spans: [{ text: 'HHHHHHHH' }] },
+    { nonCapturing: true },
+  )
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewOf(vt).includes('HHHHHHHH'), `the HUD must be the visual front:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('AAAAAAAA'), `A sits behind the HUD:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay', 'A owns the keyboard')
+
+  const deps: SaveLocationDeps = {
+    resolveDirectory: (input) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async () => null,
+  }
+  const prompt = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    deps,
+  )
+  await vt.waitForRender()
+  await settle()
+  vt.sendInput('\x1b') // cancel the prompt
+  assert.deepEqual(await prompt, { kind: 'cancelled' })
+  await vt.waitForRender()
+  await settle()
+
+  assert.ok(viewOf(vt).includes('HHHHHHHH'), `the HUD must stay visually on top:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('AAAAAAAA'), `A must not be promoted by the restore:\n${viewOf(vt)}`)
+  assert.equal(seatOf(host), 'overlay', 'A regains the keyboard')
+  a.close()
+  hud.close()
+  app.stop()
+})

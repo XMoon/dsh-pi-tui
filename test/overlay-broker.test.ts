@@ -30,6 +30,8 @@ interface FakeHandle extends OverlayHandle {
   label: string
   hiddenLog: string[]
   focusLog: string[]
+  /** The `preserveOrder` value of every focus() call (undefined = default). */
+  focusOptionsLog: (boolean | undefined)[]
   /** The fork auto-focuses a hidden CAPTURING overlay when it is shown; those
    * implicit focuses are recorded separately from explicit focus() calls. */
   showFocusLog: string[]
@@ -47,6 +49,7 @@ function fakeHandle(label: string): FakeHandle {
     label,
     hiddenLog: [] as string[],
     focusLog: [] as string[],
+    focusOptionsLog: [] as (boolean | undefined)[],
     showFocusLog: [] as string[],
     autoFocusOnShow: false,
     isHandFocused: () => focused,
@@ -65,7 +68,11 @@ function fakeHandle(label: string): FakeHandle {
       }
     },
     isHidden() { return hidden },
-    focus() { handle.focusLog.push('focus'); focused = true },
+    focus(options?: Parameters<OverlayHandle['focus']>[0]) {
+      handle.focusLog.push('focus')
+      handle.focusOptionsLog.push(options?.preserveOrder)
+      focused = true
+    },
     unfocus() { focused = false },
     isFocused() { return focused },
     getBounds() { return undefined },
@@ -749,18 +756,46 @@ test('OverlayBroker: closing a hidden root never steals a surviving front overla
   assert.ok(order[order.length - 1] === bHandle, 'B stays the current front')
 })
 
-test('OverlayBroker: reveal syncs the logical z-order with the capturing-show promotion (P2-3)', () => {
+test('OverlayBroker: reveal is an internal restore that preserves the current order (P2-3)', () => {
   const broker = new OverlayBroker()
   const c = fakeHandle('c')
   const h = fakeHandle('h')
   const cHandle = mountOverlay(broker, c, { remountable: true })
-  mountOverlay(broker, h, { nonCapturing: true, remountable: true })
-  cHandle.unfocus() // C blurred but still visible
+  const hHandle = mountOverlay(broker, h, { nonCapturing: true, remountable: true })
+  cHandle.unfocus() // C blurred but still visible; H is the visual front
   const a = fakeHandle('a')
   const aHandle = mountOverlay(broker, a, { remountable: true }) // A suppresses C and H
   broker.close(aHandle) // reveals C (capturing) and H
   const order = broker.remountOrder()
   assert.equal(order.length, 2)
-  assert.ok(order[order.length - 1] === cHandle,
-    'the capturing show promoted C physically; the logical z must follow')
+  assert.ok(order[order.length - 1] === hHandle,
+    'the internal restore must NOT promote the capturing C above the HUD')
+  assert.ok(order[0] === cHandle)
+})
+
+test('OverlayBroker: a rebind restore focuses the surviving owner without promoting it', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const aHandle = mountOverlay(broker, a, { nonCapturing: true, remountable: true })
+  aHandle.focus() // explicit focus: A owns the keyboard and is promoted
+  const h = fakeHandle('h')
+  const hHandle = mountOverlay(broker, h, { nonCapturing: true, remountable: true }) // later HUD, higher z
+  const before = broker.remountOrder()
+  assert.ok(before[before.length - 1] === hHandle, 'the later HUD is the front before the swap')
+
+  broker.detachPhysical()
+  const nextA = fakeHandle('a2')
+  const nextH = fakeHandle('h2')
+  broker.rebind(aHandle, nextA)
+  broker.rebind(hHandle, nextH)
+  assert.equal(nextA.isFocused(), false, 'a nonCapturing show does not focus')
+  assert.equal(nextH.isFocused(), false)
+
+  broker.restoreFocusAfterSwap()
+  assert.equal(nextA.isFocused(), true, 'the surviving owner regains the keyboard')
+  assert.deepEqual(nextA.focusOptionsLog, [true],
+    'the rebind restore must pass preserveOrder to the fork')
+  const after = broker.remountOrder()
+  assert.ok(after[after.length - 1] === hHandle,
+    'the rebind restore must NOT promote the owner above the higher-z HUD')
 })
