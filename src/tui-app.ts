@@ -6454,7 +6454,7 @@ export class TuiApp {
     const entry = this.messageComponents.get(message)
     if (entry === undefined) return false
     const registry = this.renderers
-    if (registry !== undefined && entry.rendererRevision !== registry.snapshot().revision) {
+    if (registry !== undefined && entry.rendererRevision !== registry.revisionOf()) {
       this.componentForMessage(message, this.expandBoundary(), this.transcriptRenderWidth(), this.userExpandBoundary())
     }
     const fresh = this.messageComponents.get(message)
@@ -10621,7 +10621,7 @@ export class TuiApp {
     // changed → the winner may differ), or the message's own content. The
     // registry revision comparison is the CHEAP gate (plan §23): renderer
     // functions run only inside buildMessage, never for unchanged content.
-    const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.snapshot().revision
+    const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.revisionOf()
     // The Host long-user fold state (the user boundary, expansion, full-reveal
     // and hint) is read ONLY by the HOST user bubble, and a user message never
     // reads the PROCESS boundary at all (`effectiveMessageExpanded`'s user
@@ -10724,6 +10724,12 @@ export class TuiApp {
     width: number,
   ): MessageComponentEntry {
     const registry = this.renderers
+    // Capture the revision that produced this renderer SELECTION before the
+    // callback runs: a plugin render() may synchronously dispose/register
+    // renderers (re-entrant mutation), and stamping a revision read AFTER the
+    // callback would claim a freshness the component does not have — the next
+    // gate would then skip the reconcile and keep a disposed renderer's view.
+    const rendererRevision = registry?.revisionOf()
     // An open opaque Assistant item is a transient display contract, not part
     // of the semantic renderer snapshot. Host rendering must own this frame so
     // an extension renderer cannot hide the immediate pending row; once the
@@ -10768,7 +10774,7 @@ export class TuiApp {
       // rebuild refreshes every hint-bearing card (review finding).
       keymapRev: this.keybindings.revision(),
       rendererId: rendered?.rendererId,
-      rendererRevision: registry === undefined ? undefined : registry.snapshot().revision,
+      rendererRevision,
       subCallExpandedRev: this.subCallExpandedRevision,
     }
   }
