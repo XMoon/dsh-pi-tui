@@ -256,12 +256,12 @@ export class OverlayBroker {
     node.explicitHidden = false
     node.resumeFocus = true
     this.showPhysical(node)
-    // The show's focus callback may have mounted a nested CAPTURING overlay
-    // that suppressed and hid this node. The fork ignores focus() on a hidden
-    // overlay, so promoting it here would leave the logical z above that nested
-    // owner while the nested owner holds the front (a later remount flips the
-    // hierarchy).
-    if (!node.closed && node.raw !== undefined && !node.raw.isHidden()) {
+    // Only complete the explicit focus when the show callback did not release
+    // it again: a nested CAPTURING overlay can suppress/hide the node, and the
+    // plugin's own onFocus can call blur() (which clears resumeFocus while the
+    // node stays visible). In either case a second focusPhysical would leave
+    // the physical keyboard ahead of the released logical intent.
+    if (!node.closed && node.raw !== undefined && !node.raw.isHidden() && node.resumeFocus === true) {
       this.focusPhysical(node)
     }
     this.deps.reconcileFocusSeat?.()
@@ -545,6 +545,13 @@ export class OverlayBroker {
       if (!node.parent.children.includes(node)) {
         throw new Error(`node ${node.id} parent does not list it as a child`)
       }
+    }
+    // The other direction: `roots` must hold EXACTLY the registered,
+    // unsuppressed, live nodes (no extraneous / closed / unregistered entry).
+    for (const root of this.roots) {
+      if (root.closed) throw new Error(`closed node ${root.id} is retained in roots`)
+      if (!this.nodes.has(root.wrapper)) throw new Error(`unregistered node ${root.id} is retained in roots`)
+      if (root.parent !== undefined) throw new Error(`suppressed node ${root.id} is retained in roots`)
     }
     for (const node of this.nodes.values()) {
       const chain = new Set<number>()
