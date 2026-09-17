@@ -822,3 +822,60 @@ test('OverlayBroker: a nested mount during the mount focus keeps the logical fro
     'the nested HUD mounted later and must stay the logical front')
   assert.ok(order[0] !== cHandle)
 })
+
+test('OverlayBroker: an explicit focus whose show callback mounts a nested capture keeps the front order', () => {
+  const broker = new OverlayBroker()
+  let cHandle: OverlayHandle | undefined
+  const a = fakeHandle('a')
+  const baseSetHidden = a.setHidden.bind(a)
+  a.setHidden = (value: boolean, options?: { preserveOrder?: boolean; preserveFocus?: boolean }) => {
+    baseSetHidden(value, options)
+    // A's capturing show focuses it, and its onFocus mounts a nested capture C
+    // that suppresses and hides A again.
+    if (value === false && cHandle === undefined && a.autoFocusOnShow) {
+      cHandle = mountOverlay(broker, fakeHandle('c'), { remountable: true })
+    }
+  }
+  const aHandle = mountOverlay(broker, a, { remountable: true })
+  aHandle.setHidden(true) // A is a hidden root
+  assert.equal(a.isHidden(), true)
+
+  aHandle.focus() // explicit focus → show → nested C suppresses A
+  assert.ok(cHandle !== undefined, 'the nested capture mounted')
+  assert.equal(a.isHidden(), true, 'C hid A')
+  const order = broker.remountOrder()
+  assert.equal(order.length, 2)
+  assert.ok(order[order.length - 1] === cHandle, 'the nested capture owns the logical front')
+  assert.ok(order[0] === aHandle)
+})
+
+test('OverlayBroker: a blur inside the focus callback keeps the released intent', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const aHandle = mountOverlay(broker, a)
+  // Simulate the plugin's onFocus calling blur(): the raw focus() re-enters
+  // unfocus() with the node's own stable handle.
+  const baseFocus = a.focus.bind(a)
+  let reenter = false
+  a.focus = (options?: Parameters<OverlayHandle['focus']>[0]) => {
+    baseFocus(options)
+    if (reenter) {
+      reenter = false
+      broker.unfocus(aHandle)
+    }
+  }
+  aHandle.unfocus()
+  assert.equal(a.isFocused(), false)
+  reenter = true
+  aHandle.focus() // the callback blurs it again
+
+  // A nonCapturing sibling does not re-derive A's intent from physical focus,
+  // so a stale logical intent would wrongly resurrect A when the sibling
+  // closes.
+  const bHandle = mountOverlay(broker, fakeHandle('b'), { nonCapturing: true })
+  bHandle.focus()
+  assert.equal(broker.hasFocusedOverlay(), true)
+  broker.close(bHandle)
+  assert.equal(a.isFocused(), false, 'the released intent must win over the stale focus request')
+  assert.equal(broker.hasFocusedOverlay(), false)
+})

@@ -4666,6 +4666,10 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - test/overlay-broker.test.ts: a nested mount during the mount focus keeps the logical front order
 - test/advanced-interactive.test.ts: a nested nonCapturing HUD mounted from onFocus keeps the logical front order
 - test/advanced-broker.test.ts: a component that settles from onFocus never leaks the mounted overlay
+- test/advanced-interactive.test.ts: an explicit show whose onFocus mounts a nested overlay keeps its focus intent
+- test/overlay-broker.test.ts: an explicit focus whose show callback mounts a nested capture keeps the front order
+- test/overlay-broker.test.ts: a blur inside the focus callback keeps the released intent
+- test/advanced-interactive.test.ts: a blur inside the focus callback keeps the overlay released
 
 #### Upstream comparison
 

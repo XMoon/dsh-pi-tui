@@ -235,24 +235,35 @@ export class OverlayBroker {
       return
     }
     // An explicit show is a SUPPRESSION OVERRIDE (I2): detach from the current
-    // suppressor before revealing, so the graph stays a forest.
+    // suppressor before revealing, so the graph stays a forest. The focus
+    // INTENT commits before the physical show: `showPhysical` can synchronously
+    // fire a plugin onFocus that mounts a nested overlay (which would hide this
+    // node and make a post-callback `isFocused()` read its corrupted value).
     this.detach(node)
     node.explicitHidden = false
+    node.resumeFocus = !node.nonCapturing
     this.showPhysical(node)
-    node.resumeFocus = node.raw?.isFocused() === true
     this.deps.reconcileFocusSeat?.()
   }
 
   /** Explicit focus request (including for a nonCapturing node): detaches any
-   * suppressor, reveals and promotes the node to the keyboard owner. */
+   * suppressor, reveals and promotes the node to the keyboard owner. The intent
+   * commits before the physical calls, which may re-enter through onFocus. */
   focus(handle: OverlayHandle): void {
     const node = this.nodes.get(handle)
     if (node === undefined || node.closed) return
     this.detach(node)
     node.explicitHidden = false
-    this.showPhysical(node)
-    this.focusPhysical(node)
     node.resumeFocus = true
+    this.showPhysical(node)
+    // The show's focus callback may have mounted a nested CAPTURING overlay
+    // that suppressed and hid this node. The fork ignores focus() on a hidden
+    // overlay, so promoting it here would leave the logical z above that nested
+    // owner while the nested owner holds the front (a later remount flips the
+    // hierarchy).
+    if (!node.closed && node.raw !== undefined && !node.raw.isHidden()) {
+      this.focusPhysical(node)
+    }
     this.deps.reconcileFocusSeat?.()
   }
 
@@ -508,16 +519,36 @@ export class OverlayBroker {
     return { handles: this.nodes.size, dependents, suspended }
   }
 
-  /** Assert the forest invariants (tests only): one parent per node, no
-   * cycles, no closed node in the graph. */
+  /** Assert the forest invariants (tests only): one suppressor per node, the
+   * parent/children edges agree in BOTH directions, `roots` holds exactly the
+   * unsuppressed nodes, and there are no cycles or closed nodes. */
   assertForest(): void {
-    const seen = new Set<number>()
+    const incoming = new Map<number, number>()
     for (const node of this.nodes.values()) {
       if (node.closed) throw new Error(`closed node ${node.id} is still in the graph`)
-      if (seen.has(node.id)) throw new Error(`node ${node.id} has multiple parents`)
-      seen.add(node.id)
-      let current: ManagedOverlayNode | undefined = node
+      for (const child of node.children) {
+        if (child.closed) throw new Error(`closed child ${child.id} is still a child of ${node.id}`)
+        if (child.parent !== node) {
+          throw new Error(`child ${child.id} does not point back to its parent ${node.id}`)
+        }
+        const count = (incoming.get(child.id) ?? 0) + 1
+        if (count > 1) throw new Error(`node ${child.id} has multiple parents`)
+        incoming.set(child.id, count)
+      }
+    }
+    for (const node of this.nodes.values()) {
+      if (node.parent === undefined) {
+        if (!this.roots.has(node)) throw new Error(`unsuppressed node ${node.id} is missing from roots`)
+        continue
+      }
+      if (this.roots.has(node)) throw new Error(`suppressed node ${node.id} is also a logical root`)
+      if (!node.parent.children.includes(node)) {
+        throw new Error(`node ${node.id} parent does not list it as a child`)
+      }
+    }
+    for (const node of this.nodes.values()) {
       const chain = new Set<number>()
+      let current: ManagedOverlayNode | undefined = node
       while (current !== undefined) {
         if (chain.has(current.id)) throw new Error(`cycle at node ${current.id}`)
         chain.add(current.id)
