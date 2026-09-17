@@ -124,6 +124,10 @@ extension-facing contract.
 - **Question flow stays in the editor seat.** Keep one unified, budgeted
   scrollport and preserve its seat/modal ownership. See
   `test/question-flow.test.ts` and `test/rendering.test.ts`.
+- **Managed overlays follow the overlay/focus contract.** Logical intent is
+  committed before any fork call that can synchronously run a plugin callback,
+  and a callback's newer operation always wins; the host derives the focused
+  seat from the live physical focus. See `docs/overlay-focus-contract.md`.
 - **Context presentation does not rewrite model input.** Keep model-facing bytes
   untouched; render parsed skill/system envelopes, never raw XML. See
   `test/rendering.test.ts`.
