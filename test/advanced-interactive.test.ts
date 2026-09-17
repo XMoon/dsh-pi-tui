@@ -12,6 +12,7 @@ import { afterEach, test } from 'node:test'
 import { AdvancedInputRegistry } from '../src/extension/internal/advanced-input.ts'
 import { normalizeInputEvent } from '../src/extension/internal/input-events.ts'
 import type { AdvancedInputEvent, AdvancedInteractiveComponent } from '../src/extension/advanced-types.ts'
+import type { SaveLocationDeps } from '../src/save-location.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -1115,5 +1116,114 @@ test('a fullscreen swap keeps a nonCapturing HUD above an explicitly focused non
   assert.ok(!view().includes('AAAAAAA'), `the owner must not be promoted to the front:\n${view()}`)
   a.close()
   hud.close()
+  app.stop()
+})
+
+test('closing the focused overlay does not re-activate a blurred sibling', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+  a.show() // explicit override: detach from B, visible + focused
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+  a.blur()
+  await vt.waitForRender()
+  b.focus()
+  await vt.waitForRender()
+  assert.equal(b.focused, true, 'B owns the keyboard')
+  assert.equal(a.focused, false, 'A is visible but blurred')
+  assert.equal(app.overlayGraphState().dependents, 0, 'A detached from B')
+
+  b.close()
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'closing B must not re-activate the blurred A')
+  assert.equal(app.focusSeatForTest(), 'editor', 'the editor owns the keyboard')
+  a.close()
+  app.stop()
+})
+
+test('an internal restore never fabricates focus transitions (child close)', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const component = interactiveComponent({ text: () => 'advanced A' })
+  const a = app.showAdvancedInteractiveOverlay(component)
+  await vt.waitForRender()
+  assert.equal(component.focusCount, 1, 'the mount focuses A exactly once')
+  a.blur()
+  await vt.waitForRender()
+  assert.equal(component.blurCount, 1)
+
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+  b.close()
+  await vt.waitForRender()
+  assert.equal(component.focusCount, 1, 'a child close must not re-focus the blurred A')
+  assert.equal(component.blurCount, 1, 'and must not blur it again')
+  a.close()
+  app.stop()
+})
+
+test('an internal restore never fabricates focus transitions (question / save / fullscreen)', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+
+  const questionComponent = interactiveComponent({ text: () => 'question A' })
+  const questionOverlay = app.showAdvancedInteractiveOverlay(questionComponent)
+  await vt.waitForRender()
+  questionOverlay.blur()
+  await vt.waitForRender()
+  const questions = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await questions.catch(() => {})
+  await vt.waitForRender()
+  assert.deepEqual(
+    { focus: questionComponent.focusCount, blur: questionComponent.blurCount },
+    { focus: 1, blur: 1 },
+    'a question round-trip must not fabricate a focus transition on a blurred overlay',
+  )
+  questionOverlay.close()
+
+  const saveComponent = interactiveComponent({ text: () => 'save A' })
+  const saveOverlay = app.showAdvancedInteractiveOverlay(saveComponent)
+  await vt.waitForRender()
+  saveOverlay.blur()
+  await vt.waitForRender()
+  const deps: SaveLocationDeps = {
+    resolveDirectory: (input) => input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async () => null,
+  }
+  const prompt = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    deps,
+  )
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  assert.deepEqual(await prompt, { kind: 'cancelled' })
+  await vt.waitForRender()
+  assert.deepEqual(
+    { focus: saveComponent.focusCount, blur: saveComponent.blurCount },
+    { focus: 1, blur: 1 },
+    'a Save Location round-trip must not fabricate a focus transition on a blurred overlay',
+  )
+  saveOverlay.close()
+
+  const fsComponent = interactiveComponent({ text: () => 'fullscreen A' })
+  const fsOverlay = app.showAdvancedInteractiveOverlay(fsComponent)
+  await vt.waitForRender()
+  fsOverlay.blur()
+  await vt.waitForRender()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.deepEqual(
+    { focus: fsComponent.focusCount, blur: fsComponent.blurCount },
+    { focus: 1, blur: 1 },
+    'a fullscreen swap must not fabricate a focus transition on a blurred overlay',
+  )
+  fsOverlay.close()
   app.stop()
 })

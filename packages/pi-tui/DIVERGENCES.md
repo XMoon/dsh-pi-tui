@@ -4595,7 +4595,7 @@ ScrollView re-arms follow-end whenever a layout clamp lands the scroll on the ne
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Checked upstream v0.85.1 updateLayout (identical re-arm clause), the ScrollView follow/scroll field graph, and the host fullscreen consumer; the guard only suppresses the re-arm branch on viewport growth.
 
-### X056 — Order-preserving overlay restore seam
+### X056 — Order- and focus-preserving internal overlay restore seam
 
 - Status: `ACTIVE`
 - Category: `PUBLIC_COMPONENT_CONTRACT`
@@ -4606,12 +4606,13 @@ ScrollView re-arms follow-end whenever a layout clamp lands the scroll on the ne
 
 #### Why it exists
 
-The host temporarily suppresses a set of managed overlays (a Question / Save Location modal, or a fullscreen screen swap) and later restores them. Upstream setHidden(false) and focus() promote the overlay's visual order as a side effect, so restoring the set would raise a restored capturing overlay above a nonCapturing HUD that legitimately sat above it. The fork adds the minimal opt-in preserveOrder option so an internal restore reproduces the pre-suppression stacking while still restoring visibility and keyboard focus.
+The host temporarily suppresses a set of managed overlays (a Question / Save Location modal, or a fullscreen screen swap) and later restores them. Upstream setHidden(false) and focus() promote the overlay's visual order AND take keyboard focus as side effects, so an internal restore would raise a restored capturing overlay above a nonCapturing HUD that legitimately sat above it, and would fire spurious onFocus/onBlur on an overlay the plugin deliberately blurred. The fork adds the minimal opt-in seam so an internal restore reproduces the pre-suppression stacking and keyboard ownership: `preserveOrder`/`preserveFocus` on setHidden, and `initialFocus: false` on showOverlay for the fullscreen rebind.
 
 #### Changed surface
 
-- OverlayHandle.setHidden(hidden, { preserveOrder }) skips the focusOrder promotion on show
-- OverlayHandle.focus({ preserveOrder }) takes the keyboard without being promoted to the front
+- OverlayOrderPreservingOptions { preserveOrder, preserveFocus } for OverlayHandle.setHidden
+- OverlayHandle.focus({ preserveOrder }) takes the keyboard without being promoted
+- OverlayOptions.initialFocus: false skips the mount-time auto-focus for an internal rebind
 
 #### Dependency map
 
@@ -4632,8 +4633,10 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - Audit note: Existing callers compile and behave unchanged.
 
 **Behavioral coupling**
-- A capturing overlay restored with preserveOrder keeps its previous focusOrder while regaining the keyboard.
+- A capturing overlay restored with preserveOrder/preserveFocus keeps its previous focusOrder and does NOT take focus on show; the host focuses exactly ONE owner afterwards.
 - A nonCapturing HUD restored with preserveOrder keeps its position above the focused overlay.
+- A rebind with initialFocus:false never auto-focuses, so a blurred overlay records no extra onFocus/onBlur across a screen swap.
+- Default (no options) setHidden(false)/focus() and showOverlay keep the upstream promoting + auto-focusing behavior.
 - Audit note: Guarded by packages/pi-tui/test/overlay-non-capturing.test.ts (the fork seam) plus the broker / advanced-interactive / extension-focus-seat host regressions.
 
 #### Guarding tests
@@ -4645,6 +4648,10 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - test/advanced-interactive.test.ts: a fullscreen swap restores a retained overlay when the old front owner was not remountable
 - test/advanced-interactive.test.ts: a fullscreen swap keeps a nonCapturing HUD above an explicitly focused nonCapturing owner
 - test/overlay-broker.test.ts: a rebind restore focuses the surviving owner without promoting it
+- test/advanced-interactive.test.ts: closing the focused overlay does not re-activate a blurred sibling
+- test/advanced-interactive.test.ts: an internal restore never fabricates focus transitions (child close)
+- test/advanced-interactive.test.ts: an internal restore never fabricates focus transitions (question / save / fullscreen)
+- packages/pi-tui/test/overlay-non-capturing.test.ts: initialFocus and preserveFocus suppress the implicit keyboard transitions (X056)
 
 #### Upstream comparison
 
@@ -4655,7 +4662,7 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - packages/tui/src/tui.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream setHidden(false)/focus() always promote the overlay's focusOrder; the fork adds an opt-in preserveOrder option used only by internal restores.
+- Remaining semantic delta: Upstream promotes focusOrder and takes keyboard focus unconditionally in setHidden(false)/focus() and auto-focuses every capturing showOverlay; the fork adds an opt-in preserveOrder/preserveFocus and initialFocus:false used only by the host's internal restores.
 
 #### Retirement conditions
 

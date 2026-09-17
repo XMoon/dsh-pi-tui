@@ -1235,5 +1235,42 @@ describe("TUI overlay non-capturing", () => {
 				tui.stop();
 			}
 		});
+
+		it("initialFocus and preserveFocus suppress the implicit keyboard transitions (X056)", async () => {
+			const terminal = new VirtualTerminal(20, 6);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const editor = new FocusableOverlay(["EDITOR"]);
+			tui.addChild(new EmptyContent());
+			tui.setFocus(editor);
+			tui.start();
+			try {
+				const capturing = new FocusableOverlay(["A"]);
+				const handle = tui.showOverlay(capturing, { row: 0, col: 0, width: 1, initialFocus: false });
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(capturing.focused, false, "initialFocus:false must not focus the entry");
+				assert.strictEqual(editor.focused, true);
+
+				handle.focus();
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(handle.isFocused(), true);
+
+				handle.setHidden(true);
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(editor.focused, true);
+
+				handle.setHidden(false, { preserveOrder: true, preserveFocus: true });
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(capturing.focused, false, "preserveFocus must not take focus on show");
+				assert.strictEqual(editor.focused, true);
+
+				// The default show still focuses the capturing entry.
+				handle.setHidden(true);
+				handle.setHidden(false);
+				await renderAndFlush(tui, terminal);
+				assert.strictEqual(handle.isFocused(), true);
+			} finally {
+				tui.stop();
+			}
+		});
 	});
 });

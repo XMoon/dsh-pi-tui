@@ -299,6 +299,16 @@ export interface OverlayOptions {
 	 * Set true when this overlay's entry is the component's sole owner.
 	 */
 	disposeOnHide?: boolean;
+	/**
+	 * Whether this capturing overlay takes keyboard focus when it is FIRST
+	 * mounted (default true). `false` is for the host's internal fullscreen
+	 * REBIND (dsh-pi-tui divergence X056): the entry is re-created for an
+	 * existing logical node and the host restores the real keyboard owner
+	 * afterwards, so an automatic focus here would emit a spurious
+	 * onFocus/onBlur pair on every screen swap. The entry keeps its normal
+	 * capturing policy for later show/focus.
+	 */
+	initialFocus?: boolean;
 }
 
 /** Options for {@link OverlayHandle.unfocus}. */
@@ -320,13 +330,20 @@ export interface OverlayBounds {
  * divergence X056). The host temporarily suppresses a set of overlays (a
  * Question / Save Location modal, or a screen swap) and later restores them.
  * Upstream `setHidden(false)` / `focus()` promote the overlay's visual order
- * as a side effect; an internal restore must reproduce the pre-suppression
- * stacking instead (e.g. a nonCapturing HUD that legitimately sat above the
- * focused capturing overlay). `preserveOrder: true` performs the same
- * visibility / keyboard change WITHOUT the `focusOrder` promotion.
+ * AND take keyboard focus as side effects; an internal restore must reproduce
+ * the pre-suppression stacking and keyboard ownership instead (e.g. a
+ * nonCapturing HUD that legitimately sat above the focused capturing overlay,
+ * or a deliberately `blur`red overlay that must not fire a spurious
+ * onFocus/onBlur).
+ *
+ * - `preserveOrder: true` — perform the visibility change WITHOUT the
+ *   `focusOrder` promotion.
+ * - `preserveFocus: true` — perform the visibility change WITHOUT taking
+ *   keyboard focus (`setHidden(false)` only; `focus()` always focuses).
  */
 export interface OverlayOrderPreservingOptions {
 	preserveOrder?: boolean;
+	preserveFocus?: boolean;
 }
 
 /**
@@ -939,8 +956,8 @@ export abstract class TuiBase extends Container implements TUI {
 			focusOrder: ++this.focusOrderCounter,
 		};
 		this.overlayStack.push(entry);
-		// Only focus if overlay is actually visible
-		if (!options?.nonCapturing && this.isOverlayVisible(entry)) {
+		// Only focus if overlay is actually visible (and not an X056 rebind)
+		if (options?.initialFocus !== false && !options?.nonCapturing && this.isOverlayVisible(entry)) {
 			this.setFocus(component);
 		}
 		this.terminal.hideCursor();
@@ -983,9 +1000,10 @@ export abstract class TuiBase extends Container implements TUI {
 				} else {
 					// Restore focus to this overlay when showing (if it's actually visible)
 					if (!options?.nonCapturing && this.isOverlayVisible(entry)) {
-						// X056: an internal restore must not promote the visual order.
+						// X056: an internal restore must not promote the visual
+						// order nor take keyboard focus.
 						if (setHiddenOptions?.preserveOrder !== true) entry.focusOrder = ++this.focusOrderCounter;
-						this.setFocus(component);
+						if (setHiddenOptions?.preserveFocus !== true) this.setFocus(component);
 					}
 				}
 				this.requestRender();
