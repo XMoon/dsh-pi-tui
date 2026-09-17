@@ -109,10 +109,12 @@ dsh --profile pi-tui
   夺取焦点、也不压住同级浮层，其下方的 Host 快捷键（如空编辑器的 `↓` 打开 Quick Tasks）
   照常生效，但显式 `focus()` 请求仍可让它取得物理键盘焦点与焦点席位；捕获型浮层被
   `blur` 或临时隐藏后把键盘与焦点席位交还编辑器，`focus`/显示后再取回，且浮层关闭
-  恢复时始终聚焦**当前**的 editor seat（不会退回已被替换的旧 editor）。fullscreen 切换
-  保留**当前**的逻辑层级、可见性意图、焦点意图与前置顺序（只重绑物理 handle），因此
-  `blur` 意图、显式隐藏、`Save Location` 下的层级以及混合类型（extension/advanced/
-  unstable 等）的顺序都不会丢失或被反转。
+  恢复时始终聚焦**当前**的 editor seat（不会退回已被替换的旧 editor）。Question / Save
+  Location 结束与 fullscreen 切换都只是**内部恢复**：保留**当前**的逻辑层级、可见性意图、
+  焦点意图与前置顺序（恢复本身不会把某个浮层重新提到最前），因此 `blur` 意图、显式隐藏、
+  浮层关闭/模态结束后的层级，以及混合类型（extension/advanced/unstable 等）的顺序都不会
+  丢失或被反转；nonCapturing HUD 在 focused 浮层之上的视觉位置在 Question/Save 往返后也
+  保持不变。
 - **Job 详情浮层有独立的底部操作提示。** 运行中的 Job 显示 `S stop · Esc back`；任务
   结束后 `Stop` 提示消失且该键失效；`Esc back` 在长内容、短终端（低至 2 行）或窄屏下始终
   可见，且宽度不足时优先保留关闭/返回而不是 `Stop`；非 Job 的独立提示面板（如登录通知）

@@ -151,11 +151,13 @@ Older DSH `0.1.5-rc.1`/`0.1.5-rc.2` keeps using the stable
   physical keyboard owner; a capturing overlay that is `blur`red or temporarily
   hidden likewise hands the keyboard and focused seat back to the editor and
   reclaims both on focus/show, and a dependent restore always focuses the CURRENT
-  editor seat rather than a replaced pre-mount editor; a fullscreen swap keeps
-  the CURRENT logical hierarchy, visibility intent, focus intent and front order
-  (only the physical handles are rebound), so the `blur` intent, an explicit
-  hide, the hierarchy under a Save Location prompt and mixed overlay kinds always
-  survive the swap.
+  editor seat rather than a replaced pre-mount editor; a Question / Save Location
+  settle and a fullscreen swap are INTERNAL restores that keep the CURRENT
+  logical hierarchy, visibility intent, focus intent and front order (the
+  restore itself never re-promotes an overlay to the front), so the `blur`
+  intent, an explicit hide, the hierarchy after a close or a modal settle, and
+  mixed overlay kinds always survive — including a nonCapturing HUD that sits
+  visually above the focused overlay across a Question / Save round-trip.
 - **The Job detail overlay has its own bottom action hint.** A running job shows
   `S stop · Esc back`; once the job settles the Stop hint disappears and its key
   becomes a no-op; `Esc back` stays visible under a long body, a short terminal

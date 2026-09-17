@@ -80,8 +80,8 @@
 
 ## Summary
 
-- Records: 56
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 45, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
+- Records: 57
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 46, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -141,6 +141,7 @@
 | X053 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
 | X054 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
 | X055 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM, LOCAL_UX | NO |
+| X056 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT | NO |
 
 ## Divergences
 
@@ -4593,3 +4594,82 @@ ScrollView re-arms follow-end whenever a layout clamp lands the scroll on the ne
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Checked upstream v0.85.1 updateLayout (identical re-arm clause), the ScrollView follow/scroll field graph, and the host fullscreen consumer; the guard only suppresses the re-arm branch on viewport growth.
+
+### X056 — Order-preserving overlay restore seam
+
+- Status: `ACTIVE`
+- Category: `PUBLIC_COMPONENT_CONTRACT`
+- Risk: `MEDIUM`
+- Files: `src/tui.ts`
+- Last audited: `2026-09-17`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+The host temporarily suppresses a set of managed overlays (a Question / Save Location modal, or a fullscreen screen swap) and later restores them. Upstream setHidden(false) and focus() promote the overlay's visual order as a side effect, so restoring the set would raise a restored capturing overlay above a nonCapturing HUD that legitimately sat above it. The fork adds the minimal opt-in preserveOrder option so an internal restore reproduces the pre-suppression stacking while still restoring visibility and keyboard focus.
+
+#### Changed surface
+
+- OverlayHandle.setHidden(hidden, { preserveOrder }) skips the focusOrder promotion on show
+- OverlayHandle.focus({ preserveOrder }) takes the keyboard without being promoted to the front
+
+#### Dependency map
+
+**Vendor internal**
+- The option only gates the `entry.focusOrder = ++this.focusOrderCounter` promotion inside the showOverlay handle closures.
+- Audit note: Visibility, focus, and render behavior are otherwise unchanged; hide() and unfocus() are untouched.
+
+**Inheritance / structural**
+- The handle is a closure over OverlayStackEntry; no subclass or structural edge is involved.
+- Audit note: None.
+
+**Host**
+- src/overlay-broker.ts showPhysical()/focusPhysical() pass preserveOrder for INTERNAL restores (reveal from a close or a modal settle).
+- Audit note: Explicit user show()/focus() keep the upstream promoting behavior.
+
+**Public / extension**
+- OverlayHandle is a public type; the new parameter is optional and additive.
+- Audit note: Existing callers compile and behave unchanged.
+
+**Behavioral coupling**
+- A capturing overlay restored with preserveOrder keeps its previous focusOrder while regaining the keyboard.
+- A nonCapturing HUD restored with preserveOrder keeps its position above the focused overlay.
+- Audit note: Guarded by packages/pi-tui/test/overlay-non-capturing.test.ts (the fork seam) plus the broker / advanced-interactive / extension-focus-seat host regressions.
+
+#### Guarding tests
+
+- packages/pi-tui/test/overlay-non-capturing.test.ts: preserveOrder restores a suppressed pair without changing the visual order (X056)
+- test/overlay-broker.test.ts: reveal is an internal restore that preserves the current order (P2-3)
+- test/advanced-interactive.test.ts: a question round-trip keeps a nonCapturing HUD visually above the focused overlay
+- test/extension-focus-seat.test.ts: a Save Location round-trip keeps a nonCapturing HUD visually above the focused overlay
+- test/advanced-interactive.test.ts: a fullscreen swap restores a retained overlay when the old front owner was not remountable
+- test/advanced-interactive.test.ts: a fullscreen swap keeps a nonCapturing HUD above an explicitly focused nonCapturing owner
+- test/overlay-broker.test.ts: a rebind restore focuses the surviving owner without promoting it
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/tui.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream setHidden(false)/focus() always promote the overlay's focusOrder; the fork adds an opt-in preserveOrder option used only by internal restores.
+
+#### Retirement conditions
+
+- Retire when upstream exposes a non-promoting overlay restore (or the host no longer suppresses and restores managed overlays), then run the HUD/order regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream promotes focusOrder unconditionally in both setHidden(false) and focus(); the fork adds the minimal opt-in seam for host internal restores.

@@ -316,17 +316,35 @@ export interface OverlayBounds {
 }
 
 /**
+ * Options for an INTERNAL order-preserving overlay restore (dsh-pi-tui
+ * divergence X056). The host temporarily suppresses a set of overlays (a
+ * Question / Save Location modal, or a screen swap) and later restores them.
+ * Upstream `setHidden(false)` / `focus()` promote the overlay's visual order
+ * as a side effect; an internal restore must reproduce the pre-suppression
+ * stacking instead (e.g. a nonCapturing HUD that legitimately sat above the
+ * focused capturing overlay). `preserveOrder: true` performs the same
+ * visibility / keyboard change WITHOUT the `focusOrder` promotion.
+ */
+export interface OverlayOrderPreservingOptions {
+	preserveOrder?: boolean;
+}
+
+/**
  * Handle returned by showOverlay for controlling the overlay
  */
 export interface OverlayHandle {
 	/** Permanently remove the overlay (cannot be shown again) */
 	hide(): void;
 	/** Temporarily hide or show the overlay */
-	setHidden(hidden: boolean): void;
+	setHidden(hidden: boolean, options?: OverlayOrderPreservingOptions): void;
 	/** Check if overlay is temporarily hidden */
 	isHidden(): boolean;
-	/** Focus this overlay and bring it to the visual front */
-	focus(): void;
+	/**
+	 * Focus this overlay and bring it to the visual front. With
+	 * `preserveOrder: true` the overlay takes the keyboard WITHOUT being
+	 * promoted to the front (internal restore).
+	 */
+	focus(options?: OverlayOrderPreservingOptions): void;
 	/** Release focus to the next visible capturing overlay or previous target, or to an explicit target when provided */
 	unfocus(options?: OverlayUnfocusOptions): void;
 	/** Check if this overlay currently has focus */
@@ -951,7 +969,7 @@ export abstract class TuiBase extends Container implements TUI {
 					this.requestRender();
 				}
 			},
-			setHidden: (hidden: boolean) => {
+			setHidden: (hidden: boolean, setHiddenOptions?: OverlayOrderPreservingOptions) => {
 				if (entry.hidden === hidden) return;
 				entry.hidden = hidden;
 				// Update focus when hiding/showing
@@ -965,16 +983,18 @@ export abstract class TuiBase extends Container implements TUI {
 				} else {
 					// Restore focus to this overlay when showing (if it's actually visible)
 					if (!options?.nonCapturing && this.isOverlayVisible(entry)) {
-						entry.focusOrder = ++this.focusOrderCounter;
+						// X056: an internal restore must not promote the visual order.
+						if (setHiddenOptions?.preserveOrder !== true) entry.focusOrder = ++this.focusOrderCounter;
 						this.setFocus(component);
 					}
 				}
 				this.requestRender();
 			},
 			isHidden: () => entry.hidden,
-			focus: () => {
+			focus: (focusOptions?: OverlayOrderPreservingOptions) => {
 				if (!this.overlayStack.includes(entry) || !this.isOverlayVisible(entry)) return;
-				entry.focusOrder = ++this.focusOrderCounter;
+				// X056: an internal restore must not promote the visual order.
+				if (focusOptions?.preserveOrder !== true) entry.focusOrder = ++this.focusOrderCounter;
 				this.setFocus(component);
 				this.requestRender();
 			},

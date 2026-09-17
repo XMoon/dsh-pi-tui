@@ -1040,3 +1040,80 @@ test('a fullscreen swap keeps a nonCapturing HUD visually above the focused over
   hud.close()
   app.stop()
 })
+
+test('a question round-trip keeps a nonCapturing HUD visually above the focused overlay', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'AAAAAAA' }))
+  await vt.waitForRender()
+  const hud = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'HHHHHHH' }] }, { nonCapturing: true })
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'A owns the keyboard')
+  assert.ok(view().includes('HHHHHHH') && !view().includes('AAAAAAA'), `HUD must be the front:\n${view()}`)
+
+  const questions = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+  await vt.waitForRender()
+  assert.ok(view().includes('proceed?'), `the question must be visible:\n${view()}`)
+  vt.sendInput('\x1b')
+  await questions.catch(() => {})
+  await vt.waitForRender()
+
+  assert.equal(a.focused, true, 'A keeps the keyboard after the question')
+  assert.ok(view().includes('HHHHHHH'), `the HUD must stay visually on top:\n${view()}`)
+  assert.ok(!view().includes('AAAAAAA'), `A must not be promoted by the restore:\n${view()}`)
+  a.close()
+  hud.close()
+  app.stop()
+})
+
+test('a fullscreen swap restores a retained overlay when the old front owner was not remountable', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  app.openPicker([{ value: 'b', label: 'picker B' }], () => {}, () => {})
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'the picker owns the keyboard')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+
+  assert.equal(a.focused, true, 'the retained remountable overlay must own the keyboard')
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the seat must not fall back to the editor')
+  assert.equal(app.overlayGraphState().handles, 1, 'the non-remountable picker is closed by the swap')
+  a.close()
+  app.stop()
+})
+
+test('a fullscreen swap keeps a nonCapturing HUD above an explicitly focused nonCapturing owner', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const a = app.showAdvancedInteractiveOverlay(
+    interactiveComponent({ text: () => 'AAAAAAA' }),
+    { nonCapturing: true },
+  )
+  await vt.waitForRender()
+  a.focus() // explicit focus: A owns the keyboard
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+  const hud = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'HHHHHHH' }] }, { nonCapturing: true })
+  await vt.waitForRender()
+  assert.ok(view().includes('HHHHHHH') && !view().includes('AAAAAAA'),
+    `the later HUD must be above the focused owner:\n${view()}`)
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+
+  assert.equal(a.focused, true, 'the explicitly focused owner keeps the keyboard')
+  assert.ok(view().includes('HHHHHHH'), `the HUD must stay above after the swap:\n${view()}`)
+  assert.ok(!view().includes('AAAAAAA'), `the owner must not be promoted to the front:\n${view()}`)
+  a.close()
+  hud.close()
+  app.stop()
+})
