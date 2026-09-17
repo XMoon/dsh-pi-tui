@@ -1015,3 +1015,60 @@ test('OverlayBroker: a re-show during the suspend release wins over the suspensi
   assert.ok(suspension.suspendedOverlays.has(aHandle))
   assert.ok(!suspension.suspendedOverlays.has(bHandle), 'the newer show detached B from the suspension')
 })
+
+test('OverlayBroker: a newer focus from the detach seat release is restored after the swap', () => {
+  const a = fakeHandle('a')
+  const b = fakeHandle('b')
+  let bHandle: OverlayHandle | undefined
+  let released = false
+  const broker = new OverlayBroker({
+    // The seat handoff blurs A, whose onBlur issues a newer B.focus().
+    focusSeatOwner: () => {
+      if (!released && bHandle !== undefined) {
+        released = true
+        bHandle.focus()
+      }
+    },
+  })
+  const aHandle = mountOverlay(broker, a, { remountable: true })
+  bHandle = mountOverlay(broker, b, { nonCapturing: true, remountable: true })
+  assert.equal(a.isFocused(), true)
+
+  broker.detachPhysical()
+  const nextA = fakeHandle('a2')
+  const nextB = fakeHandle('b2')
+  broker.rebind(aHandle, nextA)
+  broker.rebind(bHandle, nextB)
+  broker.restoreFocusAfterSwap()
+  assert.equal(nextB.isFocused(), true, 'the newer owner wins after the swap')
+  assert.equal(nextA.isFocused(), false, 'the stale pre-swap owner is not restored')
+})
+
+test('OverlayBroker: a newer focus during the modal release wins on settle', () => {
+  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+  let modalActive = false
+  let bHandle: OverlayHandle | undefined
+  let released = false
+  const broker = new OverlayBroker({
+    question: () => modalActive ? suspension : undefined,
+    focusSeatOwner: () => {
+      if (!released && bHandle !== undefined) {
+        released = true
+        bHandle.focus() // A NEWER explicit focus during the suspension release
+      }
+    },
+  })
+  const a = fakeHandle('a')
+  mountOverlay(broker, a)
+  const b = fakeHandle('b')
+  bHandle = mountOverlay(broker, b, { nonCapturing: true })
+
+  modalActive = true
+  broker.suspendVisibleRoots(suspension)
+  assert.equal(suspension.suspendedOverlays.has(bHandle), false, 'B detached from the suspension')
+  assert.equal(a.isHidden(), true)
+  modalActive = false
+  broker.resumeSuspendedRoots(suspension)
+  assert.equal(b.isFocused(), true, 'the newer B wins on settle')
+  assert.equal(a.isFocused(), false, 'A is not re-focused over the newer owner')
+})

@@ -1274,3 +1274,52 @@ describe("TUI overlay non-capturing", () => {
 		});
 	});
 });
+
+class ReentrantFocusOverlay implements Component, Focusable {
+	private lines: string[];
+	private focusedState = false;
+	/** Invoked (once) when this component loses focus. */
+	onBlurRefocus: (() => void) | undefined;
+	constructor(lines: string[]) {
+		this.lines = lines;
+	}
+	get focused(): boolean {
+		return this.focusedState;
+	}
+	set focused(value: boolean) {
+		const wasFocused = this.focusedState;
+		this.focusedState = value;
+		if (wasFocused && !value) this.onBlurRefocus?.();
+	}
+	handleInput(): void {}
+	render(): string[] {
+		return this.lines;
+	}
+	invalidate(): void {}
+}
+
+describe("TUI focus transition supersession (X056)", () => {
+	it("a focus() issued from onBlur is not overwritten by the outer transition", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui: TUI = new TuiMainScreen(terminal);
+		tui.addChild(new EmptyContent());
+		tui.start();
+		try {
+			const a = new ReentrantFocusOverlay(["A"]);
+			const b = new FocusableOverlay(["B"]);
+			tui.setFocus(a);
+			assert.strictEqual(a.focused, true);
+			a.onBlurRefocus = () => {
+				a.onBlurRefocus = undefined;
+				tui.setFocus(a);
+			};
+			tui.showOverlay(b, { row: 0, col: 0, width: 1 });
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(tui.getFocusedComponent(), a, "the nested focus transition wins");
+			assert.strictEqual(a.focused, true);
+			assert.strictEqual(b.focused, false);
+		} finally {
+			tui.stop();
+		}
+	});
+});

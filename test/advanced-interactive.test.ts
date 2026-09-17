@@ -1680,3 +1680,156 @@ test('a newer focus from the release callback survives a stale hide', async () =
   a.close()
   app.stop()
 })
+
+test('a newer focus from the detach seat release is restored after a fullscreen swap', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let bRef: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  let arm = false
+  const aComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced A' }] }),
+    handleInput: () => false,
+    onBlur: () => {
+      if (arm && bRef !== undefined) {
+        arm = false
+        bRef.focus()
+      }
+    },
+    dispose: () => {},
+  }
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(
+    interactiveComponent({ text: () => 'advanced B' }),
+    { nonCapturing: true },
+  )
+  bRef = b
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'A owns the keyboard')
+  assert.equal(b.focused, false)
+
+  // The fullscreen seat handoff blurs A; its onBlur issues a NEWER B.focus().
+  arm = true
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.equal(b.focused, true, 'the newer focus from the seat release wins')
+  assert.equal(a.focused, false, 'the stale pre-swap owner must not be restored')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  a.close()
+  b.close()
+  app.stop()
+})
+
+test('a newer focus from the modal suspension release wins on settle', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let bRef: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  let arm = false
+  const aComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced A' }] }),
+    handleInput: () => false,
+    onBlur: () => {
+      if (arm && bRef !== undefined) {
+        arm = false
+        bRef.focus()
+      }
+    },
+    dispose: () => {},
+  }
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(
+    interactiveComponent({ text: () => 'advanced B' }),
+    { nonCapturing: true },
+  )
+  bRef = b
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'A owns the keyboard')
+
+  // During the modal suspension release A blurs; its onBlur issues a NEWER
+  // B.focus(), which detaches B from the suspension.
+  arm = true
+  const questions = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await questions.catch(() => {})
+  await vt.waitForRender()
+  assert.equal(b.focused, true, 'the newer focus from the suspension release wins on settle')
+  assert.equal(a.focused, false, 'A is not re-focused over the newer owner')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  a.close()
+  b.close()
+  app.stop()
+})
+
+test('an onBlur re-focus is not overwritten by a capturing mount', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let arm = false
+  let aRef: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  const aComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced A' }] }),
+    handleInput: () => false,
+    onBlur: () => {
+      if (arm && aRef !== undefined) {
+        arm = false
+        aRef.focus()
+      }
+    },
+    dispose: () => {},
+  }
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  aRef = a
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+
+  arm = true
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'the onBlur re-focus wins over the mount transition')
+  assert.equal(b.focused, false)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'A still owns the keyboard after the swap')
+  b.close()
+  a.close()
+  app.stop()
+})
+
+test('an onBlur re-focus is not overwritten by a blur release', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let arm = false
+  let aRef: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  const aComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced A' }] }),
+    handleInput: () => false,
+    onBlur: () => {
+      if (arm && aRef !== undefined) {
+        arm = false
+        aRef.focus()
+      }
+    },
+    dispose: () => {},
+  }
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  aRef = a
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+  a.show() // independent roots, A focused
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+
+  arm = true
+  a.blur() // release focuses B → A.onBlur → A.focus()
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'the onBlur re-focus wins over the release transition')
+  assert.equal(b.focused, false)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  b.close()
+  a.close()
+  app.stop()
+})
