@@ -665,3 +665,35 @@ test('TuiApp: a renderer registered inside another render wins the next build', 
   assert.equal(second?.rendererId, 'b', 'the next build must pick up B registered during A.render')
   app.stop()
 })
+
+test('renderer revision churn cannot recursively rebuild without bound', async () => {
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const registry = new RendererRegistry()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant' as const, turn: 0, text: 'x' }])
+  await vt.waitForRender()
+
+  let renders = 0
+  registry.registerMessageRenderer({
+    id: 'churn-0',
+    order: 1,
+    render: () => {
+      renders += 1
+      // NEVER converges: every render bumps the registry revision again.
+      registry.registerMessageRenderer({ id: `churn-${renders}`, order: 5, render: () => undefined }, 'test')
+      return undefined
+    },
+  }, 'test')
+
+  // The request path rebuilds synchronously when the revision moved; a
+  // permanent churn must exit after the bound instead of recursing.
+  assert.doesNotThrow(() => app.requestRender())
+  assert.ok(renders > 0, 'the churn renderer actually ran')
+  assert.ok(renders <= 3, `the renderer reconcile must be bounded, saw ${renders} calls`)
+  await vt.waitForRender()
+  app.stop()
+})
