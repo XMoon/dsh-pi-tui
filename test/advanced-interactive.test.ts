@@ -1483,3 +1483,79 @@ test('a nested nonCapturing HUD mounted from onFocus keeps the logical front ord
   a.close()
   app.stop()
 })
+
+test('an explicit show whose onFocus mounts a nested overlay keeps its focus intent', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let c: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  let arm = false
+  const aComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced A' }] }),
+    handleInput: () => false,
+    onFocus: () => {
+      if (arm && c === undefined) {
+        c = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced C' }))
+      }
+    },
+    dispose: () => {},
+  }
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+
+  // The explicit show detaches A and focuses it; A's onFocus then mounts a
+  // nested capturing C that suppresses both A and B.
+  arm = true
+  a.show()
+  await vt.waitForRender()
+  assert.ok(c !== undefined, 'the nested overlay mounted from onFocus')
+  assert.equal(c!.focused, true, 'C owns the keyboard')
+  assert.equal(app.overlayGraphState().handles, 3)
+
+  c!.close()
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'A keeps the focus intent of its explicit show')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  b.close()
+  a.close()
+  app.stop()
+})
+
+test('a blur inside the focus callback keeps the overlay released', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let armed = false
+  let aRef: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  const aComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced A' }] }),
+    handleInput: () => false,
+    onFocus: () => { if (armed) aRef?.blur() },
+    dispose: () => {},
+  }
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  aRef = a
+  await vt.waitForRender()
+  a.blur()
+  await vt.waitForRender()
+  assert.equal(a.focused, false)
+  armed = true
+  a.focus() // onFocus blurs it again → the released intent must win
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'the blur inside onFocus wins')
+
+  // B is nonCapturing, so closing it does not re-derive A's intent from
+  // physical focus: a stale logical intent would wrongly resurrect A.
+  const b = app.showAdvancedInteractiveOverlay(
+    interactiveComponent({ text: () => 'advanced B' }),
+    { nonCapturing: true },
+  )
+  await vt.waitForRender()
+  b.focus()
+  await vt.waitForRender()
+  assert.equal(b.focused, true)
+  b.close()
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'A must not regain focus from a stale intent')
+  assert.equal(app.focusSeatForTest(), 'editor')
+  a.close()
+  app.stop()
+})

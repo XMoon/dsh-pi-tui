@@ -297,5 +297,17 @@ test('custom: a component that settles from onFocus never leaks the mounted over
   assert.equal(app.overlayGraphState().handles, 0, 'no leaked overlay node')
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
   assert.ok(!vt.getViewport().map(strip).join('\n').includes('focus-settled'), 'the overlay is gone')
+
+  // The symmetric host.close() variant from the same mount-time callback.
+  const closed = broker.custom((host) => ({
+    render: () => ({ kind: 'text', spans: [{ text: 'focus-closed' }] }),
+    onFocus: () => { host.close() },
+  }))
+  assert.equal(await closed, undefined)
+  await vt.waitForRender()
+  assert.equal(app.pendingBrokerSettlesForTest(), 0, 'no stale settle entry for the close() path')
+  assert.equal(app.ownedAdvancedOverlayLeasesForTest(), 0)
+  assert.equal(app.overlayGraphState().handles, 0)
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('focus-closed'), 'the overlay is gone')
   app.stop()
 })
