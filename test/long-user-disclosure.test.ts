@@ -673,7 +673,7 @@ test('a kind:user extension renderer does not pollute the Host long-user disclos
   app.stop()
 })
 
-test('a user-boundary shift does not rebuild a plugin-owned user component', async () => {
+test('boundary shifts and surface swaps never re-run a plugin-owned user renderer', async () => {
   const vt = new VirtualTerminal(100, 200)
   const registry = new RendererRegistry()
   let renders = 0
@@ -692,39 +692,45 @@ test('a user-boundary shift does not rebuild a plugin-owned user component', asy
   app.start()
   startedApps.add(app)
 
-  // The plugin-owned prompt sits INSIDE the recent window, so the boundary
-  // shift flips its Host `expanded` state (2 -> 3): that Host-only state must
-  // not invalidate the plugin presentation.
+  const tool = (turn: number): TranscriptMessage =>
+    ({ kind: 'tool', turn, name: 'read', args: JSON.stringify({ path: `f${turn}` }), result: 'ok', status: 'ok' })
+  // The plugin-owned prompt sits INSIDE the recent user window, and three tool
+  // turns make the PROCESS boundary non-empty, so both boundaries can move.
   const pluginOwned = user(lines(11, 'p-'), 2)
-  const before: TranscriptMessage[] = [
-    user(lines(11, 'a-'), 1),
-    pluginOwned,
-    user(lines(11, 'c-'), 3),
-    user(lines(11, 'd-'), 4),
+  const base: TranscriptMessage[] = [
+    tool(1), tool(2), tool(3),
+    user(lines(11, 'a-'), 1), pluginOwned, user(lines(11, 'c-'), 3), user(lines(11, 'd-'), 4),
   ]
-  app.setTranscript(before)
-  vt.sendInput('\x0f') // master on so the user boundary is finite
+  app.setTranscript(base)
+  vt.sendInput('\x0f') // master on so both boundaries are finite
   await viewRows(vt)
   assert.ok(renders >= 1, 'the plugin rendered the owned user at least once')
-  const rendersBeforeShift = renders
+  const rendersBefore = renders
   const componentBefore = app.messageCacheEntryForTest(pluginOwned)?.component
   assert.ok(componentBefore !== undefined)
 
-  // A newer user turn shifts the user boundary (2 -> 3) and flips the Host
-  // expanded state of the plugin-owned message; neither may rebuild it.
-  app.setTranscript([...before, user(lines(11, 'e-'), 5)])
+  // (a) PROCESS-boundary shift: a 4th tool turn moves `expandBoundary()`
+  // (0 -> 2). A user message never reads it.
+  app.setTranscript([...base, tool(4)])
   await viewRows(vt)
   assert.equal(app.messageCacheEntryForTest(pluginOwned)?.component, componentBefore,
-    'the plugin-owned user component must be reused across a user-boundary shift')
-  assert.equal(renders, rendersBeforeShift, 'the extension renderer must not re-run on the shift')
+    'the plugin-owned user must be reused across a process-boundary shift')
+  assert.equal(renders, rendersBefore, 'a process-boundary shift must not re-run the plugin renderer')
 
-  // A surface swap changes the Host hint owner but the plugin consumes none
-  // of that state either.
+  // (b) USER-boundary shift: a 5th user turn moves the recent-USER window
+  // (2 -> 3) and flips the plugin-owned message's Host `expanded` state.
+  app.setTranscript([...base, tool(4), user(lines(11, 'e-'), 5)])
+  await viewRows(vt)
+  assert.equal(app.messageCacheEntryForTest(pluginOwned)?.component, componentBefore,
+    'the plugin-owned user must be reused across a user-boundary shift')
+  assert.equal(renders, rendersBefore, 'a user-boundary shift must not re-run the plugin renderer')
+
+  // (c) Surface swap changes the Host hint owner; the plugin consumes none.
   app.setFullscreen(true)
   await viewRows(vt)
   assert.equal(app.messageCacheEntryForTest(pluginOwned)?.component, componentBefore,
-    'the plugin-owned user component must be reused across a surface swap')
-  assert.equal(renders, rendersBeforeShift, 'the extension renderer must not re-run on the swap')
+    'the plugin-owned user must be reused across a surface swap')
+  assert.equal(renders, rendersBefore, 'a surface swap must not re-run the plugin renderer')
   app.setFullscreen(false)
   app.stop()
 })
