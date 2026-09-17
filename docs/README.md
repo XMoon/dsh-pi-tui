@@ -11,6 +11,7 @@ knows where the rest lives.
 | File | Audience | What it records |
 |---|---|---|
 | `architecture.md` | contributors | Which module owns which state, and the planned extraction order for the runner's remaining responsibilities |
+| `overlay-focus-contract.md` | contributors | The managed-overlay / focus / fullscreen state model: the authority map, the synchronous-reentrancy transaction invariant, the transition map, the reentrancy matrix, the fork focus-transition rules (X056), and the regression checklist for `/model`, new modals, plugin UI and fullscreen work |
 | `concurrency.md` | contributors | Why dsh sessions cannot be shared across processes; the DSH `SessionHandle` / `SessionWriteLease` (kernel flock) as the sole cross-process writer authority, and the TUI's process-local coordination (transition gate, operation barrier, generation/stale fences) |
 | `failure-model.md` | contributors | The async failure & cancellation contract (`runDetached` / `runOwned`, error observation, lifecycle roots) — the rules that prevent unhandled rejections and misclassified cancellations |
 | `input-history.md` | contributors | Per-cwd input history: why it left the settings document, the JSONL file design (v1/v2 rows, read-only load, recall vs. persistence), the recall-order contract, the session-first editor recall scope (↑/↓ session-projected, Ctrl+R broader), the Ctrl+R search panel (scope/detail/accept semantics), and the migration path |
