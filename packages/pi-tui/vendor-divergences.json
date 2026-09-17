@@ -5678,7 +5678,12 @@
     "test/overlay-broker.test.ts: a blur inside the focus callback keeps the released intent",
     "test/advanced-interactive.test.ts: a blur inside the focus callback keeps the overlay released",
     "test/overlay-broker.test.ts: a hidden capturing focus whose show mounts a nonCapturing HUD keeps the HUD in front",
-    "test/advanced-interactive.test.ts: a hidden capturing focus whose onFocus mounts a nonCapturing HUD keeps the HUD in front"
+    "test/advanced-interactive.test.ts: a hidden capturing focus whose onFocus mounts a nonCapturing HUD keeps the HUD in front",
+    "test/overlay-broker.test.ts: a newer focus from the release callback survives a stale blur",
+    "test/overlay-broker.test.ts: a newer focus from the release callback survives a stale hide",
+    "test/advanced-interactive.test.ts: a newer focus from the release callback survives a stale blur",
+    "test/advanced-interactive.test.ts: a newer focus from the release callback survives a stale hide",
+    "test/overlay-broker.test.ts: a re-show during the suspend release wins over the suspension"
    ],
    "upstream": {
     "equivalence": "NO",

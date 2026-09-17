@@ -39,12 +39,16 @@ interface FakeHandle extends OverlayHandle {
   isHandFocused(): boolean
 }
 
+/** The fork has exactly ONE physically focused component: the fake handles
+ * share this registry so focusing one releases the previously focused one. */
+let fakeFocused: FakeHandle | undefined
+
 /** A fake raw overlay handle recording setHidden/hide/focus calls and
  * tracking its own physical focus (so the broker can rebind / restore). It
- * models the fork's `setHidden(false)` auto-focus for a capturing overlay. */
+ * models the fork's `setHidden(false)` auto-focus for a capturing overlay and
+ * the single-focused-component invariant. */
 function fakeHandle(label: string): FakeHandle {
   let hidden = false
-  let focused = false
   const handle: FakeHandle = {
     label,
     hiddenLog: [] as string[],
@@ -52,31 +56,35 @@ function fakeHandle(label: string): FakeHandle {
     focusOptionsLog: [] as (boolean | undefined)[],
     showFocusLog: [] as string[],
     autoFocusOnShow: false,
-    isHandFocused: () => focused,
-    hide() { handle.hiddenLog.push('hide'); hidden = false; focused = false },
+    isHandFocused: () => fakeFocused === handle,
+    hide() {
+      handle.hiddenLog.push('hide')
+      hidden = false
+      if (fakeFocused === handle) fakeFocused = undefined
+    },
     setHidden(value: boolean, options?: { preserveOrder?: boolean; preserveFocus?: boolean }) {
       handle.hiddenLog.push(value ? 'hide-temp' : 'show')
       const wasHidden = hidden
       hidden = value
       if (value) {
-        focused = false
+        if (fakeFocused === handle) fakeFocused = undefined
         return
       }
       // The fork auto-focuses a shown capturing overlay unless the internal
       // restore asks it not to (X056 preserveFocus).
       if (wasHidden && handle.autoFocusOnShow && options?.preserveFocus !== true) {
         handle.showFocusLog.push('focus')
-        focused = true
+        fakeFocused = handle
       }
     },
     isHidden() { return hidden },
     focus(options?: Parameters<OverlayHandle['focus']>[0]) {
       handle.focusLog.push('focus')
       handle.focusOptionsLog.push(options?.preserveOrder)
-      focused = true
+      fakeFocused = handle
     },
-    unfocus() { focused = false },
-    isFocused() { return focused },
+    unfocus() { if (fakeFocused === handle) fakeFocused = undefined },
+    isFocused() { return fakeFocused === handle },
     getBounds() { return undefined },
   }
   return handle
@@ -934,4 +942,76 @@ test('OverlayBroker: a hidden capturing focus whose show mounts a nonCapturing H
   assert.ok(order[order.length - 1] === hudHandle,
     'the later nonCapturing HUD must keep the logical front')
   assert.ok(order[0] === aHandle)
+})
+
+test('OverlayBroker: a newer focus from the release callback survives a stale blur', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const aHandle = mountOverlay(broker, a)
+  const b = fakeHandle('b')
+  mountOverlay(broker, b) // B suppresses A
+  aHandle.setHidden(false) // A explicit show: detach + focus A
+  assert.equal(a.isFocused(), true)
+  // B's focus (the release target) re-enters A.focus().
+  const baseFocus = b.focus.bind(b)
+  let reenter = false
+  b.focus = (options?: Parameters<OverlayHandle['focus']>[0]) => {
+    baseFocus(options)
+    if (reenter) {
+      reenter = false
+      aHandle.focus()
+    }
+  }
+  reenter = true
+  aHandle.unfocus() // release → focus B → B.onFocus → A.focus()
+  assert.equal(a.isFocused(), true, 'the callback focus is newer than the blur')
+  assert.equal(broker.hasFocusedOverlay(), true)
+})
+
+test('OverlayBroker: a newer focus from the release callback survives a stale hide', () => {
+  const broker = new OverlayBroker()
+  const a = fakeHandle('a')
+  const aHandle = mountOverlay(broker, a)
+  const b = fakeHandle('b')
+  mountOverlay(broker, b)
+  aHandle.setHidden(false)
+  assert.equal(a.isFocused(), true)
+  const baseFocus = b.focus.bind(b)
+  let reenter = false
+  b.focus = (options?: Parameters<OverlayHandle['focus']>[0]) => {
+    baseFocus(options)
+    if (reenter) {
+      reenter = false
+      aHandle.focus()
+    }
+  }
+  reenter = true
+  aHandle.setHidden(true) // release → focus B → B.onFocus → A.focus()
+  assert.equal(a.isHidden(), false, 'the callback focus re-showed A')
+  assert.equal(a.isFocused(), true)
+  assert.equal(broker.hasFocusedOverlay(), true)
+})
+
+test('OverlayBroker: a re-show during the suspend release wins over the suspension', () => {
+  const suspension = { suspendedOverlays: new Set<OverlayHandle>() }
+  let modalActive = false
+  let bHandle: OverlayHandle | undefined
+  const broker = new OverlayBroker({
+    question: () => modalActive ? suspension : undefined,
+    // The release (focusing the seat owner) synchronously lets a plugin issue
+    // a NEWER explicit show on a sibling.
+    focusSeatOwner: () => { bHandle?.setHidden(false) },
+  })
+  const a = fakeHandle('a')
+  const aHandle = mountOverlay(broker, a)
+  const b = fakeHandle('b')
+  bHandle = mountOverlay(broker, b, { nonCapturing: true })
+  assert.equal(a.isFocused(), true)
+
+  modalActive = true
+  broker.suspendVisibleRoots(suspension)
+  assert.equal(b.isHidden(), false, 'the callback re-show must keep B visible')
+  assert.equal(a.isHidden(), true, 'A is still suspended')
+  assert.ok(suspension.suspendedOverlays.has(aHandle))
+  assert.ok(!suspension.suspendedOverlays.has(bHandle), 'the newer show detached B from the suspension')
 })
