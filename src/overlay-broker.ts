@@ -422,8 +422,16 @@ export class OverlayBroker {
       if (node === undefined || node.closed) continue
       restored.push(node)
     }
+    // The suspension release may have let a callback issue a NEWER explicit
+    // focus()/show() on a sibling it detached from this suspension; that newer
+    // intent wins on settle. A root can only be absent from the suspension set
+    // through such an operation (explicitHidden / non-focusable roots are
+    // filtered by frontmostFocusable).
+    const newerOwner = this.frontmostFocusable(
+      [...this.roots].filter(node => !suspension.suspendedOverlays.has(node.wrapper)),
+    )
     suspension.suspendedOverlays.clear()
-    this.reveal(restored)
+    this.reveal(restored, newerOwner)
   }
 
   /** Whether a visible auto-capturing (modal) overlay exists — the POINTER /
@@ -457,12 +465,26 @@ export class OverlayBroker {
       if (node.remountable || node.closed) continue
       this.close(node.wrapper)
     }
-    // 2. Snapshot the SURVIVING keyboard owner.
-    this.swapFocusOwner = this.currentlyFocused()
-    // 2b. Release the overlays to the seat owner BEFORE detaching any raw, so
-    //     the fork's per-hide fallback cannot transiently focus a blurred
-    //     sibling on the old screen (the owner is restored after the rebind).
-    if (this.currentlyFocused() !== undefined) this.deps.focusSeatOwner?.()
+    // 2. Release the overlays to the seat owner BEFORE detaching any raw, so
+    //    the fork's per-hide fallback cannot transiently focus a blurred
+    //    sibling on the old screen. That release synchronously blurs the old
+    //    owner, whose onBlur may issue a NEWER focus() — but the outer
+    //    `setFocus(editor)` resumes after the callback and can overwrite that
+    //    PHYSICAL focus, so derive the pre-swap owner from LOGICAL intent
+    //    instead: a callback B.focus() promotes B's z/intent, so B wins; with
+    //    no callback the prior owner stays frontmost; a callback blur() clears
+    //    the prior intent and the seat owner wins.
+    const prior = this.currentlyFocused()
+    if (prior !== undefined) this.deps.focusSeatOwner?.()
+    let releases = 0
+    while (this.currentlyFocused() !== undefined && releases < 4) {
+      this.deps.focusSeatOwner?.()
+      releases += 1
+    }
+    this.swapFocusOwner = this.frontmostFocusable([...this.roots])
+      ?? (prior !== undefined && !prior.closed && prior.resumeFocus === true && !prior.explicitHidden
+        ? prior
+        : undefined)
     // 3. Detach every retained raw projection (the component survives; the
     //    host re-creates it after the swap).
     for (const node of [...this.nodes.values()]) {

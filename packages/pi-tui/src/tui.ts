@@ -706,6 +706,10 @@ export abstract class TuiBase extends Container implements TUI {
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
+	/** X056: monotonic stamp identifying the NEWEST focus transition. A focus
+	 * callback runs synchronously and may start another transition; the outer
+	 * one bails out when superseded. */
+	private focusRevision = 0;
 	private overlayStack: OverlayStackEntry[] = [];
 	/** The last-painted overlay layouts (protected: TuiAltScreen's
 	 * gesture-liveness check reads the CURRENT painted placement of a
@@ -825,6 +829,11 @@ export abstract class TuiBase extends Container implements TUI {
 		component: Component | null;
 		overlayFocusRestore: OverlayFocusRestorePolicy;
 	}): void {
+		// X056: a focus callback runs synchronously and may start a NEWER focus
+		// transition (an onBlur that re-requests focus, an onFocus that mounts
+		// another overlay). The outer transition must not overwrite whatever the
+		// newer one established, so it stamps itself and bails out when superseded.
+		const revision = ++this.focusRevision;
 		const previousFocus = this.focusedComponent;
 		let nextFocus = component;
 		const previousFocusedOverlay = previousFocus
@@ -832,12 +841,17 @@ export abstract class TuiBase extends Container implements TUI {
 			: undefined;
 		const nextFocusIsOverlay = nextFocus ? this.overlayStack.some((entry) => entry.component === nextFocus) : false;
 		const restoreState = this.getVisibleOverlayFocusRestore();
+		// The restore bookkeeping is PENDING until this transition completes: a
+		// synchronous callback may supersede it, and the newer transaction owns
+		// the final state.
+		let pendingRestore: OverlayFocusRestoreState | undefined;
+		let pendingClear = false;
 		if (nextFocus && !nextFocusIsOverlay) {
 			if (restoreState.status === "blocked" && restoreState.blockedBy === previousFocus) {
 				if (restoreState.resume.status === "focus-target" || !this.isComponentMounted(restoreState.blockedBy)) {
 					nextFocus = this.resolveBlockedOverlayFocusResume(restoreState);
 				} else {
-					this.overlayFocusRestore = {
+					pendingRestore = {
 						status: "blocked",
 						overlay: restoreState.overlay,
 						blockedBy: nextFocus,
@@ -850,7 +864,7 @@ export abstract class TuiBase extends Container implements TUI {
 				restoreState.overlay === previousFocusedOverlay &&
 				!this.isOverlayFocusAncestor(previousFocusedOverlay, nextFocus)
 			) {
-				this.overlayFocusRestore = {
+				pendingRestore = {
 					status: "blocked",
 					overlay: previousFocusedOverlay,
 					blockedBy: nextFocus,
@@ -861,19 +875,26 @@ export abstract class TuiBase extends Container implements TUI {
 			if (restoreState.status === "blocked" && restoreState.blockedBy === previousFocus) {
 				nextFocus = this.resolveBlockedOverlayFocusResume(restoreState);
 			} else if (overlayFocusRestore === "clear") {
-				this.clearOverlayFocusRestore();
+				pendingClear = true;
 			}
 		}
 
 		if (isFocusable(this.focusedComponent)) {
 			this.focusedComponent.focused = false;
+			// An onBlur callback may have started a newer transition.
+			if (revision !== this.focusRevision) return;
 		}
 
 		this.focusedComponent = nextFocus;
 
 		if (isFocusable(nextFocus)) {
 			nextFocus.focused = true;
+			// An onFocus callback may have started a newer transition.
+			if (revision !== this.focusRevision) return;
 		}
+
+		if (pendingClear) this.clearOverlayFocusRestore();
+		if (pendingRestore !== undefined) this.overlayFocusRestore = pendingRestore;
 
 		const focusedOverlay = nextFocus
 			? this.overlayStack.find((entry) => entry.component === nextFocus && this.isOverlayVisible(entry))
