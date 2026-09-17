@@ -4608,7 +4608,7 @@ ScrollView re-arms follow-end whenever a layout clamp lands the scroll on the ne
 
 #### Why it exists
 
-The host temporarily suppresses a set of managed overlays (a Question / Save Location modal, or a fullscreen screen swap) and later restores them. Upstream setHidden(false) and focus() promote the overlay's visual order AND take keyboard focus as side effects, so an internal restore would raise a restored capturing overlay above a nonCapturing HUD that legitimately sat above it, and would fire spurious onFocus/onBlur on an overlay the plugin deliberately blurred. The fork adds the minimal opt-in seam so an internal restore reproduces the pre-suppression stacking and keyboard ownership: `preserveOrder`/`preserveFocus` on setHidden, and `initialFocus: false` on showOverlay for the fullscreen rebind. The same supersession rule applies inside the fork's focus core: Tui.setFocusInternal runs the previous component's onBlur synchronously BEFORE installing the next focus, so an onBlur that re-requests focus (or mounts another overlay) would be overwritten by the outer transition. A monotonic focus revision lets the outer transition detect that a newer one superseded it and leave the newer transaction's state in place.
+The host temporarily suppresses a set of managed overlays (a Question / Save Location modal, or a fullscreen screen swap) and later restores them. Upstream setHidden(false) and focus() promote the overlay's visual order AND take keyboard focus as side effects, so an internal restore would raise a restored capturing overlay above a nonCapturing HUD that legitimately sat above it, and would fire spurious onFocus/onBlur on an overlay the plugin deliberately blurred. The fork adds the minimal opt-in seam so an internal restore reproduces the pre-suppression stacking and keyboard ownership: `preserveOrder`/`preserveFocus` on setHidden, and `initialFocus: false` on showOverlay for the fullscreen rebind. The same supersession rule applies inside the fork's focus core: Tui.setFocusInternal runs the previous component's onBlur synchronously BEFORE installing the next focus, so an onBlur that re-requests focus (or mounts another overlay) would be overwritten by the outer transition. A monotonic focus revision lets the outer transition detect that a newer one superseded it and leave the newer transaction's state in place. A pending transition must also survive an onBlur that mutates the pending target itself (blur/hide/close) WITHOUT starting a new focus transition: the fork records the released target so the outer transition re-derives instead of installing a released/hidden/removed node.
 
 #### Changed surface
 
@@ -4616,6 +4616,7 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - OverlayHandle.focus({ preserveOrder }) takes the keyboard without being promoted
 - OverlayOptions.initialFocus: false skips the mount-time auto-focus for an internal rebind
 - Tui.setFocusInternal stamps a monotonic focus revision, defers its overlay-focus-restore bookkeeping until it completes, and bails out after the blur/focus callback when a newer transition superseded it
+- Tui records the last explicitly released/unmounted focus target (unfocus / hide / setHidden(true)) and a pending transition to it re-derives from the topmost still-visible overlay
 
 #### Dependency map
 
@@ -4625,6 +4626,7 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - focus({ preserveOrder }) gates the promotion inside the focus closure (focus always takes the keyboard).
 - showOverlay(component, { initialFocus: false }) gates the mount-time `this.setFocus(component)` outside the handle closures.
 - The focus revision gates setFocusInternal after `focused = false` (onBlur) and after `focused = true` (onFocus); pendingRestore/pendingClear are applied only when this transition is still newest.
+- focusIntentSeq/focusIntentTarget gate the pending nextFocus after the previous owner's onBlur: unfocus (even when the target is not yet focused), hide and setHidden(true) invalidate it.
 - Audit note: Three additive gates over upstream behavior — focusOrder promotion, show-time focus, and mount-time focus — plus the order gate on focus(); hide() and unfocus() are untouched. The logical z promotion in showPhysical()/focusPhysical() runs BEFORE the fork call, so a nested mount triggered by the synchronous focus/show callback takes a HIGHER z (matching its later physical mount). The focus transition is now supersession-aware as well.
 
 **Inheritance / structural**
@@ -4686,6 +4688,14 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - test/advanced-interactive.test.ts: a newer focus from the modal suspension release wins on settle
 - test/overlay-broker.test.ts: a newer focus from the detach seat release is restored after the swap
 - test/overlay-broker.test.ts: a newer focus during the modal release wins on settle
+- packages/pi-tui/test/overlay-non-capturing.test.ts: a transition to a target unfocused from onBlur is not installed
+- test/advanced-interactive.test.ts: a pending focus target blurred from the previous onBlur is not installed
+- test/advanced-interactive.test.ts: a pending focus target hidden from the previous onBlur is not installed
+- test/advanced-interactive.test.ts: a pending focus target closed from the previous onBlur is not installed
+- test/advanced-interactive.test.ts: a pending focus target blurred from its own onFocus is not installed
+- test/advanced-interactive.test.ts: a pending focus target hidden from its own onFocus is not installed
+- test/advanced-interactive.test.ts: a pending focus target closed from its own onFocus is not installed
+- test/advanced-broker.test.ts: custom: a component that settles from onBlur closes its lease exactly once
 
 #### Upstream comparison
 
@@ -4696,7 +4706,7 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - packages/tui/src/tui.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream promotes focusOrder and takes keyboard focus unconditionally in setHidden(false)/focus() and auto-focuses every capturing showOverlay; the fork adds an opt-in preserveOrder/preserveFocus and initialFocus:false used only by the host's internal restores. Upstream setFocusInternal installs the next focus unconditionally after the synchronous onBlur; the fork's focus revision lets the newer nested transition win instead.
+- Remaining semantic delta: Upstream promotes focusOrder and takes keyboard focus unconditionally in setHidden(false)/focus() and auto-focuses every capturing showOverlay; the fork adds an opt-in preserveOrder/preserveFocus and initialFocus:false used only by the host's internal restores. Upstream setFocusInternal installs the next focus unconditionally after the synchronous onBlur; the fork's focus revision lets the newer nested transition win instead. Upstream also installs a pending target that a synchronous onBlur released/hid/removed; the fork's focus-intent target check re-derives instead.
 
 #### Retirement conditions
 

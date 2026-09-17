@@ -1833,3 +1833,181 @@ test('an onBlur re-focus is not overwritten by a blur release', async () => {
   a.close()
   app.stop()
 })
+
+test('a pending focus target blurred from the previous onBlur is not installed', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let bRef: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  let arm = false
+  const aComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced A' }] }),
+    handleInput: () => false,
+    onBlur: () => {
+      if (arm && bRef !== undefined) {
+        arm = false
+        bRef.blur()
+      }
+    },
+    dispose: () => {},
+  }
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(
+    interactiveComponent({ text: () => 'advanced B' }),
+    { nonCapturing: true },
+  )
+  bRef = b
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+
+  arm = true
+  b.focus() // A.onBlur blurs the pending target
+  await vt.waitForRender()
+  assert.equal(b.focused, false, 'a released pending target must not be installed')
+  assert.equal(a.focused, true, 'the previous owner keeps the keyboard')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  b.close()
+  a.close()
+  app.stop()
+})
+
+test('a pending focus target hidden from the previous onBlur is not installed', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let bRef: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  let arm = false
+  const aComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced A' }] }),
+    handleInput: () => false,
+    onBlur: () => {
+      if (arm && bRef !== undefined) {
+        arm = false
+        bRef.hide()
+      }
+    },
+    dispose: () => {},
+  }
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(
+    interactiveComponent({ text: () => 'advanced B' }),
+    { nonCapturing: true },
+  )
+  bRef = b
+  await vt.waitForRender()
+
+  arm = true
+  b.focus() // A.onBlur hides the pending target
+  await vt.waitForRender()
+  assert.equal(b.focused, false, 'a hidden pending target must not be focused')
+  assert.equal(a.focused, true)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  b.close()
+  a.close()
+  app.stop()
+})
+
+test('a pending focus target closed from the previous onBlur is not installed', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let bRef: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  let arm = false
+  const aComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced A' }] }),
+    handleInput: () => false,
+    onBlur: () => {
+      if (arm && bRef !== undefined) {
+        arm = false
+        bRef.close()
+      }
+    },
+    dispose: () => {},
+  }
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(
+    interactiveComponent({ text: () => 'advanced B' }),
+    { nonCapturing: true },
+  )
+  bRef = b
+  await vt.waitForRender()
+
+  arm = true
+  b.focus() // A.onBlur closes the pending target
+  await vt.waitForRender()
+  assert.equal(b.active, false, 'the pending target was closed')
+  assert.equal(b.focused, false, 'a closed target is never focused')
+  assert.equal(a.focused, true)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  a.close()
+  app.stop()
+})
+
+test('a pending focus target blurred from its own onFocus is not installed', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let target: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  let arm = false
+  const bComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced B' }] }),
+    handleInput: () => false,
+    onFocus: () => { if (arm) { arm = false; target?.blur() } },
+    dispose: () => {},
+  }
+  const b = app.showAdvancedInteractiveOverlay(bComponent)
+  target = b
+  await vt.waitForRender()
+  b.blur()
+  await vt.waitForRender()
+  arm = true
+  b.focus() // B.onFocus blurs itself
+  await vt.waitForRender()
+  assert.equal(b.focused, false, 'the self-blur wins')
+  assert.equal(app.focusSeatForTest(), 'editor', 'the editor fallback owns the keyboard')
+  b.close()
+  app.stop()
+})
+
+test('a pending focus target hidden from its own onFocus is not installed', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let target: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  let arm = false
+  const bComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced B' }] }),
+    handleInput: () => false,
+    onFocus: () => { if (arm) { arm = false; target?.hide() } },
+    dispose: () => {},
+  }
+  const b = app.showAdvancedInteractiveOverlay(bComponent)
+  target = b
+  await vt.waitForRender()
+  b.blur()
+  await vt.waitForRender()
+  arm = true
+  b.focus() // B.onFocus hides itself
+  await vt.waitForRender()
+  assert.equal(b.focused, false, 'a self-hidden target is not focused')
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('advanced B'), 'the target is hidden')
+  b.close()
+  app.stop()
+})
+
+test('a pending focus target closed from its own onFocus is not installed', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  let target: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  let arm = false
+  const bComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced B' }] }),
+    handleInput: () => false,
+    onFocus: () => { if (arm) { arm = false; target?.close() } },
+    dispose: () => {},
+  }
+  const b = app.showAdvancedInteractiveOverlay(bComponent)
+  target = b
+  await vt.waitForRender()
+  b.blur()
+  await vt.waitForRender()
+  arm = true
+  b.focus() // B.onFocus closes itself
+  await vt.waitForRender()
+  assert.equal(b.active, false, 'the target closed itself')
+  assert.equal(b.focused, false, 'a closed target is never focused')
+  app.stop()
+})

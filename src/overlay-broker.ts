@@ -277,6 +277,18 @@ export class OverlayBroker {
     ) {
       this.focusPhysical(node)
     }
+    // The pending target's OWN intent may have been released by a callback
+    // during focusPhysical (the previous owner's onBlur called blur()/hide()
+    // on it). Re-derive the logical owner when the explicit intent no longer
+    // stands instead of leaving it focused.
+    if (!node.closed && node.raw !== undefined && (node.resumeFocus !== true || node.explicitHidden)) {
+      const next = this.frontmostFocusable([...this.roots])
+      if (next !== undefined && next !== node) {
+        if (next.raw?.isFocused() !== true) this.focusPhysical(next, { preserveOrder: true })
+      } else if (next === undefined) {
+        this.deps.focusSeatOwner?.()
+      }
+    }
     this.deps.reconcileFocusSeat?.()
   }
 

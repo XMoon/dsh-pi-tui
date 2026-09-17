@@ -311,3 +311,23 @@ test('custom: a component that settles from onFocus never leaks the mounted over
   assert.ok(!vt.getViewport().map(strip).join('\n').includes('focus-closed'), 'the overlay is gone')
   app.stop()
 })
+
+test('custom: a component that settles from onBlur closes its lease exactly once', async () => {
+  const { vt, app } = await appWithBroker()
+  const broker = app.advancedUiBroker()
+  const promise = broker.custom((host) => ({
+    render: () => ({ kind: 'text', spans: [{ text: 'blur-settled' }] }),
+    onBlur: () => { host.done('blur-result') },
+  }))
+  await vt.waitForRender()
+  // Opening another overlay takes the keyboard from the custom component.
+  const other = broker.select({ items: [{ value: 'a', label: 'A' }] })
+  await vt.waitForRender()
+  assert.equal(await promise, 'blur-result', 'onBlur settles the custom promise')
+  assert.equal(app.ownedAdvancedOverlayLeasesForTest(), 0, 'the custom lease is closed')
+  assert.equal(app.overlayGraphState().handles, 1, 'only the select overlay remains')
+  vt.sendInput('\x1b')
+  assert.equal(await other, undefined)
+  assert.equal(app.pendingBrokerSettlesForTest(), 0, 'no stale settle remains')
+  app.stop()
+})
