@@ -109,6 +109,10 @@ interface PreparedSuppression {
 export interface PreparedMount {
   readonly node: ManagedOverlayNode
   readonly suppress: readonly PreparedSuppression[]
+  /** True when a Question / Save Location owns the seat at mount time: the
+   * host mounts with `initialFocus:false` so the new overlay never takes (and
+   * immediately loses) the keyboard. */
+  readonly suspendedAtMount: boolean
 }
 
 export class OverlayBroker {
@@ -153,7 +157,9 @@ export class OverlayBroker {
       closed: false,
     }
     node.wrapper = this.wrap(node)
-    return { node, suppress }
+    // A mount while a modal owns the seat must not take the keyboard first and
+    // lose it on commit: the host passes initialFocus:false for this mount.
+    return { node, suppress, suspendedAtMount: this.activeSuspension() !== undefined }
   }
 
   /**
@@ -215,6 +221,9 @@ export class OverlayBroker {
     if (node === undefined || node.closed) return
     if (hidden) {
       node.explicitHidden = true
+      // Move the keyboard FIRST: the fork's own hide fallback would otherwise
+      // pick another visible capturing overlay, ignoring the logical intent.
+      this.releaseKeyboard(node)
       node.raw?.setHidden(true)
       this.deps.reconcileFocusSeat?.()
       return
@@ -247,7 +256,16 @@ export class OverlayBroker {
     const node = this.nodes.get(handle)
     if (node === undefined || node.closed) return
     node.resumeFocus = false
-    node.raw?.unfocus(options)
+    if (options?.target !== undefined) {
+      // A caller-supplied target is explicit: forward it verbatim.
+      node.raw?.unfocus(options)
+      this.deps.reconcileFocusSeat?.()
+      return
+    }
+    // Move the keyboard FIRST: the fork's unfocus fallback would otherwise
+    // focus the topmost visible capturing overlay, even one the user blurred.
+    this.releaseKeyboard(node)
+    node.raw?.unfocus()
     this.deps.reconcileFocusSeat?.()
   }
 
@@ -331,12 +349,22 @@ export class OverlayBroker {
     this.deps.reconcileFocusSeat?.()
   }
 
-  /** Directly suspend every visible logical ROOT under the given modal (the
-   * Question / Save Location primitive). Child topology is never copied. */
+  /**
+   * Directly suspend every visible logical ROOT under the given modal (the
+   * Question / Save Location primitive). Child topology is never copied.
+   * TWO-PHASE: snapshot every root's focus intent BEFORE any mutation, then
+   * release the keyboard to the modal frame (the seat) before hiding, so the
+   * fork's hide fallback can never focus (and thereby re-intent) a sibling.
+   */
   suspendVisibleRoots(suspension: QuestionSuspension | SaveLocationSuspension): void {
-    for (const node of [...this.roots]) {
-      if (node.closed || !this.isVisible(node) || node.explicitHidden) continue
-      node.resumeFocus = node.raw?.isFocused() === true
+    const targets = [...this.roots].filter(node =>
+      !node.closed && this.isVisible(node) && !node.explicitHidden)
+    // Phase 1: snapshot the intent without mutating anything.
+    for (const node of targets) node.resumeFocus = node.raw?.isFocused() === true
+    // Phase 2: hand the keyboard to the seat owner BEFORE hiding any root.
+    if (this.currentlyFocused() !== undefined) this.deps.focusSeatOwner?.()
+    // Phase 3: hide and register.
+    for (const node of targets) {
       node.raw?.setHidden(true)
       suspension.suspendedOverlays.add(node.wrapper)
     }
@@ -390,6 +418,10 @@ export class OverlayBroker {
     }
     // 2. Snapshot the SURVIVING keyboard owner.
     this.swapFocusOwner = this.currentlyFocused()
+    // 2b. Release the overlays to the seat owner BEFORE detaching any raw, so
+    //     the fork's per-hide fallback cannot transiently focus a blurred
+    //     sibling on the old screen (the owner is restored after the rebind).
+    if (this.currentlyFocused() !== undefined) this.deps.focusSeatOwner?.()
     // 3. Detach every retained raw projection (the component survives; the
     //    host re-creates it after the swap).
     for (const node of [...this.nodes.values()]) {
@@ -556,6 +588,26 @@ export class OverlayBroker {
       .filter(node =>
         !node.closed && node.raw !== undefined && !node.explicitHidden && node.resumeFocus && this.isVisible(node))
       .sort((a, b) => b.zOrder - a.zOrder)[0]
+  }
+
+  /**
+   * Move the keyboard to the Broker's logical next owner BEFORE an operation
+   * makes the current owner lose physical focus. The fork's own hide/unfocus
+   * fallback picks the topmost VISIBLE capturing overlay and knows nothing
+   * about `resumeFocus`, so it would re-activate a deliberately blurred
+   * sibling. Only acts when `releasing` (or any node, when omitted) currently
+   * owns the keyboard.
+   */
+  private releaseKeyboard(releasing?: ManagedOverlayNode): void {
+    const current = this.currentlyFocused()
+    if (current === undefined) return
+    if (releasing !== undefined && current !== releasing) return
+    const next = this.frontmostFocusable([...this.roots].filter(node => node !== releasing))
+    if (next !== undefined) {
+      if (next.raw?.isFocused() !== true) this.focusPhysical(next, { preserveOrder: true })
+      return
+    }
+    this.deps.focusSeatOwner?.()
   }
 
   private currentlyFocused(): ManagedOverlayNode | undefined {

@@ -5623,7 +5623,12 @@ export class TuiApp {
       nonCapturing: options?.nonCapturing === true,
       remountable: ownership.remountable === true,
     })
-    const raw = this.activeScreen.showOverlay(component, merged)
+    // A mount under an active Question / Save Location must NOT take the
+    // keyboard first and lose it on commit (no fabricated onFocus/onBlur).
+    const mountOptions: OverlayOptions = prepared.suspendedAtMount
+      ? { ...merged, initialFocus: false }
+      : merged
+    const raw = this.activeScreen.showOverlay(component, mountOptions)
     return this.overlayBroker.commitMount(prepared, raw)
   }
 
