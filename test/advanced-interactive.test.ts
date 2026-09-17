@@ -1263,3 +1263,142 @@ test('an approval-preserving fullscreen swap never fabricates focus transitions 
   a.close()
   app.stop()
 })
+
+test('blurring every visible capturing overlay leaves the editor owning the keyboard', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+  a.show() // detach: two independent visible roots, A focused
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+  a.blur()
+  await vt.waitForRender()
+  b.focus()
+  await vt.waitForRender()
+  assert.equal(b.focused, true, 'B took the keyboard after A blurred')
+
+  b.blur() // the fork must NOT hand the keyboard back to the blurred A
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'the explicitly blurred A must stay unfocused')
+  assert.equal(b.focused, false)
+  assert.equal(app.focusSeatForTest(), 'editor', 'the editor owns the keyboard')
+  a.close()
+  b.close()
+  app.stop()
+})
+
+test('hiding the focused overlay never re-activates a blurred sibling', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+  a.show()
+  await vt.waitForRender()
+  a.blur()
+  await vt.waitForRender()
+  b.focus()
+  await vt.waitForRender()
+  assert.equal(b.focused, true)
+
+  b.hide()
+  await vt.waitForRender()
+  assert.equal(a.focused, false, 'hiding B must not re-activate the blurred A')
+  assert.equal(app.focusSeatForTest(), 'editor')
+  a.close()
+  b.close()
+  app.stop()
+})
+
+test('a question suspension never fabricates focus on a blurred sibling', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const aComponent = interactiveComponent({ text: () => 'advanced A' })
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+  a.show()
+  await vt.waitForRender()
+  a.blur()
+  await vt.waitForRender()
+  b.focus()
+  await vt.waitForRender()
+  assert.equal(b.focused, true)
+  assert.equal(a.focused, false)
+  const focusCount = aComponent.focusCount
+  const blurCount = aComponent.blurCount
+
+  const questions = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await questions.catch(() => {})
+  await vt.waitForRender()
+  assert.deepEqual(
+    { focus: aComponent.focusCount, blur: aComponent.blurCount },
+    { focus: focusCount, blur: blurCount },
+    'the suspension snapshot must not read a sibling it just re-focused',
+  )
+  assert.equal(b.focused, true, 'the pre-modal owner is restored')
+  assert.equal(a.focused, false, 'the blurred sibling stays unfocused')
+  a.close()
+  b.close()
+  app.stop()
+})
+
+test('a fullscreen swap never fabricates focus on a blurred sibling root', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const aComponent = interactiveComponent({ text: () => 'advanced A' })
+  const a = app.showAdvancedInteractiveOverlay(aComponent)
+  await vt.waitForRender()
+  const b = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced B' }))
+  await vt.waitForRender()
+  a.show()
+  await vt.waitForRender()
+  a.blur()
+  await vt.waitForRender()
+  b.focus()
+  await vt.waitForRender()
+  const focusCount = aComponent.focusCount
+  const blurCount = aComponent.blurCount
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.deepEqual(
+    { focus: aComponent.focusCount, blur: aComponent.blurCount },
+    { focus: focusCount, blur: blurCount },
+    'the detach must not transiently focus the blurred sibling',
+  )
+  assert.equal(b.focused, true, 'the pre-swap owner is restored')
+  a.close()
+  b.close()
+  app.stop()
+})
+
+test('mounting a capturing overlay under a question does not take the keyboard first', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  const questions = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+  await vt.waitForRender()
+
+  const cComponent = interactiveComponent({ text: () => 'advanced C' })
+  app.showAdvancedInteractiveOverlay(cComponent)
+  await vt.waitForRender()
+  assert.deepEqual(
+    { focus: cComponent.focusCount, blur: cComponent.blurCount },
+    { focus: 0, blur: 0 },
+    'a mount under a modal must not focus and immediately unhide',
+  )
+
+  vt.sendInput('\x1b')
+  await questions.catch(() => {})
+  await vt.waitForRender()
+  assert.equal(cComponent.focusCount, 1, 'the settled modal hands C the keyboard once')
+  assert.equal(cComponent.blurCount, 0)
+  a.close()
+  app.stop()
+})
