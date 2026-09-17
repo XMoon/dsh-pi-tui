@@ -711,10 +711,12 @@ export abstract class TuiBase extends Container implements TUI {
 	 * one bails out when superseded. */
 	private focusRevision = 0;
 	/** X056: the last component whose focus intent was explicitly released
-	 * (unfocus) or whose lifecycle ended (hide / hidden). A pending transition
-	 * to it must re-derive instead of installing a released target. */
+	 * (unfocus) or whose lifecycle ended (hide / hidden / hideOverlay), keyed by
+	 * its release stamp. A pending transition to a target released DURING the
+	 * transition must re-derive instead of installing it. A WeakMap keeps every
+	 * released target (an onBlur may release several) without retaining them. */
 	private focusIntentSeq = 0;
-	private focusIntentTarget: Component | null = null;
+	private readonly focusReleaseSeq = new WeakMap<Component, number>();
 	private overlayStack: OverlayStackEntry[] = [];
 	/** The last-painted overlay layouts (protected: TuiAltScreen's
 	 * gesture-liveness check reads the CURRENT painted placement of a
@@ -897,8 +899,11 @@ export abstract class TuiBase extends Container implements TUI {
 		// The pending target's OWN focus intent/lifecycle may have been changed
 		// by that onBlur (blur/hide/close on it) without starting a new
 		// transition: never install a released/hidden/removed target.
-		if (nextFocus !== null && this.focusIntentTarget === nextFocus && this.focusIntentSeq !== intentSeq) {
-			nextFocus = this.getTopmostVisibleOverlay(nextFocus)?.component ?? null;
+		if (nextFocus !== null) {
+			const releasedSeq = this.focusReleaseSeq.get(nextFocus);
+			if (releasedSeq !== undefined && releasedSeq > intentSeq) {
+				nextFocus = this.getTopmostVisibleOverlay(nextFocus)?.component ?? null;
+			}
 		}
 
 		this.focusedComponent = nextFocus;
@@ -1013,8 +1018,7 @@ export abstract class TuiBase extends Container implements TUI {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
 					// X056: a pending transition to this component must not install it.
-					this.focusIntentSeq += 1;
-					this.focusIntentTarget = component;
+					this.focusReleaseSeq.set(component, ++this.focusIntentSeq);
 					this.clearOverlayFocusRestoreFor(entry);
 					this.retargetOverlayPreFocus(entry);
 					this.overlayStack.splice(index, 1);
@@ -1034,13 +1038,14 @@ export abstract class TuiBase extends Container implements TUI {
 				}
 			},
 			setHidden: (hidden: boolean, setHiddenOptions?: OverlayOrderPreservingOptions) => {
+				// X056: record the release BEFORE the idempotent early-return — an
+				// already-hidden pending target released from a callback must not
+				// be installed by the outer transition either.
+				if (hidden) this.focusReleaseSeq.set(component, ++this.focusIntentSeq);
 				if (entry.hidden === hidden) return;
 				entry.hidden = hidden;
 				// Update focus when hiding/showing
 				if (hidden) {
-					// X056: a pending transition to this component must not install it.
-					this.focusIntentSeq += 1;
-					this.focusIntentTarget = component;
 					this.clearOverlayFocusRestoreFor(entry);
 					// If this overlay had focus, move focus to next visible or preFocus
 					if (this.focusedComponent === component) {
@@ -1070,8 +1075,7 @@ export abstract class TuiBase extends Container implements TUI {
 				// X056: record the release even when this component is not yet
 				// focused — it may be the PENDING target of an in-flight
 				// transition that must re-derive instead of installing it.
-				this.focusIntentSeq += 1;
-				this.focusIntentTarget = component;
+				this.focusReleaseSeq.set(component, ++this.focusIntentSeq);
 				const isFocused = this.focusedComponent === component;
 				const restoreState = this.overlayFocusRestore;
 				const hasPendingRestore = restoreState.status !== "inactive" && restoreState.overlay === entry;
@@ -1114,6 +1118,8 @@ export abstract class TuiBase extends Container implements TUI {
 	hideOverlay(): void {
 		const overlay = this.overlayStack[this.overlayStack.length - 1];
 		if (!overlay) return;
+		// X056: a pending transition to this component must not install it.
+		this.focusReleaseSeq.set(overlay.component, ++this.focusIntentSeq);
 		this.clearOverlayFocusRestoreFor(overlay);
 		this.retargetOverlayPreFocus(overlay);
 		this.overlayStack.pop();

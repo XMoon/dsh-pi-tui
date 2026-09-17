@@ -4627,6 +4627,7 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - showOverlay(component, { initialFocus: false }) gates the mount-time `this.setFocus(component)` outside the handle closures.
 - The focus revision gates setFocusInternal after `focused = false` (onBlur) and after `focused = true` (onFocus); pendingRestore/pendingClear are applied only when this transition is still newest.
 - focusIntentSeq/focusIntentTarget gate the pending nextFocus after the previous owner's onBlur: unfocus (even when the target is not yet focused), hide and setHidden(true) invalidate it.
+- focusReleaseSeq is a WeakMap keyed per component: hideOverlay, an idempotent setHidden(true) (recorded before the early-return) and an unfocus of a not-yet-focused target all invalidate a pending transition, and multiple releases in one callback are all tracked.
 - Audit note: Three additive gates over upstream behavior — focusOrder promotion, show-time focus, and mount-time focus — plus the order gate on focus(); hide() and unfocus() are untouched. The logical z promotion in showPhysical()/focusPhysical() runs BEFORE the fork call, so a nested mount triggered by the synchronous focus/show callback takes a HIGHER z (matching its later physical mount). The focus transition is now supersession-aware as well.
 
 **Inheritance / structural**
@@ -4638,6 +4639,7 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - src/overlay-broker.ts showPhysical()/focusPhysical() pass preserveOrder (and preserveFocus on show) for INTERNAL restores: close-released children, a Question / Save Location settle, and the fullscreen rebind owner restore.
 - src/tui-app.ts rebindOverlayRaw() mounts every fullscreen rebind with initialFocus: false so a capturing entry does not auto-focus during the swap.
 - src/tui-app.ts renderApprovalDialog() mounts the approval as a remountable managed node and registers a rebind callback that re-creates the surface for the same logical node (the replaced frame is disposed).
+- src/overlay-broker.ts focus() skips its post-focus re-derivation when the node forwarded a caller-supplied unfocus target, so the explicit target is never overridden by the seat fallback.
 - Audit note: Explicit user show()/focus() keep the upstream promoting behavior; the host passes the preserve options only from its internal restore / rebind paths.
 
 **Public / extension**
@@ -4696,6 +4698,10 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - test/advanced-interactive.test.ts: a pending focus target hidden from its own onFocus is not installed
 - test/advanced-interactive.test.ts: a pending focus target closed from its own onFocus is not installed
 - test/advanced-broker.test.ts: custom: a component that settles from onBlur closes its lease exactly once
+- packages/pi-tui/test/overlay-non-capturing.test.ts: a pending target hidden via hideOverlay from onBlur is not installed
+- packages/pi-tui/test/overlay-non-capturing.test.ts: an idempotently hidden pending target is not installed
+- packages/pi-tui/test/overlay-non-capturing.test.ts: a later release of another target does not lose an earlier pending-target release
+- test/overlay-broker.test.ts: an explicit unfocus target set from onFocus is not overridden
 
 #### Upstream comparison
 

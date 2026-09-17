@@ -1325,6 +1325,79 @@ describe("TUI focus transition supersession (X056)", () => {
 });
 
 describe("TUI focus transition pending-target mutation (X056)", () => {
+	it("a pending target hidden via hideOverlay from onBlur is not installed", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui: TUI = new TuiMainScreen(terminal);
+		tui.addChild(new EmptyContent());
+		tui.start();
+		try {
+			const editor = new ReentrantFocusOverlay(["EDITOR"]);
+			const target = new FocusableOverlay(["T"]);
+			tui.setFocus(editor);
+			tui.showOverlay(target, { row: 0, col: 0, width: 1, initialFocus: false });
+			editor.onBlurRefocus = () => {
+				editor.onBlurRefocus = undefined;
+				tui.hideOverlay();
+			};
+			tui.setFocus(target);
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(target.focused, false, "a hideOverlay-removed target is not installed");
+			assert.notStrictEqual(tui.getFocusedComponent(), target);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("an idempotently hidden pending target is not installed", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui: TUI = new TuiMainScreen(terminal);
+		tui.addChild(new EmptyContent());
+		tui.start();
+		try {
+			const editor = new ReentrantFocusOverlay(["EDITOR"]);
+			const target = new FocusableOverlay(["T"]);
+			tui.setFocus(editor);
+			const targetHandle = tui.showOverlay(target, { row: 0, col: 0, width: 1, initialFocus: false });
+			targetHandle.setHidden(true);
+			editor.onBlurRefocus = () => {
+				editor.onBlurRefocus = undefined;
+				targetHandle.setHidden(true); // idempotent: already hidden
+			};
+			tui.setFocus(target);
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(target.focused, false, "a hidden pending target is not installed");
+			assert.notStrictEqual(tui.getFocusedComponent(), target);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("a later release of another target does not lose an earlier pending-target release", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui: TUI = new TuiMainScreen(terminal);
+		tui.addChild(new EmptyContent());
+		tui.start();
+		try {
+			const editor = new ReentrantFocusOverlay(["EDITOR"]);
+			const target = new FocusableOverlay(["T"]);
+			const other = new FocusableOverlay(["O"]);
+			tui.setFocus(editor);
+			const targetHandle = tui.showOverlay(target, { row: 0, col: 0, width: 1, initialFocus: false });
+			const otherHandle = tui.showOverlay(other, { row: 0, col: 0, width: 1, initialFocus: false });
+			editor.onBlurRefocus = () => {
+				editor.onBlurRefocus = undefined;
+				targetHandle.unfocus();
+				otherHandle.unfocus(); // a later release must not mask the target's
+			};
+			tui.setFocus(target);
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(target.focused, false, "the earlier released target stays invalidated");
+			assert.notStrictEqual(tui.getFocusedComponent(), target);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("a transition to a target unfocused from onBlur is not installed", async () => {
 		const terminal = new VirtualTerminal(20, 6);
 		const tui: TUI = new TuiMainScreen(terminal);
