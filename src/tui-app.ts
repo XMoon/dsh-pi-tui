@@ -6436,13 +6436,16 @@ export class TuiApp {
   }
 
   /** Whether the CURRENT rendered presentation of one user message is the
-   * HOST long-user bubble. An extension message renderer that owns
-   * `kind: 'user'` presents the message itself (its snapshot carries no
-   * `expanded` state and the Host renders no compact marker), so the Host
-   * long-user disclosure state must neither be written nor counted for it —
-   * an invisible override would otherwise consume the next Ctrl+O. */
+   * HOST long-user bubble — the registry's own ownership signal (`rendererId`
+   * is unset only when no extension renderer produced the view). An extension
+   * renderer that owns `kind: 'user'` presents the message itself (its
+   * snapshot carries no `expanded` state and the Host renders no compact
+   * marker), so the Host long-user disclosure state must neither be written
+   * nor counted for it — an invisible override would otherwise consume the
+   * next Ctrl+O. */
   private isHostUserDisclosure(message: TranscriptMessage): boolean {
-    return this.messageComponents.get(message)?.component instanceof UserBubbleComponent
+    const entry = this.messageComponents.get(message)
+    return entry !== undefined && entry.rendererId === undefined
   }
 
   /** Whether the CURRENT projection shows a long user message that is
@@ -10606,25 +10609,32 @@ export class TuiApp {
     // registry revision comparison is the CHEAP gate (plan §23): renderer
     // functions run only inside buildMessage, never for unchanged content.
     const rendererRevisionChanged = this.renderers !== undefined && entry.rendererRevision !== this.renderers.snapshot().revision
-    // The user boundary / expansion / hint are read ONLY by the HOST long-user
-    // bubble. A plugin-owned kind:'user' presentation consumes none of that
-    // state (its snapshot carries no expanded field and the Host draws no
-    // marker), so comparing it would rebuild unrelated components and re-run
-    // extension renderers on every user-boundary shift or surface swap. Scope
-    // the Host long-user state to the entries that actually consume it; the
-    // renderer revision still handles Host↔plugin ownership changes.
+    // The Host long-user fold state (the user boundary, expansion, full-reveal
+    // and hint) is read ONLY by the HOST user bubble, and a user message never
+    // reads the PROCESS boundary at all (`effectiveMessageExpanded`'s user
+    // branch uses its own boundary). A plugin-owned kind:'user' presentation
+    // consumes none of it — its snapshot has no expanded field and the Host
+    // draws no marker. Leaving those Host-only inputs in the identity re-ran
+    // extension user renderers on every process/user boundary shift or surface
+    // swap. The renderer-registry revision still handles Host↔plugin ownership
+    // changes.
     const userCandidate = isUserMessageDisclosureCandidate(message)
-    const hostUserBubble = userCandidate && entry.component instanceof UserBubbleComponent
-    const pluginOwnedUser = userCandidate && !hostUserBubble
-    const userBoundaryChanged = hostUserBubble && entry.userBoundary !== userBoundary
-    if (entry.boundary !== boundary
-      || userBoundaryChanged
+    const pluginOwnsUser = userCandidate && entry.rendererId !== undefined
+    const foldStateChanged = pluginOwnsUser
+      ? false
+      : userCandidate
+        ? entry.userBoundary !== userBoundary
+          || entry.expanded !== state.expanded
+          || entry.fullReveal !== state.fullReveal
+          || entry.expandHint !== state.expandHint
+        : entry.boundary !== boundary
+          || entry.expanded !== state.expanded
+          || entry.fullReveal !== state.fullReveal
+          || entry.expandHint !== state.expandHint
+    if (foldStateChanged
       || (entry.builtWidth !== undefined && entry.builtWidth !== width)
       || entry.themeRev !== this.themeRevision
       || entry.iconStyle !== this.iconStyle
-      || (!pluginOwnedUser && (entry.expanded !== state.expanded
-          || entry.fullReveal !== state.fullReveal
-          || entry.expandHint !== state.expandHint))
       || entry.keymapRev !== this.keybindings.revision()
       || rendererRevisionChanged
       || this.componentStale(entry, message)) {
