@@ -12,6 +12,8 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { RendererRegistry } from '../src/renderer-registry.ts'
+import type { ExtensionView } from '../src/extension/public-types.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp, UserBubbleComponent } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -629,5 +631,44 @@ test('a new user turn does not rebuild unchanged non-user components', async () 
     'the assistant component must be reused across a user-boundary shift')
   assert.equal(app.messageCacheEntryForTest(tool)?.component, toolComponent,
     'the tool component must be reused across a user-boundary shift')
+  app.stop()
+})
+
+// ── Extension renderer ownership of kind: 'user' ─────────────────────────
+
+function textView(text: string): ExtensionView {
+  return { kind: 'text', spans: [{ text }] }
+}
+
+test('a kind:user extension renderer does not pollute the Host long-user disclosure state', async () => {
+  const vt = new VirtualTerminal(100, 200)
+  const registry = new RendererRegistry()
+  registry.registerMessageRenderer({
+    id: 'plugin-user',
+    order: 1,
+    render: (snapshot) => snapshot.kind === 'user' && (snapshot.text ?? '').startsWith('p-')
+      ? textView('PLUGIN USER')
+      : undefined,
+  }, 'test')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+
+  const pluginOwned = user(lines(11, 'p-'), 0)
+  const hostOwned = user(lines(11, 'b-'), 1)
+  app.setTranscript([pluginOwned, hostOwned])
+  let rows = await viewRows(vt)
+  assert.ok(rows.join('\n').includes('PLUGIN USER'), 'the plugin owns the first user presentation')
+  assert.equal(compactMarkerCount(rows), 1, 'only the Host-rendered user gets the compact marker')
+
+  // A search hit on the PLUGIN-owned long user must not write a Host override:
+  // the next Ctrl+O must still expand the recent-turn master.
+  app.revealSearchMatch(pluginOwned)
+  await viewRows(vt)
+
+  vt.sendInput('\x0f')
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('b-5')),
+    'Ctrl+O must toggle the master, not clear a phantom plugin-user override')
   app.stop()
 })
