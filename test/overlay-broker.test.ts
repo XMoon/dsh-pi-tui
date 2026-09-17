@@ -82,8 +82,9 @@ function fakeHandle(label: string): FakeHandle {
   return handle
 }
 
-/** Emulate the host's two-phase mount: prepare (snapshot), fork mount+focus,
- * commit (bind + stacking). */
+/** Emulate the host's two-phase mount: prepare (snapshot), fork mount WITHOUT
+ * focus (initialFocus:false), commit (logical graph + the single physical
+ * focus transition). */
 function mountOverlay(
   broker: OverlayBroker,
   handle: OverlayHandle,
@@ -91,7 +92,6 @@ function mountOverlay(
 ): OverlayHandle {
   ;(handle as FakeHandle).autoFocusOnShow = options.nonCapturing !== true
   const prepared = broker.prepareMount(options)
-  if (options.nonCapturing !== true) handle.focus()
   return broker.commitMount(prepared, handle)
 }
 

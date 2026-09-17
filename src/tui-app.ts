@@ -5617,18 +5617,15 @@ export class TuiApp {
       ? { ...options, disposeOnHide: false }
       : { disposeOnHide: true, ...options }
     // Two-phase mount: the broker snapshots the CURRENT logical roots and
-    // their focus intent BEFORE the fork mounts+focusses the new overlay
-    // (showOverlay focuses immediately), then binds the fresh raw projection.
+    // their focus intent, mounts the raw projection WITHOUT the fork taking
+    // focus, then commits the whole logical graph and performs the single
+    // physical focus transition itself. A plugin onFocus that mounts another
+    // overlay therefore always sees the complete committed graph.
     const prepared = this.overlayBroker.prepareMount({
       nonCapturing: options?.nonCapturing === true,
       remountable: ownership.remountable === true,
     })
-    // A mount under an active Question / Save Location must NOT take the
-    // keyboard first and lose it on commit (no fabricated onFocus/onBlur).
-    const mountOptions: OverlayOptions = prepared.suspendedAtMount
-      ? { ...merged, initialFocus: false }
-      : merged
-    const raw = this.activeScreen.showOverlay(component, mountOptions)
+    const raw = this.activeScreen.showOverlay(component, { ...merged, initialFocus: false })
     return this.overlayBroker.commitMount(prepared, raw)
   }
 
@@ -13418,6 +13415,13 @@ export class TuiApp {
       dependents: this.overlayBroker.graphState().dependents,
       suspended: this.activeQuestions?.suspendedOverlays.size ?? 0,
     }
+  }
+
+  /** Headless-test hook: assert the managed-overlay forest invariants (one
+   * suppressor per node, no cycles, no closed node retained). Throws on a
+   * violation. */
+  assertOverlayForestForTest(): void {
+    this.overlayBroker.assertForest()
   }
 
   /**

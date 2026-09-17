@@ -1402,3 +1402,44 @@ test('mounting a capturing overlay under a question does not take the keyboard f
   a.close()
   app.stop()
 })
+
+test('a plugin onFocus that mounts another overlay cannot double-adopt a child', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+
+  let c: ReturnType<typeof app.showAdvancedInteractiveOverlay> | undefined
+  const bComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced B' }] }),
+    handleInput: () => false,
+    onFocus: () => {
+      if (c === undefined) {
+        c = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced C' }))
+      }
+    },
+    dispose: () => {},
+  }
+  const b = app.showAdvancedInteractiveOverlay(bComponent)
+  await vt.waitForRender()
+
+  assert.equal(app.overlayGraphState().handles, 3, 'A, B and C are all managed')
+  assert.equal(app.overlayGraphState().dependents, 2, 'C -> B -> A, a single forest')
+  assert.doesNotThrow(() => app.assertOverlayForestForTest(), 'the forest invariant must hold')
+  assert.ok(c !== undefined, 'the re-entrant mount succeeded')
+
+  c!.close()
+  await vt.waitForRender()
+  assert.equal(b.focused, true, 'B is restored and focused')
+  assert.ok(!view().includes('advanced A'), `A stays hidden under B:\n${view()}`)
+  assert.equal(app.overlayGraphState().dependents, 1, 'only B -> A remains')
+  assert.doesNotThrow(() => app.assertOverlayForestForTest())
+
+  b.close()
+  await vt.waitForRender()
+  assert.ok(view().includes('advanced A'), `A is revealed when B closes:\n${view()}`)
+  assert.equal(a.focused, true, 'A reclaims the keyboard')
+  a.close()
+  app.stop()
+})
