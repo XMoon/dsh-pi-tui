@@ -710,6 +710,11 @@ export abstract class TuiBase extends Container implements TUI {
 	 * callback runs synchronously and may start another transition; the outer
 	 * one bails out when superseded. */
 	private focusRevision = 0;
+	/** X056: the last component whose focus intent was explicitly released
+	 * (unfocus) or whose lifecycle ended (hide / hidden). A pending transition
+	 * to it must re-derive instead of installing a released target. */
+	private focusIntentSeq = 0;
+	private focusIntentTarget: Component | null = null;
 	private overlayStack: OverlayStackEntry[] = [];
 	/** The last-painted overlay layouts (protected: TuiAltScreen's
 	 * gesture-liveness check reads the CURRENT painted placement of a
@@ -834,6 +839,7 @@ export abstract class TuiBase extends Container implements TUI {
 		// another overlay). The outer transition must not overwrite whatever the
 		// newer one established, so it stamps itself and bails out when superseded.
 		const revision = ++this.focusRevision;
+		const intentSeq = this.focusIntentSeq;
 		const previousFocus = this.focusedComponent;
 		let nextFocus = component;
 		const previousFocusedOverlay = previousFocus
@@ -849,7 +855,9 @@ export abstract class TuiBase extends Container implements TUI {
 		if (nextFocus && !nextFocusIsOverlay) {
 			if (restoreState.status === "blocked" && restoreState.blockedBy === previousFocus) {
 				if (restoreState.resume.status === "focus-target" || !this.isComponentMounted(restoreState.blockedBy)) {
-					nextFocus = this.resolveBlockedOverlayFocusResume(restoreState);
+					const resolved = this.resolveBlockedOverlayFocusResume(restoreState);
+					nextFocus = resolved.component;
+					if (resolved.clear) pendingClear = true;
 				} else {
 					pendingRestore = {
 						status: "blocked",
@@ -873,7 +881,9 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 		} else if (nextFocus === null) {
 			if (restoreState.status === "blocked" && restoreState.blockedBy === previousFocus) {
-				nextFocus = this.resolveBlockedOverlayFocusResume(restoreState);
+				const resolved = this.resolveBlockedOverlayFocusResume(restoreState);
+				nextFocus = resolved.component;
+				if (resolved.clear) pendingClear = true;
 			} else if (overlayFocusRestore === "clear") {
 				pendingClear = true;
 			}
@@ -883,6 +893,12 @@ export abstract class TuiBase extends Container implements TUI {
 			this.focusedComponent.focused = false;
 			// An onBlur callback may have started a newer transition.
 			if (revision !== this.focusRevision) return;
+		}
+		// The pending target's OWN focus intent/lifecycle may have been changed
+		// by that onBlur (blur/hide/close on it) without starting a new
+		// transition: never install a released/hidden/removed target.
+		if (nextFocus !== null && this.focusIntentTarget === nextFocus && this.focusIntentSeq !== intentSeq) {
+			nextFocus = this.getTopmostVisibleOverlay(nextFocus)?.component ?? null;
 		}
 
 		this.focusedComponent = nextFocus;
@@ -914,10 +930,17 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 	}
 
-	private resolveBlockedOverlayFocusResume(restoreState: BlockedOverlayFocusRestoreState): Component | null {
-		if (restoreState.resume.status === "restore-overlay") return restoreState.overlay.component;
-		this.clearOverlayFocusRestore();
-		return restoreState.resume.target;
+	/** Resolve a blocked overlay restore into its target focus. When the blocked
+	 * state is CONSUMED (focus-target resume) the caller must clear it — but
+	 * only once its own transition completes, because a synchronous focus
+	 * callback may supersede it (X056). */
+	private resolveBlockedOverlayFocusResume(
+		restoreState: BlockedOverlayFocusRestoreState,
+	): { component: Component | null; clear: boolean } {
+		if (restoreState.resume.status === "restore-overlay") {
+			return { component: restoreState.overlay.component, clear: false };
+		}
+		return { component: restoreState.resume.target, clear: true };
 	}
 
 	private getVisibleOverlayFocusRestore(): OverlayFocusRestoreState {
@@ -989,6 +1012,9 @@ export abstract class TuiBase extends Container implements TUI {
 			hide: () => {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
+					// X056: a pending transition to this component must not install it.
+					this.focusIntentSeq += 1;
+					this.focusIntentTarget = component;
 					this.clearOverlayFocusRestoreFor(entry);
 					this.retargetOverlayPreFocus(entry);
 					this.overlayStack.splice(index, 1);
@@ -1012,6 +1038,9 @@ export abstract class TuiBase extends Container implements TUI {
 				entry.hidden = hidden;
 				// Update focus when hiding/showing
 				if (hidden) {
+					// X056: a pending transition to this component must not install it.
+					this.focusIntentSeq += 1;
+					this.focusIntentTarget = component;
 					this.clearOverlayFocusRestoreFor(entry);
 					// If this overlay had focus, move focus to next visible or preFocus
 					if (this.focusedComponent === component) {
@@ -1038,6 +1067,11 @@ export abstract class TuiBase extends Container implements TUI {
 				this.requestRender();
 			},
 			unfocus: (unfocusOptions) => {
+				// X056: record the release even when this component is not yet
+				// focused — it may be the PENDING target of an in-flight
+				// transition that must re-derive instead of installing it.
+				this.focusIntentSeq += 1;
+				this.focusIntentTarget = component;
 				const isFocused = this.focusedComponent === component;
 				const restoreState = this.overlayFocusRestore;
 				const hasPendingRestore = restoreState.status !== "inactive" && restoreState.overlay === entry;
@@ -1164,9 +1198,10 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	/** Find the visual-frontmost visible capturing overlay, if any */
-	private getTopmostVisibleOverlay(): OverlayStackEntry | undefined {
+	private getTopmostVisibleOverlay(exclude?: Component): OverlayStackEntry | undefined {
 		let topmost: OverlayStackEntry | undefined;
 		for (const overlay of this.overlayStack) {
+			if (overlay.component === exclude) continue;
 			if (overlay.options?.nonCapturing || !this.isOverlayVisible(overlay)) continue;
 			if (!topmost || overlay.focusOrder > topmost.focusOrder) {
 				topmost = overlay;

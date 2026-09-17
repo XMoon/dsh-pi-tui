@@ -1323,3 +1323,28 @@ describe("TUI focus transition supersession (X056)", () => {
 		}
 	});
 });
+
+describe("TUI focus transition pending-target mutation (X056)", () => {
+	it("a transition to a target unfocused from onBlur is not installed", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui: TUI = new TuiMainScreen(terminal);
+		tui.addChild(new EmptyContent());
+		tui.start();
+		try {
+			const editor = new ReentrantFocusOverlay(["EDITOR"]);
+			const target = new FocusableOverlay(["T"]);
+			tui.setFocus(editor);
+			const targetHandle = tui.showOverlay(target, { row: 0, col: 0, width: 1, initialFocus: false });
+			editor.onBlurRefocus = () => {
+				editor.onBlurRefocus = undefined;
+				targetHandle.unfocus();
+			};
+			tui.setFocus(target);
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(target.focused, false, "a released pending target is not installed");
+			assert.notStrictEqual(tui.getFocusedComponent(), target);
+		} finally {
+			tui.stop();
+		}
+	});
+});
