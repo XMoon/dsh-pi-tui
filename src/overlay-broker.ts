@@ -230,7 +230,12 @@ export class OverlayBroker {
       // Move the keyboard FIRST: the fork's own hide fallback would otherwise
       // pick another visible capturing overlay, ignoring the logical intent.
       this.releaseKeyboard(node)
-      node.raw?.setHidden(true)
+      // `releaseKeyboard` focuses another root, whose synchronous onFocus may
+      // have issued a NEWER focus()/show() on this node (clearing the hidden
+      // intent). Only apply the physical hide while this release still stands.
+      if (!node.closed && node.raw !== undefined && node.explicitHidden === true) {
+        node.raw.setHidden(true)
+      }
       this.deps.reconcileFocusSeat?.()
       return
     }
@@ -290,7 +295,12 @@ export class OverlayBroker {
     // Move the keyboard FIRST: the fork's unfocus fallback would otherwise
     // focus the topmost visible capturing overlay, even one the user blurred.
     this.releaseKeyboard(node)
-    node.raw?.unfocus()
+    // The release focuses another root, whose synchronous onFocus may have
+    // issued a NEWER focus() on this node (restoring the intent). Only apply
+    // the physical unfocus while this release still stands.
+    if (!node.closed && node.raw !== undefined && node.resumeFocus === false) {
+      node.raw.unfocus()
+    }
     this.deps.reconcileFocusSeat?.()
   }
 
@@ -384,14 +394,20 @@ export class OverlayBroker {
   suspendVisibleRoots(suspension: QuestionSuspension | SaveLocationSuspension): void {
     const targets = [...this.roots].filter(node =>
       !node.closed && this.isVisible(node) && !node.explicitHidden)
-    // Phase 1: snapshot the intent without mutating anything.
-    for (const node of targets) node.resumeFocus = node.raw?.isFocused() === true
+    // Phase 1: commit the logical suspension (intent + ownership) BEFORE any
+    // physical call that can fire a callback.
+    for (const node of targets) {
+      node.resumeFocus = node.raw?.isFocused() === true
+      suspension.suspendedOverlays.add(node.wrapper)
+    }
     // Phase 2: hand the keyboard to the seat owner BEFORE hiding any root.
     if (this.currentlyFocused() !== undefined) this.deps.focusSeatOwner?.()
-    // Phase 3: hide and register.
+    // Phase 3: hide only the nodes this suspension STILL owns. A callback in
+    // Phase 2 may have explicitly re-shown one (which detaches it from the
+    // suspension set) — that newer operation must win.
     for (const node of targets) {
+      if (node.closed || !suspension.suspendedOverlays.has(node.wrapper)) continue
       node.raw?.setHidden(true)
-      suspension.suspendedOverlays.add(node.wrapper)
     }
     this.deps.reconcileFocusSeat?.()
   }

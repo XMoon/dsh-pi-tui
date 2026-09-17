@@ -1601,3 +1601,82 @@ test('a hidden capturing focus whose onFocus mounts a nonCapturing HUD keeps the
   hud?.close()
   app.stop()
 })
+
+test('a newer focus from the release callback survives a stale blur', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  let arm = false
+  const aRef = a
+  const bComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced B' }] }),
+    handleInput: () => false,
+    onFocus: () => {
+      if (arm) {
+        arm = false
+        aRef.focus()
+      }
+    },
+    dispose: () => {},
+  }
+  const b = app.showAdvancedInteractiveOverlay(bComponent)
+  await vt.waitForRender()
+  a.show() // detach: A/B are independent roots, A focused
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+  assert.equal(b.focused, false)
+
+  arm = true
+  a.blur() // release → focus B → B.onFocus → A.focus()
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'the callback focus is newer than the blur')
+  assert.equal(b.focused, false)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+  b.close()
+  a.close()
+  app.stop()
+})
+
+test('a newer focus from the release callback survives a stale hide', async () => {
+  const { vt, app } = await appWithTasksTrigger()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const view = (): string => vt.getViewport().map(strip).join('\n')
+  const a = app.showAdvancedInteractiveOverlay(interactiveComponent({ text: () => 'advanced A' }))
+  await vt.waitForRender()
+  let arm = false
+  const aRef = a
+  const bComponent: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'advanced B' }] }),
+    handleInput: () => false,
+    onFocus: () => {
+      if (arm) {
+        arm = false
+        aRef.focus()
+      }
+    },
+    dispose: () => {},
+  }
+  const b = app.showAdvancedInteractiveOverlay(bComponent)
+  await vt.waitForRender()
+  a.show()
+  await vt.waitForRender()
+  assert.equal(a.focused, true)
+
+  arm = true
+  a.hide() // release → focus B → B.onFocus → A.focus()
+  await vt.waitForRender()
+  assert.equal(a.focused, true, 'the callback focus is newer than the hide')
+  assert.ok(view().includes('advanced A'), `A stays visible:\n${view()}`)
+
+  // The newer focus() cleared the hidden intent: a fullscreen rebind must still
+  // show A.
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.ok(view().includes('advanced A'), `A stays visible across fullscreen:\n${view()}`)
+  assert.equal(a.focused, true)
+  b.close()
+  a.close()
+  app.stop()
+})
