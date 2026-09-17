@@ -1387,10 +1387,11 @@ export class ThinkingCompactComponent implements Component {
 const USER_MESSAGE_COMPACT_THRESHOLD_ROWS = 10
 const USER_MESSAGE_HEAD_ROWS = 4
 const USER_MESSAGE_TAIL_ROWS = 3
-/** Bounded reconcile attempts when a message's renderer-selection revision is
- * stale: a renderer may mutate the registry re-entrantly inside `render()`, so
- * one rebuild can still leave a stale entry. */
-const USER_DISCLOSURE_RECONCILE_ATTEMPTS = 3
+/** Bounded renderer-reconcile attempts: a renderer may mutate the registry
+ * re-entrantly inside `render()`, so a single rebuild can still leave a stale
+ * renderer selection. Shared by the global renderer-revision reconcile pass
+ * and the long-user ownership helper. */
+const RENDERER_RECONCILE_ATTEMPTS = 3
 
 /** The collapsed long user bubble's marker builder. It receives the hidden
  * visual-row count and the available inner width so a narrow bubble can fall
@@ -3315,6 +3316,12 @@ export class TuiApp {
    * rebuild only re-runs renderers for entries whose identity changed.
    */
   private lastRendererRevision = -1
+  /** The renderer-revision reconcile re-entrancy guard: `rebuildMessages()`
+   * ends with `requestRender()`, and a renderer may bump the registry revision
+   * inside `render()` — without this guard the two would recurse synchronously
+   * until the stack overflowed. While set, a nested request only schedules the
+   * physical frame. */
+  private reconcilingRendererRevision = false
   /** M9: the editor seat holder (the atomic handoff + current occupant). */
   private readonly editorSeatHolder: EditorSeatHolder
   /** The durable-image loader (plan M8): optional, wired by the runner. */
@@ -6467,7 +6474,7 @@ export class TuiApp {
     if (registry === undefined) return entry.rendererId === undefined
     for (let attempt = 0; ; attempt += 1) {
       if (entry.rendererRevision === registry.revisionOf()) break
-      if (attempt >= USER_DISCLOSURE_RECONCILE_ATTEMPTS) return false
+      if (attempt >= RENDERER_RECONCILE_ATTEMPTS) return false
       this.componentForMessage(message, this.expandBoundary(), this.transcriptRenderWidth(), this.userExpandBoundary())
       entry = this.messageComponents.get(message)
       if (entry === undefined) return false
@@ -12332,12 +12339,25 @@ export class TuiApp {
     // be REBUILT on this render (never waiting for a key, resize, session
     // event or setStatus). O(1) gate; the rebuild itself only re-runs
     // renderers for entries whose identity changed (plan §23).
-    if (this.renderers !== undefined) {
-      const revision = this.renderers.revisionOf()
-      if (revision !== this.lastRendererRevision) {
-        this.lastRendererRevision = revision
-        this.clearFocusLiveHeightState()
-        this.rebuildMessages()
+    //
+    // Re-entrancy safety: a renderer may bump the revision AGAIN inside
+    // render(), and rebuildMessages() ends with requestRender(). Without the
+    // guard the two would recurse synchronously until the stack overflowed, so
+    // the reconcile runs as a bounded iterative loop and a nested request only
+    // schedules the physical frame. A permanent churn exits after the bound
+    // (the production batcher retries on the next microtask).
+    if (this.renderers !== undefined && !this.reconcilingRendererRevision) {
+      this.reconcilingRendererRevision = true
+      try {
+        for (let attempt = 0; attempt < RENDERER_RECONCILE_ATTEMPTS; attempt += 1) {
+          const revision = this.renderers.revisionOf()
+          if (revision === this.lastRendererRevision) break
+          this.lastRendererRevision = revision
+          this.clearFocusLiveHeightState()
+          this.rebuildMessages()
+        }
+      } finally {
+        this.reconcilingRendererRevision = false
       }
     }
     // Live surface geometry (P1-1): the fork consumes the terminal resize
