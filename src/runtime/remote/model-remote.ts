@@ -33,7 +33,7 @@ import { GATEWAY_PRE_INVOCATION_CODES, type OperationResult, type WriteOutcome }
 import { GenerationCache } from './generation-cache.ts'
 import { SupersededReadError } from '../read-error.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
-import { remoteRejected, remoteNotDispatched, remoteFailureCode, remoteFailureMessage, type RemoteWriteFailure } from './write-failure.ts'
+import { remoteRejected, remoteNotDispatched, remoteFailureCode, remoteFailureMessage, copyFailureDetails, settledWriteMessage, type RemoteWriteFailure } from './write-failure.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
 
 /** The official generated `session` Remote read/write face the catalog needs. */
@@ -79,7 +79,9 @@ function copySelection(value: unknown): ModelSelectionDto | undefined {
   // (never a fabricated committed selection).
   if (typeof record.provider !== 'string' || record.provider === '') return undefined
   if (typeof record.model !== 'string' || record.model === '') return undefined
-  if (record.reasoningEffort !== undefined && record.reasoningEffort !== null
+  // Any PRESENT effort must be a non-empty string: `null` (or any other
+  // non-string) is unusable, never silently equivalent to "absent".
+  if (record.reasoningEffort !== undefined
     && (typeof record.reasoningEffort !== 'string' || record.reasoningEffort === '')) return undefined
   return {
     provider: record.provider,
@@ -135,19 +137,35 @@ function copyDirectory(value: ModelDirectoryDto): ModelDirectoryDto {
  */
 export function classifyRemoteModelFailure(error: unknown): RemoteWriteFailure {
   const code = remoteFailureCode(error)
+  const details = copyFailureDetails(error)
   const proven = code !== undefined && (
     code === 'gateway/bad-request'
     || code === 'session/not-found'
     || code === 'session/agent-busy'
+    // alpha2: the Host resolves the Session Agent BEFORE selectModel runs, so a
+    // writer held elsewhere is a proven pre-commit refusal (`session/writer-held`
+    // carries `{ sessionId }`), never an indeterminate write.
+    || code === 'session/writer-held'
     || code === 'session/model-unavailable'
     || GATEWAY_PRE_INVOCATION_CODES.has(code)
   )
   if (proven) {
-    return { kind: 'rejected', error: { code: code as string, message: remoteFailureMessage(error) } }
+    return {
+      kind: 'rejected',
+      error: {
+        code: code as string,
+        message: settledWriteMessage(code, error),
+        ...details === undefined ? {} : { details },
+      },
+    }
   }
   return {
     kind: 'indeterminate',
-    error: { code: code ?? 'session/model-indeterminate', message: remoteFailureMessage(error) },
+    error: {
+      code: code ?? 'session/model-indeterminate',
+      message: remoteFailureMessage(error),
+      ...details === undefined ? {} : { details },
+    },
   }
 }
 
@@ -286,8 +304,7 @@ export class RemoteModelCatalog implements ModelCatalog {
         ownership: 'current',
         outcome: remoteRejected('session/not-found', `session "${sessionId}" is not available`),
       }
-    }
-    if (generationChanged(this.generation, captured)) {
+    }    if (generationChanged(this.generation, captured)) {
       return { ownership: 'current', outcome: remoteNotDispatched() }
     }
     // Same-generation overlapping selections need their own owner token
@@ -319,12 +336,14 @@ export class RemoteModelCatalog implements ModelCatalog {
             kind: 'indeterminate',
             error: { code: 'session/model-result-invalid', message: 'the Host returned an unusable normalized selection' },
           }
-    // Local ownership is lost by a reconnect, a newer selection, a vanished
-    // binding, or a post-dispatch abort — none of which proves non-commit
-    // (v2 §0.2.4).
+    // Local ownership is lost by a reconnect, a newer selection, a REPLACED
+    // binding generation for the same id, or a post-dispatch abort — none of
+    // which proves non-commit (v2 §0.2.4). alpha2 `binding(id)` is borrow-only,
+    // so the exact-generation fence is IDENTITY, never mere presence: a same-id
+    // release/re-retain yields a NEW binding on the same connection.
     const superseded = generationChanged(this.generation, captured)
       || epoch !== this.writeEpoch
-      || this.sessions.binding(sessionId) === undefined
+      || !Object.is(binding, this.sessions.binding(sessionId))
       || Boolean(signal?.aborted)
     // Cache invalidation is a HOST-GENERATION fact, independent of UI
     // ownership: the Host best-effort saved (or may have saved) the global

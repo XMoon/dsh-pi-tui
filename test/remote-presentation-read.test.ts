@@ -9,6 +9,7 @@ import {
 import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { ConnectionGenerationState } from '@deepseek-ai/dsh-client-connection/client'
+import { retainableSource, type RetainableSource } from './remote-reference-source.ts'
 
 function constructOfficialReader(sessions: ISessions, generation: ConnectionGenerationState): RemotePresentationReader {
   return new RemotePresentationReader(sessions, generation)
@@ -64,6 +65,7 @@ function harness(options: {
   loadOlder?: () => Promise<void>
 } = {}): {
   readonly source: RemotePresentationSessionsSource
+  readonly references: RetainableSource<RemotePresentationBinding>
   readonly binding: RemotePresentationBinding
   setEntries(entries: readonly RemotePresentationEventEntry[]): void
   setHasMore(value: boolean): void
@@ -86,8 +88,10 @@ function harness(options: {
       getSnapshot: () => ({ entries, hasMore, revision: entries.length }),
     },
   }
+  const references = retainableSource<RemotePresentationBinding>({ 'session': binding })
   return {
-    source: { binding: id => id === 'session' ? binding : undefined },
+    source: references.source,
+    references,
     binding,
     setEntries(value) { entries = value },
     setHasMore(value) { hasMore = value },
@@ -304,11 +308,81 @@ test('discards a late history-page failure after the generation changes', async 
 
 test('returns unavailable for a missing binding or disconnected generation', async () => {
   const generations = generationHarness()
-  const missing = new RemotePresentationReader({ binding: () => undefined }, generations.source)
+  const missing = new RemotePresentationReader(retainableSource<RemotePresentationBinding>().source, generations.source)
   assert.equal(await missing.read('session'), undefined)
 
   generations.set(undefined)
   const fixture = harness()
   const disconnected = new RemotePresentationReader(fixture.source, generations.source)
   assert.equal(await disconnected.read('session'), undefined)
+})
+
+test('loadOlder pins the exact generation for the paging round-trip and releases it once', async () => {
+  const generations = generationHarness()
+  let releasePage!: () => void
+  const page = new Promise<void>((resolve) => { releasePage = resolve })
+  const fixture = harness({ entries: [durable(1)], hasMore: true, loadOlder: () => page })
+  const reader = new RemotePresentationReader(fixture.source, generations.source)
+  const pinned = fixture.references.live('session')
+  assert.ok(pinned !== undefined)
+
+  const pending = reader.loadOlder('session')
+  await Promise.resolve()
+  // The temporary pin exists and nothing has been released while paging.
+  assert.deepEqual(fixture.references.retains.map(entry => entry.source), ['tuiOperation'])
+  assert.deepEqual(fixture.references.releases, [])
+  fixture.setEntries([durable(1), durable(2)])
+  releasePage()
+  const snapshot = await pending
+  assert.equal(snapshot?.durableEvents.length, 2)
+  assert.deepEqual(fixture.references.releases, ['session'], 'the temporary pin releases exactly once')
+  assert.equal(fixture.references.live('session'), pinned,
+    'the pinned generation must still be the live one after paging')
+})
+
+test('loadOlder keeps the pinned generation alive when the navigation owner hands off mid-page', async () => {
+  const generations = generationHarness()
+  let releasePage!: () => void
+  const page = new Promise<void>((resolve) => { releasePage = resolve })
+  const fixture = harness({ entries: [durable(1)], hasMore: true, loadOlder: () => page })
+  const reader = new RemotePresentationReader(fixture.source, generations.source)
+  const pinned = fixture.references.live('session')
+  assert.ok(pinned !== undefined)
+
+  const pending = reader.loadOlder('session')
+  await Promise.resolve()
+  // The navigation owner releases the same id mid-page. Without the paging pin
+  // the generation would be retired and replaced; the pin keeps it alive, so a
+  // later acquisition borrows the SAME generation.
+  fixture.references.releaseHeld('session')
+  assert.equal(fixture.references.live('session'), pinned,
+    'the paging pin must keep the exact generation retained')
+  fixture.setEntries([durable(1), durable(2)])
+  releasePage()
+  const snapshot = await pending
+  // The page was applied to the PINNED generation, and releasing the pin after
+  // the owner's handoff retires the generation exactly once.
+  assert.equal(snapshot?.durableEvents.length, 2)
+  assert.deepEqual(fixture.references.releases, ['session'], 'the pin releases exactly once')
+  assert.equal(fixture.references.live('session'), undefined,
+    'with the owner handed off, the final pin release retires the generation')
+})
+
+test('a non-open history state keeps the selected identity, is never paged, and is not reported unavailable', async () => {
+  const generations = generationHarness()
+  for (const openState of ['cold', 'loading', 'error'] as const) {
+    const fixture = harness({ entries: [durable(1)], hasMore: true, openState })
+    const reader = new RemotePresentationReader(fixture.source, generations.source)
+    // `cold`/`loading`/`error` are real states of a live Client Session, not a
+    // missing Session: the read still resolves to the selected identity.
+    const snapshot = await reader.read('session')
+    assert.equal(snapshot?.sessionId, 'session')
+    assert.equal(snapshot?.openState, openState)
+    // Paging is only legal on an open window; an error state must not trigger a
+    // redundant open/paging attempt.
+    const paged = await reader.loadOlder('session')
+    assert.equal(fixture.loadCalls, 0, `${openState} must not page`)
+    assert.equal(paged?.openState, openState)
+    assert.deepEqual(fixture.references.releases, ['session'], 'the paging pin releases even when paging is refused')
+  }
 })

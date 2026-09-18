@@ -36,7 +36,15 @@ export interface PendingInputSnapshot {
 
 /** The semantic read seam for Host-owned pending input. */
 export interface PendingInputReader {
-  /** Return the current local projection for an already-live session.
-   * `undefined` means that session is not available to this backend. */
+  /**
+   * Return the current local projection for an already-live session.
+   *
+   * `undefined` means that session is not available to this backend — never an
+   * authoritative empty queue. The read is synchronous and total for every
+   * shape the backend's own contract can produce; a backend that reads a
+   * wire-shaped projection fails loudly when a PRESENT value violates its
+   * published shape, because a shape violation is a contract bug and reporting
+   * it as "no pending input" would hide durable input the Host may still run.
+   */
   snapshot(sessionId: string): PendingInputSnapshot | undefined
 }

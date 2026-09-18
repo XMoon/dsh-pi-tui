@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * D2.2 same-Host ordinary-write smoke over official rc2 Host and Client
- * contracts.
+ * D2.2 same-Host ordinary-write smoke over the pinned official DSH
+ * 0.1.6-alpha.2 Host and Client contracts.
  *
  * One Host Context owns a real live Agent (production AgentLoop + an in-process
  * stub LLM route), Session projections, session-title, commands, subagents,
@@ -309,36 +309,35 @@ async function main() {
     ))
     await waitFor('the fixture session to be listed', () => sessions.list.getSnapshot().ids.includes(SESSION_ID))
 
-    // The binding must exist before any write is addressed; D2.2 writes never
-    // call `sessions.open()`.
+    // alpha2: a binding exists only while a reference is retained, so the
+    // TUI's visible owner holds the fixture Session explicitly. There is no
+    // Client-global selection slot to move.
+    const owner = sessions.retain(SESSION_ID, { source: 'tuiMainView' })
     const binding = sessions.binding(SESSION_ID)
-    assert.ok(binding !== undefined, 'official Client binding did not resolve the fixture session')
-    sessions.open = () => { throw new Error('D2.2 write path must not call sessions.open()') }
+    assert.ok(binding !== undefined, 'the retained fixture session has no official Client binding')
+    assert.equal(binding, owner.binding, 'the visible owner must hold the exact borrowed generation')
 
-    // Capture the official requestId each beginSubmission mints, without
-    // replacing the official SessionFace.
-    const mintedRequestIds = []
-    const writerSessions = {
-      binding(sessionId) {
-        const current = sessions.binding(sessionId)
-        if (current === undefined) return undefined
-        const face = current.session
-        return {
-          session: {
-            beginSubmission(input) {
-              const handle = face.beginSubmission(input)
-              mintedRequestIds.push(handle.requestId)
-              return handle
-            },
-            prompt: (content, mode, signal, requestId) => face.prompt(content, mode, signal, requestId),
-            updateQueue: (itemId, action) => face.updateQueue(itemId, action),
-            cancel: () => face.cancel(),
-            rename: title => face.rename(title),
-          },
-        }
-      },
+    // Every later acquisition by the D2.2 write path must be a bounded
+    // `tuiOperation` pin — never a visible-surface acquisition, and never a
+    // cold materialization for a different Session.
+    const writeAcquisitions = []
+    const realRetain = sessions.retain.bind(sessions)
+    sessions.retain = (target, options) => {
+      writeAcquisitions.push({ id: String(target), source: options.source })
+      return realRetain(target, options)
     }
-    const writer = new RemoteSessionWriter(writerSessions, connection.generation, promptSerializer)
+
+    // Capture the official requestId each beginSubmission mints by shadowing
+    // the one verb on the real face, so the writer keeps using the EXACT
+    // official binding generation (alpha2 fences on binding identity).
+    const mintedRequestIds = []
+    const realBeginSubmission = binding.session.beginSubmission.bind(binding.session)
+    binding.session.beginSubmission = (input) => {
+      const handle = realBeginSubmission(input)
+      mintedRequestIds.push(handle.requestId)
+      return handle
+    }
+    const writer = new RemoteSessionWriter(sessions, connection.generation, promptSerializer)
     const pendingInput = new RemotePendingInputReader(sessions, connection.generation)
     const presentation = new RemoteSubmissionPresentation(sessions, connection.generation)
     const commandPort = new RemoteHostCommandPort(client.remote.commands)
@@ -364,7 +363,7 @@ async function main() {
       assert.deepEqual(outcome, { kind: 'committed', value: undefined })
       const requestId = lastRequestId()
       assert.ok(typeof requestId === 'string' && requestId !== '', 'beginSubmission minted no requestId')
-      const item = await waitFor('the queued occurrence to reach the snapshot queue', () => queueItemByRpc(requestId))
+      const item = await waitFor('the queued occurrence to reach the pending-input projection', () => queueItemByRpc(requestId))
       assert.equal(item.placement, 'queued')
       assert.equal(queueSnapshot().running, true)
       assert.equal(item.content[0].text, 'queued one')
@@ -378,7 +377,7 @@ async function main() {
       const outcome = await writer.prompt(SESSION_ID, { text: 'steer two' }, 'steer')
       assert.deepEqual(outcome, { kind: 'committed', value: undefined })
       const requestId = lastRequestId()
-      const item = await waitFor('the steering occurrence to reach the snapshot queue', () => queueItemByRpc(requestId))
+      const item = await waitFor('the steering occurrence to reach the pending-input projection', () => queueItemByRpc(requestId))
       assert.equal(item.placement, 'steering')
       const snapshot = queueSnapshot()
       assert.equal(snapshot.items.some(candidate => candidate.rpcId === requestId && candidate.placement === 'queued'), false)
@@ -596,7 +595,53 @@ async function main() {
       }
     }
 
+    // Everything above was the D2.2 write path; freeze that audit before the
+    // recovery proof below acquires the visible surface again.
+    const writePathAcquisitions = [...writeAcquisitions]
+    assert.ok(writePathAcquisitions.length > 0, 'the write path never pinned its addressed generation')
+    assert.deepEqual([...new Set(writePathAcquisitions.map(entry => entry.source))], ['tuiOperation'],
+      'the D2.2 write path must never acquire the visible main surface')
+    assert.deepEqual([...new Set(writePathAcquisitions.map(entry => entry.id))], [SESSION_ID],
+      'the D2.2 write path must never materialize another Session')
+    // Pins are released: the visible owner is the only reference left.
+    assert.equal(sessions.retainInfo(SESSION_ID).getSnapshot().referenceCount, 1)
+    assert.deepEqual({ ...sessions.retainInfo(SESSION_ID).getSnapshot().retainedBy }, { tuiMainView: 1 })
     assert.equal(sessions.binding(SESSION_ID) !== undefined, true)
+    scenarios.writeAcquisition = {
+      status: 'covered',
+      pins: writePathAcquisitions.length,
+      retainedBy: sessions.retainInfo(SESSION_ID).getSnapshot().retainedBy,
+    }
+
+    // Durable-inbox recovery (alpha.2): the pending rows live in the official
+    // DURABLE inbox projection, not in a per-generation Client cache. Release
+    // the visible owner, re-materialize the SAME id (a real same-id re-retain
+    // that produces a NEW binding generation), and the rows must reappear
+    // without any TUI-owned queue state.
+    {
+      const before = pendingInput.snapshot(SESSION_ID)
+      assert.ok(before !== undefined && before.items.length > 0,
+        'the fixture left no pending inbox rows to recover')
+      owner.release()
+      sessions.retain(SESSION_ID, { source: 'tuiMainView' })
+      await waitFor('the re-materialized binding to open', () => (
+        sessions.binding(SESSION_ID)?.session.getSnapshot().openState === 'open' ? true : undefined
+      ))
+      const recovered = await waitFor('the durable inbox rows to recover after re-materialization', () => {
+        const snapshot = pendingInput.snapshot(SESSION_ID)
+        return snapshot !== undefined && snapshot.items.length === before.items.length ? snapshot : undefined
+      })
+      assert.deepEqual(
+        recovered.items.map(item => item.id).sort(),
+        before.items.map(item => item.id).sort(),
+        'the re-materialized generation must recover exactly the durable pending rows',
+      )
+      scenarios.inboxRecovery = {
+        status: 'covered',
+        rows: recovered.items.length,
+        placements: [...new Set(recovered.items.map(item => item.placement))].sort(),
+      }
+    }
     console.log(JSON.stringify({ ok: true, scenarios }))
   } finally {
     if (client !== undefined) await client.fiber.dispose()

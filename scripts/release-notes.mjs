@@ -184,23 +184,37 @@ function containsExactGuidance(content, command) {
 // remains `0.1.5-rc.1`). The 0.4.7-alpha.1 prerelease raises the next line to
 // the published npm `0.1.6-alpha.1` family. Released changelog sections are
 // immutable, so the requirement follows the version being released.
-const dshAlphaPin = version === '0.4.0-alpha.1' ? '0.1.2-alpha.3'
-  : version === '0.4.3-alpha.2' ? '0.1.3-alpha.2'
-  : version === '0.4.3-alpha.3' ? '0.1.5-rc.1'
-  : version === '0.4.7-alpha.1' ? '0.1.6-alpha.1'
-  : '0.1.2-alpha.5'
-const dshStablePin = version === '0.4.0' || version === '0.4.1'
-  ? '0.1.2-rc.1'
-  : version === '0.4.5' || version === '0.4.6' ? '0.1.5-rc.2'
-  : '0.1.2'
+//
+// Every released 0.4 version is listed EXPLICITLY: a missing entry is a release
+// bug to fix, never a reason to inherit an older pin silently. A future version
+// must add its own pin (for example the alpha.2 install guidance of the next
+// `0.4.7-alpha.*` line) before its notes can be generated.
+const DSH_ALPHA_PINS = {
+  '0.4.0-alpha.1': '0.1.2-alpha.3',
+  '0.4.0-alpha.2': '0.1.2-alpha.5',
+  '0.4.3-alpha.2': '0.1.3-alpha.2',
+  '0.4.3-alpha.3': '0.1.5-rc.1',
+  '0.4.7-alpha.1': '0.1.6-alpha.1',
+}
+const DSH_STABLE_PINS = {
+  '0.4.0': '0.1.2-rc.1',
+  '0.4.1': '0.1.2-rc.1',
+  '0.4.5': '0.1.5-rc.2',
+  '0.4.6': '0.1.5-rc.2',
+}
 if (version.startsWith('0.4.')) {
   // Release bodies must remain reproducible after a later stable/preview
   // publish moves the npm dist-tags. README keeps the moving channel tags for
   // ordinary installs; changelog/release-note guidance pins this release.
+  const pins = channel === 'next' ? DSH_ALPHA_PINS : DSH_STABLE_PINS
+  const dshPin = pins[version]
+  if (dshPin === undefined) {
+    throw new Error(`No DSH install pin is recorded for ${channel === 'next' ? 'prerelease' : 'stable'} release ${version}; add it to ${channel === 'next' ? 'DSH_ALPHA_PINS' : 'DSH_STABLE_PINS'} before publishing`)
+  }
   const tuiPin = `@xmoon76/dsh-pi-tui@${version}`
   const dshGuidance = version === '0.4.5' || version === '0.4.6'
     ? 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2'
-    : `@deepseek-ai/dsh@${channel === 'next' ? dshAlphaPin : dshStablePin}`
+    : `@deepseek-ai/dsh@${dshPin}`
   const requiredGuidance = [
     dshGuidance,
     tuiPin,

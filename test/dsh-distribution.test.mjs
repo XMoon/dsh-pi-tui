@@ -15,6 +15,7 @@ import test from 'node:test'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { prepareDshTestEnvironment } from '../scripts/prepare-dsh-test-environment.mjs'
 import {
+  DSH_AGENT_PACKAGE,
   DSH_CLI_PACKAGE,
   DshDistributionError,
   assertInstalledDshFamily,
@@ -23,6 +24,7 @@ import {
   loadDshDistribution,
   loadDshDistributionManifest,
   npmDshFamilyOverrides,
+  npmDshVersion,
   packageMapFromTarballs,
   prepareDshInstall,
   requiredDshPackages,
@@ -532,4 +534,32 @@ test('package map derives names from tarball metadata and rejects duplicate name
   tarPackage(directory, 'one.tgz', { name: DSH_CLI_PACKAGE, version: VERSION })
   tarPackage(directory, 'two.tgz', { name: DSH_CLI_PACKAGE, version: VERSION })
   assert.throws(() => packageMapFromTarballs(directory, VERSION), /duplicate package name/u)
+})
+test('npm distribution forwards the caller package manifest (path or object) to the default target', (t) => {
+  const life = testLifecycle(t)
+  const custom = join(life.tempDir('dsh-distribution-package-'), 'package.json')
+  writeFileSync(custom, `${JSON.stringify({ name: 'consumer', devDependencies: { [DSH_AGENT_PACKAGE]: '9.9.9' } }, null, 2)}\n`)
+  // An explicit manifest OBJECT supplies the target...
+  assert.equal(
+    loadDshDistribution({ mode: 'npm', packageJson: { devDependencies: { [DSH_AGENT_PACKAGE]: '9.9.8' } } }).version,
+    '9.9.8',
+    'an object manifest must supply the npm target',
+  )
+  // ...and so does a manifest PATH, normalized exactly like the source branch.
+  assert.equal(
+    loadDshDistribution({ mode: 'npm', packageJson: custom }).version,
+    '9.9.9',
+    'a path manifest must supply the npm target',
+  )
+  // An explicit version still wins over any manifest.
+  assert.equal(loadDshDistribution({ mode: 'npm', version: '0.1.5-rc.2', packageJson: custom }).version, '0.1.5-rc.2')
+})
+
+test('npm distribution defaults to the declared package target, never a stale literal', () => {
+  const declared = npmDshVersion()
+  assert.equal(declared, '0.1.6-alpha.2')
+  const distribution = loadDshDistribution({ mode: 'npm' })
+  assert.equal(distribution.version, declared, 'an omitted npm version must resolve the declared target')
+  // An explicit caller target still wins so historical lanes keep working.
+  assert.equal(loadDshDistribution({ mode: 'npm', version: '0.1.5-rc.2' }).version, '0.1.5-rc.2')
 })

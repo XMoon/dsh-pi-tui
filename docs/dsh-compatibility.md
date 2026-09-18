@@ -18,7 +18,7 @@ fallback was checked against the peer manifest at its corresponding TUI tag.
 | `0.4.1` (published) | `dsh-v0.1.2-rc.1` | Historical stable |
 | `0.4.3-alpha.2` (historical next npm line) | `dsh-v0.1.3-alpha.2` | Last official runtime tag for this TUI line |
 | `0.4.6` (published stable) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable; validated against the published npm rc.1 family |
-| `0.4.7-alpha.1` (current `next` npm line) | `dsh-v0.1.6-alpha.1` | Published forward-integration target; validated against the npm `alpha` family |
+| `0.4.7-alpha.1` (current `next` npm line) | `dsh-v0.1.6-alpha.2` | Published forward-integration target; validated against the npm `alpha` family |
 | No historical fallback | `dsh-v0.1.0-rc.7`, `dsh-v0.1.2-alpha.1`, `dsh-v0.1.3-alpha.1`, `dsh-v0.1.5-alpha.1`, `dsh-v0.1.5-alpha.2` | Upgrade DSH to a supported release |
 
 The table is keyed to the official release tags above. Do not widen a pairing
@@ -29,9 +29,12 @@ For example, `>=0.1.2-rc.1` does not include `0.1.3-alpha.1`, and
 floor to the published npm `0.1.5-rc.1` release, and 0.4.6 kept that same
 floor; their open peer range also accepted the compatible `0.1.5-rc.2` family.
 The current `next` line raises the floor to the published npm
-`0.1.6-alpha.1` release. Its startup notice is best-effort because Loader rows
-mount concurrently. The floor is a registry release, so the notice suggests
-the exact npm upgrade target.
+`0.1.6-alpha.2` release. `dsh-v0.1.6-alpha.1` is published but predates the
+alpha.2 Client Session reference contract, so it is no longer supported by this
+line; its last compatible TUI is the published `0.4.7-alpha.1` bundle, which is
+what the startup notice offers as its fallback. The startup notice is
+best-effort because Loader rows mount concurrently; the floor is a registry
+release, so the notice suggests the exact npm upgrade target.
 
 For the current stable 0.4 line, install the recommended DSH family and the
 stable TUI. DSH `0.1.5-rc.1` is the minimum; `0.1.5-rc.2` is also compatible.
@@ -43,8 +46,8 @@ npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 ```
 
-The current `next` checkout is npm Mode and targets that published
-`0.1.6-alpha.1` family through its frozen lockfile. Use the local development
+The current `next` checkout is npm Mode and targets the published
+`0.1.6-alpha.2` family through its frozen lockfile. Use the local development
 flow to materialize it:
 
 ```sh
@@ -62,7 +65,7 @@ pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
 The startup notice on an old runtime suggests the exact published upgrade:
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.1
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2
 ```
 
 If the official `dsh-v0.1.0-rc.8` runtime must be kept, use the compatible
@@ -87,7 +90,7 @@ Official `dsh-v0.1.2-alpha.2`/`alpha.3` use
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`, and `dsh-v0.1.3-alpha.2` uses
 `@xmoon76/dsh-pi-tui@0.4.3-alpha.2`. The published 0.1.5-rc.1/rc.2 family is
 the last runtime for the `0.4.6` stable release. The current npm-mode checkout
-is separate: its peer floor is `>=0.1.6-alpha.1`, and its exact npm family is
+is separate: its peer floor is `>=0.1.6-alpha.2`, and its exact npm family is
 verified by the frozen lockfile.
 
 The root README intentionally uses DSH's moving `latest`/`alpha` channels for
@@ -100,7 +103,7 @@ reproducible release verification, always name a published version explicitly.
 Runtime compatibility and data compatibility are separate. A 0.4 runtime
 requires the declared DSH lower bound, but it continues to read
 sessions created by 0.3.x. The historical DSH `0.1.5-rc.1` runtime persists
-Session V2; `0.1.5-rc.2` and the current `0.1.6-alpha.1` line persist
+Session V2; `0.1.5-rc.2` and the current `0.1.6-alpha.2` line persist
 Session V3 and own the V2-to-V3 migration when an older session is opened.
 Preset state is read through DSH's `agentPreset` session projection: the
 creation header initializes the state and the newest `agent-preset/selected`
@@ -139,9 +142,9 @@ The CI policy is deliberately explicit: pushes to `next` and pull requests
 whose base is `next` follow the tracked `test/compat/dsh-mode.json` policy;
 `main` and every tag, including `next-v*`, always use registry-backed npm mode
 with a frozen lockfile. This checkout's `next` policy is npm mode and targets
-the published `0.1.6-alpha.1` family declared by `package.json` and resolved by
+the published `0.1.6-alpha.2` family declared by `package.json` and resolved by
 its frozen lockfile. The source lane independently pins `deepseek-harness` to
-`0a15e36e7f82b6ed45af6fa9759f29b40dcd965d` (`0.1.6-alpha.1`) in
+`ddefc45fbc7f8e46dd73185e68295696d1297887` (`0.1.6-alpha.2`) in
 `test/compat/dsh-source.json` and builds and validates that family from source.
 The Source Mode ecosystem check prints
 `SKIPPED: requires published compatible DSH/pi2dsh combination` because the

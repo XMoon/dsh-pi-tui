@@ -320,7 +320,8 @@ async function main() {
     // event window, and loadOlder contract without changing production state.
     const sessionId = listedIds[0]
     assert.ok(sessionId !== undefined)
-    context.sessions.open(sessionId)
+    // alpha2: opening history is an explicit reference acquisition.
+    context.sessions.retain(sessionId, { source: 'tuiMainView' })
     const binding = context.sessions.binding(sessionId)
     assert.ok(binding !== undefined, 'official Session binding missing')
     await waitFor(() => binding.session.getSnapshot().openState === 'open', 'initial official Session history window')

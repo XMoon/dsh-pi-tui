@@ -102,7 +102,7 @@ export const inject = ['cmdlineArgs']
  * bundle's own version cannot be read, so the message stays truthful.
  *
  * The 0.4.7-alpha.1 line has a minimum of the published npm release
- * dsh-v0.1.6-alpha.1. The recovery guidance names the recommended published
+ * dsh-v0.1.6-alpha.2. The recovery guidance names the recommended published
  * upgrade target and allows its native install scripts.
  */
 export interface HarnessCompatEntry {
@@ -112,7 +112,7 @@ export interface HarnessCompatEntry {
   max?: string
   /** The bundle release line that first required this constraint. */
   since: string
-  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.6-alpha.1 or later`. */
+  /** Human-readable requirement, e.g. `DeepSeek Harness 0.1.6-alpha.2 or later`. */
   requires: string
   /** The target DSH version to install when the current runtime is too old. */
   upgradeDsh?: string
@@ -129,10 +129,10 @@ export interface HarnessCompatEntry {
  * `harnessCompatEntryFor()` can return the first matching historical range. */
 const CURRENT_DSH_REQUIREMENT = {
   since: '0.4.7-alpha.1',
-  requires: 'DeepSeek Harness 0.1.6-alpha.1 or later',
-  upgradeDsh: '0.1.6-alpha.1',
-  upgradeCommand: 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.1',
-  guidance: 'This 0.4.7-alpha.1 line is validated with the published DeepSeek Harness 0.1.6-alpha.1 distribution; see docs/dsh-compatibility.md.',
+  requires: 'DeepSeek Harness 0.1.6-alpha.2 or later',
+  upgradeDsh: '0.1.6-alpha.2',
+  upgradeCommand: 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2',
+  guidance: 'This 0.4.7-alpha.1 line is validated with the published DeepSeek Harness 0.1.6-alpha.2 distribution; see docs/dsh-compatibility.md.',
 } as const
 
 export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
@@ -151,8 +151,12 @@ export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
   { ...CURRENT_DSH_REQUIREMENT, min: '0.1.3-alpha.2', max: '0.1.5-alpha.1', fallbackTui: '0.4.3-alpha.2' },
   { ...CURRENT_DSH_REQUIREMENT, min: '0.1.5-alpha.1', max: '0.1.5-rc.1' },
   // The published 0.1.5-rc.1/rc.2 family is the last runtime for the 0.4.5/0.4.6
-  // stable releases; the current line requires the 0.1.6-alpha.1 family.
+  // stable releases.
   { ...CURRENT_DSH_REQUIREMENT, min: '0.1.5-rc.1', max: '0.1.6-alpha.1', fallbackTui: '0.4.6' },
+  // dsh-v0.1.6-alpha.1 is published and still works with the published
+  // 0.4.7-alpha.1 line (peer `>=0.1.6-alpha.1`), but the current line depends
+  // on the alpha.2 Client Session contract and no longer supports it.
+  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.6-alpha.1', max: '0.1.6-alpha.2', fallbackTui: '0.4.7-alpha.1' },
 ]
 
 /** The compat entry covering the installed dsh version, or undefined when

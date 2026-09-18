@@ -13,10 +13,12 @@ import type { ConnectionGenerationState } from '@deepseek-ai/dsh-client-connecti
 import {
   RemoteSessionWriter,
   type RemotePromptSerializer,
+  type RemoteWriteBinding,
   type RemoteWriteSessionFace,
   type RemoteWriteSessionsSource,
 } from '../src/runtime/remote/session-writer-remote.ts'
 import { classifyRemoteWriteFailure } from '../src/runtime/remote/write-failure.ts'
+import { retainableSource, type RetainableSource } from './remote-reference-source.ts'
 import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
 
 interface GenerationHarness {
@@ -54,6 +56,9 @@ interface SessionCalls {
 
 interface WriterHarness {
   readonly source: RemoteWriteSessionsSource
+  /** The borrow-only reference double, so the temporary-write-pin lifetime is
+   * observable. */
+  readonly references: RetainableSource<RemoteWriteBinding>
   readonly calls: SessionCalls
   readonly generation: GenerationHarness
   setPromptResult(result: { ok: true; value: { accepted: true } } | { ok: false; error: unknown }): void
@@ -129,11 +134,11 @@ function writerHarness(): WriterHarness {
       return renameResult
     },
   }
-  const source: RemoteWriteSessionsSource = {
-    binding: id => id === 'session-a' ? { session } : undefined,
-  }
+  const references = retainableSource<RemoteWriteBinding>({ 'session-a': { session } })
+  const source: RemoteWriteSessionsSource = references.source
   return {
     source,
+    references,
     calls,
     generation,
     setPromptResult: result => { promptResult = result },
@@ -328,6 +333,9 @@ test('gateway settlement follows the pinned pre/post-invocation boundary', () =>
     // An unknown future gateway code is never assumed to be a refusal.
     ['gateway/unknown-future-code', 'indeterminate'],
     ['session/queue-item-not-found', 'rejected'],
+    // alpha2 writer contention is a domain refusal (it is raised before the
+    // addressed business method runs), never an indeterminate write.
+    ['session/writer-held', 'rejected'],
   ]
   for (const [code, kind] of cases) {
     assert.equal(classifyRemoteWriteFailure({ code, message: code }).kind, kind, code)
@@ -487,6 +495,7 @@ test('a generation replaced while resolving the binding cancels an updateQueue b
   // The generation moves between the pre-dispatch capture and the binding
   // resolution; the occurrence write must not be dispatched.
   const sessions: RemoteWriteSessionsSource = {
+    retain: harness.source.retain,
     binding: id => {
       harness.generation.set({ id: 2 })
       return harness.source.binding(id)
@@ -519,4 +528,143 @@ test('refreshTitle is explicitly unsupported on the Remote path', async () => {
   const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer())
   const outcome = await writer.refreshTitle('session-a', new AbortController().signal)
   assert.equal(outcome.kind, 'unsupported')
+})
+
+test('an ordinary write pins the exact generation for its whole round-trip and releases it once', async () => {
+  const harness = writerHarness()
+  const pinned = harness.references.live('session-a')
+  assert.ok(pinned !== undefined)
+  const observed: Array<{ retains: number; releases: number; live: unknown }> = []
+  const serializer = okSerializer({
+    onSerialize: () => {
+      observed.push({
+        retains: harness.references.retains.length,
+        releases: harness.references.releases.length,
+        live: harness.references.live('session-a'),
+      })
+    },
+  })
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer)
+  assert.deepEqual(await writer.prompt('session-a', {}, 'queue'), { kind: 'committed', value: undefined })
+  // During serialization the exact generation is pinned and nothing released.
+  assert.deepEqual(observed, [{ retains: 1, releases: 0, live: pinned }])
+  assert.deepEqual(harness.references.retains.map(entry => entry.source), ['tuiOperation'])
+  assert.deepEqual(harness.references.releases, ['session-a'], 'the temporary pin releases exactly once')
+  assert.equal(harness.references.live('session-a'), pinned,
+    'the pinned generation must still be the live one after the operation')
+})
+
+test('a replaced live binding under the operation fails the dispatch closed', async () => {
+  const harness = writerHarness()
+  const pinned = harness.references.live('session-a')
+  assert.ok(pinned !== undefined)
+  // Force the live binding for the id to be a DIFFERENT object during
+  // serialization — the case a Client that retires a generation without
+  // waiting for reference exhaustion would produce. Binding PRESENCE must not
+  // authorize the dispatch; identity must.
+  const serializer = okSerializer({
+    onSerialize: () => {
+      harness.references.setBinding('session-a', { session: harness.source.binding('session-a')!.session })
+      assert.notEqual(harness.references.live('session-a'), pinned)
+    },
+  })
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer)
+  const outcome = await writer.prompt('session-a', {}, 'queue')
+  assert.deepEqual(outcome, { kind: 'cancelled' }, 'a replaced generation must not receive the prompt')
+  assert.deepEqual(harness.calls.promptCalls, [], 'nothing may reach the Host for a replaced generation')
+  assert.equal(harness.calls.abandonCalls, 1, 'the local echo is abandoned, so the draft is restored')
+})
+
+test('session/writer-held is a rejected prompt with preserved details and actionable guidance', async () => {
+  const harness = writerHarness()
+  harness.setPromptResult({
+    ok: false,
+    error: { code: 'session/writer-held', message: 'internal writer diagnostic', details: { sessionId: 'session-a' } },
+  })
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer())
+  const outcome = await writer.prompt('session-a', {}, 'queue')
+  assert.equal(outcome.kind, 'rejected', 'a held writer proves the prompt was never admitted')
+  if (outcome.kind !== 'rejected') throw new Error('unreachable')
+  assert.equal(outcome.error.code, 'session/writer-held')
+  assert.deepEqual(outcome.error.details, { sessionId: 'session-a' })
+  assert.ok(outcome.error.message.includes('already in use'),
+    `the held-writer message must be actionable: ${outcome.error.message}`)
+  // The draft-restoring caller relies on a KNOWN rejection, and no retry is
+  // legal: exactly one prompt was dispatched.
+  assert.equal(harness.calls.promptCalls.length, 1)
+  assert.deepEqual(harness.references.releases, ['session-a'], 'the temporary pin releases exactly once')
+})
+
+test('session/writer-held queue mutation is rejected with details and never retried', async () => {
+  const harness = writerHarness()
+  harness.setQueueResult({
+    ok: false,
+    error: { code: 'session/writer-held', message: 'internal writer diagnostic', details: { sessionId: 'session-a' } },
+  })
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer())
+  const outcome = await writer.updateQueue('session-a', 'item-7', { kind: 'steer' })
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind !== 'rejected') throw new Error('unreachable')
+  assert.deepEqual(outcome.error.details, { sessionId: 'session-a' })
+  assert.equal(harness.calls.updateQueueCalls.length, 1, 'no automatic retry')
+})
+
+test('failure details are deeply detached and frozen, never Host-owned', () => {
+  const issues = [{ path: 'cwd', message: 'required' }, { path: 'model', message: 'unknown' }]
+  const outcome = classifyRemoteWriteFailure({
+    code: 'gateway/arguments-invalid',
+    message: 'invalid arguments',
+    details: { issues, nested: { reason: 'x' } },
+  })
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind !== 'rejected') throw new Error('unreachable')
+  const details = outcome.error.details
+  assert.ok(details !== undefined, 'a structured details bag must be preserved')
+  assert.notEqual(details.issues, issues, 'a nested array must not be the Host value')
+  assert.deepEqual(details.issues, issues)
+  assert.ok(Object.isFrozen(details))
+  assert.ok(Object.isFrozen(details.issues))
+  assert.ok(Object.isFrozen((details.issues as readonly unknown[])[0]))
+  assert.ok(Object.isFrozen(details.nested))
+  // A later Host-side mutation cannot reach the adapter's copy.
+  ;(issues[0] as { message: string }).message = 'mutated'
+  assert.equal((details.issues as readonly { message: string }[])[0]?.message, 'required')
+})
+
+test('a write targets the generation that is live when it resolves, before and after a real release/re-retain', async () => {
+  const harness = writerHarness()
+  const first = harness.references.live('session-a')
+  assert.ok(first !== undefined)
+  const dispatched: unknown[] = []
+  let serializations = 0
+  const serializer = okSerializer({
+    onSerialize: () => {
+      serializations += 1
+      // Only the FIRST write races the owner handoff; the second one runs on
+      // the replacement generation by design.
+      if (serializations > 1) return
+      // The navigation owner hands off mid-serialize. The writer's own pin
+      // keeps this exact generation retained, so no replacement can occur.
+      harness.references.releaseHeld('session-a')
+      assert.equal(harness.references.live('session-a'), first,
+        'the bounded pin must keep the exact generation alive across the write')
+    },
+  })
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer)
+  const session = harness.source.binding('session-a')!.session
+  const realPrompt = session.prompt
+  session.prompt = (...args) => {
+    dispatched.push(harness.references.live('session-a'))
+    return realPrompt.apply(session, args)
+  }
+  assert.deepEqual(await writer.prompt('session-a', {}, 'queue'), { kind: 'committed', value: undefined })
+  assert.equal(dispatched[0], first, 'the dispatch must target the pinned generation')
+
+  // Only after the writer released its pin can the id be released and
+  // re-materialized as a NEW generation (the real alpha.2 sequence).
+  const second = { session }
+  harness.references.setBinding('session-a', second)
+  assert.notEqual(harness.references.live('session-a'), first, 'a re-retained id is a NEW generation')
+  assert.deepEqual(await writer.prompt('session-a', {}, 'queue'), { kind: 'committed', value: undefined })
+  assert.equal(dispatched[1], second, 'the next write must target the new generation, never a cached one')
 })

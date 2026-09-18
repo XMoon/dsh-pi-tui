@@ -13,6 +13,7 @@ import {
   type RemotePresentationEventEntry,
   type RemotePresentationSessionsSource,
 } from '../src/runtime/remote/presentation-read-remote.ts'
+import { retainableSource } from './remote-reference-source.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import type {
   PresentationDurableEvent,
@@ -149,7 +150,10 @@ test('compares an official eventSource cut through Transcript, Window, and Focus
     },
   ]
   const binding = officialBinding(entries)
-  const remote = new RemotePresentationReader({ binding: id => id === 'session' ? binding : undefined }, generations.source)
+  const remote = new RemotePresentationReader(
+    retainableSource<RemotePresentationBinding>({ 'session': binding }).source,
+    generations.source,
+  )
   const shadow = new RemotePresentationReadShadow(direct, remote, generations.source)
 
   const report = reportOf(await shadow.compare({ sessionId: 'session', projection: { focusMode: true } }))

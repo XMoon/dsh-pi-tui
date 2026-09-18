@@ -141,6 +141,19 @@ function isDshFamilyPackage(name) {
   return name === DSH_CLI_PACKAGE || name.startsWith('@deepseek-ai/dsh-')
 }
 
+/**
+ * Normalize the TUI `packageJson` option into a manifest object: an explicit
+ * path, an explicit manifest, or this repository's own `package.json`. One
+ * helper so the npm default target and the source-distribution validation can
+ * never disagree about what "the caller's package.json" means.
+ */
+function tuiPackageManifest(value) {
+  if (value === undefined) return readJson(join(PACKAGE_ROOT, 'package.json'), 'package.json')
+  return typeof value === 'string'
+    ? readJson(resolve(value), 'package.json')
+    : objectValue(value, 'TUI package.json')
+}
+
 /** Return whether a dependency name belongs to the published DSH family. */
 export function isDshPackage(name) {
   return isDshFamilyPackage(name)
@@ -416,11 +429,7 @@ export function validateSourceDistribution(input, options = {}) {
   const listedPaths = new Set([...packages.values()].map(entry => resolve(entry.path)))
   const unlistedTarballs = tgzFiles(directory).filter(path => !listedPaths.has(resolve(path)))
   if (unlistedTarballs.length > 0) fail(`DSH distribution contains unlisted tarball(s): ${unlistedTarballs.join(', ')}`)
-  const packageJson = options.packageJson === undefined
-    ? readJson(join(PACKAGE_ROOT, 'package.json'), 'package.json')
-    : typeof options.packageJson === 'string'
-      ? readJson(resolve(options.packageJson), 'package.json')
-      : objectValue(options.packageJson, 'TUI package.json')
+  const packageJson = tuiPackageManifest(options.packageJson)
   const required = options.requiredPackages ?? requiredDshPackages(packageJson)
   const missing = required.filter(name => !packages.has(name))
   if (missing.length > 0) fail(`DSH distribution is missing TUI-required package(s): ${missing.join(', ')}`)
@@ -493,14 +502,19 @@ export function loadDshDistribution({
     return distribution
   }
   if (mode !== 'npm') fail(`unsupported DSH distribution mode ${mode}; expected source or npm`)
-  return npmDshDistribution(version ?? process.env.DSH_VERSION ?? '0.1.2-alpha.2')
+  // The declared package.json devDependency is the authoritative npm target:
+  // a hard-coded historical default would silently verify/install an obsolete
+  // family for any caller that omits the version. The caller's own manifest (a
+  // path or an object) wins over this repository's, so a consumer workspace is
+  // never verified against the wrong declared DSH.
+  return npmDshDistribution(version ?? process.env.DSH_VERSION ?? npmDshVersion(tuiPackageManifest(packageJson)))
 }
 
 /**
  * The two root overrides that pin the whole published DSH family to one exact
  * version. DSH publishes `@deepseek-ai/dsh` and every `@deepseek-ai/dsh-*`
  * sibling at one version per release, but the CLI's own dependency edges are
- * caret ranges (`^0.1.6-alpha.1`), so a fresh isolated install can otherwise
+ * caret ranges (`^0.1.6-alpha.2`), so a fresh isolated install can otherwise
  * resolve a newer, ABI-incompatible sibling — the `0.1.6-alpha.2` app-boot that
  * dropped `watchUserPatches`, for example. The two keys mirror
  * {@link isDshPackage}'s family definition so `@deepseek-ai/dsh` itself stays
@@ -796,8 +810,8 @@ function compareVersionCores(left, right) {
  * dependencies (`dsh-0.1.2-alpha.x`, `dsh-0.1.5-rc.x`). What is fenced is the
  * TARGET CORE (`0.1.6`): on that core ONLY the exact target version may
  * resolve — `0.1.6-alpha.2`, `0.1.6-rc.1` and a stable `0.1.6` are all drift —
- * and a HIGHER core must not appear at all (the CLI's `^0.1.6-alpha.1`
- * resolves a same-core variant such as `0.1.6`/`0.1.6-alpha.2` or a higher
+ * and a HIGHER core must not appear at all (the CLI's `^0.1.6-alpha.2`
+ * resolves a same-core variant such as `0.1.6` or a higher
  * STABLE core such as `0.1.7`; the gate rejects every higher core, including a
  * higher prerelease that default semver rules would not themselves select).
  * Older cores are a separate

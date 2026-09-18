@@ -257,7 +257,9 @@ async function main() {
     const connection = client.get('connection')
     const sessions = client.get('sessions')
     await waitFor('official Client readiness', () => connection.generation.getSnapshot() !== undefined && sessions.list.getSnapshot().phase === 'ready')
-    sessions.open(SessionId('presentation-session'))
+    // alpha2: opening history is an explicit reference acquisition; there is
+    // no Client-global selection slot to move.
+    sessions.retain(SessionId('presentation-session'), { source: 'tuiMainView' })
     await waitFor('presentation binding', () => {
       const binding = sessions.binding(SessionId('presentation-session'))
       return binding !== undefined && binding.session.getSnapshot().openState === 'open' && binding.eventSource.getSnapshot().entries.length > 0

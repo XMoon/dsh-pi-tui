@@ -359,8 +359,8 @@ export type SubmitDelivery = 'steer' | 'queue'
 
 /**
  * Resolve one submission's delivery mode — the DSH WEB
- * `ComposerSubmissionPolicy.resolve()` contract (baseline 0.1.6-alpha.1,
- * shared by every UI client):
+ * `ComposerSubmissionPolicy.resolve()` contract (baseline established in DSH
+ * `0.1.6-alpha.1`, shared by every UI client):
  *
  * ```text
  * !running              -> queue

@@ -2,8 +2,8 @@
 /**
  * Verify the npm/DSH runtime boundary with a real candidate tarball and a
  * published below-floor runtime. The candidate must fail on the unsupported
- * runtime. The startup row names the 0.1.6-alpha.1 floor and suggests the
- * recommended published npm 0.1.6-alpha.1 upgrade target.
+ * runtime. The startup row names the 0.1.6-alpha.2 floor and suggests the
+ * recommended published npm 0.1.6-alpha.2 upgrade target.
  *
  * Usage: node scripts/dsh-runtime-boundary-smoke.mjs [path-to-candidate.tgz]
  *       pnpm smoke:boundary -- [path-to-candidate.tgz]
@@ -30,7 +30,7 @@ const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 // rejection case is 0.1.1-rc.2; the exact prerelease floor is covered
 // by the startup-gate unit tests.
 const OLD_DSH_VERSION = '0.1.1-rc.2'
-const TARGET_DSH_VERSION = '0.1.6-alpha.1'
+const TARGET_DSH_VERSION = '0.1.6-alpha.2'
 const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|ERR_PACKAGE_PATH_NOT_EXPORTED|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
 const EXPECTED_BOUNDARY_IMPORT = /(?:@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|commands|credentials|goal|jobs|llm|llm-retry|permission-presets|plan-mode|sandbox-policy|session|session-log-export|session-persistence|session-title|settings|shell|skill|subagent|token-meter|tool-todo|tool-workflow|tools|user-approval|user-questions|tool-subagent|cordis-host-runner))(?=['"/]|$)/iu
 
@@ -125,11 +125,17 @@ function installCandidate(invocation, tarball, harnessDir, env) {
 }
 
 // Mirrors src/startup.ts HARNESS_COMPAT: every runtime below the published
-// npm 0.1.6-alpha.1 floor is rejected. The exact prerelease boundary is tested
+// npm 0.1.6-alpha.2 floor is rejected. The exact prerelease boundary is tested
 // by startup.test.ts because only the 0.1.1 line is installed by this smoke.
 function floorNoticeFor(oldVersion) {
   if (semver.lt(oldVersion, TARGET_DSH_VERSION)) {
-    return { requires: TARGET_DSH_VERSION }
+    return {
+      requires: TARGET_DSH_VERSION,
+      // Derived from the same floor the notice names, so a version-floor move
+      // cannot leave this smoke asserting a stale upgrade target.
+      upgradeCommand: 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@'
+        + TARGET_DSH_VERSION,
+    }
   }
   return undefined
 }
@@ -151,7 +157,7 @@ function assertBoundary(output, status, oldVersion = OLD_DSH_VERSION, expectedBu
       'dsh-pi-tui',
       `running dsh ${oldVersion}`,
       `DeepSeek Harness ${notice.requires} or later`,
-      'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.1',
+      notice.upgradeCommand,
       'dsh --profile pi-tui',
     ]
     // The candidate's OWN version label is part of the notice; when the real
