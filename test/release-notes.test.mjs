@@ -192,15 +192,23 @@ test('an unmapped 0.4 release fails loudly instead of inheriting an older DSH pi
   // A new 0.4 line must add its own pin deliberately: silently reusing the
   // historical `0.1.2-alpha.5` fallback would publish obsolete DSH install
   // guidance under a version whose peer floor is already newer.
-  const next = createFixture(life, { version: '0.4.7-alpha.2', guidance: '', channel: 'next' })
-  const nextResult = run(next, 'next-v0.4.7-alpha.2')
+  const next = createFixture(life, { version: '0.4.7-alpha.3', guidance: '', channel: 'next' })
+  const nextResult = run(next, 'next-v0.4.7-alpha.3')
   assert.notEqual(nextResult.status, 0)
-  assert.match(nextResult.stderr, /No DSH install pin is recorded for prerelease release 0\.4\.7-alpha\.2/u)
+  assert.match(nextResult.stderr, /No DSH install pin is recorded for prerelease release 0\.4\.7-alpha\.3/u)
 
   const stable = createFixture(life, { version: '0.4.7', guidance: '' })
   const stableResult = run(stable, 'v0.4.7')
   assert.notEqual(stableResult.status, 0)
   assert.match(stableResult.stderr, /No DSH install pin is recorded for stable release 0\.4\.7/u)
+})
+
+test('0.4.7-alpha.2 prerelease guidance pins the published 0.1.6-alpha.2 family', (t) => {
+  const life = testLifecycle(t)
+  const guidance = '\n- @deepseek-ai/dsh@0.1.6-alpha.2\n- @xmoon76/dsh-pi-tui@0.4.7-alpha.2\n- @xmoon76/dsh-pi-tui@0.3'
+  const next = createFixture(life, { version: '0.4.7-alpha.2', guidance, channel: 'next' })
+  const result = run(next, 'next-v0.4.7-alpha.2')
+  assert.equal(result.status, 0, result.stderr)
 })
 
 test('0.4.7-alpha.1 prerelease guidance pins the published 0.1.6-alpha.1 family', (t) => {

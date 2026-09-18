@@ -18,7 +18,8 @@ fallback was checked against the peer manifest at its corresponding TUI tag.
 | `0.4.1` (published) | `dsh-v0.1.2-rc.1` | Historical stable |
 | `0.4.3-alpha.2` (historical next npm line) | `dsh-v0.1.3-alpha.2` | Last official runtime tag for this TUI line |
 | `0.4.6` (published stable) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable; validated against the published npm rc.1 family |
-| `0.4.7-alpha.1` (current `next` npm line) | `dsh-v0.1.6-alpha.2` | Published forward-integration target; validated against the npm `alpha` family |
+| `0.4.7-alpha.1` (published) | `dsh-v0.1.6-alpha.1` | Published forward-integration target; keeps its own alpha.1 contract and is the fallback TUI for an alpha.1 runtime |
+| `0.4.7-alpha.2` (current `next` npm line, unreleased) | `dsh-v0.1.6-alpha.2` | Current forward-integration target; first line on the alpha.2 Client Session contract |
 | No historical fallback | `dsh-v0.1.0-rc.7`, `dsh-v0.1.2-alpha.1`, `dsh-v0.1.3-alpha.1`, `dsh-v0.1.5-alpha.1`, `dsh-v0.1.5-alpha.2` | Upgrade DSH to a supported release |
 
 The table is keyed to the official release tags above. Do not widen a pairing
@@ -28,11 +29,11 @@ For example, `>=0.1.2-rc.1` does not include `0.1.3-alpha.1`, and
 `^0.1.1-rc.1` does not include `0.1.2-alpha.1`. The 0.4.5 release raised the
 floor to the published npm `0.1.5-rc.1` release, and 0.4.6 kept that same
 floor; their open peer range also accepted the compatible `0.1.5-rc.2` family.
-The current `next` line raises the floor to the published npm
+The current `next` line (`0.4.7-alpha.2`) raises the floor to the published npm
 `0.1.6-alpha.2` release. `dsh-v0.1.6-alpha.1` is published but predates the
-alpha.2 Client Session reference contract, so it is no longer supported by this
-line; its last compatible TUI is the published `0.4.7-alpha.1` bundle, which is
-what the startup notice offers as its fallback. The startup notice is
+alpha.2 Client Session reference contract, so the current line no longer
+supports it; its last compatible TUI stays the published `0.4.7-alpha.1`
+bundle, which is what the startup notice offers as its fallback. The startup notice is
 best-effort because Loader rows mount concurrently; the floor is a registry
 release, so the notice suggests the exact npm upgrade target.
 
