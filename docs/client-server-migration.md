@@ -1192,9 +1192,13 @@ adapter/lifetime mapping and adds no migration milestone (no D2.5).
   surface, `tuiOperation` for one bounded operation pinning an existing
   generation) through the official `SessionReferenceSourceMap`, so it never
   impersonates the official Web view.
-- Navigation commits the new owner before the initial history open settles:
+- Navigation must commit the new owner before the initial history open settles:
   `retain new -> install new owner -> release old`. `ready` is awaited only by an
-  operation that genuinely must wait for that open (never by create/open).
+  operation that genuinely must wait for that open (never by create/open). The
+  adapter now RETURNS the retained owner this handoff needs; the caller-side
+  `retain new -> commit -> release old` wiring remains deferred to Remote
+  production composition / M3, so read this as the handoff contract, not as
+  runner behavior.
 - Host publication != Client view retention. `fork()` stays publication-only, so
   a superseded fork leaves a real, catalogued child that the TUI must not select;
   adoption happens on the navigation path through `open()`, which is what
