@@ -283,7 +283,7 @@ test('pending: a press followed by a resize never acts on the stale frame', asyn
   app.stop()
 })
 
-test('pending: Ctrl+O collapses an explicitly expanded pending row (regular)', async () => {
+test('pending: fullscreen Ctrl+O collapses an explicitly expanded pending row', async () => {
   const { vt, app } = startApp(100, 40)
   app.setTranscript([])
   steering(app, [longRow('p1', 'p-', 'r1')])
@@ -298,6 +298,33 @@ test('pending: Ctrl+O collapses an explicitly expanded pending row (regular)', a
   assert.equal(compactMarkerCount(rows), 1, 'Ctrl+O collapses the explicitly expanded pending row')
   assert.ok(!rows.some(row => row.includes('p-12')))
   app.setFullscreen(false)
+  app.stop()
+})
+
+test('pending: a regular Ctrl+O round-trip stays keyboard-only (no copyable tail chrome)', async () => {
+  const { vt, app } = startApp(100, 40)
+  app.setTranscript([])
+  steering(app, [longRow('p1', 'p-', 'r1')])
+  // Regular default: compact with the effective-key hint, no mouse affordance.
+  let rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'regular folds the long pending row')
+  assert.ok(rows.join('\n').includes('ctrl+o to expand'))
+  assert.equal(collapseFooterRows(rows).length, 0, 'no footer while collapsed')
+
+  // Ctrl+O expands the pending row in FULL — and regular must not inject a
+  // terminal-native-selectable collapse label into the scrollback.
+  vt.sendInput('\x0f')
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('p-12')), 'regular Ctrl+O expands the full pending row')
+  assert.equal(compactMarkerCount(rows), 0)
+  assert.equal(collapseFooterRows(rows).length, 0, 'regular is keyboard-only: no copyable collapse chrome')
+  assert.ok(rows.some(row => row.includes('steering…')), 'the status line stays visible')
+
+  // Ctrl+O collapses it back to compact.
+  vt.sendInput('\x0f')
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'regular Ctrl+O restores compact')
+  assert.ok(!rows.some(row => row.includes('p-12')))
   app.stop()
 })
 

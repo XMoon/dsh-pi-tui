@@ -1275,3 +1275,56 @@ test('fullscreen: the copy chrome filter follows the last-painted frame, not a n
   app.setFullscreen(false)
   app.stop()
 })
+
+test('fullscreen resize re-derives the expanded tail control (no stale chrome)', async () => {
+  const { vt, app } = startApp(80, 40)
+  const text = Array.from({ length: 8 }, () => 'x'.repeat(100)).join('\n')
+  app.setTranscript([user(text, 0), { kind: 'assistant', turn: 0, text: 'done' }])
+  app.setFullscreen(true)
+  vt.sendInput('\x0f') // expand the recent user
+  let rows = await viewRows(vt)
+  assert.equal(collapseFooterRows(rows).length, 1, 'narrow: the expanded prompt needs the tail control')
+
+  // Widen: the same 8 logical lines now render as 8 visual rows, below the
+  // threshold, so the bubble is no longer collapse-capable and the separate
+  // tail child must be dropped with it (the width change rebuilds the tree).
+  vt.resize(200, 40)
+  rows = await viewRows(vt)
+  assert.equal(collapseFooterRows(rows).length, 0, `wide: stale tail chrome:\n${rows.join('\n')}`)
+  assert.equal(compactMarkerCount(rows), 0, 'a non-compactable prompt has no marker either')
+
+  // Narrow again: the persisted master re-expands the recent prompt, and the
+  // tail control comes back with it.
+  vt.resize(80, 40)
+  rows = await viewRows(vt)
+  assert.equal(collapseFooterRows(rows).length, 1, `narrow again: the tail control must return:\n${rows.join('\n')}`)
+
+  const footerY = collapseFooterRows(rows)[0]!
+  clickCell(vt, 60, footerY)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'the re-derived tail control still collapses')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen: a tail press whose projection shifts above it never collapses on release', async () => {
+  const { vt, app } = startApp(100, 40)
+  const message = user(lines(24, 'b-'), 1)
+  app.setTranscript([message, { kind: 'assistant', turn: 1, text: lines(20, 'a-') }])
+  app.setFullscreen(true)
+  vt.sendInput('\x0f') // expand the recent user: the painted frame has the footer
+  let rows = await viewRows(vt)
+  const footerY = collapseFooterRows(rows)[0]!
+  assert.ok(rows[footerY]!.includes('▴ Collapse'))
+
+  // Press the tail control, then insert a preceding message (a rebuild that
+  // moves this entry down) before releasing.
+  vt.sendInput(`\x1b[<0;60;${footerY + 1}M`)
+  app.setTranscript([user('short', 0), message, { kind: 'assistant', turn: 1, text: lines(20, 'a-') }])
+  vt.sendInput(`\x1b[<0;60;${footerY + 1}m`)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 0, 'the stale tail press must not collapse the shifted message')
+  assert.equal(collapseFooterRows(rows).length, 1, 'no disclosure mutation ran from the shifted cell')
+  app.setFullscreen(false)
+  app.stop()
+})
