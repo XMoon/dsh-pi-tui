@@ -1213,6 +1213,24 @@ adapter/lifetime mapping and adds no migration milestone (no D2.5).
 - `session/writer-held` (details `{ sessionId }`) is a proven pre-commit refusal:
   it settles `rejected` with actionable holder-recovery guidance, preserved
   details, a preserved draft, and no retry, takeover, or forced resume.
+- The version identity of this line is `0.4.7-alpha.2`. The published
+  `0.4.7-alpha.1` keeps its own alpha.1 contract: an `dsh-v0.1.6-alpha.1`
+  runtime still pairs with that bundle, and it stays the startup notice's
+  fallback for that runtime.
+
+### Deferred to Remote production composition (M3)
+
+Two plan items describe caller-side behavior the alpha.2 adaptation cannot reach
+while Remote stays non-composed. They are **adapter-ready, not wired**, and M3
+owns them — do not read this adaptation as having implemented them:
+
+| Plan item | Adapter state (this PR) | Deferred owner |
+|---|---|---|
+| D3/D4 Remote fork adoption and owner handoff | `fork()` is publication-only and `open()`/`retain()` is the retain-capable adoption seam; `SessionHandle.client` carries the exact-generation owner with `clientOwnerOf()`. The Direct runner consumes only `direct`, so no `liveClientOwner` install, no `retain new -> commit -> release old`, and no old-reference release exists yet. | M3 caller/runtime composition (`adoptFork`, `transitionTo`) |
+| writer-held TUI recovery | The writer settles a KNOWN `rejected` with preserved details and no retry, which is what a caller needs to restore a draft. The TUI draft restore, model-picker rollback, and queue-row preservation for a Remote caller are not observable without that caller. | M3 caller/UI wiring |
+
+Everything else in the alpha2 scope is implemented on the adapter side and
+covered by the unit/contract tests plus the same-Host smokes.
 
 The D1 closure ledger is:
 
