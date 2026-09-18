@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A running `/fork` fixes its cut at fork admission.** It no longer waits for the old turn to finish; if navigation is superseded, the published child remains available from the session list.
 - **Workspace membership is now shared with the Web surface.** The TUI profile mounts the official workspace service, and `/fork` of a session that belongs to a workspace puts the child in that same workspace, where Web lists it.
 - **Rewind is no longer offered for the first user turn.** The official Host fork cannot represent an empty-prefix child.
+- **Long user messages now collapse in both directions.** An expanded prompt gains a tail `▴ Collapse · …` control that collapses it with a plain click (fullscreen no longer depends on `Ctrl+O` alone); long input in the `steering…` lane folds by the same visual-row rule with its status line always visible. Disclosure keeps the viewport — follow-latest keeps following and historical browsing stays on the same semantic row — and the tail control is presentation chrome that is never copied into the clipboard.
 
 ## [0.4.7-alpha.1] - 2026-09-17
 

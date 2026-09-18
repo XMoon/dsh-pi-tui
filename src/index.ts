@@ -4110,15 +4110,23 @@ export function apply(ctx: Context, config: Config): void {
     }
     /** The display text of one client-local submission echo: the draft text
      * with its attachment placeholders expanded to compact markers, so an
-     * attachment-only submission is never an empty pending row. */
-    const localEchoText = (text: string): string => {
+     * attachment-only submission is never an empty pending row. The SAME
+     * expansion decides the foldability fact: a submission carrying any
+     * attachment marker is not text-only and must render in full. */
+    const localEcho = (text: string): { text: string; foldableText: boolean } => {
       const parts: string[] = []
+      let foldableText = true
       for (const segment of expandAttachmentPlaceholders(text, draftImages, draftFiles)) {
         if (segment.type === 'text') parts.push(segment.text)
-        else if (segment.type === 'image') parts.push(`🖼️ ${segment.image.name ?? 'image'}`)
-        else parts.push(`📄 ${segment.file.name} · ${formatBytes(segment.file.byteLength)}`)
+        else if (segment.type === 'image') {
+          foldableText = false
+          parts.push(`🖼️ ${segment.image.name ?? 'image'}`)
+        } else {
+          foldableText = false
+          parts.push(`📄 ${segment.file.name} · ${formatBytes(segment.file.byteLength)}`)
+        }
       }
-      return parts.join(' ')
+      return { text: parts.join(' '), foldableText }
     }
     /**
      * Own pending input must become VISIBLE even when the reader deliberately
@@ -4872,10 +4880,12 @@ export function apply(ctx: Context, config: Config): void {
       generation: number,
       ackToken: number,
     ): void => {
+      const echo = localEcho(text)
       pendingSubmissions.begin({
         requestId,
         placement,
-        text: localEchoText(text),
+        text: echo.text,
+        foldableText: echo.foldableText,
         createdAt: Date.now(),
         ...(sessionId === undefined ? {} : { sessionId }),
         generation,

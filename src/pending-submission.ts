@@ -48,6 +48,11 @@ export interface PendingSubmissionEcho {
   readonly sessionId?: string
   /** The session generation captured at submit time. */
   readonly generation?: number
+  /** Whether `text` is the submission's COMPLETE content (text-only input):
+   * attachment markers make it false, so a pending row never folds only to
+   * materialize as a full mixed-content durable bubble. ABSENT means unknown
+   * and fails open to the full presentation. */
+  readonly foldableText?: boolean
 }
 
 /** Input accepted by {@link PendingSubmissions.begin}. */
@@ -58,6 +63,7 @@ export interface PendingSubmissionBegin {
   readonly createdAt: number
   readonly sessionId?: string
   readonly generation?: number
+  readonly foldableText?: boolean
 }
 
 /**
@@ -91,6 +97,7 @@ export class PendingSubmissions {
       createdAt: input.createdAt,
       ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
       ...(input.generation === undefined ? {} : { generation: input.generation }),
+      ...(input.foldableText === undefined ? {} : { foldableText: input.foldableText }),
     })
   }
 
