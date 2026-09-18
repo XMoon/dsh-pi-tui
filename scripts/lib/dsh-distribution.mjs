@@ -770,13 +770,18 @@ export function assertSourceResolution(targetDir, distribution, required = [...d
   printDshProvenance(distribution)
 }
 
-/**
- * The release line a prerelease version belongs to (`0.1.6-alpha.1` →
- * `0.1.6-alpha.`), or `undefined` for a stable version (its own line).
- */
-function releaseLinePrefix(version) {
-  const match = /^(\d+\.\d+\.\d+)-([A-Za-z]+)\.\d+$/u.exec(version)
-  return match === null ? undefined : `${match[1]}-${match[2]}.`
+/** The `major.minor.patch` core of one version, or `undefined` if unparseable. */
+function versionCore(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)/u.exec(version)
+  return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3])]
+}
+
+/** Compare two `major.minor.patch` cores: -1 / 0 / 1. */
+function compareVersionCores(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] < right[index] ? -1 : 1
+  }
+  return 0
 }
 
 /**
@@ -786,16 +791,20 @@ function releaseLinePrefix(version) {
  * writer-only assertion keeps passing if pnpm ever changes how it reads
  * `overrides`.
  *
- * Only the target's release line is fenced: this repository legitimately
- * carries OLDER DSH compatibility lines as transitive dependencies
- * (`dsh-0.1.2-alpha.x`, `dsh-0.1.5-rc.x`), and they are a separate upstream
- * line, not drift. Within the target line NOTHING but the target version may
- * resolve — which is exactly the `alpha.1` → `alpha.2` drift this gate exists
- * for. The version is release-line agnostic (stable/rc/alpha all work) because
- * the line is derived from the version itself, not a lockfile enumeration.
+ * The rule is deliberately NOT "every family package has one version": this
+ * repository legitimately carries OLDER DSH compatibility lines as transitive
+ * dependencies (`dsh-0.1.2-alpha.x`, `dsh-0.1.5-rc.x`). What is fenced is the
+ * TARGET CORE (`0.1.6`): on that core ONLY the exact target version may
+ * resolve — `0.1.6-alpha.2`, `0.1.6-rc.1` and a stable `0.1.6` are all drift —
+ * and a HIGHER core must not appear at all (the CLI's `^0.1.6-alpha.1`
+ * resolves a same-core variant such as `0.1.6`/`0.1.6-alpha.2` or a higher
+ * STABLE core such as `0.1.7`; the gate rejects every higher core, including a
+ * higher prerelease that default semver rules would not themselves select).
+ * Older cores are a separate
+ * upstream line and are ignored.
  * @param targetDir - installed workspace/harness root.
- * @param version - the one exact DSH version the target line must resolve to.
- * @returns the installed target-line versions (exactly `[version]` on success).
+ * @param version - the one exact DSH version the target core must resolve to.
+ * @returns the installed target-core versions (exactly `[version]` on success).
  */
 export function assertInstalledDshFamily(targetDir, version) {
   const exact = assertVersion(stringValue(version, 'DSH npm family version'), 'DSH npm family version')
@@ -810,16 +819,25 @@ export function assertInstalledDshFamily(targetDir, version) {
     const match = /^@deepseek-ai\+dsh(?:-[^@]+)?@([^_]+)/iu.exec(entry)
     if (match !== null) installed.add(match[1])
   }
-  const prefix = releaseLinePrefix(exact)
-  const line = prefix === undefined
-    ? [...installed].filter(installedVersion => installedVersion === exact)
-    : [...installed].filter(installedVersion => installedVersion.startsWith(prefix))
-  if (!line.includes(exact)) fail(`exact DSH family install contained no ${exact} package`)
-  const mismatches = line.filter(installedVersion => installedVersion !== exact).sort()
+  const targetCore = versionCore(exact)
+  const versions = [...installed]
+  const sameCore = versions.filter(installedVersion => {
+    const core = versionCore(installedVersion)
+    return core !== undefined && targetCore !== undefined && compareVersionCores(core, targetCore) === 0
+  })
+  if (!sameCore.includes(exact)) fail(`exact DSH family install contained no ${exact} package`)
+  const mismatches = sameCore.filter(installedVersion => installedVersion !== exact).sort()
   if (mismatches.length > 0) {
     fail(`exact DSH family install resolved ${mismatches.join(', ')} alongside ${exact}`)
   }
-  return { versions: line.sort() }
+  const newer = versions.filter(installedVersion => {
+    const core = versionCore(installedVersion)
+    return core !== undefined && targetCore !== undefined && compareVersionCores(core, targetCore) > 0
+  }).sort()
+  if (newer.length > 0) {
+    fail(`exact DSH family install resolved a newer DSH line (${newer.join(', ')}) alongside ${exact}`)
+  }
+  return { versions: sameCore.sort() }
 }
 
 /** Print the provenance tuple that distinguishes source commits sharing a version. */

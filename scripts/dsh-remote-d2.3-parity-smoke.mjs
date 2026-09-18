@@ -84,6 +84,35 @@ const PRESET_A = 'probe-a'
 const PRESET_B = 'probe-b'
 const OFFICIAL_PRESET_IDS = ['standard', 'ptc', 'minimal', 'cordis']
 
+// F5 model parity (case A): a CONSUMED pre-cut selection (its matching
+// request/header clears the pending intent into `lastUsed`) and a DIFFERENT
+// unconsumed selection appended after the last closed turn. The child prefix
+// must stop before the post-cut event, so the projection resolves to the
+// consumed pre-cut selection rather than the post-cut one.
+const CONSUMED_PRE_CUT_SELECTION = { provider: PROVIDER, model: MODEL, reasoningEffort: 'high' }
+const POST_CUT_SELECTION = { provider: PROVIDER, model: 'smoke-post-cut', reasoningEffort: 'minimal' }
+const A_HOST_SOURCE_SESSION_ID = 'd2-4-selection-host-source'
+const A_DIRECT_SOURCE_SESSION_ID = 'd2-4-selection-direct-source'
+// F5 default fallback (case B): sources with NO model/selection and NO
+// request/header, so the child projection carries no session-local intent.
+const B_HOST_SOURCE_SESSION_ID = 'd2-4-default-host-source'
+const B_DIRECT_SOURCE_SESSION_ID = 'd2-4-default-direct-source'
+// F5 stopped boundary (case C): a completed turn followed by a LATER aborted
+// turn; fork-latest must choose the aborted turn/end, not the completed one.
+const C_HOST_SOURCE_SESSION_ID = 'd2-4-aborted-host-source'
+const C_DIRECT_SOURCE_SESSION_ID = 'd2-4-aborted-direct-source'
+// F8 subagent lineage (case D): subagent-origin sources whose parent Session
+// owns a workspace; the child must inherit that ANCESTOR workspace while its
+// own header stays an ordinary (non-subagent) session header.
+const D_HOST_PARENT_SESSION_ID = 'd2-4-subagent-host-parent'
+const D_DIRECT_PARENT_SESSION_ID = 'd2-4-subagent-direct-parent'
+const D_HOST_SOURCE_SESSION_ID = 'd2-4-subagent-host-source'
+const D_DIRECT_SOURCE_SESSION_ID = 'd2-4-subagent-direct-source'
+// F7 cwd/meta (case E): a source header WITHOUT cwd must fork a child that
+// still has no cwd (never an invented one).
+const E_HOST_SOURCE_SESSION_ID = 'd2-4-nocwd-host-source'
+const E_DIRECT_SOURCE_SESSION_ID = 'd2-4-nocwd-direct-source'
+
 const IMAGE_LIMITS = Object.freeze({
   maxImageBytes: 5 * 1024 * 1024,
   maxImagesPerMessage: 20,
@@ -243,7 +272,7 @@ async function createHost(presetRoot, workRoot) {
     // against one source would create two writers for the same Session. It
     // shares the anchor cwd so BOTH children must join one real workspace.
     const directAgent = await loop.create(SessionId(DIRECT_SOURCE_SESSION_ID), { provider: PROVIDER, model: MODEL }, { cwd: join(workRoot, 'anchor') })
-    return { ctx, agent, directAgent, resumeCalls, persistenceRoot, persistenceFiber }
+    return { ctx, agent, directAgent, loop, resumeCalls, persistenceRoot, persistenceFiber }
   } catch (error) {
     if (persistenceFiber !== undefined) await persistenceFiber.dispose()
     rmSync(persistenceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
@@ -288,6 +317,19 @@ function waitForProjection(binding, key, predicate, description) {
   })
 }
 
+/** Append one syntactically-closed turn without running the model loop; the
+ * fork boundary selector only depends on the `turn/end` event and its reason,
+ * so this keeps the fixture independent of adapter-driven turn timing. */
+function appendSyntheticClosedTurn(session, turn, reason) {
+  session.append('turn/start', { turn })
+  return Number(session.append('turn/end', { turn, reason }).seq)
+}
+
+/** Read the wire-visible model-selection projection of one live Session. */
+function modelSelectionOf(ctx, session) {
+  return ctx.get('sessionProjections').snapshot(session, ['modelSelection']).values.modelSelection
+}
+
 async function main() {
   const scenarios = {}
   const loader = installModuleLoader()
@@ -327,6 +369,84 @@ async function main() {
     const HISTORICAL_SELECTION = { provider: PROVIDER, model: MODEL, reasoningEffort: 'high' }
     host.agent.session.append('model/selection', HISTORICAL_SELECTION)
     host.directAgent.session.append('model/selection', HISTORICAL_SELECTION)
+
+    // ---- D2.4 parity fixtures -------------------------------------------------
+    // Every case below owns ONE Host-path source and ONE Direct-path source (two
+    // INDEPENDENT writers). Sources are created before the Client connects so the
+    // official Session list already carries them.
+    const createForkSource = (sessionId, meta) =>
+      host.loop.create(SessionId(sessionId), { provider: PROVIDER, model: MODEL }, meta)
+
+    // Case A: consumed pre-cut selection + different unconsumed post-cut one.
+    const selectionHeader = selection => ({
+      header: { config: { ...selection } },
+      reason: 'change',
+      startsSeries: true,
+    })
+    const aHostSource = await createForkSource(A_HOST_SOURCE_SESSION_ID, { cwd: anchorDir })
+    const aDirectSource = await createForkSource(A_DIRECT_SOURCE_SESSION_ID, { cwd: anchorDir })
+    for (const source of [aHostSource, aDirectSource]) {
+      const session = source.session
+      session.append('model/selection', CONSUMED_PRE_CUT_SELECTION)
+      session.append('request/header', selectionHeader(CONSUMED_PRE_CUT_SELECTION))
+      appendSyntheticClosedTurn(session, 1, { kind: 'completed' })
+      session.append('model/selection', POST_CUT_SELECTION)
+    }
+    await workspace.attachSession(SessionId(A_HOST_SOURCE_SESSION_ID))
+    await workspace.attachSession(SessionId(A_DIRECT_SOURCE_SESSION_ID))
+
+    // Case B: no explicit selection and no request/header at all.
+    await createForkSource(B_HOST_SOURCE_SESSION_ID, { cwd: anchorDir })
+    await createForkSource(B_DIRECT_SOURCE_SESSION_ID, { cwd: anchorDir })
+    for (const sessionId of [B_HOST_SOURCE_SESSION_ID, B_DIRECT_SOURCE_SESSION_ID]) {
+      appendSyntheticClosedTurn(host.ctx.sessions.get(SessionId(sessionId)), 1, { kind: 'completed' })
+      await workspace.attachSession(SessionId(sessionId))
+    }
+
+    // Case C: an earlier completed turn and a LATER aborted turn. Fork-latest
+    // must pick the aborted boundary, not the earlier completed one.
+    const abortReason = { kind: 'aborted', reason: { kind: 'user' } }
+    const abortedBoundarySeq = {}
+    for (const [key, sessionId] of [['host', C_HOST_SOURCE_SESSION_ID], ['direct', C_DIRECT_SOURCE_SESSION_ID]]) {
+      const source = await createForkSource(sessionId, { cwd: anchorDir })
+      appendSyntheticClosedTurn(source.session, 1, { kind: 'completed' })
+      abortedBoundarySeq[key] = appendSyntheticClosedTurn(source.session, 2, abortReason)
+      await workspace.attachSession(SessionId(sessionId))
+    }
+
+    // Case D: subagent-origin sources whose parent is the workspace member. The
+    // workspace `attachSession` validates the stored cwd against the workspace
+    // path, so the subagent source shares the parent's cwd; its workspace still
+    // comes from ANCESTOR lineage, never its own (absent) membership.
+    const subagentParentDir = join(workRoot, 'subagent-parent')
+    mkdirSync(subagentParentDir, { recursive: true })
+    const subagentWorkspace = await host.ctx.get('workspaceRegistry').create(subagentParentDir, 'D2.4 subagent workspace')
+    for (const parentId of [D_HOST_PARENT_SESSION_ID, D_DIRECT_PARENT_SESSION_ID]) {
+      await createForkSource(parentId, { cwd: subagentParentDir })
+      await subagentWorkspace.attachSession(SessionId(parentId))
+    }
+    const subagentMembership = () => host.ctx.get('workspaceRegistry').list()
+      .find(candidate => candidate.id === subagentWorkspace.id)?.sessionIds ?? []
+    for (const [sessionId, parentId] of [
+      [D_HOST_SOURCE_SESSION_ID, D_HOST_PARENT_SESSION_ID],
+      [D_DIRECT_SOURCE_SESSION_ID, D_DIRECT_PARENT_SESSION_ID],
+    ]) {
+      const source = await createForkSource(sessionId, {
+        cwd: subagentParentDir,
+        parentSession: SessionId(parentId),
+        origin: 'subagent',
+        delegationDepth: 1,
+      })
+      appendSyntheticClosedTurn(source.session, 1, { kind: 'completed' })
+    }
+
+    // Case E: sources whose header carries no cwd.
+    for (const sessionId of [E_HOST_SOURCE_SESSION_ID, E_DIRECT_SOURCE_SESSION_ID]) {
+      const source = await createForkSource(sessionId, {})
+      appendSyntheticClosedTurn(source.session, 1, { kind: 'completed' })
+    }
+    // --------------------------------------------------------------------------
+
     globalThis.__DSH_TRANSPORT__ = hostTransport(host, fetchLog)
 
     client = new Context()
@@ -358,6 +478,16 @@ async function main() {
     const modelCatalog = new RemoteModelCatalog(client.remote.session, sessions, connection.generation)
     const presetCatalog = new RemotePresetCatalog(client.remote.agentPresets, connection.generation)
     const lifecycle = new RemoteSessionLifecycle(sessions, client.remote.session, connection.generation)
+    // The Direct composition mirrors the official controller: resolve the preset
+    // id, then mount that resolved preset in the child's setup.
+    const directPresets = host.ctx.get('agentPresets')
+    const direct = new DirectSessionLifecycle(host.ctx, async (presetId) => {
+      const resolved = await directPresets.resolve(presetId)
+      return {
+        agentPreset: resolved.id,
+        setup: async (agentCtx) => { await directPresets.mount(agentCtx, resolved.id) },
+      }
+    })
 
     // CREATE (a): ordinary create with no explicit preset routes through the
     // official ClientSessions.create and is addressable on resolution.
@@ -593,17 +723,6 @@ async function main() {
       assert.equal(directFirstEnd, scenarios.forkHistorical?.boundarySeq,
         'Direct and Host sources must agree on the historical completed-turn boundary')
 
-      // The Direct composition mirrors the official controller: resolve the
-      // preset id, then mount that resolved preset in the child's setup.
-      const directPresets = host.ctx.get('agentPresets')
-      const direct = new DirectSessionLifecycle(host.ctx, async (presetId) => {
-        const resolved = await directPresets.resolve(presetId)
-        return {
-          agentPreset: resolved.id,
-          setup: async (agentCtx) => { await directPresets.mount(agentCtx, resolved.id) },
-        }
-      })
-
       const childSession = (outcome) => outcome.kind === 'forked'
         ? host.ctx.sessions.get(SessionId(outcome.handle.session.id))
         : undefined
@@ -679,6 +798,227 @@ async function main() {
         notFoundCode: missing.outcome.kind === 'rejected' ? missing.outcome.error.code : undefined,
       }
     }
+
+    // ---- D2.4 F5/F7/F8 parity scenarios --------------------------------------
+    // Each pair forks an INDEPENDENT Host-path source and Direct-path source on
+    // the same real Host. No Direct result is ever JSON-stringified.
+    {
+      const forkPair = async (hostSourceId, directSourceId) => {
+        const hostResult = await lifecycle.fork({ sourceSessionId: hostSourceId })
+        const directResult = await direct.fork({ sourceSessionId: directSourceId })
+        assert.equal(hostResult.outcome.kind, 'forked', `Host fork of ${hostSourceId} settled as ${hostResult.outcome.kind}`)
+        assert.equal(directResult.outcome.kind, 'forked', `Direct fork of ${directSourceId} settled as ${directResult.outcome.kind}`)
+        const hostChildId = hostResult.outcome.handle.session.id
+        const directChildId = directResult.outcome.handle.session.id
+        const hostChild = host.ctx.sessions.get(SessionId(hostChildId))
+        const directChild = host.ctx.sessions.get(SessionId(directChildId))
+        assert.ok(hostChild !== undefined, `Host fork child ${hostChildId} is not in the Session registry`)
+        assert.ok(directChild !== undefined, `Direct fork child ${directChildId} is not in the Session registry`)
+        return { hostResult, directResult, hostChildId, directChildId, hostChild, directChild }
+      }
+
+      // F5 (A): a consumed pre-cut selection followed by a DIFFERENT unconsumed
+      // selection after the last closed turn. The cut must exclude the post-cut
+      // event, so the projection resolves the consumed pre-cut selection.
+      {
+        const aHostSource = host.ctx.sessions.get(SessionId(A_HOST_SOURCE_SESSION_ID))
+        const aDirectSource = host.ctx.sessions.get(SessionId(A_DIRECT_SOURCE_SESSION_ID))
+        assert.ok(aHostSource !== undefined && aDirectSource !== undefined, 'the case A sources are missing')
+        assert.deepEqual(modelSelectionOf(host.ctx, aHostSource).next, POST_CUT_SELECTION,
+          'the Host source must carry the unconsumed post-cut selection before fork')
+        assert.deepEqual(modelSelectionOf(host.ctx, aDirectSource).next, POST_CUT_SELECTION,
+          'the Direct source must carry the unconsumed post-cut selection before fork')
+        // The pre-cut selection must be CONSUMED (its request/header advanced
+        // `lastUsed`), otherwise this fixture would not prove the cut excludes
+        // the post-cut event rather than simply having no earlier intent.
+        assert.deepEqual(modelSelectionOf(host.ctx, aHostSource).lastUsed, CONSUMED_PRE_CUT_SELECTION,
+          'the Host source must show the pre-cut selection as consumed')
+        assert.deepEqual(modelSelectionOf(host.ctx, aDirectSource).lastUsed, CONSUMED_PRE_CUT_SELECTION,
+          'the Direct source must show the pre-cut selection as consumed')
+
+        const { hostChildId, directChildId, hostChild, directChild } =
+          await forkPair(A_HOST_SOURCE_SESSION_ID, A_DIRECT_SOURCE_SESSION_ID)
+        const hostSelection = modelSelectionOf(host.ctx, hostChild)
+        const directSelection = modelSelectionOf(host.ctx, directChild)
+        assert.deepEqual(hostSelection.next, CONSUMED_PRE_CUT_SELECTION,
+          'Host fork must resolve the consumed pre-cut selection, never the post-cut one')
+        assert.deepEqual(directSelection.next, CONSUMED_PRE_CUT_SELECTION,
+          'Direct fork must resolve the consumed pre-cut selection, never the post-cut one')
+        assert.deepEqual(directSelection, hostSelection,
+          'Direct and Host fork children must agree on the inherited selection projection')
+        assert.equal(Number(hostChild.inheritedEventCount), Number(directChild.inheritedEventCount),
+          'Direct and Host pre-cut selection children must agree on the inherited prefix length')
+        scenarios.forkSelectionParity = {
+          status: 'covered',
+          hostSourceSessionId: A_HOST_SOURCE_SESSION_ID,
+          directSourceSessionId: A_DIRECT_SOURCE_SESSION_ID,
+          hostChildSessionId: hostChildId,
+          directChildSessionId: directChildId,
+          inheritedSelection: CONSUMED_PRE_CUT_SELECTION,
+          excludedSelection: POST_CUT_SELECTION,
+        }
+      }
+
+      // F5 (B): no session-local selection. The projection must have no intent,
+      // and BOTH adapters must activate the Host default provider/model, which is
+      // observable only once a request header is assembled.
+      {
+        const bHostSource = host.ctx.sessions.get(SessionId(B_HOST_SOURCE_SESSION_ID))
+        const bDirectSource = host.ctx.sessions.get(SessionId(B_DIRECT_SOURCE_SESSION_ID))
+        assert.ok(bHostSource !== undefined && bDirectSource !== undefined, 'the case B sources are missing')
+        // Prove the fixture really has NO session-local intent before forking;
+        // otherwise the child assertion below could pass for the wrong reason.
+        assert.deepEqual(modelSelectionOf(host.ctx, bHostSource), { lastUsed: null, next: null },
+          'the Host no-selection source must have no session-local intent')
+        assert.deepEqual(modelSelectionOf(host.ctx, bDirectSource), { lastUsed: null, next: null },
+          'the Direct no-selection source must have no session-local intent')
+
+        const { hostResult, directResult, hostChildId, directChildId, hostChild, directChild } =
+          await forkPair(B_HOST_SOURCE_SESSION_ID, B_DIRECT_SOURCE_SESSION_ID)
+        assert.deepEqual(modelSelectionOf(host.ctx, hostChild), { lastUsed: null, next: null },
+          'Host fork without session-local selection must project no intent')
+        assert.deepEqual(modelSelectionOf(host.ctx, directChild), { lastUsed: null, next: null },
+          'Direct fork without session-local selection must project no intent')
+
+        const hostChildAgent = host.ctx.agents.get(SessionId(hostChildId))
+        const directChildAgent = directResult.outcome.handle.direct.agent
+        assert.ok(hostChildAgent !== undefined, 'the official Host fork child has no live Agent to prompt')
+        assert.ok(directChildAgent !== undefined, 'the Direct fork child has no live Agent to prompt')
+        const probe = () => createUserMessage({
+          content: [{ type: 'text', text: 'default activation probe' }],
+          source: { kind: 'user' },
+        })
+        const hostEndsBefore = hostChild.snapshotEvents().filter(event => event.type === 'turn/end').length
+        const directEndsBefore = directChild.snapshotEvents().filter(event => event.type === 'turn/end').length
+        hostChildAgent.followup(probe())
+        directChildAgent.followup(probe())
+        await waitFor('the Host default-activation child turn to complete', () =>
+          hostChild.snapshotEvents().filter(event => event.type === 'turn/end').length > hostEndsBefore ? true : undefined)
+        await waitFor('the Direct default-activation child turn to complete', () =>
+          directChild.snapshotEvents().filter(event => event.type === 'turn/end').length > directEndsBefore ? true : undefined)
+
+        const firstRequestConfig = session =>
+          session.snapshotEvents().find(event => event.type === 'request/header')?.data.header.config
+        const hostConfig = firstRequestConfig(hostChild)
+        const directConfig = firstRequestConfig(directChild)
+        assert.ok(hostConfig !== undefined, 'the Host child assembled no first request header')
+        assert.ok(directConfig !== undefined, 'the Direct child assembled no first request header')
+        assert.deepEqual({ provider: hostConfig.provider, model: hostConfig.model }, { provider: PROVIDER, model: MODEL },
+          'the Host child must activate the Host default provider/model')
+        assert.deepEqual({ provider: directConfig.provider, model: directConfig.model }, { provider: PROVIDER, model: MODEL },
+          'the Direct child must activate the Host default provider/model')
+        assert.deepEqual(directConfig, hostConfig,
+          'Direct and Host default-fallback children must assemble the same activation config')
+        scenarios.forkDefaultSelectionParity = {
+          status: 'covered',
+          hostSourceSessionId: B_HOST_SOURCE_SESSION_ID,
+          directSourceSessionId: B_DIRECT_SOURCE_SESSION_ID,
+          hostChildSessionId: hostChildId,
+          directChildSessionId: directChildId,
+          defaultActivation: { provider: PROVIDER, model: MODEL },
+        }
+      }
+
+      // F5 (C): the latest closed turn ends `aborted`, after an earlier completed
+      // turn; the fork boundary must be the aborted `turn/end`.
+      {
+        const { hostChildId, directChildId, hostChild, directChild } =
+          await forkPair(C_HOST_SOURCE_SESSION_ID, C_DIRECT_SOURCE_SESSION_ID)
+        assert.equal(abortedBoundarySeq.host, abortedBoundarySeq.direct,
+          'structurally identical case C sources must agree on the aborted boundary seq')
+        const lastEnd = session => session.snapshotEvents().findLast(event => event.type === 'turn/end')
+        const hostEnd = lastEnd(hostChild)
+        const directEnd = lastEnd(directChild)
+        assert.equal(Number(hostEnd.seq), abortedBoundarySeq.host,
+          'Host fork must stop at the aborted turn/end, not the earlier completed one')
+        assert.equal(Number(directEnd.seq), abortedBoundarySeq.direct,
+          'Direct fork must stop at the aborted turn/end, not the earlier completed one')
+        assert.equal(hostEnd.data.reason.kind, 'aborted', 'Host fork must inherit the aborted turn/end reason')
+        assert.equal(directEnd.data.reason.kind, 'aborted', 'Direct fork must inherit the aborted turn/end reason')
+        assert.equal(Number(hostChild.inheritedEventCount), abortedBoundarySeq.host + 1,
+          'Host aborted-boundary fork must record the exact prefix through the aborted turn/end')
+        assert.equal(Number(directChild.inheritedEventCount), abortedBoundarySeq.direct + 1,
+          'Direct aborted-boundary fork must record the exact prefix through the aborted turn/end')
+        scenarios.forkAbortedBoundaryParity = {
+          status: 'covered',
+          hostSourceSessionId: C_HOST_SOURCE_SESSION_ID,
+          directSourceSessionId: C_DIRECT_SOURCE_SESSION_ID,
+          hostChildSessionId: hostChildId,
+          directChildSessionId: directChildId,
+          boundarySeq: abortedBoundarySeq.direct,
+          boundaryReason: 'aborted',
+        }
+      }
+
+      // F8 (D): a subagent-origin source is NOT a direct workspace member, but
+      // its parent is. The child must join the nearest ancestor workspace while
+      // its own header stays an ordinary (non-subagent) lineage header.
+      {
+        assert.equal(subagentMembership().includes(D_HOST_SOURCE_SESSION_ID), false,
+          'the Host subagent source must not be a direct workspace member')
+        assert.equal(subagentMembership().includes(D_DIRECT_SOURCE_SESSION_ID), false,
+          'the Direct subagent source must not be a direct workspace member')
+        // Pin the fixture preconditions: without them the "child does not copy
+        // origin/delegationDepth" assertions could pass on a malformed source.
+        const dHostSource = host.ctx.sessions.get(SessionId(D_HOST_SOURCE_SESSION_ID))
+        const dDirectSource = host.ctx.sessions.get(SessionId(D_DIRECT_SOURCE_SESSION_ID))
+        assert.ok(dHostSource !== undefined && dDirectSource !== undefined, 'the case D sources are missing')
+        for (const [label, source, parentId] of [
+          ['Host', dHostSource, D_HOST_PARENT_SESSION_ID],
+          ['Direct', dDirectSource, D_DIRECT_PARENT_SESSION_ID],
+        ]) {
+          assert.equal(source.header.origin, 'subagent', `${label} subagent source fixture must carry origin: 'subagent'`)
+          assert.equal(source.header.delegationDepth, 1, `${label} subagent source fixture must carry delegationDepth: 1`)
+          assert.equal(source.header.parentSession, parentId, `${label} subagent source must name its immediate parent`)
+        }
+        const { hostChildId, directChildId, hostChild, directChild } =
+          await forkPair(D_HOST_SOURCE_SESSION_ID, D_DIRECT_SOURCE_SESSION_ID)
+        for (const [label, child, sourceId, childId] of [
+          ['Host', hostChild, D_HOST_SOURCE_SESSION_ID, hostChildId],
+          ['Direct', directChild, D_DIRECT_SOURCE_SESSION_ID, directChildId],
+        ]) {
+          assert.equal(child.header.parentSession, sourceId, `${label} subagent fork must preserve the immediate parent lineage`)
+          assert.equal(child.header.origin, undefined, `${label} subagent fork child must not copy origin: 'subagent'`)
+          assert.equal(child.header.delegationDepth, undefined, `${label} subagent fork child must not copy delegationDepth`)
+          assert.equal(child.header.cwd, subagentParentDir, `${label} subagent fork child must keep the source cwd`)
+          assert.equal(child.header.isSeeded, true, `${label} subagent fork must publish a seeded child`)
+          assert.equal(subagentMembership().includes(childId), true,
+            `${label} subagent fork child must inherit the nearest ancestor workspace`)
+        }
+        scenarios.forkSubagentWorkspaceParity = {
+          status: 'covered',
+          hostSourceSessionId: D_HOST_SOURCE_SESSION_ID,
+          directSourceSessionId: D_DIRECT_SOURCE_SESSION_ID,
+          hostChildSessionId: hostChildId,
+          directChildSessionId: directChildId,
+          ancestorWorkspaceId: subagentWorkspace.id,
+        }
+      }
+
+      // F7 (E): a cwd-absent source must fork a cwd-absent child.
+      {
+        const eHostSource = host.ctx.sessions.get(SessionId(E_HOST_SOURCE_SESSION_ID))
+        const eDirectSource = host.ctx.sessions.get(SessionId(E_DIRECT_SOURCE_SESSION_ID))
+        assert.equal(eHostSource.header.cwd, undefined, 'the Host cwd-absent source must have no cwd')
+        assert.equal(eDirectSource.header.cwd, undefined, 'the Direct cwd-absent source must have no cwd')
+        const { hostChildId, directChildId, hostChild, directChild } =
+          await forkPair(E_HOST_SOURCE_SESSION_ID, E_DIRECT_SOURCE_SESSION_ID)
+        assert.equal(hostChild.header.cwd, undefined, 'Host fork of a cwd-absent source must not invent a cwd')
+        assert.equal(directChild.header.cwd, undefined, 'Direct fork of a cwd-absent source must not invent a cwd')
+        assert.equal(hostChild.header.parentSession, E_HOST_SOURCE_SESSION_ID, 'Host cwd-absent fork must preserve lineage')
+        assert.equal(directChild.header.parentSession, E_DIRECT_SOURCE_SESSION_ID, 'Direct cwd-absent fork must preserve lineage')
+        assert.equal(hostChild.header.isSeeded, true, 'Host cwd-absent fork must publish a seeded child')
+        assert.equal(directChild.header.isSeeded, true, 'Direct cwd-absent fork must publish a seeded child')
+        scenarios.forkCwdAbsentParity = {
+          status: 'covered',
+          hostSourceSessionId: E_HOST_SOURCE_SESSION_ID,
+          directSourceSessionId: E_DIRECT_SOURCE_SESSION_ID,
+          hostChildSessionId: hostChildId,
+          directChildSessionId: directChildId,
+        }
+      }
+    }
+    // --------------------------------------------------------------------------
 
     // OPEN: official Client open/binding, the Client current identity moves,
     // and no Host resume is issued.

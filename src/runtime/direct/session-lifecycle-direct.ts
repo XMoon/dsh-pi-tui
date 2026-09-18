@@ -106,6 +106,11 @@ export interface ForkWorkspaceRegistryLike {
 export interface DirectOwnerPoolLike {
   claim(sessionId: string): AgentHandle | undefined
   park(handle: AgentHandle): void
+  /** Await any in-flight retirement of THIS session's owner before resuming it.
+   * The persistence write claim is exclusive, so resuming a still-live handle
+   * (`session "X" is already owned by an active write handle`) would fail while
+   * its lease is held; a reopen must therefore follow the release. */
+  waitForRelease?(sessionId: string): Promise<void>
 }
 
 /** The Direct backend's session lifecycle: the `ctx.agents` service behind
@@ -180,6 +185,32 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     }
   }
 
+  /**
+   * Await a pending Direct owner release, honoring the caller's cancellation.
+   * @returns `true` when the release settled (or there was none), `false` when
+   *   the signal aborted first — the caller then settles as `cancelled`
+   *   instead of staying pending behind a slow retirement.
+   */
+  private async waitForReleaseOrAbort(sessionId: string, signal: AbortSignal | undefined): Promise<boolean> {
+    const release = this.ownerPool?.waitForRelease?.(sessionId)
+    if (release === undefined) return true
+    if (signal === undefined) {
+      await release
+      return true
+    }
+    if (signal.aborted) return false
+    let onAbort: (() => void) | undefined
+    const aborted = new Promise<false>(resolve => {
+      onAbort = () => resolve(false)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      return await Promise.race([release.then(() => true), aborted])
+    } finally {
+      if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
+    }
+  }
+
   async open(request: OpenSessionRequest): Promise<OpenResult> {
     if (Boolean(request.signal?.aborted)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
     // A successful Direct fork whose navigation was superseded already owns a
@@ -196,6 +227,15 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     const agents = this.ctx.get('agents') as AgentsServiceLike | undefined
     if (agents === undefined) {
       return { ownership: 'current', outcome: { kind: 'unavailable', message: 'agents service unavailable' } }
+    }
+    // A source owner whose retirement is still in flight must be released
+    // before it can be resumed: the persistence write claim is exclusive, so
+    // resuming the still-live handle would fail. `claim` above already handled
+    // a PARKED owner; this handles the one being retired. The wait honors the
+    // caller's cancellation: an aborted open must not stay pending behind a
+    // slow retirement.
+    if (!await this.waitForReleaseOrAbort(request.sessionId, request.signal)) {
+      return { ownership: 'current', outcome: { kind: 'cancelled' } }
     }
     // Capture the activation fallback at admission (v2 §0.8.3).
     const agentOptions = this.agentOptions()

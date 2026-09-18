@@ -1110,16 +1110,23 @@ Ordinary create stays cwd-only, exactly like official `session.create` without a
 official executor appends `command/done` to the SOURCE session only after the
 handler settles. Direct therefore commits the visible child inside the handler
 but QUEUES the source owner's retirement, flushing it at an explicit
-post-command-settlement seam. Every NON-command path (the rewind picker's owned
-task) instead awaits that retirement inside the handoff, exactly as before the
-seam, so the handoff does not report success until the old source is fully
-disposed and an immediate `/resume` after that success can never observe a live,
-lease-held owner. (The internal current identity already switched to the child
-earlier, as it always did; the guarantee is about the returned handoff, not the
-internal swap.)
-Retiring the source inside the command handler would detach the Session first,
-and a detached `Session.append` never reaches the persistence writer, so the
-durable log would keep `command/run` without its `command/done`.
+post-command-settlement seam. That seam WAITS for the retirement: the command
+workflow reports completion — and the source owner releases its write lease —
+only after `command/done` has landed AND the old owner is disposed. Every
+NON-command path (the rewind picker's owned task) awaits the same retirement
+inside the handoff. `/fork` additionally pins the source for the WHOLE
+operation, from admission before the child exists: while that pin is held (and
+the retirement is still running), opening or resuming the source waits for the
+release instead of resuming a live, lease-held handle (`DirectOwnerPoolLike.
+waitForRelease`). So there is exactly one handoff completion point, and an
+immediate reopen after it is safe. If a retirement phase is CONTAINED as a
+failure (notably `disposeOwner`), the pin still releases and the reopen fails
+loudly on the official exclusive write claim rather than hanging behind a pin
+that could never settle; the failed phase is already diag-logged by the
+retirement helper, and a leaked handle remains its own bug. Retiring the source
+inside the command handler would instead detach the Session first, and a
+detached `Session.append` never reaches the persistence writer, so the durable
+log would keep `command/run` without its `command/done`.
 
 **Settlement taxonomy.** `session/fork-unavailable` means only "the source has
 no legal completed-turn boundary". A missing source is `session/not-found`, a
@@ -1132,10 +1139,18 @@ impossible `session/fork-not-addressable` outcome is gone: a resolved official
 
 Validation for this stage: Direct/Remote lifecycle contract tests, pure rewind
 candidate tests, runner busy-admission/supersession/park-claim tests, the
-Direct-vs-Host same-Host `smoke:remote-d2-fork` comparison, the
-`smoke:remote-d2-closure` aggregate, the client-boundary gate, and the
-`command/run`/`command/done` pairing regression. The boundary gate stays green
-and `packages/pi-tui/**` is unchanged.
+`command/run`/`command/done` pairing regression, the source-release/reopen
+regressions (adapter `waitForRelease` contract + rewind-picker awaited
+retirement), the `smoke:remote-d2-closure` aggregate, and the
+`smoke:remote-d2-fork` same-Host Direct-vs-official-Host comparison. That smoke
+now covers, as real Direct/Host pairs on one Host and one real
+`workspaceRegistry`: latest/historical/future anchors, open-tail and not-found
+refusals, a consumed pre-cut model selection with a different post-cut selection
+excluded, no-explicit-selection activation through the Host default (observed on
+the child's first request header), an `aborted` `turn/end` boundary, subagent
+nearest-ancestor workspace inheritance with `origin`/`delegationDepth` not
+copied, and a cwd-absent source. The client-boundary gate stays green and
+`packages/pi-tui/**` is unchanged.
 
 **DSH 0.1.6 compatibility note.** `next` now targets the published DSH
 `0.1.6-alpha.1` family in npm mode, and the Source Mode pin moves to
