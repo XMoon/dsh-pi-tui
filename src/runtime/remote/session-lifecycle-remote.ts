@@ -1,6 +1,6 @@
 /**
  * Experimental Remote implementation of the semantic SessionLifecycle port
- * (D2.3).
+ * (D2.3–D2.4).
  *
  * Ordinary create maps to the official `ClientSessions.create()` (which
  * guarantees that, on resolution, the created Session is in the Client list
@@ -14,9 +14,9 @@
  * Open is the official Client semantic `select/open this Session`:
  * `ClientSessions.open()` / `binding()`. No Host `resume` RPC is invented.
  *
- * Seeded/fork creates fail closed: D2.4 owns Host fork, and the legacy Direct
- * seed payload must never be serialized as a new Remote contract. A create
- * error is operation-specific: a post-publication error is never reported as
+ * Host-owned fork maps to the official `ClientSessions.fork()` exactly once;
+ * no seed payload or child identity crosses this adapter. A create error is
+ * operation-specific: a post-publication error is never reported as
  * "the Session was never created", its published identity is machine-readable,
  * a Connection generation replaced mid-RPC is indeterminate, and no same-id
  * retry happens.
@@ -36,6 +36,8 @@ import type {
   CreateOutcome,
   CreateResult,
   CreateSessionRequest,
+  ForkResult,
+  ForkSessionRequest,
   OpenResult,
   OpenSessionRequest,
   SessionLifecycle,
@@ -55,9 +57,12 @@ export interface RemoteLifecycleSessionSummary {
   readonly cwd?: string
 }
 
-/** The official `ClientSessions` subset the lifecycle needs. */
+/** The official `ClientSessions` subset the lifecycle needs. The generated
+ * RemoteResult is already unwrapped by ClientSessions.create/fork; only the
+ * generated session namespace below exposes RemoteResultLike values. */
 export interface RemoteLifecycleSessions {
   create(opts: { workspaceId?: string; cwd?: string; sessionId?: string }): Promise<string>
+  fork(opts: { readonly sessionId: string; readonly atSeq?: number }): Promise<string>
   open(id: string): void
   binding(id: string): { readonly sessionId?: string } | undefined
   handleSessionAdded(summary: RemoteLifecycleSessionSummary): void
@@ -87,14 +92,8 @@ const CREATE_REFUSAL_CODES: ReadonlySet<string> = new Set([
   'session/agent-busy',
 ])
 
-/** Whether the request carries the Direct D2.4 fork/rewind legacy payload. */
-function isSeededCreate(request: CreateSessionRequest): boolean {
-  return request.seed !== undefined || request.meta.isSeeded === true
-}
-
 function requestCwd(request: CreateSessionRequest): string | undefined {
-  const cwd = request.meta.cwd
-  return typeof cwd === 'string' ? cwd : undefined
+  return request.cwd
 }
 
 /**
@@ -158,6 +157,31 @@ function classifyCreateFailure(error: unknown, requestedSessionId: string): Crea
   }
 }
 
+const FORK_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  'gateway/bad-request',
+  'session/not-found',
+  'session/fork-unavailable',
+])
+
+function classifyForkFailure(error: unknown): ForkResult['outcome'] {
+  const code = errorCode(error)
+  const published = publishedSessionId(error)
+  if (published !== undefined) {
+    return {
+      kind: 'published-with-error',
+      sessionId: published,
+      error: { code: code ?? 'session/workspace-attach-failed', message: remoteFailureMessage(error) },
+    }
+  }
+  if (code !== undefined && (FORK_REFUSAL_CODES.has(code) || GATEWAY_PRE_INVOCATION_CODES.has(code))) {
+    return { kind: 'rejected', error: { code, message: remoteFailureMessage(error) } }
+  }
+  return {
+    kind: 'indeterminate',
+    error: { code: code ?? 'session/fork-indeterminate', message: remoteFailureMessage(error) },
+  }
+}
+
 /** The experimental Remote session lifecycle. */
 export class RemoteSessionLifecycle implements SessionLifecycle {
   private readonly sessions: RemoteLifecycleSessions
@@ -177,16 +201,6 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
   async create(request: CreateSessionRequest): Promise<CreateResult> {
     // A provable PRE-dispatch cancellation is `cancelled` (never a throw).
     if (request.signal?.aborted === true) return { ownership: 'current', outcome: { kind: 'cancelled' } }
-    if (isSeededCreate(request)) {
-      // Never serialize the legacy Direct seed payload as a Remote contract.
-      return {
-        ownership: 'current',
-        outcome: {
-          kind: 'rejected',
-          error: { code: 'session/create-seeded-unsupported', message: 'the Remote ordinary create path cannot create a seeded/forked Session; D2.4 owns Host fork' },
-        },
-      }
-    }
     const cwd = requestCwd(request)
     const captured = this.generation.getSnapshot()
     // A disconnected client must not dispatch through stale/queued state.
@@ -296,5 +310,54 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     // generation that owned it is still current.
     const ownershipNow: OperationOwnership = Object.is(captured, this.generation.getSnapshot()) ? 'current' : 'superseded'
     return { ownership: ownershipNow, outcome: { kind: 'opened', handle: { session: { id: request.sessionId } } } }
+  }
+
+  async fork(request: ForkSessionRequest): Promise<ForkResult> {
+    // The semantic port accepts only canonical event sequence anchors; the
+    // official Client performs its own flooring for lower-level callers, but
+    // this adapter must not create a Remote-only normalization rule.
+    if (request.atSeq !== undefined
+      && (!Number.isSafeInteger(request.atSeq) || request.atSeq < 0)) {
+      return { ownership: 'current', outcome: { kind: 'rejected', error: { code: 'gateway/bad-request', message: 'atSeq must be a non-negative safe integer' } } }
+    }
+    const captured = this.generation.getSnapshot()
+    if (captured === undefined) {
+      return { ownership: 'current', outcome: { kind: 'rejected', error: { code: 'session/fork-unavailable', message: 'the remote connection is not connected' } } }
+    }
+    const ownership = (): OperationOwnership =>
+      Object.is(captured, this.generation.getSnapshot()) ? 'current' : 'superseded'
+    let childId: string
+    try {
+      // The official ClientSessions fork owns Host dispatch, child identity,
+      // cut, lineage, workspace and Client-state reconciliation. This is one
+      // call only; no retry is legal for any failure below.
+      childId = String(await this.sessions.fork({
+        sessionId: request.sourceSessionId,
+        ...request.atSeq === undefined ? {} : { atSeq: request.atSeq },
+      }))
+    } catch (error) {
+      return { ownership: ownership(), outcome: classifyForkFailure(error) }
+    }
+    if (childId === '') {
+      return {
+        ownership: ownership(),
+        outcome: { kind: 'indeterminate', error: { code: 'session/fork-result-invalid', message: 'the Host returned an unusable fork Session id' } },
+      }
+    }
+    const handle = { session: { id: childId } }
+    // A reconnect after dispatch does not turn a known Host success into an
+    // error; the child is real, but the old Client navigation no longer owns it.
+    if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'forked', handle } }
+    if (this.sessions.binding(childId) === undefined) {
+      return {
+        ownership: 'current',
+        outcome: {
+          kind: 'published-with-error',
+          sessionId: childId,
+          error: { code: 'session/fork-not-addressable', message: 'the forked Session is not addressable in Client state' },
+        },
+      }
+    }
+    return { ownership: 'current', outcome: { kind: 'forked', handle } }
   }
 }

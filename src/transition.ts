@@ -1,6 +1,6 @@
 /**
- * The session switch transaction — the canonical ordering shared by /new,
- * /fork, conversation rewind and `/sessions` switch/resume:
+ * The ordinary session-switch transaction — the canonical ordering shared by
+ * /new and `/sessions` switch/resume:
  *
  * ```text
  * 1. quiesce old (whenIdle + final flush)

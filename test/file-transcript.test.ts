@@ -221,9 +221,12 @@ test('assistant finalized tool-result content uses an explicit fallback everywhe
 
 test('rewind recognizes file-only turns and generalizes the warning label', () => {
   const candidates = collectRewindCandidates([
-    turnEvent('turn/start', 1, 1),
-    userEvent([fileBlock()], 2),
-    turnEvent('turn/end', 3, 1),
+    turnEvent('turn/start', 0, 0),
+    userEvent([{ type: 'text', text: 'previous' }], 1),
+    turnEvent('turn/end', 2, 0),
+    turnEvent('turn/start', 3, 1),
+    userEvent([fileBlock()], 4),
+    turnEvent('turn/end', 5, 1),
   ])
   assert.equal(candidates.length, 1)
   assert.equal(candidates[0]?.editorText, '')

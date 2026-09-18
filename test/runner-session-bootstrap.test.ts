@@ -104,6 +104,14 @@ function modelEvent(type: 'model/selection' | 'request/header', data: unknown, s
   } as unknown as SessionEvent
 }
 
+function resequence(events: readonly SessionEvent[]): SessionEvent[] {
+  return events.map((entry, index) => ({
+    ...entry,
+    seq: SessionSeq(index),
+    time: 1_700_000_000_000 + index * 1000,
+  }))
+}
+
 function modelHistory(provider: string, model: string, reasoningEffort: string): SessionEvent[] {
   const header = {
     config: { provider, model, reasoningEffort },
@@ -326,7 +334,12 @@ function makeHarness(
     observeSession: async (id: unknown) => {
       const session = persisted.get(String(id))
       if (session === undefined) throw new Error(`unknown test session ${String(id)}`)
-      return { header: session.header, events: [...session.snapshotEvents()], [Symbol.dispose]: () => {} }
+      return {
+        header: session.header,
+        events: [...session.snapshotEvents()],
+        projections: { values: { agentPreset: undefined } },
+        [Symbol.dispose]: () => {},
+      }
     },
   }
   const agents = {
@@ -1009,7 +1022,7 @@ test('/new without an explicit default intent observes the persisted default, ne
     '/new without an explicit default intent must not freeze a durable choice into the fresh Session')
 })
 
-test('/fork applies the source current selection after its historical inherited prefix', async (t) => {
+test('/fork lets Host choose the child selection after the historical inherited prefix', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fork-selection-')
   const previousHome = process.env.DSH_HOME
@@ -1026,16 +1039,16 @@ test('/fork applies the source current selection after its historical inherited 
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
 
   const currentSelection = { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' }
-  const sourceEvents = [
+  const sourceEvents = resequence([
     modelEvent('model/selection', { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' }, 0),
     modelEvent('request/header', {
       header: { config: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' } },
     }, 1),
     ...sessionEvents('source answer'),
     // This is the source's current switch, after the completed turn, so the
-    // fork seed deliberately excludes it and retains only historical A.
+    // Host fork seed deliberately excludes it and retains only historical A.
     modelEvent('model/selection', currentSelection, 6),
-  ]
+  ])
   const source: FakeSession = fakeSession({
     id: 'fork-selection-source',
     header: { id: 'fork-selection-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
@@ -1058,17 +1071,405 @@ test('/fork applies the source current selection after its historical inherited 
     'the child keeps the exact historical A prefix')
   assert.deepEqual(source.snapshotEvents(), sourceEvents, 'fork does not mutate the source log')
   const childBoundary = child.snapshotEvents()[inheritedPrefix.length]
-  assert.equal((childBoundary as unknown as { type?: unknown } | undefined)?.type, 'model/selection',
-    'the current selection starts in the child-owned suffix')
-  assert.deepEqual((childBoundary as unknown as { data?: unknown } | undefined)?.data, currentSelection)
+  assert.equal((childBoundary as unknown as { type?: unknown } | undefined)?.type, undefined,
+    'the Host fork does not append the source current selection')
+  assert.deepEqual((childBoundary as unknown as { data?: unknown } | undefined)?.data, undefined,
+    'Host fork does not append the source current model selection')
   const childSelections = child.snapshotEvents().filter(event => (event as unknown as { type?: unknown }).type === 'model/selection')
-  assert.deepEqual((childSelections.at(-1) as unknown as { data?: unknown } | undefined)?.data, currentSelection,
-    'the child-owned suffix records the source current B/max selection')
-  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).pending, currentSelection,
-    'the child effective next selection is B/max')
+  assert.deepEqual((childSelections.at(-1) as unknown as { data?: unknown } | undefined)?.data, {
+    provider: 'provider-a', model: 'model-a', reasoningEffort: 'high',
+  }, 'the child keeps the historical A selection rather than copying source current B/max')
+  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).lastUsed, {
+    provider: 'provider-a', model: 'model-a', reasoningEffort: 'high',
+  }, 'the child effective selection is the historical A selection')
 })
 
-test('/rewind forwards the source selection through the real picker callback', async (t) => {
+test('/fork dispatches at admission without waiting for a busy source', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-busy-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseCreate!: () => void
+  let signalCreateStarted!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  const createGate = async (): Promise<void> => {
+    signalCreateStarted()
+    await new Promise<void>(resolve => { releaseCreate = resolve })
+  }
+  const source = fakeSession({
+    id: 'fork-busy-source',
+    header: { id: 'fork-busy-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('busy source answer'),
+  })
+  let sourceBusy = false
+  let releaseSourceIdle!: () => void
+  const sourceIdleGate = async (sessionId: string): Promise<void> => {
+    if (sessionId === source.id && sourceBusy) {
+      await new Promise<void>(resolve => { releaseSourceIdle = resolve })
+    }
+  }
+  const harness = makeHarness(home, source, { provider: 'global', model: 'fallback' }, undefined, createGate, undefined, sourceIdleGate)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  await settle()
+  await new Promise(resolve => setTimeout(resolve, 70))
+  const idleBeforeFork = harness.retirementEvents.filter(event => event === `idle:${source.id}`).length
+  sourceBusy = true
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+
+  const forkPromise = forkHandler()
+  await createStarted
+  assert.equal(harness.retirementEvents.filter(event => event === `idle:${source.id}`).length, idleBeforeFork,
+    'fork dispatch must not wait for the source Agent to become idle')
+  releaseCreate()
+  sourceBusy = false
+  releaseSourceIdle?.()
+  await forkPromise
+  await settle()
+  assert.equal(harness.createdSessions.length, 1)
+})
+
+test('/fork navigation supersession parks a Direct child for later claim', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-superseded-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseCreate!: () => void
+  let signalCreateStarted!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  const createGate = async (): Promise<void> => {
+    signalCreateStarted()
+    await new Promise<void>(resolve => { releaseCreate = resolve })
+  }
+  const source = fakeSession({
+    id: 'fork-superseded-source',
+    header: { id: 'fork-superseded-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const target = fakeSession({
+    id: 'fork-superseded-target',
+    header: { id: 'fork-superseded-target', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('target answer'),
+  })
+  const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' }, undefined, createGate)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+
+  const forkPromise = forkHandler()
+  await createStarted
+  const resume = resumeHandler as (invocation: { rawInput: string }) => unknown
+  await resume({ rawInput: target.id })
+  await settle()
+  assert.ok(harness.retirementEvents.includes(`dispose:${source.id}`),
+    'a newer navigation must commit without waiting for the pending Host fork')
+
+  releaseCreate()
+  await forkPromise
+  await settle()
+  const child = harness.createdSessions[0]
+  assert.ok(child, 'the pending fork must still publish its child')
+  assert.equal(harness.createdSessions.length, 1)
+
+  const resumesBeforeClaim = harness.resumeSignals.length
+  await resume({ rawInput: child.id })
+  await settle()
+  assert.equal(harness.resumeSignals.length, resumesBeforeClaim,
+    'opening a parked child must claim its existing Direct owner, not resume a second writer')
+  const mountedFiber = fiber
+  assert.ok(mountedFiber)
+  await mountedFiber.dispose()
+  fiber = undefined
+  await settle()
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${child.id}`).length, 1,
+    'claiming a parked child must leave exactly one teardown owner')
+})
+
+test('/fork retires an unclaimed parked Direct owner during teardown', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-parked-teardown-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let signalCreateStarted!: () => void
+  let releaseCreate!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  const createGate = async (): Promise<void> => {
+    signalCreateStarted()
+    await new Promise<void>(resolve => { releaseCreate = resolve })
+  }
+  const source = fakeSession({
+    id: 'fork-parked-teardown-source',
+    header: { id: 'fork-parked-teardown-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const target = fakeSession({
+    id: 'fork-parked-teardown-target',
+    header: { id: 'fork-parked-teardown-target', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('target answer'),
+  })
+  const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' }, undefined, createGate)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+
+  const forkPromise = forkHandler()
+  await createStarted
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: target.id })
+  await settle()
+  const mountedFiber = fiber
+  assert.ok(mountedFiber)
+  const teardown = mountedFiber.dispose()
+  releaseCreate()
+  await Promise.all([forkPromise, teardown])
+  fiber = undefined
+  await settle()
+
+  const child = harness.createdSessions[0]
+  assert.ok(child, 'the superseded fork must publish before teardown drains its parked owner')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${child.id}`).length, 1,
+    'an unclaimed parked Direct owner must be disposed exactly once during teardown')
+})
+
+test('/fork suppresses a delayed failure after navigation supersession', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-failure-stale-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let signalCreateStarted!: () => void
+  let releaseFailure!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  const failure = new Promise<never>((_, reject) => { releaseFailure = () => reject(new Error('delayed fork failure')) })
+  const createGate = async (): Promise<never> => {
+    signalCreateStarted()
+    return failure
+  }
+  const source = fakeSession({
+    id: 'fork-failure-source',
+    header: { id: 'fork-failure-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const target = fakeSession({
+    id: 'fork-failure-target',
+    header: { id: 'fork-failure-target', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('target answer'),
+  })
+  const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' }, undefined, createGate)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+
+  const forkPromise = forkHandler()
+  await createStarted
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: target.id })
+  await settle()
+  releaseFailure()
+  await forkPromise
+  await settle()
+
+  assert.equal(harness.createdSessions.length, 0, 'a failed fork must not publish a child')
+  assert.ok(!probe.notices.some(notice => notice.includes('delayed fork failure')),
+    `a stale fork failure must not notify the newer session: ${probe.notices.join(', ')}`)
+})
+
+test('/rewind rejects an A to B to A stale picker selection', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-aba-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const userMessage = (id: string, text: string, seq: number): SessionEvent => event('user/message', {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  } as never, seq)
+  const source = fakeSession({
+    id: 'rewind-aba-source',
+    header: { id: 'rewind-aba-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      userMessage('rewind-aba-one', 'first', 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      userMessage('rewind-aba-two', 'second', 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+  const target = fakeSession({
+    id: 'rewind-aba-target',
+    header: { id: 'rewind-aba-target', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('target answer'),
+  })
+  const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TUI for the rewind picker')
+
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: target.id })
+  await settle()
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: source.id })
+  await settle()
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  await settle()
+
+  assert.equal(harness.createdSessions.length, 0, 'A → B → A must not revive the old A picker row into a fork')
+  assert.ok(probe.notices.some(notice => notice.includes('rewind cancelled')),
+    `the stale A picker selection must be cancelled: ${probe.notices.join(', ')}`)
+})
+
+test('/rewind stale callback cannot invalidate an admitted A fork', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-stale-admitted-fork-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let signalCreateStarted!: () => void
+  let releaseCreate!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  const createGate = async (): Promise<void> => {
+    signalCreateStarted()
+    await new Promise<void>(resolve => { releaseCreate = resolve })
+  }
+  const userMessage = (id: string, text: string, seq: number): SessionEvent => event('user/message', {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  } as never, seq)
+  const source = fakeSession({
+    id: 'rewind-stale-admitted-source',
+    header: { id: 'rewind-stale-admitted-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      userMessage('rewind-stale-admitted-one', 'first', 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      userMessage('rewind-stale-admitted-two', 'second', 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+  const target = fakeSession({
+    id: 'rewind-stale-admitted-target',
+    header: { id: 'rewind-stale-admitted-target', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('target answer'),
+  })
+  const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' }, undefined, createGate)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TUI for the rewind picker')
+
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: target.id })
+  await settle()
+  await (resumeHandler as (invocation: { rawInput: string }) => unknown)({ rawInput: source.id })
+  await settle()
+
+  const sourceDisposesBeforeFork = harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length
+  const forkPromise = forkHandler()
+  await createStarted
+  // This is the old picker callback, now stale. It must return before
+  // consuming the epoch admitted by the legitimate /fork above.
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  await settle()
+  releaseCreate()
+  await forkPromise
+  await settle()
+
+  assert.equal(harness.createdSessions.length, 1, 'the admitted /fork must still publish one child')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, sourceDisposesBeforeFork + 1,
+    'the admitted /fork must adopt and retire A rather than parking its child')
+})
+
+test('/rewind forwards the Host-owned fork anchor through the real picker callback', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-rewind-selection-')
   const previousHome = process.env.DSH_HOME
@@ -1104,7 +1505,7 @@ test('/rewind forwards the source selection through the real picker callback', a
     seq: event.seq + firstTurn.length,
     time: event.time + firstTurn.length * 1000,
   })) as unknown as SessionEvent[]
-  const sourceEvents = [
+  const sourceEvents = resequence([
     modelEvent('model/selection', { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' }, 0),
     modelEvent('request/header', {
       header: { config: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' } },
@@ -1114,7 +1515,7 @@ test('/rewind forwards the source selection through the real picker callback', a
     // The current switch is after the selected rewind cursor. It must be
     // written after the inherited historical prefix in the child.
     modelEvent('model/selection', currentSelection, firstTurn.length + secondTurn.length + 2),
-  ]
+  ])
   const source: FakeSession = fakeSession({
     id: 'rewind-selection-source',
     header: { id: 'rewind-selection-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
@@ -1138,12 +1539,68 @@ test('/rewind forwards the source selection through the real picker callback', a
   assert.deepEqual(child.snapshotEvents().slice(0, inheritedPrefix.length), inheritedPrefix,
     'rewind keeps the exact historical prefix')
   assert.deepEqual(source.snapshotEvents(), sourceEvents, 'rewind does not mutate the source log')
-  assert.deepEqual((child.snapshotEvents()[inheritedPrefix.length] as unknown as { data?: unknown } | undefined)?.data, currentSelection,
-    'the real rewind call site writes B/max in the child suffix')
-  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).pending, currentSelection)
+  assert.deepEqual((child.snapshotEvents()[inheritedPrefix.length] as unknown as { data?: unknown } | undefined)?.data, undefined,
+    'the Host fork does not append a source current-selection event after the historical prefix')
+  const childSelections = child.snapshotEvents().filter(event => (event as unknown as { type?: unknown }).type === 'model/selection')
+  assert.deepEqual((childSelections.at(-1) as unknown as { data?: unknown } | undefined)?.data, {
+    provider: 'provider-a', model: 'model-a', reasoningEffort: 'high',
+  }, 'rewind preserves the historical A selection')
 })
 
-test('/fork treats a reasoning-effort change as a new selection', async (t) => {
+test('/rewind surfaces a current Host fork rejection', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-rejection-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const userMessage = (id: string, text: string, seq: number): SessionEvent => event('user/message', {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  } as never, seq)
+  const source = fakeSession({
+    id: 'rewind-rejection-source',
+    header: { id: 'rewind-rejection-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: resequence([
+      event('turn/start', { turn: 0 }, 0),
+      userMessage('rewind-rejection-one', 'first prompt', 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      userMessage('rewind-rejection-two', 'second prompt', 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ]),
+  })
+  const harness = makeHarness(home, source, { provider: 'global', model: 'fallback' }, undefined, async () => {
+    throw new Error('fork refused by Host')
+  })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TUI for the rewind picker')
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  await settle()
+
+  assert.equal(harness.createdSessions.length, 0, 'a rejected Host fork must not publish a child')
+  assert.ok(probe.notices.some(notice => notice.includes('fork refused by Host')),
+    `the current rewind failure must remain visible: ${probe.notices.join(', ')}`)
+})
+
+test('/fork does not inherit a source-only reasoning-effort change', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fork-selection-effort-')
   const previousHome = process.env.DSH_HOME
@@ -1160,14 +1617,14 @@ test('/fork treats a reasoning-effort change as a new selection', async (t) => {
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
 
   const currentSelection = { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' }
-  const sourceEvents = [
+  const sourceEvents = resequence([
     modelEvent('model/selection', { provider: 'provider-b', model: 'model-b', reasoningEffort: 'high' }, 0),
     modelEvent('request/header', {
       header: { config: { provider: 'provider-b', model: 'model-b', reasoningEffort: 'high' } },
     }, 1),
     ...sessionEvents('source answer'),
     modelEvent('model/selection', currentSelection, 6),
-  ]
+  ])
   const source: FakeSession = fakeSession({
     id: 'fork-selection-effort-source',
     header: { id: 'fork-selection-effort-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
@@ -1184,9 +1641,11 @@ test('/fork treats a reasoning-effort change as a new selection', async (t) => {
   const child = harness.createdSessions[0]!
   assert.deepEqual(harness.createInheritedEventCounts, [8])
   const childBoundary = child.snapshotEvents()[8]
-  assert.deepEqual((childBoundary as unknown as { data?: unknown } | undefined)?.data, currentSelection,
-    'same provider/model with a changed effort writes the new child selection')
-  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).pending, currentSelection)
+  assert.deepEqual((childBoundary as unknown as { data?: unknown } | undefined)?.data, undefined,
+    'the source-only effort change is outside the inherited prefix')
+  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).lastUsed, {
+    provider: 'provider-b', model: 'model-b', reasoningEffort: 'high',
+  }, 'the child preserves the historical reasoning effort')
 })
 
 test('/fork avoids a duplicate selection when the inherited prefix already matches', async (t) => {

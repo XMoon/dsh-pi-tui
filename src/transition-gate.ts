@@ -2,19 +2,19 @@
  * The process-local session-transition gate: ONE writer for the live
  * session at a time.
  *
- * Every path that changes which session owns the surface — /new, /fork,
- * conversation rewind, `/sessions` switch/resume, the first-session
- * creation — must run its whole workflow (quiesce old → preflight →
- * create/resume → COMMIT (assign new + generation bump) → retire old)
- * inside {@link SessionTransitionGate.run}. Without it, two interleaved transitions can:
+ * Every ordinary path that changes which session owns the surface — /new,
+ * `/sessions` switch/resume, and first-session creation — must run its whole
+ * workflow (quiesce old → preflight → create/resume → COMMIT (assign new +
+ * generation bump) → retire old) inside {@link SessionTransitionGate.run}.
+ * Host fork dispatch runs outside this FIFO; only adoption of a returned Direct
+ * child enters the gate. Without this gate, two interleaved transitions can:
  *
  * - create a child whose metadata mixes two surfaces (parent captured
  *   before an await, cwd read after a concurrent switch — the P2 "cwd
  *   race");
- * - publish a forked child (session/created → persistence starts writing
- *   its seed) and then detect "stale" only AFTER the create, leaving a
- *   durable ghost branch the user never entered — `handle.dispose()` stops
- *   the agent but does NOT delete the persisted session;
+ * - publish an ordinary child (session/created → persistence starts writing
+ *   its seed) and then detect a stale surface only AFTER the create, leaving
+ *   two live Direct surfaces with no serialized adoption/retirement order;
  * - pass a stale identity check and then yield inside the swap (flush /
  *   old-owner retirement), letting a second transition land in between and
  *   later get overwritten by the first continuation.

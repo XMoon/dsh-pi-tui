@@ -17,17 +17,12 @@
     "permissionPresets",
     "planMode",
     "sandboxPolicy",
-    "sessionPersistence",
     "sessionQuery",
     "sessions",
     "settings",
     "shell",
     "subagents",
-    "tokenMeter",
     "tools"
-  ],
-  "present.ts": [
-    "import:dsh-session"
   ],
   "rewind.ts": [
     "import:dsh-session"
@@ -56,9 +51,7 @@
   "runtime/direct/session-direct.ts": [
     "agentPresets",
     "import:dsh-session",
-    "sessionPersistence",
     "sessionQuery",
-    "sessions",
     "tokenMeter"
   ],
   "runtime/direct/session-preset-direct.ts": [
@@ -68,16 +61,16 @@
     "sessionQuery"
   ],
   "runtime/direct/session-projection-direct.ts": [
-    "agentPresets",
     "import:dsh-agent",
-    "import:dsh-session",
-    "sessionQuery"
+    "import:dsh-session"
   ],
   "runtime/direct/session-lifecycle-direct.ts": [
     "agentDefaultModel",
     "agents",
     "import:dsh-agent",
-    "import:dsh-session"
+    "import:dsh-session",
+    "sessionQuery",
+    "workspaceRegistry"
   ],
   "runtime/direct/model-selection-direct.ts": [
     "import:dsh-agent"
@@ -93,10 +86,6 @@
   ],
   "runtime/direct/subagent-direct.ts": [
     "subagents"
-  ],
-  "session-fork.ts": [
-    "import:dsh-agent",
-    "import:dsh-session"
   ],
   "sessions.ts": [
     "import:dsh-session"

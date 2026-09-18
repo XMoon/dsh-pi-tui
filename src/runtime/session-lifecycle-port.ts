@@ -1,30 +1,22 @@
 /**
- * The session LIFECYCLE domain port (D2.1 contract convergence, D2.3
- * semantic convergence): the transport-neutral semantic boundary for
- * creating a fresh Session and opening an existing Session.
+ * The session LIFECYCLE domain port: the transport-neutral semantic boundary
+ * for ordinary create/open and Host-owned fork operations.
  *
- * D2.3 removed the ordinary `provider`/`model` semantic inputs. The official
- * create/open contracts own only current Client/Host concepts (session id,
- * location/preset metadata) and derive the activation model from the Host
- * global default; a Direct adapter that still needs in-process activation
- * options resolves them from the Host default service itself, never from the
- * cross-backend request.
+ * D2.3 removed the ordinary `provider`/`model` inputs. D2.4 removes the
+ * TUI-owned fork seed, child identity, lineage metadata and model/preset/cwd
+ * inheritance from the cross-backend contract. `fork()` carries only the
+ * source Session and an optional official event anchor; Host semantics own the
+ * boundary, child identity, lineage, workspace and composition.
  *
  * Open is the official Client semantic `select/open this Session` — not
  * `resume a Host Agent`. The Direct adapter still calls `agents.resume()`
  * internally so the in-process TUI has a live Agent; a Remote adapter maps
  * the same operation to `ClientSessions.open()/binding()`.
  *
- * `meta` still carries the Direct session-header metadata (cwd, parent session
- * and the seeded marker); `seed`/`inheritedEventCount` remain Direct D2.4
- * fork/rewind inputs and must not be described as an already Remote-ready wire
- * payload. The DIRECT adapter still supports them (fork/rewind rely on it); the
- * REMOTE adapter fails closed on a seeded create until D2.4 owns Host fork.
- *
- * Requests carry serializable data plus the explicitly client-local lifecycle
- * signal. The signal is never serialized; a Remote adapter maps it to its own
- * client/connection cancellation. Results carry Session identity and, only
- * for Direct, the ownership escape needed by the current runner.
+ * Create carries only ordinary semantic intent. Its lifecycle signal is
+ * client-local and never serialized. Fork intentionally has no signal: the
+ * official Host operation is not cancelled by navigation supersession; only
+ * the visible navigation commit is supersedable.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/session-lifecycle-port
@@ -32,25 +24,49 @@
 
 import type { OperationOwnership, WriteError } from './write-outcome.ts'
 
-/** Create one fresh session (the /new and first-session paths). The identity,
- * cwd-like metadata and preset are semantic intent. The seed, inherited count
- * and parent metadata are current Direct fork/rewind creation inputs; D2.4
- * owns their Host-fork convergence. `signal` is client-local and never
- * serialized. */
+/** Create one ordinary fresh Session (the /new and first-session paths).
+ * The Host owns the durable header shape; these are the only ordinary semantic
+ * inputs the TUI supplies. `signal` is client-local and never serialized. */
 export interface CreateSessionRequest {
-  /** The pre-generated session identity (the TUI owns the id). */
+  /** The pre-generated identity for an ordinary fresh Session. */
   sessionId: string
-  /** Durable session metadata (currently includes cwd, parent session and the
-   * Direct seeded-session marker). D2.4 owns convergence of fork metadata. */
-  meta: Record<string, unknown>
+  /** Optional ordinary workspace directory. */
+  cwd?: string
   /** Semantic preset intent; the Direct adapter resolves its setup. */
   agentPreset?: string
-  /** Current Direct fork/rewind seed; D2.4 owns Host fork convergence. */
-  seed?: readonly unknown[]
-  /** Current Direct fork/rewind inherited prefix length. */
-  inheritedEventCount?: number
   /** Client-local creation cancellation; never serialized. */
   signal?: AbortSignal
+}
+
+/** Official Host-owned fork intent. The Host chooses the child identity,
+ * completed-turn boundary, inherited prefix, lineage, workspace and model /
+ * preset restoration. There is deliberately no signal, seed, child id or
+ * caller-owned metadata. */
+export interface ForkSessionRequest {
+  readonly sourceSessionId: string
+  /** Canonical non-negative safe event sequence from the TUI event model. */
+  readonly atSeq?: number
+}
+
+/** Host fork settlement, independent from local navigation ownership. */
+export type ForkOutcome =
+  | { readonly kind: 'forked'; readonly handle: SessionHandle }
+  | { readonly kind: 'rejected'; readonly error: WriteError }
+  | {
+      readonly kind: 'published-with-error'
+      readonly sessionId: string
+      readonly error: WriteError
+      /** Direct-only owner returned when publication succeeded before a later
+       * workspace/reconcile step failed; the runner must retain it. */
+      readonly handle?: SessionHandle
+    }
+  | { readonly kind: 'indeterminate'; readonly error: WriteError }
+
+/** A fork settlement paired with whether the caller still owns its visible
+ * navigation surface. A superseded successful fork is still a real child. */
+export interface ForkResult {
+  readonly ownership: OperationOwnership
+  readonly outcome: ForkOutcome
 }
 
 /** Open a persisted session (the ordinary Client semantic:
@@ -81,6 +97,7 @@ export interface SessionHandle {
 export interface SessionLifecycle {
   create(request: CreateSessionRequest): Promise<CreateResult>
   open(request: OpenSessionRequest): Promise<OpenResult>
+  fork(request: ForkSessionRequest): Promise<ForkResult>
 }
 
 /**
@@ -120,7 +137,7 @@ export interface OpenResult {
 
 /** Every settlement a lifecycle error can carry (machine-readable, never a
  *  bare message). */
-export type LifecycleSettlement = CreateOutcome['kind'] | OpenOutcome['kind'] | 'superseded'
+export type LifecycleSettlement = CreateOutcome['kind'] | OpenOutcome['kind'] | ForkOutcome['kind'] | 'superseded'
 
 /** A lifecycle outcome that must ABORT the caller's transition, carrying the
  *  two independent axes so a Remote caller never has to parse a string. */

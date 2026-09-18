@@ -65,9 +65,7 @@ export const DEPRECATED_READER_PATTERNS = [
  */
 export const DEPRECATED_READER_ALLOWLIST = [
   { file: 'src/commands.ts', call: 'eventAt', site: 'const event = liveAgent.session.eventAt(SessionSeq(seq))', why: '/rewind candidate: one durable event by seq for the Direct in-process session' },
-  { file: 'src/commands.ts', call: 'snapshotEvents', site: 'const seed = source === undefined ? undefined : forkSeed(source.session.snapshotEvents())', why: '/fork Direct seed: in-process snapshot read (D2.4 owns the official fork cut)' },
   { file: 'src/commands.ts', call: 'snapshotEvents', site: 'const stats = computeStats(liveAgent.session.snapshotEvents())', why: '/status Direct stats fold over the in-process session log' },
-  { file: 'src/index.ts', call: 'snapshotEvents', site: 'const folded = foldPendingModelSelection(target.session.snapshotEvents())', why: 'Direct pending model-selection fold at session bootstrap' },
   { file: 'src/index.ts', call: 'snapshotEvents', site: 'let observedEvents: readonly SessionEvent[] = initialChild?.snapshotEvents() ?? []', why: 'Direct child-viewer observed history seed' },
   { file: 'src/index.ts', call: 'snapshotEvents', site: 'const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)', why: 'Direct child-viewer durable history merge' },
   { file: 'src/index.ts', call: 'snapshotEvents', site: '? agent.session.snapshotEvents()', why: 'Direct resume history branch' },
@@ -76,7 +74,6 @@ export const DEPRECATED_READER_ALLOWLIST = [
   { file: 'src/index.ts', call: 'snapshotEvents', site: "settleCompactionSurface(app, () => { markContextDirty(); refreshContextMeasurement('compaction-end') }, workingFromLog(liveAgent.session.snapshotEvents()))", why: 'Direct compaction-end context re-measure from the in-process log' },
   { file: 'src/runtime/direct/model-selection-direct.ts', call: 'snapshotEvents', site: 'const folded = foldPendingModelSelection(agent.session.snapshotEvents())', why: 'Direct model-selection replay over the in-process session log' },
   { file: 'src/runtime/direct/presentation-read-direct.ts', call: 'snapshotEvents', site: 'const durableEvents = agent.session.snapshotEvents().map(event => detachedClone(event as PresentationDurableEvent))', why: 'Direct presentation read fold over the in-process session log' },
-  { file: 'src/session-fork.ts', call: 'snapshotEvents', site: 'seed = rewindSeed(source.session.snapshotEvents(), candidate)', why: 'Direct rewind seed: in-process snapshot helper (D2.4 owns the official fork cut)' },
   { file: 'src/transcript.ts', call: 'snapshotEvents', site: 'for (const event of session.snapshotEvents()) {', why: 'Direct full transcript reconstruction from the in-process log' },
 ]
 

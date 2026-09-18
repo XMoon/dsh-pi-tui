@@ -1,31 +1,36 @@
 /**
- * The Direct session lifecycle (D2.1 contract convergence, D2.3 semantic
- * convergence) — the in-process implementation of `SessionLifecycle` over the
- * dsh `agents` service.
+ * The Direct session lifecycle (D2.1–D2.4) — the in-process
+ * implementation of `SessionLifecycle` over the dsh `agents` service.
  *
- * D2.3 moved the Direct-only activation requirements INSIDE the adapter: the
- * cross-backend request carries only the semantic create/open intent, while
- * the adapter resolves the Host global default for `agentOptions` and the
- * persisted recorded preset for an open. The semantic `open()` operation
- * still calls the Direct `agents.resume()` API; this Host implementation
- * detail is intentionally hidden at the port.
+ * D2.3 moved ordinary create/open activation requirements INSIDE the adapter.
+ * D2.4 does the same for fork: this adapter maps the official Host fork
+ * algorithm (observation, completed-turn boundary, seed, lineage, preset,
+ * default model and workspace attachment) without exposing those details
+ * through the semantic port.
  *
- * The adapter is the only module in the session create/open path that touches
- * `ctx` and the preset composition. It converts the transitional lifecycle
- * request into Direct shapes (`setup` callback, `SessionId`, seed) and keeps
- * the real AgentHandle ownership escape required by the current runner.
+ * The adapter is the only module in these lifecycle paths that touches `ctx`
+ * and the preset composition. It keeps the real AgentHandle ownership escape
+ * required by the current Direct runner.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-lifecycle-direct
  */
 
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { recordedSessionPreset } from './session-preset-direct.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import type { CreateResult, CreateSessionRequest, OpenResult, OpenSessionRequest, SessionLifecycle } from '../session-lifecycle-port.ts'
+import type {
+  CreateResult,
+  CreateSessionRequest,
+  ForkResult,
+  OpenResult,
+  OpenSessionRequest,
+  SessionLifecycle,
+} from '../session-lifecycle-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -65,6 +70,44 @@ export interface AgentsServiceLike {
   }): Promise<AgentHandle>
 }
 
+/** Structural observation used by the private Direct fork mapping. */
+export interface ForkObservationLike {
+  readonly header: {
+    readonly id: string
+    readonly cwd?: string
+    readonly origin?: string
+  }
+  readonly events: readonly SessionEvent[]
+  readonly projections: { readonly values: { readonly agentPreset?: string | null } }
+  [Symbol.dispose](): void
+}
+
+/** The official DSH session-query fork subset. */
+export interface ForkSessionQueryLike {
+  observeSession(sessionId: ReturnType<typeof SessionId>): Promise<ForkObservationLike>
+  traceSession?(sessionId: string): Promise<{
+    readonly ancestors: readonly { readonly header: { readonly id: string } }[]
+  }>
+}
+
+/** The official workspace subset used by the Host fork algorithm. */
+export interface ForkWorkspaceLike {
+  readonly id: string
+  readonly sessionIds: readonly string[]
+  attachSession(sessionId: ReturnType<typeof SessionId>): Promise<void>
+}
+
+export interface ForkWorkspaceRegistryLike {
+  list(): readonly ForkWorkspaceLike[]
+}
+
+/** Direct-only owner handoff. The runner parks a child when navigation is
+ * superseded and the adapter claims it before opening that child later. */
+export interface DirectOwnerPoolLike {
+  claim(sessionId: string): AgentHandle | undefined
+  park(handle: AgentHandle): void
+}
+
 /** The Direct backend's session lifecycle: the `ctx.agents` service behind
  * the semantic `SessionLifecycle` interface. The preset composition (and
  * with it the agent-setup callback) is resolved here from the request's
@@ -74,10 +117,16 @@ export interface AgentsServiceLike {
 export class DirectSessionLifecycle implements SessionLifecycle {
   private readonly ctx: HostContextLike
   private readonly compose: (presetId?: string) => Promise<CompositionLike>
+  private readonly ownerPool: DirectOwnerPoolLike | undefined
 
-  constructor(ctx: HostContextLike, compose: (presetId?: string) => Promise<CompositionLike>) {
+  constructor(
+    ctx: HostContextLike,
+    compose: (presetId?: string) => Promise<CompositionLike>,
+    ownerPool?: DirectOwnerPoolLike,
+  ) {
     this.ctx = ctx
     this.compose = compose
+    this.ownerPool = ownerPool
   }
 
   /** The in-process activation fallback: the Host global default, never a
@@ -101,22 +150,15 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       // concern: resolved inside the adapter from the request's preset id.
       const composition = await this.compose(request.agentPreset)
       // The semantic `agentPreset` is the SINGLE preset authority: the adapter
-      // persists the preset it actually composed. A legacy seeded/fork caller
-      // that still carries `meta.agentPreset` must agree with it (D2.4 folds
-      // that transition path away).
-      const metaPreset = request.meta.agentPreset
-      if (metaPreset !== undefined && composition.agentPreset !== undefined && metaPreset !== composition.agentPreset) {
-        throw new Error(`create meta.agentPreset "${String(metaPreset)}" disagrees with the semantic agentPreset "${composition.agentPreset}"`)
-      }
+      // persists the preset it actually composed in the ordinary header.
       const handle = await agents.create({
         sessionId: SessionId(request.sessionId),
-        meta: composition.agentPreset === undefined
-          ? request.meta
-          : { ...request.meta, agentPreset: composition.agentPreset },
+        meta: {
+          ...request.cwd === undefined ? {} : { cwd: request.cwd },
+          ...composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset },
+        },
         agentOptions,
         setup: composition.setup,
-        seed: request.seed as readonly SessionEvent[] | undefined,
-        ...request.inheritedEventCount === undefined ? {} : { inheritedEventCount: SessionLogOffset(request.inheritedEventCount) },
         signal: request.signal,
       })
       // Preserve both the live Agent and the real AgentHandle. The latter is
@@ -140,6 +182,17 @@ export class DirectSessionLifecycle implements SessionLifecycle {
 
   async open(request: OpenSessionRequest): Promise<OpenResult> {
     if (Boolean(request.signal?.aborted)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
+    // A successful Direct fork whose navigation was superseded already owns a
+    // live Agent and SessionWriteLease. Claim it before any cold observation or
+    // `agents.resume()` so opening the parked child never creates a second
+    // writer for the same Session.
+    const parked = this.ownerPool?.claim(request.sessionId)
+    if (parked !== undefined) {
+      return {
+        ownership: 'current',
+        outcome: { kind: 'opened', handle: { session: { id: String(parked.agent.session.id) }, direct: { agent: parked.agent, ownerHandle: parked } } },
+      }
+    }
     const agents = this.ctx.get('agents') as AgentsServiceLike | undefined
     if (agents === undefined) {
       return { ownership: 'current', outcome: { kind: 'unavailable', message: 'agents service unavailable' } }
@@ -171,9 +224,136 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       return { ownership: 'current', outcome: { kind: 'unavailable', message: safeErrorMessage(error) } }
     }
   }
+
+  /** Map the official Host fork algorithm into the Direct implementation. The
+   * only raw seed construction in the repository lives here, immediately next
+   * to `agents.create`; commands and the semantic port see only the source id
+   * and optional official anchor. */
+  async fork(request: { readonly sourceSessionId: string; readonly atSeq?: number }): Promise<ForkResult> {
+    // The semantic port supplies a canonical event sequence; reject forged
+    // non-canonical values consistently with the Remote adapter.
+    const atSeq = request.atSeq
+    if (atSeq !== undefined
+      && (!Number.isSafeInteger(atSeq) || atSeq < 0)) {
+      return currentForkRejected('gateway/bad-request', 'atSeq must be a non-negative safe integer')
+    }
+    const agents = this.ctx.get('agents') as AgentsServiceLike | undefined
+    if (agents === undefined) return currentForkRejected('session/fork-unavailable', 'agents service unavailable')
+    const query = this.ctx.get('sessionQuery') as ForkSessionQueryLike | undefined
+    if (query === undefined) return currentForkRejected('session/fork-unavailable', 'session query service unavailable')
+
+    let source: ForkObservationLike
+    try {
+      source = await query.observeSession(SessionId(request.sourceSessionId))
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        && typeof (error as { code?: unknown }).code === 'string'
+        ? (error as { code: string }).code
+        : undefined
+      return currentForkRejected(
+        code === 'SESSION_QUERY_SESSION_NOT_FOUND' ? 'session/not-found' : 'gateway/internal',
+        `fork source unavailable: ${safeErrorMessage(error)}`,
+      )
+    }
+    try {
+      const lastSeq = source.events.at(-1)?.seq ?? -1
+      const anchoredBoundary = atSeq === undefined
+        ? undefined
+        : source.events.find(event => event.type === 'turn/end' && Number(event.seq) >= atSeq)
+      const boundary = anchoredBoundary
+        ?? (atSeq === undefined || atSeq > Number(lastSeq)
+          ? [...source.events].reverse().find(event => event.type === 'turn/end')
+          : undefined)
+      if (boundary === undefined) {
+        return currentForkRejected(
+          'session/fork-unavailable',
+          atSeq !== undefined && atSeq <= Number(lastSeq)
+            ? `session "${request.sourceSessionId}" has not completed the turn containing event ${String(atSeq)}`
+            : `session "${request.sourceSessionId}" has no completed turn to fork from`,
+        )
+      }
+
+      let workspace: ForkWorkspaceLike | undefined
+      try {
+        workspace = await this.forkWorkspace(source)
+      } catch (error) {
+        return currentForkRejected('gateway/internal', `failed to resolve fork workspace: ${safeErrorMessage(error)}`)
+      }
+      const preset = source.projections.values.agentPreset ?? undefined
+      let composition: CompositionLike
+      try {
+        composition = await this.compose(preset)
+      } catch (error) {
+        return currentForkRejected('session/fork-unavailable', `failed to compose fork session: ${safeErrorMessage(error)}`)
+      }
+      const cut = Number(boundary.seq) + 1
+      const childMeta: Record<string, unknown> = {
+        ...(source.header.cwd === undefined ? {} : { cwd: source.header.cwd }),
+        parentSession: source.header.id,
+        isSeeded: true,
+        ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
+      }
+      let handle: AgentHandle
+      try {
+        handle = await agents.create({
+          sessionId: SessionId(`session-${randomUUID()}`),
+          seed: source.events.slice(0, cut),
+          inheritedEventCount: SessionLogOffset(cut),
+          meta: childMeta,
+          agentOptions: this.agentOptions(),
+          setup: composition.setup,
+        })
+      } catch (error) {
+        return currentForkRejected('session/fork-failed', safeErrorMessage(error))
+      }
+      const child = { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } }
+      if (workspace !== undefined) {
+        try {
+          await workspace.attachSession(SessionId(child.session.id))
+        } catch (error) {
+          return {
+            ownership: 'current',
+            outcome: {
+              kind: 'published-with-error',
+              sessionId: child.session.id,
+              handle: child,
+              error: {
+                code: 'session/workspace-attach-failed',
+                message: `Session "${child.session.id}" was forked but could not attach to workspace "${workspace.id}": ${safeErrorMessage(error)}`,
+                details: { workspaceId: workspace.id },
+              },
+            },
+          }
+        }
+      }
+      return { ownership: 'current', outcome: { kind: 'forked', handle: child } }
+    } finally {
+      source[Symbol.dispose]()
+    }
+  }
+
+  private async forkWorkspace(source: ForkObservationLike): Promise<ForkWorkspaceLike | undefined> {
+    const registry = this.ctx.get('workspaceRegistry') as ForkWorkspaceRegistryLike | undefined
+    if (registry === undefined) return undefined
+    const workspaces = registry.list()
+    const direct = workspaces.find(workspace => workspace.sessionIds.includes(source.header.id))
+    if (direct !== undefined || source.header.origin !== 'subagent') return direct
+    const query = this.ctx.get('sessionQuery') as ForkSessionQueryLike | undefined
+    if (query?.traceSession === undefined) return undefined
+    const lineage = await query.traceSession(source.header.id)
+    for (const ancestor of lineage.ancestors) {
+      const workspace = workspaces.find(candidate => candidate.sessionIds.includes(ancestor.header.id))
+      if (workspace !== undefined) return workspace
+    }
+    return undefined
+  }
 }
 
 /** A Direct create rejection that still owns the local surface. */
 function currentCreateRejected(code: string, message: string): CreateResult {
+  return { ownership: 'current', outcome: { kind: 'rejected', error: { code, message } } }
+}
+
+function currentForkRejected(code: string, message: string): ForkResult {
   return { ownership: 'current', outcome: { kind: 'rejected', error: { code, message } } }
 }

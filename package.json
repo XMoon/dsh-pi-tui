@@ -223,6 +223,8 @@
     "smoke:remote-d1-closure": "node --import tsx/esm scripts/dsh-remote-d1-closure-smoke.mjs",
     "smoke:remote-d2-write": "node --import tsx/esm scripts/dsh-remote-d2-write-smoke.mjs",
     "smoke:remote-d2-lifecycle": "node scripts/dsh-remote-d2.3-parity-smoke.mjs",
+    "smoke:remote-d2-fork": "node scripts/dsh-remote-d2.4-fork-parity-smoke.mjs",
+    "smoke:remote-d2-closure": "node scripts/dsh-remote-d2-closure-smoke.mjs",
     "smoke:boundary": "node scripts/dsh-runtime-boundary-smoke.mjs",
     "smoke:startup-strictness": "node scripts/startup-strictness-smoke.mjs",
     "dsh:source:pack": "node scripts/dsh-source-pack.mjs",

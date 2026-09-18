@@ -53,6 +53,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   const sessionLifecycle = {
     create: async () => ({}) as never,
     open: async () => ({}) as never,
+    fork: async () => ({}) as never,
   }
   const interaction = {
     registerQuestionProvider: () => true,

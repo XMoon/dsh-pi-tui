@@ -255,19 +255,26 @@ export function sessionLabelParts(label: string): { prefix: string; title: strin
  * fork children, rewind branches AND subagents alike (plan §20: `origin`
  * only decides the badge, `parentSession` decides the hierarchy) — hangs
  * under its parent chain (depth = distance to the nearest root). Orphans —
- * a parent outside the shown window, or a missing parent id — sit at
- * depth 1. The input order (newest first) is preserved per level; a
- * `placed` set guards against parent cycles in corrupt data.
+ * a parent outside the shown window, or a missing parent id — degrade to root
+ * depth 0. The input order (newest first) is preserved per level; a `placed`
+ * set guards against parent cycles in corrupt data, which are emitted from
+ * root depth when no ordinary root reaches them.
  * @param rows - the picker rows, newest first.
  * @returns rows in display order with their tree depth.
  */
 export function buildSessionTree(rows: readonly SessionPickerRow[]): { row: SessionPickerRow; depth: number }[] {
+  const known = new Set(rows.map(row => row.id))
   const children = new Map<string, SessionPickerRow[]>()
+  const roots: SessionPickerRow[] = []
   for (const row of rows) {
-    if (row.parentSession !== undefined) {
+    if (row.parentSession !== undefined && known.has(row.parentSession)) {
       const list = children.get(row.parentSession)
       if (list === undefined) children.set(row.parentSession, [row])
       else list.push(row)
+    } else {
+      // Match the official Client flattenLineage projection: an absent parent
+      // is an orphaned root, never an indented pseudo-child.
+      roots.push(row)
     }
   }
   const result: { row: SessionPickerRow; depth: number }[] = []
@@ -278,11 +285,11 @@ export function buildSessionTree(rows: readonly SessionPickerRow[]): { row: Sess
     result.push({ row, depth })
     for (const child of children.get(row.id) ?? []) place(child, depth + 1)
   }
+  for (const root of roots) place(root, 0)
+  // A cycle has no root. Emit its first member as a root and let the placed
+  // guard terminate the back-edge without dropping any session.
   for (const row of rows) {
-    if (row.parentSession === undefined) place(row, 0)
-  }
-  for (const row of rows) {
-    if (row.parentSession !== undefined) place(row, 1)
+    if (!placed.has(row.id)) place(row, 0)
   }
   return result
 }

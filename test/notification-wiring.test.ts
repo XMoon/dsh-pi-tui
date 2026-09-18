@@ -38,10 +38,10 @@ test('the ONLY completion-controller feed is agent/status (turn/end can never no
 
 test('the live-agent identity resets at every commit site plus teardown', () => {
   // Startup resume (setLiveAgent(liveAgent?.id)), session switch
-  // (/new /fork rewind /sessions — ONE commit point), the first-session
-  // creation, and the cleanup fence: exactly four resets.
+  // (/new /fork rewind /sessions — ONE commit point), fork adoption, the
+  // first-session creation, and the cleanup fence: exactly five resets.
   const occurrences = indexSource.split('completionController.setLiveAgent').length - 1
-  assert.equal(occurrences, 4,
+  assert.equal(occurrences, 5,
     'setLiveAgent must run at startup resume, the switch commit, first-session create and cleanup')
 })
 

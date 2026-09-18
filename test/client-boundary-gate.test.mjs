@@ -15,7 +15,7 @@ import { writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from './support/temp-lifecycle.ts'
-import { scanTree, findNewDebt, loadBaseline, HOST_SERVICES } from '../scripts/client-boundary-gate.mjs'
+import { scanTree, findNewDebt, findStaleBaseline, loadBaseline, HOST_SERVICES } from '../scripts/client-boundary-gate.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -58,6 +58,13 @@ test('findNewDebt reports only pairs missing from the baseline', () => {
   const baseline = { 'a.ts': ['agents'] }
   assert.deepEqual(findNewDebt(scanned, baseline), ['a.ts: sessions', 'b.ts: skills'])
   assert.deepEqual(findNewDebt(scanned, scanned), [])
+})
+
+test('findStaleBaseline reports removed files and coupling pairs', () => {
+  const scanned = { 'a.ts': ['agents'], 'b.ts': ['skills'] }
+  const baseline = { 'a.ts': ['agents', 'sessions'], 'removed.ts': ['llm'] }
+  assert.deepEqual(findStaleBaseline(scanned, baseline), ['a.ts: sessions', 'removed.ts: file'])
+  assert.deepEqual(findStaleBaseline(scanned, scanned), [])
 })
 
 test('HOST_SERVICES covers the migration inventory', () => {

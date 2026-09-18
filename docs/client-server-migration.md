@@ -11,7 +11,7 @@
 ```text
 M0  DONE           (AGENTS.md guardrails, coupling inventory, boundary gate, baseline)
 M1  DONE           (semantic ports + Direct adapters, no behavior change — M1.1–M1.12 landed: subagent, session read/write/lifecycle, interaction, catalog (models/presets/skills), config (settings/provider profiles/credentials/authorization/permissions/preset default), host-file (`@`-mention discovery + send-time canonicalization), and Agent-local model selection (durable Session intent plus global fallback); CommandHostCapabilities retired, `runner.host` removed, commands read Host state ONLY through ports; Direct ownership escapes (lock/lease/PINNED/guard/transition/barrier) untouched at M1 — the physical lock stack is removed legacy on the master baseline; contract review: authorization is an EVENT surface (begin → attemptId → notice/prompt events → respond/cancel — never a callback-bearing interaction across the port), Host-file candidates are PATH-ONLY DTOs (`{path, kind}`, the official FileReferenceCandidate shape — ranking/quoting/presentation are client policy in mentions.ts), the catalog directory DTO is semantic (no settings namespace/path), the /login credential options cross as the port's `CredentialProviderOption` DTO (semantic flags only — `canProvisionProfile` replaces any namespace/path, one adapter-owned rule drives both the flag and the write-time validation), keyless profile writes return written/skipped, and viewer follow-ups canonicalize against the CHILD workspace)
-M2  IN PROGRESS   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 DONE: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section; D2.4 (NEXT): seed/fork metadata convergence)
+M2  DONE   (D1 COMPLETE: D1.1 Session read shadow, D1.2 command/skill authority read shadow, and D1.3 subagent/task + presentation read parity; D2.1 DONE: Direct-only write-contract convergence + pending-input presentation parity; D2.2 DONE: experimental official Client ordinary-write adapters + submission-presentation seam — see the D2.2 status section; D2.3 DONE: model directory + Session-local model selection, blank-Session preset selection, ordinary create/open lifecycle convergence and presentation closure — see the D2.3 status section; D2.4 DONE: Host-owned fork/rewind convergence; D2 COMPLETE)
 M3  NOT STARTED   (experimental in-process wire: Semantic Port + Remote Adapter + DSH Connection)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
@@ -372,7 +372,7 @@ calls, aliases and wrappers are prohibited.
 - `session.seq` remains the count/offset fact that needs no history
   materialization.
 - The Direct backend's existing reader calls (transcript reconstruction,
-  rewind/fork seeds, cold hydration, Direct status/presentation folds) are
+  cold hydration, Direct status/presentation folds, and the client-local rewind picker) are
   compatibility debt FROZEN by `scripts/check-no-session-events.mjs`: an explicit
   file + normalized call-site allowlist, so a call cannot move to another file
   or be swapped for another call site, and a removed call must drop its
@@ -1029,8 +1029,8 @@ Session mount.
   settlement, distinct from each other): a reconnect during a Host success is
   `created + superseded`, and during a Host refusal is `rejected + superseded` —
   the settlement is never downgraded to `indeterminate`. The Host-returned
-  session identity (not the requested one) is authoritative, seeded/fork
-  creates fail closed until D2.4 owns Host fork, a post-publication create error
+  session identity (not the requested one) is authoritative; fork uses the
+  official `ClientSessions.fork()` exactly once, and a post-publication create error
   is `published-with-error` carrying the published identity, and no same-id
   retry happens. The generated-create reconciliation
   inserts the Client LIST row/binding only; it deliberately does NOT fabricate a
@@ -1072,24 +1072,45 @@ Validation for this stage: per-adapter contract tests for the Remote model,
 preset and lifecycle adapters; the D2.3 Direct contract/outcome tests; headless
 model/preset/create/open presentation tests; and the same-Host
 `smoke:remote-d2-lifecycle` integration smoke. The boundary gate stays green
-and `packages/pi-tui/**` is unchanged. D2.3 is COMPLETE; the next stage is D2.4
-(seed/fork metadata convergence), which owns Host fork and the remaining
-create/fork metadata.
+and `packages/pi-tui/**` is unchanged.
+
+## D2.4 status (COMPLETE) — Host-owned fork / rewind convergence
+
+D2.4 moves `/fork` and `/rewind` to the semantic Host fork operation. The
+request carries only the source Session id and an optional canonical completed-
+turn anchor; Host owns the cut, child identity, inherited prefix, lineage,
+workspace attachment, source preset and activation default. Direct reproduces
+that algorithm inside its lifecycle adapter and retains a real unselected
+`AgentHandle` in the runner's park/claim pool. Remote calls
+`ClientSessions.fork()` exactly once and distinguishes rejection,
+published-with-error, indeterminate and superseded settlements without retry.
+
+Fork publication and local navigation are separate: dispatch does not wait for
+source idle or hold the destructive transition FIFO. A current child is adopted
+through a short gated handoff; a child superseded by newer navigation remains
+published and can later be opened without a second Direct writer. Rewind rows
+use predecessor `turn/end` anchors, so the first human turn is intentionally not
+offered. Production remains Direct; M8 still owns eventual Direct ownership
+retirement.
+
+Validation for this stage: Direct/Remote lifecycle contract tests, pure rewind
+candidate tests, runner busy-admission/supersession/park-claim tests, the
+client-boundary gate, and the same-Host `smoke:remote-d2-fork` /
+`smoke:remote-d2-closure` integration entry points. The boundary gate stays
+green and `packages/pi-tui/**` is unchanged.
 
 **DSH 0.1.6 compatibility note.** `next` now targets the published DSH
 `0.1.6-alpha.1` family in npm mode, and the Source Mode pin moves to
 `0a15e36e7f82b6ed45af6fa9759f29b40dcd965d` (`0.1.6-alpha.1`). This compatibility
-stage changes no Semantic Port: the Direct `forkSeed()`/`rewindSeed()`/
-`snapshotEvents()` reads remain in-process implementation details. 0.1.6 states
+stage now converges Host-owned fork on the Semantic Port. Direct keeps the
+official mapping private; Remote calls `ClientSessions.fork()` and neither
+adapter exposes a seed or child identity. 0.1.6 states
 the official fork cut more precisely — a selected completed turn's seed ends at
 and includes that `turn/end`, and queued input, title and model settings after
-it do not enter the child seed — so D2.4 must take the official `session.fork`
-contract as its authority rather than serializing TUI raw seed payloads into a
-future Remote contract. Plugin-owned durable events such as `image/offload`
+it do not enter the child seed — and D2.4 takes the official `session.fork` contract as its authority rather
+than serializing TUI raw seed payloads into a Remote contract. Plugin-owned durable events such as `image/offload`
 inherit by the official cut/prefix; the TUI keeps no event-type inheritance
-whitelist. This note does not advance the D2.4 status.
-
-
+whitelist. This note records the completed D2.4 convergence.
 
 The D1 closure ledger is:
 

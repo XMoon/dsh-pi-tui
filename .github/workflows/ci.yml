@@ -284,6 +284,10 @@ jobs:
         if: env.DSH_MODE == 'source'
         run: pnpm smoke:remote-d2-write
 
+      - name: D2 closure smoke
+        if: env.DSH_MODE == 'source'
+        run: pnpm smoke:remote-d2-closure
+
       # This was missing from the previous CI.
       - name: Test documentation
         run: pnpm test:docs

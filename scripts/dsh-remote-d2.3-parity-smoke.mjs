@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * D2.3 same-Host model / preset / session-lifecycle parity smoke over the
- * official rc2 Host and Client contracts.
+ * D2.3/D2.4 same-Host model / preset / session-lifecycle/fork parity smoke
+ * over the official Host and Client contracts.
  *
  * One Host Context owns a real live Agent (production AgentLoop + an
  * in-process stub LLM route), the real `AgentPresets` service over a fixture
@@ -19,8 +19,9 @@
  *   commits a blank-Session switch through `agentPresets.select`, while a
  *   started Session settles as `agent-preset/locked`;
  * - `RemoteSessionLifecycle` maps ordinary create to `ClientSessions.create`,
- *   an explicit-preset fresh create to the generated `session.create`, and
- *   open to `ClientSessions.open`/`binding` with no Host resume call.
+ *   an explicit-preset fresh create to the generated `session.create`, open to
+ *   `ClientSessions.open`/`binding`, and fork to one `ClientSessions.fork()`
+ *   call with no Host Agent resume.
  *
  * No external network and no real provider: the only model route is the
  * in-process `SmokeAdapter` registered on the Host LlmRuntime.
@@ -326,7 +327,7 @@ async function main() {
     // CREATE (a): ordinary create with no explicit preset routes through the
     // official ClientSessions.create and is addressable on resolution.
     {
-      const ordinaryResult = await lifecycle.create({ sessionId: ORDINARY_SESSION_ID, meta: { cwd: join(workRoot, 'ordinary') } })
+      const ordinaryResult = await lifecycle.create({ sessionId: ORDINARY_SESSION_ID, cwd: join(workRoot, 'ordinary') })
       assert.equal(ordinaryResult.ownership, 'current')
       assert.deepEqual(ordinaryResult.outcome, { kind: 'created', handle: { session: { id: ORDINARY_SESSION_ID } } })
       assert.ok(sessions.binding(ORDINARY_SESSION_ID) !== undefined, 'ordinary create left no Client binding')
@@ -340,7 +341,7 @@ async function main() {
     {
       const freshResult = await lifecycle.create({
         sessionId: FRESH_SESSION_ID,
-        meta: { cwd: join(workRoot, 'fresh') },
+        cwd: join(workRoot, 'fresh'),
         agentPreset: PRESET_B,
       })
       assert.equal(freshResult.ownership, 'current')
@@ -354,7 +355,7 @@ async function main() {
     }
 
     // A dedicated blank Session for the committed preset switch.
-    const blankResult = await lifecycle.create({ sessionId: BLANK_SESSION_ID, meta: { cwd: join(workRoot, 'blank') } })
+    const blankResult = await lifecycle.create({ sessionId: BLANK_SESSION_ID, cwd: join(workRoot, 'blank') })
     assert.equal(blankResult.outcome.kind, 'created')
 
     // MODEL: the official directory read, the normalized commit, and the
@@ -425,16 +426,89 @@ async function main() {
       scenarios.preset = { status: 'covered', defaultId: roster.defaultId, committed: PRESET_B }
     }
 
-    // PRESET (locked): a Session with one completed turn refuses the switch
+    // PRESET (locked): a Session with completed turns refuses the switch
     // through the adapter as a proven `agent-preset/locked` rejection.
     {
       host.agent.followup(createUserMessage({
-        content: [{ type: 'text', text: 'starting turn' }],
+        content: [{ type: 'text', text: 'starting first turn' }],
         source: { kind: 'user' },
       }))
-      await waitFor('the anchor turn to complete', () => (
-        host.agent.session.snapshotEvents().some(event => event.type === 'turn/end') ? true : undefined
-      ))
+      await waitFor('the first anchor turn to complete', () => {
+        const ends = host.agent.session.snapshotEvents().filter(event => event.type === 'turn/end')
+        return ends.length >= 1 ? true : undefined
+      })
+      host.agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'starting second turn' }],
+        source: { kind: 'user' },
+      }))
+      await waitFor('the second anchor turn to complete', () => {
+        const ends = host.agent.session.snapshotEvents().filter(event => event.type === 'turn/end')
+        return ends.length >= 2 ? true : undefined
+      })
+      const anchorEnds = host.agent.session.snapshotEvents().filter(event => event.type === 'turn/end')
+      const firstEnd = Number(anchorEnds[0].seq)
+      const secondEnd = Number(anchorEnds[1].seq)
+
+      // F1 latest boundary: ClientSessions.fork owns the completed-turn cut,
+      // child identity and reconciliation. The adapter sends one call and
+      // never creates a child through the ordinary create path.
+      {
+        const forkResult = await lifecycle.fork({ sourceSessionId: ANCHOR_SESSION_ID })
+        assert.equal(forkResult.ownership, 'current')
+        assert.equal(forkResult.outcome.kind, 'forked', `latest fork did not settle as published: ${JSON.stringify(forkResult)}`)
+        const childId = forkResult.outcome.kind === 'forked' ? forkResult.outcome.handle.session.id : undefined
+        assert.ok(childId !== undefined && childId !== ANCHOR_SESSION_ID, 'Host fork did not generate a distinct child id')
+        assert.ok(sessions.binding(childId) !== undefined, 'fork child is not addressable in Client state')
+        const child = host.ctx.sessions.get(SessionId(childId))
+        assert.ok(child !== undefined, 'fork child did not reach the Host Session registry')
+        assert.equal(child.header.parentSession, ANCHOR_SESSION_ID, 'Host fork did not preserve the parent lineage')
+        assert.equal(child.header.cwd, join(workRoot, 'anchor'), 'Host fork did not preserve the source cwd')
+        const childPreset = host.ctx.get('sessionProjections')
+          .snapshot(child, ['agentPreset']).values.agentPreset
+        assert.equal(childPreset, PRESET_A, 'Host fork did not preserve the observed source preset')
+        assert.equal(Number(child.snapshotEvents().findLast(event => event.type === 'turn/end')?.seq), secondEnd,
+          'omitted anchor must inherit through the latest closed turn')
+        scenarios.forkLatest = { status: 'covered', sourceSessionId: ANCHOR_SESSION_ID, childSessionId: childId, boundarySeq: secondEnd }
+      }
+
+      // F2 historical boundary: the official first turn/end at or after the
+      // anchor wins; no TUI-side historical seed is constructed.
+      {
+        const forkResult = await lifecycle.fork({ sourceSessionId: ANCHOR_SESSION_ID, atSeq: firstEnd - 1 })
+        assert.equal(forkResult.outcome.kind, 'forked', `historical fork did not settle: ${JSON.stringify(forkResult)}`)
+        const childId = forkResult.outcome.kind === 'forked' ? forkResult.outcome.handle.session.id : undefined
+        assert.ok(childId !== undefined)
+        const child = host.ctx.sessions.get(SessionId(childId))
+        assert.ok(child !== undefined)
+        assert.equal(Number(child.snapshotEvents().findLast(event => event.type === 'turn/end')?.seq), firstEnd,
+          'historical anchor must stop at the first completed turn at or after the anchor')
+        scenarios.forkHistorical = { status: 'covered', sourceSessionId: ANCHOR_SESSION_ID, childSessionId: childId, anchorSeq: firstEnd - 1, boundarySeq: firstEnd }
+      }
+
+      // F4 future anchor: the official Host falls back to the latest closed
+      // turn rather than inventing a future boundary.
+      {
+        const forkResult = await lifecycle.fork({ sourceSessionId: ANCHOR_SESSION_ID, atSeq: secondEnd + 100 })
+        assert.equal(forkResult.outcome.kind, 'forked', `future-anchor fork did not settle: ${JSON.stringify(forkResult)}`)
+        const childId = forkResult.outcome.kind === 'forked' ? forkResult.outcome.handle.session.id : undefined
+        assert.ok(childId !== undefined)
+        const child = host.ctx.sessions.get(SessionId(childId))
+        assert.ok(child !== undefined)
+        assert.equal(Number(child.snapshotEvents().findLast(event => event.type === 'turn/end')?.seq), secondEnd,
+          'a future anchor must fall back to the latest completed turn')
+        scenarios.forkFuture = { status: 'covered', sourceSessionId: ANCHOR_SESSION_ID, childSessionId: childId, anchorSeq: secondEnd + 100, boundarySeq: secondEnd }
+      }
+
+      // F3 open-tail rejection: append a turn/start without a matching end;
+      // an anchor inside that tail has no legal completed boundary.
+      {
+        const openStart = host.agent.session.append('turn/start', { turn: 99 })
+        const forkResult = await lifecycle.fork({ sourceSessionId: ANCHOR_SESSION_ID, atSeq: Number(openStart.seq) })
+        assert.equal(forkResult.outcome.kind, 'rejected', `open-tail fork was not rejected: ${JSON.stringify(forkResult)}`)
+        if (forkResult.outcome.kind === 'rejected') assert.equal(forkResult.outcome.error.code, 'session/fork-unavailable')
+        scenarios.forkOpenTail = { status: 'covered', sourceSessionId: ANCHOR_SESSION_ID, anchorSeq: Number(openStart.seq) }
+      }
+
       const result = await presetCatalog.selectSessionPreset(ANCHOR_SESSION_ID, PRESET_B)
       const outcome = result.outcome
       assert.equal(outcome.kind, 'rejected', `a started Session preset switch was not rejected: ${JSON.stringify(result)}`)
@@ -481,6 +555,7 @@ async function main() {
         '/api/session/create',
         '/api/session/modelCatalog',
         '/api/session/selectModel',
+        '/api/session/fork',
         '/api/agentPresets/list',
         '/api/agentPresets/select',
       ]) {
