@@ -146,6 +146,7 @@
     "@deepseek-ai/dsh-session": "0.1.6-alpha.1",
     "@deepseek-ai/dsh-session-log-export": "0.1.6-alpha.1",
     "@deepseek-ai/dsh-session-persistence": "0.1.6-alpha.1",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "0.1.6-alpha.1",
     "@deepseek-ai/dsh-session-projection": "0.1.6-alpha.1",
     "@deepseek-ai/dsh-session-query": "0.1.6-alpha.1",
     "@deepseek-ai/dsh-session-query-sqlite": "0.1.6-alpha.1",
