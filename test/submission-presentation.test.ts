@@ -89,13 +89,14 @@ test('the Remote source maps official pending submissions and attachment labels'
   }), generation.source)
 
   assert.deepEqual(source.snapshot('session-a'), [
-    { requestId: 'req-1', placement: 'queued', text: 'A', createdAt: 100, attachments: [] },
+    { requestId: 'req-1', placement: 'queued', text: 'A', createdAt: 100, attachments: [], foldableText: true },
     {
       requestId: 'req-2',
       placement: 'steering',
       text: 'B',
       createdAt: 101,
       attachments: [{ kind: 'image', label: 'shot.png' }, { kind: 'file', label: 'notes.txt' }],
+      foldableText: false,
     },
   ])
 })
@@ -108,7 +109,7 @@ test('the Remote source preserves the transcript placement for an idle submissio
     ]),
   }), generation.source)
   assert.deepEqual(source.snapshot('session-a'), [
-    { requestId: 'req-3', placement: 'transcript', text: 'C', createdAt: 200, attachments: [] },
+    { requestId: 'req-3', placement: 'transcript', text: 'C', createdAt: 200, attachments: [], foldableText: true },
   ])
 })
 

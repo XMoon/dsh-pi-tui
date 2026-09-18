@@ -39,6 +39,10 @@ export interface SubmissionPresentationItem {
   readonly text: string
   readonly createdAt: number
   readonly attachments: readonly PresentationAttachment[]
+  /** Whether `text` is the submission's complete content (text-only input),
+   * so the pending row may join the long-user visual-row fold. ABSENT means
+   * unknown and fails open to the full presentation. */
+  readonly foldableText?: boolean
 }
 
 /**
@@ -75,6 +79,7 @@ export class DirectSubmissionPresentation implements SubmissionPresentationSourc
         text: echo.text,
         createdAt: echo.createdAt,
         attachments: [],
+        ...(echo.foldableText === undefined ? {} : { foldableText: echo.foldableText }),
       }))
   }
 }
@@ -149,6 +154,9 @@ export class RemoteSubmissionPresentation implements SubmissionPresentationSourc
       text: submission.text,
       createdAt: submission.time,
       attachments: submission.attachments.map(attachmentLabel),
+      // The official Remote echo carries structured attachments and a raw
+      // text body: text-only exactly when no attachment is present.
+      foldableText: submission.attachments.length === 0,
     }))
   }
 }

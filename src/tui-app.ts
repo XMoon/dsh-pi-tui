@@ -224,14 +224,20 @@ export type TranscriptViewportAnchorEdge = 'top' | 'bottom'
 
 /** One rendered transcript row used to restore a viewport after re-windowing.
  * Object identity is preferred for overlapping folder projections; row kind and
- * occurrence preserve the discriminator when a caller supplies fresh objects. */
+ * occurrence preserve the discriminator when a caller supplies fresh objects.
+ * `message`/`activity` rows are identified by their turn; an ephemeral
+ * `pending-user` block has neither and is identified by its stable pending key
+ * (a local echo and its authoritative replacement share it). */
 export interface TranscriptViewportAnchorPoint {
-  readonly turn: number
-  readonly rowKind: 'message' | 'activity'
+  readonly rowKind: 'message' | 'activity' | 'pending-user'
+  /** The owning turn (`message`/`activity` rows only). */
+  readonly turn?: number
   /** The zero-based occurrence of this row kind within its turn. */
   readonly occurrence: number
   readonly message?: TranscriptMessage
   readonly activity?: TurnActivity
+  /** The stable pending-user disclosure key (`pending-user` rows only). */
+  readonly pendingKey?: string
   /** The line inside the row that was at the selected viewport edge. */
   readonly rowOffset: number
   /** The line's offset from the viewport top (0 for the top edge). */
@@ -1407,6 +1413,10 @@ interface UserBubbleCompactOptions {
   readonly headRows: number
   readonly tailRows: number
   readonly compactMarker: UserBubbleCompactMarker
+  /** Whether this bubble currently renders EXPANDED (full content) while
+   * still being compact-capable: the caller then owns the tail collapse
+   * control row. */
+  readonly expanded: boolean
 }
 
 /**
@@ -1432,6 +1442,7 @@ export class UserBubbleComponent implements Component {
   private lastWidth = -1
   private cached: string[] | undefined
   private lastCompactMarkerRow: number | undefined
+  private lastCollapseEligible = false
 
   constructor(
     child: Component,
@@ -1462,6 +1473,14 @@ export class UserBubbleComponent implements Component {
     return this.lastCompactMarkerRow
   }
 
+  /** Whether the current render is an EXPANDED compact-capable bubble: the
+   * visual rows exceed the threshold, so the caller must place a tail
+   * collapse control after the body (the spacer row when one follows, or one
+   * dedicated presentation row for the final block). */
+  showsCollapseControl(): boolean {
+    return this.lastCollapseEligible
+  }
+
   render(width: number): string[] {
     const inner = Math.max(1, width - this.markerWidth)
     const child = this.child.render(inner)
@@ -1485,11 +1504,17 @@ export class UserBubbleComponent implements Component {
   /** Collapse the child's FULL visual rows to head + marker + tail when the
    * row-count threshold is exceeded. The decision and the slice both run on
    * the rows the current width actually produces, so a resize re-decides
-   * (no baked compact count/marker position). */
+   * (no baked compact count/marker position). An EXPANDED bubble keeps the
+   * full rows and only records that it is collapse-eligible. */
   private compactRows(child: string[], inner: number): string[] {
     this.lastCompactMarkerRow = undefined
+    this.lastCollapseEligible = false
     const options = this.compactOptions
     if (options === undefined || child.length <= options.thresholdRows) return child
+    if (options.expanded) {
+      this.lastCollapseEligible = true
+      return child
+    }
     const head = Math.min(options.headRows, child.length)
     const tail = Math.min(options.tailRows, Math.max(0, child.length - head))
     if (head + tail >= child.length) return child
@@ -1508,18 +1533,46 @@ export class UserBubbleComponent implements Component {
  * The ephemeral pending user-input row: the SAME floating user bubble as a
  * durable human message, plus one dim pending-status line so it reads as
  * accepted-but-not-yet-materialized rather than as durable transcript content.
- * `pendingUserComponent` is presentation-only and is never inserted into the
- * transcript folder.
+ * `PendingUserComponent` is presentation-only and is never inserted into the
+ * transcript folder. It exposes the same disclosure geometry as the durable
+ * bubble (the compact marker row and the expanded collapse-control
+ * eligibility) so the row map shares ONE hit model for both.
  */
-function pendingUserComponent(row: PendingUserRow, running: boolean): Component {
-  const container = new Container()
-  container.addChild(new UserBubbleComponent(
-    new Text(row.text, 0, 0),
-    `${color.roleUser('❯')} `,
-    color.roleUserBg,
-  ))
-  container.addChild(new Text(color.textDim(`  ${pendingUserStatusText(row, running)}`), 0, 0))
-  return container
+class PendingUserComponent implements Component {
+  private readonly container: Container
+  private readonly bubble: UserBubbleComponent
+
+  constructor(row: PendingUserRow, running: boolean, compactOptions?: UserBubbleCompactOptions) {
+    this.bubble = new UserBubbleComponent(
+      new Text(row.text, 0, 0),
+      `${color.roleUser('❯')} `,
+      color.roleUserBg,
+      compactOptions,
+    )
+    this.container = new Container()
+    this.container.addChild(this.bubble)
+    this.container.addChild(new Text(color.textDim(`  ${pendingUserStatusText(row, running)}`), 0, 0))
+  }
+
+  render(width: number): string[] {
+    return this.container.render(width)
+  }
+
+  invalidate(): void {
+    this.container.invalidate?.()
+  }
+
+  dispose(): void {
+    this.container.dispose?.()
+  }
+
+  compactMarkerRow(): number | undefined {
+    return this.bubble.compactMarkerRow()
+  }
+
+  showsCollapseControl(): boolean {
+    return this.bubble.showsCollapseControl()
+  }
 }
 
 /**
@@ -2561,6 +2614,21 @@ export interface PendingUserRow {
   /** The pending status line: an accepted steer reads `steering…`, an idle
    * prompt awaiting its durable message reads `sending…`. */
   status?: 'steering' | 'sending'
+  /** Whether `text` is the row's COMPLETE content (text-only user input), so
+   * the same visual-row disclosure as a durable text-only user message
+   * applies. ABSENT means UNKNOWN and fails open to the FULL presentation —
+   * a pending row carrying attachment markers must never be folded only to
+   * materialize as a full mixed-content durable bubble. */
+  foldableText?: boolean
+}
+
+/** The stable presentation identity of one pending-user row: the rpc
+ * correlation when present (a local echo and its authoritative occurrence
+ * share it), the occurrence/request id otherwise. Never text, and never the
+ * entry index — a projection update must not transfer disclosure state (or a
+ * stale click) to a different pending row. */
+function pendingUserDisclosureKey(row: PendingUserRow): string {
+  return row.rpcId !== undefined ? `rpc:${row.rpcId}` : `id:${row.id}`
 }
 
 /** The single atomic pending-input presentation update. Queue rows, the
@@ -2928,16 +2996,54 @@ interface ExitConfirmationTrigger {
 type FullscreenRowEntry = {
   message?: TranscriptMessage
   activity?: TurnActivity
+  /** The stable disclosure identity of an ephemeral pending-user block. */
+  pendingKey?: string
   height: number
   attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
   collapseFocusOwnerOnClick?: number
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
   workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
-  /** The collapsed long-user bubble's compact marker row (entry-relative).
-   * Only the marker row is an expand target; every other row of the bubble
-   * stays inert so ordinary user text keeps selection/copy semantics. */
-  userDisclosureRow?: number
+  /** The ONE visible long-user disclosure control (entry-relative): the
+   * compact marker when collapsed (expand) or the tail control row when
+   * expanded (collapse). Every other row of the bubble stays inert so
+   * ordinary user text keeps selection/copy semantics and never becomes an
+   * implicit button. */
+  userDisclosureHit?: UserDisclosureHit
   hasTrailingSpacer: boolean
+}
+
+/** The direction one visible long-user disclosure control performs. */
+type UserDisclosureAction = 'expand' | 'collapse'
+
+/** What one long-user disclosure control acts on: a durable transcript
+ * message or an ephemeral pending-user row (identified by its stable key). */
+type UserDisclosureTarget =
+  | { readonly kind: 'durable'; readonly message: TranscriptMessage }
+  | { readonly kind: 'pending'; readonly key: string }
+
+/** One bidirectional long-user disclosure control. `row` is entry-relative;
+ * the action is explicit so a stale press/release fence can never confuse an
+ * expand target with a collapse target that repainted onto the same cell. */
+type UserDisclosureHit = {
+  readonly row: number
+  readonly action: UserDisclosureAction
+  readonly target: UserDisclosureTarget
+}
+
+/** The disclosure geometry a bubble component exposes after a render. Both
+ * the durable {@link UserBubbleComponent} and the ephemeral pending wrapper
+ * implement it structurally; the row map never reaches into their children. */
+interface UserDisclosureComponent {
+  /** The compact marker row when the current render is collapsed. */
+  compactMarkerRow(): number | undefined
+  /** Whether the current render is an EXPANDED compact-capable bubble that
+   * needs a tail collapse control. */
+  showsCollapseControl(): boolean
+}
+
+function isUserDisclosureComponent(component: Component): component is Component & UserDisclosureComponent {
+  return typeof (component as Partial<UserDisclosureComponent>).compactMarkerRow === 'function'
+    && typeof (component as Partial<UserDisclosureComponent>).showsCollapseControl === 'function'
 }
 
 /** One transcript block rendered once for the current Focus projection. The
@@ -2952,7 +3058,7 @@ type RenderedTranscriptBlock = {
   collapseFocusOwnerOnClick?: number
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
   workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
-  userDisclosureRow?: number
+  userDisclosureHit?: UserDisclosureHit
 }
 
 /** Presentation-only high-water for one running Focus turn. The activity
@@ -3438,6 +3544,11 @@ export class TuiApp {
    * regardless of the fold or the override.
    */
   private readonly expandedOverride = new Map<TranscriptMessage, boolean>()
+  /** Per-pending-row long-user disclosure overrides, keyed by the stable
+   * {@link pendingUserDisclosureKey}. Presentation-only ephemeral state: it
+   * never enters the transcript folder, persistence, or the session, and it
+   * is pruned to the live pending keys on every presentation update. */
+  private readonly pendingUserExpanded = new Map<string, boolean>()
   /** PTC sub-call bodies the user expanded by subCallId (stable across
    * live updates, replay and sibling insertion — never an array index). */
   private readonly subCallExpanded = new Set<string>()
@@ -4388,6 +4499,7 @@ export class TuiApp {
     }
     this.terminalSchemeListeners.clear()
     this.expandedOverride.clear()
+    this.pendingUserExpanded.clear()
     this.disposeMessageComponents()
     this.localMessages.length = 0
     this.pendingUserRows = []
@@ -5354,19 +5466,19 @@ export class TuiApp {
         // Fullscreen + Focus: Ctrl+O owns the Thought-root bulk (plan §3) —
         // any expanded root → Collapse All, none → expand the recent
         // `EXPAND_RECENT_TURNS` eligible roots — AND it collapses an
-        // explicitly expanded long user bubble (plan §6.4/§21.7): a visible
-        // long-user override with no expanded root consumes the press as a
-        // user collapse, so the Thought roots are untouched. The root
-        // storage/expansion rule itself is unchanged.
+        // explicitly expanded long user bubble/pending row (plan §6.4/§21.7):
+        // a visible long-user override with no expanded root consumes the
+        // press as a user collapse, so the Thought roots are untouched. The
+        // root storage/expansion rule itself is unchanged.
         if (this.fullscreen !== undefined && this.focusModeEnabled) {
           if (this.hasVisibleExpandedFocusRoots()) {
             // Clear the user overrides BEFORE the single root-collapse
-            // rebuild so one pass paints both.
-            this.clearUserMessageDisclosureOverrides()
+            // rebuild so one pass paints both, and keep the root contract's
+            // own `anchor-turn` viewport (never a generic user anchor).
+            this.clearUserDisclosureOverrides()
             this.toggleFullscreenFocusRoots()
-          } else if (this.hasVisibleExpandedUserMessage()) {
-            this.clearUserMessageDisclosureOverrides()
-            this.rebuildMessages()
+          } else if (this.hasVisibleExpandedUserDisclosure()) {
+            this.mutateTranscriptDisclosure(() => this.clearUserDisclosureOverrides())
           } else {
             this.toggleFullscreenFocusRoots()
           }
@@ -5375,14 +5487,19 @@ export class TuiApp {
         // Every other surface/Focus combination keeps the historical
         // tool/system detail master. Ctrl+O collapses what it owns: the
         // recent-turn master AND any explicit long-user expansion;
-        // otherwise it expands the recent turns.
-        if (this.toolOutputExpanded || this.hasVisibleExpandedUserMessage()) {
-          this.toolOutputExpanded = false
-          this.clearUserMessageDisclosureOverrides()
+        // otherwise it expands the recent turns. The disclosure change is
+        // viewport-safe: following the live tail keeps following it, and a
+        // historical position stays on the same semantic row.
+        if (this.toolOutputExpanded || this.hasVisibleExpandedUserDisclosure()) {
+          this.mutateTranscriptDisclosure(() => {
+            this.toolOutputExpanded = false
+            this.clearUserDisclosureOverrides()
+          })
         } else {
-          this.toolOutputExpanded = true
+          this.mutateTranscriptDisclosure(() => {
+            this.toolOutputExpanded = true
+          })
         }
-        this.rebuildMessages()
         return true
       },
       toggleThinking: () => {
@@ -5911,7 +6028,7 @@ export class TuiApp {
     // through such a regular surface (re-entry re-derives folded). A regular
     // surface WITH the key keeps its search reveal across the swap.
     if (enabled && !this.userDisclosureAffordanceAvailable()) {
-      this.clearUserMessageDisclosureOverrides()
+      this.clearUserDisclosureOverrides()
     }
     this.clearFocusLiveHeightState()
     this.disposeTrackedKeybindingEditors()
@@ -6006,6 +6123,11 @@ export class TuiApp {
         // OSC 52 write; the alt screen never needs to understand
         // tmux/SSH/Wayland/X11.
         copySelection: this.copySelection,
+        // The expanded long-user tail control is presentation chrome: it must
+        // never reach the clipboard. Its visual row copies as the blank
+        // separator it replaced (fork seam X057), so a selection crossing the
+        // message tail stays byte-faithful to the old separator semantics.
+        selectionLineText: context => this.selectionLineText(context),
         // Fullscreen mouse capture also swallows native OSC 8 link
         // activation and (on Windows) the native right-click paste — the
         // host owns both: the opener validates http/https and the paste
@@ -6573,31 +6695,39 @@ export class TuiApp {
     return entry.rendererId === undefined
   }
 
-  /** Whether the CURRENT projection shows a long user message that is
+  /** Whether the CURRENT projection shows a long user disclosure that is
    * ACTUALLY compacted and explicitly expanded (the Ctrl+O user-collapse
-   * target, plan §6.4/§21.7). Only VISIBLE, HOST-rendered, compact-capable
-   * messages count: a parked override on a windowed-away message, a stale
-   * override on a short/resized-short bubble with no visible effect, or an
-   * override on a plugin-owned presentation must not consume the Ctrl+O
-   * press and wedge the toggle into a no-op. */
-  private hasVisibleExpandedUserMessage(): boolean {
+   * target, plan §6.4/§21.7) — a durable message OR an ephemeral pending row.
+   * Only VISIBLE, HOST-rendered, compact-capable entries count: a parked
+   * override on a windowed-away message, a stale override on a
+   * short/resized-short bubble with no visible effect, or an override on a
+   * plugin-owned presentation must not consume the Ctrl+O press and wedge the
+   * toggle into a no-op. */
+  private hasVisibleExpandedUserDisclosure(): boolean {
     for (const message of this.messages) {
       if (!isUserMessageDisclosureCandidate(message)) continue
       if (this.expandedOverride.get(message) !== true) continue
       if (!this.isHostUserDisclosure(message)) continue
       if (this.userMessageCompactsAtCurrentWidth(message)) return true
     }
+    for (const row of this.pendingUserRows) {
+      if (row.foldableText !== true) continue
+      if (this.pendingUserExpanded.get(pendingUserDisclosureKey(row)) !== true) continue
+      if (this.pendingUserCompactsAtCurrentWidth(row)) return true
+    }
     return false
   }
 
   /** Clear every long-user disclosure override (the Ctrl+O user-collapse
-   * pass). It filters by the user-disclosure classification ONLY — thinking,
-   * tool, system and compaction overrides are never touched. */
-  private clearUserMessageDisclosureOverrides(): void {
+   * pass): durable message overrides AND ephemeral pending-row overrides. It
+   * filters by the user-disclosure classification ONLY — thinking, tool,
+   * system and compaction overrides are never touched. */
+  private clearUserDisclosureOverrides(): void {
     for (const message of [...this.expandedOverride.keys()]) {
       if (!isUserMessageDisclosureCandidate(message)) continue
       this.expandedOverride.delete(message)
     }
+    this.pendingUserExpanded.clear()
   }
 
   /** The eligible Focus roots for Ctrl+O bulk expansion: turns with a
@@ -6816,6 +6946,30 @@ export class TuiApp {
       welcomeHeight + transcriptRow - FOCUS_ANCHOR_TOP_PADDING,
       { disableFollow: true },
     )
+  }
+
+  /** The single long-user disclosure transition (plan §10): capture the
+   * fullscreen viewport intent, mutate the disclosure state, rebuild once, and
+   * restore the SAME visual intent. A user who was following the live tail
+   * keeps following it (never a historical browse); a historical reader is
+   * restored to the SAME semantic row (durable message identity or the stable
+   * pending key) and viewport offset — never a raw delta-height scrollTop.
+   * Regular mode (no fullscreen scroll view) just rebuilds. Focus root
+   * transitions own their own `anchor-turn` contract and never route here. */
+  private mutateTranscriptDisclosure(mutate: () => void): void {
+    const scroll = this.fullscreenScroll
+    const wasFollowingEnd = scroll?.isFollowingEnd === true
+    const anchor = scroll === undefined || wasFollowingEnd
+      ? undefined
+      : this.captureTranscriptViewportAnchor()
+    mutate()
+    this.clearFocusLiveHeightState()
+    this.rebuildMessages()
+    if (scroll !== undefined) {
+      if (wasFollowingEnd) this.applyFullscreenFollowEndViewport()
+      else if (anchor !== undefined) this.restoreTranscriptViewportAnchor(anchor, 'top')
+    }
+    this.requestRender()
   }
 
   /** The projected transcript row (in `messageRows` coordinates, welcome
@@ -7146,7 +7300,7 @@ export class TuiApp {
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
       let workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined
-      let userDisclosureRow: number | undefined
+      let userDisclosureHit: UserDisclosureHit | undefined
       const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
       if (block.kind === 'activity') {
         // The live Thought disclosure; the hidden process rows (if any)
@@ -7168,8 +7322,12 @@ export class TuiApp {
         // The ephemeral pending user lane: user-bubble visual language plus a
         // dim pending status. Never cached with durable messages (it leaves
         // the presentation once its authoritative/durable counterpart lands).
-        component = pendingUserComponent(block.row, this.queueRunning)
+        component = this.pendingUserComponentFor(block.row)
         rendered = component.render(width)
+        userDisclosureHit = this.userDisclosureHitFor(component, rendered, truncatedMarker, {
+          kind: 'pending',
+          key: pendingUserDisclosureKey(block.row),
+        })
       } else {
         // Persistent per-message components (stage J): unchanged messages
         // reuse their component, so the fork's text-identity render caches
@@ -7178,7 +7336,12 @@ export class TuiApp {
         rendered = component.render(width)
         truncatedMarker = block.truncated === true
         attachments = this.attachmentRangesOf(component, width)
-        if (component instanceof UserBubbleComponent) userDisclosureRow = component.compactMarkerRow()
+        if (isUserMessageDisclosureCandidate(block.message)) {
+          userDisclosureHit = this.userDisclosureHitFor(component, rendered, truncatedMarker, {
+            kind: 'durable',
+            message: block.message,
+          })
+        }
         const subCallInfo = this.subCallHitsByMessage.get(block.message)
         subCallHits = subCallInfo === undefined
           ? undefined
@@ -7197,9 +7360,27 @@ export class TuiApp {
         ...(collapseFocusOwnerOnClick === undefined ? {} : { collapseFocusOwnerOnClick }),
         ...(subCallHits === undefined ? {} : { subCallHits }),
         ...(workflowHits === undefined ? {} : { workflowHits }),
-        ...(userDisclosureRow === undefined ? {} : { userDisclosureRow }),
+        ...(userDisclosureHit === undefined ? {} : { userDisclosureHit }),
       }
     })
+  }
+
+  /** The ONE bidirectional disclosure control of a long-user bubble (durable
+   * or pending): the compact marker while collapsed, the tail row while an
+   * expanded compact-capable bubble needs one. The tail row is the trailing
+   * separator row when one follows, or one dedicated presentation row charged
+   * to the final block (the height rule mirrors it). */
+  private userDisclosureHitFor(
+    component: Component,
+    rendered: readonly string[],
+    truncatedMarker: boolean,
+    target: UserDisclosureTarget,
+  ): UserDisclosureHit | undefined {
+    if (!isUserDisclosureComponent(component)) return undefined
+    const markerRow = component.compactMarkerRow()
+    if (markerRow !== undefined) return { row: markerRow, action: 'expand', target }
+    if (!component.showsCollapseControl()) return undefined
+    return { row: rendered.length + (truncatedMarker ? 1 : 0), action: 'collapse', target }
   }
 
   /**
@@ -7215,12 +7396,26 @@ export class TuiApp {
   ): RenderedTranscriptBlock[] {
     return mounted.map(entry => {
       const rendered = entry.component.render(width)
+      if (entry.block.kind === 'pending-user') {
+        const userDisclosureHit = this.userDisclosureHitFor(entry.component, rendered, entry.truncatedMarker, {
+          kind: 'pending',
+          key: pendingUserDisclosureKey(entry.block.row),
+        })
+        return {
+          ...entry,
+          rendered,
+          ...(userDisclosureHit === undefined ? { userDisclosureHit: undefined } : { userDisclosureHit }),
+        }
+      }
       if (entry.block.kind !== 'message') {
         return { ...entry, rendered }
       }
       const attachments = this.attachmentRangesOf(entry.component, width)
-      const userDisclosureRow = entry.component instanceof UserBubbleComponent
-        ? entry.component.compactMarkerRow()
+      const userDisclosureHit = isUserMessageDisclosureCandidate(entry.block.message)
+        ? this.userDisclosureHitFor(entry.component, rendered, entry.truncatedMarker, {
+            kind: 'durable',
+            message: entry.block.message,
+          })
         : undefined
       const subCallInfo = this.subCallHitsByMessage.get(entry.block.message)
       const subCallHits = subCallInfo === undefined
@@ -7236,7 +7431,7 @@ export class TuiApp {
         attachments,
         ...(subCallHits === undefined ? { subCallHits: undefined } : { subCallHits }),
         ...(workflowHits === undefined ? { workflowHits: undefined } : { workflowHits }),
-        ...(userDisclosureRow === undefined ? { userDisclosureRow: undefined } : { userDisclosureRow }),
+        ...(userDisclosureHit === undefined ? { userDisclosureHit: undefined } : { userDisclosureHit }),
       }
     })
   }
@@ -7252,14 +7447,20 @@ export class TuiApp {
   }
 
   /** The normal physical height charged to one rendered block, preserving the
-   * existing zero-row and original-index Spacer rules exactly. */
+   * existing zero-row and original-index Spacer rules exactly. An expanded
+   * long-user tail control REUSES the trailing separator row when one
+   * follows; for the final block it is one dedicated presentation row, so the
+   * height must charge it here (the row map and the mounted tree share this
+   * single rule). */
   private normalTranscriptBlockHeight(
     entry: RenderedTranscriptBlock,
     index: number,
     total: number,
   ): number {
     if (entry.rendered.length === 0 && !entry.truncatedMarker) return 0
-    return entry.rendered.length + (entry.truncatedMarker ? 1 : 0) + (index < total - 1 ? 1 : 0)
+    const trailing = index < total - 1 ? 1 : 0
+    const tailControl = entry.userDisclosureHit?.action === 'collapse' && trailing === 0 ? 1 : 0
+    return entry.rendered.length + (entry.truncatedMarker ? 1 : 0) + trailing + tailControl
   }
 
   /** Drop presentation floors and their measured padding. */
@@ -7358,12 +7559,13 @@ export class TuiApp {
     const block = entry.block
     return {
       ...(block.kind === 'message' ? { message: block.message } : block.kind === 'activity' ? { activity: block.activity } : {}),
+      ...(block.kind === 'pending-user' ? { pendingKey: pendingUserDisclosureKey(block.row) } : {}),
       ...(entry.collapseFocusOwnerOnClick === undefined ? {} : { collapseFocusOwnerOnClick: entry.collapseFocusOwnerOnClick }),
       height,
       attachments: entry.attachments,
       ...(entry.subCallHits === undefined ? {} : { subCallHits: entry.subCallHits }),
       ...(entry.workflowHits === undefined ? {} : { workflowHits: entry.workflowHits }),
-      ...(entry.userDisclosureRow === undefined ? {} : { userDisclosureRow: entry.userDisclosureRow }),
+      ...(entry.userDisclosureHit === undefined ? {} : { userDisclosureHit: entry.userDisclosureHit }),
       hasTrailingSpacer,
     }
   }
@@ -7411,7 +7613,17 @@ export class TuiApp {
         }
         const hasTrailingSpacer = index < renderedBlocks.length - 1
         rows.push(this.fullscreenRowEntry(entry, height, hasTrailingSpacer))
-        if (hasTrailingSpacer) this.messagesView.addChild(new Spacer())
+        if (entry.userDisclosureHit?.action === 'collapse') {
+          // The expanded long-user tail control: presentation chrome at the
+          // message tail. It REUSES the separator row when one follows, and
+          // is one dedicated row for the final block — never a row inside the
+          // user body, so ordinary text keeps selection/copy semantics.
+          this.messagesView.addChild(new TranscriptGutterComponent(
+            this.userCollapseControlText(width),
+          ))
+        } else if (hasTrailingSpacer) {
+          this.messagesView.addChild(new Spacer())
+        }
       }
       const padding = paddingRows.get(index) ?? 0
       if (padding > 0) {
@@ -7659,26 +7871,33 @@ export class TuiApp {
       let rowTop = welcomeHeight
       let candidate: TranscriptViewportAnchorPoint | undefined
       for (const entry of this.messageRows) {
-        const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.activity === undefined ? 'message' : 'activity'
-        const turn = entry.message !== undefined && 'turn' in entry.message
-          ? entry.message.turn
-          : entry.activity?.turn
-        const occurrenceKey = turn === undefined ? undefined : `${rowKind}:${turn}`
+        const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.pendingKey !== undefined
+          ? 'pending-user'
+          : entry.activity === undefined ? 'message' : 'activity'
+        const turn = entry.pendingKey !== undefined
+          ? undefined
+          : entry.message !== undefined && 'turn' in entry.message
+            ? entry.message.turn
+            : entry.activity?.turn
+        const occurrenceKey = entry.pendingKey !== undefined
+          ? `pending-user:${entry.pendingKey}`
+          : turn === undefined ? undefined : `${rowKind}:${turn}`
         const occurrence = occurrenceKey === undefined ? 0 : (occurrences.get(occurrenceKey) ?? 0)
         if (occurrenceKey !== undefined) occurrences.set(occurrenceKey, occurrence + 1)
         const visible = entry.height > 0
           && rowTop + entry.height > viewportTop
           && rowTop <= viewportBottom
-        if (visible && turn !== undefined) {
+        if (visible && (turn !== undefined || entry.pendingKey !== undefined)) {
           const line = fromTop
             ? Math.max(viewportTop, rowTop)
             : Math.min(viewportBottom, rowTop + entry.height - 1)
           const point: TranscriptViewportAnchorPoint = {
-            turn,
             rowKind,
+            ...(turn === undefined ? {} : { turn }),
             occurrence,
             ...(entry.message === undefined ? {} : { message: entry.message }),
             ...(entry.activity === undefined ? {} : { activity: entry.activity }),
+            ...(entry.pendingKey === undefined ? {} : { pendingKey: entry.pendingKey }),
             rowOffset: line - rowTop,
             viewportOffset: line - viewportTop,
           }
@@ -7717,11 +7936,17 @@ export class TuiApp {
       const occurrences = new Map<string, number>()
       let rowTop = welcomeHeight
       for (const entry of this.messageRows) {
-        const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.activity === undefined ? 'message' : 'activity'
-        const turn = entry.message !== undefined && 'turn' in entry.message
-          ? entry.message.turn
-          : entry.activity?.turn
-        const occurrenceKey = turn === undefined ? undefined : `${rowKind}:${turn}`
+        const rowKind: TranscriptViewportAnchorPoint['rowKind'] = entry.pendingKey !== undefined
+          ? 'pending-user'
+          : entry.activity === undefined ? 'message' : 'activity'
+        const turn = entry.pendingKey !== undefined
+          ? undefined
+          : entry.message !== undefined && 'turn' in entry.message
+            ? entry.message.turn
+            : entry.activity?.turn
+        const occurrenceKey = entry.pendingKey !== undefined
+          ? `pending-user:${entry.pendingKey}`
+          : turn === undefined ? undefined : `${rowKind}:${turn}`
         const occurrence = occurrenceKey === undefined ? 0 : (occurrences.get(occurrenceKey) ?? 0)
         if (occurrenceKey !== undefined) occurrences.set(occurrenceKey, occurrence + 1)
         if (entry.height <= 0) {
@@ -7729,6 +7954,11 @@ export class TuiApp {
           continue
         }
         const located = { top: rowTop, height: entry.height }
+        if (point.rowKind === 'pending-user') {
+          if (entry.pendingKey !== undefined && entry.pendingKey === point.pendingKey) return located
+          rowTop += entry.height
+          continue
+        }
         const exact = point.rowKind === rowKind && (
           point.message !== undefined
             ? entry.message === point.message
@@ -7741,14 +7971,21 @@ export class TuiApp {
       return undefined
     }
     const points = edge === 'top' ? [anchor.top, anchor.bottom] : [anchor.bottom, anchor.top]
+    let sawPendingPoint = false
     for (const point of points) {
       if (point === undefined) continue
+      if (point.rowKind === 'pending-user') sawPendingPoint = true
       const row = rowFor(point)
       if (row === undefined) continue
       const rowOffset = Math.max(0, Math.min(row.height - 1, point.rowOffset))
       scroll.scrollTo(row.top + rowOffset - point.viewportOffset, { disableFollow: true })
       return true
     }
+    // A pending-user anchor is SEMANTIC-ONLY: the ephemeral row has no durable
+    // identity to fall back to, so an unresolved pending point never copies the
+    // pre-mutation absolute scrollTop over the live position (plan §35.8). The
+    // layout update above already clamped the current position; leave it there.
+    if (sawPendingPoint) return false
     scroll.scrollTo(anchor.scrollTop, { disableFollow: true })
     return false
   }
@@ -7937,17 +8174,29 @@ export class TuiApp {
 
   /** The per-row SEMANTIC hit identity of one transcript row (mouse
    * parity): the row's ACTUAL action target, following the click-path
-   * priority EXACTLY (blank-row escape hatch > Focus activity > PTC
-   * sub-call > Workflow > attachment > Focus-secondary/card). A row
-   * inside a Workflow card that matches no hit is INERT (the card
-   * consumes every click — it must never fall through to the owner/card
-   * branch). Shared by the paint-snapshot commit and the release-click
-   * validation so both sides compute the EXACT same identity string. */
+   * priority EXACTLY (long-user disclosure > blank-row escape hatch > Focus
+   * activity > PTC sub-call > Workflow > attachment > Focus-secondary/card).
+   * The long-user control wins first because it shares the trailing separator
+   * row with the blank-row escape hatch; a row inside a Workflow card that
+   * matches no hit is INERT (the card consumes every click — it must never
+   * fall through to the owner/card branch). Shared by the paint-snapshot
+   * commit and the release-click validation so both sides compute the EXACT
+   * same identity string. */
   private fullscreenRowHitIdentity(
     entry: FullscreenRowEntry,
     inMessage: number,
     nextVisible: FullscreenRowEntry | undefined,
   ): string {
+    // The long-user disclosure control wins FIRST: it sits on the trailing
+    // separator row (or one dedicated final row), which the generic blank-row
+    // escape hatch would otherwise consume. Only the EXACT control row is a
+    // target; every other bubble row is INERT so ordinary user text keeps
+    // selection/copy semantics and never becomes an implicit button.
+    if (entry.userDisclosureHit !== undefined) {
+      return inMessage === entry.userDisclosureHit.row
+        ? this.userDisclosureHitIdentity(entry.userDisclosureHit)
+        : 'inert'
+    }
     // The blank-row escape hatch: the click collapses the owner Thought
     // (the boundary spacer is unclaimed → inert).
     if (entry.hasTrailingSpacer && inMessage === entry.height - 1) {
@@ -7981,12 +8230,6 @@ export class TuiApp {
         return `attachment:${token}:${attachment.imageIndex}`
       }
     }
-    // Collapsed long-user bubble: only the compact marker row is an expand
-    // target; every other row is inert, so ordinary user text keeps
-    // selection/copy semantics and never becomes an implicit button.
-    if (entry.userDisclosureRow !== undefined) {
-      return inMessage === entry.userDisclosureRow ? `user:expand:${token}` : 'inert'
-    }
     // Focus owner-marked rows: a SECONDARY card toggles ITSELF (the
     // card-level identity); a NON-secondary process row collapses the
     // owner turn.
@@ -7996,6 +8239,18 @@ export class TuiApp {
     }
     // The card-level toggle.
     return `message:toggle:${token}`
+  }
+
+  /** The press/release semantic identity of one long-user disclosure control:
+   * the durable message token or the stable pending key, ALWAYS qualified by
+   * the direction. A stale press must never transfer an expand target to a
+   * collapse target (or to a different pending row) that repainted onto the
+   * same cell. */
+  private userDisclosureHitIdentity(hit: UserDisclosureHit): string {
+    if (hit.target.kind === 'durable') {
+      return `user:${hit.action}:${this.identityToken(hit.target.message)}`
+    }
+    return `pending-user:${hit.action}:${hit.target.key}`
   }
 
   /** The semantic identity of one Workflow card row hit (the durable
@@ -8039,16 +8294,18 @@ export class TuiApp {
   }
 
   /** The press-time semantic identity of a transcript row (mouse parity):
-   * the message/activity owner (kind + turn + the per-object identity
-   * token, or the entry index for ownerless rows). Shared by the
-   * paint-snapshot commit and the release-click validation so both sides
-   * compute the EXACT same identity string. */
-  private fullscreenRowOwnerId(entry: { message?: TranscriptMessage; activity?: TurnActivity }, entryIndex: number): string {
+   * the message/activity/pending-user owner (kind + turn + the per-object
+   * identity token, the stable pending key, or the entry index for truly
+   * ownerless rows). Shared by the paint-snapshot commit and the release-click
+   * validation so both sides compute the EXACT same identity string. */
+  private fullscreenRowOwnerId(entry: { message?: TranscriptMessage; activity?: TurnActivity; pendingKey?: string }, entryIndex: number): string {
     return entry.message !== undefined
       ? `msg:${entry.message.kind}:${'turn' in entry.message ? entry.message.turn : 0}:${this.identityToken(entry.message)}`
       : entry.activity !== undefined
         ? `activity:${entry.activity.turn}:${this.identityToken(entry.activity)}`
-        : `entry:${entryIndex}`
+        : entry.pendingKey !== undefined
+          ? `pending-user:${entry.pendingKey}`
+          : `entry:${entryIndex}`
   }
 
   /** Resolve a fullscreen physical row to a transcript cell (the entry
@@ -8381,6 +8638,15 @@ export class TuiApp {
     }
     this.fullscreenCellGesture = undefined
     {
+      // The long-user disclosure control is resolved FIRST (it shares the
+      // trailing separator row with the generic blank-row escape hatch, and
+      // the user disclosure target wins there). Only the EXACT control row
+      // acts; every other bubble row has an inert identity and never reaches
+      // this branch.
+      if (entry.userDisclosureHit !== undefined) {
+        if (inMessage === entry.userDisclosureHit.row) this.applyUserDisclosureHit(entry.userDisclosureHit)
+        return
+      }
       // NEW: the Thought internal blank-row escape hatch (plan §9/§23)
         // — a click on a blank visual row (the inter-block spacer charged
         // to this entry) that sits INSIDE an expanded Thought collapses
@@ -8431,13 +8697,6 @@ export class TuiApp {
         // optional message for the attachment/message toggles below.
         const message = entry.message
         if (message === undefined) return
-        // The collapsed long-user bubble's compact marker expands ONLY that
-        // user message — never a Focus/section toggle. Non-marker rows of the
-        // bubble have an inert hit identity and never reach this branch.
-        if (entry.userDisclosureRow !== undefined) {
-          if (inMessage === entry.userDisclosureRow) this.expandUserMessage(message)
-          return
-        }
         // PTC sub-call header rows win FIRST (their own disclosure is
         // independent of the root card): a click on a child header toggles
         // THAT child's body, never the parent card.
@@ -8520,15 +8779,22 @@ export class TuiApp {
     return nextTurn === turn ? turn : undefined
   }
 
-  /** Expand one collapsed long user message (fullscreen compact-marker
-   * click). The marker only exists while collapsed, so this is expand-only;
-   * the override reuses the same per-message disclosure state as every other
-   * card, and the canonical `message.text` is never touched. */
-  private expandUserMessage(message: TranscriptMessage): void {
-    if (this.expandedOverride.get(message) === true) return
-    this.expandedOverride.set(message, true)
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+  /** Apply one bidirectional long-user disclosure control click (fullscreen
+   * compact marker → expand, expanded tail control → collapse). The durable
+   * override reuses the per-message disclosure state; the pending override is
+   * presentation-only ephemeral state keyed by the stable pending identity.
+   * The canonical `message.text` is never touched. */
+  private applyUserDisclosureHit(hit: UserDisclosureHit): void {
+    const expanded = hit.action === 'expand'
+    this.mutateTranscriptDisclosure(() => {
+      if (hit.target.kind === 'durable') {
+        if (this.expandedOverride.get(hit.target.message) === expanded) return
+        this.expandedOverride.set(hit.target.message, expanded)
+      } else {
+        if (this.pendingUserExpanded.get(hit.target.key) === expanded) return
+        this.pendingUserExpanded.set(hit.target.key, expanded)
+      }
+    })
   }
 
   /** Toggle one collapsible message's individual expansion (mouse click).
@@ -8803,6 +9069,9 @@ export class TuiApp {
   clearSessionOverrides(): void {
     this.clearFocusLiveHeightState()
     this.expandedOverride.clear()
+    // Pending-user disclosure is presentation-only ephemeral state too: a
+    // session switch must drop it with the lane it belongs to.
+    this.pendingUserExpanded.clear()
     // A session switch is a pointer-gesture boundary too: the new session
     // can reuse the same turn numbers AND the same todo dock/panel
     // geometry, so an in-flight press from the old session must never
@@ -10683,9 +10952,7 @@ export class TuiApp {
         // expand master) the effective key. Inside a fullscreen Focus,
         // Ctrl+O owns the Thought-root bulk, so the label is click-only —
         // never a dead key hint.
-        ? (this.fullscreen === undefined
-            ? 'fold'
-            : this.focusModeEnabled ? 'click' : 'click-fold')
+        ? this.userFoldHint()
         : insideFocusSecondary
           ? (this.fullscreen !== undefined ? 'click' : undefined)
           : 'fold'
@@ -11174,10 +11441,12 @@ export class TuiApp {
       // surface-adaptive disclosure rule) comes from the render-cache
       // identity, so Ctrl+O / a fullscreen marker click rebuilds this
       // component from the canonical full text — the text is never mutated.
-      // A regular surface with NO effective expand key has no affordance at
-      // all (fullscreen keeps the marker click), so it must render the full
-      // prompt rather than strand it collapsed forever.
-      if (!expanded && this.userDisclosureAffordanceAvailable()) {
+      // An EXPANDED long prompt keeps the same compact-capable bubble so the
+      // caller can place the tail collapse control (the bubble only reports
+      // that it is collapse-eligible). A regular surface with NO effective
+      // expand key has no affordance at all (fullscreen keeps the marker
+      // click), so it must render the full prompt rather than strand it.
+      if (this.userDisclosureAffordanceAvailable()) {
         const hint = expandHint
         return new UserBubbleComponent(
           new Text(message.text, 0, 0),
@@ -11187,6 +11456,7 @@ export class TuiApp {
             thresholdRows: USER_MESSAGE_COMPACT_THRESHOLD_ROWS,
             headRows: USER_MESSAGE_HEAD_ROWS,
             tailRows: USER_MESSAGE_TAIL_ROWS,
+            expanded,
             compactMarker: (hiddenRows, available) => this.userCompactMarker(hiddenRows, available, hint),
           },
         )
@@ -13226,6 +13496,18 @@ export class TuiApp {
     this.queueItems = presentation.queued
     this.pendingUserRows = presentation.steering
     this.queueRunning = presentation.running
+    // Prune the presentation-only disclosure state to the LIVE pending keys
+    // (plan §16): a steering row that left the lane (its durable message
+    // materialized, or the occurrence settled) must not accumulate stale
+    // rpc/id state for the life of the session. The identity is the stable
+    // pending key, so a local echo whose authoritative occurrence replaces it
+    // keeps its explicit disclosure state.
+    if (this.pendingUserExpanded.size > 0) {
+      const liveKeys = new Set(presentation.steering.map(pendingUserDisclosureKey))
+      for (const key of [...this.pendingUserExpanded.keys()]) {
+        if (!liveKeys.has(key)) this.pendingUserExpanded.delete(key)
+      }
+    }
     // The activity notify re-renders the footer.
     this.projectActivity()
     this.renderQueuePane()
@@ -13775,6 +14057,70 @@ export class TuiApp {
     return color.textDim(`── ${hiddenRows} rows compacted ──`)
   }
 
+  /** The long-user fold-hint owner for the CURRENT surface: regular is the
+   * Ctrl+O recent-turn master; fullscreen without Focus offers the compact
+   * marker click AND the effective expand key; fullscreen Focus is click-only
+   * (Ctrl+O owns the Thought-root bulk there). Shared by the durable bubble
+   * and the ephemeral pending lane so their labels never diverge. */
+  private userFoldHint(): ExpandHint {
+    return this.fullscreen === undefined ? 'fold' : this.focusModeEnabled ? 'click' : 'click-fold'
+  }
+
+  /** The expanded long-user tail control: presentation chrome naming the
+   * collapse affordance of the CURRENT surface. Right-aligned within the
+   * transcript content width; a narrow width truncates instead of wrapping. */
+  private userCollapseControlText(width: number): Text {
+    const label = `▴ Collapse · ${this.expandHint(this.userFoldHint())}`
+    const clipped = visibleWidth(label) <= width ? label : truncateToWidth(label, width, '…')
+    const pad = ' '.repeat(Math.max(0, width - visibleWidth(clipped)))
+    return new Text(color.textDim(pad + clipped), 0, 0)
+  }
+
+  /** The expanded long-user tail control is presentation chrome: it must
+   * never reach the clipboard. Its visual row copies as the blank separator
+   * it replaced (fork seam X057) — paint, search and the mouse hit map are
+   * untouched; only the copy source is filtered. */
+  private selectionLineText(context: { row: number; line: string; scrollView?: ScrollView }): string | undefined {
+    if (context.scrollView === undefined || context.scrollView !== this.fullscreenScroll) return undefined
+    let rowTop = this.welcomeCard.render(this.terminal.columns).length
+    for (const entry of this.messageRows) {
+      const hit = entry.userDisclosureHit
+      if (hit !== undefined && hit.action === 'collapse' && rowTop + hit.row === context.row) return ''
+      rowTop += entry.height
+    }
+    return undefined
+  }
+
+  /** The effective disclosure state of one ephemeral pending-user row: the
+   * explicit per-row override wins, otherwise the surface rule — fullscreen
+   * Focus is compact-by-default (Ctrl+O owns the Thought roots there), every
+   * other surface follows the Ctrl+O master exactly like a recent durable
+   * user prompt. */
+  private pendingUserExpandedState(row: PendingUserRow): boolean {
+    const override = this.pendingUserExpanded.get(pendingUserDisclosureKey(row))
+    if (override !== undefined) return override
+    if (this.fullscreen !== undefined && this.focusModeEnabled) return false
+    return this.toolOutputExpanded
+  }
+
+  /** Build the ephemeral pending-user component for this surface. A text-only
+   * pending row joins the SAME visual-row compaction as a durable text-only
+   * user bubble when this surface has a disclosure affordance; otherwise it
+   * renders in full (never a dead marker). */
+  private pendingUserComponentFor(row: PendingUserRow): PendingUserComponent {
+    if (row.foldableText !== true || !this.userDisclosureAffordanceAvailable()) {
+      return new PendingUserComponent(row, this.queueRunning)
+    }
+    const hint = this.userFoldHint()
+    return new PendingUserComponent(row, this.queueRunning, {
+      thresholdRows: USER_MESSAGE_COMPACT_THRESHOLD_ROWS,
+      headRows: USER_MESSAGE_HEAD_ROWS,
+      tailRows: USER_MESSAGE_TAIL_ROWS,
+      expanded: this.pendingUserExpandedState(row),
+      compactMarker: (hiddenRows, available) => this.userCompactMarker(hiddenRows, available, hint),
+    })
+  }
+
   /** Whether the long-user fold has a usable expand affordance on THIS
    * surface. Fullscreen always does (the compact-marker click); regular needs
    * the effective `app.transcript.toggleExpand` key — compacting without one
@@ -13791,6 +14137,14 @@ export class TuiApp {
   private userMessageCompactsAtCurrentWidth(message: Extract<TranscriptMessage, { kind: 'user' }>): boolean {
     const inner = Math.max(1, this.transcriptRenderWidth() - visibleWidth(`${color.roleUser('❯')} `))
     return new Text(message.text, 0, 0).render(inner).length > USER_MESSAGE_COMPACT_THRESHOLD_ROWS
+  }
+
+  /** Whether one pending-user row ACTUALLY compacts at the current transcript
+   * width (the same visual-row threshold the pending bubble renderer applies),
+   * so a stale override on a short row never consumes the Ctrl+O press. */
+  private pendingUserCompactsAtCurrentWidth(row: PendingUserRow): boolean {
+    const inner = Math.max(1, this.transcriptRenderWidth() - visibleWidth(`${color.roleUser('❯')} `))
+    return new Text(row.text, 0, 0).render(inner).length > USER_MESSAGE_COMPACT_THRESHOLD_ROWS
   }
 
   /**

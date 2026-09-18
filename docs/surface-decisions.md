@@ -934,14 +934,54 @@ the component cache identity:
   expansion into a surface whose marker says `click to expand`. Ctrl+O there
   belongs to the Thought-root bulk, so the marker never advertises a dead key.
 
-Because the marker exists only while collapsed, the expanded state has no
-collapse affordance of its own; Ctrl+O is that owner. The Ctrl+O press
-collapses what it owns and otherwise keeps its existing expand action: in
-regular/fullscreen-non-Focus it turns the recent-turn master off and clears
-the true long-user overrides when either the master is on or a VISIBLE user
-bubble is explicitly expanded; in fullscreen Focus it also clears the
-long-user overrides (with the root-collapse pass, or alone when no Thought
-root is expanded). The override cleanup filters `kind === 'user'` only, so
+A persisted Ctrl+O master keeps recent prompts expanded when the user moves
+into fullscreen without Focus, exactly like the ephemeral pending lane: the
+master is a cross-surface preference that also drives tool/system detail, so it
+is deliberately NOT reset on the transition. Disabling the toggleExpand key
+removes only the KEYBOARD affordance — the surface is never stranded: every
+expanded prompt still shows the tail `▴ Collapse · click` control and every
+folded one still shows the `click to expand` marker, so the mouse round-trip
+works with no key.
+
+The collapsed state exposes the compact marker; the EXPANDED state exposes a
+tail collapse control at the message tail — reusing the trailing separator row
+when one follows, or one dedicated presentation row for the final block. The
+direction is explicit in the shared disclosure metadata (`expand` vs
+`collapse`) and in the fullscreen hit identity, so a stale press can never
+transfer an expand target to a collapse target (or to a replacement pending
+row). The tail label is surface-adaptive: `▴ Collapse · <key>` in regular,
+`▴ Collapse · click / <key>` in fullscreen without Focus, and
+`▴ Collapse · click` inside a fullscreen Focus (Ctrl+O owns the Thought-root
+bulk there, so the card never advertises a dead key). The tail row is
+presentation chrome: the fork's copy-source seam (X057) copies it as the blank
+separator it replaced, while paint, search, word/line selection and the mouse
+hit map keep reading the rendered line.
+
+Ctrl+O keeps its existing ownership: in regular/fullscreen-non-Focus it turns
+the recent-turn master off and clears the true long-user overrides when either
+the master is on or a VISIBLE user bubble/pending row is explicitly expanded;
+in fullscreen Focus it also clears the long-user overrides (with the
+root-collapse pass, or alone when no Thought root is expanded). Every
+disclosure mutation runs through one viewport transaction: a reader who was
+following the live tail keeps following it, and a historical reader is restored
+to the SAME semantic row (durable message identity, or the pending row's stable
+key) at the same viewport offset — never a raw absolute scrollTop that would
+land on different content after a 150→8 row shrink. The Focus root Collapse All
+keeps its own `anchor-turn` contract and never routes through the generic user
+anchor.
+
+The ephemeral pending steering/transcript lane joins the SAME visual-row
+disclosure when its row is text-only (`foldableText`); an unknown or
+mixed-content row fails open to the full presentation, so a pending row never
+folds only to materialize as a full mixed-content durable bubble. Pending
+disclosure state is presentation-only, keyed by the stable `rpc:<id>` /
+`id:<id>` identity (a local echo and its authoritative replacement share it)
+and pruned to the live pending keys on every presentation update; it never
+enters the transcript, persistence, or the session. The status line
+(`steering…` / `sending…` / `waiting for next turn…`) always stays visible and
+is never folded into the compact middle.
+
+The override cleanup filters `kind === 'user'` only, so
 thinking/tool/system/compaction overrides and the Thought-root storage rule
 are untouched. Both the search reveal and the Ctrl+O collapse predicate only
 treat a message as folded when the HOST bubble owns its current presentation
@@ -964,10 +1004,11 @@ A regular surface WITH the key keeps its reveal across the swap. A search
 reveal is not a permanent pin: the next explicit Ctrl+O collapse hides it
 again, and a later search jump reveals it afresh.
 
-Only the marker row is a click target; every other row of the bubble has an
-inert hit identity so ordinary user text keeps selection/copy semantics. A
-search hit inside the collapsed middle expands the message on jump, including
-outside Focus mode, because the search corpus is the full text.
+Only the marker row and the tail control row are click targets; every other
+row of the bubble has an inert hit identity so ordinary user text keeps
+selection/copy semantics. A search hit inside the collapsed middle expands the
+message on jump, including outside Focus mode, because the search corpus is the
+full text.
 
 **Known limitation (deferred):** the search match carries no intra-message
 offset, so the jump expands the message but does not reposition the viewport

@@ -65,6 +65,7 @@ export function buildPendingPresentation(input: PendingPresentationInput): Pendi
           ...(item.rpcId === undefined ? {} : { rpcId: item.rpcId }),
           text: input.textOf(item.content),
           status: 'steering',
+          foldableText: isTextOnlyContent(item.content),
         })
       }
     }
@@ -94,10 +95,26 @@ export function buildPendingPresentation(input: PendingPresentationInput): Pendi
         text,
         local: true,
         status: echo.placement === 'transcript' ? 'sending' : 'steering',
+        ...(echo.foldableText === undefined ? {} : { foldableText: echo.foldableText }),
       })
     }
   }
   return { queued, steering, running }
+}
+
+/**
+ * Whether an authoritative pending occurrence's structural content is
+ * text-only, so the ephemeral row may join the long-user visual-row fold. Any
+ * unrecognized block (image/file/attachment/generic non-text) fails open to
+ * the FULL presentation — the pending row must never be folded only to
+ * materialize as a full mixed-content durable bubble.
+ */
+function isTextOnlyContent(content: readonly unknown[]): boolean {
+  if (content.length === 0) return false
+  return content.every(block =>
+    typeof block === 'object'
+    && block !== null
+    && (block as { type?: unknown }).type === 'text')
 }
 
 /**
