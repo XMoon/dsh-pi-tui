@@ -42,7 +42,7 @@ import type {} from '@deepseek-ai/dsh-tool-todo'
 import { resolvePresetRequest } from './runtime/session-preset.ts'
 import { recordedSessionPreset, selectBlankSessionPreset, sessionPresetOf } from './runtime/direct/session-preset-direct.ts'
 import { DirectModelSelectionOwner, type DefaultModelServiceLike } from './runtime/direct/model-selection-direct.ts'
-import { foldPendingModelSelection, rawSelectionFromRequestHeader, sameModelSelection } from './model-selection.ts'
+import { rawSelectionFromRequestHeader, sameModelSelection } from './model-selection.ts'
 // Empty type imports carry the loader Context merge for the settlement await
 // and the cmdline Context merge for the appExit host value.
 import type {} from '@deepseek-ai/cordis-plugin-loader'
@@ -199,7 +199,7 @@ import { DirectSubagentPort } from './runtime/direct/subagent-direct.ts'
 import { DirectSessionReader, type SessionQueryLike } from './runtime/direct/session-direct.ts'
 import { DirectSessionWriter } from './runtime/direct/session-writer-direct.ts'
 import { DirectPendingInputReader } from './runtime/direct/pending-input-reader-direct.ts'
-import { DirectSessionLifecycle } from './runtime/direct/session-lifecycle-direct.ts'
+import { DirectSessionLifecycle, type DirectOwnerPoolLike } from './runtime/direct/session-lifecycle-direct.ts'
 import { DirectInteractionPort } from './runtime/direct/interaction-direct.ts'
 import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from './runtime/direct/config-direct.ts'
@@ -209,7 +209,16 @@ import { serializeTuiSettingsMutation } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
 import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-direct.ts'
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
-import { LifecycleError, directAgentOf, ownerHandleOf, requireCreated, requireOpened, type CreateSessionRequest, type OpenSessionRequest, type SessionHandle } from './runtime/session-lifecycle-port.ts'
+import {
+  LifecycleError,
+  directAgentOf,
+  ownerHandleOf,
+  requireCreated,
+  requireOpened,
+  type CreateSessionRequest,
+  type OpenSessionRequest,
+  type SessionHandle,
+} from './runtime/session-lifecycle-port.ts'
 import type { HostCommandOutcome } from './runtime/host-command-port.ts'
 import type { PendingInputItem } from './runtime/pending-input-reader-port.ts'
 import { formatShellSubmitText, localShellSandboxPreferenceOf, shellCommandOf, shellModeOf, submitShellResult, type ShellSubmitAgentLike } from './shell-context.ts'
@@ -229,11 +238,7 @@ import {
 } from './skill-catalog.ts'
 
 import { collectRewindCandidates, rewindPickerItem } from './rewind.ts'
-import {
-  commitRewind,
-  type RewindCommitHost,
-  type RewindLiveIdentity,
-} from './session-fork.ts'
+import { isRewindIdentityCurrent, type RewindLiveIdentity } from './session-fork.ts'
 import { SessionTransitionGate } from './transition-gate.ts'
 import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from './submit-ack.ts'
 import { PendingSubmissions, type PendingSubmissionPlacement } from './pending-submission.ts'
@@ -1228,13 +1233,6 @@ function timedBootstrapScan<T>(diag: Diag, name: string, eventCount: number, sca
   return result
 }
 
-/** A balanced completed-turn prefix for forking: the log up to (and including)
- * the last `turn/end`. Undefined when no turn has completed yet.
- * @param events - the session log.
- * @returns the fork seed events, or undefined.
- */
-export { forkSeed } from './commands.ts'
-
 /** One fold of a compaction lifecycle event over the runner's in-flight
  * compaction state. Pure (the firehose applies the returned surface
  * effects): dsh-compaction is not a peer, so the event is read
@@ -1716,6 +1714,22 @@ export function apply(ctx: Context, config: Config): void {
     // race the DSH agent-loop owner disposer.
     const transitionGate = new SessionTransitionGate()
     const operationBarrier = new SessionOperationBarrier()
+    const parkedDirectOwners = new Map<string, AgentHandle>()
+    const directOwnerPool: DirectOwnerPoolLike = {
+      claim: sessionId => {
+        const handle = parkedDirectOwners.get(sessionId)
+        if (handle !== undefined) parkedDirectOwners.delete(sessionId)
+        return handle
+      },
+      park: handle => {
+        const sessionId = String(handle.agent.session.id)
+        const previous = parkedDirectOwners.get(sessionId)
+        if (previous !== undefined && previous !== handle) throw new Error(`duplicate parked Direct owner for session "${sessionId}"`)
+        parkedDirectOwners.set(sessionId, handle)
+      },
+    }
+    let navigationEpoch = 0
+    const pendingForks = new Set<Promise<unknown>>()
     // Alt+Up may finish a queue mutation while a transition is waiting on the
     // same writer barrier. Keep its confirmed local representation until the
     // transition outcome is known: commit drops it, failure restores it.
@@ -1769,6 +1783,17 @@ export function apply(ctx: Context, config: Config): void {
         // phase), while an aborted transition leaves the old owner current
         // and retires it. A deferred start never created an owner: nothing
         // to retire, the surface teardown is complete.
+        const retireParked = async (agent: Agent, handle: AgentHandle): Promise<RetirementReport> =>
+          retireDirectOwnedSession({
+            cancel: () => agent.cancel({ kind: 'user' }),
+            whenIdle: () => agent.whenIdle(),
+            drainDescendants: async () => {
+              const subagents = ctx.get('subagents') as { drainContinuableDescendants?(parents: readonly unknown[]): Promise<void> } | undefined
+              await subagents?.drainContinuableDescendants?.([agent])
+            },
+            flush: async () => { await sessions.flush(agent.session) },
+            disposeOwner: () => handle.dispose(),
+          })
         const retire = async (): Promise<RetirementReport> => {
           const agent = liveAgent
           const handle = liveHandle
@@ -1835,7 +1860,17 @@ export function apply(ctx: Context, config: Config): void {
           // boundary. The gate/barrier are constructed BEFORE any owner can
           // exist (see the hoisted declarations), so an owner always has a
           // serialization path.
-          return await transitionGate.run(() => operationBarrier.runTransition(retire))
+          while (pendingForks.size > 0) await Promise.allSettled([...pendingForks])
+          return await transitionGate.run(() => operationBarrier.runTransition(async () => {
+            const current = await retire()
+            const failures = [...current.failures]
+            for (const [sessionId, parked] of parkedDirectOwners) {
+              parkedDirectOwners.delete(sessionId)
+              const report = await retireParked(parked.agent, parked)
+              failures.push(...report.failures)
+            }
+            return { failures }
+          }))
         } catch (error) {
           // Defensive: a reentrant gate/barrier means a transition is STILL
           // active — retiring now would race it. Record the failure and SKIP
@@ -2116,7 +2151,7 @@ export function apply(ctx: Context, config: Config): void {
       }),
       directPendingInputReader,
       directSessionWriter,
-      new DirectSessionLifecycle(ctx, (presetId) => compose(presetId)),
+      new DirectSessionLifecycle(ctx, (presetId) => compose(presetId), directOwnerPool),
       new DirectInteractionPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
       new DirectCatalogPort(
         ctx,
@@ -2430,58 +2465,22 @@ export function apply(ctx: Context, config: Config): void {
       })
     }
 
-    /** The ONE writer for the live session: every path that changes which
-     * session owns the surface — /new, /fork, rewind, `/sessions` switch,
-     * the first-session creation — runs its WHOLE workflow (prepare/create
-     * → flush → COMMIT (assign new + generation bump) → retire old) inside
-     * {@link transitionGate}. Without the gate a transition can interleave
-     * with another: a fork child could be created (and its seed published
-     * to persistence) before a stale check sees the surface already moved —
-     * `dispose()` stops the agent but never deletes the persisted session —
-     * and a stale identity check could pass, then yield across an await
-     * inside the commit preparation, letting a concurrent switch land and
-     * later get overwritten. The rewind commit holds the gate from BEFORE
-     * `createForkedAgent` (the create itself is inside the exclusive
-     * section), so a stale rewind never creates a child at all.
+    /** The transition gate protects ordinary session surface changes — `/new`,
+     * `/sessions` switch/open and first-session creation — from interleaving.
+     * Fork dispatch is intentionally outside this destructive queue: Host
+     * publication may outlive local navigation, while the visible adoption and
+     * old-owner retirement use a short gated handoff.
      * @see SessionTransitionGate */
     // (The transition gate and operation barrier are constructed BEFORE the
     // first Agent can exist — see the hoisted declarations above — so the
     // retirement coordinator is fully wired before any owner is created.)
 
-    /**
-     * The ONE session-transition transaction, shared by /new, /fork,
-     * conversation rewind and `/sessions` switch/resume. The canonical
-     * ordering lives in `runTransitionTo` (src/transition.ts — unit-tested
-     * against the exact phase order); this is the runner's host adapter.
-     *
-     * The ordering is the whole point (review rounds 2–3):
-     *
-     *   1. QUIESCE OLD — `whenIdle()` then the FINAL flush. `dispose()` is
-     *      an async quiescence and a cancelled RUNNING turn appends its
-     *      closure events (interrupted assistant/message, step/end,
-     *      turn/end) in finally blocks — the old agent must be idle before
-     *      the flush so those closures are never split across the switch.
-     *      Old-idle-then-flush closes that window; may fail → abort with
-     *      ZERO child side effects.
-     *   2. caller `prepare` (rewind's stale gate, switch pre-checks)
-     *      — may fail → abort;
-     *   3. create/resume the CHILD — may fail → abort; once it SUCCEEDS the
-     *      child is published (session/created → persistence may already
-     *      write its seed) and there is NO failure path afterwards that may
-     *      be interpreted as "the child never happened" (`dispose()` stops
-     *      an agent but never deletes a persisted session; dsh has no
-     *      durable rollback);
-     *   4. COMMIT — a synchronous critical section (generation bump, live
-     *      handle/agent replacement) with no awaits between its steps;
-     *   5. RETIRE — retire the old Direct owner in the fixed order
-     *      (cancel → idle → drain continuable descendants → final flush →
-     *      dispose — see src/runtime/direct/owned-session-retirement.ts),
-     *      then child whenIdle, surface rebuild, catalog refresh —
-     *      failures WARN ONLY, the committed child always stands.
-     *
-     * Must be called inside {@link transitionGate} (via
-     * `withSessionTransition` or the rewind commit's own gate wrapper).
-     */
+    /** The ordinary session-transition transaction. Its canonical ordering
+     * lives in `runTransitionTo` (src/transition.ts — unit-tested): quiesce and
+     * flush the old owner, run caller preflight, create/open the child, commit
+     * the visible handle synchronously, then retire the old Direct owner and
+     * refresh the child surface. Published children are never treated as if
+     * they did not exist, and callers use this only inside the gate. */
 
 /** Extract the live in-process agent from a transition next value: the
  * Direct SessionHandle carries it via direct.agent; an AgentHandle IS the
@@ -2490,10 +2489,11 @@ export function apply(ctx: Context, config: Config): void {
 // transition agent/handle extraction lives in runtime/session-lifecycle-port.ts
 // (ownerHandleOf / directAgentOf) so the runner AND the contract tests share
 // the exact extraction the transition commit uses.
-    const transitionTo = async <T>(steps: TransitionSteps<T> & { inheritSelection?: ModelSelection }): Promise<TransitionOutcome<T>> => {
+    const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
+      navigationEpoch += 1
       const from = liveAgent?.session.id
-        const opening = { id: steps.target.id, events: [] as SessionEvent[] }
-        openingSession = opening
+      const opening = { id: steps.target.id, events: [] as SessionEvent[] }
+      openingSession = opening
       const oldHandle = liveHandle
       const oldAgent = liveAgent
       let transitionCommitted = false
@@ -2502,7 +2502,7 @@ export function apply(ctx: Context, config: Config): void {
           if (liveAgent === undefined) return
           // QUIESCE first: after whenIdle the old agent can no longer
           // produce turn events, so the final flush below is truly final.
-          // (A /new or /fork while the agent is busy now WAITS for the
+          // (A /new while the agent is busy now WAITS for the
           // current activity instead of aborting it — the deliberate
           // product semantics, see docs/concurrency.md.) The wait is
           // abort-aware: an exit during the quiesce cancels the CURRENT
@@ -2537,35 +2537,6 @@ export function apply(ctx: Context, config: Config): void {
           // out and the new agent must be observed running before it can
           // ever notify.
           completionController.setLiveAgent(liveAgent.id)
-          // A caller-supplied selection is the desired target state. For /new it is
-          // the explicit default intent; for /fork and /rewind it is the source's
-          // current selection after the inherited historical prefix. Record it durably
-          // so the first request and any later resume both see it.
-          // Durable history in an inherited seed is compared rather than treated as
-          // a veto.
-          // A matching selection does not append a duplicate event;
-          // a differing selection is recorded in the child-owned suffix.
-          if (steps.inheritSelection !== undefined) {
-            const target = directAgentOf(next) as Agent
-            // The shared fold decides whether the target carries VALID
-            // durable model history (pending intent or a usable request
-            // header): malformed events are not durable history, and the
-            // fold is null-safe, so a hostile log can never throw here.
-            const folded = foldPendingModelSelection(target.session.snapshotEvents())
-            const durableSelection = folded.pending ?? folded.lastUsed
-            if (!sameModelSelection(durableSelection, steps.inheritSelection)) {
-              try {
-                 modelSelections.selectForNextRequest(target, steps.inheritSelection)
-               } catch (error) {
-                 // A failed seed must not leave a published target without
-                 // its post-commit surface initialization.
-                 diag.error('transition selection seed failed', {
-                   session: target.session.id,
-                   error: safeErrorMessage(error),
-                 })
-               }
-            }
-          }
         },
         retireOld: async (next) => {
           const retired: string[] = []
@@ -2621,10 +2592,7 @@ export function apply(ctx: Context, config: Config): void {
           } catch (error) {
             retired.push(`surface rebuild: ${safeErrorMessage(error)}`)
           }
-          {
-             if (openingSession === opening) openingSession = undefined
-           }
-           // The new owner's catalog refresh is AWAITED before the switch is
+          // The new owner's catalog refresh is AWAITED before the switch is
           // reported: the old wrappers became revalidating transitions at
           // the target change, and the report must not precede the new
           // catalog (a failed attempt still returns a successful switch —
@@ -2636,29 +2604,30 @@ export function apply(ctx: Context, config: Config): void {
             retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
           }
           if (openingSession === opening) openingSession = undefined
-           if (retired.length > 0) {
+          if (retired.length > 0) {
             diag.error('transition retire failed (child committed)', { to: (directAgentOf(next) as Agent).session.id, failures: retired })
           }
           diag.info('switch ok', { from: from ?? '(none)', to: (directAgentOf(next) as Agent).session.id, seq: Number((directAgentOf(next) as Agent).session.seq) })
         },
         recordFailure: (phase, error) => {
           diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
-           if (openingSession === opening) openingSession = undefined
+          if (openingSession === opening) openingSession = undefined
         },
       }, steps).finally(() => {
-         if (!transitionCommitted) settlePendingQueueRecalls(false)
-         if (openingSession === opening) openingSession = undefined
-       })
+        if (!transitionCommitted) settlePendingQueueRecalls(false)
+        if (openingSession === opening) openingSession = undefined
+      })
     }
 
     /** Hand the TUI over to another persisted session. Never throws: every
      * failure (unknown session, broken log, preset mount) returns an error
      * string so callers' `.then(error => ...)` need no rejection path. The
      * whole switch (compose → resume → commit) runs inside the
-     * session-transition gate, so it can never interleave with /new, /fork
-     * or a rewind commit (the single-writer rule). */
-    const switchSession = (sessionId: string): Promise<string | undefined> =>
-      transitionGate.run(() => operationBarrier.runTransition(async () => {
+     * session-transition gate, so it can never interleave with another
+     * ordinary transition (the single-writer rule). */
+    const switchSession = (sessionId: string): Promise<string | undefined> => {
+      navigationEpoch += 1
+      return transitionGate.run(() => operationBarrier.runTransition(async () => {
         try {
           return await switchSessionLocked(sessionId)
         } finally {
@@ -2667,6 +2636,7 @@ export function apply(ctx: Context, config: Config): void {
           settlePendingQueueRecalls(false)
         }
       }))
+    }
 
     const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
       // A switch INTO the session we are already on is a no-op.
@@ -3145,6 +3115,153 @@ export function apply(ctx: Context, config: Config): void {
       create: async (options) => requireCreated(await backend.sessionLifecycle.create({ ...options, signal })),
       open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }
+
+    const parkForkOwner = (handle: SessionHandle | undefined): void => {
+      const owner = handle === undefined ? undefined : ownerHandleOf(handle) as AgentHandle | undefined
+      if (owner !== undefined) directOwnerPool.park(owner)
+    }
+    const forkNavigationCurrent = (expected: RewindLiveIdentity): boolean =>
+      isRewindIdentityCurrent({
+        sessionId: liveAgent?.session.id,
+        generation: sessionGeneration,
+        navigationEpoch,
+      }, expected)
+    const adoptFork = async (
+      handle: SessionHandle,
+      expected: RewindLiveIdentity,
+      onAdopted?: () => void,
+    ): Promise<boolean> => {
+      let adopted = false
+      try {
+        await transitionGate.run(() => operationBarrier.runTransition(async () => {
+        if (cleanedUp || !forkNavigationCurrent(expected)) {
+          parkForkOwner(handle)
+          return
+        }
+        const oldAgent = liveAgent
+        const oldHandle = liveHandle
+        const nextAgent = directAgentOf(handle) as Agent | undefined
+        const nextHandle = ownerHandleOf(handle) as AgentHandle | undefined
+        if (nextAgent === undefined || nextHandle === undefined) {
+          throw new Error(`forked session "${handle.session.id}" has no Direct owner`)
+        }
+        settlePendingQueueRecalls(true)
+        settleLocalSubmitAck('session forked')
+        submitLatencyTracker.reset()
+        bumpSessionGeneration()
+        liveAgent = nextAgent
+        liveHandle = nextHandle
+        completionController.setLiveAgent(nextAgent.id)
+        adopted = true
+        try {
+          onAdopted?.()
+        } catch (error) {
+          diag.error('fork adoption callback failed after child commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
+        }
+        if (oldAgent !== undefined && oldHandle !== undefined) {
+          const report = await retireDirectOwnedSession({
+            cancel: () => oldAgent.cancel({ kind: 'user' }),
+            whenIdle: () => oldAgent.whenIdle(),
+            drainDescendants: async () => {
+              const subagents = ctx.get('subagents') as { drainContinuableDescendants?(parents: readonly unknown[]): Promise<void> } | undefined
+              await subagents?.drainContinuableDescendants?.([oldAgent])
+            },
+            flush: async () => { await sessions.flush(oldAgent.session) },
+            disposeOwner: () => oldHandle.dispose(),
+          })
+          if (report.failures.length > 0) diag.error('fork old-owner retirement failed (child committed)', { from: oldAgent.session.id, failures: report.failures })
+        }
+        let aborted = false
+        try {
+          aborted = await whenIdleOrAbort(nextAgent, lifecycleController.signal)
+        } catch (error) {
+          diag.error('fork child quiescence failed after commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
+        }
+        if (!aborted) {
+          try {
+            await initLiveSession(nextAgent)
+          } catch (error) {
+            diag.error('fork child initialization failed after commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
+          }
+        }
+        try {
+          await refreshLiveCatalog(nextAgent)
+        } catch (error) {
+          diag.error('fork child catalog refresh failed after commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
+        }
+      }))
+      } catch (error) {
+        if (!adopted) throw error
+        diag.error('fork post-commit handoff failed', { error: safeErrorMessage(error), session: handle.session.id })
+      }
+      return adopted
+    }
+    const forkSession = async (
+      sourceSessionId: string,
+      atSeq?: number,
+      onAdopted?: () => void,
+      pickerIdentity?: RewindLiveIdentity,
+    ) => {
+      // A rewind picker captures identity BEFORE its overlay can yield to a
+      // newer navigation. Validate that capture against the live surface before
+      // claiming a fresh operation epoch; A → B → A must not revive A's row.
+      const before = {
+        sessionId: liveAgent?.session.id,
+        generation: sessionGeneration,
+        navigationEpoch,
+      }
+      const pickerCurrent = pickerIdentity === undefined || isRewindIdentityCurrent(before, pickerIdentity)
+      const expectedSessionId = pickerIdentity?.sessionId ?? before.sessionId
+      // Reject an obsolete picker before consuming an epoch. A stale A picker
+      // must not invalidate a newer legitimate A fork that already admitted.
+      if (cleanedUp || !pickerCurrent || expectedSessionId !== sourceSessionId) {
+        return { kind: 'error' as const, text: 'the session changed before fork dispatch' }
+      }
+      const expected: RewindLiveIdentity = {
+        sessionId: expectedSessionId,
+        generation: pickerIdentity?.generation ?? before.generation,
+        navigationEpoch: ++navigationEpoch,
+      }
+      let settleFork!: () => void
+      let forkedHandle: SessionHandle | undefined
+      const pending = new Promise<void>(resolve => { settleFork = resolve })
+      pendingForks.add(pending)
+      try {
+        const result = await backend.sessionLifecycle.fork({
+          sourceSessionId,
+          ...atSeq === undefined ? {} : { atSeq },
+        })
+        const outcome = result.outcome
+        if (outcome.kind === 'rejected' || outcome.kind === 'indeterminate' || outcome.kind === 'published-with-error') {
+          if (outcome.kind === 'published-with-error') parkForkOwner(outcome.handle)
+          // A Direct failure is still returned as `current` because Direct has
+          // no transport generation to supersede it. Navigation owns whether
+          // that failure may be shown, so apply the same fence as success.
+          if (result.ownership === 'superseded' || !forkNavigationCurrent(expected)) {
+            return { kind: 'success' as const }
+          }
+          return { kind: 'error' as const, text: `${outcome.error.message} (${outcome.error.code})` }
+        }
+        if (result.ownership === 'superseded' || !forkNavigationCurrent(expected)) {
+          parkForkOwner(outcome.handle)
+          return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}; navigation stayed on the newer session` }
+        }
+        forkedHandle = outcome.handle
+        const adopted = await adoptFork(outcome.handle, expected, onAdopted)
+        if (!adopted) return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
+        draftImages.clearUnpinned()
+        draftFiles.clearUnpinned()
+        return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
+      } catch (error) {
+        if (forkedHandle !== undefined) parkForkOwner(forkedHandle)
+        if (!forkNavigationCurrent(expected)) return { kind: 'success' as const }
+        return { kind: 'error' as const, text: `fork failed: ${safeErrorMessage(error)}` }
+      } finally {
+        settleFork()
+        pendingForks.delete(pending)
+      }
+    }
+
     // Abort handle for the currently running `!` shell command.
     let localShellController: AbortController | undefined
     /** Stop the captured live Agent through the SessionWriter seam. The
@@ -3340,7 +3457,7 @@ export function apply(ctx: Context, config: Config): void {
       // all defined by this point — the resume that produced the live
       // agent ran after them). Without a live owner there is nothing to
       // retire; close the diagnostics handle either way (idempotent).
-      if (liveAgent !== undefined && liveHandle !== undefined) {
+      if (liveAgent !== undefined || liveHandle !== undefined || parkedDirectOwners.size > 0 || pendingForks.size > 0) {
         await retireOwnedSession()
       } else {
         diag.dispose()
@@ -6776,7 +6893,7 @@ export function apply(ctx: Context, config: Config): void {
           runDetached('settings fullscreen write', () => serializeTuiSettingsMutation(
              settings,
              () => settings.replace({ ...settings.get(), footerCustomItems: userFooterCustomItemsForSave(), fullscreen: fullscreen ? 'on' : 'off' }),
-           ), {
+            ), {
             diag,
             notify: (message) => {
               if (cleanedUp) return
@@ -8819,7 +8936,7 @@ export function apply(ctx: Context, config: Config): void {
       if (creating !== undefined) return creating
       // The first-session creation is a session transition too: it runs
       // inside the single-writer gate so it can never interleave with a
-      // /new, /fork, rewind or switch that is already in flight.
+      // an ordinary session transition that is already in flight.
       creating = transitionGate.run(() => operationBarrier.runTransition(async () => {
         const launched = await launchComposition()
         if (launched.failure !== undefined) resumeFailure = launched.failure
@@ -8830,7 +8947,7 @@ export function apply(ctx: Context, config: Config): void {
         // (no pin, no second fresh fallback).
         const createFirstSession = async (composition: { agentPreset?: string; setup: (agentCtx: Context, agent: Agent) => Promise<void> | void }): Promise<SessionHandle> => {
           const sessionId = SessionId(`session-${randomUUID()}`)
-           openingSession = { id: String(sessionId), events: [] }
+          openingSession = { id: String(sessionId), events: [] }
           // Quiesce EVERY sessionless `/model` default write (and its fenced
           // correction) BEFORE the create: the Direct adapter captures the
           // settled persisted Host default for Agent activation. A failed
@@ -8843,7 +8960,7 @@ export function apply(ctx: Context, config: Config): void {
             // The semantic `agentPreset` is the sole preset authority; the
             // Direct adapter writes the actually composed preset into the
             // durable header (never a duplicated meta field).
-            meta: { cwd: process.cwd() },
+            cwd: process.cwd(),
             agentPreset: composition.agentPreset,
             signal: lifecycleController.signal,
           }))
@@ -8876,7 +8993,7 @@ export function apply(ctx: Context, config: Config): void {
         // A successful Direct create always yields the live agent (the
         // port contract: direct.agent is present on Direct backends).
         const createdAgent = created.direct!.agent as Agent
-         const opening = openingSession
+        const opening = openingSession
         liveHandle = created.direct!.ownerHandle as AgentHandle
         liveAgent = createdAgent
         // First-session commit: the notification controller resets with
@@ -9046,9 +9163,9 @@ export function apply(ctx: Context, config: Config): void {
     /**
      * The conversation rewind picker (the ONE entry shared by the idle
      * empty-editor double-Esc and `/rewind` — plan §22). Lists the completed
-     * user turns of the live session; a selection commits through
-     * `commitRewind` (create → commit → prompt restore) as an OWNED task with
-     * the stale-generation gates. Sessionless (deferred start) it notifies
+     * user turns of the live session; a selection dispatches the semantic Host fork with the candidate's predecessor boundary
+     * as an OWNED task with
+     * the navigation identity gates. Sessionless (deferred start) it notifies
      * and never creates a session.
      */
     function openRewindPicker(): void {
@@ -9070,85 +9187,49 @@ export function apply(ctx: Context, config: Config): void {
         app.notify('no completed user turn to rewind', 'info')
         return
       }
-      // The source identity captured at OPEN time: the selection commits
-      // only while the same session still owns the surface (stale gates
-      // inside commitRewind).
+      // Capture the picker-open identity, not only the Session id. A switch
+      // away and back to the same id must still supersede the old candidate.
       const sourceId = source.session.id
-      const sourceGeneration = sessionGeneration
-      const sourceSelection = selected.current
-      const commitHost: RewindCommitHost = {
-        sessionCwd: () => sessionCwd(),
-        sessionPreset: (session) => session.id === sourceId
-          ? currentPreset()
-          : sessionPresetOf(ctx, session),
-        compose,
-        agents: lifecycleAgents,
-        liveIdentity: () => ({ sessionId: liveAgent?.session.id, generation: sessionGeneration }),
-        // The unified transaction: the old session is flushed BEFORE the
-        // child is created (a stale rewind is detected before anything is
-        // published; a flush failure leaves zero side effects), the commit
-        // is a synchronous critical section, and nothing after the create
-        // is ever "rolled back" (dispose cannot delete a persisted child).
-        transitionTo: (steps) => transitionTo(steps),
-        replaceDraft: (text) => app.setDraft(text),
+      const pickerIdentity: RewindLiveIdentity = {
+        sessionId: sourceId,
+        generation: sessionGeneration,
+        navigationEpoch,
       }
       app.openPicker(
         candidates.map(rewindPickerItem),
         (value) => {
           const candidate = candidates.find(item => String(item.turnStartSeq) === value)
           if (candidate === undefined) return
-          runOwned('conversation rewind', () => {
-            // The WHOLE commit — gate 1 → create → commit → restore — runs
-            // inside the session-transition gate: no other transition can
-            // interleave, so a stale rewind is detected BEFORE the child is
-            // created (never a published-and-disposed durable ghost), and
-            // the commit can never be overwritten by a concurrent switch.
-            return transitionGate.run(() => operationBarrier.runTransition(async () => {
-              try {
-                return await commitRewind(commitHost, source, candidate, {
-                  sessionId: sourceId,
-                  generation: sourceGeneration,
-                }, sourceSelection)
-              } finally {
-                settlePendingQueueRecalls(false)
-              }
-            }))
-          }, {
+          let adopted = false
+          runOwned('conversation rewind', () => forkSession(
+            sourceId,
+            candidate.forkAtSeq,
+            () => {
+              adopted = true
+              app.setDraft(candidate.editorText)
+            },
+            pickerIdentity,
+          ), {
             diag,
             sessionId: () => sourceId,
             onResult: (outcome) => {
-              if (outcome.kind === 'superseded') {
-                // A locally superseded lifecycle result during the commit owns
-                // nothing: no notice, no repaint (v2 §0.2.1).
+              if (outcome.kind === 'success' && adopted) {
+                if (candidate.hasNonTextContent) {
+                  app.notify(`rewound to turn ${candidate.turn}; original non-text content was not re-staged — review it before sending`, 'error')
+                } else {
+                  app.notify(`rewound to turn ${candidate.turn}`, 'info')
+                }
                 return
               }
-              if (outcome.kind === 'stale') {
-                // The stale gate runs BEFORE any create (inside the gate a
-                // switch cannot interleave): the picker's selection is
-                // refused while the surface is still the source — no child
-                // was created, nothing to dispose (review round 8).
-                app.notify('session changed — rewind cancelled', 'info')
-                return
-              }
-              if (outcome.kind === 'failed') {
-                app.notify(outcome.message, 'error')
-                return
-              }
-              // The swap COMMITTED: staged drafts are per-session UI state —
-              // drop the unpinned ones now, exactly like /new and /fork (a
-              // historic non-text content is never silently re-staged).
-              draftImages.clearUnpinned()
-              draftFiles.clearUnpinned()
-              if (outcome.hasNonTextContent) {
-                app.notify(`rewound to turn ${outcome.turn}; original non-text content was not re-staged — review it before sending`, 'error')
-              } else {
-                app.notify(`rewound to turn ${outcome.turn}`, 'info')
+              if (outcome.kind === 'error') {
+                if (outcome.text === 'the session changed before fork dispatch') {
+                  app.notify('session changed — rewind cancelled', 'info')
+                } else {
+                  app.notify(outcome.text, 'error')
+                }
               }
             },
             onError: (error) => {
-              // Failed compose/create keeps the CURRENT session, the picker
-              // is closed, the editor draft is untouched (commitRewind never
-              // writes it before the transaction commits).
               app.notify(safeErrorMessage(error), 'error')
             },
           })
@@ -9286,6 +9367,7 @@ export function apply(ctx: Context, config: Config): void {
           : refresh(request)
       },
       switchSession,
+      forkSession,
       transitionTo,
       currentPreset,
       sessionBlank,
@@ -9304,10 +9386,11 @@ export function apply(ctx: Context, config: Config): void {
       // transition is in flight (quiesce → commit) — the old agent may be
       // woken again between whenIdle and the retire.
       sessionTransitionPending: () => transitionGate.busy,
-      // The single-writer session-transition gate: /new, /fork and the
-      // command-side switches run their create AND commit inside one
-      // exclusive section via this seam (rewind goes through
-      // openRewindPicker's own gate wrapper).
+      // The single-writer session-transition gate: ordinary /new and
+      // command-side switches run create AND commit inside one exclusive
+      // section via this seam. Host fork dispatch is outside this FIFO;
+      // forked-child adoption and rewind navigation use their own gated
+      // adoption path.
       withSessionTransition: <T>(task: () => Promise<T> | T) =>
         transitionGate.run(() => operationBarrier.runTransition(async () => {
           try {

@@ -19,9 +19,9 @@ const CI_WORKFLOW = new URL('../.github/workflows/ci.yml', import.meta.url)
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const GATE_SCRIPT = join(REPO_ROOT, 'scripts', 'check-no-session-events.mjs')
 
-test('migration status records the completed D1 read parity gates', () => {
+test('migration status records the completed D1 and D2 parity gates', () => {
   const document = readFileSync(MIGRATION_DOC, 'utf8')
-  assert.match(document, /M2\s+IN PROGRESS\s+\(D1 COMPLETE:[^\n]*D1\.3[^\n]*D2\.1 DONE:[^\n]*D2\.2 DONE:[^\n]*D2\.3 DONE:[^\n]*\)/u)
+  assert.match(document, /M2\s+DONE\s+\(D1 COMPLETE:[^\n]*D1\.3[^\n]*D2\.1 DONE:[^\n]*D2\.2 DONE:[^\n]*D2\.3 DONE:[^\n]*D2\.4 DONE:[^\n]*D2 COMPLETE[^\n]*\)/u)
   assert.match(document, /D1\.1 is the first M2 slice\. It is complete for the experimental read surface/u)
   assert.match(document, /D1\.2 is complete for the experimental live-session authority read shadow/u)
   assert.match(document, /## D1\.3 status — Task and presentation read parity/u)
@@ -51,13 +51,14 @@ test('Source Mode parity smokes build the vendored pi-tui dist first', () => {
   )
 })
 
-test('D1.3 task, presentation, and closure smokes are Source Mode gates', () => {
+test('D1-D2 task, presentation, and closure smokes are Source Mode gates', () => {
   const workflow = readFileSync(CI_WORKFLOW, 'utf8')
   for (const [name, command] of [
     ['Remote task read parity smoke', 'smoke:remote-task-read-parity'],
     ['Remote presentation/history parity smoke', 'smoke:remote-presentation-parity'],
     ['D1 closure gate', 'smoke:remote-d1-closure'],
     ['Remote D2.2 ordinary-write same-Host smoke', 'smoke:remote-d2-write'],
+    ['D2 closure smoke', 'smoke:remote-d2-closure'],
   ]) {
     assert.match(
       workflow,

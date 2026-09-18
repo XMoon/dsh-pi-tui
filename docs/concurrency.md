@@ -85,35 +85,35 @@ transition paths — `/new`, `/fork`, `/rewind`, `/sessions` switch/open
 and the first-session creation. Before the gate, two such workflows could
 overlap across their awaits:
 
-- a fork child could be created — `session/created` published, persistence
-  already writing its seed — and THEN the stale check notice the surface
-  had moved; `AgentHandle.dispose()` stops the agent and removes it from
-  the live registry, but it does **not** delete the persisted session, so a
-  durable ghost branch would appear in `/sessions` that the user never
-  entered;
-- a rewind swap's identity check could pass, then yield across the
-  old-handle `dispose()` await, letting a concurrent switch land and later
-  be overwritten by the first continuation.
+- a fork child can be published while the visible surface moves; publication
+  is not rolled back because the persisted child is authoritative. The stale
+  child owner is parked in a Direct-only pool and a later `/sessions` open
+  claims it instead of starting a second writer;
+- a rewind adoption's identity check could pass, then yield across the
+  old-owner retirement await, letting a concurrent switch land and later be
+  overwritten by the first continuation. The adoption critical section now
+  rechecks the navigation identity under the gate.
 
 ### SessionTransitionGate — one transition at a time
 
-`src/transition-gate.ts` is a **process-local single-writer queue**: every
-transition path runs inside `SessionTransitionGate.run`, held from BEFORE
-the child create (for rewind) or the open (Direct `resume`) for switches until the
-transaction settles. Tasks are strictly FIFO; a rejected task fails its own
+`src/transition-gate.ts` is a **process-local single-writer queue**: ordinary
+session transitions run inside `SessionTransitionGate.run`, held from BEFORE
+the child create or Direct `resume` until the transaction settles. Host fork
+dispatch is intentionally outside this destructive transition queue; only a
+known-current fork adoption enters the gate for the visible handoff and
+old-owner retirement. Tasks are strictly FIFO; a rejected task fails its own
 caller and never blocks the queue; re-entering the gate from inside a task
 is refused loudly (AsyncLocalStorage detects it — re-entry would deadlock
 the queue). The runner exposes the gate as `runner.withSessionTransition(task)`.
 
-On top of the gate, all paths share ONE transaction shape
-(`runner.transitionTo` / `RewindCommitHost.transitionTo`), whose phase
-order — fixed in `src/transition.ts` (`runTransitionTo`, unit-tested) —
-is the whole point:
+On top of the gate, ordinary session transitions share ONE transaction shape
+(`runner.transitionTo`), whose phase order — fixed in `src/transition.ts`
+(`runTransitionTo`, unit-tested) — is the whole point:
 
-1. QUIESCE OLD — `old.whenIdle()` then the FINAL flush. (A `/new` or
-   `/fork` while the agent is busy WAITS for the current activity instead
-   of aborting it — the deliberate product semantics.) May fail → abort,
-   ZERO child side effects.
+1. QUIESCE OLD — `old.whenIdle()` then the FINAL flush. (A `/new`
+   while the agent is busy WAITS for the current activity instead of aborting
+   it — the deliberate product semantics.) May fail → abort, ZERO child
+   side effects.
 2. ALL TUI-owned preflight (preset/composition/stale checks — BEFORE the
    DSH boundary, so failures abort with ZERO side effects).
 3. create/open the CHILD — may fail → abort; once it SUCCEEDS the child
@@ -129,6 +129,23 @@ is the whole point:
    continuable descendants → final flush → dispose — see the Direct
    top-level Agent retirement section); child surface/catalog work is
    best-effort and the committed child always stands.
+
+### Fork dispatch and adoption
+
+`/fork` and `/rewind` are deliberately not ordinary transition transactions.
+They capture the source identity and navigation epoch, dispatch the semantic
+Host fork immediately without `whenIdle()` or the destructive transition gate,
+and keep the operation in the runner's pending-fork set through adoption or
+parking. The Host boundary fixes the completed-turn cut at admission, so a
+busy source is not waited to a later boundary.
+
+When a known child settles, the runner rechecks the captured identity. A newer
+navigation leaves the visible surface unchanged and parks the successful Direct
+owner; it does not roll back the published child. If the identity is current,
+a short gated handoff swaps the visible handle, bumps the generation, restores
+rewind draft state, and retires the old owner. Cleanup waits for pending forks
+before retiring current and parked Direct owners, including late published-
+with-error settlements.
 
 A rejected `create`/`open` is handled WITHOUT any publication-phase
 inference: the old session simply stays current and the user may retry.
@@ -304,10 +321,10 @@ attachment preparation cannot let a later gesture overtake an earlier one.
   refuses to commit state once a newer generation owns the surface.
 - The submission re-validation checks the live agent object AND the session
   generation before mutating visible state.
-- Rewind commits run a **stale gate** before anything is created: the
-  source identity captured when the picker opened must still own the
-  surface, or the selection is rejected as `stale` (a stale selection
-  never creates a child).
+- Rewind captures the source identity, generation and navigation epoch when the
+  picker opens. Selection revalidates that full identity before dispatching the
+  Host fork, so returning to the same Session id after newer navigation still
+  rejects the stale picker row without creating a child.
 
 ## Direct top-level Agent retirement
 
@@ -354,13 +371,16 @@ Where it runs:
 - **HMR / runner fiber unload**: the fiber disposer is async (Cordis
   unloads await it) and runs the SAME memoized retirement — one teardown
   promise shared by every teardown path, never four copies.
-- **Successful session transition** (`/new`, `/fork`, rewind, `/sessions`
-  switch): the pre-commit quiesce (whenIdle + flush) is preserved; AFTER
-  the commit the old owner is retired with the same fixed order, so the old
-  Agent's continuable descendants are drained and its final flush lands
-  after the drain. A failed child create never drains or disposes the old
-  owner — the old session stays current (the transaction semantics are
-  unchanged).
+- **Successful ordinary session transition** (`/new`, `/sessions` switch,
+  or open): the pre-commit quiesce (whenIdle + flush) is preserved; AFTER the
+  commit the old owner is retired with the same fixed order, so the old
+  Agent's continuable descendants are drained and its final flush lands after
+  the drain. A failed child create never drains or disposes the old owner —
+  the old session stays current (the transaction semantics are unchanged).
+- **Fork/rewind adoption:** Host publication is not rolled back on navigation
+  supersession. Current Direct adoption retires the old owner after the gated
+  visible handoff; a successful unselected child remains parked for a later
+  owner claim, and runner teardown retires all remaining parked owners.
 
 The process-local transition gate / operation barrier coordinate only the
 TUI's Client writers; they do not take over Host ownership. The retirement

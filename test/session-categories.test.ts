@@ -129,7 +129,7 @@ test('S04: fork and subagent siblings keep the input order', () => {
   ])
 })
 
-test('S05: an orphan child (parent outside the window) sits at depth 1', () => {
+test('S05: an orphan child (parent outside the window) degrades to root depth', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-orphan-fork', createdAt: 3, updatedAt: 3, parentSession: 'session-missing', live: false },
     { id: 'session-root', createdAt: 2, updatedAt: 2, live: false },
@@ -138,8 +138,8 @@ test('S05: an orphan child (parent outside the window) sits at depth 1', () => {
   const tree = buildSessionTree(rows)
   const byId = new Map(tree.map(entry => [entry.row.id, entry.depth]))
   assert.equal(byId.get('session-root'), 0)
-  assert.equal(byId.get('session-orphan-fork'), 1, 'orphan fork children must not be lost')
-  assert.equal(byId.get('session-orphan-sub'), 1, 'orphan subagents stay at depth 1')
+  assert.equal(byId.get('session-orphan-fork'), 0, 'orphan fork children degrade to root without being lost')
+  assert.equal(byId.get('session-orphan-sub'), 0, 'orphan subagents degrade to root without being lost')
 })
 
 test('S06: parent cycles never loop and each row appears once', () => {
@@ -217,7 +217,7 @@ test('sessionPickerCategories treats a trailing-slash cwd as the same workspace'
     `/ws/project-a/ scopes the same sessions as /ws/project-a:\n${JSON.stringify(currentIds)}`)
 })
 
-test('the Current category indents fork children in the current workspace', () => {
+test('the Current category keeps real fork children indented and orphan roots flat', () => {
   const treeItem = (row: SessionPickerRow, indent = 0): SessionPickerItem => sessionPickerItem(row, '', indent)
   const categories = sessionPickerCategories(
     [
@@ -238,7 +238,7 @@ test('the Current category indents fork children in the current workspace', () =
   assert.ok(parent !== undefined && !parent.label.includes('└─'), 'the workspace root stays flat')
   assert.ok(fork !== undefined && fork.label.startsWith('  └─ '), `a fork child in the current workspace must be indented:\n${fork!.label}`)
   assert.equal(otherCwd, undefined, 'a child in ANOTHER workspace is out of the Current scope')
-  assert.ok(orphan !== undefined && orphan!.label.startsWith('  └─ '), 'an orphan (parent outside the workspace/window) sits at depth 1, never lost')
+  assert.ok(orphan !== undefined && !orphan.label.startsWith('  └─ '), 'an orphan (parent outside the workspace/window) degrades to a flat root')
 })
 
 test('sessionPickerItem indents subagent rows in the All category', () => {

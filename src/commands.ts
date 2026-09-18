@@ -30,7 +30,6 @@ import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefini
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import type { DefaultIntentRecord } from './default-intent.ts'
-import { createForkedAgent } from './session-fork.ts'
 import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture } from './tui-app.ts'
 import { mergeDraft, sessionUnchanged } from './steer.ts'
@@ -133,24 +132,10 @@ import {
   type HumanSkillSummary,
 } from './skill-catalog.ts'
 
-/** A balanced completed-turn prefix for forking: the log up to (and including)
- * the last `turn/end`. Undefined when no turn has completed yet.
- * @param events - the session log.
- * @returns the fork seed events, or undefined.
- */
-export function forkSeed(events: readonly SessionEvent[]): readonly SessionEvent[] | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    if (events[index]?.type === 'turn/end') return events.slice(0, index + 1)
-  }
-  return undefined
-}
-
 /** Shorten a session id for read-only display rows, capped at 28 characters. */
 function displaySessionId(id: string): string {
   return id.length > 28 ? `${id.slice(0, 28)}…` : id
 }
-
-/** Session meta for a fresh/forked session: the cwd plus the preset id when composed. */
 
 /**
  * The `/sessions` category tabs (the 2026-08-22 plan, item 3): the session
@@ -191,8 +176,8 @@ export function sessionPickerCategories(
       header: `${header} · Current directory`,
       // The same lineage tree as "All directories", built over the CURRENT
       // workspace's subset: a fork/rewind branch whose parent lives in
-      // another workspace (or outside the window) is an orphan at depth 1 —
-      // never lost, never mis-nested under an unrelated root.
+      // another workspace (or outside the window) degrades to a root at depth
+      // 0 — never lost, never mis-nested under an unrelated root.
       items: () => {
         const mainRows = rows.filter(row => row.origin !== 'subagent')
         if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
@@ -206,9 +191,9 @@ export function sessionPickerCategories(
       label: 'All directories',
       header: `${header} · All directories`,
       // The lineage tree (plan §20): fork/rewind children and subagents
-      // hang under their parentSession chain with a └─ prefix — never flat
-      // roots. Orphans sit at depth 1; the tree's `placed` guard keeps
-      // corrupt metadata from looping.
+      // hang under their parentSession chain with a └─ prefix. Missing-parent
+      // or cycle members degrade to flat roots; the tree's `placed` guard
+      // keeps corrupt metadata from looping.
       items: () => {
         const mainRows = rows.filter(row => row.origin !== 'subagent')
         if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
@@ -591,6 +576,11 @@ export interface TuiCommandRunner {
    * swap. Late async work must re-check it before committing state. */
   readonly sessionGeneration: number
   switchSession(sessionId: string): Promise<string | undefined>
+  /** Host-owned /fork navigation. The runner dispatches the semantic fork
+   * outside the destructive transition FIFO and only commits the visible child
+   * while the captured navigation intent is still current. Optional keeps
+   * command-only test runners focused on unrelated commands. */
+  forkSession?: (sourceSessionId: string) => Promise<CommandResult>
   /**
    * The unified session-transition transaction: the old session is flushed
    * BEFORE the child is created, the commit is a synchronous critical
@@ -601,12 +591,8 @@ export interface TuiCommandRunner {
    * this transaction and must run it inside {@link withSessionTransition}.
    */
   transitionTo<T>(steps: {
-    /** The child's PRE-GENERATED session identity (MANDATORY). */
+    /** The child's pre-generated session identity (mandatory). */
     target: { id: string; header?: { cwd?: string } }
-    /** An explicit model selection the target must observe after creation.
-     * For /fork and /rewind it preserves the source selection after the
-     * inherited historical prefix. */
-    inheritSelection?: ModelSelection
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string; error?: unknown }>
@@ -688,13 +674,11 @@ export interface TuiCommandRunner {
    */
   sessionTransitionPending(): boolean
   /**
-   * Run one session-transition workflow exclusively through the
-   * process-local single-writer gate: /new, /fork and /rewind must create
-   * their child AND swap inside ONE exclusive section, so a transition can
-   * never interleave with another — no mixed-parent child (cwd captured
-   * across a concurrent switch), no stale commit after a switch, no ghost
-   * child published to persistence once the surface moved. Re-entering the
-   * gate from inside a task is refused loudly (it would deadlock).
+   * Run one destructive session-transition workflow exclusively through the
+   * process-local single-writer gate. Host-owned fork dispatch is intentionally
+   * outside this FIFO; only its current visible adoption and Direct retirement
+   * handoff use the gate. Re-entering the gate from inside a task is refused
+   * loudly (it would deadlock).
    */
   withSessionTransition<T>(task: () => Promise<T> | T): Promise<T>
   /**
@@ -4083,7 +4067,7 @@ export function registerTuiCommands(
             // The semantic `agentPreset` is the SINGLE preset authority; the
             // Direct adapter persists the actually composed preset into the
             // durable header. Never duplicate it into generic meta.
-            meta: { cwd },
+            cwd,
             agentPreset: resolved.id,
           })
         },
@@ -4804,56 +4788,18 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'fork',
-    description: 'Fork this session at the last completed turn',
-    handler: () => runner.withSessionTransition(async () => {
+    description: 'Fork this session at the Host-selected completed-turn boundary',
+    handler: async () => {
       const source = runner.liveAgent
-      const seed = source === undefined ? undefined : forkSeed(source.session.snapshotEvents())
-      if (seed === undefined || source === undefined) return { kind: 'error', text: 'no completed turn to fork from' }
-      const sourceSelection = runner.selected.current
-      // Shared child creation with rewind (plan §6.2): preset inheritance,
-      // live session cwd, base provider/model options plus effective selection,
-      // parentSession +
-      // isSeeded/inheritedEventCount metadata — one chain, no drift between the two surfaces.
-      // The child's id is PRE-GENERATED so the create publishes it under a
-      // known identity (review round 6); the create runs inside the unified
-      // transaction, and a failure before the create leaves nothing behind
-      // (no published child, no ghost, no rollback attempt).
-      const sessionId = SessionId(`session-${randomUUID()}`)
-      const childCwd = source.session.header.cwd || runner.sessionCwd()
-      // The current preset is read once from the DSH projection and rides the
-      // create (a rejected create is NEVER retried — the old session stays
-      // current). The composition setup stays inside the Direct session
-      // lifecycle — the command surface only ever sees the identity
-      // (migration M1.11).
-      const sourcePreset = runner.currentPreset()
-      const result = await runner.transitionTo({
-        target: { id: String(sessionId), header: { cwd: childCwd } },
-        ...(sourceSelection === undefined ? {} : { inheritSelection: sourceSelection }),
-        create: () => createForkedAgent(runner, source, seed, sessionId, sourcePreset),
-      })
-      if (!result.ok) {
-        if (result.error instanceof LifecycleError) {
-          runner.diag.warn('fork create did not own the surface', {
-            settlement: result.error.settlement,
-            ownership: result.error.ownership,
-            publishedSessionId: result.error.publishedSessionId,
-            requestedSessionId: result.error.requestedSessionId,
-          })
-          // Superseded owns nothing: no user-visible text (§0.2.1).
-          if (result.error.ownership === 'superseded') return { kind: 'success' }
-        }
-        return { kind: 'error', text: result.message }
+      if (source === undefined) return { kind: 'error', text: 'no conversation to fork from' }
+      if (runner.forkSession === undefined) {
+        return { kind: 'error', text: 'session fork is unavailable in this backend' }
       }
-      // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
-      // drop the unpinned ones now (durable attachments are untouched, plan
-      // §14; in-flight submissions keep their pinned drafts — review
-      // finding 2).
-      runner.imageStore.clearUnpinned()
-      runner.fileStore?.clearUnpinned()
-      // A Direct create always yields the live agent (port contract);
-      // Remote handles surface the session identity only.
-      return { kind: 'success', text: `forked as ${result.next.session.id}` }
-    }),
+      // The command captures only the source identity. Host fork owns the
+      // boundary, child identity, lineage, workspace and model/preset policy;
+      // runner.forkSession owns the independently supersedable navigation.
+      return runner.forkSession(source.session.id)
+    },
   })
 
   commands.register({

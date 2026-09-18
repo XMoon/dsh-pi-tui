@@ -31,7 +31,7 @@ function compose(presetId?: string) {
 
 const createRequest: CreateSessionRequest = {
   sessionId: 'session-new',
-  meta: { cwd: '/ws' },
+  cwd: '/ws',
   agentPreset: 'preset-a',
 }
 
@@ -74,7 +74,7 @@ test('the semantic agentPreset is the SINGLE preset authority for the durable he
   }), compose('preset-a'))
   // A legacy caller carrying the SAME preset in meta is tolerated, and the
   // durable header records the composed preset.
-  await requireCreated(await lifecycle.create({ sessionId: 'session-new', meta: { cwd: '/ws', agentPreset: 'preset-a' }, agentPreset: 'preset-a' }))
+  await requireCreated(await lifecycle.create({ sessionId: 'session-new', cwd: '/ws', agentPreset: 'preset-a' }))
   assert.deepEqual(calls[0].meta, { cwd: '/ws', agentPreset: 'preset-a' })
 })
 
@@ -216,7 +216,7 @@ test('P1 regression (round 3): transition commit stores the OWNER HANDLE, and a 
   }), compose('preset-a'))
 
   // Transition A -> B: create B's SessionHandle.
-  const handleB = requireCreated(await lifecycle.create({ sessionId: 'session-b', meta: {} }))
+  const handleB = requireCreated(await lifecycle.create({ sessionId: 'session-b' }))
   // The commit stores the OWNER HANDLE (exactly what the runner does):
   let liveHandle = ownerHandleOf(handleB) as { dispose(): Promise<void> }
   assert.ok(liveHandle !== undefined, 'the commit stores the real owner handle, never the SessionHandle')
@@ -226,7 +226,7 @@ test('P1 regression (round 3): transition commit stores the OWNER HANDLE, and a 
   assert.deepEqual(disposed, ['session-b'], 'transition B→C disposes B\x27s original AgentHandle exactly once')
 
   // And a third transition disposes C exactly once:
-  const handleC = requireCreated(await lifecycle.create({ sessionId: 'session-c', meta: {} }))
+  const handleC = requireCreated(await lifecycle.create({ sessionId: 'session-c' }))
   liveHandle = ownerHandleOf(handleC) as { dispose(): Promise<void> }
   await liveHandle.dispose()
   assert.deepEqual(disposed, ['session-b', 'session-c'], 'each retired session disposes exactly once, in order')
@@ -316,7 +316,7 @@ test('requireCreated keeps an indeterminate requestedSessionId as CORRELATION ON
   assert.equal(error.requestedSessionId, 'session-req')
 })
 
-test('Direct create persists the COMPOSED preset and rejects a mismatched legacy meta.agentPreset', async () => {
+test('Direct create persists the COMPOSED preset as the single ordinary-create authority', async () => {
   const metas: unknown[] = []
   const lifecycle = new DirectSessionLifecycle(host({
     create: async (options: { meta: unknown }) => {
@@ -327,15 +327,12 @@ test('Direct create persists the COMPOSED preset and rejects a mismatched legacy
   }), async () => ({ agentPreset: 'composed', setup: () => {} }))
   // The semantic preset is the single authority: the durable header records the
   // actually composed preset, not a caller-supplied duplicate.
-  const created = await lifecycle.create({ sessionId: 'session-new', meta: { cwd: '/ws' }, agentPreset: 'ignored-by-compose' })
+  const created = await lifecycle.create({ sessionId: 'session-new', cwd: '/ws', agentPreset: 'ignored-by-compose' })
   assert.equal(created.outcome.kind, 'created')
   assert.deepEqual(metas[0], { cwd: '/ws', agentPreset: 'composed' })
 
-  // A legacy seeded/fork caller whose meta disagrees with the semantic intent
-  // fails closed instead of persisting a divergent preset.
-  const mismatched = await lifecycle.create({ sessionId: 'session-forked', meta: { cwd: '/ws', agentPreset: 'other' }, agentPreset: 'x', seed: [] })
-  assert.equal(mismatched.outcome.kind, 'rejected')
-  if (mismatched.outcome.kind === 'rejected') assert.match(mismatched.outcome.error.message, /disagrees with the semantic agentPreset/)
+  const second = await lifecycle.create({ sessionId: 'session-forked', cwd: '/ws', agentPreset: 'x' })
+  assert.equal(second.outcome.kind, 'created')
 })
 
 test('Direct create captures the Host default at ADMISSION (a later /model write must not rewrite it)', async () => {
@@ -354,7 +351,7 @@ test('Direct create captures the Host default at ADMISSION (a later /model write
         }
       : name === 'agentDefaultModel' ? { currentSelection: () => selection } : undefined,
   }, async () => { await composeGate; return { setup: () => {} } })
-  const pending = lifecycle.create({ sessionId: 'session-new', meta: { cwd: '/ws' } })
+  const pending = lifecycle.create({ sessionId: 'session-new', cwd: '/ws' })
   await Promise.resolve()
   // A later sessionless /model default write lands while compose is in flight.
   selection = { provider: 'p', model: 'm-later' }

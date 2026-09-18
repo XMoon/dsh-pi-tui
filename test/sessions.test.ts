@@ -15,6 +15,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import {
 
   MAX_PICKER_SESSIONS,
+  buildSessionTree,
   findSessionMatch,
   formatSessionAge,
   headerToPickerRow,
@@ -151,6 +152,41 @@ test('headerToPickerRow maps a header onto the row shape', () => {
   assert.equal(row.parentSession, 'session-p')
   assert.equal(row.origin, 'subagent')
   assert.equal(row.live, true)
+})
+
+function treeRow(id: string, parentSession?: string): SessionPickerRow {
+  return {
+    id,
+    updatedAt: 0,
+    createdAt: 0,
+    live: false,
+    ...(parentSession === undefined ? {} : { parentSession }),
+  }
+}
+
+test('buildSessionTree follows Host lineage depth for normal ancestry', () => {
+  const rows = buildSessionTree([
+    treeRow('root'),
+    treeRow('child', 'root'),
+    treeRow('grandchild', 'child'),
+  ])
+  assert.deepEqual(rows.map(entry => [entry.row.id, entry.depth]), [
+    ['root', 0], ['child', 1], ['grandchild', 2],
+  ])
+})
+
+test('buildSessionTree degrades an orphan to root depth', () => {
+  const rows = buildSessionTree([treeRow('orphan', 'missing-parent'), treeRow('root')])
+  assert.deepEqual(rows.map(entry => [entry.row.id, entry.depth]), [
+    ['orphan', 0], ['root', 0],
+  ])
+})
+
+test('buildSessionTree emits cycle members without indentation or infinite traversal', () => {
+  const twoNode = buildSessionTree([treeRow('a', 'b'), treeRow('b', 'a')])
+  assert.deepEqual(twoNode.map(entry => [entry.row.id, entry.depth]), [['a', 0], ['b', 1]])
+  const self = buildSessionTree([treeRow('self', 'self')])
+  assert.deepEqual(self.map(entry => [entry.row.id, entry.depth]), [['self', 0]])
 })
 
 test('headerToPickerRow preserves code until a roster-aware reader can disambiguate it', () => {

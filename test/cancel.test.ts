@@ -682,9 +682,9 @@ test('Esc Esc opens the rewind picker and Enter selects the turn (headless E2E)'
     onRewind: () => {
       app.openPicker(
         [
-          rewindPickerItem({ turnStartSeq: 8, turn: 3, messageSeq: 9, editorText: 'C', preview: 'C', hasNonTextContent: false }),
-          rewindPickerItem({ turnStartSeq: 4, turn: 2, messageSeq: 5, editorText: 'B', preview: 'B', hasNonTextContent: false }),
-          rewindPickerItem({ turnStartSeq: 0, turn: 1, messageSeq: 1, editorText: 'A', preview: 'A', hasNonTextContent: false }),
+          rewindPickerItem({ turnStartSeq: 8, forkAtSeq: 7, turn: 3, messageSeq: 9, editorText: 'C', preview: 'C', hasNonTextContent: false }),
+          rewindPickerItem({ turnStartSeq: 4, forkAtSeq: 3, turn: 2, messageSeq: 5, editorText: 'B', preview: 'B', hasNonTextContent: false }),
+          rewindPickerItem({ turnStartSeq: 0, forkAtSeq: 0, turn: 1, messageSeq: 1, editorText: 'A', preview: 'A', hasNonTextContent: false }),
         ],
         (value) => picked.push(value),
         () => {},

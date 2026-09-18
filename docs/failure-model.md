@@ -68,6 +68,23 @@ teardown or leak a rejection. The Direct owned-session retirement
 phase failure is recorded and the remaining phases still run, so a hostile
 rejection can never skip the final flush or the handle dispose.
 
+## Host fork settlement
+
+`/fork` and `/rewind` separate Host publication from local navigation:
+
+- `rejected` means no child was published and the current surface remains;
+- `published-with-error` carries an authoritative child id when publication
+  succeeded but follow-up addressing or workspace work failed;
+- `indeterminate` means the result is not knowable and is never retried;
+- `forked` is a known published child, while `superseded` means a newer local
+  navigation owns the visible surface.
+
+Navigation supersession is not Host cancellation. A published Direct child
+that is not selected is parked in the runner-owned owner pool and can later be
+claimed by `/sessions`; teardown retires every still-parked owner exactly once.
+Remote uses one official `ClientSessions.fork()` call and preserves a known
+published identity rather than issuing a second attempt.
+
 ## Where the contract is wired in
 
 - Owned callbacks do CORRECTNESS FIRST (draft restore, card settle,
