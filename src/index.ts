@@ -1715,6 +1715,51 @@ export function apply(ctx: Context, config: Config): void {
     const transitionGate = new SessionTransitionGate()
     const operationBarrier = new SessionOperationBarrier()
     const parkedDirectOwners = new Map<string, AgentHandle>()
+    // Session owners whose retirement is IN FLIGHT, keyed by session id. A
+    // reopen (`/resume`, `/sessions`) must follow that release: the persistence
+    // write claim is exclusive, and the retirement's `dispose` is what closes
+    // it. The release is registered the moment a fork QUEUES the retirement, so
+    // a reopen admitted in the window before the retirement starts still waits.
+    const pendingOwnerReleases = new Map<string, Set<Promise<void>>>()
+    /** Register a pending release for one session; returns the resolver the
+     *  retirement calls when it has finished. */
+    const beginOwnerRelease = (sessionId: string): () => void => {
+      let resolve!: () => void
+      const promise = new Promise<void>(settle => { resolve = settle })
+      const releases = pendingOwnerReleases.get(sessionId) ?? new Set<Promise<void>>()
+      releases.add(promise)
+      pendingOwnerReleases.set(sessionId, releases)
+      return () => {
+        releases.delete(promise)
+        if (releases.size === 0) pendingOwnerReleases.delete(sessionId)
+        resolve()
+      }
+    }
+    const waitForOwnerRelease = async (sessionId: string): Promise<void> => {
+      // Loop: another release for the same id may be registered while waiting.
+      while (true) {
+        const releases = pendingOwnerReleases.get(sessionId)
+        if (releases === undefined || releases.size === 0) return
+        await Promise.allSettled([...releases])
+      }
+    }
+    /** Admission-time pin for one `/fork` source. It is held from the moment the
+     *  fork is admitted — before the child is even created — and released when
+     *  the fork settles AND, if it committed, after the source owner's
+     *  retirement finishes. While it is held, an open/resume of that session
+     *  waits for the release instead of resuming a live, lease-held owner. */
+    const beginForkSourcePin = (sessionId: string): { state: { retirementOwnsRelease: boolean }; release: () => void } => {
+      const finish = beginOwnerRelease(sessionId)
+      const state = { released: false, retirementOwnsRelease: false }
+      return {
+        state,
+        release: (): void => {
+          if (state.released) return
+          state.released = true
+          finish()
+        },
+      }
+    }
     const directOwnerPool: DirectOwnerPoolLike = {
       claim: sessionId => {
         const handle = parkedDirectOwners.get(sessionId)
@@ -1727,6 +1772,7 @@ export function apply(ctx: Context, config: Config): void {
         if (previous !== undefined && previous !== handle) throw new Error(`duplicate parked Direct owner for session "${sessionId}"`)
         parkedDirectOwners.set(sessionId, handle)
       },
+      waitForRelease: waitForOwnerRelease,
     }
     let navigationEpoch = 0
     const pendingForks = new Set<Promise<unknown>>()
@@ -3148,12 +3194,12 @@ export function apply(ctx: Context, config: Config): void {
     // post-command-settlement point instead. Outside a command (the rewind
     // picker's owned task), the retirement runs immediately.
     let commandExecutionDepth = 0
-    const deferredSourceRetirements: Array<() => Promise<void>> = []
+    const deferredSourceRetirements: Array<{ sessionId: string; retire: () => Promise<void> }> = []
     // Start one source retirement through the owned-task model AND register its
     // promise, so teardown can wait for it before `diag.dispose()` / the Host
     // teardown (see `pendingSourceRetirements`). The task promise is returned so
     // a non-command caller can preserve the original awaited ordering.
-    const startSourceRetirement = (retire: () => Promise<void>): Promise<void> | undefined => {
+    const startSourceRetirement = (sessionId: string, retire: () => Promise<void>): Promise<void> | undefined => {
       let pending: Promise<void> | undefined
       runOwned('fork source retirement', () => {
         const task = retire()
@@ -3174,26 +3220,55 @@ export function apply(ctx: Context, config: Config): void {
     /** Retire the source owner. A DSH command defers it to its own settlement
      *  (the executor's `command/done` append must land first) and returns
      *  `undefined`; outside a command the retirement promise is returned so the
-     *  caller keeps the baseline ordering — the handoff does not report success
-     *  until the source is disposed, so an immediate open/resume AFTER that
-     *  success can never observe a live, lease-held source. (The internal
-     *  `liveAgent`/`liveHandle` swap still happens first, as it always did.) */
-    const retireSourceOwnerAfterSettlement = (retire: () => Promise<void>): Promise<void> | undefined => {
-      if (commandExecutionDepth === 0) return startSourceRetirement(retire)
-      deferredSourceRetirements.push(retire)
+     *  caller keeps the baseline ordering.
+     *
+     *  `finishRelease` settles the fork's admission pin when the retirement has
+     *  FINISHED — success or a CONTAINED failure. `retireDirectOwnedSession`
+     *  never rejects: a failed phase (notably `disposeOwner`) is recorded in its
+     *  report and diag-logged, and the pin still releases. That is deliberate:
+     *  holding the pin on a failed dispose would leave `open`/`resume` pending
+     *  forever, so the reopen instead proceeds and fails LOUDLY on the official
+     *  exclusive write claim (`session "X" is already owned by an active write
+     *  handle`). A failed dispose is a leaked-handle bug in its own right; the
+     *  retirement helper already contains and reports it. */
+    const retireSourceOwnerAfterSettlement = (
+      sessionId: string,
+      retire: () => Promise<void>,
+      finishRelease: () => void,
+    ): Promise<void> | undefined => {
+      const run = async (): Promise<void> => {
+        try {
+          await retire()
+        } finally {
+          finishRelease()
+        }
+      }
+      if (commandExecutionDepth === 0) return startSourceRetirement(sessionId, run)
+      deferredSourceRetirements.push({ sessionId, retire: run })
       return undefined
     }
-    const flushSourceRetirementsAfterSettlement = (): void => {
+    /** Start every retirement queued by the settled command(s) and return the
+     *  started promises so the settlement can WAIT for them. */
+    const flushSourceRetirementsAfterSettlement = (): Promise<void>[] => {
+      const started: Promise<void>[] = []
       while (deferredSourceRetirements.length > 0) {
-        const retire = deferredSourceRetirements.shift()
-        if (retire !== undefined) startSourceRetirement(retire)
+        const entry = deferredSourceRetirements.shift()
+        if (entry === undefined) continue
+        const pending = startSourceRetirement(entry.sessionId, entry.retire)
+        if (pending !== undefined) started.push(pending)
       }
+      return started
     }
-    /** Close one command-settlement window EXACTLY once, flushing the
-     *  retirements it queued when the outermost command settles. */
-    const settleCommandExecution = (): void => {
+    /** Close one command-settlement window EXACTLY once and WAIT for the source
+     *  retirements it queued. The command workflow must not report completion —
+     *  nor release the submit FIFO — while the old owner still holds its write
+     *  lease, or an immediate reopen of that Session would be refused. The
+     *  executor's `command/done` append already happened inside the wrapped
+     *  execution, so this preserves durability AND makes `/fork`'s outward
+     *  completion imply the source is released. */
+    const settleCommandExecution = async (): Promise<void> => {
       commandExecutionDepth -= 1
-      if (commandExecutionDepth === 0) flushSourceRetirementsAfterSettlement()
+      if (commandExecutionDepth === 0) await Promise.allSettled(flushSourceRetirementsAfterSettlement())
     }
 
     const parkForkOwner = (handle: SessionHandle | undefined): void => {
@@ -3210,6 +3285,7 @@ export function apply(ctx: Context, config: Config): void {
       handle: SessionHandle,
       expected: RewindLiveIdentity,
       onAdopted?: () => void,
+      pin?: { state: { retirementOwnsRelease: boolean }; release: () => void },
     ): Promise<boolean> => {
       let adopted = false
       try {
@@ -3239,7 +3315,10 @@ export function apply(ctx: Context, config: Config): void {
           diag.error('fork adoption callback failed after child commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
         }
         if (oldAgent !== undefined && oldHandle !== undefined) {
-          const retirement = retireSourceOwnerAfterSettlement(async () => {
+          // The retirement now owns the fork's admission pin: it is released
+          // only when the source owner has actually been disposed.
+          if (pin !== undefined) pin.state.retirementOwnsRelease = true
+          const retirement = retireSourceOwnerAfterSettlement(oldAgent.session.id, async () => {
             const report = await retireDirectOwnedSession({
               cancel: () => oldAgent.cancel({ kind: 'user' }),
               whenIdle: () => oldAgent.whenIdle(),
@@ -3251,7 +3330,7 @@ export function apply(ctx: Context, config: Config): void {
               disposeOwner: () => oldHandle.dispose(),
             })
             if (report.failures.length > 0) diag.error('fork old-owner retirement failed (child committed)', { from: oldAgent.session.id, failures: report.failures })
-          })
+          }, pin?.release ?? ((): void => {}))
           // A DSH command defers (`undefined`): the source owner must stay
           // attached through its own `command/done` append. Every OTHER path
           // (the rewind picker) awaits it here, exactly as before this seam, so
@@ -3312,6 +3391,10 @@ export function apply(ctx: Context, config: Config): void {
         generation: pickerIdentity?.generation ?? before.generation,
         navigationEpoch: ++navigationEpoch,
       }
+      // Pin the source for the WHOLE fork (from admission, before the child is
+      // created): an open/resume of it must wait until the fork settles and, if
+      // it committed, until the source owner has been retired.
+      const pin = beginForkSourcePin(sourceSessionId)
       let settleFork!: () => void
       let forkedHandle: SessionHandle | undefined
       const pending = new Promise<void>(resolve => { settleFork = resolve })
@@ -3343,7 +3426,7 @@ export function apply(ctx: Context, config: Config): void {
           return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}; navigation stayed on the newer session` }
         }
         forkedHandle = outcome.handle
-        const adopted = await adoptFork(outcome.handle, expected, onAdopted)
+        const adopted = await adoptFork(outcome.handle, expected, onAdopted, pin)
         if (!adopted) return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
         draftImages.clearUnpinned()
         draftFiles.clearUnpinned()
@@ -3355,6 +3438,10 @@ export function apply(ctx: Context, config: Config): void {
       } finally {
         settleFork()
         pendingForks.delete(pending)
+        // If the fork committed, its source retirement owns the pin (released
+        // when that retirement finishes); otherwise the source was never
+        // detached and is immediately reopenable.
+        if (!pin.state.retirementOwnsRelease) pin.release()
       }
     }
 
@@ -5382,10 +5469,10 @@ export function apply(ctx: Context, config: Config): void {
               }))
             } catch (error) {
               // A SYNCHRONOUS throw (the delivery wrapper, or a branch throwing
-              // before it returns its promise) must release the window exactly
-              // once too — otherwise the depth leaks and every deferred
-              // retirement stays queued forever.
-              settleCommandExecution()
+              // before it returns its promise) means the handler never ran, so
+              // nothing was queued: close the window synchronously (no
+              // retirement to await) and rethrow.
+              commandExecutionDepth -= 1
               throw error
             }
             // The official executor's post-handler `command/done` append is

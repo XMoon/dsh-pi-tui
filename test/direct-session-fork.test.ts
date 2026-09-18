@@ -216,6 +216,66 @@ test('Direct maps a missing Host fork service to gateway/internal', async () => 
   if (result.outcome.kind === 'rejected') assert.equal(result.outcome.error.code, 'gateway/internal')
 })
 
+test('Direct open waits for a pending owner release before resuming', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const waits: string[] = []
+  const resumed: string[] = []
+  const lifecycle = new DirectSessionLifecycle({
+    get: name => name === 'agents'
+      ? {
+          create: async () => { throw new Error('create should not run') },
+          resume: async ({ resumeSessionId }: { resumeSessionId: unknown }) => {
+            resumed.push(String(resumeSessionId))
+            return { agent: { session: { id: resumeSessionId } }, dispose: async () => {} }
+          },
+        }
+      : undefined,
+  }, async () => ({ setup: () => {} }), {
+    claim: () => undefined,
+    park: () => { throw new Error('park should not run') },
+    waitForRelease: async (sessionId: string) => { waits.push(sessionId); await gate },
+  })
+
+  const opening = lifecycle.open({ sessionId: 'session-source' })
+  await new Promise(resolve => { setTimeout(resolve, 0) })
+  assert.deepEqual(waits, ['session-source'], 'open must wait for the pending owner release')
+  assert.deepEqual(resumed, [], 'the source must not be resumed while its release is pending')
+  release()
+  const result = await opening
+  assert.equal(result.outcome.kind, 'opened')
+  assert.deepEqual(resumed, ['session-source'])
+})
+
+test('Direct open cancels while waiting for a pending owner release', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const controller = new AbortController()
+  const resumed: string[] = []
+  const lifecycle = new DirectSessionLifecycle({
+    get: name => name === 'agents'
+      ? {
+          create: async () => { throw new Error('create should not run') },
+          resume: async ({ resumeSessionId }: { resumeSessionId: unknown }) => {
+            resumed.push(String(resumeSessionId))
+            return { agent: { session: { id: resumeSessionId } }, dispose: async () => {} }
+          },
+        }
+      : undefined,
+  }, async () => ({ setup: () => {} }), {
+    claim: () => undefined,
+    park: () => {},
+    waitForRelease: async () => { await gate },
+  })
+
+  const opening = lifecycle.open({ sessionId: 'session-source', signal: controller.signal })
+  controller.abort()
+  const result = await opening
+  assert.equal(result.outcome.kind, 'cancelled', 'an aborted open must not stay pending behind the release')
+  assert.deepEqual(resumed, [], 'an aborted open must never resume the source')
+  release()
+})
+
 test('Direct open claims a parked fork owner before resume', async () => {
   const parked = { agent: { session: { id: 'session-parked' } }, dispose: async () => {} }
   let claimed = false

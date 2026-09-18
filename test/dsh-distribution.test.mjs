@@ -343,14 +343,24 @@ test('exact DSH family assertion scans the resolved virtual store, not the overr
   mkdirSync(join(store, `@deepseek-ai+dsh-app-boot@${VERSION}_peer`), { recursive: true })
   assert.deepEqual(assertInstalledDshFamily(workspace, VERSION), { versions: [VERSION] })
 
-  // An OLDER DSH compatibility line is not drift: this repository legitimately
-  // carries such transitives, so only the target's own line is fenced.
-  mkdirSync(join(store, '@deepseek-ai+dsh-compaction@0.1.5-rc.2_peer'), { recursive: true })
+  // An OLDER-core DSH compatibility line is not drift: this repository
+  // legitimately carries such transitives, and only the TARGET core is fenced.
+  mkdirSync(join(store, '@deepseek-ai+dsh-compaction@0.1.1-rc.2_peer'), { recursive: true })
   assert.deepEqual(assertInstalledDshFamily(workspace, VERSION), { versions: [VERSION] })
 
-  // A second version anywhere in the family is the drift this gate exists for.
+  // A same-core sibling is the drift this gate exists for.
   mkdirSync(join(store, '@deepseek-ai+dsh-app-boot@0.1.2-alpha.2_peer'), { recursive: true })
   assert.throws(() => assertInstalledDshFamily(workspace, VERSION), /resolved 0\.1\.2-alpha\.2 alongside/u)
+  rmSync(join(store, '@deepseek-ai+dsh-app-boot@0.1.2-alpha.2_peer'), { recursive: true, force: true })
+
+  // A same-core STABLE or rc release is drift too (a caret range can accept it).
+  mkdirSync(join(store, '@deepseek-ai+dsh-app-boot@0.1.2_peer'), { recursive: true })
+  assert.throws(() => assertInstalledDshFamily(workspace, VERSION), /resolved 0\.1\.2 alongside/u)
+  rmSync(join(store, '@deepseek-ai+dsh-app-boot@0.1.2_peer'), { recursive: true, force: true })
+
+  // A NEWER core is never allowed.
+  mkdirSync(join(store, '@deepseek-ai+dsh-app-boot@0.1.3-alpha.1_peer'), { recursive: true })
+  assert.throws(() => assertInstalledDshFamily(workspace, VERSION), /newer DSH line \(0\.1\.3-alpha\.1\)/u)
 })
 
 test('source install materializes local peers temporarily and restores package metadata', (t) => {

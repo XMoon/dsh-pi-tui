@@ -241,6 +241,10 @@ interface RunnerHarness {
    * appends, each with whether the session still had a live owner handle at
    * that moment (the durability the `/fork` retirement seam must preserve). */
   readonly commandSettlements: { sessionId: string; phase: 'run' | 'done'; ownerLive: boolean }[]
+  /** Session ids passed to the simulated `agents.resume`, in call order. */
+  readonly resumeSessionIds: string[]
+  /** Session ids whose simulated owner `dispose()` must throw (a leaked handle). */
+  readonly disposeFailures: Set<string>
 }
 
 function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<void>, retirementEvents?: string[]): Agent {
@@ -314,6 +318,8 @@ function makeHarness(
       agent,
       dispose: async () => {
         retirementEvents.push(`dispose:${session.id}`)
+        // A failing dispose must NOT remove the live owner: the handle is leaked.
+        if (disposeFailures.has(session.id)) throw new Error(`dispose failed for ${session.id}`)
         live.delete(session.id)
       },
     }
@@ -349,6 +355,7 @@ function makeHarness(
   const agents = {
     resume: async ({ resumeSessionId, setup, signal }: { resumeSessionId: unknown; setup?: (agentCtx: unknown, agent: Agent) => unknown; signal?: AbortSignal }) => {
       resumeSignals.push(signal)
+      resumeSessionIds.push(String(resumeSessionId))
       if (resumeError !== undefined) throw resumeError
       const session = persisted.get(String(resumeSessionId))
       if (session === undefined) throw new Error(`unknown test session ${String(resumeSessionId)}`)
@@ -410,6 +417,8 @@ function makeHarness(
   }
   const definitions = new Map<string, { name: string; description: string; handler: (...args: never[]) => unknown }>()
   const commandSettlements: { sessionId: string; phase: 'run' | 'done'; ownerLive: boolean }[] = []
+  const resumeSessionIds: string[] = []
+  const disposeFailures = new Set<string>()
   let commandSeq = 0
   const commands = {
     register: (definition: { name: string; description: string; handler: (...args: never[]) => unknown }) => {
@@ -456,7 +465,7 @@ function makeHarness(
   const subagentsService = typeof subagents === 'function'
     ? (subagents as (events: string[]) => unknown)(retirementEvents)
     : subagents
-  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createInheritedEventCounts, createSignals, resumeSignals, createdSessions, commands, subagents: subagentsService, retirementEvents, commandSettlements }
+  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createInheritedEventCounts, createSignals, resumeSignals, createdSessions, commands, subagents: subagentsService, retirementEvents, commandSettlements, resumeSessionIds, disposeFailures }
 }
 
 async function settle(): Promise<void> {
@@ -1333,6 +1342,49 @@ test('a rewind-picker fork awaits source retirement before its handoff completes
     `the picker fork must still report success: ${probe.notices.join(', ')}`)
   assert.equal(harness.retirementEvents.filter(entry => entry === `dispose:${source.id}`).length, 1,
     'the source owner must be retired exactly once')
+})
+
+test('/fork settles when the source disposal fails (contained, never a hang)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-dispose-fail-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const source = fakeSession({
+    id: 'fork-dispose-fail-source',
+    header: { id: 'fork-dispose-fail-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const harness = makeHarness(home, source)
+  // A failing `dispose()` leaks the handle (the write lease stays held), which
+  // `retireDirectOwnedSession` CONTAINS and records. The admission pin must
+  // still settle, or the command workflow (which awaits the retirement) would
+  // hang forever.
+  harness.disposeFailures.add(source.id)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/fork')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settle()
+  assert.equal(harness.createdSessions.length, 1, 'the fork must settle even when the source disposal fails')
+  assert.ok(harness.retirementEvents.includes(`dispose:${source.id}`),
+    'the source disposal must be attempted (and its failure contained)')
+  const sourceSettlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(sourceSettlements.map(entry => entry.phase), ['run', 'done'],
+    'the source command must still settle after a contained dispose failure')
 })
 
 test('/fork dispatches at admission without waiting for a busy source', async (t) => {
