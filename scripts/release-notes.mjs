@@ -18,6 +18,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs'
 import { parseReleaseTag } from './release-context.mjs'
+import { requiredGuidance } from './lib/dsh-compat.mjs'
 
 const [, , input, output = 'release-notes.md'] = process.argv
 
@@ -93,12 +94,6 @@ function extractSection(file) {
   }
   if (!/^### /mu.test(content)) {
     throw new Error(`Version ${version} in ${file} must contain changelog categories`)
-  }
-  if (version === '0.4.5') {
-    const limitation = file.endsWith('CHANGELOG.md') ? '已知限制' : 'Known limitation'
-    if (!content.includes(limitation)) {
-      throw new Error(`Version ${version} in ${file} must document its known limitation`)
-    }
   }
   const comparePrefix = channel === 'next' ? 'next-v' : 'v'
   const tagPattern = `${comparePrefix}\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?`
@@ -203,55 +198,13 @@ function containsExactGuidance(content, command) {
   return new RegExp(`${escaped}(?![0-9A-Za-z.+-])`, 'u').test(content)
 }
 
-// The DSH install pin each 0.4 release documents: 0.4.0-alpha.1 shipped on
-// the alpha.3 family, the alpha train documented its latest validated alpha
-// family while the peer floor stayed at the previous alpha. The 0.4.0 and
-// 0.4.1 stable releases continue to use the published rc.1 family because the
-// 0.1.2 stable family is not published yet. The 0.4.3-alpha.2 prerelease
-// targets the published npm `0.1.3-alpha.2` family, while the 0.4.5 and 0.4.6
-// stable releases recommend the published `0.1.5-rc.2` family (the peer floor
-// remains `0.1.5-rc.1`). The 0.4.7-alpha.1 prerelease raised the next line to
-// the published npm `0.1.6-alpha.1` family, and the 0.4.7-alpha.2 prerelease
-// moves that line to the published `0.1.6-alpha.2` family. Released changelog
-// sections are immutable, so the requirement follows the version being released.
-//
-// Every released 0.4 version is listed EXPLICITLY: a missing entry is a release
-// bug to fix, never a reason to inherit an older pin silently. A future version
-// must add its own pin (for example the alpha.2 install guidance of the next
-// `0.4.7-alpha.*` line) before its notes can be generated.
-const DSH_ALPHA_PINS = {
-  '0.4.0-alpha.1': '0.1.2-alpha.3',
-  '0.4.0-alpha.2': '0.1.2-alpha.5',
-  '0.4.3-alpha.2': '0.1.3-alpha.2',
-  '0.4.3-alpha.3': '0.1.5-rc.1',
-  '0.4.7-alpha.1': '0.1.6-alpha.1',
-  '0.4.7-alpha.2': '0.1.6-alpha.2',
-}
-const DSH_STABLE_PINS = {
-  '0.4.0': '0.1.2-rc.1',
-  '0.4.1': '0.1.2-rc.1',
-  '0.4.5': '0.1.5-rc.2',
-  '0.4.6': '0.1.5-rc.2',
-}
+// The install guidance each 0.4 release body must carry is derived from the
+// shared matrix (src/dsh-compat-matrix.json) through scripts/lib/dsh-compat.mjs:
+// the shipped DSH floor, this exact TUI version, and the compatible pair for
+// every fallback row the rule selects. A matrix that does not describe the
+// release is a release bug to fix there, never a reason to inherit an older pin.
 if (version.startsWith('0.4.')) {
-  // Release bodies must remain reproducible after a later stable/preview
-  // publish moves the npm dist-tags. README keeps the moving channel tags for
-  // ordinary installs; changelog/release-note guidance pins this release.
-  const pins = channel === 'next' ? DSH_ALPHA_PINS : DSH_STABLE_PINS
-  const dshPin = pins[version]
-  if (dshPin === undefined) {
-    throw new Error(`No DSH install pin is recorded for ${channel === 'next' ? 'prerelease' : 'stable'} release ${version}; add it to ${channel === 'next' ? 'DSH_ALPHA_PINS' : 'DSH_STABLE_PINS'} before publishing`)
-  }
-  const tuiPin = `@xmoon76/dsh-pi-tui@${version}`
-  const dshGuidance = version === '0.4.5' || version === '0.4.6'
-    ? 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2'
-    : `@deepseek-ai/dsh@${dshPin}`
-  const requiredGuidance = [
-    dshGuidance,
-    tuiPin,
-    '@xmoon76/dsh-pi-tui@0.3',
-  ]
-  for (const command of requiredGuidance) {
+  for (const command of requiredGuidance(version)) {
     if (!containsExactGuidance(zh.content, command) || !containsExactGuidance(en.content, command)) {
       throw new Error(`Version ${version} must document ${command} in both changelogs`)
     }

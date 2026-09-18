@@ -11,6 +11,7 @@ import { readFileSync, realpathSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
+import compatMatrix from './dsh-compat-matrix.json' with { type: 'json' }
 
 // ── Inline version helpers (startup must stay a ZERO-DEPENDENCY island) ────
 //
@@ -87,10 +88,9 @@ export const name = 'tui-startup'
 /** Services required before the flags can be resolved. */
 export const inject = ['cmdlineArgs']
 
-/** Incompatible dsh harness ranges and the guidance each deserves. Add a
- * new entry here whenever a future bundle release stops supporting an
- * older (or newer) harness line; entries are checked in ORDER and the
- * first whose range covers the installed dsh version wins.
+/** Incompatible dsh harness ranges and the guidance each deserves. Entries
+ * are checked in ORDER and the first whose range covers the installed dsh
+ * version wins.
  *
  * Range semantics: `min` is inclusive, `max` is EXCLUSIVE. An entry with
  * only `max` covers everything below it (the common "too old" case); an
@@ -127,38 +127,61 @@ export interface HarnessCompatEntry {
   guidance?: string
 }
 
-/** The compatibility table. Entries are ordered from oldest to newest so
- * `harnessCompatEntryFor()` can return the first matching historical range. */
-const CURRENT_DSH_REQUIREMENT = {
-  since: '0.4.7-alpha.2',
-  requires: 'DeepSeek Harness 0.1.6-alpha.2 or later',
-  upgradeDsh: '0.1.6-alpha.2',
-  upgradeCommand: 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2',
-  guidance: 'This 0.4.7-alpha.2 line is validated with the published DeepSeek Harness 0.1.6-alpha.2 distribution; see docs/dsh-compatibility.md.',
-} as const
+/** One row of the shared compatibility matrix (src/dsh-compat-matrix.json):
+ * the DSH versions from `dshFrom` up to the next row's `dshFrom`, and the TUI
+ * line released for them. `tui` is absent when no released TUI supports the
+ * range (the runtime notice then offers the upgrade only). */
+interface CompatMatrixRow {
+  dshFrom: string
+  tui?: string
+  /** The published DSH versions the row covers, oldest first. */
+  versions: readonly string[]
+}
 
+interface CompatMatrix {
+  current: {
+    since: string
+    requires: string
+    upgradeDsh: string
+    upgradeCommand: string
+    guidance: string
+  }
+  floor: { below: string }
+  matrix: readonly CompatMatrixRow[]
+}
+
+/** The shared matrix. The bundler inlines this JSON, so the startup island
+ * gains neither a runtime file read nor a dependency. */
+const COMPAT = compatMatrix as unknown as CompatMatrix
+
+/** The floor this checkout imposes and the recovery guidance every
+ * incompatible range shows. */
+const CURRENT_DSH_REQUIREMENT: HarnessCompatEntry = {
+  since: COMPAT.current.since,
+  requires: COMPAT.current.requires,
+  upgradeDsh: COMPAT.current.upgradeDsh,
+  upgradeCommand: COMPAT.current.upgradeCommand,
+  guidance: COMPAT.current.guidance,
+}
+
+/** The compatibility table, derived from the shared matrix and ordered from
+ * oldest to newest so `harnessCompatEntryFor()` can return the first matching
+ * range. The oldest entry is the catch-all floor; each matrix row contributes
+ * a range that ends at the NEXT row's lower bound (the last row is the current
+ * supported line and produces no incompatible entry).
+ *
+ * Two boundaries are worth keeping in mind: cross-core prereleases do not
+ * satisfy an older TUI package's semver peer range, and the official
+ * dsh-v0.1.5-alpha.1/.2 tags predate the setup contract required by the next
+ * supported TUI line, so they carry no fallback. */
 export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
-  // These boundaries follow the published DSH tags. Cross-core prereleases do
-  // not satisfy the older TUI package's semver peer range.
-  { ...CURRENT_DSH_REQUIREMENT, max: '0.1.0-rc.8' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.0-rc.8', max: '0.1.1-rc.1', fallbackTui: '0.2' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.1-rc.1', max: '0.1.2-alpha.1', fallbackTui: '0.3' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-alpha.1', max: '0.1.2-alpha.2' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-alpha.2', max: '0.1.2-alpha.4', fallbackTui: '0.4.0-alpha.1' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-alpha.4', max: '0.1.2-rc.1', fallbackTui: '0.4.0-alpha.2' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.2-rc.1', max: '0.1.3-alpha.1', fallbackTui: '0.4.1' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.3-alpha.1', max: '0.1.3-alpha.2' },
-  // The last official runtime for this fallback is dsh-v0.1.3-alpha.2;
-  // the next official tags, dsh-v0.1.5-alpha.1/.2, require the new setup contract.
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.3-alpha.2', max: '0.1.5-alpha.1', fallbackTui: '0.4.3-alpha.2' },
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.5-alpha.1', max: '0.1.5-rc.1' },
-  // The published 0.1.5-rc.1/rc.2 family is the last runtime for the 0.4.5/0.4.6
-  // stable releases.
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.5-rc.1', max: '0.1.6-alpha.1', fallbackTui: '0.4.6' },
-  // dsh-v0.1.6-alpha.1 is published and still works with the published
-  // 0.4.7-alpha.1 line (peer `>=0.1.6-alpha.1`), but the current line depends
-  // on the alpha.2 Client Session contract and no longer supports it.
-  { ...CURRENT_DSH_REQUIREMENT, min: '0.1.6-alpha.1', max: '0.1.6-alpha.2', fallbackTui: '0.4.7-alpha.1' },
+  { ...CURRENT_DSH_REQUIREMENT, max: COMPAT.floor.below },
+  ...COMPAT.matrix.slice(0, -1).map((row, index) => ({
+    ...CURRENT_DSH_REQUIREMENT,
+    min: row.dshFrom,
+    max: COMPAT.matrix[index + 1].dshFrom,
+    ...(row.tui === undefined ? {} : { fallbackTui: row.tui }),
+  })),
 ]
 
 /** The compat entry covering the installed dsh version, or undefined when

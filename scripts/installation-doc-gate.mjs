@@ -11,6 +11,7 @@
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { COMPAT_MATRIX } from './lib/dsh-compat.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const README_FILES = [
@@ -38,7 +39,8 @@ const ACTIVE_FILES = [
 ]
 const STABLE_COMMAND = 'dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest'
 const DSH_ALLOW_SCRIPTS = '--allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext'
-const DSH_TARGET_COMMAND = `npm install -g ${DSH_ALLOW_SCRIPTS} @deepseek-ai/dsh@0.1.6-alpha.2`
+const DSH_TARGET_COMMAND = COMPAT_MATRIX.current.upgradeCommand
+const DSH_PEER_FLOOR = `>=${COMPAT_MATRIX.current.upgradeDsh}`
 const STABLE_DSH_CHANNEL = '@deepseek-ai/dsh@latest'
 const PREVIEW_COMMAND = 'pnpm compat:dsh:npm'
 const PREVIEW_DSH_CHANNEL = '@deepseek-ai/dsh@alpha'
@@ -110,8 +112,8 @@ for (const relativePath of ACTIVE_FILES) {
   const text = readFileSync(path, 'utf8')
   check(!text.includes(forbiddenGlobalTuiInstall), `${relativePath}: forbidden global TUI install command`)
   if (relativePath === 'docs/dsh-compatibility.md') {
-    check(text.includes(DSH_TARGET_COMMAND), `${relativePath}: recommended 0.1.6-alpha.2 install command must remain exact`)
-    check(text.includes('>=0.1.6-alpha.2'), `${relativePath}: 0.1.6-alpha.2 peer floor must remain documented`)
+    check(text.includes(DSH_TARGET_COMMAND), `${relativePath}: the recommended DSH install command must remain exact`)
+    check(text.includes(DSH_PEER_FLOOR), `${relativePath}: the ${DSH_PEER_FLOOR} peer floor must remain documented`)
     check(text.includes('Session V2') && text.includes('Session V3'), `${relativePath}: V2/V3 persistence generations must remain documented`)
   }
 }

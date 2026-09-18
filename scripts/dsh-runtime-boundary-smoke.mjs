@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 import semver from 'semver'
 
 import { cleanupTimedOutProcessTree, pnpmExecutable } from './lib/process.mjs'
+import { COMPAT_MATRIX } from './lib/dsh-compat.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -30,7 +31,7 @@ const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 // rejection case is 0.1.1-rc.2; the exact prerelease floor is covered
 // by the startup-gate unit tests.
 const OLD_DSH_VERSION = '0.1.1-rc.2'
-const TARGET_DSH_VERSION = '0.1.6-alpha.2'
+const TARGET_DSH_VERSION = COMPAT_MATRIX.current.upgradeDsh
 const RAW_BOUNDARY_ERROR = /ERR_MODULE_NOT_FOUND|ERR_PACKAGE_PATH_NOT_EXPORTED|does not provide an export|Cannot find module|ERR_REQUIRE_ESM/iu
 const EXPECTED_BOUNDARY_IMPORT = /(?:@xmoon76\/dsh-pi-tui|dsh-pi-tui|@deepseek-ai\/dsh-(?:agent|agent-presets|authorization|cmdline|commands|credentials|goal|jobs|llm|llm-retry|permission-presets|plan-mode|sandbox-policy|session|session-log-export|session-persistence|session-title|settings|shell|skill|subagent|token-meter|tool-todo|tool-workflow|tools|user-approval|user-questions|tool-subagent|cordis-host-runner))(?=['"/]|$)/iu
 
