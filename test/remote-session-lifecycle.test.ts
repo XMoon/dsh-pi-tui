@@ -133,16 +133,16 @@ test('successful fork after a generation change remains real but is locally supe
   assert.equal(result.outcome.kind, 'forked')
 })
 
-test('current fork reports published-with-error when Client cannot address the child', async () => {
+test('a resolved fork trusts the official Client addressability guarantee', async () => {
   const h = harness()
-  h.setForkResult('session-not-reconciled')
+  h.setForkResult('session-reconciled')
+  // Official ClientSessions.fork() reconciles the child before it resolves, so
+  // binding() must not be re-checked here: an absent local binding would mean
+  // the Client contract itself broke, not a fork business outcome.
   h.setForkAddsAddressable(false)
   const result = await h.lifecycle.fork({ sourceSessionId: 'session-source' })
-  assert.equal(result.outcome.kind, 'published-with-error')
-  if (result.outcome.kind === 'published-with-error') {
-    assert.equal(result.outcome.sessionId, 'session-not-reconciled')
-    assert.equal(result.outcome.error.code, 'session/fork-not-addressable')
-  }
+  assert.equal(result.ownership, 'current')
+  assert.deepEqual(result.outcome, { kind: 'forked', handle: { session: { id: 'session-reconciled' } } })
   assert.equal(h.calls.forks.length, 1)
 })
 
@@ -155,10 +155,13 @@ test('open is Client-local selection and never invokes a Host create/fork', asyn
   assert.deepEqual(h.calls.forks, [])
 })
 
-test('disconnected fork is a known refusal before dispatch', async () => {
+test('disconnected fork is a client-local pre-dispatch refusal, never a Host outcome', async () => {
   const h = harness()
   h.setGeneration(undefined)
   const result = await h.lifecycle.fork({ sourceSessionId: 'session-source' })
-  assert.equal(result.outcome.kind, 'rejected')
+  assert.deepEqual(result, {
+    ownership: 'current',
+    outcome: { kind: 'unavailable', message: 'the remote connection is not connected' },
+  })
   assert.deepEqual(h.calls.forks, [])
 })

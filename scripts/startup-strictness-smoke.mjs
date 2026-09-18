@@ -109,10 +109,6 @@ async function main() {
       type: 'module',
       dependencies: {
         '@deepseek-ai/dsh': targetDshVersion,
-        // DSH 0.1.6-alpha.1 imports watchUserPatches from the matching
-        // app-boot release. Its broad npm range can otherwise resolve the
-        // incompatible alpha.2 package in this isolated harness.
-        '@deepseek-ai/dsh-app-boot': targetDshVersion,
       },
     }, null, 2) + '\n', 'utf8')
     const pnpm = run(PNPM_COMMAND, ['--version'], { cwd: harnessDir, env })

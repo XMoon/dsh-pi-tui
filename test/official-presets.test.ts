@@ -28,6 +28,7 @@ test('the TUI overlay supplies preset-required Host services', () => {
     ['subagent-model-selection-settings', '@deepseek-ai/dsh-tool-subagent/model-selection-settings'],
     ['cordis-host-runner', '@deepseek-ai/dsh-cordis-host-runner'],
     ['authorization', '@deepseek-ai/dsh-authorization'],
+    ['workspace', '@deepseek-ai/dsh-workspace'],
   ] as const) {
     assert.match(patch, new RegExp(`^    - id: ${id}\\n      name: '${packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'$`, 'mu'),
       `${id} must be present on the host overlay`)

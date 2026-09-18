@@ -322,7 +322,11 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     }
     const captured = this.generation.getSnapshot()
     if (captured === undefined) {
-      return { ownership: 'current', outcome: { kind: 'rejected', error: { code: 'session/fork-unavailable', message: 'the remote connection is not connected' } } }
+      // CLIENT-LOCAL pre-dispatch refusal: nothing was dispatched, so there is
+      // no Host settlement. `session/fork-unavailable` is a PROVEN Host
+      // business refusal (no legal completed-turn boundary) and must never be
+      // reused for "this client is not connected".
+      return { ownership: 'current', outcome: { kind: 'unavailable', message: 'the remote connection is not connected' } }
     }
     const ownership = (): OperationOwnership =>
       Object.is(captured, this.generation.getSnapshot()) ? 'current' : 'superseded'
@@ -348,16 +352,10 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     // A reconnect after dispatch does not turn a known Host success into an
     // error; the child is real, but the old Client navigation no longer owns it.
     if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'forked', handle } }
-    if (this.sessions.binding(childId) === undefined) {
-      return {
-        ownership: 'current',
-        outcome: {
-          kind: 'published-with-error',
-          sessionId: childId,
-          error: { code: 'session/fork-not-addressable', message: 'the forked Session is not addressable in Client state' },
-        },
-      }
-    }
+    // Official `ClientSessions.fork()` guarantees that a resolved child is
+    // already reconciled into Client list state and synchronously addressable
+    // through `binding()` (it records the mutation before projecting the list).
+    // There is therefore no "forked but not addressable" state to report.
     return { ownership: 'current', outcome: { kind: 'forked', handle } }
   }
 }

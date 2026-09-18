@@ -237,6 +237,10 @@ interface RunnerHarness {
    * `flush:<id>` / `dispose:<id>`) in call order — the Direct
    * owned-session retirement assertions. */
   readonly retirementEvents: string[]
+  /** The simulated official command executor's `command/run` / `command/done`
+   * appends, each with whether the session still had a live owner handle at
+   * that moment (the durability the `/fork` retirement seam must preserve). */
+  readonly commandSettlements: { sessionId: string; phase: 'run' | 'done'; ownerLive: boolean }[]
 }
 
 function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<void>, retirementEvents?: string[]): Agent {
@@ -405,6 +409,8 @@ function makeHarness(
     listConfigurableProviders: () => [],
   }
   const definitions = new Map<string, { name: string; description: string; handler: (...args: never[]) => unknown }>()
+  const commandSettlements: { sessionId: string; phase: 'run' | 'done'; ownerLive: boolean }[] = []
+  let commandSeq = 0
   const commands = {
     register: (definition: { name: string; description: string; handler: (...args: never[]) => unknown }) => {
       definitions.set(definition.name, definition)
@@ -413,13 +419,44 @@ function makeHarness(
       }
     },
     list: () => [...definitions.values()].map(({ name, description }) => ({ name, description })),
-    execute: async () => ({ result: { kind: 'success' } }),
+    // The official CommandRuntime appends `command/run` BEFORE the handler and
+    // `command/done` AFTER it settles, both to the SAME (source) Session. The
+    // simulation records whether that Session still had a live owner handle at
+    // each append, which is exactly the durability `/fork` must not break.
+    execute: async (agent: unknown, line: string) => {
+      const name = String(line).replace(/^\//u, '').split(/\s/u)[0] ?? ''
+      const definition = definitions.get(name)
+      if (definition === undefined) return undefined
+      const commandId = `cmd-test-${++commandSeq}`
+      const session = (agent as { session: FakeSession }).session
+      const appendEvent = session.append as (type: string, data: unknown) => unknown
+      const append = (phase: 'run' | 'done', type: string, data: unknown): void => {
+        commandSettlements.push({ sessionId: session.id, phase, ownerLive: live.has(session.id) })
+        appendEvent(type, data)
+      }
+      append('run', 'command/run', { commandId, name, source: { kind: 'user' } })
+      const result = await definition.handler({
+        commandId,
+        agent,
+        rawInput: String(line).slice(name.length + 1),
+        attachments: [],
+        signal: new AbortController().signal,
+      } as never)
+      // Test-only window between the handler settling and the executor's own
+      // `command/done` append: a test installs `settlementGate` to hold the
+      // append open and observe whether teardown respects the settlement.
+      await commands.settlementGate?.()
+      append('done', 'command/done', { commandId, kind: (result as { kind?: string } | undefined)?.kind ?? 'success' })
+      return { commandId, result }
+    },
     handler: (name: string) => definitions.get(name)?.handler,
+    /** Set by a test to hold the post-handler `command/done` append open. */
+    settlementGate: undefined as (() => Promise<void>) | undefined,
   }
   const subagentsService = typeof subagents === 'function'
     ? (subagents as (events: string[]) => unknown)(retirementEvents)
     : subagents
-  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createInheritedEventCounts, createSignals, resumeSignals, createdSessions, commands, subagents: subagentsService, retirementEvents }
+  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createInheritedEventCounts, createSignals, resumeSignals, createdSessions, commands, subagents: subagentsService, retirementEvents, commandSettlements }
 }
 
 async function settle(): Promise<void> {
@@ -1082,6 +1119,220 @@ test('/fork lets Host choose the child selection after the historical inherited 
   assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).lastUsed, {
     provider: 'provider-a', model: 'model-a', reasoningEffort: 'high',
   }, 'the child effective selection is the historical A selection')
+})
+
+test('/fork leaves the source Session attached until the executor appends command/done', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-settlement-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const source = fakeSession({
+    id: 'fork-settlement-source',
+    header: { id: 'fork-settlement-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const harness = makeHarness(home, source)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/fork')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settle()
+
+  assert.equal(harness.createdSessions.length, 1, '/fork must fork one child through the command plane')
+  // The official executor appends `command/done` to the SOURCE Session only
+  // after the handler settles; appending to a detached Session never reaches
+  // the persistence writer. The source owner must therefore still be live at
+  // that append — retiring it inside the handler (which detaches the Session)
+  // is the regression this asserts.
+  const sourceSettlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(sourceSettlements.map(entry => entry.phase), ['run', 'done'])
+  assert.equal(sourceSettlements.at(-1)?.ownerLive, true,
+    'the source owner must stay attached through the command/done append')
+  const eventTypes = source.snapshotEvents().map(event => (event as unknown as { type?: unknown }).type)
+  assert.ok(eventTypes.includes('command/run') && eventTypes.includes('command/done'),
+    `the source log must keep the run/done pairing: ${JSON.stringify(eventTypes)}`)
+
+  // The retirement still happens — just after settlement, never lost.
+  await settle()
+  assert.ok(harness.retirementEvents.includes(`dispose:${source.id}`),
+    'the source owner must still be disposed after the command settled')
+})
+
+test('/fork teardown awaits the command settlement and retires the source exactly once', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-teardown-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseCreate!: () => void
+  let signalCreateStarted!: () => void
+  const createStarted = new Promise<void>(resolve => { signalCreateStarted = resolve })
+  let releaseSettlement!: () => void
+  let signalSettlementReached!: () => void
+  const settlementReached = new Promise<void>(resolve => { signalSettlementReached = resolve })
+  const source = fakeSession({
+    id: 'fork-teardown-source',
+    header: { id: 'fork-teardown-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const harness = makeHarness(home, source, undefined, undefined, async () => {
+    signalCreateStarted()
+    await new Promise<void>(resolve => { releaseCreate = resolve })
+  })
+  // Hold the executor's post-handler `command/done` append open, so the test can
+  // observe whether teardown respects the in-flight command settlement.
+  ;(harness.commands as { settlementGate?: () => Promise<void> }).settlementGate = async () => {
+    signalSettlementReached()
+    await new Promise<void>(resolve => { releaseSettlement = resolve })
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/fork')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await createStarted
+
+  // Tear the surface down WHILE the `/fork` command is inside `agents.create`,
+  // then let the fork settle but keep `command/done` open.
+  const disposal = fiber.dispose()
+  await settle()
+  releaseCreate()
+  await settlementReached
+  await settle()
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, 0,
+    'teardown must not retire the source while its own command is still settling')
+
+  releaseSettlement()
+  await disposal
+  await settle()
+
+  const sourceSettlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(sourceSettlements.map(entry => entry.phase), ['run', 'done'],
+    'the executor must still settle the source command')
+  assert.equal(sourceSettlements.at(-1)?.ownerLive, true,
+    'teardown must not detach the source Session before its own command/done')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, 1,
+    'teardown must retire the source owner exactly once')
+})
+
+test('a rewind-picker fork awaits source retirement before its handoff completes', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-retirement-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseDrain!: () => void
+  let signalDrainReached!: () => void
+  const drainReached = new Promise<void>(resolve => { signalDrainReached = resolve })
+  const source = fakeSession({
+    id: 'rewind-retirement-source',
+    header: { id: 'rewind-retirement-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', {
+        id: MessageId('rewind-retirement-one'),
+        role: 'user',
+        content: [{ type: 'text', text: 'first' }],
+        source: { kind: 'user' },
+      } as never, 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      event('user/message', {
+        id: MessageId('rewind-retirement-two'),
+        role: 'user',
+        content: [{ type: 'text', text: 'second' }],
+        source: { kind: 'user' },
+      } as never, 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+  // Gate the retirement's drain phase: the source owner must not be observable
+  // as retired (nor the handoff reported complete) until teardown finishes. The
+  // gate is ONE-SHOT — the teardown retirement's own drain call must pass
+  // through, or the disposer would block forever.
+  let drainCalls = 0
+  const harness = makeHarness(home, source, { provider: 'global', model: 'fallback' }, undefined, undefined, () => ({
+    drainContinuableDescendants: async () => {
+      drainCalls += 1
+      if (drainCalls !== 1) return
+      signalDrainReached()
+      await new Promise<void>(resolve => { releaseDrain = resolve })
+    },
+    listDescendants: async () => [],
+  }))
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TUI for the rewind picker')
+
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  const reachedDrain = await Promise.race([
+    drainReached.then(() => true),
+    new Promise<boolean>(resolve => { setTimeout(() => resolve(false), 3_000) }),
+  ])
+  try {
+    assert.equal(reachedDrain, true, 'the picker fork must reach the source-retirement drain phase')
+    // Give a DETACHED handoff every chance to finish: if the picker path did not
+    // await the retirement, `forkSession` would resolve here and report success.
+    await settle()
+    // A DSH command defers its source retirement; the picker path must NOT: the
+    // handoff cannot report success (nor dispose the source) while the old owner
+    // is still retiring — otherwise an immediate /resume could observe a live,
+    // lease-held source.
+    assert.ok(!probe.notices.some(notice => notice.includes('rewound to turn')),
+      `the rewind handoff must wait for source retirement: ${probe.notices.join(', ')}`)
+    assert.equal(harness.retirementEvents.filter(entry => entry === `dispose:${source.id}`).length, 0,
+      'the source must not be disposed while its retirement is still draining')
+  } finally {
+    // Always release the gate so a failing assertion still leaves a clean
+    // teardown (the disposer awaits this retirement).
+    releaseDrain?.()
+    await settle()
+  }
+  assert.ok(probe.notices.some(notice => notice.includes('rewound to turn')),
+    `the picker fork must still report success: ${probe.notices.join(', ')}`)
+  assert.equal(harness.retirementEvents.filter(entry => entry === `dispose:${source.id}`).length, 1,
+    'the source owner must be retired exactly once')
 })
 
 test('/fork dispatches at admission without waiting for a busy source', async (t) => {

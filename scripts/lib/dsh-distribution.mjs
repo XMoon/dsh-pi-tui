@@ -496,8 +496,56 @@ export function loadDshDistribution({
   return npmDshDistribution(version ?? process.env.DSH_VERSION ?? '0.1.2-alpha.2')
 }
 
-/** Return temporary pnpm override values for every packed DSH package. */
-export function buildDshOverrides(distribution) {
+/**
+ * The two root overrides that pin the whole published DSH family to one exact
+ * version. DSH publishes `@deepseek-ai/dsh` and every `@deepseek-ai/dsh-*`
+ * sibling at one version per release, but the CLI's own dependency edges are
+ * caret ranges (`^0.1.6-alpha.1`), so a fresh isolated install can otherwise
+ * resolve a newer, ABI-incompatible sibling — the `0.1.6-alpha.2` app-boot that
+ * dropped `watchUserPatches`, for example. The two keys mirror
+ * {@link isDshPackage}'s family definition so `@deepseek-ai/dsh` itself stays
+ * inside the same pin instead of remaining one exception.
+ */
+export function npmDshFamilyOverrides(version) {
+  const exact = assertVersion(stringValue(version, 'npm DSH family version'), 'npm DSH family version')
+  return {
+    [DSH_CLI_PACKAGE]: exact,
+    '@deepseek-ai/dsh-*': exact,
+  }
+}
+
+/**
+ * Return a copy of an install environment with every minimum-release-age
+ * setting removed (case-insensitive; pnpm reads both the `npm_config_` and
+ * `pnpm_config_` spellings).
+ *
+ * The exact-family RESOLUTION step must run through this: with a
+ * minimum-release-age setting present, pnpm was observed to ignore the family
+ * `overrides` entirely, so the CLI's caret family edges re-opened to a newer
+ * sibling. Removing the settings is deliberate isolation of the resolve
+ * phase's configuration source, not a statement about pnpm internals. A frozen
+ * realization step needs no resolution, so it may keep the policy.
+ */
+export function withoutMinimumReleaseAge(env) {
+  return Object.fromEntries(
+    Object.entries(env).filter(([key]) => !/^(?:npm|pnpm)_config_minimum_release_age$/iu.test(key)),
+  )
+}
+
+/**
+ * Return temporary pnpm override values for one DSH distribution.
+ *
+ * A source pack pins every packed package to its local tarball. An npm
+ * distribution pins the whole family to the exact version ONLY when the caller
+ * explicitly declared "verify this exact family" (`npmFamilyPin`): the ordinary
+ * frozen-lockfile lane owns its own resolution and must not be rewritten.
+ * @param distribution - normalized DSH distribution.
+ * @param options - `npmFamilyPin` opts an npm distribution into the exact pin.
+ */
+export function buildDshOverrides(distribution, options = {}) {
+  if (distribution?.kind === 'npm') {
+    return options.npmFamilyPin === true ? npmDshFamilyOverrides(distribution.version) : {}
+  }
   if (distribution?.kind !== 'source-pack') return {}
   const overrides = {}
   for (const [name, packageEntry] of distribution.packages) {
@@ -517,8 +565,15 @@ function overrideYaml(overrides) {
   return lines.join('\n')
 }
 
-/** Write source-only overrides into an ephemeral pnpm workspace file. */
-export function writeDshWorkspaceOverrides(workspaceDir, distribution, fileName = 'pnpm-workspace.yaml') {
+/**
+ * Write the managed DSH override block into an ephemeral pnpm workspace file.
+ * Source mode pins the packed family to local tarballs; an npm distribution
+ * writes the exact-family pin only when `options.npmFamilyPin` is set. The
+ * block is delimited by the managed markers, so a previous block is replaced
+ * instead of nested (pnpm reads root `overrides` from this file, not from
+ * package.json).
+ */
+export function writeDshWorkspaceOverrides(workspaceDir, distribution, fileName = 'pnpm-workspace.yaml', options = {}) {
   const path = join(resolve(workspaceDir), fileName)
   const existed = existsSync(path)
   const current = existed ? readFileSync(path, 'utf8') : 'packages:\n- packages/*\n'
@@ -531,14 +586,16 @@ export function writeDshWorkspaceOverrides(workspaceDir, distribution, fileName 
     const after = current.slice(end + SOURCE_OVERRIDE_END.length).replace(/^\s*\n/u, '')
     base += after
   }
-  const overrides = distribution?.kind === 'source-pack' ? buildDshOverrides(distribution) : {}
+  const overrides = buildDshOverrides(distribution, options)
   try {
-    if (distribution?.kind === 'source-pack') {
-      if (Object.keys(overrides).length === 0) fail('source DSH distribution produced no overrides')
+    if (distribution?.kind === 'source-pack' && Object.keys(overrides).length === 0) {
+      fail('source DSH distribution produced no overrides')
+    }
+    if (Object.keys(overrides).length === 0) {
+      writeFileSync(path, base, 'utf8')
+    } else {
       const next = `${base.trimEnd()}\n${overrideYaml(overrides)}\n`
       writeFileSync(path, next, 'utf8')
-    } else {
-      writeFileSync(path, base, 'utf8')
     }
   } catch (error) {
     try {
@@ -575,7 +632,7 @@ function packageSpec(distribution, name) {
 export function prepareDshInstall(distribution, targetDir, options = {}) {
   const directory = resolve(targetDir)
   if (!existsSync(directory)) fail(`DSH install target is missing: ${directory}`)
-  const overrides = buildDshOverrides(distribution)
+  const overrides = buildDshOverrides(distribution, options)
   const packagePath = options.packageJsonPath ?? join(directory, 'package.json')
   const materializeSourceDependencies = distribution?.kind === 'source-pack' && options.materializeSourceDependencies === true
   let workspaceFile
@@ -583,7 +640,7 @@ export function prepareDshInstall(distribution, targetDir, options = {}) {
   try {
     workspaceFile = options.workspaceFile === false
       ? undefined
-      : writeDshWorkspaceOverrides(directory, distribution, options.workspaceFile ?? 'pnpm-workspace.yaml')
+      : writeDshWorkspaceOverrides(directory, distribution, options.workspaceFile ?? 'pnpm-workspace.yaml', options)
     if (options.addCliDependency === true || materializeSourceDependencies || options.stripPackageManager === true) {
       packageJsonBackup = readFileSync(packagePath, 'utf8')
       const pkg = readJson(packagePath, 'temporary install package.json')
@@ -711,6 +768,58 @@ export function assertSourceResolution(targetDir, distribution, required = [...d
   if (distribution?.kind !== 'source-pack') return
   for (const name of required) assertSourcePackageResolution(targetDir, distribution, name)
   printDshProvenance(distribution)
+}
+
+/**
+ * The release line a prerelease version belongs to (`0.1.6-alpha.1` →
+ * `0.1.6-alpha.`), or `undefined` for a stable version (its own line).
+ */
+function releaseLinePrefix(version) {
+  const match = /^(\d+\.\d+\.\d+)-([A-Za-z]+)\.\d+$/u.exec(version)
+  return match === null ? undefined : `${match[1]}-${match[2]}.`
+}
+
+/**
+ * Assert that an exact-family npm install RESOLVED only the requested version
+ * across the TARGET's release line. Scans pnpm's virtual store, so this proves
+ * the actual dependency resolution rather than the generated override file — a
+ * writer-only assertion keeps passing if pnpm ever changes how it reads
+ * `overrides`.
+ *
+ * Only the target's release line is fenced: this repository legitimately
+ * carries OLDER DSH compatibility lines as transitive dependencies
+ * (`dsh-0.1.2-alpha.x`, `dsh-0.1.5-rc.x`), and they are a separate upstream
+ * line, not drift. Within the target line NOTHING but the target version may
+ * resolve — which is exactly the `alpha.1` → `alpha.2` drift this gate exists
+ * for. The version is release-line agnostic (stable/rc/alpha all work) because
+ * the line is derived from the version itself, not a lockfile enumeration.
+ * @param targetDir - installed workspace/harness root.
+ * @param version - the one exact DSH version the target line must resolve to.
+ * @returns the installed target-line versions (exactly `[version]` on success).
+ */
+export function assertInstalledDshFamily(targetDir, version) {
+  const exact = assertVersion(stringValue(version, 'DSH npm family version'), 'DSH npm family version')
+  const modulesPath = join(resolve(targetDir), 'node_modules', '.pnpm')
+  if (!existsSync(modulesPath) || !statSync(modulesPath).isDirectory()) {
+    fail(`exact DSH family check has no pnpm virtual store: ${modulesPath}`)
+  }
+  const installed = new Set()
+  for (const entry of readdirSync(modulesPath)) {
+    // pnpm directory names are `@scope+name@version` plus a `_`-separated peer
+    // suffix; the version never contains `_`, so the capture stops correctly.
+    const match = /^@deepseek-ai\+dsh(?:-[^@]+)?@([^_]+)/iu.exec(entry)
+    if (match !== null) installed.add(match[1])
+  }
+  const prefix = releaseLinePrefix(exact)
+  const line = prefix === undefined
+    ? [...installed].filter(installedVersion => installedVersion === exact)
+    : [...installed].filter(installedVersion => installedVersion.startsWith(prefix))
+  if (!line.includes(exact)) fail(`exact DSH family install contained no ${exact} package`)
+  const mismatches = line.filter(installedVersion => installedVersion !== exact).sort()
+  if (mismatches.length > 0) {
+    fail(`exact DSH family install resolved ${mismatches.join(', ')} alongside ${exact}`)
+  }
+  return { versions: line.sort() }
 }
 
 /** Print the provenance tuple that distinguishes source commits sharing a version. */

@@ -17,10 +17,12 @@ import { prepareDshTestEnvironment } from '../scripts/prepare-dsh-test-environme
 import {
   DSH_CLI_PACKAGE,
   DshDistributionError,
+  assertInstalledDshFamily,
   assertNoSourceLeak,
   buildDshOverrides,
   loadDshDistribution,
   loadDshDistributionManifest,
+  npmDshFamilyOverrides,
   packageMapFromTarballs,
   prepareDshInstall,
   requiredDshPackages,
@@ -28,6 +30,7 @@ import {
   sourceExternalPeerDependencies,
   sourceInstallPackages,
   validateSourceDistribution,
+  withoutMinimumReleaseAge,
   writeDshWorkspaceOverrides,
 } from '../scripts/lib/dsh-distribution.mjs'
 
@@ -267,15 +270,87 @@ test('temporary workspace overrides are generated without changing the package c
   const workspace = life.tempDir('dsh-workspace-test-')
   const original = 'packages:\n- packages/*\nallowBuilds:\n  esbuild: true\n'
   writeFileSync(join(workspace, 'pnpm-workspace.yaml'), original)
+  // The on-disk package contract the override writer must leave untouched.
+  const packagePath = join(workspace, 'package.json')
+  const packageText = '{\n  "name": "temporary-tui",\n  "private": true\n}\n'
+  writeFileSync(packagePath, packageText)
   const distribution = loadDshDistributionManifest(fixture.directory, { packageJson: fixture.packageJson })
   writeDshWorkspaceOverrides(workspace, distribution)
   const generated = readFileSync(join(workspace, 'pnpm-workspace.yaml'), 'utf8')
   assert.match(generated, /BEGIN DSH SOURCE OVERRIDES/u)
   assert.match(generated, /misleading-artifact-0\.tgz/u)
   assert.match(generated, /allowBuilds/u)
-  assert.equal(JSON.stringify(fixture.packageJson), JSON.stringify(fixture.packageJson))
+  assert.equal(readFileSync(packagePath, 'utf8'), packageText)
   writeDshWorkspaceOverrides(workspace, { kind: 'npm', version: VERSION })
   assert.equal(readFileSync(join(workspace, 'pnpm-workspace.yaml'), 'utf8'), original)
+  assert.equal(readFileSync(packagePath, 'utf8'), packageText)
+})
+
+test('npm family overrides pin the CLI and every dsh sibling, and stay opt-in', (t) => {
+  const life = testLifecycle(t)
+  const workspace = life.tempDir('dsh-npm-family-test-')
+  const original = 'packages:\n- packages/*\n'
+  writeFileSync(join(workspace, 'pnpm-workspace.yaml'), original)
+  const distribution = { kind: 'npm', version: VERSION }
+
+  assert.deepEqual(npmDshFamilyOverrides(VERSION), {
+    [DSH_CLI_PACKAGE]: VERSION,
+    '@deepseek-ai/dsh-*': VERSION,
+  })
+  // The ordinary frozen-lockfile lane owns its resolution: no override.
+  assert.deepEqual(buildDshOverrides(distribution), {})
+  assert.deepEqual(buildDshOverrides(distribution, { npmFamilyPin: true }), npmDshFamilyOverrides(VERSION))
+  writeDshWorkspaceOverrides(workspace, distribution)
+  assert.equal(readFileSync(join(workspace, 'pnpm-workspace.yaml'), 'utf8'), original)
+
+  writeDshWorkspaceOverrides(workspace, distribution, 'pnpm-workspace.yaml', { npmFamilyPin: true })
+  const generated = readFileSync(join(workspace, 'pnpm-workspace.yaml'), 'utf8')
+  assert.match(generated, /BEGIN DSH SOURCE OVERRIDES/u)
+  assert.ok(generated.includes(`"${DSH_CLI_PACKAGE}": "${VERSION}"`))
+  assert.ok(generated.includes(`"@deepseek-ai/dsh-*": "${VERSION}"`))
+
+  // A second pinned write replaces the managed block instead of nesting keys.
+  writeDshWorkspaceOverrides(workspace, distribution, 'pnpm-workspace.yaml', { npmFamilyPin: true })
+  const rewritten = readFileSync(join(workspace, 'pnpm-workspace.yaml'), 'utf8')
+  assert.equal((rewritten.match(/^overrides:/gmu) ?? []).length, 1)
+  assert.equal(rewritten, generated)
+})
+
+test('minimum-release-age settings are stripped from every spelling for the resolve phase', () => {
+  const stripped = withoutMinimumReleaseAge({
+    PATH: '/bin',
+    npm_config_minimum_release_age: '0',
+    pnpm_config_minimum_release_age: '0',
+    NPM_CONFIG_MINIMUM_RELEASE_AGE: '60',
+    PNPM_CONFIG_MINIMUM_RELEASE_AGE: '60',
+    npm_config_registry: 'https://registry.npmjs.org/',
+  })
+  assert.deepEqual(stripped, {
+    PATH: '/bin',
+    npm_config_registry: 'https://registry.npmjs.org/',
+  })
+})
+
+test('exact DSH family assertion scans the resolved virtual store, not the override file', (t) => {
+  const life = testLifecycle(t)
+  const workspace = life.tempDir('dsh-npm-family-assert-test-')
+  const store = join(workspace, 'node_modules', '.pnpm')
+  mkdirSync(store, { recursive: true })
+  writeFileSync(join(workspace, 'pnpm-workspace.yaml'), 'overrides:\n')
+  assert.throws(() => assertInstalledDshFamily(workspace, VERSION), new RegExp(`contained no ${VERSION.replaceAll('.', '\\.')} package`, 'u'))
+
+  mkdirSync(join(store, `@deepseek-ai+dsh@${VERSION}_peer`), { recursive: true })
+  mkdirSync(join(store, `@deepseek-ai+dsh-app-boot@${VERSION}_peer`), { recursive: true })
+  assert.deepEqual(assertInstalledDshFamily(workspace, VERSION), { versions: [VERSION] })
+
+  // An OLDER DSH compatibility line is not drift: this repository legitimately
+  // carries such transitives, so only the target's own line is fenced.
+  mkdirSync(join(store, '@deepseek-ai+dsh-compaction@0.1.5-rc.2_peer'), { recursive: true })
+  assert.deepEqual(assertInstalledDshFamily(workspace, VERSION), { versions: [VERSION] })
+
+  // A second version anywhere in the family is the drift this gate exists for.
+  mkdirSync(join(store, '@deepseek-ai+dsh-app-boot@0.1.2-alpha.2_peer'), { recursive: true })
+  assert.throws(() => assertInstalledDshFamily(workspace, VERSION), /resolved 0\.1\.2-alpha\.2 alongside/u)
 })
 
 test('source install materializes local peers temporarily and restores package metadata', (t) => {

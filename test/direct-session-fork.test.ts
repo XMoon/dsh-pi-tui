@@ -163,6 +163,59 @@ test('Direct rejects a non-canonical fork anchor before Host observation', async
   assert.equal(observed, false)
 })
 
+test('Direct maps a fork composition failure to gateway/internal, never fork-unavailable', async () => {
+  const source = {
+    header: { id: 'session-source' },
+    events: [{ type: 'turn/end', seq: 0, data: { turn: 1 } }],
+    projections: { values: {} },
+    [Symbol.dispose]: () => {},
+  }
+  const lifecycle = new DirectSessionLifecycle({
+    get: name => name === 'sessionQuery'
+      ? { observeSession: async () => source }
+      : name === 'agents'
+        ? { create: async () => { throw new Error('create should not run') }, resume: async () => { throw new Error('resume should not run') } }
+        : undefined,
+  }, async () => { throw new Error('preset unavailable') })
+
+  const result = await lifecycle.fork({ sourceSessionId: 'session-source' })
+  assert.equal(result.outcome.kind, 'rejected')
+  if (result.outcome.kind === 'rejected') {
+    assert.equal(result.outcome.error.code, 'gateway/internal')
+    assert.match(result.outcome.error.message, /compose/u)
+  }
+})
+
+test('Direct maps an agents.create failure to gateway/internal, never session/fork-failed', async () => {
+  const source = {
+    header: { id: 'session-source' },
+    events: [{ type: 'turn/end', seq: 0, data: { turn: 1 } }],
+    projections: { values: {} },
+    [Symbol.dispose]: () => {},
+  }
+  const lifecycle = new DirectSessionLifecycle({
+    get: name => name === 'sessionQuery'
+      ? { observeSession: async () => source }
+      : name === 'agents'
+        ? { create: async () => { throw new Error('activation exploded') }, resume: async () => { throw new Error('resume should not run') } }
+        : undefined,
+  }, async () => ({ setup: () => {} }))
+
+  const result = await lifecycle.fork({ sourceSessionId: 'session-source' })
+  assert.equal(result.outcome.kind, 'rejected')
+  if (result.outcome.kind === 'rejected') {
+    assert.equal(result.outcome.error.code, 'gateway/internal')
+    assert.match(result.outcome.error.message, /activation exploded/u)
+  }
+})
+
+test('Direct maps a missing Host fork service to gateway/internal', async () => {
+  const lifecycle = new DirectSessionLifecycle({ get: () => undefined }, async () => ({ setup: () => {} }))
+  const result = await lifecycle.fork({ sourceSessionId: 'session-source' })
+  assert.equal(result.outcome.kind, 'rejected')
+  if (result.outcome.kind === 'rejected') assert.equal(result.outcome.error.code, 'gateway/internal')
+})
+
 test('Direct open claims a parked fork owner before resume', async () => {
   const parked = { agent: { session: { id: 'session-parked' } }, dispose: async () => {} }
   let claimed = false
