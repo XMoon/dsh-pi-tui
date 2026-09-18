@@ -1537,6 +1537,147 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("filters only the copy source of a row via selectionLineText (X057)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+			// Row 0 is presentation chrome: it copies as a blank separator,
+			// while every other row is copied verbatim.
+			selectionLineText: ({ row, line }) => (row === 0 ? "" : line.toUpperCase()),
+		});
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;4;2M");
+		terminal.sendInput("\x1b[<0;4;2m");
+		await terminal.waitForRender();
+
+		// The overridden row copies blank; the untouched row is copied from
+		// the override text (proving the seam replaces the copy source), and
+		// the PAINT still shows the original rendered lines.
+		assert.deepStrictEqual(copied, ["\nBETA"]);
+		assert.ok(terminal.getViewport().some((line) => line.includes("alpha")));
+		assert.ok(terminal.getViewport().some((line) => line.includes("beta")));
+
+		tui.stop();
+	});
+
+	it("keeps the copied text unchanged when selectionLineText returns undefined (X057)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+			selectionLineText: () => undefined,
+		});
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;4;2M");
+		terminal.sendInput("\x1b[<0;4;2m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copied, ["alpha\nbeta"]);
+		tui.stop();
+	});
+
+	it("computes word selection on the rendered line but copies the override (X057)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+			selectionLineText: ({ row }) => (row === 0 ? "" : undefined),
+		});
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		// Double-click "beta" (row 1, no override): the word range is computed
+		// on the RENDERED line and copied unchanged.
+		terminal.sendInput("\x1b[<0;1;2M");
+		terminal.sendInput("\x1b[<0;1;2m");
+		terminal.sendInput("\x1b[<0;1;2M");
+		terminal.sendInput("\x1b[<0;1;2m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(copied, ["beta"]);
+
+		// Double-click "alpha" (row 0, overridden to blank): the gesture still
+		// selects the word on the rendered line, but the copied text is empty.
+		copied.length = 0;
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<0;1;1m");
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<0;1;1m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(copied, []);
+
+		tui.stop();
+	});
+
+	it("computes the copy range on the rendered line for a non-empty override (X057)", async () => {
+		const terminal = new RecordingTerminal(20, 1);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+			// The override is NARROWER than the rendered wide glyph: the
+			// selection still covers the glyph's two cells, so the copied
+			// override must be sliced with the RENDERED line's column range.
+			selectionLineText: ({ row }) => (row === 0 ? "XY" : undefined),
+		});
+		tui.addChild(new Text("日", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		// Drag from the glyph's second cell to the end of the line.
+		terminal.sendInput("\x1b[<0;2;1M");
+		terminal.sendInput("\x1b[<32;3;1M");
+		terminal.sendInput("\x1b[<0;3;1m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copied, ["XY"]);
+		tui.stop();
+	});
+
+	it("filters the OSC 52 clipboard text too when no handler is injected (X057)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			selectionLineText: ({ row }) => (row === 0 ? "" : undefined),
+		});
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;4;2M");
+		terminal.sendInput("\x1b[<0;4;2m");
+		await terminal.waitForRender();
+
+		const osc = terminal.events
+			.filter((event): event is { type: "write"; data: string } => event.type === "write" && event.data.includes("\x1b]52;c;"))
+			.map((event) => event.data)[0];
+		assert.ok(osc !== undefined, "an OSC 52 copy must be emitted without an injected handler");
+		const payload = /\]52;c;([A-Za-z0-9+/=]+)\x07/.exec(osc)![1]!;
+		assert.strictEqual(Buffer.from(payload, "base64").toString("utf8"), "\nbeta");
+
+		tui.stop();
+	});
+
 	it("leaves selections visible without copying when copyOnSelect is disabled", async () => {
 		const terminal = new RecordingTerminal(20, 4);
 		const copied: string[] = [];

@@ -80,8 +80,8 @@
 
 ## Summary
 
-- Records: 57
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 46, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
+- Records: 58
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 47, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -142,6 +142,7 @@
 | X054 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
 | X055 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM, LOCAL_UX | NO |
 | X056 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT | NO |
+| X057 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
 
 ## Divergences
 
@@ -4731,3 +4732,80 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Confirmed upstream promotes focusOrder unconditionally in both setHidden(false) and focus(); the fork adds the minimal opt-in seam for host internal restores.
+
+### X057 — Copy-source line filter for host presentation chrome
+
+- Status: `ACTIVE`
+- Category: `PUBLIC_COMPONENT_CONTRACT`
+- Risk: `LOW`
+- Files: `src/tui-alt-screen.ts`
+- Last audited: `2026-09-18`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+The host paints presentation-only chrome inside the transcript scroll content (the expanded long-user disclosure tail control). That row must stay visible and clickable, but it is not transcript text: a selection crossing it must copy the blank separator the row replaced, never the label. Upstream derives the copied text directly from the rendered scroll lines with no host hook, so the only way to keep paint, search, mouse hit-testing and word/line selection on the RENDERED line while filtering the clipboard is a narrow copy-source override. The seam is generic (any row, any host reason) and consulted ONLY in getActiveSelectionText; word/line range computation, search and the mouse hit map keep reading the rendered line, so double-click/triple-click and hit-testing semantics are unchanged.
+
+#### Changed surface
+
+- TuiAltScreenOptions.selectionLineText?: (context: { row, line, scrollView? }) => string | undefined — replaces that scroll-content row contribution to the copied selection; undefined keeps the rendered line
+
+#### Dependency map
+
+**Vendor internal**
+- getActiveSelectionText consults this.selectionLineText once per selected row (after resolving sourceLines and before getSelectionColumns/sliceByColumn) and slices the override line; returning undefined keeps the upstream path byte-identical.
+- Audit note: One additive lookup on the copy path; no other fork code reads the field.
+
+**Inheritance / structural**
+- No subclass or structural edge: the option is a plain constructor field on TuiAltScreen.
+- Audit note: None.
+
+**Host**
+- src/tui-app.ts passes selectionLineText and returns an empty string for the expanded long-user tail control row only, identified from its own messageRows/userDisclosureHit geometry; every other row returns undefined.
+- src/tui-app.ts selectionLineText returns undefined unless the context scrollView is the transcript ScrollView, so overlay/editor selections are never filtered.
+- Audit note: The host owns the semantic meaning of its chrome; the fork never learns what the row is.
+
+**Public / extension**
+- TuiAltScreenOptions is a public type; the new field is optional and additive, so existing consumers compile and behave unchanged.
+- Audit note: No behavioural change when the option is absent.
+
+**Behavioral coupling**
+- A row whose override is a string copies that string (an empty string copies as the blank separator); rows returning undefined copy the rendered line.
+- The paint, the word/line selection ranges, the search corpus/highlight and the mouse hit map are unaffected.
+- With no handler (or one returning undefined) the copied text is identical to the pinned upstream behavior.
+- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X057) plus the host tail-control clipboard regression in test/long-user-disclosure.test.ts.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: filters only the copy source of a row via selectionLineText (X057)
+- packages/pi-tui/test/tui-alt-screen.test.ts: keeps the copied text unchanged when selectionLineText returns undefined (X057)
+- packages/pi-tui/test/tui-alt-screen.test.ts: computes word selection on the rendered line but copies the override (X057)
+- test/long-user-disclosure.test.ts: the tail control chrome never reaches the clipboard
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/tui-alt-screen.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream copies selected scroll-content rows verbatim; the fork adds an optional per-row copy-source override consulted only when building the copied text. Default behavior is unchanged.
+
+#### Retirement conditions
+
+- Retire when upstream exposes a host hook for non-copyable presentation rows (or the host stops painting chrome inside the copyable transcript content), then run the X057 copy regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream getActiveSelectionText slices the rendered scroll lines with no host override hook; the fork adds one optional lookup on the copy path only.
