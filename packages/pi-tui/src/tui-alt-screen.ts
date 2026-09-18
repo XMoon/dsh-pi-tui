@@ -206,6 +206,20 @@ export interface TuiAltScreenOptions {
 	 */
 	copySelection?: (text: string) => Promise<boolean>;
 	/**
+	 * Override the COPY source line of one scroll-content row. Returning a string
+	 * replaces that row's contribution to the copied selection (an empty string
+	 * makes the row copy as a blank separator); returning `undefined` keeps the
+	 * normally rendered line. The visual render, word/line selection ranges,
+	 * search, and mouse hit-testing are never affected — this only filters what
+	 * reaches the clipboard, for host presentation chrome that must not be
+	 * copied. (dsh-pi-tui divergence X057.)
+	 */
+	selectionLineText?: (context: {
+		row: number;
+		line: string;
+		scrollView?: ScrollView;
+	}) => string | undefined;
+	/**
 	 * Called when a viewport navigation attempt reaches an edge. The callback
 	 * receives -1 for older/upward navigation and +1 for newer/downward
 	 * navigation, plus the input source. Returning true lets the host replace
@@ -334,6 +348,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly onRightClickPaste?: () => void;
 	private copyOnSelect: boolean;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
+	private readonly selectionLineText?: (context: {
+		row: number;
+		line: string;
+		scrollView?: ScrollView;
+	}) => string | undefined;
 	private readonly onCellClick?: (x: number, y: number) => void;
 	private readonly onCellPress?: (x: number, y: number) => void;
 	private readonly onFramePainted?: () => void;
@@ -369,6 +388,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copyOnSelect = options.copyOnSelect ?? true;
 		this.copySelection = options.copySelection;
+		this.selectionLineText = options.selectionLineText;
 		this.onCellClick = options.onCellClick;
 		this.onCellPress = options.onCellPress;
 		this.onFramePainted = options.onFramePainted;
@@ -1980,9 +2000,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const lines: string[] = [];
 		for (let row = selection.start.row; row <= selection.end.row; row++) {
 			const line = sourceLines[row] ?? "";
+			const override = this.selectionLineText?.({ row, line, ...(selection.start.scrollView === undefined ? {} : { scrollView: selection.start.scrollView }) });
+			const copyLine = override === undefined ? line : override;
+			// The column RANGE always comes from the RENDERED line: a non-empty
+			// override only replaces the copied text, never the selection's
+			// grapheme/word/line boundaries. (dsh-pi-tui divergence X057.)
 			const columns = this.getSelectionColumns(line, row, selection);
 			const sliced = stripTerminalSequences(
-				sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),
+				sliceByColumn(copyLine, columns.start, Math.max(0, columns.end - columns.start), true),
 			).trimEnd();
 			// dsh-pi-tui extension: when the selection starts at the line
 			// head, drop the emoji-column indent (1-3 cells) so copied
