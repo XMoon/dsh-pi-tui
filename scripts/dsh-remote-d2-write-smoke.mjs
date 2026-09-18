@@ -68,12 +68,21 @@ const IMAGE_LIMITS = Object.freeze({
   mediaTypes: Object.freeze(['image/png']),
 })
 
-/** In-process stub LLM route. Parent turns hang until cancelled so queue/steer
- * admission is observable; every other session streams one plain text turn. */
+/**
+ * In-process stub LLM route. Parent turns hang until cancelled so queue/steer
+ * admission is observable; every other session streams one plain text turn.
+ *
+ * `parentCalls` counts ACTUAL parent `stream()` entries. That is the only
+ * reliable "the current turn reached its hanging model call" signal: an Agent's
+ * `running` status spans the whole driver drain interval across consecutive
+ * queued turns, so it can still be true while a turn boundary is claiming
+ * inbox rows.
+ */
 class SmokeAdapter extends LlmAdapter {
   constructor(parentSessionId) {
     super()
     this.parentSessionId = parentSessionId
+    this.parentCalls = 0
   }
 
   resolveModel(provider, model) {
@@ -82,6 +91,7 @@ class SmokeAdapter extends LlmAdapter {
 
   async * stream(options) {
     if (options.sessionId === this.parentSessionId) {
+      this.parentCalls += 1
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: 'working' }
       await new Promise((_resolve, reject) => {
@@ -448,12 +458,18 @@ async function main() {
       scenarios.queueEdit = { status: 'covered', itemId: item.id }
     }
 
+    // Recorded by Scenario 6 and consumed by the recovery proof.
+    let parentCallsAtCancel = 0
+
     // Scenario 6: cancel settles committed while queued work is preserved.
     {
       const promptOutcome = await writer.prompt(SESSION_ID, { text: 'preserve six' }, 'queue')
       assert.equal(promptOutcome.kind, 'committed')
       const requestId = lastRequestId()
       const item = await waitFor('the preserved occurrence to reach the queue', () => queueItemByRpc(requestId))
+      // Latch for the recovery proof below: the resumed turn has really entered
+      // its model call only once `parentCalls` advances past this value.
+      parentCallsAtCancel = host.adapter.parentCalls
       const outcome = await writer.cancel(SESSION_ID)
       assert.deepEqual(outcome, { kind: 'committed', value: undefined })
       // `keepInbox: true` preserves pending work: it stays pending, or it is
@@ -620,13 +636,14 @@ async function main() {
     // running turn with `keepInbox: true`, so the Host legitimately claims its
     // queued work while it resumes -- a `before`-count snapshot taken there is
     // NOT part of the alpha2 contract and races the Host. Wait for the resumed
-    // turn to reach its hanging model call instead: no turn/step boundary can
-    // then claim anything, so the pending set is stable. Queue one fresh row so
+    // turn to actually ENTER its model call instead (`parentCalls`, since the
+    // Agent's `running` status spans consecutive queued turns): no turn/step
+    // boundary can then claim anything, so the pending set is stable. Queue one fresh row so
     // that stable set is non-empty, and take the Host-authoritative pending ids
     // as the baseline.
     {
-      await waitFor('the resumed post-cancel turn to reach its hanging model call', () => (
-        host.agent.status === 'running' ? true : undefined
+      await waitFor('the resumed post-cancel turn to enter its hanging model call', () => (
+        host.adapter.parentCalls > parentCallsAtCancel ? true : undefined
       ))
       const queuedOutcome = await writer.prompt(SESSION_ID, { text: 'recover seven' }, 'queue')
       assert.equal(queuedOutcome.kind, 'committed')
