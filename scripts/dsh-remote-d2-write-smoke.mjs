@@ -614,32 +614,65 @@ async function main() {
     }
 
     // Durable-inbox recovery (alpha.2): the pending rows live in the official
-    // DURABLE inbox projection, not in a per-generation Client cache. Release
-    // the visible owner, re-materialize the SAME id (a real same-id re-retain
-    // that produces a NEW binding generation), and the rows must reappear
-    // without any TUI-owned queue state.
+    // DURABLE inbox projection, not in a per-generation Client cache.
+    //
+    // The proof needs a STABLE Host inbox first. Scenario 6 cancelled the
+    // running turn with `keepInbox: true`, so the Host legitimately claims its
+    // queued work while it resumes -- a `before`-count snapshot taken there is
+    // NOT part of the alpha2 contract and races the Host. Wait for the resumed
+    // turn to reach its hanging model call instead: no turn/step boundary can
+    // then claim anything, so the pending set is stable. Queue one fresh row so
+    // that stable set is non-empty, and take the Host-authoritative pending ids
+    // as the baseline.
     {
-      const before = pendingInput.snapshot(SESSION_ID)
-      assert.ok(before !== undefined && before.items.length > 0,
-        'the fixture left no pending inbox rows to recover')
-      owner.release()
-      sessions.retain(SESSION_ID, { source: 'tuiMainView' })
-      await waitFor('the re-materialized binding to open', () => (
-        sessions.binding(SESSION_ID)?.session.getSnapshot().openState === 'open' ? true : undefined
+      await waitFor('the resumed post-cancel turn to reach its hanging model call', () => (
+        host.agent.status === 'running' ? true : undefined
       ))
-      const recovered = await waitFor('the durable inbox rows to recover after re-materialization', () => {
-        const snapshot = pendingInput.snapshot(SESSION_ID)
-        return snapshot !== undefined && snapshot.items.length === before.items.length ? snapshot : undefined
-      })
-      assert.deepEqual(
-        recovered.items.map(item => item.id).sort(),
-        before.items.map(item => item.id).sort(),
-        'the re-materialized generation must recover exactly the durable pending rows',
-      )
-      scenarios.inboxRecovery = {
-        status: 'covered',
-        rows: recovered.items.length,
-        placements: [...new Set(recovered.items.map(item => item.placement))].sort(),
+      const queuedOutcome = await writer.prompt(SESSION_ID, { text: 'recover seven' }, 'queue')
+      assert.equal(queuedOutcome.kind, 'committed')
+      const requestId = lastRequestId()
+      await waitFor('the recovery row to reach the stable Host inbox', () => (
+        host.agent.inbox.nextTurn.some(message => message.source?.rpcId === requestId) ? true : undefined
+      ))
+
+      // The Host is the authority. It cannot make progress between these two
+      // synchronous reads (same process, same task), so the expected id set is
+      // exact -- and it stays exact because the running turn only hangs.
+      const hostPendingIds = [
+        ...host.agent.inbox.nextTurn.map(message => String(message.id)),
+        ...host.agent.inbox.nextStep.map(message => String(message.id)),
+      ].sort()
+      assert.ok(hostPendingIds.length > 0, 'the stable Host inbox must carry pending rows to recover')
+
+      const oldBinding = sessions.binding(SESSION_ID)
+      assert.ok(oldBinding !== undefined, 'the fixture Session lost its visible owner before the recovery proof')
+      owner.release()
+      const rematerialized = sessions.retain(SESSION_ID, { source: 'tuiMainView' })
+      try {
+        // alpha2: the same id re-retained after a full release is a NEW generation.
+        assert.notEqual(rematerialized.binding, oldBinding,
+          'a same-id re-retain after release must produce a new Client generation')
+        await waitFor('the re-materialized binding to open', () => (
+          sessions.binding(SESSION_ID)?.session.getSnapshot().openState === 'open' ? true : undefined
+        ))
+        const recovered = await waitFor('the durable inbox rows to recover after re-materialization', () => {
+          const snapshot = pendingInput.snapshot(SESSION_ID)
+          if (snapshot === undefined) return undefined
+          const ids = snapshot.items.map(item => item.id).sort()
+          return ids.length === hostPendingIds.length && ids.every((id, index) => id === hostPendingIds[index])
+            ? snapshot
+            : undefined
+        })
+        assert.deepEqual(recovered.items.map(item => item.id).sort(), hostPendingIds,
+          'the re-materialized generation must expose exactly the durable pending rows the Host still holds')
+        scenarios.inboxRecovery = {
+          status: 'covered',
+          rows: recovered.items.length,
+          placements: [...new Set(recovered.items.map(item => item.placement))].sort(),
+          generationReplaced: rematerialized.binding !== oldBinding,
+        }
+      } finally {
+        rematerialized.release()
       }
     }
     console.log(JSON.stringify({ ok: true, scenarios }))
