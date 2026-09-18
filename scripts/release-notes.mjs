@@ -129,9 +129,10 @@ function extractSection(file) {
  * Only the changelog's own basic shapes are recognized: blank lines,
  * headings, fenced code (backtick or tilde, up to three spaces of indent),
  * blockquotes, lists, reference definitions and thematic breaks. A bullet's
- * 2-space-indented continuation and a prose paragraph's own continuation are
- * folded; every other line is emitted as written. A deliberate hard break
- * (two trailing spaces or a trailing backslash) survives.
+ * 2-space-indented continuation, a prose paragraph's own continuation and a
+ * blockquote's marked continuation are folded; every other line is emitted as
+ * written. A deliberate hard break (two trailing spaces or a trailing
+ * backslash) survives.
  */
 function compactSoftWraps(content) {
   const lines = content.split('\n')
@@ -150,13 +151,18 @@ function compactSoftWraps(content) {
     }
 
     const previous = out[out.length - 1] ?? ''
-    // A bullet's continuation is indented; a prose paragraph continues at
-    // column 0.
-    const isContinuation = /^ {2}\S/.test(line)
-      ? /^\s*[-*]\s+\S/.test(previous)
-      : !startsBlock(line) && !startsBlock(previous)
+    // A blockquote's marked continuation joins its own marker line; a bullet's
+    // continuation is indented; a prose paragraph continues at column 0.
+    const quoteContinuation = /^ {0,3}>/.test(line) && /^ {0,3}>/.test(previous)
+    const quoteText = quoteContinuation ? line.replace(/^ {0,3}>[ \t]*/, '') : ''
+    const isContinuation = quoteContinuation
+      ? quoteText !== ''
+      : /^ {2}\S/.test(line)
+        ? /^\s*[-*]\s+\S/.test(previous)
+        : !startsBlock(line) && !startsBlock(previous)
     if (isContinuation && !/(?: {2,}|\\)$/.test(previous)) {
-      out[out.length - 1] = `${previous.trimEnd()} ${line.trimStart()}`
+      const addition = quoteContinuation ? quoteText : line.trimStart()
+      out[out.length - 1] = `${previous.trimEnd()} ${addition}`
       continue
     }
     out.push(line)
