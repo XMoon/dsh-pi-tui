@@ -276,6 +276,41 @@ test('Direct open cancels while waiting for a pending owner release', async () =
   release()
 })
 
+test('Direct open freezes the activation fallback before waiting for a release', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let defaultSelection = { provider: 'p1', model: 'm1' }
+  const resumedOptions: unknown[] = []
+  const lifecycle = new DirectSessionLifecycle({
+    get: name => {
+      if (name === 'agents') {
+        return {
+          create: async () => { throw new Error('create should not run') },
+          resume: async (options: { agentOptions: unknown }) => {
+            resumedOptions.push(options.agentOptions)
+            return { agent: { session: { id: 'session-source' } }, dispose: async () => {} }
+          },
+        }
+      }
+      if (name === 'agentDefaultModel') return { currentSelection: () => defaultSelection }
+      return undefined
+    },
+  }, async () => ({ setup: () => {} }), {
+    claim: () => undefined,
+    park: () => {},
+    waitForRelease: async () => { await gate },
+  })
+
+  const opening = lifecycle.open({ sessionId: 'session-source' })
+  // A global `/model` default change WHILE this open waits must not leak into it:
+  // the activation fallback is frozen at admission (v2 §0.8.3).
+  defaultSelection = { provider: 'p2', model: 'm2' }
+  release()
+  const result = await opening
+  assert.equal(result.outcome.kind, 'opened')
+  assert.deepEqual(resumedOptions[0], { provider: 'p1', model: 'm1' })
+})
+
 test('Direct open claims a parked fork owner before resume', async () => {
   const parked = { agent: { session: { id: 'session-parked' } }, dispose: async () => {} }
   let claimed = false
