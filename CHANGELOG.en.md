@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7-alpha.2] - 2026-09-18
+
+### Installation and version pairing
+
+This release moves the `next` npm line's DSH compatibility target to
+`0.1.6-alpha.2` (peer floor `>=0.1.6-alpha.2`). Its native install scripts must
+be explicitly allowed:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.7-alpha.2
+dsh --profile pi-tui
+```
+
+To keep an older DSH runtime, install the TUI line paired with it:
+`@deepseek-ai/dsh@0.1.6-alpha.1` uses `@xmoon76/dsh-pi-tui@0.4.7-alpha.1`, and
+`@deepseek-ai/dsh@0.1.5-rc.2` uses `@xmoon76/dsh-pi-tui@0.4.6`.
+
 ### Changed
 
 - **The DSH compatibility target moves to `0.1.6-alpha.2`.** Client Session lifetime now uses the official explicit reference ownership (`retain` / `release`), so the runtime peer floor rises to `>=0.1.6-alpha.2`. A Harness still on `0.1.6-alpha.1` gets an actionable startup upgrade notice (and may keep using the published `0.4.7-alpha.1` TUI line).
@@ -1241,7 +1259,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.2...HEAD
+[0.4.7-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...next-v0.4.7-alpha.2
 [0.4.7-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.3-alpha.2...next-v0.4.7-alpha.1
 [0.4.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...v0.4.5

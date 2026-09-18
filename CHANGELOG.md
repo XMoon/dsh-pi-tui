@@ -7,6 +7,23 @@
 
 ## [Unreleased]
 
+## [0.4.7-alpha.2] - 2026-09-18
+
+### 安装与版本对应
+
+本版本把 `next` npm 线的 DSH 兼容目标推进到 `0.1.6-alpha.2`（peer floor
+`>=0.1.6-alpha.2`）；安装 DSH 时需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.7-alpha.2
+dsh --profile pi-tui
+```
+
+仍需保留旧版 DSH 的用户，请安装与该 runtime 配对的 TUI 线：
+`@deepseek-ai/dsh@0.1.6-alpha.1` 使用 `@xmoon76/dsh-pi-tui@0.4.7-alpha.1`，
+`@deepseek-ai/dsh@0.1.5-rc.2` 使用 `@xmoon76/dsh-pi-tui@0.4.6`。
+
 ### 改进
 
 - **DSH 兼容目标推进到 `0.1.6-alpha.2`。** Client Session 生命周期改为官方的显式引用持有语义（`retain` / `release`），因此 runtime peer floor 升至 `>=0.1.6-alpha.2`。仍在 `0.1.6-alpha.1` 的 Harness 会在启动时收到可执行的升级提示（也可继续使用已发布的 `0.4.7-alpha.1` TUI 线）。
@@ -989,7 +1006,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.2...HEAD
+[0.4.7-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...next-v0.4.7-alpha.2
 [0.4.7-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.3-alpha.2...next-v0.4.7-alpha.1
 [0.4.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.1...v0.4.5
