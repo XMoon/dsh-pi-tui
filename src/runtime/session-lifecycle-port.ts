@@ -61,6 +61,12 @@ export type ForkOutcome =
       readonly handle?: SessionHandle
     }
   | { readonly kind: 'indeterminate'; readonly error: WriteError }
+  /** A CLIENT-LOCAL pre-dispatch refusal: nothing reached the Host, so there is
+   * no Host settlement to report. Distinct from `rejected`, which is a PROVEN
+   * Host/business refusal such as `session/fork-unavailable` (the source has no
+   * legal completed-turn boundary). Semantic `cancelled` stays removed
+   * (v3 §7.2); this is the pre-dispatch state that removal left unnamed. */
+  | { readonly kind: 'unavailable'; readonly message: string }
 
 /** A fork settlement paired with whether the caller still owns its visible
  * navigation surface. A superseded successful fork is still a real child. */

@@ -26,9 +26,28 @@
 
     - id: tui-app
       name: '@xmoon76/dsh-pi-tui'
-      inject: [tuiStartup, piTuiExtensions, authorization]
+      # `workspaceRegistry` is injected, not merely looked up: D2.4 Direct fork
+      # must observe the official workspace membership, and Cordis must have
+      # finished the registry's one-time history bootstrap before the surface
+      # can fork. The row below is this bundle's own, so the dependency is
+      # self-contained and a profile that disables it fails loud instead of
+      # silently forking without workspace inheritance.
+      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry]
       config:
         sessionId: ''
+
+    # Host-owned workspace membership (`ctx.workspaceRegistry`): D2.4 Direct
+    # fork mirrors the official Host rule (use the source's directly owning
+    # workspace, else the nearest ancestor workspace of a subagent source) and
+    # attaches the child after publication. That association only exists while
+    # this service is mounted, so the TUI inserts the same official row the web
+    # bundle does (the DSH installation already ships the package). Activating
+    # it also performs the official one-time history bootstrap that groups
+    # stored Session headers by canonical cwd into durable workspace records —
+    # an upstream migration, not a TUI invention, and the reason the row is
+    # documented in docs/client-server-coupling.md.
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'
 
     # The authorization seam (`ctx.authorization`): plugin-owned credential-
     # obtaining flows, one attempt per key, transport-neutral notices and

@@ -238,9 +238,9 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       return currentForkRejected('gateway/bad-request', 'atSeq must be a non-negative safe integer')
     }
     const agents = this.ctx.get('agents') as AgentsServiceLike | undefined
-    if (agents === undefined) return currentForkRejected('session/fork-unavailable', 'agents service unavailable')
+    if (agents === undefined) return currentForkRejected('gateway/internal', 'agents service unavailable')
     const query = this.ctx.get('sessionQuery') as ForkSessionQueryLike | undefined
-    if (query === undefined) return currentForkRejected('session/fork-unavailable', 'session query service unavailable')
+    if (query === undefined) return currentForkRejected('gateway/internal', 'session query service unavailable')
 
     let source: ForkObservationLike
     try {
@@ -284,7 +284,10 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       try {
         composition = await this.compose(preset)
       } catch (error) {
-        return currentForkRejected('session/fork-unavailable', `failed to compose fork session: ${safeErrorMessage(error)}`)
+        // A composition failure is an in-process infrastructure failure, never
+        // a Host fork refusal: `session/fork-unavailable` means "the source has
+        // no legal completed-turn boundary" and nothing else.
+        return currentForkRejected('gateway/internal', `failed to compose fork session: ${safeErrorMessage(error)}`)
       }
       const cut = Number(boundary.seq) + 1
       const childMeta: Record<string, unknown> = {
@@ -304,7 +307,11 @@ export class DirectSessionLifecycle implements SessionLifecycle {
           setup: composition.setup,
         })
       } catch (error) {
-        return currentForkRejected('session/fork-failed', safeErrorMessage(error))
+        // The child was never published; an in-process `agents.create` failure
+        // is a Host-internal failure, matching the official
+        // `SessionCommandController.fork` mapping (there is no
+        // `session/fork-failed` business code in the official taxonomy).
+        return currentForkRejected('gateway/internal', `failed to fork session "${request.sourceSessionId}": ${safeErrorMessage(error)}`)
       }
       const child = { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } }
       if (workspace !== undefined) {

@@ -3349,7 +3349,6 @@ export function registerTuiCommands(
     // pinned across the WHOLE invocation — the async prepare, the steer
     // and the draft consumption — so a concurrent /image prune can never
     // delete images this invocation is still admitting (review finding 1).
-    const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
     // The host's pre-step listener (dsh-tool-skill) injects the rendered
     // body only when its tool registration is visible to this agent. Probe
     // that semantic catalog fact before choosing the delivery path.
@@ -3372,6 +3371,10 @@ export function registerTuiCommands(
         })
       })()
       : undefined
+    // Acquire the pin HERE, immediately before the `try` that owns its release:
+    // every earlier step is synchronous, so a throw above can no longer strand
+    // the pin and permanently block pruning of the referenced drafts.
+    const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
     let userMessage: import('@deepseek-ai/dsh-llm').UserMessage
     try {
       userMessage = await runner.prepareDraftMessage(line)

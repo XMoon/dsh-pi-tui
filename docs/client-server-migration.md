@@ -1093,11 +1093,49 @@ use predecessor `turn/end` anchors, so the first human turn is intentionally not
 offered. Production remains Direct; M8 still owns eventual Direct ownership
 retirement.
 
+**Production workspace parity.** Workspace inheritance is not an adapter-only
+algorithm: the bundle mounts the official `@deepseek-ai/dsh-workspace` row
+(`ctx.workspaceRegistry`) and the `tui-app` row injects it, so Cordis finishes
+the registry's one-time history bootstrap before the surface can fork. Direct
+fork then applies the official rule — the source's directly owning workspace, or
+the nearest ancestor workspace of a subagent source — and attaches the published
+child; a failed attach settles as `published-with-error` carrying the
+authoritative child id. Activating this row runs the upstream one-time bootstrap
+that groups stored Session headers by canonical cwd into durable workspace
+records; that migration is DSH-owned (see `docs/client-server-coupling.md`).
+Ordinary create stays cwd-only, exactly like official `session.create` without a
+`workspaceId`; the TUI does not invent workspace membership for it.
+
+**Command settlement durability.** `/fork` is a registered DSH command, and the
+official executor appends `command/done` to the SOURCE session only after the
+handler settles. Direct therefore commits the visible child inside the handler
+but QUEUES the source owner's retirement, flushing it at an explicit
+post-command-settlement seam. Every NON-command path (the rewind picker's owned
+task) instead awaits that retirement inside the handoff, exactly as before the
+seam, so the handoff does not report success until the old source is fully
+disposed and an immediate `/resume` after that success can never observe a live,
+lease-held owner. (The internal current identity already switched to the child
+earlier, as it always did; the guarantee is about the returned handoff, not the
+internal swap.)
+Retiring the source inside the command handler would detach the Session first,
+and a detached `Session.append` never reaches the persistence writer, so the
+durable log would keep `command/run` without its `command/done`.
+
+**Settlement taxonomy.** `session/fork-unavailable` means only "the source has
+no legal completed-turn boundary". A missing source is `session/not-found`, a
+malformed anchor is `gateway/bad-request`, and composition/activation/internal
+failures are `gateway/internal` (the official taxonomy has no
+`session/fork-failed`). On the Remote side, a disconnected client is a
+client-local pre-dispatch `unavailable`, never a fabricated Host refusal, and the
+impossible `session/fork-not-addressable` outcome is gone: a resolved official
+`ClientSessions.fork()` already guarantees the child is addressable.
+
 Validation for this stage: Direct/Remote lifecycle contract tests, pure rewind
 candidate tests, runner busy-admission/supersession/park-claim tests, the
-client-boundary gate, and the same-Host `smoke:remote-d2-fork` /
-`smoke:remote-d2-closure` integration entry points. The boundary gate stays
-green and `packages/pi-tui/**` is unchanged.
+Direct-vs-Host same-Host `smoke:remote-d2-fork` comparison, the
+`smoke:remote-d2-closure` aggregate, the client-boundary gate, and the
+`command/run`/`command/done` pairing regression. The boundary gate stays green
+and `packages/pi-tui/**` is unchanged.
 
 **DSH 0.1.6 compatibility note.** `next` now targets the published DSH
 `0.1.6-alpha.1` family in npm mode, and the Source Mode pin moves to

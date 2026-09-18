@@ -55,6 +55,17 @@ owns. This is Direct ownership retirement, not a semantic-port or Remote
 capability (see `docs/client-server-migration.md` §Direct ownership
 retirement).
 
+The bundle also mounts one Host row the base layer deliberately leaves to the
+web bundle: `@deepseek-ai/dsh-workspace` (`cordis.patch.yml`, row id
+`workspace`), injected by the `tui-app` row. D2.4 Direct fork must observe the
+official workspace membership (`workspaceRegistry` in the
+`session-lifecycle-direct.ts` row below), and that service only exists while the
+row is mounted. It is the same official row the web bundle inserts, and the DSH
+installation already ships the package; activating it performs the upstream
+one-time history bootstrap that groups stored Session headers by canonical cwd
+into durable workspace records. See the D2.4 status in
+`docs/client-server-migration.md`.
+
 ## Inventory (baseline, generated from the current tree)
 
 ### DIRECT_HOST_REQUIRED

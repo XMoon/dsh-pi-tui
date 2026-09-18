@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`/fork` and `/rewind` now use the official DSH Host fork semantics.** The Host owns the completed-turn cut, child identity, lineage, workspace, and model/preset composition; Direct and Remote follow the same semantics.
 - **A running `/fork` fixes its cut at fork admission.** It no longer waits for the old turn to finish; if navigation is superseded, the published child remains available from the session list.
+- **Workspace membership is now shared with the Web surface.** The TUI profile mounts the official workspace service, and `/fork` of a session that belongs to a workspace puts the child in that same workspace, where Web lists it.
 - **Rewind is no longer offered for the first user turn.** The official Host fork cannot represent an empty-prefix child.
 
 ## [0.4.7-alpha.1] - 2026-09-17

@@ -9,6 +9,13 @@
  * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.6-alpha.1]
  * Client-only family lanes add `--exact-family --client-smoke-only`.
  *
+ * `--exact-family` semantics: when the requested target equals this checkout's
+ * declared DSH version (the CI lane), the copied TRACKED lockfile is already an
+ * exact family and is installed frozen, then asserted. A genuinely ALTERNATE
+ * target instead re-resolves under the shared `npmDshFamilyOverrides` glob; that
+ * path is best-effort, because pnpm's glob overrides do not cover every
+ * peer-context transitive instance in this multi-package workspace.
+ *
  * @module dsh-npm-verify
  */
 
@@ -22,11 +29,13 @@ import { parseArgs } from 'node:util'
 import { pnpmExecutable, runBounded } from './lib/process.mjs'
 import {
   PACKAGE_ROOT,
+  assertInstalledDshFamily,
+  assertNoSourceLeak,
   npmDshDistribution,
   npmDshVersion,
   prepareDshInstall,
   restoreDshInstall,
-  assertNoSourceLeak,
+  withoutMinimumReleaseAge,
 } from './lib/dsh-distribution.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
@@ -70,11 +79,16 @@ function parseCli() {
   return values
 }
 
-async function run(command, args, cwd, label, environment = process.env, timeoutMs = NPM_VERIFY_TIMEOUTS.check) {
+async function run(command, args, cwd, label, environment = process.env, timeoutMs = NPM_VERIFY_TIMEOUTS.check, { retainMinimumReleaseAge = true } = {}) {
   console.log(`DSH npm verify: ${label}`)
+  const withPolicy = { ...environment, npm_config_minimum_release_age: '0', pnpm_config_minimum_release_age: '0' }
   const result = await runBounded(command, args, {
     cwd,
-    env: { ...environment, npm_config_minimum_release_age: '0', pnpm_config_minimum_release_age: '0' },
+    // An exact-family resolve must not carry a minimum-release-age setting:
+    // with one present, pnpm was observed to ignore the family `overrides` and
+    // re-open the caret family graph to a newer sibling. The frozen install
+    // resolves nothing, so it keeps the policy.
+    env: retainMinimumReleaseAge ? withPolicy : withoutMinimumReleaseAge(withPolicy),
     timeoutMs,
     label,
   })
@@ -97,68 +111,20 @@ function copyRepository(destination) {
 }
 
 /**
- * Read DSH package names in the selected semver rc family from the tracked
- * lock. Legacy packages outside that release line deliberately stay out of
- * the set: they are a separate upstream compatibility line.
+ * Pin every declared DSH development package in an ephemeral npm verification
+ * copy to the requested version. The whole-family override that fences the
+ * transitive closure is the shared `npmDshFamilyOverrides` written by
+ * `prepareDshInstall({ npmFamilyPin })`; this function only rewrites the
+ * top-level importers so the temporary lockfile matches the requested target.
  */
-function releasedDshFamilyNames(workspace, version) {
-  const releaseBase = /^([0-9]+\.[0-9]+\.[0-9]+)-rc\.[0-9]+$/u.exec(version)?.[1]
-  const familyPattern = releaseBase === undefined
-    ? undefined
-    : new RegExp(`^\\s{2,}['"]?(@deepseek-ai\\/dsh-[a-z0-9-]+)@${releaseBase.replaceAll('.', '\\.')}-rc\\.[0-9]+(?:['"]|\\(|:)`, 'iu')
-  const lockfile = readFileSync(join(workspace, 'pnpm-lock.yaml'), 'utf8')
-  const names = new Set()
-  if (familyPattern === undefined) return names
-  for (const line of lockfile.split('\n')) {
-    const match = familyPattern.exec(line)
-    if (match !== null) names.add(match[1])
-  }
-  return names
-}
-
-/**
- * Pin every DSH development package in an ephemeral npm verification copy.
- * With exactFamily enabled, the temporary pnpm overrides fence every released
- * rc package in the resolved graph to one version instead of allowing a
- * prerelease range to drift to another release in the same line.
- */
-export function pinNpmDshDependencies(workspace, version, { exactFamily = false } = {}) {
+export function pinNpmDshDependencies(workspace, version) {
   const packagePath = join(workspace, 'package.json')
   const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'))
   const devDependencies = packageJson.devDependencies ?? {}
   for (const name of Object.keys(devDependencies)) {
     if (name.startsWith('@deepseek-ai/dsh')) devDependencies[name] = version
   }
-  if (exactFamily) {
-    const familyNames = releasedDshFamilyNames(workspace, version)
-    for (const name of Object.keys(devDependencies)) {
-      if (name.startsWith('@deepseek-ai/dsh')) familyNames.add(name)
-    }
-    const workspacePath = join(workspace, 'pnpm-workspace.yaml')
-    const workspaceConfig = readFileSync(workspacePath, 'utf8').trimEnd()
-    const overrideLines = [...familyNames]
-      .sort()
-      .map(name => `  '${name}': '${version}'`)
-    writeFileSync(workspacePath, `${workspaceConfig}\noverrides:\n${overrideLines.join('\n')}\n`, 'utf8')
-  }
   writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8')
-}
-
-/** Assert that an exact-family install did not retain a second rc version. */
-function assertInstalledDshFamily(workspace, version) {
-  const modulesPath = join(workspace, 'node_modules', '.pnpm')
-  const installed = readdirSync(modulesPath)
-    .map(name => /^@deepseek-ai\+dsh-[^@]+@([^_]+)/iu.exec(name))
-    .filter(match => match !== null)
-    .map(match => match[1])
-  const releaseBase = /^([0-9]+\.[0-9]+\.[0-9]+)-rc\.[0-9]+$/u.exec(version)?.[1]
-  const familyPrefix = releaseBase === undefined ? version : `${releaseBase}-rc.`
-  const released = installed.filter(installedVersion => installedVersion.startsWith(familyPrefix))
-  if (released.length === 0) fail(`exact DSH family install contained no ${familyPrefix} package for ${version}`)
-  const mismatches = released.filter(installedVersion => installedVersion !== version)
-  if (mismatches.length > 0) {
-    fail(`exact DSH family install resolved ${[...new Set(mismatches)].join(', ')} alongside ${version}`)
-  }
 }
 
 /** Point the temporary workspace at the real repository's git metadata so
@@ -207,24 +173,36 @@ async function main() {
     writeFileSync(npmConfigPath, `registry=${PUBLIC_NPM_REGISTRY}\n`, 'utf8')
     copyRepository(workspace)
     attachGitMetadata(workspace)
-    if (requestedVersion !== undefined) {
-      pinNpmDshDependencies(workspace, distribution.version, { exactFamily })
-      await run(
-        PNPM_COMMAND,
-        ['install', '--lockfile-only', '--no-frozen-lockfile', '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only'],
-        workspace,
-        'resolve DSH override lockfile',
-        npmEnvironment,
-        NPM_VERIFY_TIMEOUTS.install,
-      )
-    }
-    const prepared = prepareDshInstall(distribution, workspace, { stripPackageManager: true })
+    // The declared target's exact-family lane FREEZES the tracked lockfile: it
+    // already resolves the whole family at the target, and re-resolving under
+    // the glob override both rewrites the lockfile's own config and leaves
+    // peer-context transitive instances behind (pnpm's glob overrides do not
+    // cover them). A genuinely ALTERNATE target still re-resolves.
+    const exactDeclaredTarget = exactFamily && distribution.version === npmDshVersion()
+    if (requestedVersion !== undefined && !exactDeclaredTarget) pinNpmDshDependencies(workspace, distribution.version)
+    const prepared = prepareDshInstall(distribution, workspace, {
+      stripPackageManager: true,
+      npmFamilyPin: exactFamily && !exactDeclaredTarget,
+    })
     try {
+      if (requestedVersion !== undefined && !exactDeclaredTarget) {
+        await run(
+          PNPM_COMMAND,
+          // No age FLAG here: the phase's policy comes from the environment
+          // alone, so the exact-family lane can drop it in one place.
+          ['install', '--lockfile-only', '--no-frozen-lockfile', '--ignore-scripts', '--reporter=append-only'],
+          workspace,
+          'resolve DSH override lockfile',
+          npmEnvironment,
+          NPM_VERIFY_TIMEOUTS.install,
+          { retainMinimumReleaseAge: !exactFamily },
+        )
+      }
       await run(PNPM_COMMAND, [...prepared.installArgs, '--ignore-scripts', '--config.minimum-release-age=0', '--reporter=append-only'], workspace, 'frozen npm dependency install', npmEnvironment, NPM_VERIFY_TIMEOUTS.install)
+      if (exactFamily) assertInstalledDshFamily(workspace, distribution.version)
     } finally {
       restoreDshInstall(prepared)
     }
-    if (exactFamily) assertInstalledDshFamily(workspace, distribution.version)
     if (clientSmokeOnly) {
       await run(PNPM_COMMAND, ['smoke:remote-session-read'], workspace, 'Remote Session fixture smoke', npmEnvironment)
       await run(PNPM_COMMAND, ['smoke:remote-session-read-parity'], workspace, 'same-Host Remote Session parity smoke', npmEnvironment)

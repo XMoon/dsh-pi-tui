@@ -149,7 +149,7 @@ import { DefaultIntentTracker } from './default-intent.ts'
 import { DefaultWriteBarrier } from './default-write-barrier.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
-import { runDetached, runOwned, isCancellation, cancellationError, type OwnedTaskOptions } from './detached.ts'
+import { runDetached, runOwned, isCancellation, cancellationError, observeSettled, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile, loadHistoryRecords, recallHistoryForSession } from './history.ts'
 import { terminalTitleOf } from './terminal-title.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from './history-persist.ts'
@@ -1730,6 +1730,18 @@ export function apply(ctx: Context, config: Config): void {
     }
     let navigationEpoch = 0
     const pendingForks = new Set<Promise<unknown>>()
+    // In-flight work whose settlement is reachable only from a later callback,
+    // so teardown must await it explicitly: a command execution (INCLUDING the
+    // official executor's post-handler `command/done` append — a `/fork`
+    // command's SOURCE Session has to stay attached while its own executor
+    // settles, or the durable log keeps `command/run` without `command/done`)
+    // and the nested image-submit it launches in its `onResult`.
+    const pendingSettlementWork = new Set<Promise<unknown>>()
+    // Every source-owner retirement that has STARTED (the deferred queue's
+    // flush). Teardown awaits these so the retirement never runs after the
+    // Host context / diag it touches is gone (a skipped dispose leaks the
+    // writer lease).
+    const pendingSourceRetirements = new Set<Promise<void>>()
     // Alt+Up may finish a queue mutation while a transition is waiting on the
     // same writer barrier. Keep its confirmed local representation until the
     // transition outcome is known: commit drops it, failure restores it.
@@ -1861,6 +1873,15 @@ export function apply(ctx: Context, config: Config): void {
           // exist (see the hoisted declarations), so an owner always has a
           // serialization path.
           while (pendingForks.size > 0) await Promise.allSettled([...pendingForks])
+          // A `/fork` command's SOURCE Session is retired by ITS OWN command
+          // settlement, never by navigation: the official executor appends
+          // `command/done` to that Session only after the handler returns. Wait
+          // for every in-flight command first (that append included), then for
+          // every source retirement it queued, so teardown can never detach the
+          // source before its `command/done` nor start a retirement after the
+          // context it touches is gone.
+          while (pendingSettlementWork.size > 0) await Promise.allSettled([...pendingSettlementWork])
+          while (pendingSourceRetirements.size > 0) await Promise.allSettled([...pendingSourceRetirements])
           return await transitionGate.run(() => operationBarrier.runTransition(async () => {
             const current = await retire()
             const failures = [...current.failures]
@@ -3116,6 +3137,65 @@ export function apply(ctx: Context, config: Config): void {
       open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }
 
+    // `/fork` is a registered DSH command: the official executor appends
+    // `command/done` to the SOURCE session only AFTER the handler settles. The
+    // fork handler commits the visible child inside that handler, so retiring
+    // (flushing + disposing) the source Direct owner there would detach the
+    // source Session first — `Session.append` on a detached Session never
+    // reaches the persistence writer, and the durable log would keep
+    // `command/run` without its `command/done`. These two slots let the handler
+    // QUEUE the source retirement and flush it at the first explicit
+    // post-command-settlement point instead. Outside a command (the rewind
+    // picker's owned task), the retirement runs immediately.
+    let commandExecutionDepth = 0
+    const deferredSourceRetirements: Array<() => Promise<void>> = []
+    // Start one source retirement through the owned-task model AND register its
+    // promise, so teardown can wait for it before `diag.dispose()` / the Host
+    // teardown (see `pendingSourceRetirements`). The task promise is returned so
+    // a non-command caller can preserve the original awaited ordering.
+    const startSourceRetirement = (retire: () => Promise<void>): Promise<void> | undefined => {
+      let pending: Promise<void> | undefined
+      runOwned('fork source retirement', () => {
+        const task = retire()
+        pending = task
+        return task
+      }, { diag, sessionId: () => undefined })
+      if (pending !== undefined) {
+        const tracked = pending
+        pendingSourceRetirements.add(tracked)
+        // `then(onSettled, onSettled)` (never `.finally`) so tracking a
+        // retirement cannot create a second, unhandled rejection branch:
+        // `runOwned` already owns the task's failure semantics.
+        const untrack = (): void => { pendingSourceRetirements.delete(tracked) }
+        observeSettled(tracked, untrack)
+      }
+      return pending
+    }
+    /** Retire the source owner. A DSH command defers it to its own settlement
+     *  (the executor's `command/done` append must land first) and returns
+     *  `undefined`; outside a command the retirement promise is returned so the
+     *  caller keeps the baseline ordering — the handoff does not report success
+     *  until the source is disposed, so an immediate open/resume AFTER that
+     *  success can never observe a live, lease-held source. (The internal
+     *  `liveAgent`/`liveHandle` swap still happens first, as it always did.) */
+    const retireSourceOwnerAfterSettlement = (retire: () => Promise<void>): Promise<void> | undefined => {
+      if (commandExecutionDepth === 0) return startSourceRetirement(retire)
+      deferredSourceRetirements.push(retire)
+      return undefined
+    }
+    const flushSourceRetirementsAfterSettlement = (): void => {
+      while (deferredSourceRetirements.length > 0) {
+        const retire = deferredSourceRetirements.shift()
+        if (retire !== undefined) startSourceRetirement(retire)
+      }
+    }
+    /** Close one command-settlement window EXACTLY once, flushing the
+     *  retirements it queued when the outermost command settles. */
+    const settleCommandExecution = (): void => {
+      commandExecutionDepth -= 1
+      if (commandExecutionDepth === 0) flushSourceRetirementsAfterSettlement()
+    }
+
     const parkForkOwner = (handle: SessionHandle | undefined): void => {
       const owner = handle === undefined ? undefined : ownerHandleOf(handle) as AgentHandle | undefined
       if (owner !== undefined) directOwnerPool.park(owner)
@@ -3159,17 +3239,27 @@ export function apply(ctx: Context, config: Config): void {
           diag.error('fork adoption callback failed after child commit', { error: safeErrorMessage(error), session: nextAgent.session.id })
         }
         if (oldAgent !== undefined && oldHandle !== undefined) {
-          const report = await retireDirectOwnedSession({
-            cancel: () => oldAgent.cancel({ kind: 'user' }),
-            whenIdle: () => oldAgent.whenIdle(),
-            drainDescendants: async () => {
-              const subagents = ctx.get('subagents') as { drainContinuableDescendants?(parents: readonly unknown[]): Promise<void> } | undefined
-              await subagents?.drainContinuableDescendants?.([oldAgent])
-            },
-            flush: async () => { await sessions.flush(oldAgent.session) },
-            disposeOwner: () => oldHandle.dispose(),
+          const retirement = retireSourceOwnerAfterSettlement(async () => {
+            const report = await retireDirectOwnedSession({
+              cancel: () => oldAgent.cancel({ kind: 'user' }),
+              whenIdle: () => oldAgent.whenIdle(),
+              drainDescendants: async () => {
+                const subagents = ctx.get('subagents') as { drainContinuableDescendants?(parents: readonly unknown[]): Promise<void> } | undefined
+                await subagents?.drainContinuableDescendants?.([oldAgent])
+              },
+              flush: async () => { await sessions.flush(oldAgent.session) },
+              disposeOwner: () => oldHandle.dispose(),
+            })
+            if (report.failures.length > 0) diag.error('fork old-owner retirement failed (child committed)', { from: oldAgent.session.id, failures: report.failures })
           })
-          if (report.failures.length > 0) diag.error('fork old-owner retirement failed (child committed)', { from: oldAgent.session.id, failures: report.failures })
+          // A DSH command defers (`undefined`): the source owner must stay
+          // attached through its own `command/done` append. Every OTHER path
+          // (the rewind picker) awaits it here, exactly as before this seam, so
+          // the handoff cannot report success until the source is disposed — an
+          // immediate open/resume after that success would otherwise race its
+          // own retirement. (The `liveAgent` swap above already happened, as it
+          // always did; this preserves the returned-handoff ordering.)
+          if (retirement !== undefined) await retirement
         }
         let aborted = false
         try {
@@ -3232,6 +3322,12 @@ export function apply(ctx: Context, config: Config): void {
           ...atSeq === undefined ? {} : { atSeq },
         })
         const outcome = result.outcome
+        if (outcome.kind === 'unavailable') {
+          // Client-local pre-dispatch refusal: nothing reached the Host, so
+          // there is no child to park and no Host settlement to report.
+          if (result.ownership === 'superseded' || !forkNavigationCurrent(expected)) return { kind: 'success' as const }
+          return { kind: 'error' as const, text: outcome.message }
+        }
         if (outcome.kind === 'rejected' || outcome.kind === 'indeterminate' || outcome.kind === 'published-with-error') {
           if (outcome.kind === 'published-with-error') parkForkOwner(outcome.handle)
           // A Direct failure is still returned as `current` because Direct has
@@ -4908,7 +5004,6 @@ export function apply(ctx: Context, config: Config): void {
      *   this submission; bound for the command execution so a TUI-owned
      *   skill handler accepts it instead of re-deriving it. */
     const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void, delivery: SubmitDelivery): void => {
-      const submitTurn = takeSubmitTurn()
       // Admission identity is captured synchronously, before this gesture
       // waits behind an earlier submit. A later session must never inherit
       // an old submission merely because the FIFO turn became available.
@@ -5035,6 +5130,11 @@ export function apply(ctx: Context, config: Config): void {
       // The submit-flow core owns the ordering contract (reserve →
       // run → failure-restore-before-release → release), shared with the
       // integration tests — never hand-rolled per path.
+      // The FIFO turn is taken HERE, after every synchronous admission step. A
+      // throw before this point must not strand the tail (no turn was taken),
+      // and no other submission can interleave during the synchronous setup
+      // above, so the ordering contract is unchanged.
+      const submitTurn = takeSubmitTurn()
       runOwned('submit', () => runReservedSubmit({
         reserve: (t) => {
           try {
@@ -5252,28 +5352,52 @@ export function apply(ctx: Context, config: Config): void {
             planeAdvertised = commandPlaneLine && wasAdvertisedAtSubmit
             const tuiOwnedCommand = parsedAtSubmit !== undefined
               && (LOCAL_COMMANDS.has(parsedAtSubmit.name) || isSkillWrapperName?.(parsedAtSubmit.name) === true)
-            return withCommandDelivery(delivery, () => {
-              if (!commandPlaneLine || parsedAtSubmit === undefined) {
-                return Promise.resolve({ kind: 'committed', matched: false } as HostCommandOutcome)
-              }
-              if (tuiOwnedCommand) {
-                // TUI-local commands and skill wrappers retain their existing
-                // in-process command service path; HostCommandPort is only for
-                // a line already selected as Host-owned.
-                return commands.execute(agent as Agent, toggled, submittedAttachments, signal).then(execution => {
+            // The post-command-settlement window opens HERE: a handler that
+            // commits a fork queues its source retirement instead of detaching
+            // the Session the executor is still appending `command/done` to.
+            commandExecutionDepth += 1
+            let settled: Promise<HostCommandOutcome>
+            try {
+              settled = Promise.resolve(withCommandDelivery(delivery, () => {
+                if (!commandPlaneLine || parsedAtSubmit === undefined) {
+                  return Promise.resolve({ kind: 'committed', matched: false } as HostCommandOutcome)
+                }
+                if (tuiOwnedCommand) {
+                  // TUI-local commands and skill wrappers retain their existing
+                  // in-process command service path; HostCommandPort is only for
+                  // a line already selected as Host-owned.
+                  return commands.execute(agent as Agent, toggled, submittedAttachments, signal).then(execution => {
 
-                   return execution === undefined
-                    ? { kind: 'committed', matched: false } as const
-                    : { kind: 'committed', matched: true, execution } as const
-                 })
-              }
-              return operationBarrier.runWriter(agent.session.id, () => backend.hostCommand.execute({
-                sessionId: agent.session.id,
-                line: toggled,
-                attachments: submittedAttachments,
-                signal,
+                     return execution === undefined
+                      ? { kind: 'committed', matched: false } as const
+                      : { kind: 'committed', matched: true, execution } as const
+                   })
+                }
+                return operationBarrier.runWriter(agent.session.id, () => backend.hostCommand.execute({
+                  sessionId: agent.session.id,
+                  line: toggled,
+                  attachments: submittedAttachments,
+                  signal,
+                }))
               }))
-            })
+            } catch (error) {
+              // A SYNCHRONOUS throw (the delivery wrapper, or a branch throwing
+              // before it returns its promise) must release the window exactly
+              // once too — otherwise the depth leaks and every deferred
+              // retirement stays queued forever.
+              settleCommandExecution()
+              throw error
+            }
+            // The official executor's post-handler `command/done` append is
+            // inside this settlement: teardown awaits it before retiring the
+            // current owner, and the window closes only after the append.
+            settled = settled.finally(settleCommandExecution)
+            pendingSettlementWork.add(settled)
+            // `then(onSettled, onSettled)`: tracking must not add an unhandled
+            // rejection branch next to `runOwned`'s own failure handling.
+            const untrackSettlement = (): void => { pendingSettlementWork.delete(settled) }
+            observeSettled(settled, untrackSettlement)
+            return settled
           }, {
             diag,
             sessionId: () => agent.session.id,
@@ -5355,7 +5479,9 @@ export function apply(ctx: Context, config: Config): void {
                   // consumes the handoff pin across the async admission
                   // and releases it in its own finally (review finding 1
                   // follow-up).
-                  runOwned('image submit', () => runReservedSubmit({
+                  let nestedSettlement: Promise<unknown> | undefined
+                  runOwned('image submit', () => {
+                    const task = runReservedSubmit({
                     // TRANSFER the handoff reservation, never a second
                     // pin: fallbackPin was acquired synchronously before
                     // commands.execute() launched (covering the outer
@@ -5440,7 +5566,16 @@ export function apply(ctx: Context, config: Config): void {
                       }
                     },
                     restore: (t) => restoreSubmissionDraft(t),
-                  }, text), {
+                    }, text)
+                    // This nested submission starts one callback later than the
+                    // command execution, so teardown must reach it explicitly.
+                    nestedSettlement = task
+                    const untrackNested = (): void => {
+                      if (nestedSettlement !== undefined) pendingSettlementWork.delete(nestedSettlement)
+                    }
+                    observeSettled(task, untrackNested)
+                    return task
+                  }, {
                     diag,
                     sessionId: () => agent.session.id,
                     onResult: () => {
@@ -5464,6 +5599,7 @@ export function apply(ctx: Context, config: Config): void {
                       settleLocalSubmitAck('submit cancelled', { token: submitAckToken, terminal: true })
                     },
                   })
+                  if (nestedSettlement !== undefined) pendingSettlementWork.add(nestedSettlement)
                 } else {
                   fallbackPin()
                   submitTurn.release()

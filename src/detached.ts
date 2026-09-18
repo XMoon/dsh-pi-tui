@@ -98,6 +98,20 @@ function invokeTask<T>(task: () => T | Promise<T>): Promise<T> {
 }
 
 /**
+ * Observe the settlement of an ALREADY-OWNED promise without taking ownership.
+ * The callback runs on fulfilment or rejection and its own result is dropped,
+ * so bookkeeping (for example removing a promise from a teardown-drained set)
+ * never adds a second, unhandled rejection branch next to the real owner's
+ * failure handling. Never use this to START work — that is `runDetached` /
+ * `runOwned`.
+ * @param promise - the promise whose failure semantics already have an owner.
+ * @param onSettled - runs once, on either settlement.
+ */
+export function observeSettled(promise: Promise<unknown>, onSettled: () => void): void {
+  promise.then(onSettled, onSettled)
+}
+
+/**
  * Attach rejection handling to a fire-and-forget task. The factory is
  * invoked synchronously (a synchronous throw is a rejection like any
  * other); every rejection is caught and classified:

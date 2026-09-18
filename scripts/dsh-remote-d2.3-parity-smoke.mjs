@@ -56,6 +56,11 @@ import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import Storage from '@deepseek-ai/dsh-storage'
+import * as StorageJson from '@deepseek-ai/dsh-storage-json'
+import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
+import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
+import { DirectSessionLifecycle } from '../src/runtime/direct/session-lifecycle-direct.ts'
 import { RemoteModelCatalog } from '../src/runtime/remote/model-remote.ts'
 import { RemotePresetCatalog } from '../src/runtime/remote/preset-remote.ts'
 import { RemoteSessionLifecycle } from '../src/runtime/remote/session-lifecycle-remote.ts'
@@ -67,6 +72,9 @@ const PACKAGE_IDS = {
 }
 
 const ANCHOR_SESSION_ID = 'd2-3-anchor-session'
+/** The Direct adapter's independent source: driving Direct and Remote against
+ * one source Session would create two writers for it. */
+const DIRECT_SOURCE_SESSION_ID = 'd2-4-direct-source-session'
 const ORDINARY_SESSION_ID = 'd2-3-ordinary-session'
 const FRESH_SESSION_ID = 'd2-3-fresh-session'
 const BLANK_SESSION_ID = 'd2-3-blank-session'
@@ -158,7 +166,6 @@ function provideHostPeripheralServices(ctx) {
     bindPrompt: () => ({ commit: () => {}, [Symbol.dispose]: () => {} }),
     retirePrompt: () => {},
   })
-  ctx.provide('workspaceRegistry', { list: () => [] })
   ctx.provide('webServer', {
     registerUpgrade: () => () => {},
   })
@@ -202,6 +209,13 @@ async function createHost(presetRoot, workRoot) {
     await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
       new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
     })
+    // The REAL official workspace stack (the same rows the web bundle mounts):
+    // Direct and Remote forks below must observe one genuine
+    // `ctx.workspaceRegistry`, not a fixture that can only say "no workspace".
+    await ctx.plugin(Storage)
+    await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
+    await ctx.plugin(StorageDomain, { backend: 'json' })
+    await ctx.plugin(WorkspaceRegistry)
     await ctx.inject(SessionController.inject, controllerCtx => {
       new SessionController(controllerCtx, { nativeOpen: false })
     })
@@ -225,7 +239,11 @@ async function createHost(presetRoot, workRoot) {
     }
 
     const agent = await loop.create(SessionId(ANCHOR_SESSION_ID), { provider: PROVIDER, model: MODEL }, { cwd: join(workRoot, 'anchor') })
-    return { ctx, agent, resumeCalls, persistenceRoot, persistenceFiber }
+    // The Direct comparison needs its OWN source session: driving both adapters
+    // against one source would create two writers for the same Session. It
+    // shares the anchor cwd so BOTH children must join one real workspace.
+    const directAgent = await loop.create(SessionId(DIRECT_SOURCE_SESSION_ID), { provider: PROVIDER, model: MODEL }, { cwd: join(workRoot, 'anchor') })
+    return { ctx, agent, directAgent, resumeCalls, persistenceRoot, persistenceFiber }
   } catch (error) {
     if (persistenceFiber !== undefined) await persistenceFiber.dispose()
     rmSync(persistenceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
@@ -292,6 +310,23 @@ async function main() {
     assert.ok(sessionClient !== undefined, 'official Session Controller Client did not load')
 
     host = await createHost(presetRoot, workRoot)
+    // One REAL workspace whose membership BOTH fork sources already hold, set up
+    // BEFORE any fork. Attaching it later would leave the Host-side child out of
+    // the workspace while the Direct child joined it — the earlier fixture did
+    // exactly that and the one-sided membership assertion still passed.
+    const anchorDir = join(workRoot, 'anchor')
+    mkdirSync(anchorDir, { recursive: true })
+    const workspace = await host.ctx.get('workspaceRegistry').create(anchorDir, 'D2.4 parity workspace')
+    await workspace.attachSession(SessionId(ANCHOR_SESSION_ID))
+    await workspace.attachSession(SessionId(DIRECT_SOURCE_SESSION_ID))
+    const workspaceMembership = () => host.ctx.get('workspaceRegistry').list()
+      .find(candidate => candidate.id === workspace.id)?.sessionIds ?? []
+    // A concrete non-default selection WITH `reasoningEffort` on BOTH sources:
+    // the inherited model projection is then pinned by expected value, so a
+    // SYMMETRIC inheritance regression fails instead of passing a cross-equal.
+    const HISTORICAL_SELECTION = { provider: PROVIDER, model: MODEL, reasoningEffort: 'high' }
+    host.agent.session.append('model/selection', HISTORICAL_SELECTION)
+    host.directAgent.session.append('model/selection', HISTORICAL_SELECTION)
     globalThis.__DSH_TRANSPORT__ = hostTransport(host, fetchLog)
 
     client = new Context()
@@ -463,6 +498,11 @@ async function main() {
         assert.ok(child !== undefined, 'fork child did not reach the Host Session registry')
         assert.equal(child.header.parentSession, ANCHOR_SESSION_ID, 'Host fork did not preserve the parent lineage')
         assert.equal(child.header.cwd, join(workRoot, 'anchor'), 'Host fork did not preserve the source cwd')
+        assert.equal(child.header.isSeeded, true, 'Host fork did not publish a seeded child')
+        assert.equal(Number(child.inheritedEventCount), secondEnd + 1,
+          'Host fork must record the exact inherited prefix length (through the selected turn/end)')
+        assert.ok(workspaceMembership().includes(childId),
+          'Host fork child was not attached to the source workspace')
         const childPreset = host.ctx.get('sessionProjections')
           .snapshot(child, ['agentPreset']).values.agentPreset
         assert.equal(childPreset, PRESET_A, 'Host fork did not preserve the observed source preset')
@@ -482,6 +522,8 @@ async function main() {
         assert.ok(child !== undefined)
         assert.equal(Number(child.snapshotEvents().findLast(event => event.type === 'turn/end')?.seq), firstEnd,
           'historical anchor must stop at the first completed turn at or after the anchor')
+        assert.equal(Number(child.inheritedEventCount), firstEnd + 1,
+          'historical Host fork must record the exact inherited prefix length')
         scenarios.forkHistorical = { status: 'covered', sourceSessionId: ANCHOR_SESSION_ID, childSessionId: childId, anchorSeq: firstEnd - 1, boundarySeq: firstEnd }
       }
 
@@ -514,6 +556,128 @@ async function main() {
       assert.equal(outcome.kind, 'rejected', `a started Session preset switch was not rejected: ${JSON.stringify(result)}`)
       assert.equal(outcome.error.code, 'agent-preset/locked')
       scenarios.presetLocked = { status: 'covered', sessionId: ANCHOR_SESSION_ID, code: outcome.error.code }
+    }
+
+    // DIRECT vs HOST (D2.4): the same fork scenarios against an INDEPENDENT
+    // source Session on the SAME real Host, so the two adapters are compared
+    // directly and no Session ever has two writers. Both sources carry
+    // structurally identical logs, and both are members of ONE real workspace
+    // created through the official registry (never a fake that can only say
+    // "no workspace").
+    {
+      host.directAgent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'starting first turn' }],
+        source: { kind: 'user' },
+      }))
+      await waitFor('the Direct source first turn to complete', () => {
+        const ends = host.directAgent.session.snapshotEvents().filter(event => event.type === 'turn/end')
+        return ends.length >= 1 ? true : undefined
+      })
+      host.directAgent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'starting second turn' }],
+        source: { kind: 'user' },
+      }))
+      await waitFor('the Direct source second turn to complete', () => {
+        const ends = host.directAgent.session.snapshotEvents().filter(event => event.type === 'turn/end')
+        return ends.length >= 2 ? true : undefined
+      })
+      const directEnds = host.directAgent.session.snapshotEvents().filter(event => event.type === 'turn/end')
+      const directFirstEnd = Number(directEnds[0].seq)
+      const directSecondEnd = Number(directEnds[1].seq)
+
+      // The two sources carry structurally identical logs, so their cut
+      // sequences MUST match; the children's own-seq checks below are not
+      // evidence of parity without this cross-equality.
+      assert.equal(directSecondEnd, scenarios.forkLatest?.boundarySeq,
+        'Direct and Host sources must agree on the latest completed-turn boundary')
+      assert.equal(directFirstEnd, scenarios.forkHistorical?.boundarySeq,
+        'Direct and Host sources must agree on the historical completed-turn boundary')
+
+      // The Direct composition mirrors the official controller: resolve the
+      // preset id, then mount that resolved preset in the child's setup.
+      const directPresets = host.ctx.get('agentPresets')
+      const direct = new DirectSessionLifecycle(host.ctx, async (presetId) => {
+        const resolved = await directPresets.resolve(presetId)
+        return {
+          agentPreset: resolved.id,
+          setup: async (agentCtx) => { await directPresets.mount(agentCtx, resolved.id) },
+        }
+      })
+
+      const childSession = (outcome) => outcome.kind === 'forked'
+        ? host.ctx.sessions.get(SessionId(outcome.handle.session.id))
+        : undefined
+
+      // F1: Direct latest boundary, child metadata and workspace inheritance
+      // must equal the Host's.
+      const latest = await direct.fork({ sourceSessionId: DIRECT_SOURCE_SESSION_ID })
+      assert.equal(latest.outcome.kind, 'forked', `Direct latest fork did not settle as ${latest.outcome.kind}`)
+      const latestChildId = latest.outcome.kind === 'forked' ? latest.outcome.handle.session.id : undefined
+      assert.ok(latestChildId !== undefined && latestChildId !== DIRECT_SOURCE_SESSION_ID, 'Direct fork did not generate a distinct child id')
+      const latestChild = childSession(latest.outcome)
+      assert.ok(latestChild !== undefined, 'Direct fork child did not reach the Host Session registry')
+      assert.equal(latestChild.header.parentSession, DIRECT_SOURCE_SESSION_ID, 'Direct fork must preserve the parent lineage')
+      assert.equal(latestChild.header.cwd, anchorDir, 'Direct fork must preserve the source cwd')
+      assert.equal(latestChild.header.isSeeded, true, 'Direct fork must publish a seeded child')
+      assert.equal(Number(latestChild.inheritedEventCount), directSecondEnd + 1,
+        'Direct latest fork must record the exact inherited prefix length')
+      assert.equal(Number(latestChild.snapshotEvents().findLast(event => event.type === 'turn/end')?.seq), directSecondEnd,
+        'Direct latest fork must stop at the same completed-turn boundary the Host chooses')
+      const latestPreset = host.ctx.get('sessionProjections').snapshot(latestChild, ['agentPreset']).values.agentPreset
+      assert.equal(latestPreset, PRESET_A, 'Direct fork must preserve the observed source preset')
+      assert.ok(workspaceMembership().includes(latestChildId), 'Direct fork child was not attached to the source workspace')
+      // Direct child model state must match the Host child's for the equivalent
+      // source. Pin the EXPECTED selection (non-default, with reasoningEffort)
+      // instead of only cross-comparing: a symmetric inheritance regression
+      // would otherwise pass.
+      const hostChildId = scenarios.forkLatest?.childSessionId
+      const hostChild = hostChildId === undefined ? undefined : host.ctx.sessions.get(SessionId(hostChildId))
+      const selectionOf = session => host.ctx.get('sessionProjections')
+        .snapshot(session, ['modelSelection']).values.modelSelection
+      assert.ok(hostChild !== undefined, 'the Remote fork child from the same-Host block is missing')
+      const directSelection = selectionOf(latestChild)
+      const hostSelection = selectionOf(hostChild)
+      assert.deepEqual(directSelection?.next, HISTORICAL_SELECTION,
+        'Direct fork must inherit the concrete historical selection (including reasoningEffort)')
+      assert.deepEqual(hostSelection?.next, HISTORICAL_SELECTION,
+        'Host fork must inherit the concrete historical selection (including reasoningEffort)')
+      assert.deepEqual(directSelection, hostSelection,
+        'Direct and Host fork children must agree on the inherited model selection')
+      assert.equal(Number(latestChild.inheritedEventCount), Number(hostChild.inheritedEventCount),
+        'Direct and Host fork children must agree on the inherited prefix length')
+
+      // F2/F4/F3: historical anchor, future anchor and open-tail rejection must
+      // settle exactly like the Host.
+      const historical = await direct.fork({ sourceSessionId: DIRECT_SOURCE_SESSION_ID, atSeq: directFirstEnd - 1 })
+      assert.equal(historical.outcome.kind, 'forked', `Direct historical fork did not settle as ${historical.outcome.kind}`)
+      assert.equal(Number(childSession(historical.outcome)?.snapshotEvents().findLast(event => event.type === 'turn/end')?.seq), directFirstEnd,
+        'Direct historical anchor must stop at the first completed turn at or after it')
+      assert.equal(Number(childSession(historical.outcome)?.inheritedEventCount), directFirstEnd + 1,
+        'Direct historical fork must record the exact inherited prefix length')
+
+      const future = await direct.fork({ sourceSessionId: DIRECT_SOURCE_SESSION_ID, atSeq: directSecondEnd + 100 })
+      assert.equal(future.outcome.kind, 'forked', `Direct future-anchor fork did not settle as ${future.outcome.kind}`)
+      assert.equal(Number(childSession(future.outcome)?.snapshotEvents().findLast(event => event.type === 'turn/end')?.seq), directSecondEnd,
+        'Direct future anchor must fall back to the latest completed turn')
+
+      const directOpenStart = host.directAgent.session.append('turn/start', { turn: 99 })
+      const openTail = await direct.fork({ sourceSessionId: DIRECT_SOURCE_SESSION_ID, atSeq: Number(directOpenStart.seq) })
+      assert.equal(openTail.outcome.kind, 'rejected', `Direct open-tail fork did not settle as ${openTail.outcome.kind}`)
+      if (openTail.outcome.kind === 'rejected') assert.equal(openTail.outcome.error.code, 'session/fork-unavailable')
+
+      const missing = await direct.fork({ sourceSessionId: 'session-does-not-exist' })
+      assert.equal(missing.outcome.kind, 'rejected', `Direct missing-source fork did not settle as ${missing.outcome.kind}`)
+      if (missing.outcome.kind === 'rejected') assert.equal(missing.outcome.error.code, 'session/not-found')
+
+      scenarios.directHostForkParity = {
+        status: 'covered',
+        sourceSessionId: DIRECT_SOURCE_SESSION_ID,
+        childSessionId: latestChildId,
+        boundarySeq: directSecondEnd,
+        workspaceId: workspace.id,
+        openTailCode: openTail.outcome.kind === 'rejected' ? openTail.outcome.error.code : undefined,
+        notFoundCode: missing.outcome.kind === 'rejected' ? missing.outcome.error.code : undefined,
+      }
     }
 
     // OPEN: official Client open/binding, the Client current identity moves,
