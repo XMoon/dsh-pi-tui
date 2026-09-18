@@ -81,7 +81,7 @@ function extractSection(file) {
     }
   }
 
-  const content = compactListContinuations(
+  const content = compactSoftWraps(
     lines
       .slice(start + 1, end)
       .join('\n')
@@ -117,23 +117,29 @@ function extractSection(file) {
 }
 
 /**
- * Fold a list item's wrapped continuation lines into single lines.
+ * Fold soft-wrapped continuation lines into single lines.
  *
- * The changelogs write each bullet as a wrapped paragraph (a `- ` line
- * followed by 2-space-indented continuation lines). GitHub's file viewer
+ * The changelogs write every bullet and every prose paragraph as a wrapped
+ * block (a first line followed by continuation lines). GitHub's file viewer
  * folds those soft breaks, but its Release-body renderer turns them into
  * hard `<br>` breaks, so an extracted release body shows arbitrary line
  * breaks mid-sentence. Folding the continuations makes the Release body
- * render as one paragraph per bullet, matching the changelog file view.
- * Blank lines, headings, code fences and their contents are left alone.
+ * render as one paragraph per block, matching the changelog file view.
+ *
+ * Only the changelog's own basic shapes are recognized: blank lines,
+ * headings, fenced code (backtick or tilde, up to three spaces of indent),
+ * blockquotes, lists, reference definitions and thematic breaks. A bullet's
+ * 2-space-indented continuation and a prose paragraph's own continuation are
+ * folded; every other line is emitted as written. A deliberate hard break
+ * (two trailing spaces or a trailing backslash) survives.
  */
-function compactListContinuations(content) {
+function compactSoftWraps(content) {
   const lines = content.split('\n')
   const out = []
   let inCodeFence = false
 
   for (const line of lines) {
-    if (/^```/.test(line)) {
+    if (/^ {0,3}(?:```|~~~)/.test(line)) {
       inCodeFence = !inCodeFence
       out.push(line)
       continue
@@ -142,14 +148,31 @@ function compactListContinuations(content) {
       out.push(line)
       continue
     }
-    if (/^ {2}\S/.test(line) && /^\s*[-*]\s+\S/.test(out[out.length - 1] ?? '')) {
-      out[out.length - 1] = `${out[out.length - 1].trimEnd()} ${line.trimStart()}`
+
+    const previous = out[out.length - 1] ?? ''
+    // A bullet's continuation is indented; a prose paragraph continues at
+    // column 0.
+    const isContinuation = /^ {2}\S/.test(line)
+      ? /^\s*[-*]\s+\S/.test(previous)
+      : !startsBlock(line) && !startsBlock(previous)
+    if (isContinuation && !/(?: {2,}|\\)$/.test(previous)) {
+      out[out.length - 1] = `${previous.trimEnd()} ${line.trimStart()}`
       continue
     }
     out.push(line)
   }
 
   return out.join('\n')
+}
+
+/** True when a line opens a Markdown block rather than continuing one. */
+function startsBlock(line) {
+  return (
+    line.trim() === '' ||
+    /^ {0,3}(?:#{1,6}(?:\s|$)|```|~~~|>|\[[^\]]+\]:)/.test(line) ||
+    /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/.test(line) ||
+    /^ {0,3}(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$/.test(line)
+  )
 }
 
 const zh = extractSection('CHANGELOG.md')

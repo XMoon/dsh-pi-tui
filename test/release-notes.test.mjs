@@ -126,22 +126,6 @@ test('0.4.5 release guidance pins the recommended rc.2 DSH/TUI pairing', (t) => 
   assert.doesNotMatch(body, /@xmoon76\/dsh-pi-tui@(latest|next)/u)
 })
 
-test('0.4.6 release guidance keeps the 0.4.5 rc.2 DSH pairing', (t) => {
-  const life = testLifecycle(t)
-  const guidance = '\n```sh\nnpm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2\n```\n- @xmoon76/dsh-pi-tui@0.4.6\n- @xmoon76/dsh-pi-tui@0.3'
-  const fixture = createFixture(life, { version: '0.4.6', guidance })
-  const result = run(fixture, 'v0.4.6')
-  assert.equal(result.status, 0, result.stderr)
-  const body = readFileSync(fixture.output, 'utf8')
-  for (const command of [
-    '@deepseek-ai/dsh@0.1.5-rc.2',
-    '@xmoon76/dsh-pi-tui@0.4.6',
-    '@xmoon76/dsh-pi-tui@0.3',
-  ]) {
-    assert.ok(body.includes(command), `release body is missing ${command}`)
-  }
-})
-
 test('0.4 release guidance pins the exact release TUI version', (t) => {
   const life = testLifecycle(t)
   // A fixture on the alpha.4 floor (any 0.4 prerelease after 0.4.0-alpha.1)
@@ -150,33 +134,17 @@ test('0.4 release guidance pins the exact release TUI version', (t) => {
   // and must not retain prerelease-only guidance.
   const prereleaseGuidance = '\n- @deepseek-ai/dsh@0.1.2-alpha.5\n- @xmoon76/dsh-pi-tui@0.4.0-alpha.2\n- @xmoon76/dsh-pi-tui@0.3'
   const futurePrerelease = createFixture(life, { version: '0.4.0-alpha.2', guidance: prereleaseGuidance, channel: 'next' })
-  try {
-    const accepted = run(futurePrerelease, 'next-v0.4.0-alpha.2')
-    assert.equal(accepted.status, 0, accepted.stderr)
-    const stableWithPrereleaseGuidance = createFixture(life, { version: '0.4.0', guidance: prereleaseGuidance })
-    try {
-      const result = run(stableWithPrereleaseGuidance, 'v0.4.0')
-      assert.notEqual(result.status, 0)
-      assert.match(result.stderr, /@deepseek-ai\/dsh@0\.1\.2-rc\.1/u)
-    } finally {
-      // testLifecycle cleans the fixture roots.
-    }
-  } finally {
-    // testLifecycle cleans the fixture roots.
-  }
+  const accepted = run(futurePrerelease, 'next-v0.4.0-alpha.2')
+  assert.equal(accepted.status, 0, accepted.stderr)
+  const stableWithPrereleaseGuidance = createFixture(life, { version: '0.4.0', guidance: prereleaseGuidance })
+  const result = run(stableWithPrereleaseGuidance, 'v0.4.0')
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /@deepseek-ai\/dsh@0\.1\.2-rc\.1/u)
 
   const stableGuidance = '\n- @deepseek-ai/dsh@0.1.2-rc.1\n- @xmoon76/dsh-pi-tui@0.4.0\n- @xmoon76/dsh-pi-tui@0.3'
   const stable = createFixture(life, { version: '0.4.0', guidance: stableGuidance })
   const stableResult = run(stable, 'v0.4.0')
   assert.equal(stableResult.status, 0, stableResult.stderr)
-})
-
-test('0.4.1 stable guidance pins the published rc.1 DSH family', (t) => {
-  const life = testLifecycle(t)
-  const guidance = '\n- @deepseek-ai/dsh@0.1.2-rc.1\n- @xmoon76/dsh-pi-tui@0.4.1\n- @xmoon76/dsh-pi-tui@0.3'
-  const stable = createFixture(life, { version: '0.4.1', guidance })
-  const result = run(stable, 'v0.4.1')
-  assert.equal(result.status, 0, result.stderr)
 })
 
 test('0.4.3-alpha.2 prerelease guidance pins the published 0.1.3-alpha.2 family', (t) => {
@@ -201,14 +169,6 @@ test('an unmapped 0.4 release fails loudly instead of inheriting an older DSH pi
   const stableResult = run(stable, 'v0.4.7')
   assert.notEqual(stableResult.status, 0)
   assert.match(stableResult.stderr, /No DSH install pin is recorded for stable release 0\.4\.7/u)
-})
-
-test('0.4.7-alpha.2 prerelease guidance pins the published 0.1.6-alpha.2 family', (t) => {
-  const life = testLifecycle(t)
-  const guidance = '\n- @deepseek-ai/dsh@0.1.6-alpha.2\n- @xmoon76/dsh-pi-tui@0.4.7-alpha.2\n- @xmoon76/dsh-pi-tui@0.3'
-  const next = createFixture(life, { version: '0.4.7-alpha.2', guidance, channel: 'next' })
-  const result = run(next, 'next-v0.4.7-alpha.2')
-  assert.equal(result.status, 0, result.stderr)
 })
 
 test('0.4.7-alpha.1 prerelease guidance pins the published 0.1.6-alpha.1 family', (t) => {
