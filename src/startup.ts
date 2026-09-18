@@ -101,9 +101,11 @@ export const inject = ['cmdlineArgs']
  * it is shown as the fallback version label (`>= <since>`) when the
  * bundle's own version cannot be read, so the message stays truthful.
  *
- * The 0.4.7-alpha.1 line has a minimum of the published npm release
+ * The 0.4.7-alpha.2 line has a minimum of the published npm release
  * dsh-v0.1.6-alpha.2. The recovery guidance names the recommended published
- * upgrade target and allows its native install scripts.
+ * upgrade target and allows its native install scripts. The already-published
+ * 0.4.7-alpha.1 line keeps its own alpha.1 contract and remains the compatible
+ * fallback for a dsh-v0.1.6-alpha.1 runtime.
  */
 export interface HarnessCompatEntry {
   /** Inclusive lower bound of the incompatible range; absent = unbounded below. */
@@ -128,11 +130,11 @@ export interface HarnessCompatEntry {
 /** The compatibility table. Entries are ordered from oldest to newest so
  * `harnessCompatEntryFor()` can return the first matching historical range. */
 const CURRENT_DSH_REQUIREMENT = {
-  since: '0.4.7-alpha.1',
+  since: '0.4.7-alpha.2',
   requires: 'DeepSeek Harness 0.1.6-alpha.2 or later',
   upgradeDsh: '0.1.6-alpha.2',
   upgradeCommand: 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2',
-  guidance: 'This 0.4.7-alpha.1 line is validated with the published DeepSeek Harness 0.1.6-alpha.2 distribution; see docs/dsh-compatibility.md.',
+  guidance: 'This 0.4.7-alpha.2 line is validated with the published DeepSeek Harness 0.1.6-alpha.2 distribution; see docs/dsh-compatibility.md.',
 } as const
 
 export const HARNESS_COMPAT: readonly HarnessCompatEntry[] = [
