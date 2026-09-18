@@ -1232,3 +1232,46 @@ test('fullscreen: a stale collapsed-marker press never collapses via the tail th
   app.setFullscreen(false)
   app.stop()
 })
+
+test('fullscreen: the copy chrome filter follows the last-painted frame, not a newer rebuild', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const copied: string[] = []
+  const app = new TuiApp(
+    vt,
+    { onSubmit: () => {}, onExit: () => {} },
+    { copySelection: async (text) => { copied.push(text); return true } },
+  )
+  app.start()
+  startedApps.add(app)
+  const message = user(lines(11), 1)
+  app.setTranscript([message, { kind: 'assistant', turn: 1, text: lines(20, 'a-') }])
+  app.setFullscreen(true)
+  vt.sendInput('\x0f') // expand the recent user: the painted frame has the footer
+  await viewRows(vt)
+  let rows = await viewRows(vt)
+  const footerY = rows.findIndex(row => row.includes('▴ Collapse'))
+  assert.ok(footerY >= 0, `the painted frame must carry the footer:\n${rows.join('\n')}`)
+  const paintedBelow = rows[footerY + 2]!
+  assert.ok(paintedBelow.trim() !== '' && !paintedBelow.includes('Collapse'))
+
+  // Start a drag selection across the footer (+ the real text below it) and
+  // do NOT release yet.
+  vt.sendInput(`\x1b[<0;1;${footerY}M`)
+  vt.sendInput(`\x1b[<32;90;${footerY + 3}M`)
+
+  // A transcript update rebuilds the projection and moves the footer down two
+  // rows, but the frame is NOT repainted before the release.
+  app.setTranscript([user('short', 0), message, { kind: 'assistant', turn: 1, text: lines(20, 'a-') }])
+  vt.sendInput(`\x1b[<0;90;${footerY + 3}m`)
+  await viewRows(vt)
+
+  assert.ok(copied.length >= 1, `expected a copy gesture:\n${rows.join('\n')}`)
+  const text = copied.join('\n')
+  // The painted footer row must still copy blank (no leak)...
+  assert.ok(!text.includes('Collapse'), `painted footer chrome leaked into the clipboard:\n${text}`)
+  // ...and the painted REAL row that the newer projection now calls a footer
+  // must NOT be blanked.
+  assert.ok(text.includes(paintedBelow.trim()), `a real painted row was wrongly blanked:\n${text}`)
+  app.setFullscreen(false)
+  app.stop()
+})

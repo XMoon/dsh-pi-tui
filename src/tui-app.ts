@@ -3714,6 +3714,12 @@ export class TuiApp {
          * so a repaint that reinterprets the pressed row can never pass
          * the release fence. */
         rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
+        /** The PAINTED content rows whose copy source is blank presentation
+         * chrome (the expanded long-user tail control). Derived at the paint
+         * boundary from the same projection as `rows`, so the copy filter and
+         * the user's visible frame share one epoch — a rebuild that has not
+         * repainted yet must never reinterpret a painted row. */
+        copyBlankRows: ReadonlySet<number>
       }
     | undefined
   /** ONE external-editor ownership at a time: set synchronously at launch,
@@ -8130,11 +8136,23 @@ export class TuiApp {
     const scroll = this.fullscreenScroll
     const paintedHeight = (component: Component): number => this.fullscreen?.getPaintedBox(component)?.height ?? 0
     this.refreshMessageRows()
+    const welcomeHeight = this.welcomeCard.lastRenderedHeight
+    // The painted rows whose copy source is presentation chrome, derived from
+    // the SAME projection/height base as `rows` below (the last-painted
+    // frame), so the copy filter can never reinterpret a row against a newer,
+    // not-yet-painted rebuild.
+    const copyBlankRows = new Set<number>()
+    let rowTop = welcomeHeight
+    for (const entry of this.messageRows) {
+      const hit = entry.userDisclosureHit
+      if (hit !== undefined && hit.action === 'collapse') copyBlankRows.add(rowTop + hit.row)
+      rowTop += entry.height
+    }
     this.fullscreenPaintSnapshot = {
       columns: this.terminal.columns,
       termRows: this.terminal.rows,
       headerHeight: paintedHeight(this.header),
-      welcomeHeight: this.welcomeCard.lastRenderedHeight,
+      welcomeHeight,
       footerHeight: paintedHeight(this.footer),
       editorHeight: paintedHeight(this.editorSeat),
       workingHeight: paintedHeight(this.working),
@@ -8149,6 +8167,7 @@ export class TuiApp {
         height: entry.height,
         hits: this.fullscreenRowHits(entry, index),
       })),
+      copyBlankRows,
     }
   }
 
@@ -14084,15 +14103,15 @@ export class TuiApp {
    * never reach the clipboard. Its visual row copies as the blank separator
    * it replaced (fork seam X057) — paint, search and the mouse hit map are
    * untouched; only the copy source is filtered. */
+  /** The copy-source filter of one selected row. The decision comes from the
+   * LAST-PAINTED snapshot (the same epoch that produced the ScrollView's
+   * `scrollContentLines`), never the live `messageRows`: a rebuild that has
+   * not repainted yet must not reinterpret a painted row — otherwise the
+   * painted tail chrome would leak, or a painted real row the newer
+   * projection calls chrome would be wrongly blanked. */
   private selectionLineText(context: { row: number; line: string; scrollView?: ScrollView }): string | undefined {
     if (context.scrollView === undefined || context.scrollView !== this.fullscreenScroll) return undefined
-    let rowTop = this.welcomeCard.render(this.terminal.columns).length
-    for (const entry of this.messageRows) {
-      const hit = entry.userDisclosureHit
-      if (hit !== undefined && hit.action === 'collapse' && rowTop + hit.row === context.row) return ''
-      rowTop += entry.height
-    }
-    return undefined
+    return this.fullscreenPaintSnapshot?.copyBlankRows.has(context.row) === true ? '' : undefined
   }
 
   /** The effective disclosure state of one ephemeral pending-user row: the
