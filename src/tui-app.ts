@@ -14099,11 +14099,11 @@ export class TuiApp {
     return new Text(color.textDim(pad + clipped), 0, 0)
   }
 
-  /** The expanded long-user tail control is presentation chrome: it must
-   * never reach the clipboard. Its visual row copies as the blank separator
-   * it replaced (fork seam X057) — paint, search and the mouse hit map are
-   * untouched; only the copy source is filtered. */
-  /** The copy-source filter of one selected row. The decision comes from the
+  /** The copy-source filter of one selected row: the expanded long-user tail
+   * control is presentation chrome that must never reach the clipboard, and
+   * its visual row copies as the blank separator it replaced (fork seam
+   * X057). Paint, search, word/line selection and the mouse hit map are
+   * untouched — only the copy source is filtered. The decision comes from the
    * LAST-PAINTED snapshot (the same epoch that produced the ScrollView's
    * `scrollContentLines`), never the live `messageRows`: a rebuild that has
    * not repainted yet must not reinterpret a painted row — otherwise the
