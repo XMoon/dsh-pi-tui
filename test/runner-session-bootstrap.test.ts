@@ -1387,6 +1387,70 @@ test('/fork settles when the source disposal fails (contained, never a hang)', a
     'the source command must still settle after a contained dispose failure')
 })
 
+test('/fork does not release the submit FIFO before the source retirement completes', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-fifo-retire-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const header = (id: string) => ({ id, cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION })
+  const source = fakeSession({ id: 'fifo-retire-source', header: header('fifo-retire-source'), events: sessionEvents('source answer') })
+  const other = fakeSession({ id: 'fifo-retire-other', header: header('fifo-retire-other'), events: sessionEvents('other answer') })
+  let releaseDrain!: () => void
+  let signalDrainReached!: () => void
+  const drainReached = new Promise<void>(resolve => { signalDrainReached = resolve })
+  let drainCalls = 0
+  const harness = makeHarness(home, [source, other], undefined, undefined, undefined, () => ({
+    drainContinuableDescendants: async () => {
+      drainCalls += 1
+      if (drainCalls !== 1) return
+      signalDrainReached()
+      await new Promise<void>(resolve => { releaseDrain = resolve })
+    },
+    listDescendants: async () => [],
+  }))
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/fork')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  const reached = await Promise.race([
+    drainReached.then(() => true),
+    new Promise<boolean>(resolve => { setTimeout(() => resolve(false), 3_000) }),
+  ])
+  try {
+    assert.equal(reached, true, 'the /fork source retirement must reach its drain phase')
+    const runsWhileGated = harness.commandSettlements.filter(entry => entry.phase === 'run').length
+    // Durability is already satisfied: command/done landed before the drain gate.
+    assert.deepEqual(harness.commandSettlements.filter(entry => entry.sessionId === source.id).map(entry => entry.phase), ['run', 'done'],
+      'command/done must land before the source retirement completes')
+    // The command must NOT have released the submit FIFO yet: a queued second
+    // submission must stay pending until the retirement finishes.
+    app.setDraft(`/resume ${other.id}`)
+    ;(app as unknown as { submitDraft(): void }).submitDraft()
+    await settle()
+    assert.equal(harness.commandSettlements.filter(entry => entry.phase === 'run').length, runsWhileGated,
+      'the submit FIFO must stay held until the source retirement completes')
+  } finally {
+    releaseDrain?.()
+    await settle()
+  }
+  assert.ok(harness.retirementEvents.includes(`dispose:${source.id}`),
+    'the source must be disposed once the held retirement completes')
+})
+
 test('/fork dispatches at admission without waiting for a busy source', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fork-busy-')

@@ -112,6 +112,11 @@ const D_DIRECT_SOURCE_SESSION_ID = 'd2-4-subagent-direct-source'
 // still has no cwd (never an invented one).
 const E_HOST_SOURCE_SESSION_ID = 'd2-4-nocwd-host-source'
 const E_DIRECT_SOURCE_SESSION_ID = 'd2-4-nocwd-direct-source'
+// F5 historical selection (plan §6.1 cases B+F): a HISTORICAL fork anchor lands
+// between a consumed selection A (turn 1) and a later selection B (turn 2), so
+// the child must inherit A and exclude B on BOTH adapters.
+const F_HOST_SOURCE_SESSION_ID = 'd2-4-historical-host-source'
+const F_DIRECT_SOURCE_SESSION_ID = 'd2-4-historical-direct-source'
 
 const IMAGE_LIMITS = Object.freeze({
   maxImageBytes: 5 * 1024 * 1024,
@@ -445,6 +450,23 @@ async function main() {
       const source = await createForkSource(sessionId, {})
       appendSyntheticClosedTurn(source.session, 1, { kind: 'completed' })
     }
+
+    // Case F: a HISTORICAL cut inside a two-selection log. Selection A is
+    // consumed before turn 1; selection B is recorded after turn 1 and before
+    // turn 2. Structurally identical per path, so ONE anchor seq is valid for
+    // both.
+    const historicalCutSeq = {}
+    for (const [key, sessionId] of [['host', F_HOST_SOURCE_SESSION_ID], ['direct', F_DIRECT_SOURCE_SESSION_ID]]) {
+      const source = await createForkSource(sessionId, { cwd: anchorDir })
+      source.session.append('model/selection', CONSUMED_PRE_CUT_SELECTION)
+      source.session.append('request/header', selectionHeader(CONSUMED_PRE_CUT_SELECTION))
+      historicalCutSeq[key] = appendSyntheticClosedTurn(source.session, 1, { kind: 'completed' })
+      source.session.append('model/selection', POST_CUT_SELECTION)
+      appendSyntheticClosedTurn(source.session, 2, { kind: 'completed' })
+      await workspace.attachSession(SessionId(sessionId))
+    }
+    assert.equal(historicalCutSeq.host, historicalCutSeq.direct,
+      'the case F historical anchors must be structurally identical per path')
     // --------------------------------------------------------------------------
 
     globalThis.__DSH_TRANSPORT__ = hostTransport(host, fetchLog)
@@ -803,9 +825,9 @@ async function main() {
     // Each pair forks an INDEPENDENT Host-path source and Direct-path source on
     // the same real Host. No Direct result is ever JSON-stringified.
     {
-      const forkPair = async (hostSourceId, directSourceId) => {
-        const hostResult = await lifecycle.fork({ sourceSessionId: hostSourceId })
-        const directResult = await direct.fork({ sourceSessionId: directSourceId })
+      const forkPair = async (hostSourceId, directSourceId, atSeq) => {
+        const hostResult = await lifecycle.fork({ sourceSessionId: hostSourceId, ...atSeq === undefined ? {} : { atSeq } })
+        const directResult = await direct.fork({ sourceSessionId: directSourceId, ...atSeq === undefined ? {} : { atSeq } })
         assert.equal(hostResult.outcome.kind, 'forked', `Host fork of ${hostSourceId} settled as ${hostResult.outcome.kind}`)
         assert.equal(directResult.outcome.kind, 'forked', `Direct fork of ${directSourceId} settled as ${directResult.outcome.kind}`)
         const hostChildId = hostResult.outcome.handle.session.id
@@ -1015,6 +1037,59 @@ async function main() {
           directSourceSessionId: E_DIRECT_SOURCE_SESSION_ID,
           hostChildSessionId: hostChildId,
           directChildSessionId: directChildId,
+        }
+      }
+
+      // F5 (F, plan §6.1 cases B+F): a HISTORICAL fork anchor inside a
+      // two-selection log. The child must inherit the selection consumed BEFORE
+      // the anchor and exclude the later one, and Direct must equal the official
+      // Host on the observable child selection.
+      {
+        const fHostSource = host.ctx.sessions.get(SessionId(F_HOST_SOURCE_SESSION_ID))
+        const fDirectSource = host.ctx.sessions.get(SessionId(F_DIRECT_SOURCE_SESSION_ID))
+        assert.ok(fHostSource !== undefined && fDirectSource !== undefined, 'the case F sources are missing')
+        for (const [label, source] of [['Host', fHostSource], ['Direct', fDirectSource]]) {
+          assert.deepEqual(modelSelectionOf(host.ctx, source).lastUsed, CONSUMED_PRE_CUT_SELECTION,
+            `the ${label} historical source must show A consumed before the anchor`)
+          assert.deepEqual(modelSelectionOf(host.ctx, source).next, POST_CUT_SELECTION,
+            `the ${label} historical source must show B pending after the anchor`)
+        }
+
+        const anchor = historicalCutSeq.host
+        const { hostChildId, directChildId, hostChild, directChild } =
+          await forkPair(F_HOST_SOURCE_SESSION_ID, F_DIRECT_SOURCE_SESSION_ID, anchor)
+        const hostSelection = modelSelectionOf(host.ctx, hostChild)
+        const directSelection = modelSelectionOf(host.ctx, directChild)
+        assert.deepEqual(hostSelection.lastUsed, CONSUMED_PRE_CUT_SELECTION,
+          'the Host historical fork child must inherit the pre-anchor selection A')
+        assert.deepEqual(directSelection.lastUsed, CONSUMED_PRE_CUT_SELECTION,
+          'the Direct historical fork child must inherit the pre-anchor selection A')
+        assert.deepEqual(hostSelection.next, CONSUMED_PRE_CUT_SELECTION,
+          'the Host historical fork child must NOT see the post-anchor selection B')
+        assert.deepEqual(directSelection.next, CONSUMED_PRE_CUT_SELECTION,
+          'the Direct historical fork child must NOT see the post-anchor selection B')
+        assert.deepEqual(directSelection, hostSelection,
+          'Direct and Host historical fork children must agree on the inherited selection projection')
+        assert.equal(Number(hostChild.inheritedEventCount), anchor + 1,
+          'the Host historical fork must record the prefix through its anchor turn/end')
+        assert.equal(Number(directChild.inheritedEventCount), anchor + 1,
+          'the Direct historical fork must record the prefix through its anchor turn/end')
+        for (const [label, child] of [['Host', hostChild], ['Direct', directChild]]) {
+          const selections = child.snapshotEvents()
+            .filter(event => event.type === 'model/selection')
+            .map(event => event.data)
+          assert.equal(selections.some(selection => selection.model === POST_CUT_SELECTION.model), false,
+            `the ${label} historical fork child must not contain the post-anchor selection B`)
+        }
+        scenarios.forkHistoricalSelectionParity = {
+          status: 'covered',
+          hostSourceSessionId: F_HOST_SOURCE_SESSION_ID,
+          directSourceSessionId: F_DIRECT_SOURCE_SESSION_ID,
+          hostChildSessionId: hostChildId,
+          directChildSessionId: directChildId,
+          anchorSeq: anchor,
+          inheritedSelection: CONSUMED_PRE_CUT_SELECTION,
+          excludedSelection: POST_CUT_SELECTION,
         }
       }
     }

@@ -1146,7 +1146,8 @@ retirement), the `smoke:remote-d2-closure` aggregate, and the
 now covers, as real Direct/Host pairs on one Host and one real
 `workspaceRegistry`: latest/historical/future anchors, open-tail and not-found
 refusals, a consumed pre-cut model selection with a different post-cut selection
-excluded, no-explicit-selection activation through the Host default (observed on
+excluded (both at the latest turn and at a HISTORICAL anchor between the two),
+no-explicit-selection activation through the Host default (observed on
 the child's first request header), an `aborted` `turn/end` boundary, subagent
 nearest-ancestor workspace inheritance with `origin`/`delegationDepth` not
 copied, and a cwd-absent source. The client-boundary gate stays green and

@@ -109,7 +109,16 @@ export interface DirectOwnerPoolLike {
   /** Await any in-flight retirement of THIS session's owner before resuming it.
    * The persistence write claim is exclusive, so resuming a still-live handle
    * (`session "X" is already owned by an active write handle`) would fail while
-   * its lease is held; a reopen must therefore follow the release. */
+   * its lease is held; a reopen must therefore follow the release.
+   *
+   * INVARIANTS (removing either re-creates a transition-gate/pin deadlock):
+   * 1. The release must NEVER require the transition gate. The deferred `/fork`
+   *    retirement is started at the command settlement, AFTER `adoptFork`
+   *    released the gate; keep it that way.
+   * 2. `switchSessionLocked`'s same-session no-op guard stays: the pin can only
+   *    be awaited while the source is no longer current (a fork that still needs
+   *    the gate has `liveAgent.session.id === sourceSessionId`, and that switch
+   *    returns early exactly then). */
   waitForRelease?(sessionId: string): Promise<void>
 }
 
@@ -228,6 +237,10 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     if (agents === undefined) {
       return { ownership: 'current', outcome: { kind: 'unavailable', message: 'agents service unavailable' } }
     }
+    // Capture the activation fallback at admission (v2 §0.8.3) — BEFORE any
+    // await, including the owner-release wait below: a global `/model` default
+    // change while this open waits must not leak into this resume.
+    const agentOptions = this.agentOptions()
     // A source owner whose retirement is still in flight must be released
     // before it can be resumed: the persistence write claim is exclusive, so
     // resuming the still-live handle would fail. `claim` above already handled
@@ -237,8 +250,6 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     if (!await this.waitForReleaseOrAbort(request.sessionId, request.signal)) {
       return { ownership: 'current', outcome: { kind: 'cancelled' } }
     }
-    // Capture the activation fallback at admission (v2 §0.8.3).
-    const agentOptions = this.agentOptions()
     try {
       // The Direct adapter owns the persisted-preset lookup the official open
       // semantic needs in-process: the recorded preset wins (a session that
