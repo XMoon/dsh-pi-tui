@@ -7,7 +7,10 @@
  * before running the same frozen install and checks.
  *
  * Usage: pnpm compat:dsh:npm [-- --dsh-version 0.1.6-alpha.1]
- * Client-only family lanes add `--exact-family --client-smoke-only`.
+ * Client-only family lanes add `--exact-family --client-smoke-only`; that lane
+ * runs the Remote Session read smokes AND the D2 closure (Direct ↔ official Host
+ * fork/rewind parity), so the published exact-family distribution is covered by
+ * the same parity gate as source mode.
  *
  * `--exact-family` semantics: when the requested target equals this checkout's
  * declared DSH version (the CI lane), the copied TRACKED lockfile is already an
@@ -206,6 +209,11 @@ async function main() {
     if (clientSmokeOnly) {
       await run(PNPM_COMMAND, ['smoke:remote-session-read'], workspace, 'Remote Session fixture smoke', npmEnvironment)
       await run(PNPM_COMMAND, ['smoke:remote-session-read-parity'], workspace, 'same-Host Remote Session parity smoke', npmEnvironment)
+      // The exact-family install IS the distribution the published package runs
+      // against, so it must clear the same Direct ↔ official Host fork/rewind
+      // parity gate as source mode. Keeping the closure here (rather than in the
+      // ordinary source-check job) lets npm CI prove it too.
+      await run(PNPM_COMMAND, ['smoke:remote-d2-closure'], workspace, 'D2 closure (fork/rewind parity) smoke', npmEnvironment)
       console.log(`DSH Client family compatibility passed — ${distribution.version}${exactFamily ? ' (exact family)' : ''}`)
       return
     }

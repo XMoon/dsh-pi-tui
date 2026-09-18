@@ -534,6 +534,10 @@ while the overall M2 remains in progress:
   synthetic ready frame or private envelope.
 - `compat:dsh:client-family` runs the fixture and same-Host parity gates in an
   isolated npm install using the exact DSH version declared by `package.json`.
+  Its `--client-smoke-only` lane runs the Remote Session read smokes AND the D2
+  closure (`smoke:remote-d2-closure`), so the exact-family npm distribution is
+  covered by the same Direct ↔ official Host fork/rewind parity gate as source
+  mode; a source-only closure step would leave the npm lane unproven.
   CI runs this release-family job only in npm mode; Source Mode runs the same
   parity scripts against the pinned source distribution in the Source checks
   lane. A different npm release is a local-only probe via
