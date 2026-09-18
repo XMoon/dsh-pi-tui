@@ -3030,20 +3030,18 @@ type UserDisclosureHit = {
   readonly target: UserDisclosureTarget
 }
 
-/** The disclosure geometry a bubble component exposes after a render. Both
- * the durable {@link UserBubbleComponent} and the ephemeral pending wrapper
- * implement it structurally; the row map never reaches into their children. */
-interface UserDisclosureComponent {
-  /** The compact marker row when the current render is collapsed. */
-  compactMarkerRow(): number | undefined
-  /** Whether the current render is an EXPANDED compact-capable bubble that
-   * needs a tail collapse control. */
-  showsCollapseControl(): boolean
-}
-
-function isUserDisclosureComponent(component: Component): component is Component & UserDisclosureComponent {
-  return typeof (component as Partial<UserDisclosureComponent>).compactMarkerRow === 'function'
-    && typeof (component as Partial<UserDisclosureComponent>).showsCollapseControl === 'function'
+/** The Host-owned long-user disclosure geometry. Only the two Host bubbles
+ * implement it, and the row map never reaches into their children. The brand
+ * is EXPLICIT (`instanceof`): a plugin renderer that happens to expose
+ * same-named methods must never be mistaken for a Host disclosure component
+ * (the M7 plugin-owned `kind: 'user'` contract). */
+function userDisclosureComponentOf(
+  component: Component,
+): UserBubbleComponent | PendingUserComponent | undefined {
+  if (component instanceof UserBubbleComponent || component instanceof PendingUserComponent) {
+    return component
+  }
+  return undefined
 }
 
 /** One transcript block rendered once for the current Focus projection. The
@@ -7367,19 +7365,25 @@ export class TuiApp {
 
   /** The ONE bidirectional disclosure control of a long-user bubble (durable
    * or pending): the compact marker while collapsed, the tail row while an
-   * expanded compact-capable bubble needs one. The tail row is the trailing
-   * separator row when one follows, or one dedicated presentation row charged
-   * to the final block (the height rule mirrors it). */
+   * expanded compact-capable bubble needs one. The tail is FULLSCREEN-only:
+   * regular draws into the terminal main screen, where an app-owned copy
+   * filter cannot exist, so a visible label there WOULD be copied by the
+   * terminal's native selection — Ctrl+O stays the regular collapse owner. In
+   * fullscreen the tail row is the trailing separator row when one follows,
+   * or one dedicated presentation row charged to the final block (the height
+   * rule mirrors it). */
   private userDisclosureHitFor(
     component: Component,
     rendered: readonly string[],
     truncatedMarker: boolean,
     target: UserDisclosureTarget,
   ): UserDisclosureHit | undefined {
-    if (!isUserDisclosureComponent(component)) return undefined
-    const markerRow = component.compactMarkerRow()
+    const bubble = userDisclosureComponentOf(component)
+    if (bubble === undefined) return undefined
+    const markerRow = bubble.compactMarkerRow()
     if (markerRow !== undefined) return { row: markerRow, action: 'expand', target }
-    if (!component.showsCollapseControl()) return undefined
+    if (this.fullscreen === undefined) return undefined
+    if (!bubble.showsCollapseControl()) return undefined
     return { row: rendered.length + (truncatedMarker ? 1 : 0), action: 'collapse', target }
   }
 

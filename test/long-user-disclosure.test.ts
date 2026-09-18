@@ -947,15 +947,21 @@ test('fullscreen Focus: the tail control is click-only (Ctrl+O owns the Thought 
   app.stop()
 })
 
-test('regular: the expanded tail advertises the Ctrl+O master (never a mouse click)', async () => {
+test('regular: expanded long user does not inject collapse chrome into scrollback', async () => {
   const { vt, app } = startApp()
   app.setTranscript([user(lines(11)), { kind: 'assistant', turn: 0, text: 'done' }])
   vt.sendInput('\x0f')
   const rows = await viewRows(vt)
-  const footerY = collapseFooterRows(rows)
-  assert.equal(footerY.length, 1, `regular expanded needs the keyboard hint:\n${rows.join('\n')}`)
-  assert.ok(rows[footerY[0]!]!.includes('ctrl+o'), 'the regular tail names the effective key')
-  assert.ok(!rows[footerY[0]!]!.includes('click'), 'regular has no mouse disclosure')
+  assert.ok(rows.some(row => row.includes('line5')), 'the prompt is expanded')
+  // Regular draws into the terminal main screen: a visible label would be
+  // copied by the terminal's native selection, so no tail control is painted.
+  // Ctrl+O remains the regular collapse owner.
+  assert.equal(collapseFooterRows(rows).length, 0, `regular must not paint a copyable collapse label:\n${rows.join('\n')}`)
+  assert.ok(!rows.join('\n').includes('▴ Collapse'))
+
+  vt.sendInput('\x0f')
+  const collapsed = await viewRows(vt)
+  assert.equal(compactMarkerCount(collapsed), 1, 'Ctrl+O still collapses the regular prompt')
   app.stop()
 })
 
