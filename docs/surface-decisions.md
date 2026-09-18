@@ -959,7 +959,11 @@ the terminal's native selection — and regular has no mouse disclosure anyway, 
 its only job would be a keyboard hint not worth polluting scrollback copy. In
 fullscreen the tail row is presentation chrome: the fork's copy-source seam
 (X057) copies it as the blank separator it replaced, while paint, search,
-word/line selection and the mouse hit map keep reading the rendered line.
+word/line selection and the mouse hit map keep reading the rendered line. The
+excluded rows are derived at the PAINT boundary (`copyBlankRows` on the
+last-painted snapshot), so the copy filter shares the same frame epoch as the
+scroll content the user actually saw — a rebuild that has not repainted yet can
+never leak the chrome or blank the wrong row.
 
 Ctrl+O keeps its existing ownership: in regular/fullscreen-non-Focus it turns
 the recent-turn master off and clears the true long-user overrides when either
