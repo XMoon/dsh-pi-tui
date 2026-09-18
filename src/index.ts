@@ -2552,8 +2552,10 @@ export function apply(ctx: Context, config: Config): void {
 /** Extract the live in-process agent from a transition next value: the
  * Direct SessionHandle carries it via direct.agent; an AgentHandle IS the
  * agent handle. A Remote handle carries no Direct agent: it carries exactly one
- * Client generation reference (`SessionHandle.client`), released through
- * `clientOwnerOf()` — M2+. */
+ * Client generation reference (`SessionHandle.client`), which a composing
+ * Remote runner WILL release through `clientOwnerOf()`. This Direct runner does
+ * not take that owner over yet — the Remote caller-side handoff is deferred to
+ * Remote production composition (M2+/M3). */
 // transition agent/handle extraction lives in runtime/session-lifecycle-port.ts
 // (ownerHandleOf / directAgentOf) so the runner AND the contract tests share
 // the exact extraction the transition commit uses.

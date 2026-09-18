@@ -109,8 +109,9 @@ export interface SessionHandle {
     readonly agent: unknown
     readonly ownerHandle: unknown
   }
-  /** Remote-only ownership escape. The runner releases exactly this Client
-   * generation on retirement; a Direct backend leaves it undefined. */
+  /** Remote-only ownership escape. A composing Remote caller must release
+   * exactly this Client generation on retirement; the Direct runner does not
+   * take it over, and a Direct backend leaves it undefined. */
   readonly client?: ClientSessionOwner
 }
 
@@ -252,8 +253,10 @@ export function directAgentOf(next: unknown): unknown {
 }
 
 /** Extract the Remote Client generation owner from a lifecycle result. A
- * Direct handle yields undefined. The runner must release it exactly once on
- * retirement — including when a superseded transition discards the handle. */
+ * Direct handle yields undefined. A composing Remote caller must release it
+ * exactly once on retirement — including when a superseded transition discards
+ * the handle. The Direct runner does not consume it yet (Remote remains
+ * non-composed). */
 export function clientOwnerOf(next: unknown): ClientSessionOwner | undefined {
   const handle = next as { client?: ClientSessionOwner }
   return handle.client
