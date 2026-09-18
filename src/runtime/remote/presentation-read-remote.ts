@@ -19,6 +19,7 @@ import type {
   RemoteConnectionGeneration,
   RemoteConnectionGenerationSource,
 } from './session-reader-remote.ts'
+import { pinExistingGeneration, type RemoteReferenceSessionsSource } from './session-reference.ts'
 
 /** Structural durable entry exposed by the official Client event source. */
 export interface RemotePresentationDurableEntry {
@@ -69,10 +70,8 @@ export interface RemotePresentationBinding {
   }
 }
 
-/** Structural subset of official `ClientSessions`. */
-export interface RemotePresentationSessionsSource {
-  binding(sessionId: string): RemotePresentationBinding | undefined
-}
+/** Structural subset of official `ClientSessions` (borrow + reference pin). */
+export interface RemotePresentationSessionsSource extends RemoteReferenceSessionsSource<RemotePresentationBinding> {}
 
 function generationMatches(
   generation: RemoteConnectionGenerationSource,
@@ -209,22 +208,35 @@ export class RemotePresentationReader implements PresentationReader {
     signal?.throwIfAborted()
     const capturedGeneration = this.generation.getSnapshot()
     if (capturedGeneration === undefined) return undefined
-    const binding = this.sessions.binding(sessionId)
-    if (binding === undefined) return undefined
-    if (!generationMatches(this.generation, capturedGeneration)) return undefined
-
-    const current = snapshotOf(sessionId, binding)
-    if (current.openState !== 'open' || !current.hasMore || current.loadingOlder) return current
-
+    // Borrow first: paging must extend an ALREADY-open window, never cold-open
+    // an arbitrary Session as a side effect.
+    if (this.sessions.binding(sessionId) === undefined) return undefined
+    // Pin that exact generation for the whole paging round-trip so a same-id
+    // release/re-retain cannot swap the binding mid-flight.
+    const pinned = pinExistingGeneration(this.sessions, sessionId)
+    if (pinned === undefined) return undefined
+    const binding = pinned.binding
     try {
-      await binding.session.loadOlder()
-    } catch (error) {
+      if (!generationMatches(this.generation, capturedGeneration)) return undefined
+
+      const current = snapshotOf(sessionId, binding)
+      if (current.openState !== 'open' || !current.hasMore || current.loadingOlder) return current
+
+      try {
+        await binding.session.loadOlder()
+      } catch (error) {
+        signal?.throwIfAborted()
+        if (!generationMatches(this.generation, capturedGeneration)) return undefined
+        throw error
+      }
       signal?.throwIfAborted()
       if (!generationMatches(this.generation, capturedGeneration)) return undefined
-      throw error
+      // `binding()` PRESENCE alone never authorizes paging; the result belongs
+      // to this exact generation only while the id still resolves to it.
+      if (!Object.is(binding, this.sessions.binding(sessionId))) return undefined
+      return snapshotOf(sessionId, binding)
+    } finally {
+      pinned.release()
     }
-    signal?.throwIfAborted()
-    if (!generationMatches(this.generation, capturedGeneration)) return undefined
-    return snapshotOf(sessionId, binding)
   }
 }

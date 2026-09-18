@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The DSH compatibility target moves to `0.1.6-alpha.2`.** Client Session lifetime now uses the official explicit reference ownership (`retain` / `release`), so the runtime peer floor rises to `>=0.1.6-alpha.2`. A Harness still on `0.1.6-alpha.1` gets an actionable startup upgrade notice (and may keep using the published `0.4.7-alpha.1` TUI line).
+- **Pending input now reads the official durable inbox projection.** Queued/steering rows no longer depend on a transient in-session queue snapshot and recover after a reconnect or restart; a writer held by another DSH instance or context now surfaces actionable quit-and-retry guidance instead of an internal diagnostic.
 - **`/fork` and `/rewind` now use the official DSH Host fork semantics.** The Host owns the completed-turn cut, child identity, lineage, workspace, and model/preset composition; Direct and Remote follow the same semantics.
 - **A running `/fork` fixes its cut at fork admission.** It no longer waits for the old turn to finish; if navigation is superseded, the published child remains available from the session list.
 - **Workspace membership is now shared with the Web surface.** The TUI profile mounts the official workspace service, and `/fork` of a session that belongs to a workspace puts the child in that same workspace, where Web lists it.

@@ -10,8 +10,11 @@
  *
  * Open is the official Client semantic `select/open this Session` — not
  * `resume a Host Agent`. The Direct adapter still calls `agents.resume()`
- * internally so the in-process TUI has a live Agent; a Remote adapter maps
- * the same operation to `ClientSessions.open()/binding()`.
+ * internally so the in-process TUI has a live Agent; the Remote adapter maps
+ * the same operation to an explicit official `ClientSessions.retain()` and
+ * hands back a client-owned `SessionHandle`. DSH 0.1.6-alpha.2 retired the
+ * Client's own current-selection slot, so the Remote visible owner lives in
+ * the TUI (and only in this handle), while `binding()` stays borrow-only.
  *
  * Create carries only ordinary semantic intent. Its lifecycle signal is
  * client-local and never serialized. Fork intentionally has no signal: the
@@ -85,10 +88,19 @@ export interface OpenSessionRequest {
   signal?: AbortSignal
 }
 
+/** A Remote-only Client Session generation owner: one official
+ * `SessionReference` held for an exact binding generation. `bindingIdentity`
+ * is an identity token for exact-generation comparison only — never a lookup
+ * key and never a `ready` gate. `release()` must run exactly once. */
+export interface ClientSessionOwner {
+  readonly bindingIdentity: object
+  release(): void
+}
+
 /** The lightweight outcome of a lifecycle operation — the cross-backend
- * session identity. Direct backends additionally carry the ownership escape:
- * the live Agent and real AgentHandle. Remote backends leave `direct`
- * undefined; the client runtime owns the Session there. */
+ * session identity. A backend additionally carries its ownership escape:
+ * Direct the live Agent and real AgentHandle, Remote the exact Client
+ * generation reference. Both are optional and mutually exclusive. */
 export interface SessionHandle {
   readonly session: { readonly id: string }
   /** Direct-only ownership escape. The runner disposes the real owner handle
@@ -97,6 +109,9 @@ export interface SessionHandle {
     readonly agent: unknown
     readonly ownerHandle: unknown
   }
+  /** Remote-only ownership escape. The runner releases exactly this Client
+   * generation on retirement; a Direct backend leaves it undefined. */
+  readonly client?: ClientSessionOwner
 }
 
 /** The session LIFECYCLE domain port. */
@@ -234,4 +249,12 @@ export function ownerHandleOf(next: unknown): unknown {
 export function directAgentOf(next: unknown): unknown {
   const handle = next as { agent?: unknown; direct?: { agent?: unknown } }
   return handle.direct?.agent ?? handle.agent
+}
+
+/** Extract the Remote Client generation owner from a lifecycle result. A
+ * Direct handle yields undefined. The runner must release it exactly once on
+ * retirement — including when a superseded transition discards the handle. */
+export function clientOwnerOf(next: unknown): ClientSessionOwner | undefined {
+  const handle = next as { client?: ClientSessionOwner }
+  return handle.client
 }

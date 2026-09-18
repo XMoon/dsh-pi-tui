@@ -553,7 +553,7 @@ introduced by D1.1/D1.2.
 ## D1.2 status — pinned-master command/skill authority shadow
 
 D1.2 is complete for the experimental live-session authority read shadow. The
-`next` Source Mode pin is `0a15e36e7f82b6ed45af6fa9759f29b40dcd965d` (`0.1.6-alpha.1`).
+`next` Source Mode pin is `ddefc45fbc7f8e46dd73185e68295696d1297887` (`0.1.6-alpha.2`).
 The shadow uses the official Connection and generated Remotes only:
 
 - `commands/list(sessionId)` and `skills/list({ sessionId }, signal)` are mapped
@@ -696,8 +696,9 @@ action)` contract. Ctrl+S remains client-side FIFO choreography over
 `{ kind: 'steer' }` calls, matching the dsh-web queued-placement gesture; no
 TUI-specific batch RPC is needed. The main-surface Alt+Up recall-all extension
 uses `{ kind: 'remove' }` calls and is not presented as Web edit parity. A future
-Remote `PendingInputReader` should normalize the official
-`SessionSnapshot.queue` projection rather than expose transport fields. Remote
+Remote `PendingInputReader` should normalize the official durable inbox
+projection (`session.projections.faceOf('inbox')`) rather than expose transport
+fields. Remote
 title auto-regeneration remains unsupported until its official Client contract
 is available.
 
@@ -845,10 +846,11 @@ correct presentation.
   PROPAGATES rather than being disguised as `indeterminate`; only the explicit
   local pre-dispatch steps (preflight, echo registration, serialization, mention
   canonicalization, identity minting) are caught and mapped to a known refusal.
-- `RemotePendingInputReader` maps the official `SessionSnapshot.queue`
-  (`queued`/`steering`/`context`, occurrence id, optional plain `rpcId`) with
-  the official order preserved, detached/frozen content, and a Connection
-  generation fence. It never reads Direct `nextTurn`/`nextStep` names and never
+- `RemotePendingInputReader` maps the official durable inbox projection
+  (`session.projections.faceOf('inbox')`, whose `next-turn`/`next-step` lists
+  survive a reconnect or restart re-materialization) into
+  `queued`/`steering`/`context` with occurrence id, optional plain `rpcId`,
+  official order, detached/frozen content, and a Connection generation fence. It never reads Direct `nextTurn`/`nextStep` names and never
   derives placement from `running`.
 - `RemoteSubmissionPresentation` is the Remote half of the client-local
   submission-presentation seam (`src/submission-presentation.ts`): production
@@ -1025,10 +1027,12 @@ Session mount.
   of racing any of them; that wait is abort-aware, so a hung Host save can never
   block first creation past shutdown.
 - `RemoteSessionLifecycle` uses official `ClientSessions.create()` for the
-  ordinary create (reconciled list + binding), the generated
-  `session.create({sessionId, cwd, agentPreset})` + Client-state reconciliation
-  for a guaranteed-fresh explicit-preset create (never create-then-select), and
-  `ClientSessions.open()/binding()` for open (no Host resume RPC is invented).
+  ordinary create (reconciled list row, then an explicit `retain`), the
+  generated `session.create({sessionId, cwd, agentPreset})` + public
+  `refresh()` reconciliation + `retain` for a guaranteed-fresh explicit-preset
+  create (never create-then-select), and
+  `ClientSessions.retain()` for open (no Host resume RPC is invented, and no
+  Client-global selection slot is moved).
   `create`/`open` return a first-class two-axis result (ownership + lifecycle
   settlement, distinct from each other): a reconnect during a Host success is
   `created + superseded`, and during a Host refusal is `rejected + superseded` —
@@ -1036,16 +1040,18 @@ Session mount.
   session identity (not the requested one) is authoritative; fork uses the
   official `ClientSessions.fork()` exactly once, and a post-publication create error
   is `published-with-error` carrying the published identity, and no same-id
-  retry happens. The generated-create reconciliation
-  inserts the Client LIST row/binding only; it deliberately does NOT fabricate a
+  retry happens. The generated-create reconciliation reconciles the Client LIST
+  row only, and the Client generation is then acquired by an explicit `retain`;
+  it deliberately does NOT fabricate a
   `projectionValues` hint, because `SessionProjectionHints.asOfSeq` is a durable
   Host sequence the TUI does not own — the preset projection stays authoritative
   from the Host control stream/binding (plan §9.3 requires Client visibility +
   binding, not a synthesized projection). `open` is Client-LOCAL selection: it
-  requires a valid current Client generation AND an addressable Client Session,
-  fails closed otherwise, reports `superseded` when the generation changes
-  during the local open, and never dispatches a Host mutation or an invented
-  resume RPC (v2 §0.5/§0.7.4).
+  requires a valid current Client generation, acquires the Session with an
+  explicit `retain` (an unknown identity fails closed as `unavailable`), releases
+  the new reference when a synchronous subscriber supersedes the navigation, and
+  never dispatches a Host mutation or an invented resume RPC
+  (v2 §0.5/§0.7.4).
 - Presentation closure: the `/model` picker enters a `Selecting…` state and
   dismisses only after the semantic write settles — a rejected/cancelled write
   walks back to the model list so the picker stays usable, a duplicate apply is
@@ -1157,9 +1163,11 @@ nearest-ancestor workspace inheritance with `origin`/`delegationDepth` not
 copied, and a cwd-absent source. The client-boundary gate stays green and
 `packages/pi-tui/**` is unchanged.
 
-**DSH 0.1.6 compatibility note.** `next` now targets the published DSH
-`0.1.6-alpha.1` family in npm mode, and the Source Mode pin moves to
-`0a15e36e7f82b6ed45af6fa9759f29b40dcd965d` (`0.1.6-alpha.1`). This compatibility
+**DSH 0.1.6 compatibility note.** D2.4 was validated against the then-current
+DSH `0.1.6-alpha.1` family in npm mode, with Source Mode pinned to
+`0a15e36e7f82b6ed45af6fa9759f29b40dcd965d`. The current line has since moved to
+the published `0.1.6-alpha.2` family (see the alpha.2 Client lifetime
+adaptation section below). This compatibility
 stage now converges Host-owned fork on the Semantic Port. Direct keeps the
 official mapping private; Remote calls `ClientSessions.fork()` and neither
 adapter exposes a seed or child identity. 0.1.6 states
@@ -1169,6 +1177,38 @@ it do not enter the child seed — and D2.4 takes the official `session.fork` co
 than serializing TUI raw seed payloads into a Remote contract. Plugin-owned durable events such as `image/offload`
 inherit by the official cut/prefix; the TUI keeps no event-type inheritance
 whitelist. This note records the completed D2.4 convergence.
+
+## DSH 0.1.6-alpha.2 Client lifetime adaptation (D2 COMPLETE)
+
+DSH 0.1.6-alpha.2 changes Client Session lifetime to explicit `SessionReference`
+ownership. D2 semantics remain complete; this adaptation changes only the Client
+adapter/lifetime mapping and adds no migration milestone (no D2.5).
+
+- `retain()` owns one exact Client generation and starts its initial history
+  open; `SessionReference` is the ownership token. `binding()` is borrow-only and
+  no longer an acquisition API, and `create()`/`fork()` publish a catalogued
+  identity without guaranteeing a binding.
+- The TUI declares its own reference sources (`tuiMainView` for the visible main
+  surface, `tuiOperation` for one bounded operation pinning an existing
+  generation) through the official `SessionReferenceSourceMap`, so it never
+  impersonates the official Web view.
+- Navigation commits the new owner before the initial history open settles:
+  `retain new -> install new owner -> release old`. `ready` is awaited only by an
+  operation that genuinely must wait for that open (never by create/open).
+- Host publication != Client view retention. `fork()` stays publication-only, so
+  a superseded fork leaves a real, catalogued child that the TUI must not select;
+  adoption happens on the navigation path through `open()`, which is what
+  acquires the Client reference.
+- Session identity is not a lifetime: the same `sessionId` retained after a full
+  release is a NEW binding generation on the SAME connection. Every long async
+  operation (writer, paging, model selection) therefore fences the exact binding
+  generation, not merely its presence.
+- Pending durable input is read from the official durable inbox projection
+  (`session.projections.faceOf('inbox')`); the alpha.1 `SessionSnapshot.queue`
+  no longer exists.
+- `session/writer-held` (details `{ sessionId }`) is a proven pre-commit refusal:
+  it settles `rejected` with actionable holder-recovery guidance, preserved
+  details, a preserved draft, and no retry, takeover, or forced resume.
 
 The D1 closure ledger is:
 
@@ -1215,13 +1255,15 @@ therefore does not guess or prefetch full history.
 
 ## Startup constraint
 
-`src/startup.ts` parses flags and gives a friendly error for Harness versions
-below the 0.4 floor. Experimental Remote dependencies must never enter its
-static import graph — load the selected backend via dynamic import in a
-`runtime/backend-loader` module. The 0.4 Direct backend targets DSH
-`>=0.1.2-alpha.4` (the alpha.2/alpha.3 baseline falls back to the previous
-published 0.4 line, `0.4.0-alpha.1`); it has no old/new runtime fallback or
-capability-detection branch. Future versions are not rejected without a
+`src/startup.ts` parses flags and prints the advisory compatibility notice for
+Harness versions below the current floor. Experimental Remote dependencies must
+never enter its static import graph — load the selected backend via dynamic
+import in a `runtime/backend-loader` module. The current line requires DSH
+`>=0.1.6-alpha.2`; `HARNESS_COMPAT` maps every older official tag to its
+historically compatible TUI line (the `0.1.6-alpha.1` runtime falls back to the
+published `0.4.7-alpha.1` bundle, the `0.1.5-rc.1`/`rc.2` family to `0.4.6`) and
+supplies the exact npm upgrade command. There is no old/new runtime
+capability-detection branch, and future versions are not rejected without a
 confirmed break.
 
 ## How to update this file

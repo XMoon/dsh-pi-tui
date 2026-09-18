@@ -75,6 +75,9 @@ interface ModelHarness {
   setCatalogHook(hook: () => void | Promise<void>): void
   /** Queue distinct per-call catalog results (consumed in order). */
   queueCatalogResults(...results: Array<{ ok: true; value: typeof DIRECTORY } | { ok: false; error: unknown }>): void
+  /** Model a same-id release + re-retain: the next borrow yields a NEW binding
+   * generation on the SAME connection. */
+  replaceBinding(sessionId: string): void
 }
 
 function modelHarness(): ModelHarness {
@@ -110,17 +113,26 @@ function modelHarness(): ModelHarness {
       return result
     },
   }
+  // One STABLE binding generation per id, exactly like the official
+  // `ClientSessions` scope record: the exact-generation fence compares
+  // identity, so a per-call object would make every write look superseded.
+  const bindings = new Map<string, RemoteModelBinding>()
   const sessions: RemoteModelSessionsSource = {
     binding: (sessionId): RemoteModelBinding | undefined => {
       calls.bindings.push(sessionId)
       if (!bound.has(sessionId)) return undefined
-      return {
-        session: {
-          projections: {
-            faceOf: () => ({ getSnapshot: () => projection }),
+      let binding = bindings.get(sessionId)
+      if (binding === undefined) {
+        binding = {
+          session: {
+            projections: {
+              faceOf: () => ({ getSnapshot: () => projection }),
+            },
           },
-        },
+        }
+        bindings.set(sessionId, binding)
       }
+      return binding
     },
   }
   const generation = generationHarness()
@@ -136,6 +148,7 @@ function modelHarness(): ModelHarness {
     setSelectionGate: (gate) => { selectionGate = gate },
     setSelectionThrow: (error) => { selectionThrow = error },
     queueSelectionResults: (...results) => { selectionQueue.push(...results) },
+    replaceBinding: (sessionId) => { bindings.delete(sessionId) },
     setCatalogHook: (hook) => { catalogHook = hook },
     queueCatalogResults: (...results) => { catalogQueue.push(...results) },
   }
@@ -476,4 +489,52 @@ test('copySelection rejects empty provider/model and a present non-string effort
   harness.setSelectionResult({ ok: true, value: { selected: { provider: 'p', model: 'm1', reasoningEffort: 123 } } } as never)
   const badEffort = await harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'wanted' })
   assert.equal(badEffort.outcome.kind, 'indeterminate', 'a non-string effort must not be silently dropped into a commit')
+
+  // `null` is a PRESENT value, not an absent one: treating it as "no effort"
+  // would fabricate a committed selection from a malformed Host success.
+  harness.setSelectionResult({ ok: true, value: { selected: { provider: 'p', model: 'm1', reasoningEffort: null } } } as never)
+  const nullEffort = await harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'wanted' })
+  assert.equal(nullEffort.outcome.kind, 'indeterminate', 'a present null effort is unusable, never equivalent to absent')
+
+  harness.setSelectionResult({ ok: true, value: { selected: { provider: 'p', model: 'm1', reasoningEffort: '' } } } as never)
+  const emptyEffort = await harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'wanted' })
+  assert.equal(emptyEffort.outcome.kind, 'indeterminate', 'a present empty effort is unusable')
+})
+
+test('same connection, same id, replaced binding generation: the older select never owns the surface', async () => {
+  const harness = modelHarness()
+  let releaseGate!: () => void
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve })
+  harness.setSelectionGate(() => gate)
+  const pending = harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'm1' })
+  await Promise.resolve()
+  // The id is released and re-retained while the Host call is in flight: a NEW
+  // Client binding generation exists on the SAME connection.
+  harness.replaceBinding('session-a')
+  harness.setProjection({ lastUsed: null, next: { provider: 'p', model: 'm2' } })
+  releaseGate()
+  const result = await pending
+  // The Host settlement is real, but the replaced generation must not paint.
+  assert.equal(result.outcome.kind, 'committed', 'a Host commit stays a real commit')
+  assert.equal(result.ownership, 'superseded', 'binding PRESENCE must not authorize painting a replaced generation')
+})
+
+test('session/writer-held is a proven pre-commit model rejection with actionable guidance', async () => {
+  const harness = modelHarness()
+  harness.setSelectionResult({
+    ok: false,
+    error: { code: 'session/writer-held', message: 'internal writer diagnostic', details: { sessionId: 'session-a' } },
+  })
+  const result = await harness.catalog.selectSessionModel('session-a', { provider: 'p', model: 'wanted' })
+  assert.equal(result.outcome.kind, 'rejected', 'a held writer proves the selection never committed')
+  if (result.outcome.kind !== 'rejected') throw new Error('unreachable')
+  assert.equal(result.outcome.error.code, 'session/writer-held')
+  assert.deepEqual(result.outcome.error.details, { sessionId: 'session-a' })
+  assert.ok(result.outcome.error.message.includes('already in use'),
+    `the held-writer message must be actionable: ${result.outcome.error.message}`)
+  assert.ok(!result.outcome.error.message.includes('another process'),
+    'the guidance must not claim a specific holder process')
+  // The REQUESTED value is never painted as a committed selection.
+  assert.equal(result.outcome.kind === 'rejected' && 'value' in result.outcome, false)
+  assert.equal(harness.calls.selections.length, 1, 'no automatic retry')
 })

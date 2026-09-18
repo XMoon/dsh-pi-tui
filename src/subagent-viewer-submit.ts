@@ -1,7 +1,8 @@
 /**
  * The interactive subagent viewer's HUMAN PROMPT delivery seam — the pure,
  * dependency-injected layer between TuiApp's semantic submit event and the
- * DSH official subagent control API (plan §17; DSH 0.1.6-alpha.1). It owns
+ * DSH official subagent control API (plan §17; introduced in DSH
+ * `0.1.6-alpha.1`). It owns
  * validation, the `ctx.subagents.prompt(...)` call, and error
  * classification; the runner owns the surface effects (draft restore,
  * notices, stale-viewer guards).

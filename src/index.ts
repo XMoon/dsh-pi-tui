@@ -954,7 +954,7 @@ function packageVersion(): string {
 
 /**
  * The welcome card's version line: the installed dsh version plus the
- * bundle's own version (header-badge parity — `dsh-0.1.6-alpha.1 ·
+ * bundle's own version (header-badge parity — `dsh-0.1.6-alpha.2 ·
  * tui-v0.4.7-alpha.1`). Without a resolvable dsh launcher it degrades to
  * the bundle version alone.
  * @returns the combined version string.
@@ -1516,8 +1516,8 @@ export async function composeAgent(
 }
 
 /**
- * The preset a persisted session actually runs, read from DSH 0.1.6-alpha.1's
- * V3 session projection (header initialization plus the latest selection event).
+ * The preset a persisted session actually runs, read from the DSH 0.1.6 V3
+ * session projection (header initialization plus the latest selection event).
  * @param ctx - the runner context.
  * @param sessionId - the persisted session id.
  * @returns the recorded preset id, or undefined to compose the default.
@@ -2551,8 +2551,9 @@ export function apply(ctx: Context, config: Config): void {
 
 /** Extract the live in-process agent from a transition next value: the
  * Direct SessionHandle carries it via direct.agent; an AgentHandle IS the
- * agent handle. Remote handles carry neither (the client runtime owns the
- * session there — M2+). */
+ * agent handle. A Remote handle carries no Direct agent: it carries exactly one
+ * Client generation reference (`SessionHandle.client`), released through
+ * `clientOwnerOf()` — M2+. */
 // transition agent/handle extraction lives in runtime/session-lifecycle-port.ts
 // (ownerHandleOf / directAgentOf) so the runner AND the contract tests share
 // the exact extraction the transition commit uses.
@@ -6566,7 +6567,7 @@ export function apply(ctx: Context, config: Config): void {
       const isSessionless = parsed !== undefined && SESSIONLESS_COMMANDS.has(parsed.name)
       // The submission's effective delivery mode — resolved ONCE, here at
       // the boundary (web ComposerSubmissionPolicy parity, DSH
-      // 0.1.6-alpha.1): an idle agent queues, plain Enter takes the
+      // 0.1.6): an idle agent queues, plain Enter takes the
       // preference, the accelerated chord takes its OPPOSITE, and the
       // explicit queue action always queues. The resolved mode rides into
       // the command plane (dispatchViaSession → withDelivery → the TUI skill

@@ -1,33 +1,40 @@
 /**
  * Experimental Remote implementation of the semantic SessionLifecycle port
- * (D2.3–D2.4).
+ * (D2.3–D2.4, aligned to the DSH 0.1.6-alpha.2 Client contract).
  *
- * Ordinary create maps to the official `ClientSessions.create()` (which
- * guarantees that, on resolution, the created Session is in the Client list
- * and its binding resolves). A guaranteed-fresh TUI create carrying an
- * explicit preset uses the generated official `session.create({sessionId, cwd,
- * agentPreset})` — one Host mutation preserving creation-time atomicity — and
- * reconciles the official Client object layer so `binding(sessionId)`
- * resolves. The `create()` + `agentPresets.select()` emulation is deliberately
- * NOT used.
+ * alpha2 turned Client Session lifetime into explicit reference ownership:
+ * `retain()` owns one exact generation, `binding()` only borrows, `create()`
+ * and `fork()` publish a catalogued identity WITHOUT guaranteeing a binding,
+ * and the Client's own current-selection slot is gone (navigation belongs to
+ * the view owner). Three consequences shape this adapter:
  *
- * Open is the official Client semantic `select/open this Session`:
- * `ClientSessions.open()` / `binding()`. No Host `resume` RPC is invented.
+ * 1. Ordinary create maps to the official `ClientSessions.create()` and then
+ *    RETAINS the published id for the TUI's visible main surface. A locally
+ *    superseded navigation still reports the real publication but takes no
+ *    ownership.
+ * 2. A guaranteed-fresh TUI create carrying an explicit preset uses the
+ *    generated official `session.create({sessionId, cwd, agentPreset})` — one
+ *    Host mutation preserving creation-time atomicity. Because that raw call
+ *    bypasses `ClientSessions.create()`'s local mutation recording, the
+ *    adapter reconciles through the public `sessions.refresh()` before
+ *    retaining. The `create()` + `agentPresets.select()` emulation is
+ *    deliberately NOT used.
+ * 3. Open is the official Client semantic `select/open this Session`, now
+ *    expressed as `sessions.retain(id, { source: 'tuiMainView' })`. `ready` is
+ *    never awaited: official Web navigation commits the new owner before the
+ *    initial history open settles.
  *
  * Host-owned fork maps to the official `ClientSessions.fork()` exactly once;
- * no seed payload or child identity crosses this adapter. A create error is
- * operation-specific: a post-publication error is never reported as
- * "the Session was never created", its published identity is machine-readable,
- * a Connection generation replaced mid-RPC is indeterminate, and no same-id
- * retry happens.
+ * no seed payload or child identity crosses this adapter. Fork resolution means
+ * only "the child is catalogued" — it is NOT a binding and it does NOT retain:
+ * publication is deliberately independent from navigation adoption, so a
+ * superseded fork leaves a real child that the TUI must not select. Adoption
+ * happens on the caller's navigation path through `open()` above.
  *
- * The explicit-preset path's Client-state reconciliation (`handleSessionAdded`)
- * is a SYNCHRONOUS local list insert with no await, and it runs AFTER the Host
- * create has already committed. A caller abort observed during that local
- * insert cannot retroactively un-publish the Session, so the create still
- * settles `created` — reporting it as failed would lie about durable Host
- * state. (The async fences cover everything up to and including the Host
- * round-trip.)
+ * A create error is operation-specific: a post-publication error is never
+ * reported as "the Session was never created", its published identity is
+ * machine-readable, a Connection generation replaced mid-RPC is indeterminate,
+ * and no same-id retry happens.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/session-lifecycle-remote
  */
@@ -40,22 +47,20 @@ import type {
   ForkSessionRequest,
   OpenResult,
   OpenSessionRequest,
+  SessionHandle,
   SessionLifecycle,
 } from '../session-lifecycle-port.ts'
 import type { OperationOwnership } from '../write-outcome.ts'
 import { GATEWAY_PRE_INVOCATION_CODES } from '../write-outcome.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
+import {
+  acquireMainSurfaceReference,
+  type MainSurfaceReference,
+  type RemoteSessionReferenceLike,
+  type TuiSessionReferenceSource,
+} from './session-reference.ts'
 import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
-
-/** One official Client Session list summary synthesized by reconciliation. */
-export interface RemoteLifecycleSessionSummary {
-  readonly sessionId: string
-  readonly updatedAt: number
-  readonly running: boolean
-  readonly blank: boolean
-  readonly cwd?: string
-}
 
 /** The official `ClientSessions` subset the lifecycle needs. The generated
  * RemoteResult is already unwrapped by ClientSessions.create/fork; only the
@@ -63,9 +68,12 @@ export interface RemoteLifecycleSessionSummary {
 export interface RemoteLifecycleSessions {
   create(opts: { workspaceId?: string; cwd?: string; sessionId?: string }): Promise<string>
   fork(opts: { readonly sessionId: string; readonly atSeq?: number }): Promise<string>
-  open(id: string): void
-  binding(id: string): { readonly sessionId?: string } | undefined
-  handleSessionAdded(summary: RemoteLifecycleSessionSummary): void
+  /** Public list reconciliation after a raw generated create. */
+  refresh(): Promise<void>
+  retain(
+    target: string,
+    options: { readonly source: TuiSessionReferenceSource; readonly signal?: AbortSignal },
+  ): RemoteSessionReferenceLike
 }
 
 /** The official generated `session` Remote create face. */
@@ -75,6 +83,12 @@ export interface RemoteLifecycleSessionRemotes {
     readonly cwd?: string
     readonly agentPreset?: string
   }): Promise<RemoteResultLike<{ readonly sessionId: string; readonly agentPreset?: string }>>
+}
+
+/** Read the caller's cancellation state. Kept behind a call so a re-read after
+ * an await is not narrowed away by the pre-dispatch check. */
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
 }
 
 /** Exact `session.create` refusal codes the pinned Host proves happen BEFORE a
@@ -91,10 +105,6 @@ const CREATE_REFUSAL_CODES: ReadonlySet<string> = new Set([
   'session/conflict',
   'session/agent-busy',
 ])
-
-function requestCwd(request: CreateSessionRequest): string | undefined {
-  return request.cwd
-}
 
 /**
  * Read a PROVEN published Session identity off an official create error.
@@ -200,8 +210,8 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
 
   async create(request: CreateSessionRequest): Promise<CreateResult> {
     // A provable PRE-dispatch cancellation is `cancelled` (never a throw).
-    if (request.signal?.aborted === true) return { ownership: 'current', outcome: { kind: 'cancelled' } }
-    const cwd = requestCwd(request)
+    if (isAborted(request.signal)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
+    const cwd = request.cwd
     const captured = this.generation.getSnapshot()
     // A disconnected client must not dispatch through stale/queued state.
     if (captured === undefined) return { ownership: 'current', outcome: { kind: 'cancelled' } }
@@ -209,74 +219,10 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     // abort means this result no longer owns the surface — it does NOT prove
     // the Host did not create the Session.
     const ownership = (): OperationOwnership =>
-      !Object.is(captured, this.generation.getSnapshot()) || request.signal?.aborted === true
+      !Object.is(captured, this.generation.getSnapshot()) || isAborted(request.signal)
         ? 'superseded'
         : 'current'
-    if (request.agentPreset !== undefined) {
-      // Guaranteed-fresh TUI create with an explicit preset: one Host mutation
-      // (`session.create` with the preset) preserves creation-time atomicity.
-      // The official generated Remote THROWS on transport/envelope failure;
-      // normalize it so a post-dispatch failure is `indeterminate` with the
-      // requested id as correlation (v2 §0.7.3), never a rejected Promise.
-      const result = await this.session.create({
-        sessionId: request.sessionId,
-        ...cwd === undefined ? {} : { cwd },
-        agentPreset: request.agentPreset,
-      }).catch((error: unknown) => ({ ok: false as const, error }))
-      if (!result.ok) return { ownership: ownership(), outcome: classifyCreateFailure(result.error, request.sessionId) }
-      const publishedId = result.value.sessionId
-      // The connection envelope parser does not validate the nested payload:
-      // a malformed success must not fake a created Session identity.
-      if (typeof publishedId !== 'string' || publishedId === '') {
-        return {
-          ownership: ownership(),
-          outcome: {
-            kind: 'indeterminate',
-            error: { code: 'session/create-result-invalid', message: 'the Host returned an unusable Session id' },
-            requestedSessionId: request.sessionId,
-          },
-        }
-      }
-      const handle = { session: { id: publishedId } }
-      // Classify FIRST, then ownership: a Host success after a reconnect is
-      // `created + superseded`, never a downgraded indeterminate.
-      if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'created', handle } }
-      // Reconcile the official Client object layer so the Session is visible
-      // and addressable synchronously. A reconciliation failure is
-      // POST-PUBLICATION: it preserves the published identity.
-      try {
-        this.sessions.handleSessionAdded({
-          sessionId: publishedId,
-          updatedAt: Date.now(),
-          running: false,
-          blank: true,
-          ...cwd === undefined ? {} : { cwd },
-        })
-      } catch (error) {
-        return {
-          ownership: 'current',
-          outcome: {
-            kind: 'published-with-error',
-            sessionId: publishedId,
-            error: { code: 'session/reconcile-failed', message: `the created Session could not be reconciled into Client state: ${remoteFailureMessage(error)}` },
-          },
-        }
-      }
-      if (this.sessions.binding(publishedId) === undefined) {
-        return {
-          ownership: 'current',
-          outcome: {
-            kind: 'published-with-error',
-            sessionId: publishedId,
-            error: { code: 'session/created-not-addressable', message: 'the created Session is not addressable in Client state' },
-          },
-        }
-      }
-      // A caller abort observed during the SYNCHRONOUS reconciliation cannot
-      // un-publish the Session, but it does mean this result no longer owns the
-      // surface: recompute ownership so it is `created + superseded`.
-      return { ownership: ownership(), outcome: { kind: 'created', handle } }
-    }
+    if (request.agentPreset !== undefined) return this.createWithPreset(request, cwd, ownership)
     let id: string
     try {
       id = String(await this.sessions.create({
@@ -286,30 +232,141 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     } catch (error) {
       return { ownership: ownership(), outcome: classifyCreateFailure(error, request.sessionId) }
     }
-    return { ownership: ownership(), outcome: { kind: 'created', handle: { session: { id } } } }
+    const handle: SessionHandle = { session: { id } }
+    // The Host success is the authoritative publication. A navigation that was
+    // superseded while the create was in flight must NOT take Client ownership:
+    // the child stays real and catalogued for a later explicit open.
+    if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'created', handle } }
+    return this.ownPublishedSession(id, ownership, request.signal)
+  }
+
+  /**
+   * Guaranteed-fresh TUI create with an explicit preset: one Host mutation
+   * (`session.create` with the preset) preserves creation-time atomicity. The
+   * official generated Remote THROWS on transport/envelope failure; normalize
+   * it so a post-dispatch failure is `indeterminate` with the requested id as
+   * correlation (v2 §0.7.3), never a rejected Promise.
+   */
+  private async createWithPreset(
+    request: CreateSessionRequest,
+    cwd: string | undefined,
+    ownership: () => OperationOwnership,
+  ): Promise<CreateResult> {
+    const result = await this.session.create({
+      sessionId: request.sessionId,
+      ...cwd === undefined ? {} : { cwd },
+      ...request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset },
+    }).catch((error: unknown) => ({ ok: false as const, error }))
+    if (!result.ok) return { ownership: ownership(), outcome: classifyCreateFailure(result.error, request.sessionId) }
+    const publishedId = result.value.sessionId
+    // The connection envelope parser does not validate the nested payload:
+    // a malformed success must not fake a created Session identity.
+    if (typeof publishedId !== 'string' || publishedId === '') {
+      return {
+        ownership: ownership(),
+        outcome: {
+          kind: 'indeterminate',
+          error: { code: 'session/create-result-invalid', message: 'the Host returned an unusable Session id' },
+          requestedSessionId: request.sessionId,
+        },
+      }
+    }
+    const handle: SessionHandle = { session: { id: publishedId } }
+    // Classify FIRST, then ownership: a Host success after a reconnect is
+    // `created + superseded`, never a downgraded indeterminate.
+    if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'created', handle } }
+    // The raw generated create bypasses `ClientSessions.create()`'s local
+    // mutation recording, so the published id is not yet addressable. alpha2
+    // `retain(stringId)` resolves through the resident/list/address tables, and
+    // the `api-session/added` frame is not guaranteed to precede this line:
+    // reconcile deterministically through the public list refresh.
+    try {
+      await this.sessions.refresh()
+    } catch (error) {
+      return {
+        ownership: ownership(),
+        outcome: {
+          kind: 'published-with-error',
+          sessionId: publishedId,
+          error: { code: 'session/reconcile-failed', message: `the created Session could not be reconciled into Client state: ${remoteFailureMessage(error)}` },
+        },
+      }
+    }
+    // The refresh is an await: a superseded navigation must still not retain.
+    if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'created', handle } }
+    return this.ownPublishedSession(publishedId, ownership, request.signal)
+  }
+
+  /**
+   * Take Client generation ownership of a just-published Session.
+   *
+   * A retain failure is POST-PUBLICATION: the identity stays authoritative and
+   * creation must never be retried, so it settles `published-with-error`
+   * carrying the published id rather than pretending nothing was created.
+   *
+   * `retain` publishes reference counts and can synchronously notify a
+   * subscriber that cancels/supersedes the navigation, so ownership is re-read
+   * AFTER acquisition on BOTH paths: a superseded create must release the new
+   * generation instead of handing it to a caller that will discard it (a leak),
+   * and an acquisition refused by an already-aborted signal is `superseded`,
+   * never a fabricated `current`.
+   */
+  private ownPublishedSession(
+    id: string,
+    ownership: () => OperationOwnership,
+    signal: AbortSignal | undefined,
+  ): CreateResult {
+    let owner: MainSurfaceReference
+    try {
+      owner = acquireMainSurfaceReference(this.sessions, id, signal)
+    } catch (error) {
+      return {
+        ownership: ownership(),
+        outcome: {
+          kind: 'published-with-error',
+          sessionId: id,
+          error: { code: 'session/reconcile-failed', message: `the created Session could not be retained in Client state: ${remoteFailureMessage(error)}` },
+        },
+      }
+    }
+    if (ownership() === 'superseded') {
+      owner.release()
+      return { ownership: 'superseded', outcome: { kind: 'created', handle: { session: { id } } } }
+    }
+    return { ownership: 'current', outcome: { kind: 'created', handle: { session: { id }, client: owner } } }
   }
 
   async open(request: OpenSessionRequest): Promise<OpenResult> {
-    if (request.signal?.aborted === true) return { ownership: 'current', outcome: { kind: 'cancelled' } }
+    if (isAborted(request.signal)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
     // v2 §0.5: open is Client-local selection, but it still requires a valid
     // current Client generation; a disconnected Client cannot select.
     const captured = this.generation.getSnapshot()
     if (captured === undefined) {
       return { ownership: 'current', outcome: { kind: 'unavailable', message: `session "${request.sessionId}" cannot be opened: the remote connection is not connected` } }
     }
-    // Fail closed when the id is not an addressable Client Session — before
-    // mutating the Client's current selection.
-    if (this.sessions.binding(request.sessionId) === undefined) {
-      return { ownership: 'current', outcome: { kind: 'unavailable', message: `session "${request.sessionId}" is not available in Client state` } }
+    // alpha2 acquisition IS `retain`: it materializes the exact generation
+    // (and starts its initial history open) without moving any Client-global
+    // selection. An unknown identity throws instead of silently succeeding.
+    let owner: MainSurfaceReference
+    try {
+      owner = acquireMainSurfaceReference(this.sessions, request.sessionId, request.signal)
+    } catch (error) {
+      // A mid-acquisition abort is a client-local cancellation; anything else
+      // is an unavailable identity (never a fabricated Host outcome).
+      if (isAborted(request.signal)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
+      return { ownership: 'current', outcome: { kind: 'unavailable', message: `session "${request.sessionId}" is not available in Client state: ${remoteFailureMessage(error)}` } }
     }
-    this.sessions.open(request.sessionId)
-    if (this.sessions.binding(request.sessionId) === undefined) {
-      return { ownership: 'current', outcome: { kind: 'unavailable', message: `session "${request.sessionId}" could not be opened in Client state` } }
+    // `retain` publishes local reference counts and can synchronously notify
+    // subscribers, so a navigation cancelled from that notification is a real
+    // post-acquisition supersession: never leak the new generation's ownership.
+    if (!Object.is(captured, this.generation.getSnapshot()) || isAborted(request.signal)) {
+      owner.release()
+      return { ownership: 'superseded', outcome: { kind: 'cancelled' } }
     }
-    // The local selection is only this operation's result while the Client
-    // generation that owned it is still current.
-    const ownershipNow: OperationOwnership = Object.is(captured, this.generation.getSnapshot()) ? 'current' : 'superseded'
-    return { ownership: ownershipNow, outcome: { kind: 'opened', handle: { session: { id: request.sessionId } } } }
+    return {
+      ownership: 'current',
+      outcome: { kind: 'opened', handle: { session: { id: request.sessionId }, client: owner } },
+    }
   }
 
   async fork(request: ForkSessionRequest): Promise<ForkResult> {
@@ -348,14 +405,11 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
         outcome: { kind: 'indeterminate', error: { code: 'session/fork-result-invalid', message: 'the Host returned an unusable fork Session id' } },
       }
     }
-    const handle = { session: { id: childId } }
-    // A reconnect after dispatch does not turn a known Host success into an
-    // error; the child is real, but the old Client navigation no longer owns it.
-    if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'forked', handle } }
-    // Official `ClientSessions.fork()` guarantees that a resolved child is
-    // already reconciled into Client list state and synchronously addressable
-    // through `binding()` (it records the mutation before projecting the list).
-    // There is therefore no "forked but not addressable" state to report.
-    return { ownership: 'current', outcome: { kind: 'forked', handle } }
+    // Publication only (D2.4): a resolved child is catalogued, NOT retained and
+    // NOT guaranteed to have a binding. A reconnect after dispatch does not
+    // turn a known Host success into an error; the child is real, but the old
+    // Client navigation no longer owns it. Retention happens when the caller's
+    // navigation adopts the child through `open()`.
+    return { ownership: ownership(), outcome: { kind: 'forked', handle: { session: { id: childId } } } }
   }
 }

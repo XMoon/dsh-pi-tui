@@ -18,10 +18,12 @@
  * - `RemotePresetCatalog` reads the official `agentPresets.list` roster and
  *   commits a blank-Session switch through `agentPresets.select`, while a
  *   started Session settles as `agent-preset/locked`;
- * - `RemoteSessionLifecycle` maps ordinary create to `ClientSessions.create`,
- *   an explicit-preset fresh create to the generated `session.create`, open to
- *   `ClientSessions.open`/`binding`, and fork to one `ClientSessions.fork()`
- *   call with no Host Agent resume.
+ * - `RemoteSessionLifecycle` maps ordinary create to `ClientSessions.create`
+ *   plus one explicit `retain`, an explicit-preset fresh create to the
+ *   generated `session.create` + public `refresh` + `retain`, open to
+ *   `ClientSessions.retain` (never a Client-global selection), and fork to one
+ *   `ClientSessions.fork()` publication with no retain and no Host Agent
+ *   resume. Adoption of a published fork child is the separate `open` step.
  *
  * No external network and no real provider: the only model route is the
  * in-process `SmokeAdapter` registered on the Host LlmRuntime.
@@ -489,12 +491,14 @@ async function main() {
     ))
     await waitFor('the anchor session to be listed', () => sessions.list.getSnapshot().ids.includes(ANCHOR_SESSION_ID))
 
-    // Record every official Client open so the lifecycle mapping is observable.
-    const openCalls = []
-    const realOpen = sessions.open.bind(sessions)
-    sessions.open = (id) => {
-      openCalls.push(String(id))
-      realOpen(id)
+    // Record every official Client reference acquisition so the lifecycle
+    // mapping is observable. alpha2 acquisition IS `retain`; there is no
+    // Client-global selection verb to observe.
+    const retainCalls = []
+    const realRetain = sessions.retain.bind(sessions)
+    sessions.retain = (target, options) => {
+      retainCalls.push({ id: String(target), source: options.source })
+      return realRetain(target, options)
     }
 
     const modelCatalog = new RemoteModelCatalog(client.remote.session, sessions, connection.generation)
@@ -512,19 +516,27 @@ async function main() {
     })
 
     // CREATE (a): ordinary create with no explicit preset routes through the
-    // official ClientSessions.create and is addressable on resolution.
+    // official ClientSessions.create and is then RETAINED for the visible
+    // surface (alpha.2 acquisition is an explicit reference, not a Client-global
+    // selection or a resolution-time binding guarantee).
     {
       const ordinaryResult = await lifecycle.create({ sessionId: ORDINARY_SESSION_ID, cwd: join(workRoot, 'ordinary') })
       assert.equal(ordinaryResult.ownership, 'current')
-      assert.deepEqual(ordinaryResult.outcome, { kind: 'created', handle: { session: { id: ORDINARY_SESSION_ID } } })
-      assert.ok(sessions.binding(ORDINARY_SESSION_ID) !== undefined, 'ordinary create left no Client binding')
+      assert.equal(ordinaryResult.outcome.kind, 'created')
+      assert.equal(ordinaryResult.outcome.handle.session.id, ORDINARY_SESSION_ID)
+      const ordinaryOwner = ordinaryResult.outcome.handle.client
+      assert.ok(ordinaryOwner !== undefined, 'ordinary create must own the Client generation it retained')
+      assert.deepEqual(retainCalls.at(-1), { id: ORDINARY_SESSION_ID, source: 'tuiMainView' })
+      assert.equal(sessions.binding(ORDINARY_SESSION_ID), ordinaryOwner.bindingIdentity,
+        'ordinary create left no live Client binding for its own generation')
       assert.equal(sessions.list.getSnapshot().ids.includes(ORDINARY_SESSION_ID), true)
       assert.ok(host.ctx.sessions.get(SessionId(ORDINARY_SESSION_ID)) !== undefined, 'ordinary create reached no Host Session')
       scenarios.createOrdinary = { status: 'covered', sessionId: ORDINARY_SESSION_ID }
     }
 
     // CREATE (b): a guaranteed-fresh create WITH an explicit preset uses the
-    // generated `session.create` and reconciles Client state.
+    // generated `session.create`, reconciles the public list, and retains the
+    // published identity.
     {
       const freshResult = await lifecycle.create({
         sessionId: FRESH_SESSION_ID,
@@ -532,7 +544,9 @@ async function main() {
         agentPreset: PRESET_B,
       })
       assert.equal(freshResult.ownership, 'current')
-      assert.deepEqual(freshResult.outcome, { kind: 'created', handle: { session: { id: FRESH_SESSION_ID } } })
+      assert.equal(freshResult.outcome.kind, 'created')
+      assert.equal(freshResult.outcome.handle.session.id, FRESH_SESSION_ID)
+      assert.deepEqual(retainCalls.at(-1), { id: FRESH_SESSION_ID, source: 'tuiMainView' })
       assert.ok(sessions.binding(FRESH_SESSION_ID) !== undefined, 'explicit-preset create left no Client binding')
       const hostSession = host.ctx.sessions.get(SessionId(FRESH_SESSION_ID))
       assert.ok(hostSession !== undefined, 'explicit-preset create reached no Host Session')
@@ -548,7 +562,8 @@ async function main() {
     // MODEL: the official directory read, the normalized commit, and the
     // durable `modelSelection` projection for the same Session.
     {
-      await sessions.open(ORDINARY_SESSION_ID)
+      // The ordinary create already retained this Session for the visible
+      // owner; alpha2 has no Client-global selection verb to call here.
       const binding = sessions.binding(ORDINARY_SESSION_ID)
       assert.ok(binding !== undefined, 'the ordinary Session binding disappeared before the model scenario')
       await waitForProjection(binding, 'modelSelection', value => value !== undefined, 'the modelSelection projection baseline')
@@ -597,7 +612,6 @@ async function main() {
         assert.equal(row.trust, 'system')
       }
 
-      await sessions.open(BLANK_SESSION_ID)
       const binding = sessions.binding(BLANK_SESSION_ID)
       assert.ok(binding !== undefined, 'the blank Session binding disappeared before the preset scenario')
       const initial = await waitForProjection(binding, 'agentPreset', value => value !== undefined, 'the agentPreset projection baseline')
@@ -645,7 +659,19 @@ async function main() {
         assert.equal(forkResult.outcome.kind, 'forked', `latest fork did not settle as published: ${JSON.stringify(forkResult)}`)
         const childId = forkResult.outcome.kind === 'forked' ? forkResult.outcome.handle.session.id : undefined
         assert.ok(childId !== undefined && childId !== ANCHOR_SESSION_ID, 'Host fork did not generate a distinct child id')
-        assert.ok(sessions.binding(childId) !== undefined, 'fork child is not addressable in Client state')
+        assert.ok(sessions.list.getSnapshot().ids.includes(childId),
+          'the fork child is not catalogued in Client state')
+        assert.equal(sessions.binding(childId), undefined,
+          'fork publication must not retain (or materialize) the child generation')
+        // D2.4 adoption: the navigation owner opens the published child, which
+        // is the only step that acquires the Client reference.
+        const adopted = await lifecycle.open({ sessionId: childId })
+        assert.equal(adopted.ownership, 'current')
+        assert.equal(adopted.outcome.kind, 'opened', `fork adoption settled as ${adopted.outcome.kind} instead of opened`)
+        assert.ok(adopted.outcome.kind === 'opened' && adopted.outcome.handle.client !== undefined,
+          'fork adoption must return a client-owned handle')
+        assert.deepEqual(retainCalls.at(-1), { id: childId, source: 'tuiMainView' })
+        assert.ok(sessions.binding(childId) !== undefined, 'fork adoption did not retain the child')
         const child = host.ctx.sessions.get(SessionId(childId))
         assert.ok(child !== undefined, 'fork child did not reach the Host Session registry')
         assert.equal(child.header.parentSession, ANCHOR_SESSION_ID, 'Host fork did not preserve the parent lineage')
@@ -1099,22 +1125,28 @@ async function main() {
     // and no Host resume is issued.
     {
       const resumeBefore = host.resumeCalls.length
-      const opensBefore = openCalls.length
+      const retainsBefore = retainCalls.length
       const openResult = await lifecycle.open({ sessionId: FRESH_SESSION_ID })
       assert.equal(openResult.ownership, 'current')
       assert.equal(openResult.outcome.kind, 'opened')
       const handle = openResult.outcome.kind === 'opened' ? openResult.outcome.handle : undefined
-      assert.deepEqual(handle, { session: { id: FRESH_SESSION_ID } })
-      assert.equal(openCalls.length, opensBefore + 1, 'open did not route through ClientSessions.open')
-      assert.equal(openCalls.at(-1), FRESH_SESSION_ID)
-      await waitFor('the Client current selection to become the opened Session', () => (
-        sessions.list.getSnapshot().current === FRESH_SESSION_ID ? true : undefined
-      ))
+      assert.equal(handle?.session.id, FRESH_SESSION_ID)
+      assert.ok(handle?.client !== undefined, 'open must return the retained Client generation owner')
+      assert.equal(retainCalls.length, retainsBefore + 1, 'open did not route through ClientSessions.retain')
+      assert.deepEqual(retainCalls.at(-1), { id: FRESH_SESSION_ID, source: 'tuiMainView' })
+      // alpha2 has no Client-global current-selection slot: the TUI's own
+      // reference IS the visible ownership, observable through retainInfo.
+      assert.ok((sessions.retainInfo(FRESH_SESSION_ID).getSnapshot().retainedBy.tuiMainView ?? 0) >= 1,
+        'the opened Session is not retained by the TUI view source')
       const binding = sessions.binding(FRESH_SESSION_ID)
       assert.ok(binding !== undefined, 'the opened Session lost its binding')
       await waitForProjection(binding, 'agentPreset', value => value === PRESET_B, 'the opened Session agentPreset projection')
       assert.equal(host.resumeCalls.length, resumeBefore, 'open issued a Host Agent resume')
-      scenarios.open = { status: 'covered', sessionId: FRESH_SESSION_ID, current: String(sessions.list.getSnapshot().current) }
+      scenarios.open = {
+        status: 'covered',
+        sessionId: FRESH_SESSION_ID,
+        retainedBy: sessions.retainInfo(FRESH_SESSION_ID).getSnapshot().retainedBy,
+      }
     }
 
     assert.equal(host.resumeCalls.length, 0, `no Host Agent resume may occur in this smoke, saw ${JSON.stringify(host.resumeCalls)}`)

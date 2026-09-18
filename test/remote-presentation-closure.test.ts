@@ -18,7 +18,6 @@ import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { RemotePendingInputReader } from '../src/runtime/remote/pending-input-reader-remote.ts'
-import type { RemoteQueuedOccurrence } from '../src/runtime/remote/pending-input-reader-remote.ts'
 import { RemoteSubmissionPresentation } from '../src/submission-presentation.ts'
 import type { RemotePendingSubmission } from '../src/submission-presentation.ts'
 import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
@@ -59,15 +58,33 @@ function generationHarness(): { source: RemoteConnectionGenerationSource; set(va
   }
 }
 
+/** One official durable inbox message shape (id + content + source). */
+interface OfficialInboxMessage {
+  readonly id: string
+  readonly content: readonly unknown[]
+  readonly source: { readonly kind?: string; readonly rpcId?: string }
+}
+
+/** The official alpha2 durable inbox projection value. */
+interface OfficialInbox {
+  readonly 'next-turn': readonly OfficialInboxMessage[]
+  readonly 'next-step': readonly OfficialInboxMessage[]
+}
+
+const EMPTY_INBOX: OfficialInbox = { 'next-turn': [], 'next-step': [] }
+
 /** The official Session read facts both D2.2 Remote adapters consume. */
 interface OfficialSnapshot {
-  readonly queue: readonly RemoteQueuedOccurrence[]
+  readonly inbox: OfficialInbox
   readonly running: boolean
   readonly pendingSubmissions: readonly RemotePendingSubmission[]
 }
 
 interface OfficialSessionFace {
-  getSnapshot(): OfficialSnapshot
+  getSnapshot(): { readonly running: boolean; readonly pendingSubmissions: readonly RemotePendingSubmission[] }
+  readonly projections: {
+    faceOf(key: string): { getSnapshot(): unknown }
+  }
 }
 
 /** The ClientSessions face that structurally satisfies BOTH adapters. */
@@ -80,7 +97,12 @@ function officialSession(initial: OfficialSnapshot): {
   set(next: Partial<OfficialSnapshot>): void
 } {
   let state = initial
-  const face: OfficialSessionFace = { getSnapshot: () => state }
+  const face: OfficialSessionFace = {
+    getSnapshot: () => ({ running: state.running, pendingSubmissions: state.pendingSubmissions }),
+    projections: {
+      faceOf: key => ({ getSnapshot: () => key === 'inbox' ? state.inbox : undefined }),
+    },
+  }
   return {
     sessions: { binding: id => id === 'session-a' ? { session: face } : undefined },
     set(next) { state = { ...state, ...next } },
@@ -116,7 +138,7 @@ test('a Remote local queued echo renders in the real queue pane marked sending',
   await vt.waitForRender()
   const generation = generationHarness()
   const host = officialSession({
-    queue: [],
+    inbox: EMPTY_INBOX,
     running: true,
     pendingSubmissions: [
       { requestId: 'req-1', placement: 'queued', time: 1, text: 'REMOTE-QUEUED-LOCAL', attachments: [] },
@@ -134,9 +156,10 @@ test('a matching Host queue rpcId retires the Remote local duplicate in the rend
   await vt.waitForRender()
   const generation = generationHarness()
   const host = officialSession({
-    queue: [
-      { id: 'occ-1', placement: 'queued', rpcId: 'req-1', content: [{ type: 'text', text: 'REMOTE-QUEUED-LOCAL' }] },
-    ],
+    inbox: {
+      'next-turn': [{ id: 'occ-1', content: [{ type: 'text', text: 'REMOTE-QUEUED-LOCAL' }], source: { kind: 'user', rpcId: 'req-1' } }],
+      'next-step': [],
+    },
     running: true,
     pendingSubmissions: [
       { requestId: 'req-1', placement: 'queued', time: 1, text: 'REMOTE-QUEUED-LOCAL', attachments: [] },
@@ -154,7 +177,7 @@ test('a Remote local steering echo renders in the steering lane and never in the
   await vt.waitForRender()
   const generation = generationHarness()
   const host = officialSession({
-    queue: [],
+    inbox: EMPTY_INBOX,
     running: true,
     pendingSubmissions: [
       { requestId: 'req-2', placement: 'steering', time: 1, text: 'REMOTE-STEER-LOCAL', attachments: [] },
@@ -175,7 +198,7 @@ test('a Remote local transcript echo renders in the tail lane marked sending', a
   await vt.waitForRender()
   const generation = generationHarness()
   const host = officialSession({
-    queue: [],
+    inbox: EMPTY_INBOX,
     running: false,
     pendingSubmissions: [
       { requestId: 'req-3', placement: 'transcript', time: 1, text: 'REMOTE-TRANSCRIPT-LOCAL', attachments: [] },
@@ -195,7 +218,7 @@ test('a replaced Connection generation clears the stale Remote presentation from
   await vt.waitForRender()
   const generation = generationHarness()
   const host = officialSession({
-    queue: [],
+    inbox: EMPTY_INBOX,
     running: true,
     pendingSubmissions: [
       { requestId: 'req-1', placement: 'queued', time: 1, text: 'REMOTE-STALE-QUEUED', attachments: [] },
@@ -227,14 +250,14 @@ test('a rendered SESSION switch clears the previous session Remote presentation'
   await vt.waitForRender()
   const generation = generationHarness()
   const a = officialSession({
-    queue: [],
+    inbox: EMPTY_INBOX,
     running: true,
     pendingSubmissions: [
       { requestId: 'req-a', placement: 'queued', time: 1, text: 'SESSION-A-QUEUED', attachments: [] },
       { requestId: 'req-a2', placement: 'steering', time: 2, text: 'SESSION-A-STEER', attachments: [] },
     ],
   })
-  const b = officialSession({ queue: [], running: false, pendingSubmissions: [] })
+  const b = officialSession({ inbox: EMPTY_INBOX, running: false, pendingSubmissions: [] })
   const faces: Record<string, OfficialSessionFace> = {
     'session-a': a.sessions.binding('session-a')!.session,
     'session-b': b.sessions.binding('session-a')!.session,
@@ -258,7 +281,7 @@ test('a Remote image-only local queued echo renders a non-empty attachment marke
   await vt.waitForRender()
   const generation = generationHarness()
   const host = officialSession({
-    queue: [],
+    inbox: EMPTY_INBOX,
     running: true,
     pendingSubmissions: [
       {
@@ -282,7 +305,7 @@ test('a Remote image-only local steering echo renders in the lane, never the que
   await vt.waitForRender()
   const generation = generationHarness()
   const host = officialSession({
-    queue: [],
+    inbox: EMPTY_INBOX,
     running: true,
     pendingSubmissions: [
       {
@@ -308,9 +331,10 @@ test('the same authoritative occurrence is presented once even for two same-text
   await vt.waitForRender()
   const generation = generationHarness()
   const host = officialSession({
-    queue: [
-      { id: 'occ-1', placement: 'queued', rpcId: 'req-1', content: [{ type: 'text', text: 'SAME-TEXT' }] },
-    ],
+    inbox: {
+      'next-turn': [{ id: 'occ-1', content: [{ type: 'text', text: 'SAME-TEXT' }], source: { kind: 'user', rpcId: 'req-1' } }],
+      'next-step': [],
+    },
     running: true,
     pendingSubmissions: [
       { requestId: 'req-1', placement: 'queued', time: 1, text: 'SAME-TEXT', attachments: [] },
