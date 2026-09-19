@@ -7377,7 +7377,9 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         if (reason === 'jump-latest') {
-          resetSearchState()
+          // Clear the presentation in memory; the latest-window repaint below
+          // commits both changes in the single required message-tree rebuild.
+          resetSearchState({ rebuild: false })
           const controller = activeWindow()
           controller.latest()
           repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
