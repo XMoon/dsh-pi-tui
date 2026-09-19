@@ -255,6 +255,9 @@ jobs:
       - name: Typecheck vendored pi-tui
         run: pnpm typecheck:fork
 
+      - name: Typecheck performance benchmark
+        run: pnpm typecheck:bench
+
       - name: Test vendored pi-tui
         run: pnpm test:fork
 

@@ -5,8 +5,8 @@
 > Node v26.7.0 · headless xterm at 24 rows · `BENCH_FAST=1` iteration counts.
 >
 > Re-run: `pnpm bench` (full sweep), `pnpm bench:fast` (short sweep), or
-> `pnpm bench:smoke` (runtime-maintenance gate). The benchmark is NOT part of
-> the test suite — it is a manual, non-default tool by design.
+> `pnpm bench:smoke` (reduced smoke workload). Full timing sweeps are manual
+> and non-default; the reduced smoke workload is part of tooling CI.
 
 ## Transcript invalidation baseline (2026-09-19)
 

@@ -2,7 +2,8 @@
 /**
  * @xmoon76/dsh-pi-tui/scripts/bench — non-default performance benchmark
  * (run explicitly: `pnpm bench`; direct equivalent:
- * `node --expose-gc --import tsx/esm scripts/bench.mts`; never part of the test suite).
+ * `node --expose-gc --import tsx/esm scripts/bench.mts`). Full timing sweeps are
+ * manual/non-default; `pnpm bench:smoke` is the reduced workload in tooling CI.
  *
  * Builds synthetic session logs (markdown, diffs, consecutive reads, tool
  * calls, CJK/emoji) and measures, across widths and themes:
@@ -519,12 +520,11 @@ function projectRenderFixture(app: TuiApp, fixture: RenderFixture): void {
     maxTurns: controller.windowTurns,
     ...(endTurn === undefined ? {} : { endTurn }),
   })
-  const snapshot = controller.snapshot()
   app.setTranscript(projection.messages, folder.turnActivities(), {
     ...controller.state(),
-    firstTurn: snapshot.firstTurn,
-    lastTurn: snapshot.lastTurn,
-    hasNewer: snapshot.hasNewer,
+    firstTurn: projection.firstTurn,
+    lastTurn: projection.lastTurn,
+    hasNewer: projection.hasNewer,
   }, [])
 }
 
@@ -670,10 +670,13 @@ async function main(): Promise<void> {
   }
   {
     const turns = SMOKE ? 3 : 20
-    const events = buildTextHeavyEvents(turns, SMOKE ? 100 : 18_000, SMOKE ? 100 : 17_000)
+    const assistantChars = SMOKE ? 100 : 18_000
+    const resultChars = SMOKE ? 100 : 17_000
+    const events = buildTextHeavyEvents(turns, assistantChars, resultChars)
     const metrics = measureLongSession(events)
     const memory = process.memoryUsage()
-    row(`700k-like ${events.length} events (${turns} turns, ${turns * (18_000 + 17_000)} chars)`, `${metrics.messages} messages`)
+    const label = SMOKE ? 'text-heavy' : '700k-like'
+    row(`${label} ${events.length} events (${turns} turns, ${turns * (assistantChars + resultChars)} chars)`, `${metrics.messages} messages`)
     row('  TranscriptFolder.hydrate', fmtMs(metrics.transcriptHydrate))
     row('  StatsFolder.hydrate', fmtMs(metrics.statsHydrate))
     row(`  StatsFolder.snapshot ×${FAST ? 20 : 50}`, fmtDuration(metrics.snapshot))
