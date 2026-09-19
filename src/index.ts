@@ -1095,6 +1095,7 @@ function repaint(
   windowController: TranscriptWindowController,
   streamingToolPreviews: readonly StreamingToolPreview[],
   searchPresentation?: () => TranscriptSearchPresentation | undefined,
+  onProjected?: () => void,
 ): TranscriptWindow {
   windowController.setTurns(folder.groupedTurns())
   const endTurn = windowController.endTurn()
@@ -1102,6 +1103,7 @@ function repaint(
     maxTurns: windowController.windowTurns,
     ...(endTurn === undefined ? {} : { endTurn }),
   })
+  onProjected?.()
   app.setTranscript(projection.messages, folder.turnActivities(), {
     ...windowController.state(),
     firstTurn: projection.firstTurn,
@@ -4558,8 +4560,10 @@ export function apply(ctx: Context, config: Config): void {
         && snapshot.firstTurn !== undefined && snapshot.lastTurn !== undefined
         && match.turn >= snapshot.firstTurn && match.turn <= snapshot.lastTurn
       if (sameWindow) {
-        app.setTranscriptSearchPresentation(navigationSearchPresentation(match))
+        const presentation = navigationSearchPresentation(match)
         searchProfiler.stage('search.presentation-commit')
+        app.setTranscriptSearchPresentation(presentation)
+        searchProfiler.stage('search.rebuild')
         app.scrollToSearchTarget()
         searchProfiler.stage('search.scroll')
         app.setSearchResult(searchCurrent + 1, searchMatches.length)
@@ -4572,9 +4576,20 @@ export function apply(ctx: Context, config: Config): void {
       // objects are in place before the single rebuild), and only THEN anchor
       // the exact rendered occurrence.
       controller.anchorAt(match.turn)
-      repaint(app, folder, controller, activeStreamingToolPreviews(), () => navigationSearchPresentation(match))
+      repaint(
+        app,
+        folder,
+        controller,
+        activeStreamingToolPreviews(),
+        () => {
+          const presentation = navigationSearchPresentation(match)
+          searchProfiler.stage('search.presentation-commit')
+          return presentation
+        },
+        () => searchProfiler.stage('search.window'),
+      )
+      searchProfiler.stage('search.rebuild')
       searchBoundRevision = folder.searchRevision()
-      searchProfiler.stage('search.window')
       app.scrollToSearchTarget()
       searchProfiler.stage('search.scroll')
       app.setSearchResult(searchCurrent + 1, searchMatches.length)

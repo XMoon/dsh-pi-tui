@@ -8,6 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { createSearchProfiler, searchProfilingEnabled } from '../src/search-profile.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -137,4 +138,32 @@ test('perf: the cached content geometry matches the rendered mounted view', asyn
   assert.equal(app.transcriptContentHeightForTest(), scroll.contentHeight,
     'the cached height must equal messagesView.render(width).length')
   app.stop()
+})
+
+test('perf: the search profiler is a no-op unless enabled and emits the plan stage set once per operation', () => {
+  assert.equal(searchProfilingEnabled({ DSH_TUI_SEARCH_PROFILE: '1' }), true)
+  assert.equal(searchProfilingEnabled({}), false)
+
+  const disabledLines: string[] = []
+  const disabled = createSearchProfiler(false, () => 0, line => disabledLines.push(line))
+  disabled.start()
+  disabled.stage('search.rebuild')
+  disabled.end()
+  assert.deepEqual(disabledLines, [], 'a disabled profiler writes nothing')
+
+  const lines: string[] = []
+  let clock = 0
+  const enabled = createSearchProfiler(true, () => (clock += 5), line => lines.push(line))
+  enabled.start()
+  enabled.stage('search.semantic')
+  enabled.stage('search.resolve-representatives')
+  enabled.stage('search.window')
+  enabled.stage('search.presentation-commit')
+  enabled.stage('search.rebuild')
+  enabled.stage('search.scroll')
+  enabled.end()
+  assert.equal(lines.length, 1, 'ONE line per operation')
+  for (const stage of ['search.semantic=', 'search.resolve-representatives=', 'search.window=', 'search.presentation-commit=', 'search.rebuild=', 'search.scroll=', 'search.total=']) {
+    assert.ok(lines[0]!.includes(stage), `stage ${stage} missing from ${lines[0]!}`)
+  }
 })

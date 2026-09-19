@@ -2,9 +2,13 @@
  * Opt-in wall-clock profiling for the Ctrl+F search hot path (perf plan S1
  * §4.2). Disabled by default: with `DSH_TUI_SEARCH_PROFILE` unset every method
  * is a no-op, so the hot path pays nothing. Enabled, ONE line per operation is
- * written (the search semantic scan, the representative resolution, the
- * presentation commit and the viewport anchor), which makes a real long-session
- * before/after comparison possible without a machine-dependent CI threshold.
+ * written with the plan's stage set — `search.semantic`,
+ * `search.resolve-representatives`, `search.window` (the anchored projection),
+ * `search.presentation-commit` (resolving the presentation for that epoch),
+ * `search.rebuild` (the app's atomic commit + message-tree rebuild),
+ * `search.scroll` (the viewport anchor) and `search.total`. That makes a real
+ * long-session before/after comparison possible without a machine-dependent CI
+ * threshold.
  * @module @xmoon76/dsh-pi-tui/search-profile
  */
 
