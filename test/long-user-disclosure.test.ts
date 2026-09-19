@@ -1352,7 +1352,7 @@ test('an unrelated long-user collapse does not revoke the current search reveal'
   rows = await viewRows(vt)
   let aRow = rows.findIndex(row => row.includes('a-5'))
   assert.ok(aRow >= 0, 'the search target expands A')
-  assert.ok(vt.getCellInverse(aRow, rows[aRow]!.indexOf('a-5')), 'precondition: A is the current occurrence')
+  assert.ok(!vt.getCellInverse(aRow, rows[aRow]!.indexOf('a-5')), 'precondition: a long bubble is anchor-only (no guessed strong)')
 
   // Collapse the UNRELATED B via its tail control.
   const footers = collapseFooterRows(rows)
@@ -1361,8 +1361,7 @@ test('an unrelated long-user collapse does not revoke the current search reveal'
   rows = await viewRows(vt)
   assert.ok(!rows.some(row => row.includes('b-5')), 'B collapsed')
   aRow = rows.findIndex(row => row.includes('a-5'))
-  assert.ok(aRow >= 0, 'A stays expanded')
-  assert.ok(vt.getCellInverse(aRow, rows[aRow]!.indexOf('a-5')), 'the unrelated collapse must NOT revoke A search reveal')
+  assert.ok(aRow >= 0, 'the unrelated collapse must NOT revoke A search reveal (A stays expanded)')
   app.setFullscreen(false)
   app.stop()
 })

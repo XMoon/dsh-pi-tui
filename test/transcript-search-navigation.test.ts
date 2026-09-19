@@ -72,7 +72,7 @@ test('navigation: the current strong highlight moves between occurrences in one 
   app.stop()
 })
 
-test('navigation: a reveal that changes height still anchors the hidden occurrence', async () => {
+test('navigation: a reveal still expands an anchor-only card and anchors its top', async () => {
   const { vt, app } = startApp(100, 20)
   const longText = Array.from({ length: 24 }, (_, index) => `line ${index}`).join('\n')
     + '\nneedle in the compacted middle\n' + Array.from({ length: 6 }, (_, index) => `tail ${index}`).join('\n')
@@ -81,6 +81,7 @@ test('navigation: a reveal that changes height still anchors the hidden occurren
   app.setTranscript([message])
   const collapsed = (await viewport(vt)).join('\n')
   assert.ok(!collapsed.includes('needle in the compacted middle'), 'precondition: the middle is compacted away')
+  assert.ok(collapsed.includes('rows compacted'), 'precondition: the bubble is compacted')
 
   app.setTranscriptSearchTarget({
     query: 'compacted middle',
@@ -88,12 +89,12 @@ test('navigation: a reveal that changes height still anchors the hidden occurren
     message,
   })
   app.scrollToSearchTarget()
-  const revealedLines = await viewport(vt)
-  const revealed = revealedLines.join('\n')
-  assert.ok(revealed.includes('needle in the compacted middle'), `the revealed occurrence must be anchored into view:\n${revealed}`)
-  const row = revealedLines.findIndex(line => line.includes('needle in the compacted middle'))
-  const col = revealedLines[row]!.indexOf('compacted')
-  assert.ok(vt.getCellInverse(row, col), 'the current occurrence keeps its strong highlight')
+  const revealed = (await viewport(vt)).join('\n')
+  // A compact-capable long bubble inserts marker/tail chrome rows, so its whole
+  // card is NOT occurrence-preserving: the reveal still EXPANDS it, and the
+  // selection anchors at the owning card top (no guessed strong occurrence).
+  assert.ok(!revealed.includes('rows compacted'), `the search reveal must expand the bubble:\n${revealed}`)
+  assert.ok(revealed.includes('line 0'), `the anchor lands on the owning card top:\n${revealed}`)
   app.stop()
 })
 
@@ -213,7 +214,7 @@ test('navigation: a live group reflow keeps the current highlight via stable-mat
   app.setTranscriptSearchTarget({ query: 'read', match, message })
   let lines = await viewport(vt)
   let row = lines.findIndex(line => line.includes('Read 2 files'))
-  assert.ok(row >= 0 && vt.getCellInverse(row, lines[row]!.indexOf('Read')), 'precondition: the target name is highlighted')
+  assert.ok(row >= 0 && vt.getCellUnderline(row, lines[row]!.indexOf('Read')), 'precondition: the target card is decorated (anchor-only source)')
 
   // A late cross-turn read joins the group: the representative card OBJECT is
   // replaced by the reflow, while match.id/source stay stable.
@@ -230,11 +231,14 @@ test('navigation: a live group reflow keeps the current highlight via stable-mat
   lines = await viewport(vt)
   row = lines.findIndex(line => line.includes('Read 3 files'))
   assert.ok(row >= 0, `the reflowed group card is visible:\n${lines.join('\n')}`)
-  assert.ok(vt.getCellInverse(row, lines[row]!.indexOf('Read')), 'the rebind keeps the current occurrence strong after reflow')
+  // The rebind re-attached the presentation to the NEW card object: without it
+  // the card would not even be decorated (identity would not match).
+  assert.ok(vt.getCellUnderline(row, lines[row]!.indexOf('Read')), 'the rebind keeps the reflowed card decorated')
+  assert.ok(!vt.getCellInverse(row, lines[row]!.indexOf('Read')), 'a tool name/args source stays anchor-only (no guessed strong)')
   app.stop()
 })
 
-test('navigation: Next from a tool args hit to a result hit moves the strong highlight', async () => {
+test('navigation: tool args and result hits are anchor-only (no guessed strong)', async () => {
   const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
     ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
   const folder = new TranscriptFolder()

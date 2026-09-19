@@ -231,7 +231,7 @@ test('presentation: SearchHighlightComponent reuses the child render and decorat
   const child = linesComponent(lines)
   const selector = wholeCardSelector(lines, 'needle')
   const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selector)
-  const component = new SearchHighlightComponent(child, selector, selection, 40)
+  const component = new SearchHighlightComponent(child, selector, selection, 40, lines)
   const rendered = component.render(40)
   assert.equal(rendered.length, 1)
   assert.ok(rendered[0]!.includes('\x1b[1;7mneedle\x1b[22;27m'))
@@ -243,7 +243,31 @@ test('presentation: a width change downgrades to weak (no stale strong geometry)
   const child = linesComponent(lines)
   const selector = wholeCardSelector(lines, 'needle')
   const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selector)
-  const component = new SearchHighlightComponent(child, selector, selection, 40)
+  const component = new SearchHighlightComponent(child, selector, selection, 40, lines)
   const rendered = component.render(10)
   assert.ok(!rendered.some(line => line.includes('\x1b[1;7m')), 'no strong highlight on a width the geometry was not measured at')
+})
+
+test('presentation: a same-width content change never reuses stale strong geometry', () => {
+  let lines: readonly string[] = ['needle here']
+  const child: Component = { render: () => [...lines], invalidate: () => {} }
+  const selector = wholeCardSelector(lines, 'needle')
+  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selector)
+  const component = new SearchHighlightComponent(child, selector, selection, 40, lines)
+  assert.ok(component.render(40)[0]!.includes('\x1b[1;7mneedle'), 'precondition: the proven occurrence is strong')
+  lines = ['foobar here']
+  const second = component.render(40)
+  assert.ok(!second.some(line => line.includes('\x1b[1;7m')), 'changed content must not inherit a stale strong occurrence')
+  assert.ok(!second[0]!.includes('needle'), 'the old occurrence is gone from the render')
+})
+
+test('presentation: clear() stops decorating a mounted wrapper', () => {
+  const lines = ['alpha needle beta']
+  const child = linesComponent(lines)
+  const selector = wholeCardSelector(lines, 'needle')
+  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selector)
+  const component = new SearchHighlightComponent(child, selector, selection, 40, lines)
+  component.clear()
+  const rendered = component.render(40)
+  assert.deepEqual(rendered, ['alpha needle beta'], 'a cleared wrapper returns the raw child lines')
 })
