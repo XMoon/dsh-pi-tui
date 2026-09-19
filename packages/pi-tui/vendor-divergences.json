@@ -2991,7 +2991,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-18",
+    "lastAuditedAt": "2026-09-19",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
