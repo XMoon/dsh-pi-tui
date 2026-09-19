@@ -93,6 +93,12 @@ function mountedComponents(app: TuiApp): unknown[] {
     .map(child => child.child)
 }
 
+function mountedTranscriptBatch(app: TuiApp): Array<{ rendered: readonly string[]; component: unknown }> {
+  return (app as unknown as {
+    mountedTranscriptBlocks: Array<{ rendered: readonly string[]; component: unknown }>
+  }).mountedTranscriptBlocks
+}
+
 test('identical indexed projections are no-op and equivalent summaries reuse the mount', () => {
   const { app } = startApp()
   const firstSummary = { kind: 'summary' as const, text: '… 4 earlier turns — window 20 turns' }
@@ -172,12 +178,14 @@ test('ordinary assistant streaming replaces only the dirty mounted block', async
   showFolder(app, folder)
   await terminal.waitForRender()
   const before = mountedComponents(app)
+  const beforeBatch = mountedTranscriptBatch(app)
   app.resetTranscriptPresentationDiagnosticsForTest()
 
   folder.applyLiveInput(liveText(' changed content'))
   showFolder(app, folder)
   await terminal.waitForRender()
   const after = mountedComponents(app)
+  const afterBatch = mountedTranscriptBatch(app)
   const diag = diagnostics(app)
   assert.equal(diag.structuralCommits, 0)
   assert.equal(diag.contentCommits, 1)
@@ -186,6 +194,13 @@ test('ordinary assistant streaming replaces only the dirty mounted block', async
   assert.equal(diag.rowMapRefreshes, 1)
   assert.equal(after.length, before.length)
   assert.notEqual(after[after.length - 1], before[before.length - 1])
+  for (let index = 0; index < beforeBatch.length - 1; index += 1) {
+    assert.strictEqual(
+      afterBatch[index]?.rendered,
+      beforeBatch[index]?.rendered,
+      `unchanged block ${index} must reuse rendered metadata`,
+    )
+  }
   assert.ok(terminal.getViewport().some(line => line.includes('changed content')))
   const published = (app as unknown as {
     mountedTranscriptBlocks: Array<{ block: { kind: string }; component: unknown }>
@@ -391,15 +406,24 @@ test('fullscreen content refresh updates geometry without remounting unchanged b
   await terminal.waitForRender()
   const beforeHeight = app.transcriptContentHeightForTest()
   const before = mountedComponents(app)
+  const beforeBatch = mountedTranscriptBatch(app)
   app.resetTranscriptPresentationDiagnosticsForTest()
 
   folder.applyLiveInput(liveText('\nsecond line that changes the row height'))
   showFolder(app, folder)
   await terminal.waitForRender()
   const after = mountedComponents(app)
+  const afterBatch = mountedTranscriptBatch(app)
   const diag = diagnostics(app)
   assert.equal(diag.structuralCommits, 0)
   assert.equal(diag.contentCommits, 1)
   assert.ok(app.transcriptContentHeightForTest() > beforeHeight)
   assert.equal(after.length, before.length)
+  for (let index = 0; index < beforeBatch.length - 1; index += 1) {
+    assert.strictEqual(
+      afterBatch[index]?.rendered,
+      beforeBatch[index]?.rendered,
+      `fullscreen unchanged block ${index} must reuse rendered metadata`,
+    )
+  }
 })
