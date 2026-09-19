@@ -147,6 +147,14 @@ export {
 export { dispatchMouseEvent, retargetMouseEvent } from "./tui.ts";
 export { TuiAltScreen, type TuiAltScreenOptions } from "./tui-alt-screen.ts";
 export { TuiMainScreen, type TuiMainScreenRenderState } from "./tui-main-screen.ts";
+// Rendered transcript search matcher (dsh-pi-tui divergence X028): the host
+// reuses it for its full-history search highlight instead of implementing a
+// second Unicode/ANSI column mapper.
+export {
+	findAltScreenSearchMatches,
+	type AltScreenSearchMatch,
+	type AltScreenSearchSegment,
+} from "./alt-screen-search.ts";
 // Utilities
 export {
 	getGraphemeSegmenter,
