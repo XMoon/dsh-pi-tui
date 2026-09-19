@@ -295,7 +295,7 @@ test('runner search: a late session event never strands the current target', asy
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
   })
-  const vt = new VirtualTerminal(100, 30)
+  const vt = new VirtualTerminal(100, 6)
   life.defer(installVirtualProcessTerminal(vt))
   const probe = captureApps()
   life.defer(probe.restore)
@@ -303,10 +303,23 @@ test('runner search: a late session event never strands the current target', asy
   life.defer(projections.restore)
   const context = new Context()
   life.defer(() => disposeContext(context))
+  const settingsDoc: Record<string, unknown> = {
+    theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default',
+    footerLayout: { schemaVersion: 1, rows: [] }, footerCustomItems: undefined, footerCommand: undefined,
+    fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
+    focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto',
+  }
+  context.provide('settings', {
+    describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: [] } }],
+    register: () => ({
+      get: () => ({ ...settingsDoc }),
+      replace: async (next: Record<string, unknown>) => { Object.assign(settingsDoc, next) },
+    }),
+  } as never)
   const session: FakeSession = fakeSession({
     id: 'search-runner-live-session',
     header: { id: 'search-runner-live-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
-    events: searchSession(3, [2]),
+    events: searchSession(3, [0, 2]),
   })
   const harness = makeHarness(home, session, { provider: 'p', model: 'm' })
   const fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id })
@@ -314,8 +327,11 @@ test('runner search: a late session event never strands the current target', asy
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
   const input = (data: string): void => {
-    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
-    tui.handleTerminalInput(data)
+    const screens = app as unknown as {
+      tui: { handleTerminalInput(data: string): void }
+      fullscreen?: { handleTerminalInput(data: string): void }
+    }
+    ;(screens.fullscreen ?? screens.tui).handleTerminalInput(data)
   }
   const settleRender = async (): Promise<void> => {
     await settle()
@@ -329,7 +345,18 @@ test('runner search: a late session event never strands the current target', asy
   for (const char of 'transcript') input(char)
   await settleRender()
   const before = app.transcriptSearchPresentationForTest()
-  assert.equal(before?.matchTurn, 2, 'precondition: the only match is current')
+  assert.equal(before?.matchTurn, 0, 'precondition: the first match is current')
+
+  // Move away from the current target before the passive runner repaint. The
+  // target must be outside the viewport so a later accidental explicit reveal
+  // would change the observable scroll position.
+  app.scrollToBottom({ disableFollow: true })
+  await settleRender()
+  const beforeScroll = app.fullscreenScrollForTest()?.scrollTop
+  assert.ok(beforeScroll !== undefined && beforeScroll > 0,
+    `precondition: the user has scrolled away from the target (scrollTop=${beforeScroll}, contentHeight=${app.transcriptContentHeightForTest()})`)
+  assert.ok(!vt.getViewport().some(line => line.includes('turn 0 transcript needle')),
+    'precondition: the current target is outside the manually selected viewport')
 
   // A durable event lands while the search stays open: the runner repaints the
   // projection and the passive binding re-resolves the SAME match against the
@@ -339,7 +366,7 @@ test('runner search: a late session event never strands the current target', asy
   app.resetSearchPresentationDiagnosticsForTest()
   const emit = (context as unknown as { emit(name: string, ...args: unknown[]): void }).emit
   emit('session/event', liveSession, event('assistant/message', {
-    turn: 3, step: 0,
+    turn: 30, step: 0,
     message: {
       id: MessageId('late-answer'),
       role: 'assistant',
@@ -351,6 +378,8 @@ test('runner search: a late session event never strands the current target', asy
   await settleRender()
   assert.equal(projections.count(), 1, 'the live event projects the transcript exactly once')
   assert.equal(app.searchPresentationDiagnosticsForTest().rebuilds, 1, 'the live projection stays one rebuild')
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop, beforeScroll,
+    'a passive production-runner repaint must not snap back to the search target')
   const after = app.transcriptSearchPresentationForTest()
   assert.equal(after?.matchId, before?.matchId, 'the current match identity is preserved across the live projection')
   assert.equal(after?.revealGranted, true, 'the reveal grant survives the passive projection')

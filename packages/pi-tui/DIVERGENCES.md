@@ -2365,7 +2365,7 @@ fd output can identify a directory without a trailing slash, including through s
 - Category: `HARD_HOST_API`
 - Risk: `CRITICAL`
 - Files: `src/tui-alt-screen.ts`, `src/components/scroll-view.ts`, `src/alt-screen-search.ts`, `src/index.ts`
-- Last audited: `2026-09-18`
+- Last audited: `2026-09-19`
 - Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists

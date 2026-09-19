@@ -452,7 +452,12 @@ test('navigation: deliverable path and description hits are anchor-only', async 
     event('deliverables/presented', { turn: 1, callId: 'present-1', files: [{ path: 'out/report.md', description: 'Final report' }] }, 1),
     event('assistant/message', {
       turn: 1, step: 0,
-      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      message: {
+        id: MessageId('a1'),
+        role: 'assistant',
+        content: [{ type: 'text', text: `earlier report\n${Array.from({ length: 18 }, (_, index) => `filler ${index}`).join('\n')}` }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
       stream: [],
     }, 2),
     event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
@@ -462,26 +467,37 @@ test('navigation: deliverable path and description hits are anchor-only', async 
   const descriptionMatch = matches.find(m => m.source.kind === 'assistant-deliverable' && m.source.field === 'description')
   assert.ok(pathMatch !== undefined && descriptionMatch !== undefined, `both deliverable fields must match: ${JSON.stringify(matches)}`)
 
-  const { vt, app } = startApp()
+  const { vt, app } = startApp(80, 12)
   app.setFullscreen(true)
   const card = folder.messages()[0]!
   app.setTranscript([card], folder.turnActivities())
 
   app.setTranscriptSearchTarget({ query: 'report', match: pathMatch, message: card })
   let lines = await viewport(vt)
-  const pathRow = lines.findIndex(line => line.includes('out/report.md'))
+  const pathRow = lines.findIndex(line => line.includes('report.md'))
   assert.ok(pathRow >= 0, `delivered path row missing:\n${lines.join('\n')}`)
   // The path is RELATIVIZED (raw prefix removed), so a raw ordinal cannot be
   // proven: anchor only, no strong highlight.
   assert.ok(!isStrongCell(vt, pathRow, lines[pathRow]!.indexOf('report')), 'the PATH hit must not strong-highlight a relativized path')
 
   app.setTranscriptSearchTarget({ query: 'report', match: descriptionMatch, message: card })
+  app.scrollToSearchTarget()
   lines = await viewport(vt)
   const descriptionRow = lines.findIndex(line => line.includes('Final report'))
-  assert.ok(descriptionRow >= 0, `delivered description row missing:\n${lines.join('\n')}`)
-  // The description is WRAPPED (and hard-broken for over-wide tokens), which
-  // can drop a raw occurrence from the rendered corpus: anchor only.
-  assert.ok(!isStrongCell(vt, descriptionRow, lines[descriptionRow]!.indexOf('report')), 'the DESCRIPTION hit must not strong-highlight a wrapped description')
+  assert.ok(descriptionRow >= 0, `deliverable description must be the viewport destination:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.includes('earlier report')),
+    `the unrelated assistant-body hit must not be the viewport destination:\n${lines.join('\n')}`)
+  assert.ok((app.fullscreenScrollForTest()?.scrollTop ?? 0) > 0, 'the source-local destination must be below the card top')
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{
+      block: { message?: TranscriptMessage }
+      searchSelection?: { selectedIndex: number; exact: boolean }
+    }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === card)?.searchSelection
+  assert.equal(selection?.selectedIndex, -1, 'source-region viewport targeting remains anchor-only')
+  assert.equal(selection?.exact, false, 'source-region viewport targeting never proves provenance')
+  assert.ok(!isStrongCell(vt, descriptionRow, lines[descriptionRow]!.indexOf('report')), 'the DESCRIPTION hit must not strong-highlight an approximate target')
   assert.ok(!isStrongCell(vt, pathRow, lines[pathRow]!.indexOf('report')), 'the path row is not the current occurrence')
   app.stop()
 })
