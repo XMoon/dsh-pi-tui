@@ -10,10 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Full-text search in long sessions is much faster.** Typing and stepping
-  with `Enter`/`Shift+Enter` no longer rebuild the whole transcript tree,
-  re-measure, or re-render the entire window for every character; a
-  same-window jump is near-instant and a cross-window jump performs exactly one
-  necessary re-projection.
+  with `Enter`/`Shift+Enter` now rebuild the transcript tree at most ONCE per
+  operation and no longer re-measure or re-render the entire window for every
+  character; a same-window jump is near-instant and a cross-window jump performs
+  exactly one necessary re-projection.
 - **The current search result is more prominent and follows the theme.** A
   provable current occurrence uses an explicit themed foreground/background
   block instead of relying on the terminal's inverse attribute; a

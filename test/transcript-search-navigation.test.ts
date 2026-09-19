@@ -52,6 +52,12 @@ function isStrongCell(vt: VirtualTerminal, row: number, col: number): boolean {
   return vt.getCellBgRgb(row, col) === 0xf5c542
 }
 
+/** Press+release a left click at one viewport cell. */
+function click(vt: VirtualTerminal, x: number, y: number): void {
+  vt.sendInput(`\x1b[<0;${x};${y}M`)
+  vt.sendInput(`\x1b[<0;${x};${y}m`)
+}
+
 test('navigation: the current strong highlight moves between occurrences in one source', async () => {
   const { vt, app } = startApp()
   // A Workflow member label is a direct projection with proven columns, so its
@@ -597,5 +603,52 @@ test('navigation: a hard-wrapped description token never strong-highlights a sur
   const surviving = lines.findIndex(line => line.includes('ghij'))
   assert.ok(surviving >= 0, `the surviving occurrence must render:\n${lines.join('\n')}`)
   assert.ok(!isStrongCell(vt, surviving, lines[surviving]!.indexOf('ghij')), 'a surviving hard-wrap match must not be the current occurrence')
+  app.stop()
+})
+
+test('navigation: an explicit re-navigation re-opens a manually collapsed PTC sub-call', async () => {
+  const grandchild: TranscriptToolMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{}', result: 'deepest-needle output', status: 'ok',
+    subCallId: 'grand-1', parentCallId: 'child-1', rootCallId: 'root-1',
+  }
+  const child: TranscriptToolMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{}', result: 'child output', status: 'ok',
+    subCalls: [grandchild], subCallId: 'child-1', parentCallId: 'root-1', rootCallId: 'root-1',
+  }
+  const root: TranscriptToolMessage = {
+    kind: 'tool', turn: 0, name: 'run_code', args: '{}', result: 'ok', status: 'ok', subCalls: [child],
+  }
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  app.setTranscript([root])
+  const target = () => ({
+    query: 'deepest-needle',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'subcall-field' as const, subCallIds: ['child-1', 'grand-1'], field: 'result' as const },
+      sourceOccurrence: 0,
+    },
+    message: root,
+  })
+  app.setTranscriptSearchTarget(target())
+  let lines = await viewport(vt)
+  const bodyRow = lines.findIndex(line => line.includes('deepest-needle output'))
+  assert.ok(bodyRow > 0, `the reveal must open the grandchild body:\n${lines.join('\n')}`)
+
+  // The USER manually collapses the grandchild by clicking its header. This adds
+  // the sub-call to the search suppression set WITHOUT revoking the reveal grant.
+  click(vt, 10, bodyRow)
+  lines = await viewport(vt)
+  assert.ok(!lines.some(line => line.includes('deepest-needle output')),
+    `the manual collapse must hide the body:\n${lines.join('\n')}`)
+  assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, true,
+    'a PTC sub-call collapse keeps the reveal grant (plan §7.5)')
+
+  // An explicit navigation that wraps to the SAME semantic target must still
+  // re-open the sub-call (plan §10.4: only the next explicit Next/Prev re-reveals).
+  app.setTranscriptSearchTarget(target())
+  lines = await viewport(vt)
+  assert.ok(lines.some(line => line.includes('deepest-needle output')),
+    `an explicit re-navigation must re-open the collapsed sub-call:\n${lines.join('\n')}`)
   app.stop()
 })

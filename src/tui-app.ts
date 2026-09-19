@@ -6805,8 +6805,12 @@ export class TuiApp {
     // fresh target object per repaint, and reference inequality would re-grant
     // the reveal (undoing a user collapse) on every passive projection.
     const sameTarget = sameSearchTarget(this.searchTarget, next)
-    const regrant = presentation.grantReveal === true && next !== undefined && !this.searchRevealGranted
-    if (!sameTarget || regrant) {
+    // An EXPLICIT navigation (grantReveal) ALWAYS re-grants and re-opens every
+    // PTC sub-call the user collapsed while the previous target held them open
+    // — even when it wraps to the SAME match (a single-result Next/Prev), which
+    // `sameTarget` alone would treat as a no-op. A passive rebind never does.
+    const navigation = presentation.grantReveal === true && next !== undefined
+    if (!sameTarget || navigation) {
       this.searchTarget = next
       if (next === undefined) {
         this.searchRevealGranted = false
