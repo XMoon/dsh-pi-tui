@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * @xmoon76/dsh-pi-tui/scripts/bench — non-default performance benchmark
- * (run explicitly: `node --import tsx/esm scripts/bench.mts`; never part of the test suite).
+ * (run explicitly: `pnpm bench`; direct equivalent:
+ * `node --expose-gc --import tsx/esm scripts/bench.mts`; never part of the test suite).
  *
  * Builds synthetic session logs (markdown, diffs, consecutive reads, tool
  * calls, CJK/emoji) and measures, across widths and themes:
@@ -34,6 +35,8 @@ import type { TranscriptMessage } from '../src/transcript.ts'
 import type { SessionStats } from '../src/stats.ts'
 
 const XtermTerminal = xterm.Terminal
+let benchmarkAppsCreated = 0
+let benchmarkAppsDisposed = 0
 
 /** A minimal headless terminal for TuiApp (render target only). */
 class BenchTerminal implements Terminal {
@@ -70,11 +73,14 @@ function withBenchApp<T>(
 ): T {
   const terminal = new BenchTerminal(width, rows)
   const app = new TuiApp(terminal, { onSubmit: () => {}, onExit: () => {} })
+  benchmarkAppsCreated += 1
   try {
     app.start()
     return run(app, terminal)
   } finally {
     app.dispose()
+    if (!app.isDisposed()) throw new Error('benchmark app did not reach final disposed state')
+    benchmarkAppsDisposed += 1
   }
 }
 
@@ -534,6 +540,69 @@ function applyLiveFrame(fixture: RenderFixture, frame: number): void {
   })
 }
 
+/** Append one settled turn after the hydrated history to exercise topology. */
+function appendDurableTurn(fixture: RenderFixture, turn: number): void {
+  const seq = 1_000_000 + turn * 10
+  fixture.folder.apply([
+    { type: 'turn/start', seq, time: seq, data: { turn } } as SessionEvent,
+    {
+      type: 'user/message', seq: seq + 1, time: seq + 1, data: {
+        id: `append-user-${turn}`,
+        role: 'user',
+        content: [{ type: 'text', text: `appended prompt ${turn}` }],
+        source: { kind: 'user' },
+      },
+    } as SessionEvent,
+    {
+      type: 'assistant/message', seq: seq + 2, time: seq + 2, data: {
+        turn,
+        step: 0,
+        stream: [],
+        message: {
+          id: `append-assistant-${turn}`,
+          role: 'assistant',
+          content: [{ type: 'text', text: `appended answer ${turn}` }],
+          source: { kind: 'model', provider: 'bench', model: 'bench' },
+        },
+      },
+    } as unknown as SessionEvent,
+    { type: 'turn/end', seq: seq + 3, time: seq + 3, data: { turn, reason: { kind: 'completed' } } } as SessionEvent,
+  ])
+}
+
+/** Settle the live tail with a durable final answer and turn-end shape change. */
+function finalizeLiveTurn(fixture: RenderFixture): void {
+  fixture.folder.applyLiveInput({
+    kind: 'end',
+    sessionId: 'bench-session',
+    attemptId: 'bench-attempt',
+    turn: fixture.liveTurn,
+    step: 0,
+    status: 'committed',
+    settlement: 'attempt',
+  })
+  const seq = 1_100_000 + fixture.liveTurn * 10
+  fixture.folder.apply([
+    {
+      type: 'assistant/message', seq, time: seq, data: {
+        turn: fixture.liveTurn,
+        step: 1,
+        stream: [],
+        message: {
+          id: `final-assistant-${fixture.liveTurn}`,
+          role: 'assistant',
+          content: [{ type: 'text', text: `final answer ${fixture.liveTurn}` }],
+          source: { kind: 'model', provider: 'bench', model: 'bench' },
+        },
+      },
+    } as unknown as SessionEvent,
+    {
+      type: 'turn/end', seq: seq + 1, time: seq + 1,
+      data: { turn: fixture.liveTurn, reason: { kind: 'completed' } },
+    } as SessionEvent,
+  ])
+}
+
 function formatPresentationDiagnostics(diagnostics: ReturnType<TuiApp['transcriptPresentationDiagnosticsForTest']>): string {
   return `structural/content/no-op ${diagnostics.structuralCommits} / ${diagnostics.contentCommits} / ${diagnostics.noopCommits}`
 }
@@ -687,6 +756,41 @@ async function main(): Promise<void> {
     })
     row('Focus expanded streaming', fmt(stats(expanded.timings)))
     row('  Focus expanded commits', formatPresentationDiagnostics(expanded.diagnostics))
+  }
+
+  // Structural presentation cases stay explicit: these must never be absorbed
+  // by the content-only path even when the visible window remains bounded.
+  {
+    const appendFixture = buildRenderFixture(renderTurns)
+    const append = withBenchApp(80, 24, app => {
+      projectRenderFixture(app, appendFixture)
+      app.resetTranscriptPresentationDiagnosticsForTest()
+      appendDurableTurn(appendFixture, renderTurns)
+      projectRenderFixture(app, appendFixture)
+      return app.transcriptPresentationDiagnosticsForTest()
+    })
+    row('append visible message commits', formatPresentationDiagnostics(append))
+
+    const finalFixture = buildRenderFixture(renderTurns, true)
+    const finalized = withBenchApp(80, 24, app => {
+      app.setFocusMode(true)
+      projectRenderFixture(app, finalFixture)
+      app.resetTranscriptPresentationDiagnosticsForTest()
+      finalizeLiveTurn(finalFixture)
+      projectRenderFixture(app, finalFixture)
+      return app.transcriptPresentationDiagnosticsForTest()
+    })
+    row('turn finalization / shape transition', formatPresentationDiagnostics(finalized))
+
+    const windowFixture = buildRenderFixture(renderTurns)
+    const moved = withBenchApp(80, 24, app => {
+      projectRenderFixture(app, windowFixture)
+      app.resetTranscriptPresentationDiagnosticsForTest()
+      if (!windowFixture.controller.moveOlder()) throw new Error('benchmark window fixture has no older page')
+      projectRenderFixture(app, windowFixture)
+      return app.transcriptPresentationDiagnosticsForTest()
+    })
+    row('window move (older) commits', formatPresentationDiagnostics(moved))
   }
 
   // 3. Fullscreen uses the same bounded projection and live folder fixture.
@@ -1041,6 +1145,7 @@ async function main(): Promise<void> {
     }
   }
 
+  row('benchmark app lifecycle', `created=${benchmarkAppsCreated} disposed=${benchmarkAppsDisposed}`)
   console.log(rows.join('\n'))
 }
 

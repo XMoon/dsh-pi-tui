@@ -4,14 +4,15 @@
 > the optimization (incremental read grouping + per-message render cache) ·
 > Node v26.7.0 · headless xterm at 24 rows · `BENCH_FAST=1` iteration counts.
 >
-> Re-run: `node --expose-gc --import tsx/esm scripts/bench.mts`
-> (full sweep without `BENCH_FAST`). The benchmark is NOT part of the test
-> suite — it is a manual, non-default tool by design.
+> Re-run: `pnpm bench` (full sweep), `pnpm bench:fast` (short sweep), or
+> `pnpm bench:smoke` (runtime-maintenance gate). The benchmark is NOT part of
+> the test suite — it is a manual, non-default tool by design.
 
 ## Transcript invalidation baseline (2026-09-19)
 
 > Repaired-benchmark before SHA: `120ad66c0f7e45140966116dfe8d63b3db48d923`.
-> Optimization SHA: `9549f96` (content-only transcript invalidation). Node
+> Optimization SHA: `9549f96d0d6a4f1caf7cd5a79d2c41750342fd5e` (content-only
+> transcript invalidation). Node
 > `v24.20.0`; `BENCH_FAST=1 pnpm bench:fast`; headless terminals at 24 rows.
 > The renderer fixture hydrates 30 turns, projects a bounded 20-turn indexed
 > window, and drives the live tail through `TranscriptFolder.applyLiveInput()`.
