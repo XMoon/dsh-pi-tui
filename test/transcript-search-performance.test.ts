@@ -34,10 +34,10 @@ function userMessage(turn: number, text: string): TranscriptMessage {
   return { kind: 'user', turn, text }
 }
 
-function target(message: TranscriptMessage) {
+function target(message: TranscriptMessage, query = 'needle', sourceOccurrence = 0) {
   return {
-    query: 'needle',
-    match: { id: 0, turn: 'turn' in message ? message.turn : 0, occurrence: 0, source: { kind: 'message' as const }, sourceOccurrence: 0 },
+    query,
+    match: { id: 0, turn: 'turn' in message ? message.turn : 0, occurrence: 0, source: { kind: 'message' as const }, sourceOccurrence },
     message,
   }
 }
@@ -117,6 +117,69 @@ test('perf: an ordinary search jump neither remeasures nor re-renders the whole 
   const diagnostics = app.searchPresentationDiagnosticsForTest()
   assert.equal(diagnostics.remeasures, 0, 'the rebuild already measured the rows')
   assert.equal(diagnostics.fullRenders, 0, 'the cached content height replaces the whole-view render')
+  app.stop()
+})
+
+test('perf: same-query navigation reuses each live card’s indexed rendered results', async () => {
+  const { vt, app } = startApp()
+  const messages = Array.from({ length: 20 }, (_, turn) => userMessage(turn, `turn ${turn} needle content`))
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+
+  const representatives = new Set(messages)
+  app.setTranscriptSearchPresentation({ matchMessages: representatives, target: target(messages[0]!), grantReveal: true })
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.setTranscriptSearchPresentation({ matchMessages: representatives, target: target(messages[1]!), grantReveal: true })
+
+  const diagnostics = app.searchPresentationDiagnosticsForTest()
+  assert.equal(diagnostics.rebuilds, 1, 'same-query navigation still rebuilds at most once')
+  assert.ok(diagnostics.renderedMatchLookups > 0, 'the normal host path performs indexed lookups')
+  assert.equal(diagnostics.renderedMatchResultCacheHits, diagnostics.renderedMatchLookups,
+    'unchanged cards reuse their complete rendered match arrays')
+
+  const cache = (app as unknown as {
+    messageComponents: Map<TranscriptMessage, { renderedSearchIndex?: object }>
+  }).messageComponents
+  const indexes = messages.map(message => cache.get(message)?.renderedSearchIndex)
+  assert.ok(indexes.every(index => index !== undefined), 'search indexes are lazy-created for participating cards')
+  assert.equal(new Set(indexes).size, messages.length, 'each live message entry owns its own index')
+  app.stop()
+})
+
+test('perf: indexed search reuses the entry across query changes and invalidates changed lines', async () => {
+  const { vt, app } = startApp()
+  const message = userMessage(0, 'needle before')
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  await vt.waitForRender()
+  const presentation = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{
+      block: { kind: string; message?: TranscriptMessage }
+      searchSelection?: { matches: readonly unknown[]; selectedIndex: number }
+    }>
+  })
+  const currentSelection = () => presentation.mountedTranscriptBlocks.find(entry => entry.block.message === message)?.searchSelection
+
+  app.setTranscriptSearchTarget(target(message))
+  assert.equal(currentSelection()?.matches.length, 1, 'the initial query has one rendered match')
+  const cache = (app as unknown as {
+    messageComponents: Map<TranscriptMessage, { renderedSearchIndex?: { search: (lines: readonly string[], query: string) => { matches: readonly unknown[] } } }>
+  }).messageComponents
+  const index = cache.get(message)?.renderedSearchIndex
+  assert.ok(index !== undefined, 'the initial presentation creates the entry index')
+
+  message.text = 'omega after'
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.setTranscript([message])
+  assert.equal(currentSelection()?.matches.length, 0, 'changed rendered lines do not reuse the old query match')
+  assert.equal(app.searchPresentationDiagnosticsForTest().renderedMatchResultCacheHits, 0,
+    'line invalidation cannot report a complete result-cache hit')
+  assert.strictEqual(cache.get(message)?.renderedSearchIndex, index, 'the same entry keeps the same index object')
+
+  app.setTranscriptSearchTarget(target(message, 'omega'))
+  assert.equal(currentSelection()?.matches.length, 1, 'the new query matches the changed rendered lines')
+  assert.equal(currentSelection()?.selectedIndex, -1, 'message provenance remains anchor-only')
   app.stop()
 })
 

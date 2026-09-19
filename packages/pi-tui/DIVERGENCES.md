@@ -2380,7 +2380,7 @@ The host virtual transcript owns paging, search, and the jump-to-latest semantic
 - clearSearch and previous/next prompt routing
 - shouldShowScrollToEndIndicator so a host virtual-history window keeps the jump-to-end label even while its local view follows the end
 - onScrollToEndIndicator so a host can consume the label click and run its own semantic jump-to-latest instead of the local scrollToBottom fallback
-- root re-export of the pure rendered search matcher (findAltScreenSearchMatches with AltScreenSearchMatch/AltScreenSearchSegment) so the host highlights the same ANSI/grapheme/cell occurrence geometry the native fullscreen search uses instead of implementing a second Unicode column mapper
+- root re-export of the pure rendered search matcher and AltScreenSearchIndex (findAltScreenSearchMatches with AltScreenSearchMatch/AltScreenSearchSegment plus the indexed cache) so the host reuses the same ANSI/grapheme/cell occurrence geometry and corpus invalidation semantics the native fullscreen search uses instead of implementing a second Unicode column mapper
 
 #### Dependency map
 
@@ -2395,11 +2395,12 @@ The host virtual transcript owns paging, search, and the jump-to-latest semantic
 **Host**
 - src/tui-app.ts wires onBeforeViewportInput and onScrollBoundary, owns virtual transcript paging/Home/End, calls clearSearch for jumpLatest and prompt navigation, and wires scrollToEndIndicator/shouldShowScrollToEndIndicator/onScrollToEndIndicator to the semantic TranscriptWindowController state
 - src/search-presentation.ts consumes the root matcher export to decorate the host full-history search occurrences (weak/current styles, image lines untouched, visible width and stripped text preserved)
+- src/tui-app.ts attaches the exported AltScreenSearchIndex to each live MessageComponentEntry so unchanged rendered lines reuse the native corpus/results cache
 - Audit note: Host wires the callbacks and clearSearch; ScrollView.canScroll is consumed internally by TuiAltScreen as fallback state, not called by the host.
 
 **Public / extension**
 - TuiAltScreenOptions viewport callbacks, the scrollToEndIndicator/shouldShowScrollToEndIndicator/onScrollToEndIndicator options, and ScrollView.canScroll public component shape.
-- root exports findAltScreenSearchMatches plus the AltScreenSearchMatch/AltScreenSearchSegment types.
+- root exports findAltScreenSearchMatches, AltScreenSearchIndex, and the AltScreenSearchMatch/AltScreenSearchSegment types.
 - Audit note: The seams are part of compatibility tests.
 
 **Behavioral coupling**
@@ -2409,6 +2410,7 @@ The host virtual transcript owns paging, search, and the jump-to-latest semantic
 - jump-latest resets built-in search
 - the jump-to-end label is host-forced for a virtual-history window and a host-consumed click skips the local scrollToBottom fallback
 - the exported matcher computes the same occurrence segments as the native fullscreen search (query normalization, ANSI stripping, grapheme-safe columns)
+- AltScreenSearchIndex reuses full matches only when rendered lines and the normalized query are unchanged, and rebuilds its corpus when rendered lines change
 - Audit note: Restoring upstream can silently consume navigation keys or bypass virtual transcript ownership.
 
 #### Guarding tests
@@ -2417,6 +2419,8 @@ The host virtual transcript owns paging, search, and the jump-to-latest semantic
 - packages/pi-tui/test/tui-shrink.test.ts and ScrollView canScroll coverage
 - test/home-end-keys.test.ts: bundle Home/End ownership and the fullscreen jump-to-latest indicator
 - test/transcript-search-presentation.test.ts: host consumes the root matcher (ANSI/CJK/wrap, current vs weak style, width/text preserved)
+- packages/pi-tui/test/tui-alt-screen.test.ts: root export constructs AltScreenSearchIndex
+- test/transcript-search-performance.test.ts: Host per-message index lookup/result-cache reuse and rendered-line invalidation
 
 #### Upstream comparison
 
@@ -2446,7 +2450,7 @@ The host virtual transcript owns paging, search, and the jump-to-latest semantic
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Rechecked the viewport seams, the short-transcript fallthrough, and the added pure-matcher root export consumed by the host search highlight; KEEP HARD.
+- Notes: Rechecked the viewport seams, the short-transcript fallthrough, and the added pure-matcher/index root export consumed by the host search highlight/cache; KEEP HARD.
 
 ### X029 — Editor history callbacks
 

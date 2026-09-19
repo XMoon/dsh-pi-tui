@@ -151,6 +151,7 @@ export { TuiMainScreen, type TuiMainScreenRenderState } from "./tui-main-screen.
 // reuses it for its full-history search highlight instead of implementing a
 // second Unicode/ANSI column mapper.
 export {
+	AltScreenSearchIndex,
 	findAltScreenSearchMatches,
 	type AltScreenSearchMatch,
 	type AltScreenSearchSegment,

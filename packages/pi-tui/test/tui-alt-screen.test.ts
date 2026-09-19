@@ -5,6 +5,7 @@ import {
 	AltScreenSearchIndex,
 	findAltScreenSearchMatches,
 } from "../src/alt-screen-search.ts";
+import { AltScreenSearchIndex as RootAltScreenSearchIndex } from "../src/index.ts";
 import { Box } from "../src/components/box.ts";
 import { Container } from "../src/tui.ts";
 import { Input } from "../src/components/input.ts";
@@ -724,6 +725,12 @@ describe("TuiAltScreen", () => {
 				],
 			},
 		]);
+	});
+
+	it("exports the rendered-search index from the package root", () => {
+		const index = new RootAltScreenSearchIndex();
+		const result = index.search(["root export needle"], "needle");
+		assert.equal(result.matches.length, 1);
 	});
 
 	it("reuses indexed transcript matches until the query or rendered lines change", () => {
