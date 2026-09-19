@@ -1328,3 +1328,41 @@ test('fullscreen: a tail press whose projection shifts above it never collapses 
   app.setFullscreen(false)
   app.stop()
 })
+
+test('an unrelated long-user collapse does not revoke the current search reveal', async () => {
+  const { vt, app } = startApp(100, 60)
+  const a = user(lines(11, 'a-'), 0)
+  const b = user(lines(11, 'b-'), 1)
+  app.setTranscript([a, b])
+  app.setFullscreen(true)
+  let rows = await viewRows(vt)
+  // Expand B manually (the SECOND compact marker belongs to B).
+  const markers = rows.map((row, index) => ({ row, index })).filter(entry => entry.row.includes('rows compacted'))
+  assert.equal(markers.length, 2, `both prompts start compact:\n${rows.join('\n')}`)
+  clickCell(vt, 10, markers[1]!.index)
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('b-5')), 'B is manually expanded')
+
+  // Target A with the search reveal.
+  app.setTranscriptSearchTarget({
+    query: 'a-5',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: a,
+  })
+  rows = await viewRows(vt)
+  let aRow = rows.findIndex(row => row.includes('a-5'))
+  assert.ok(aRow >= 0, 'the search target expands A')
+  assert.ok(vt.getCellInverse(aRow, rows[aRow]!.indexOf('a-5')), 'precondition: A is the current occurrence')
+
+  // Collapse the UNRELATED B via its tail control.
+  const footers = collapseFooterRows(rows)
+  assert.equal(footers.length, 2, `both expanded prompts offer a tail control:\n${rows.join('\n')}`)
+  clickCell(vt, 50, footers[footers.length - 1]!)
+  rows = await viewRows(vt)
+  assert.ok(!rows.some(row => row.includes('b-5')), 'B collapsed')
+  aRow = rows.findIndex(row => row.includes('a-5'))
+  assert.ok(aRow >= 0, 'A stays expanded')
+  assert.ok(vt.getCellInverse(aRow, rows[aRow]!.indexOf('a-5')), 'the unrelated collapse must NOT revoke A search reveal')
+  app.setFullscreen(false)
+  app.stop()
+})

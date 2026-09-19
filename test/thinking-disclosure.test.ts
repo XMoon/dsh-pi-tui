@@ -18,7 +18,7 @@ import { afterEach, test } from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
@@ -1031,5 +1031,48 @@ test('L3: an Alt+T expanded transition rebuilds the plugin-rendered component to
   app.toggleThinkingExpanded()
   await vt.waitForRender()
   assert.ok(calls.length > before, `the expanded transition must rebuild the plugin component (${calls.length} vs ${before})`)
+  app.stop()
+})
+
+test('H3: collapsing an unrelated Thinking card keeps the current search reveal', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  applyMixed(folder, twoThinkingTurn(0))
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // Manually expand beta.
+  let y = findRow(vt.getViewport(), 'beta latest')
+  assert.ok(y >= 0, 'beta card missing')
+  click(vt, 10, y + 1)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('\n  beta reasoning'), 'precondition: beta expanded')
+
+  const alpha = folder.messages().find(m => m.kind === 'thinking' && m.text.includes('alpha'))
+  assert.ok(alpha !== undefined)
+  app.setTranscriptSearchTarget({
+    query: 'alpha',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: alpha,
+  })
+  await vt.waitForRender()
+  let rows = vt.getViewport()
+  let alphaRow = rows.findIndex(line => stripTerminalSequences(line).includes('alpha reasoning'))
+  assert.ok(alphaRow >= 0, `the search target expands alpha:\n${rows.join('\n')}`)
+  let alphaCol = stripTerminalSequences(rows[alphaRow]!).indexOf('alpha')
+  assert.ok(vt.getCellInverse(alphaRow, alphaCol), 'precondition: alpha is the current occurrence')
+
+  // Collapse the UNRELATED beta card (click its own row).
+  const betaRow = rows.findIndex(line => stripTerminalSequences(line).includes('beta reasoning'))
+  assert.ok(betaRow >= 0)
+  click(vt, 10, betaRow + 1)
+  await vt.waitForRender()
+  rows = vt.getViewport()
+  assert.ok(!rows.join('\n').includes('\n  beta reasoning'), 'beta collapsed')
+  alphaRow = rows.findIndex(line => stripTerminalSequences(line).includes('alpha reasoning'))
+  assert.ok(alphaRow >= 0, 'alpha stays expanded')
+  alphaCol = stripTerminalSequences(rows[alphaRow]!).indexOf('alpha')
+  assert.ok(vt.getCellInverse(alphaRow, alphaCol), 'the unrelated Thinking collapse must NOT revoke the search reveal')
+  app.setFullscreen(false)
   app.stop()
 })

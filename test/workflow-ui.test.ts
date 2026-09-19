@@ -13,7 +13,7 @@ import { afterEach, test } from 'node:test'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { TuiApp, type WorkflowAction } from '../src/tui-app.ts'
-import { TranscriptFolder, type TranscriptMessage, type WorkflowMemberView, type WorkflowRunId, type WorkflowRunStatus } from '../src/transcript.ts'
+import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type WorkflowMemberView, type WorkflowRunId, type WorkflowRunStatus } from '../src/transcript.ts'
 import { workflowMemberViewerTarget, type TaskBrowserRow } from '../src/tasks-browser.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -940,5 +940,218 @@ test('a workflow member press cannot transfer to the aggregate View row after a 
     kind: 'open-phase-agents', runId: 'run-1', name: 'audit', phaseLabel: 'A',
     childIds: ['child-0', 'child-1', 'child-2', 'child-3', 'child-4', 'child-5'],
   }], `a fresh aggregate click must emit the scoped action`)
+  app.stop()
+})
+
+// ---------------------------------------------------------------------------
+// Transcript search reveal (plan §6.5/§6.6)
+// ---------------------------------------------------------------------------
+
+const stripped = (view: string): string => view.split('\n').map(line => stripTerminalSequences(line)).join('\n')
+
+test('workflow search: a hidden large-phase member gets ONE search-only context row', async () => {
+  const { vt, app } = startApp()
+  const card = workflow({
+    status: 'running',
+    members: [
+      member(0, 'boom', 'Migration', 'failed'),
+      ...Array.from({ length: 5 }, (_, i) => member(i + 1, `shard-${i + 1}`, 'Migration', 'completed')),
+    ],
+  })
+  app.setTranscript([card])
+  let view = stripped(await viewport(vt))
+  assert.ok(!view.includes('shard-5'), `the large-phase summary hides member 5:\n${view}`)
+  assert.ok(view.includes('View 6 agents'), `the normal aggregate entry stays:\n${view}`)
+
+  app.setTranscriptSearchTarget({
+    query: 'shard-5',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('Migration'), seq: 5, field: 'label' },
+      sourceOccurrence: 0,
+    },
+    message: card,
+  })
+  view = stripped(await viewport(vt))
+  assert.ok(view.includes('↳ shard-5 — completed'), `the search-only context row must appear:\n${view}`)
+  assert.ok(view.includes('View 6 agents'), 'the normal aggregate entry is untouched')
+  assert.ok(!view.includes('shard-4'), 'only the current matched member is shown')
+  // The current member occurrence is strongly highlighted on the context row
+  // (and nowhere else on the card).
+  const rows = vt.getViewport()
+  const contextRow = rows.findIndex(line => stripTerminalSequences(line).includes('shard-5'))
+  assert.ok(contextRow >= 0, `context row missing:\n${rows.join('\n')}`)
+  const contextCol = stripTerminalSequences(rows[contextRow]!).indexOf('shard-5')
+  assert.ok(vt.getCellInverse(contextRow, contextCol), 'the matched member cell is the current highlight')
+
+  // Clearing the target removes the search-only context row (the run stays
+  // open because its facts are abnormal).
+  app.setTranscriptSearchTarget(undefined)
+  view = stripped(await viewport(vt))
+  assert.ok(!view.includes('shard-5'), `the context row must disappear:\n${view}`)
+  assert.equal(runChevron(view), '▼', 'the abnormal run stays open')
+  assert.ok(view.includes('boom'), 'the abnormal preview stays')
+  app.stop()
+})
+
+test('workflow search: a member already inline uses the existing row (no duplicate)', async () => {
+  const { vt, app } = startApp()
+  const card = workflow({ members: [
+    member(0, 'a', 'Research', 'running'),
+    member(1, 'b', 'Research', 'completed'),
+  ] })
+  app.setTranscript([card])
+  await viewport(vt)
+  app.setTranscriptSearchTarget({
+    query: 'b',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('Research'), seq: 1, field: 'label' },
+      sourceOccurrence: 0,
+    },
+    message: card,
+  })
+  const view = stripped(await viewport(vt))
+  const occurrences = view.split('\n').filter(line => line.includes('b — completed')).length
+  assert.equal(occurrences, 1, `the inline member row must not be duplicated:\n${view}`)
+  assert.ok(!view.includes('↳'), 'no search-only context row for an inline member')
+  app.stop()
+})
+
+test('workflow search: a run-level hit opens the run without writing userOpen', async () => {
+  const { vt, app } = startApp()
+  const card = workflow({
+    status: 'completed',
+    members: [member(0, 'a', 'Research', 'completed')],
+  })
+  app.setTranscript([card])
+  let view = stripped(await viewport(vt))
+  assert.equal(runChevron(view), '▶', `a clean completed run is folded:\n${view}`)
+
+  app.setTranscriptSearchTarget({
+    query: 'audit',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'workflow-run', field: 'name' },
+      sourceOccurrence: 0,
+    },
+    message: card,
+  })
+  view = stripped(await viewport(vt))
+  assert.equal(runChevron(view), '▼', `the search target forces the run open:\n${view}`)
+
+  app.setTranscriptSearchTarget(undefined)
+  view = stripped(await viewport(vt))
+  assert.equal(runChevron(view), '▶', `the run folds again (search never wrote userOpen):\n${view}`)
+  app.stop()
+})
+
+/** The viewport cell of a substring on the first line containing it. */
+function cellOf(vt: VirtualTerminal, needle: string, innerOffset = 0): { row: number; col: number; line: string } {
+  const rows = vt.getViewport()
+  const row = rows.findIndex(line => stripTerminalSequences(line).includes(needle))
+  assert.ok(row >= 0, `row ${needle} missing:\n${rows.join('\n')}`)
+  const plain = stripTerminalSequences(rows[row]!)
+  const col = plain.indexOf(needle) + innerOffset
+  assert.ok(col >= 0, `column ${needle} missing:\n${plain}`)
+  return { row, col, line: rows[row]! }
+}
+
+test('workflow search: the status field is disambiguated from the label on one row', async () => {
+  const { vt, app } = startApp()
+  // One failed member keeps the (inline) phase open. Query 'a' matches BOTH
+  // fields: 'alpha' (twice) and 'failed' (once).
+  const card = workflow({ status: 'running', members: [member(0, 'alpha', 'Research', 'failed')] })
+  app.setTranscript([card])
+  await viewport(vt)
+  app.setTranscriptSearchTarget({
+    query: 'a',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('Research'), seq: 0, field: 'status' },
+      sourceOccurrence: 0,
+    },
+    message: card,
+  })
+  await viewport(vt)
+  const row = vt.getViewport().findIndex(line => stripTerminalSequences(line).includes('alpha — failed'))
+  assert.ok(row >= 0, `member row missing:\n${vt.getViewport().join('\n')}`)
+  const plain = stripTerminalSequences(vt.getViewport()[row]!)
+  const statusCol = plain.indexOf('failed') + 1 // the 'a' of failed
+  assert.ok(vt.getCellInverse(row, statusCol), `the STATUS 'a' must be the current occurrence:\n${plain}`)
+  const labelCol = plain.indexOf('alpha')
+  assert.ok(!vt.getCellInverse(row, labelCol), 'the label occurrence must NOT be current')
+  app.stop()
+})
+
+test('workflow search: an anomaly-preview member row carries the member range', async () => {
+  const { vt, app } = startApp()
+  // 6 members: the phase renders as a summary; the two failed members are the
+  // anomaly preview rows (context row suppressed for them).
+  const card = workflow({
+    status: 'running',
+    members: [
+      member(0, 'bad-a', 'Migration', 'failed'),
+      member(1, 'bad-b', 'Migration', 'failed'),
+      ...Array.from({ length: 4 }, (_, i) => member(i + 2, `ok-${i}`, 'Migration', 'completed')),
+    ],
+  })
+  app.setTranscript([card])
+  const initial = stripped(await viewport(vt))
+  assert.ok(initial.includes('bad-a'), `the anomaly preview must render the member:\n${initial}`)
+  app.setTranscriptSearchTarget({
+    query: 'bad-a',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('Migration'), seq: 0, field: 'label' },
+      sourceOccurrence: 0,
+    },
+    message: card,
+  })
+  await viewport(vt)
+  const cell = cellOf(vt, 'bad-a', 0)
+  assert.ok(vt.getCellInverse(cell.row, cell.col), `the visible anomaly row must be the current occurrence:\n${cell.line}`)
+  const rows = vt.getViewport()
+  assert.ok(!rows.some(line => stripTerminalSequences(line).includes('↳')), 'no duplicate context row is inserted')
+  app.stop()
+})
+
+test('workflow search: clicking an UNRELATED phase does not hide the search target', async () => {
+  const { vt, app } = startApp()
+  const card = workflow({
+    status: 'running',
+    members: [
+      member(0, 'a-bad', 'A', 'failed'),
+      ...Array.from({ length: 5 }, (_, i) => member(i + 1, `a-ok-${i}`, 'A', 'completed')),
+      member(6, 'b-bad', 'B', 'failed'),
+      ...Array.from({ length: 5 }, (_, i) => member(i + 7, `b-ok-${i}`, 'B', 'completed')),
+    ],
+  })
+  app.setFullscreen(true)
+  app.setTranscript([card])
+  await viewport(vt)
+  app.setTranscriptSearchTarget({
+    query: 'a-ok-0',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('A'), seq: 1, field: 'label' },
+      sourceOccurrence: 0,
+    },
+    message: card,
+  })
+  let view = stripped(await viewport(vt))
+  assert.ok(view.includes('↳ a-ok-0 — completed'), `the search context row must exist:\n${view}`)
+
+  // Click the UNRELATED phase B header: the target's phase/context row stays.
+  const bRow = rowOf(await viewport(vt), 'B 6 agents')
+  await clickCell(vt, 10, bRow)
+  view = stripped(await viewport(vt))
+  assert.ok(view.includes('↳ a-ok-0 — completed'), `an unrelated phase click must not hide the search target:\n${view}`)
+
+  // Click the TARGET phase A header: the reveal is revoked with the close.
+  const aRow = rowOf(await viewport(vt), 'A 6 agents')
+  await clickCell(vt, 10, aRow)
+  view = stripped(await viewport(vt))
+  assert.ok(!view.includes('a-ok-0'), `clicking the target phase must close it and drop the context row:\n${view}`)
   app.stop()
 })

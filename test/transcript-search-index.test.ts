@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { TranscriptFolder, transcriptSearchText, workflowReadablePhase, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
+import { TranscriptFolder, transcriptSearchText, transcriptSearchMatchKey, transcriptSearchSourceKey, workflowReadablePhase, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
 import { refreshedSearchState, steppedSearchOverlayState } from '../src/search-overlay.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 
@@ -166,28 +166,61 @@ function workflowCorpus(message: Extract<TranscriptMessage, { kind: 'workflow' }
 function legacySearchForTest(folder: TranscriptFolder, query: string): TranscriptMessage[] {
   const needle = query.trim().toLowerCase()
   if (needle === '') return []
-  return folder.messages().filter(message => {
-    const text = message.kind === 'tool' ? `${message.name} ${message.args} ${message.result}`
-      : message.kind === 'workflow' ? workflowCorpus(message)
-        : message.text
-    return text.toLowerCase().includes(needle)
-  })
+  return folder.messages().filter(message => cardSearchCorpus(message).toLowerCase().includes(needle))
+}
+
+/** The raw searchable text of one legacy card (the pre-D1 corpus). */
+function cardSearchCorpus(message: TranscriptMessage): string {
+  if (message.kind === 'tool') return `${message.name} ${message.args} ${message.result}`
+  if (message.kind === 'workflow') return workflowCorpus(message)
+  return message.text ?? ''
+}
+
+/** Count NON-OVERLAPPING occurrences of the normalized needle in one text. */
+function occurrenceCount(text: string, needle: string): number {
+  let count = 0
+  let start = 0
+  while (true) {
+    const index = text.indexOf(needle, start)
+    if (index < 0) break
+    count += 1
+    start = index + Math.max(1, needle.length)
+  }
+  return count
 }
 
 /**
- * Semantic parity: same count, same order, same turn, and every indexed
- * match resolves to the EXACT legacy card object (identity — a merged read
- * group must resolve to the same card legacy emitted).
+ * The occurrence-level legacy oracle: every card in order, expanded to one
+ * entry per non-overlapping occurrence (the post-fix result contract).
+ */
+function legacyOccurrenceSearchForTest(
+  folder: TranscriptFolder,
+  query: string,
+): Array<{ message: TranscriptMessage; occurrence: number }> {
+  const needle = query.trim().toLowerCase()
+  if (needle === '') return []
+  const result: Array<{ message: TranscriptMessage; occurrence: number }> = []
+  for (const message of folder.messages()) {
+    const count = occurrenceCount(cardSearchCorpus(message).toLowerCase(), needle)
+    for (let occurrence = 0; occurrence < count; occurrence += 1) result.push({ message, occurrence })
+  }
+  return result
+}
+
+/**
+ * Semantic parity: same occurrence order, same resolved visible card, same
+ * occurrence ordinal and turn as the occurrence-level legacy oracle.
  */
 function assertSearchParity(folder: TranscriptFolder, query: string, label = ''): void {
-  const legacy = legacySearchForTest(folder, query)
+  const legacy = legacyOccurrenceSearchForTest(folder, query)
   const indexed = folder.search(query)
   assert.equal(indexed.length, legacy.length, `${label} count for ${JSON.stringify(query)} (indexed ${indexed.length} vs legacy ${legacy.length})`)
   for (let i = 0; i < legacy.length; i += 1) {
+    const expected = legacy[i]!
     const resolved = folder.resolveSearchMatch(indexed[i]!)
-    assert.equal(resolved, legacy[i], `${label} match ${i} for ${JSON.stringify(query)} must resolve to the legacy card`)
-    const legacyCard = legacy[i]!
-    const legacyTurn = 'turn' in legacyCard ? legacyCard.turn : undefined
+    assert.equal(resolved, expected.message, `${label} match ${i} for ${JSON.stringify(query)} must resolve to the legacy card`)
+    assert.equal(indexed[i]!.occurrence, expected.occurrence, `${label} match ${i} occurrence for ${JSON.stringify(query)}`)
+    const legacyTurn = 'turn' in expected.message ? expected.message.turn : undefined
     assert.equal(indexed[i]!.turn, legacyTurn, `${label} match ${i} turn for ${JSON.stringify(query)}`)
   }
 }
@@ -270,7 +303,7 @@ test('case-insensitivity: Unicode lowercases exactly like the legacy path', () =
   assertCorpusParity(folder, ['ünïcödé', 'ÜNÏCÖDÉ', 'ärchiv', 'overflow'])
 })
 
-test('G1: same-turn adjacent reads merge into ONE visible match, parity kept', () => {
+test('G1: same-turn adjacent reads merge into ONE representative card, parity kept', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(0, 0),
@@ -287,14 +320,15 @@ test('G1: same-turn adjacent reads merge into ONE visible match, parity kept', (
   assert.equal(grouped.length, 1, 'the three reads merge into one card')
   assertCorpusParity(folder, ['shared-keyword', 'file A', 'file B', 'file C', 'read'])
   const matches = folder.search('shared-keyword')
-  assert.equal(matches.length, 1, 'one logical card -> one search result, never three')
-  assert.equal(matches[0]!.turn, 0)
+  assert.equal(matches.length, 3, 'one logical card -> one occurrence per member result')
+  assert.ok(matches.every(match => match.turn === 0))
+  assert.equal(new Set(matches.map(match => match.id)).size, 1, 'every occurrence belongs to the one representative card')
   // The legacy merged card searches "read N files <results>" — no member paths.
   assert.equal(legacySearchForTest(folder, 'src/b.ts').length, 0)
   assert.equal(folder.search('src/b.ts').length, 0, 'member paths are NOT searchable: strict legacy parity')
 })
 
-test('G2: cross-turn read grouping keeps one visible match with the max turn', () => {
+test('G2: cross-turn read grouping keeps one representative with the max turn', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(0, 0),
@@ -311,8 +345,8 @@ test('G2: cross-turn read grouping keeps one visible match with the max turn', (
   assert.equal(grouped[0]!.turn, 1, 'the merged card carries the max turn')
   assertCorpusParity(folder, ['cross-turn', 'keyword', 'part one', 'part two'])
   const matches = folder.search('cross-turn')
-  assert.equal(matches.length, 1)
-  assert.equal(matches[0]!.turn, 1)
+  assert.equal(matches.length, 2, 'one occurrence per member result')
+  assert.ok(matches.every(match => match.turn === 1))
 })
 
 test('G3: a late non-tail result reflows the run; search text updates, no duplicate', () => {
@@ -348,9 +382,10 @@ test('G3: a late non-tail result reflows the run; search text updates, no duplic
   // b is still RUNNING: a and c are separate singletons; b searchable by args.
   assertCorpusParity(live, ['alpha payload', 'gamma payload', 'src/b.ts'])
   live.apply([toolResult(6, 'b', 'beta payload')])
-  // Now a+b+c merge into ONE card: one match for any member content.
+  // Now a+b+c merge into ONE card: one occurrence per member payload.
   const matches = live.search('payload')
-  assert.equal(matches.length, 1, 'late settlement merges the run into one visible match')
+  assert.equal(matches.length, 3, 'late settlement merges the run into one visible card with three occurrences')
+  assert.equal(new Set(matches.map(match => match.id)).size, 1)
   assertCorpusParity(live, ['alpha payload', 'beta payload', 'gamma payload', 'payload', 'src/b.ts'])
 })
 
@@ -368,7 +403,8 @@ test('G4: running -> settled read args searchable, then merged group text', () =
   folder.apply([toolResult(4, 'r2', 'beta-result needle')])
   assertCorpusParity(folder, ['needle'])
   const matches = folder.search('needle')
-  assert.equal(matches.length, 1, 'the merged read card is one match')
+  assert.equal(matches.length, 2, 'the merged read card holds one occurrence per result')
+  assert.equal(new Set(matches.map(match => match.id)).size, 1)
 })
 
 test('G5: error results and synthetic error cards keep legacy semantics', () => {
@@ -438,7 +474,7 @@ test('stable ids survive settlement and group reflow (never object identity)', (
     turnEnd(5, 0),
   ])
   const matches = folder.search('result')
-  assert.equal(matches.length, 1, 'merged group -> one match')
+  assert.equal(matches.length, 2, 'merged group -> one occurrence per member result')
   const id = matches[0]!.id
   // A later live append must not change the id namespace of earlier matches.
   folder.apply([
@@ -446,8 +482,9 @@ test('stable ids survive settlement and group reflow (never object identity)', (
     userMessage(7, 'result three in a new turn'),
     turnEnd(8, 1),
   ])
-  assert.equal(id, matches[0]!.id, 'the id stays stable across live appends')
-  const resolved = folder.resolveSearchMatch({ id, turn: 0 })
+  const afterAppend = folder.search('result')
+  assert.equal(afterAppend[0]!.id, id, 'the id stays stable across live appends')
+  const resolved = folder.resolveSearchMatch({ id, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 })
   assert.equal(resolved?.kind, 'tool', 'the id still resolves to the merged card')
   assert.ok(resolved!.result.includes('result one') && resolved!.result.includes('result two'))
 })
@@ -467,7 +504,7 @@ test('query refinement: prefix typing narrows candidates only when the revision 
 
   let matches: TranscriptSearchMatch[] = folder.search('n')
   let revision = folder.searchRevision()
-  assert.equal(matches.length, 50, 'every turn has a needle candidate')
+  assert.equal(matches.length, 100, 'two occurrences (needle + candidate) per turn')
   assert.equal(folder.searchDiagnosticsForTest().fullScans, diagnosticsBefore.fullScans + 1)
   const scansAtStart = folder.searchDiagnosticsForTest()
 
@@ -775,7 +812,7 @@ test('stale search overlay: Next/Prev refreshes matches when the transcript chan
   ])
   // The overlay queried while the merged cross-turn card (turn 1) matched.
   const initial = folder.search('payload')
-  assert.equal(initial.length, 1)
+  assert.equal(initial.length, 2, 'one occurrence per member result')
   assert.equal(initial[0]!.turn, 1)
   const state = { matches: initial, current: 0, query: 'payload', revision: folder.searchRevision(), folder }
 
@@ -790,7 +827,7 @@ test('stale search overlay: Next/Prev refreshes matches when the transcript chan
   ])
   const refreshed = refreshedSearchState(state, folder)
   assert.equal(refreshed.changed, true, 'a moved revision must mark the overlay state stale')
-  assert.equal(refreshed.matches.length, 1)
+  assert.equal(refreshed.matches.length, 3)
   assert.equal(refreshed.matches[0]!.turn, 2, 'the jump must use the NEW group turn, never the stale 1')
   assert.equal(refreshed.matches[0]!.id, initial[0]!.id, 'the same logical card is recovered by stable id')
   assert.equal(refreshed.current, 0)
@@ -803,8 +840,8 @@ test('stale search overlay: Next/Prev refreshes matches when the transcript chan
     turnEnd(14, 3),
   ])
   const withNew = refreshedSearchState({ matches: refreshed.matches, current: refreshed.current, query: 'payload', revision: refreshed.revision, folder }, folder)
-  assert.equal(withNew.matches.length, 2, 'a live new match enters the candidate list')
-  assert.equal(withNew.current, 0, 'the previous current card stays current by id')
+  assert.equal(withNew.matches.length, 4, 'a live new occurrence enters the candidate list')
+  assert.equal(withNew.current, 0, 'the previous current occurrence stays current by key')
 
   // An UNCHANGED revision is a no-op (query retyping path: onSearchQuery
   // already committed the fresh revision).
@@ -812,7 +849,7 @@ test('stale search overlay: Next/Prev refreshes matches when the transcript chan
   assert.equal(unchanged.changed, false)
 
   // A stale id that no longer matches clamps instead of crashing.
-  const clamped = refreshedSearchState({ matches: [{ id: 999, turn: 0 }], current: 0, query: 'payload', revision: 0, folder }, folder)
+  const clamped = refreshedSearchState({ matches: [{ id: 999, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 }], current: 0, query: 'payload', revision: 0, folder }, folder)
   assert.equal(clamped.changed, true)
   assert.ok(clamped.matches.length > 0 && clamped.current >= 0, 'the index clamps into the refreshed list')
 
@@ -1007,4 +1044,235 @@ test('PTC child settle marks the root search entry dirty immediately', () => {
   const matches = folder.search('128 passed')
   assert.equal(matches.length, 1, 'the settled child content must be searchable immediately')
   assert.equal(matches[0]!.id, 0, 'the match locates the root Code card')
+})
+
+// ── Occurrence-level search (plan §4) ─────────────────────────────────────
+
+test('occurrence: one card yields one match per occurrence with ordinals', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'foo bar foo baz foo'), turnEnd(2, 0)])
+  const matches = folder.search('foo')
+  assert.equal(matches.length, 3, 'three non-overlapping occurrences in one card')
+  assert.deepEqual(matches.map(match => match.occurrence), [0, 1, 2])
+  assert.deepEqual(matches.map(match => match.sourceOccurrence), [0, 1, 2])
+  assert.ok(matches.every(match => transcriptSearchSourceKey(match.source) === 'message'))
+  assert.equal(new Set(matches.map(transcriptSearchMatchKey)).size, 3, 'every occurrence has a distinct key')
+  assert.ok(matches.every(match => folder.resolveSearchMatch(match)?.kind === 'user'))
+})
+
+test('occurrence: case-insensitive enumeration keeps every occurrence', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'Foo fOO foo FOO'), turnEnd(2, 0)])
+  assert.equal(folder.search('foo').length, 4)
+})
+
+test('occurrence: a tool card maps name/args/result occurrences to semantic sources', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'c1', 'bash', { command: 'needle in args' }, 0),
+    toolResult(2, 'c1', 'needle in result'),
+    turnEnd(3, 0),
+  ])
+  const name = folder.search('bash')
+  assert.equal(name.length, 1)
+  assert.equal(transcriptSearchSourceKey(name[0]!.source), 'tool.name')
+  const needle = folder.search('needle')
+  assert.equal(needle.length, 2, 'args + result occurrences')
+  assert.deepEqual(needle.map(match => transcriptSearchSourceKey(match.source)), ['tool.args', 'tool.result'])
+  assert.deepEqual(needle.map(match => match.sourceOccurrence), [0, 0], 'each source owns its own ordinal')
+  assert.deepEqual(needle.map(match => match.occurrence), [0, 1])
+})
+
+test('occurrence: a merged read group enumerates every member occurrence', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/a.ts', 0),
+    toolResult(2, 'r1', 'shared token A'),
+    readToolCall(3, 'r2', 'src/b.ts', 0),
+    toolResult(4, 'r2', 'shared token B'),
+    turnEnd(5, 0),
+  ])
+  const matches = folder.search('shared')
+  assert.equal(matches.length, 2, 'the representative group card holds both occurrences')
+  assert.ok(matches.every(match => transcriptSearchSourceKey(match.source) === 'tool.result'))
+  assert.deepEqual(matches.map(match => match.sourceOccurrence), [0, 1])
+  assert.equal(new Set(matches.map(match => match.id)).size, 1, 'both occurrences belong to the one representative id')
+})
+
+test('occurrence: Workflow phase/member/run occurrences carry their semantic source', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit', }, 1),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 0, label: 'dependency-scan', phase: 'Research', childId: 'session-x' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'schema-scan', phase: 'Research', childId: 'session-y' }, 3),
+  ])
+  const run = folder.search('audit')
+  assert.equal(run.length, 1)
+  assert.equal(transcriptSearchSourceKey(run[0]!.source), 'workflow-run.name')
+  const phase = folder.search('research')
+  assert.equal(phase.length, 1)
+  assert.deepEqual(phase[0]!.source, { kind: 'workflow-phase', phaseKey: 'value:8:Research' })
+  const member = folder.search('dependency-scan')
+  assert.equal(member.length, 1)
+  assert.deepEqual(member[0]!.source, { kind: 'workflow-member', phaseKey: 'value:8:Research', seq: 0, field: 'label' })
+  const status = folder.search('running')
+  assert.equal(status.length, 3, 'the run status plus both member status words')
+  assert.equal(transcriptSearchSourceKey(status[0]!.source), 'workflow-run.status')
+  const memberStatuses = status.slice(1)
+  assert.ok(memberStatuses.every(match => match.source.kind === 'workflow-member' && match.source.field === 'status'))
+  assert.deepEqual(memberStatuses.map(match => match.sourceOccurrence), [0, 0], 'the member seq makes each status its own source')
+})
+
+test('occurrence: a nested PTC hit carries its full ancestor subCallId path', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'code-1', 'run_code', { code: 'print(1)' }, 0),
+    event('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('child-1'),
+      name: 'bash',
+      arguments: { cmd: 'child args marker' },
+    }, 2),
+    event('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('child-1'),
+      subCallId: ToolCallId('grand-1'),
+      name: 'bash',
+      arguments: { cmd: 'grandchild-needle' },
+    }, 3),
+  ])
+  const matches = folder.search('grandchild-needle')
+  assert.equal(matches.length, 1)
+  assert.deepEqual(matches[0]!.source, {
+    kind: 'subcall-field',
+    subCallIds: ['child-1', 'grand-1'],
+    field: 'args',
+  })
+  assert.equal(matches[0]!.id, 0, 'the hit still locates the root Code card')
+})
+
+test('occurrence: prefix refinement rescans candidate cards for every occurrence', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    turnStart(0, 0),
+    userMessage(1, 'needle needle needle'),
+    turnEnd(2, 0),
+    turnStart(3, 1),
+    userMessage(4, 'needle filler'),
+    turnEnd(5, 1),
+  ])
+  let matches = folder.search('n')
+  assert.equal(matches.length, 4, 'three occurrences in card one plus one in card two')
+  let revision = folder.searchRevision()
+  const fullScansBefore = folder.searchDiagnosticsForTest().fullScans
+  for (const partial of ['ne', 'nee', 'need', 'needle']) {
+    matches = folder.search(partial, { previousQuery: partial.slice(0, -1), previousMatches: matches, revision })
+    revision = folder.searchRevision()
+  }
+  assert.equal(matches.length, 4, 'refinement must not lose duplicate-id occurrences')
+  assert.deepEqual(matches.map(match => match.occurrence), [0, 1, 2, 0])
+  assert.equal(folder.searchDiagnosticsForTest().fullScans, fullScansBefore, 'refinement never full-scans')
+})
+
+test('occurrence: live append refreshes the occurrence count', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'live needle'), turnEnd(2, 0)])
+  assert.equal(folder.search('needle').length, 1)
+  folder.apply([turnStart(3, 1), userMessage(4, 'another needle and a needle again', 1), turnEnd(5, 1)])
+  assert.equal(folder.search('needle').length, 3)
+})
+
+// ── Occurrence-aware overlay recovery (plan §5) ───────────────────────────
+
+test('overlay occurrence: the exact current occurrence survives an unrelated revision', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'foo foo foo'), turnEnd(2, 0)])
+  const initial = folder.search('foo')
+  assert.equal(initial.length, 3)
+  const state = { matches: initial, current: 2, query: 'foo', revision: folder.searchRevision(), folder }
+  // An unrelated turn arrives: the revision moves but the exact occurrence key
+  // still exists.
+  folder.apply([turnStart(3, 1), userMessage(4, 'unrelated text', 1), turnEnd(5, 1)])
+  const refreshed = refreshedSearchState(state, folder)
+  assert.equal(refreshed.changed, true)
+  assert.equal(refreshed.current, 2, 'the same occurrence stays current')
+  assert.equal(transcriptSearchMatchKey(refreshed.matches[refreshed.current]!), transcriptSearchMatchKey(initial[2]!))
+})
+
+test('overlay occurrence: an append AFTER the current occurrence keeps it current', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'foo foo'), turnEnd(2, 0)])
+  const initial = folder.search('foo')
+  const state = { matches: initial, current: 0, query: 'foo', revision: folder.searchRevision(), folder }
+  // A new matching occurrence arrives LATER in the transcript.
+  folder.apply([turnStart(3, 1), userMessage(4, 'foo again', 1), turnEnd(5, 1)])
+  const refreshed = refreshedSearchState(state, folder)
+  assert.equal(refreshed.current, 0, 'the previous source occurrence must not jump to the new occurrence')
+  assert.equal(refreshed.matches[refreshed.current]!.sourceOccurrence, 0)
+})
+
+test('overlay occurrence: a vanished source occurrence clamps into the surviving card', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'foo foo'), turnEnd(2, 0)])
+  const initial = folder.search('foo')
+  const state = { matches: initial, current: 1, query: 'foo', revision: folder.searchRevision(), folder }
+  // The same card loses one occurrence (authoritative replacement).
+  folder.apply([assistantMessage(3, 0, 0, 'foo only')])
+  const refreshed = refreshedSearchState(state, folder)
+  assert.ok(refreshed.current >= 0)
+  assert.equal(refreshed.matches[refreshed.current]!.id, initial[1]!.id, 'the surviving occurrence of the same card is chosen')
+})
+
+test('overlay occurrence: Next/Prev step through a single card occurrences then wrap', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'foo foo foo'), turnEnd(2, 0)])
+  const initial = folder.search('foo')
+  let state = { matches: initial, current: 0, query: 'foo', revision: folder.searchRevision(), folder }
+  const seen: number[] = [state.current]
+  for (let step = 0; step < 4; step += 1) {
+    const stepped = steppedSearchOverlayState(state, folder, 1)
+    state = { matches: stepped.matches, current: stepped.current, query: 'foo', revision: stepped.revision, folder }
+    seen.push(state.current)
+  }
+  assert.deepEqual(seen, [0, 1, 2, 0, 1], 'Next walks occurrences inside the card and wraps')
+  const prev = steppedSearchOverlayState(state, folder, -1)
+  assert.equal(prev.current, 0)
+})
+
+// ── Corpus compatibility + cross-span source ownership (round-1 findings) ──
+
+test('compat: transcriptSearchText keeps the legacy Workflow raw text (empty members)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+    rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 2),
+  ])
+  const card = folder.messages()[0]!
+  // The legacy template always emitted both group separators (two trailing
+  // spaces for an empty run); the source-aware corpus must preserve it.
+  assert.equal(transcriptSearchText(card), 'workflow audit completed  ')
+})
+
+test('cross-span: a workflow member label+status query keeps the member source', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+    ...Array.from({ length: 6 }, (_, i) =>
+      rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: i, label: `shard-${i}`, phase: 'Migration', childId: `session-${i}` }, 2 + i)),
+  ])
+  const matches = folder.search('shard-5 running')
+  assert.equal(matches.length, 1, 'the cross-span occurrence is preserved')
+  assert.deepEqual(matches[0]!.source, {
+    kind: 'workflow-member',
+    phaseKey: 'value:9:Migration',
+    seq: 5,
+    field: 'label',
+  }, 'the occurrence keeps the FIRST chunk owner so reveal/context-row still trigger')
 })

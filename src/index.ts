@@ -4247,10 +4247,10 @@ export function apply(ctx: Context, config: Config): void {
     // stale end must never clear a NEWER compaction's footer/busy state.
     let compactingId: string | undefined
     // Transcript-search state (see the onSearch* events below). Matches are
-    // LIGHTWEIGHT stable identities ({id, turn} — never full message
-    // objects): the full-history search runs over the folder's incremental
-    // projection, so a query change never materializes the grouped
-    // transcript nor re-lowercases history.
+    // LIGHTWEIGHT occurrence identities (representative id + semantic source +
+    // ordinals — never full message objects): the full-history search runs
+    // over the folder's incremental projection, so a query change never
+    // materializes the grouped transcript nor re-lowercases history.
     let searchMatches: TranscriptSearchMatch[] = []
     let searchCurrent = -1
      let searchOrigin: { controller: TranscriptWindowController; state: TranscriptWindowState } | undefined
@@ -4409,8 +4409,8 @@ export function apply(ctx: Context, config: Config): void {
     // changing (settlements, read-group reflow, new messages), so Next/Prev
     // must never jump with a stale candidate list or a stale turn. This
     // re-runs the SAME lightweight query when the active folder's
-    // projection revision moved (or the folder itself changed), recovers
-    // the previously current match by stable id, and clamps the index.
+    // projection revision moved (or the folder itself changed), recovers the
+    // previously current OCCURRENCE by its match key, and clamps the index.
     const refreshSearchMatchesIfStale = (): void => {
       const folder = activeFolder()
       const refreshed = refreshedSearchState(
@@ -4427,35 +4427,28 @@ export function apply(ctx: Context, config: Config): void {
     const jumpToSearchMatch = (): void => {
       refreshSearchMatchesIfStale()
       const match = searchMatches[searchCurrent]
-      if (match === undefined) return
+      if (match === undefined) {
+        app.setTranscriptSearchTarget(undefined)
+        app.setSearchResult(0, 0)
+        return
+      }
       // ONE fold snapshot: the anchored message window and the activities
       // come from the same folder call (plan §19 — a jump must never
-      // combine a fresh window with stale activity data).
+      // combine a fresh window with stale activity data). Order is the
+      // contract (plan §22): materialize the target window FIRST, then
+      // resolve the semantic target, publish the temporary search reveal,
+      // repaint/measure, and only THEN anchor the exact rendered occurrence.
       const folder = activeFolder()
       const controller = activeWindow()
       controller.anchorAt(match.turn)
-      repaint(app, folder, controller, activeStreamingToolPreviews())
-      app.scrollToBottom({ disableFollow: !controller.isLatest() })
-
-      // Focus Mode: the search hits the FULL transcript (hidden process
-      // rows included — plan §23), so a jump into a collapsed turn must
-      // open its Thought for the hit to be visible — and a hit inside a
-      // SECONDARY card must full-reveal that card (plan §28; the compact
-      // timeline is a FULLSCREEN property — regular Focus full-reveals
-      // any expanded root anyway). The disclosure is not reverted when
-      // search closes. The match resolves to its CURRENT visible card: a
-      // group reflow after the query may have replaced the card object —
-      // resolving by stable id fails soft (the turn jump above already
-      // landed the window; only the exact-card reveal is skipped).
-      //
-      // A long text-only USER message is revealed REGARDLESS of Focus Mode:
-      // its compacted middle hides the canonical full text the search ran
-      // against, so a hidden hit must expand the bubble in any mode. The
-      // reveal is a no-op for non-user kinds outside Focus Mode.
       const message = folder.resolveSearchMatch(match)
-      if (message !== undefined && (app.isFocusModeEnabled() || message.kind === 'user')) {
-        app.revealSearchMatch(message)
-      }
+      app.setTranscriptSearchTarget(message === undefined ? undefined : {
+        query: lastSearchQuery,
+        match,
+        message,
+      })
+      repaint(app, folder, controller, activeStreamingToolPreviews())
+      app.scrollToSearchTarget()
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
     /** Enter the subagent viewer for one session (live or persisted). The
@@ -7114,6 +7107,7 @@ export function apply(ctx: Context, config: Config): void {
         // cannot restore the historical anchor we are explicitly leaving.
         searchOrigin = undefined
         resetSearchState()
+        app.setTranscriptSearchTarget(undefined)
         const closedSearch = app.closeTranscriptSearch()
         const controller = activeWindow()
         const changed = controller.latest()
@@ -7146,6 +7140,9 @@ export function apply(ctx: Context, config: Config): void {
       onSearchOpen: () => {
         const controller = activeWindow()
         searchOrigin = { controller, state: controller.state() }
+        // A stale search presentation from a previous session must never
+        // leak its reveal/highlight into the fresh overlay.
+        app.setTranscriptSearchTarget(undefined)
       },
       onSearchQuery: (query) => {
         const folder = activeFolder()
@@ -7160,8 +7157,10 @@ export function apply(ctx: Context, config: Config): void {
         lastSearchRevision = folder.searchRevision()
         lastSearchFolder = folder
         searchCurrent = searchMatches.length > 0 ? 0 : -1
-        app.setSearchResult(searchCurrent + 1, searchMatches.length)
-        if (searchCurrent >= 0) jumpToSearchMatch()
+        // Always run the jump path: an empty/no-match query must CLEAR the
+        // stale search presentation target (0/0), not leave the previous
+        // reveal/highlight on screen.
+        jumpToSearchMatch()
       },
       onSearchNext: () => {
         // PR D1 P1: refresh BEFORE stepping — an empty candidate list
@@ -7179,8 +7178,8 @@ export function apply(ctx: Context, config: Config): void {
         searchCurrent = stepped.current
         lastSearchRevision = stepped.revision
         lastSearchFolder = folder
-        app.setSearchResult(searchCurrent + 1, searchMatches.length)
-        if (stepped.current < 0) return
+        // An emptied list steps to -1: the jump path still runs so the
+        // stale target/highlight is cleared (0/0).
         jumpToSearchMatch()
       },
       onSearchPrev: () => {
@@ -7194,12 +7193,14 @@ export function apply(ctx: Context, config: Config): void {
         searchCurrent = stepped.current
         lastSearchRevision = stepped.revision
         lastSearchFolder = folder
-        app.setSearchResult(searchCurrent + 1, searchMatches.length)
-        if (stepped.current < 0) return
         jumpToSearchMatch()
       },
       onSearchClose: () => {
         resetSearchState()
+        // Clear the temporary search presentation BEFORE restoring the origin
+        // window so no stale reveal/highlight survives the close (the user's
+        // own disclosure state was never written by search).
+        app.setTranscriptSearchTarget(undefined)
         const origin = searchOrigin
         searchOrigin = undefined
         const controller = activeWindow()

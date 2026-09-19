@@ -1542,6 +1542,41 @@ test('a click on a PTC sub-call header expands only that child body', async () =
   assert.ok(!view.includes('file content'), `the other child stays collapsed:\n${view}`)
 })
 
+test('a manually-expanded PTC child can still be collapsed while a search target covers it', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const card = ptcCodeCard()
+  app.setTranscript([card])
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  // Manually expand the first child BEFORE the search navigation exists.
+  let bashIdx = vt.getViewport().join('\n').split('\n').findIndex(line => strip(line).includes('Bash'))
+  clickCell(vt, 10, bashIdx)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('4 failed'), 'precondition: the child is manually expanded')
+
+  // A search target that covers the SAME child (already in the manual set).
+  app.setTranscriptSearchTarget({
+    query: 'failed',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'subcall-field', subCallIds: ['code-1:code:1'], field: 'result' },
+      sourceOccurrence: 0,
+    },
+    message: card,
+  })
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('4 failed'), 'the search target keeps the child open')
+
+  // One explicit click must COLLAPSE it (not be reopened by the search force).
+  bashIdx = vt.getViewport().join('\n').split('\n').findIndex(line => strip(line).includes('Bash'))
+  clickCell(vt, 10, bashIdx)
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('4 failed'), 'the explicit click must collapse the search-forced child')
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('a PTC sub-call press cannot transfer after a sibling settle reflow (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)

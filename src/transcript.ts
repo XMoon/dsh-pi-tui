@@ -495,54 +495,230 @@ export interface TranscriptWorkflowMessage {
  */
 export type TranscriptItemId = number
 
-/** One full-history search hit: the CURRENT visible representative of the
- * matched logical card plus its visible turn. Matches deliberately never
- * carry `TranscriptMessage` objects: live settlement replaces items and
- * grouping reflow replaces merged cards, so an object-based match would
- * pin stale state and break Next/Prev navigation. */
+/** The semantic origin of one searchable span inside a message's corpus.
+ * Reveal/selection needs the origin, not just a character offset: a PTC hit
+ * must know its ancestor `subCallIds` chain, a Workflow member hit its
+ * `phaseKey`/`seq`, an assistant deliverable hit its file index. */
+export type TranscriptSearchSource =
+  | { readonly kind: 'message' }
+  | { readonly kind: 'tool-field'; readonly field: 'name' | 'args' | 'result' }
+  | { readonly kind: 'subcall-field'; readonly subCallIds: readonly string[]; readonly field: 'name' | 'args' | 'result' }
+  | { readonly kind: 'workflow-run'; readonly field: 'kind' | 'name' | 'status' }
+  | { readonly kind: 'workflow-phase'; readonly phaseKey: string }
+  | { readonly kind: 'workflow-member'; readonly phaseKey: string; readonly seq: number; readonly field: 'label' | 'status' }
+  | { readonly kind: 'assistant-deliverable'; readonly index: number; readonly field: 'path' | 'description' }
+
+/** Stable string identity of one semantic source. This is the source half of
+ * {@link transcriptSearchMatchKey}; it must stay stable across re-normalization
+ * (live settlement / group reflow) so the overlay can recover the current hit. */
+export function transcriptSearchSourceKey(source: TranscriptSearchSource): string {
+  switch (source.kind) {
+    case 'message': return 'message'
+    case 'tool-field': return `tool.${source.field}`
+    case 'subcall-field': return `subcall.${source.subCallIds.join('>')}.${source.field}`
+    case 'workflow-run': return `workflow-run.${source.field}`
+    case 'workflow-phase': return `workflow-phase.${source.phaseKey}`
+    case 'workflow-member': return `workflow-member.${source.phaseKey}.${source.seq}.${source.field}`
+    case 'assistant-deliverable': return `assistant-deliverable.${source.index}.${source.field}`
+  }
+}
+
+/** One corpus chunk: the raw text plus its semantic origin. */
+interface TranscriptSearchChunk {
+  readonly text: string
+  readonly source: TranscriptSearchSource
+}
+
+/** One span of a message corpus: NORMALIZED-coordinate bounds plus its origin.
+ * `sourceKey` is the stable identity used by {@link transcriptSearchMatchKey}. */
+export interface TranscriptSearchCorpusSpan {
+  readonly start: number
+  readonly end: number
+  readonly source: TranscriptSearchSource
+  readonly sourceKey: string
+}
+
+/** The full searchable corpus of one message: the legacy raw text (the
+ * compatibility surface {@link transcriptSearchText} returns) plus the
+ * whole-string lowercase normalized text and its source spans. */
+export interface TranscriptSearchCorpus {
+  readonly text: string
+  readonly normalizedText: string
+  readonly spans: readonly TranscriptSearchCorpusSpan[]
+}
+
+/** One full-history search hit: the current visible representative of the
+ * matched logical card, its visible turn, and the OCCURRENCE identity inside
+ * that card. Matches deliberately never carry `TranscriptMessage` objects:
+ * live settlement replaces items and grouping reflow replaces merged cards,
+ * so an object-based match would pin stale state and break Next/Prev.
+ * `occurrence` counts non-overlapping hits in the representative corpus;
+ * `source`/`sourceOccurrence` locate the same hit inside its semantic source
+ * (PTC path, Workflow member, deliverable) for temporary reveal + highlight. */
 export interface TranscriptSearchMatch {
   readonly id: TranscriptItemId
   readonly turn: number
+  readonly occurrence: number
+  readonly source: TranscriptSearchSource
+  readonly sourceOccurrence: number
 }
 
-/** The searchable text of one message — the SINGLE source of truth for the
- * search corpus (the legacy full-history search semantics: tools search
- * `name args result`, every other kind searches `text`). `summary` rows
- * never reach `items`, so the projection never indexes them. A PTC root
- * card's corpus recursively includes its sub-call descendants (their
- * name/args/result), so nested output stays searchable and matches locate
- * the root Code card. */
+/** The stable occurrence identity used by the overlay's stale-refresh
+ * recovery: representative id + semantic source + source-local ordinal.
+ * Deliberately NOT the card id alone — one card holds many hits. */
+export function transcriptSearchMatchKey(match: TranscriptSearchMatch): string {
+  return `${match.id}:${transcriptSearchSourceKey(match.source)}:${match.sourceOccurrence}`
+}
+
+/** The searchable text of one message — the compatibility helper over the
+ * SINGLE corpus builder (tools search `name args result`, every other kind
+ * searches `text`). `summary` rows never reach `items`. A PTC root card's
+ * corpus recursively includes its sub-call descendants (name/args/result). */
 export function transcriptSearchText(message: TranscriptMessage, depth = 0): string {
+  return transcriptSearchCorpus(message, depth).text
+}
+
+/** The full source-aware corpus of one message: raw text for compatibility
+ * plus the normalized text/spans the indexed query path consumes. */
+export function transcriptSearchCorpus(message: TranscriptMessage, depth = 0): TranscriptSearchCorpus {
+  return buildSearchCorpus(searchChunksForMessage(message, depth))
+}
+
+function searchChunksForMessage(message: TranscriptMessage, depth: number): TranscriptSearchChunk[] {
   if (message.kind === 'tool') {
-    const own = `${message.name} ${message.args} ${message.result}`
-    if (message.subCalls === undefined || message.subCalls.length === 0 || depth >= PTC_MAX_DEPTH) return own
-    return `${own} ${message.subCalls.map(child => transcriptSearchText(child, depth + 1)).join(' ')}`
+    const chunks: TranscriptSearchChunk[] = [
+      { text: message.name, source: { kind: 'tool-field', field: 'name' } },
+      { text: message.args, source: { kind: 'tool-field', field: 'args' } },
+      { text: message.result, source: { kind: 'tool-field', field: 'result' } },
+    ]
+    if (message.subCalls !== undefined && message.subCalls.length > 0 && depth < PTC_MAX_DEPTH) {
+      for (const child of message.subCalls) chunks.push(...searchChunksForSubCall(child, depth + 1, [child.subCallId ?? '']))
+    }
+    return chunks
   }
   if (message.kind === 'workflow') {
     // The run's search identity (PR2 plan §13): the kind, the run name, the
     // current status, every phase's readable label (Unassigned/Empty stay
     // distinct) and every member's label + status. Machine identities
-    // (childId/runId) are deliberately NOT indexed. A member hidden inside
-    // a large phase's summary still hits its Workflow card (plan §13.1).
+    // (childId/runId) are deliberately NOT indexed. A member hidden inside a
+    // large phase's summary still hits its Workflow card (plan §13.1), and
+    // the member's `phaseKey`/`seq` survive for the search-only context row.
+    const chunks: TranscriptSearchChunk[] = [
+      { text: 'workflow', source: { kind: 'workflow-run', field: 'kind' } },
+      { text: message.name, source: { kind: 'workflow-run', field: 'name' } },
+      { text: message.status, source: { kind: 'workflow-run', field: 'status' } },
+    ]
     const phases = new Set<string>()
-    const members: string[] = []
     for (const member of message.members) {
-      phases.add(workflowReadablePhase(member.phase))
-      members.push(`${member.label} ${member.status}`)
+      const phaseKey = workflowPhaseKey(member.phase)
+      if (phases.has(phaseKey)) continue
+      phases.add(phaseKey)
+      chunks.push({ text: workflowReadablePhase(member.phase), source: { kind: 'workflow-phase', phaseKey } })
     }
-    return `workflow ${message.name} ${message.status} ${[...phases].join(' ')} ${members.join(' ')}`
+    if (message.members.length === 0) {
+      // The legacy template always emitted BOTH group separators, so an empty
+      // run's raw corpus keeps its two trailing spaces. The empty chunks carry
+      // no searchable text; they only preserve `transcriptSearchText`.
+      const empty = { text: '', source: { kind: 'workflow-run', field: 'kind' } } as const
+      chunks.push(empty, empty)
+      return chunks
+    }
+    for (const member of message.members) {
+      const phaseKey = workflowPhaseKey(member.phase)
+      chunks.push({ text: member.label, source: { kind: 'workflow-member', phaseKey, seq: member.seq, field: 'label' } })
+      chunks.push({ text: member.status, source: { kind: 'workflow-member', phaseKey, seq: member.seq, field: 'status' } })
+    }
+    return chunks
   }
   if (message.kind === 'assistant' && message.deliverables !== undefined && message.deliverables.length > 0) {
-    return `${message.text} ${message.deliverables.map(file => [file.path, file.description ?? ''].join(' ')).join(' ')}`
+    const chunks: TranscriptSearchChunk[] = [{ text: message.text, source: { kind: 'message' } }]
+    message.deliverables.forEach((file, index) => {
+      chunks.push({ text: file.path, source: { kind: 'assistant-deliverable', index, field: 'path' } })
+      chunks.push({ text: file.description ?? '', source: { kind: 'assistant-deliverable', index, field: 'description' } })
+    })
+    return chunks
   }
-  return message.text ?? ''
+  return [{ text: message.text ?? '', source: { kind: 'message' } }]
 }
 
-/** Normalize search text exactly like the legacy query path did (JS String
- * `toLowerCase`, no locale options). Applied ONCE per entry at build/refresh
- * time — never per query. */
-function normalizeSearchText(text: string): string {
-  return text.toLowerCase()
+function searchChunksForSubCall(message: TranscriptToolMessage, depth: number, path: readonly string[]): TranscriptSearchChunk[] {
+  const chunks: TranscriptSearchChunk[] = [
+    { text: message.name, source: { kind: 'subcall-field', subCallIds: path, field: 'name' } },
+    { text: message.args, source: { kind: 'subcall-field', subCallIds: path, field: 'args' } },
+    { text: message.result, source: { kind: 'subcall-field', subCallIds: path, field: 'result' } },
+  ]
+  if (message.subCalls !== undefined && message.subCalls.length > 0 && depth < PTC_MAX_DEPTH) {
+    for (const child of message.subCalls) {
+      chunks.push(...searchChunksForSubCall(child, depth + 1, [...path, child.subCallId ?? '']))
+    }
+  }
+  return chunks
+}
+
+function buildSearchCorpus(chunks: readonly TranscriptSearchChunk[]): TranscriptSearchCorpus {
+  const text = chunks.map(chunk => chunk.text).join(' ')
+  const rawSpans: TranscriptSearchCorpusSpan[] = []
+  let offset = 0
+  for (const chunk of chunks) {
+    const start = offset
+    offset += chunk.text.length
+    rawSpans.push({
+      start,
+      end: offset,
+      source: chunk.source,
+      sourceKey: transcriptSearchSourceKey(chunk.source),
+    })
+    offset += 1 // the single-space join separator
+  }
+  return { text, normalizedText: text.toLowerCase(), spans: normalizeSearchSpans(text, rawSpans) }
+}
+
+/** Map raw-coordinate span bounds into whole-string-lowercase coordinates.
+ * The normalizer is JS `toLowerCase` over the WHOLE corpus (Unicode needs the
+ * word context: a final sigma is `ς`, not `σ`), so the mapping is derived from
+ * per-code-point lowercase LENGTHS — chunk-by-chunk lowercasing would change
+ * the corpus (see the Greek-sigma regression test). */
+function normalizeSearchSpans(raw: string, spans: readonly TranscriptSearchCorpusSpan[]): TranscriptSearchCorpusSpan[] {
+  const map = rawToNormalizedIndex(raw)
+  return spans.map(span => ({
+    ...span,
+    start: map[span.start] ?? span.start,
+    end: map[span.end] ?? span.end,
+  }))
+}
+
+function rawToNormalizedIndex(raw: string): number[] {
+  const map = new Array<number>(raw.length + 1).fill(0)
+  let normalized = 0
+  let index = 0
+  while (index < raw.length) {
+    map[index] = normalized
+    const codePoint = raw.codePointAt(index) ?? 0
+    const size = codePoint > 0xffff ? 2 : 1
+    normalized += raw.slice(index, index + size).toLowerCase().length
+    if (size === 2) map[index + 1] = normalized
+    index += size
+  }
+  map[raw.length] = normalized
+  return map
+}
+
+/** Resolve the semantic source of one normalized-coordinate occurrence: the
+ * span that owns the occurrence's START. A query crossing a chunk boundary
+ * (`label` + `status`, tool name + args) keeps the FIRST chunk's owner, so a
+ * cross-span Workflow member hit still reaches its run/phase/member reveal and
+ * search-only context row. Only an occurrence starting INSIDE a join separator
+ * (no owning span) falls back to the whole-card `message` source. */
+function resolveSearchSource(
+  spans: readonly TranscriptSearchCorpusSpan[],
+  matchStart: number,
+): TranscriptSearchCorpusSpan | undefined {
+  for (const span of spans) {
+    if (span.start > matchStart) break
+    if (matchStart < span.start || matchStart >= span.end) continue
+    return span
+  }
+  return undefined
 }
 
 /** The turn-end reason surface Focus reads (structural — never a full
@@ -1269,6 +1445,8 @@ interface TranscriptSearchEntry {
    * only; non-representative members keep their own raw text and are
    * skipped at scan time. */
   normalizedText: string
+  /** The source spans of `normalizedText` (occurrence → semantic origin). */
+  spans: readonly TranscriptSearchCorpusSpan[]
 }
 
 interface NextStepInboxIdentity {
@@ -1877,9 +2055,11 @@ export class TranscriptFolder {
     // The searchable projection mirrors the item's own text (eager at
     // append — the cold path); later mutations mark the entry dirty and
     // re-normalize lazily at the next search.
+    const corpus = transcriptSearchCorpus(message)
     this.searchEntries.push({
       turn: 'turn' in message ? message.turn : 0,
-      normalizedText: normalizeSearchText(transcriptSearchText(message)),
+      normalizedText: corpus.normalizedText,
+      spans: corpus.spans,
     })
     this.searchRevisionCounter += 1
     const turn = 'turn' in message ? message.turn : undefined
@@ -1945,7 +2125,9 @@ export class TranscriptFolder {
       const card = group ?? this.items[index]
       if (card === undefined) continue
       entry.turn = 'turn' in card ? card.turn : 0
-      entry.normalizedText = normalizeSearchText(transcriptSearchText(card))
+      const corpus = transcriptSearchCorpus(card)
+      entry.normalizedText = corpus.normalizedText
+      entry.spans = corpus.spans
       this.searchRefreshCount += 1
     }
     this.dirtySearchEntries.clear()
@@ -1953,8 +2135,9 @@ export class TranscriptFolder {
 
   /** The CURRENT output representative of one raw item id: the first member
    * of its merged read group when grouped, else the item itself. Search
-   * results are deduplicated by representative so a merged read card yields
-   * exactly ONE visible match no matter how many members hit. */
+   * deduplicates by representative: a merged read card emits ONE result per
+   * OCCURRENCE in the representative corpus, never a separate result per
+   * hidden member. */
   private representativeOf(id: number): number {
     const group = this.groupOf.get(id)
     if (group === undefined) return id
@@ -2232,7 +2415,9 @@ export class TranscriptFolder {
       const entry = this.searchEntries[first]
       if (entry === undefined) continue
       entry.turn = group.turn
-      entry.normalizedText = normalizeSearchText(transcriptSearchText(group))
+      const corpus = transcriptSearchCorpus(group)
+      entry.normalizedText = corpus.normalizedText
+      entry.spans = corpus.spans
       this.dirtySearchEntries.delete(first)
       this.searchRefreshCount += 1
     }
@@ -3207,12 +3392,13 @@ export class TranscriptFolder {
   /** Full-history transcript search over the lightweight projection — same
    * corpus and ORDER as the legacy full search (`messages()` + filter +
    * per-message lowercase), but never materializes the grouped transcript
-   * and never re-lowercases history per query. Results are deduplicated by
-   * CURRENT group representative: a merged read card yields exactly ONE
-   * visible match no matter how many members hit, and Next/Prev never loop
-   * on one card. `refinement` (optional) narrows a previous result set when
-   * the new query extends it AND the projection revision is unchanged —
-   * otherwise the full lightweight scan runs.
+   * and never re-lowercases history per query. Results are OCCURRENCE-level:
+   * a card emits one match per non-overlapping occurrence in its
+   * representative corpus (each with its semantic `source` + ordinal), and a
+   * merged read card yields occurrences from its members' text rather than
+   * hidden member-level results. `refinement` (optional) narrows a previous
+   * result set when the new query extends it AND the projection revision is
+   * unchanged — otherwise the full lightweight scan runs.
    * @param query - the raw query (trimmed + lowercased here, like legacy).
    * @param refinement - the previous query's matches for prefix refinement;
    * the folder validates the prefix AND the revision internally.
@@ -3250,10 +3436,27 @@ export class TranscriptFolder {
       // Tombstoned failed-attempt text is not part of the corpus.
       const item = this.items[id]
       if (item !== undefined && !this.isVisible(item)) return
-      if (!entry.normalizedText.includes(needle)) return
       if (seen.has(representative)) return
+      if (!entry.normalizedText.includes(needle)) return
       seen.add(representative)
-      matches.push({ id: representative, turn: entry.turn })
+      // Enumerate every NON-OVERLAPPING occurrence in the representative
+      // corpus: the overlay count is occurrence-level, and each occurrence
+      // carries its semantic source for reveal/highlight.
+      let start = 0
+      let occurrence = 0
+      const sourceOccurrences = new Map<string, number>()
+      while (true) {
+        const index = entry.normalizedText.indexOf(needle, start)
+        if (index < 0) break
+        const span = resolveSearchSource(entry.spans, index)
+        const source: TranscriptSearchSource = span?.source ?? { kind: 'message' }
+        const sourceKey = span?.sourceKey ?? 'message'
+        const sourceOccurrence = sourceOccurrences.get(sourceKey) ?? 0
+        sourceOccurrences.set(sourceKey, sourceOccurrence + 1)
+        matches.push({ id: representative, turn: entry.turn, occurrence, source, sourceOccurrence })
+        occurrence += 1
+        start = index + Math.max(1, needle.length)
+      }
     }
     if (canRefine) {
       for (const match of refinement.previousMatches) consider(match.id)

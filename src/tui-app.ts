@@ -139,7 +139,13 @@ import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
-import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
+import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
+import {
+  SearchHighlightComponent,
+  renderedSearchSelection,
+  type RenderedSearchSelection,
+  type RenderedSearchSelector,
+} from './search-presentation.ts'
 import {
   workflowCountsText,
   workflowPhasePresentations,
@@ -347,6 +353,30 @@ export type WorkflowHit =
   | { readonly kind: 'member'; readonly runId: string; readonly seq: number; readonly childId: string }
   | { readonly kind: 'phase-agents'; readonly runId: string; readonly phaseKey: string }
   | { readonly kind: 'run-agents'; readonly runId: string }
+
+/** One rendered Workflow member row's block-relative position plus the visible
+ * column SPANS of its label/status fields (a row renders both). */
+type WorkflowMemberRange = {
+  readonly top: number
+  readonly height: number
+  readonly phaseKey: string
+  readonly seq: number
+  readonly labelStart: number
+  readonly labelEnd: number
+  readonly statusStart: number
+  readonly statusEnd: number
+}
+
+/** The temporary search presentation target (plan §6): the current match, its
+ * query and the resolved CURRENT visible card. It drives presentation ONLY —
+ * effective Focus/secondary/PTC/Workflow reveal and the rendered highlight —
+ * and NEVER mutates user disclosure state, so clearing it restores exactly the
+ * user's own disclosure. */
+export interface TranscriptSearchPresentationTarget {
+  readonly query: string
+  readonly match: TranscriptSearchMatch
+  readonly message: TranscriptMessage
+}
 
 /** The compaction lifecycle phase the working row advertises: idle (no
  * compaction), summarizing (compaction/start seen, the summary is being
@@ -2924,6 +2954,11 @@ interface MessageComponentEntry {
    * fold hint — the semantic owner alone cannot detect a remap (review
    * finding). */
   keymapRev: number
+  /** The search presentation revision at build time: a Workflow search-only
+   * context row or a PTC search reveal changes the rendered rows without
+   * changing the semantic expansion, so the search revision must invalidate
+   * the cached component. */
+  searchPresentationRev?: number
   /** The values the component was built from, for O(1) staleness checks:
    * text-bearing kinds compare the CURRENT text object — an unchanged
    * message keeps the same string instance, so the check is O(1) and
@@ -3050,7 +3085,13 @@ function userDisclosureComponentOf(
 type RenderedTranscriptBlock = {
   block: TranscriptRenderBlock
   component: Component
+  /** The component mounted into `messagesView`: the raw component, or the
+   * search-decorated wrapper while this block owns the current search target.
+   * Geometry/hit maps always use `component` (the raw render). */
+  mountedComponent?: Component
   rendered: string[]
+  /** The current search selection for this block (block-relative rows). */
+  searchSelection?: RenderedSearchSelection
   truncatedMarker: boolean
   attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
   collapseFocusOwnerOnClick?: number
@@ -3318,6 +3359,33 @@ export class TuiApp {
   private searchOverlay: OverlayHandle | undefined
   /** The search input component, while one is open (for match counts). */
   private searchComponent: TranscriptSearchComponent | undefined
+  /** The temporary search presentation target: while set, its owner turn /
+   * card is revealed and the query highlighted — presentation only, never
+   * written into any user disclosure map. */
+  private searchTarget: TranscriptSearchPresentationTarget | undefined
+  /** Bumped whenever the search presentation target changes: part of the
+   * message-component cache identity so a Workflow search context row / PTC
+   * search reveal is rebuilt even when the semantic expansion is unchanged. */
+  private searchPresentationRevision = 0
+  /** Whether the CURRENT search target may force its reveal (plan §6): an
+   * explicit navigation grants it, an explicit user collapse revokes it until
+   * the next navigation. Never written into user disclosure maps. */
+  private searchRevealGranted = false
+  /** The Host-ownership admission latched at grant time for a long-user
+   * target: a later plugin unload / registry settle must NOT resurrect a
+   * reveal that was not admitted (the "no phantom Host expansion" invariant). */
+  private searchRevealHostOwned = false
+  /** The long-user expand affordance the surface offered AT GRANT TIME. A
+   * regular grant without the key never becomes a fullscreen click reveal
+   * later (no surface-change resurrection); a key-based grant stops applying
+   * once the key is disabled. */
+  private searchRevealAffordance: 'fullscreen' | 'key' | 'none' = 'none'
+  /** PTC sub-calls the user explicitly collapsed while the search reveal had
+   * them open: they stay collapsed until the next explicit navigation. */
+  private readonly searchSuppressedSubCalls = new Set<string>()
+  /** The block-relative transcript row of the current search selection (welcome
+   * card excluded), recomputed on every rebuild/remeasure. */
+  private currentSearchTranscriptRow: number | undefined
   /** The Ctrl+R input-history panel, while one is open. */
   private historyPanel: HistoryPanel | undefined
   /** The overlay handle of the history panel (hide() closes it). */
@@ -3559,6 +3627,13 @@ export class TuiApp {
   /** The block-relative Workflow card hit rows recorded at render time,
    * keyed by the message object (the renderer owns the exact layout). */
   private readonly workflowHitsByMessage = new Map<TranscriptMessage, { hits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>; total: number }>()
+  /** The block-relative rendered row of every Workflow member row (inline,
+   * anomaly preview OR the search-only context row), keyed by the message
+   * object, with the visible-column spans of the label/status fields so a
+   * member occurrence maps to its exact field. Search selection uses it
+   * instead of a whole-card ordinal that could pick the run status or another
+   * member/field. */
+  private readonly workflowMemberRangesByMessage = new Map<TranscriptMessage, { ranges: ReadonlyArray<WorkflowMemberRange>; total: number }>()
   /** Per-run Workflow disclosure state (PR2 plan §7), keyed by the durable
    * `runId`. Session-scoped: cleared on session switch. */
   private readonly workflowDisclosure = new Map<string, WorkflowRunDisclosureState>()
@@ -5480,9 +5555,17 @@ export class TuiApp {
             // rebuild so one pass paints both, and keep the root contract's
             // own `anchor-turn` viewport (never a generic user anchor).
             this.clearUserDisclosureOverrides()
+            if (this.searchTarget !== undefined && isUserMessageDisclosureCandidate(this.searchTarget.message)) {
+              this.suppressSearchReveal()
+            }
             this.toggleFullscreenFocusRoots()
           } else if (this.hasVisibleExpandedUserDisclosure()) {
-            this.mutateTranscriptDisclosure(() => this.clearUserDisclosureOverrides())
+            this.mutateTranscriptDisclosure(() => {
+              this.clearUserDisclosureOverrides()
+              // An explicit user collapse revokes the temporary search reveal
+              // (the semantic match/highlight stays current).
+              this.suppressSearchReveal()
+            })
           } else {
             this.toggleFullscreenFocusRoots()
           }
@@ -5498,6 +5581,9 @@ export class TuiApp {
           this.mutateTranscriptDisclosure(() => {
             this.toolOutputExpanded = false
             this.clearUserDisclosureOverrides()
+            if (this.searchTarget !== undefined && isUserMessageDisclosureCandidate(this.searchTarget.message)) {
+              this.suppressSearchReveal()
+            }
           })
         } else {
           this.mutateTranscriptDisclosure(() => {
@@ -6026,11 +6112,12 @@ export class TuiApp {
     // that surface never folded, so it cannot hold long-user disclosure state.
     // The clear is deliberately GLOBAL for the transition (the override map
     // has no source tag and the plan forbids a parallel state): a stale
-    // regular search reveal must not leak a full render into fullscreen Focus,
-    // whose only long-user affordance is the compact marker — and, as a
+    // regular disclosure override must not leak a full render into fullscreen
+    // Focus, whose only long-user affordance is the compact marker — and, as a
     // consequence, an earlier fullscreen expansion does not survive a trip
-    // through such a regular surface (re-entry re-derives folded). A regular
-    // surface WITH the key keeps its search reveal across the swap.
+    // through such a regular surface (re-entry re-derives folded). The
+    // temporary SEARCH reveal is separate state: the runner closes the search
+    // overlay on a surface swap, which clears the target.
     if (enabled && !this.userDisclosureAffordanceAvailable()) {
       this.clearUserDisclosureOverrides()
     }
@@ -6222,12 +6309,11 @@ export class TuiApp {
       } catch {
         // A broken stdout degrades focus reporting silently.
       }
-      // Regular never re-reads a fullscreen per-card state: drop the
-      // Thinking overrides a fullscreen click (or a search reveal)
-      // created, so returning to fullscreen later starts from the bulk
-      // preference again (plan §6.2's preferred cleanup — the regular
-      // surface's only Thinking state is the bulk preference; search
-      // reveals set fresh overrides as needed).
+      // Regular never re-reads a fullscreen per-card state: drop the Thinking
+      // override a fullscreen click created, so returning to fullscreen later
+      // starts from the bulk preference again (plan §6.2's preferred cleanup
+      // — the regular surface's only Thinking state is the bulk preference).
+      // Search reveals are separate temporary state and write no override.
       this.clearThinkingExpansionOverrides()
       // The alt screen's exit repaint starts at the hardware cursor row, so
       // rows above it (e.g. a dialog the alt screen composited) survive in
@@ -6551,7 +6637,11 @@ export class TuiApp {
    * was already following live output; a collapse always anchors the
    * Thought header in view (the PR #29 contract). */
   toggleFocusTurn(turn: number): void {
-    if (this.focusExpandedTurns.has(turn)) {
+    // The EFFECTIVE open state includes a granted search-only reveal, which is
+    // not written into `focusExpandedTurns`: the first explicit click on a
+    // search-opened Thought must collapse it (and revoke the reveal), never
+    // re-expand as a no-op.
+    if (this.focusExpandedTurns.has(turn) || this.searchTargetTurn() === turn) {
       this.collapseFocusTurn(turn, { fullscreenViewport: 'anchor-turn' })
       return
     }
@@ -6581,39 +6671,158 @@ export class TuiApp {
     this.setFocusTurnExpanded(turn, true)
   }
 
-  /** Reveal one search-matched message: open its owner Thought (Focus on)
-   * and full-reveal the matched SECONDARY card, so the hit is visible
-   * even though the FULLSCREEN process timeline defaults to compact (plan
-   * §28 — regular mode full-reveals the whole process anyway). A hit
-   * inside Thinking full-reveals ONLY that block via its per-message
-   * override — the thinkingExpanded bulk preference is never touched by
-   * search (plan §14). A hit inside a collapsed long USER message expands
-   * that message (the search corpus is the full text, so the hit may sit in
-   * the hidden middle) — this is the one reveal that also runs OUTSIDE
-   * Focus mode. The search caller owns the jump target — no anchor. */
-  revealSearchMatch(message: TranscriptMessage): void {
-    const turn = 'turn' in message ? message.turn : undefined
-    if (turn !== undefined && this.focusModeEnabled) {
-      this.setFocusTurnExpanded(turn, true)
+  /** Set (or clear) the TEMPORARY search presentation target (plan §6). The
+   * target drives effective reveal (Focus Thought, secondary cards, Thinking,
+   * long user, PTC ancestors, Workflow run/phase, the Workflow hidden-member
+   * context row) and the rendered occurrence highlight — PRESENTATION ONLY.
+   * It never writes `expandedOverride`, `focusExpandedTurns`,
+   * `subCallExpanded` or Workflow `userOpen`, so clearing it restores the
+   * user's own disclosure state exactly (including any manual operation the
+   * user performed while the search was open). */
+  setTranscriptSearchTarget(target: TranscriptSearchPresentationTarget | undefined): void {
+    if (this.searchTarget === target && (target === undefined || this.searchRevealGranted)) return
+    this.searchTarget = target
+    if (target === undefined) {
+      this.searchRevealGranted = false
+      this.searchRevealHostOwned = false
+      this.searchRevealAffordance = 'none'
+    } else {
+      // Every target set is an explicit navigation and (re-)grants the
+      // temporary reveal. A long-user reveal latches HOST ownership and the
+      // surface affordance here so a later plugin unload / surface swap
+      // cannot resurrect an expansion that was not admitted at navigation
+      // time.
+      this.searchRevealGranted = true
+      // The runner sets the target BEFORE the anchored window is repainted, so
+      // a long-user hit may not have a cached component yet. Seed it first so
+      // the Host-ownership decision is real rather than a false "not owned".
+      if (isUserMessageDisclosureCandidate(target.message) && this.messageComponents.get(target.message) === undefined) {
+        this.componentForMessage(target.message, this.expandBoundary(), this.transcriptRenderWidth(), this.userExpandBoundary())
+      }
+      this.searchRevealHostOwned = !isUserMessageDisclosureCandidate(target.message)
+        || this.isHostUserDisclosure(target.message)
+      this.searchRevealAffordance = this.fullscreen !== undefined
+        ? 'fullscreen'
+        : this.keybindings.keyHint('app.transcript.toggleExpand') !== '' ? 'key' : 'none'
+      // A new navigation re-opens every PTC sub-call the previous target's
+      // reveal had covered.
+      this.searchSuppressedSubCalls.clear()
     }
-    if (isUserMessageDisclosureCandidate(message)
-      && this.isHostUserDisclosure(message)
-      && this.userDisclosureAffordanceAvailable()
-      && this.userMessageCompactsAtCurrentWidth(message)) {
-      // Only a bubble the CURRENT surface actually folds needs the override:
-      // a plugin-owned presentation, a short prompt, or a regular surface with
-      // no expand key (which renders the prompt in full) would otherwise
-      // accumulate an invisible override that later consumes a Ctrl+O
-      // collapse or leaks a full render into a fullscreen Focus whose only
-      // affordance is the compact marker.
-      if (this.expandedOverride.get(message) !== true) this.clearFocusLiveHeightState()
-      this.expandedOverride.set(message, true)
-    }
-    if (isFocusSecondaryDisclosure(message)) {
-      if (this.expandedOverride.get(message) !== true) this.clearFocusLiveHeightState()
-      this.expandedOverride.set(message, true)
-    }
+    this.searchPresentationRevision += 1
+    this.clearFocusLiveHeightState()
     this.rebuildMessages()
+  }
+
+  /** Revoke the temporary search reveal (an explicit user collapse): the
+   * semantic match/highlight stay current, but the target no longer forces
+   * its card open until the next explicit navigation. */
+  private suppressSearchReveal(): void {
+    if (!this.searchRevealGranted) return
+    this.searchRevealGranted = false
+    this.searchPresentationRevision += 1
+  }
+
+  /** Message-only convenience over {@link setTranscriptSearchTarget} for a
+   * caller that resolved a card without an occurrence identity (the search
+   * overlay always uses the full target). */
+  revealSearchMatch(message: TranscriptMessage): void {
+    this.setTranscriptSearchTarget({
+      query: '',
+      match: {
+        id: -1,
+        turn: 'turn' in message ? message.turn : 0,
+        occurrence: 0,
+        source: { kind: 'message' },
+        sourceOccurrence: 0,
+      },
+      message,
+    })
+  }
+
+  /** Whether a card's RENDERED ROWS (not just its expansion) depend on the
+   * search presentation target: the Workflow card grows a search-only context
+   * row and the PTC root's sub-call bodies can be search-forced open. */
+  private searchPresentationSensitive(message: TranscriptMessage): boolean {
+    return message.kind === 'workflow' || (message.kind === 'tool' && (message.subCalls?.length ?? 0) > 0)
+  }
+
+  /** The current search target's owner turn (Focus temporary reveal). Gated on
+   * the grant: after an explicit collapse the target must not force the Focus
+   * root open either. */
+  private searchTargetTurn(): number | undefined {
+    if (!this.searchRevealGranted) return undefined
+    const message = this.searchTarget?.message
+    return message !== undefined && 'turn' in message ? message.turn : undefined
+  }
+
+  /** Whether the CURRENT search target owns this message (effective reveal).
+   * A long-user reveal is admitted only for the HOST bubble that actually
+   * compacts at the current width and still offers an expand affordance; the
+   * Host-ownership decision is LATCHED at navigation time (see
+   * {@link setTranscriptSearchTarget}). */
+  private searchForcesMessageExpanded(message: TranscriptMessage): boolean {
+    if (!this.searchRevealGranted || this.searchTarget?.message !== message) return false
+    if (!isUserMessageDisclosureCandidate(message)) return true
+    if (!this.searchRevealHostOwned) return false
+    // The affordance latched at grant time must still be available: a
+    // key-based grant stops applying once the key is disabled, and a regular
+    // no-affordance grant never becomes a fullscreen click reveal later.
+    const affordanceAvailable = this.searchRevealAffordance === 'fullscreen'
+      ? this.fullscreen !== undefined || this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
+      : this.searchRevealAffordance === 'key'
+        ? this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
+        : false
+    return affordanceAvailable && this.userMessageCompactsAtCurrentWidth(message)
+  }
+
+  /** Whether the current search target's PTC path contains this sub-call. */
+  private searchForcesSubCallExpanded(subCallId: string): boolean {
+    if (!this.searchRevealGranted) return false
+    if (this.searchSuppressedSubCalls.has(subCallId)) return false
+    const source = this.searchTarget?.match.source
+    return source?.kind === 'subcall-field' && source.subCallIds.includes(subCallId)
+  }
+
+  /** Whether the current search target is inside this Workflow run (temporary
+   * reveal; never written into the run's `userOpen`). */
+  private searchForcesWorkflowRunOpen(runId: string): boolean {
+    if (!this.searchRevealGranted) return false
+    const target = this.searchTarget
+    if (target === undefined || target.message.kind !== 'workflow') return false
+    if (target.message.runId !== runId) return false
+    const kind = target.match.source.kind
+    return kind === 'workflow-run' || kind === 'workflow-phase' || kind === 'workflow-member'
+  }
+
+  /** Whether the current search target is inside this Workflow phase. */
+  private searchForcesWorkflowPhaseOpen(runId: string, phaseKey: string): boolean {
+    if (!this.searchRevealGranted) return false
+    const target = this.searchTarget
+    if (target === undefined || target.message.kind !== 'workflow') return false
+    if (target.message.runId !== runId) return false
+    const source = target.match.source
+    if (source.kind === 'workflow-phase') return source.phaseKey === phaseKey
+    if (source.kind === 'workflow-member') return source.phaseKey === phaseKey
+    return false
+  }
+
+  /** The phase key the current search target lives in, when its source names
+   * a Workflow phase or member. */
+  private searchTargetPhaseKey(): string | undefined {
+    const source = this.searchTarget?.match.source
+    if (source?.kind === 'workflow-phase') return source.phaseKey
+    if (source?.kind === 'workflow-member') return source.phaseKey
+    return undefined
+  }
+
+  /** The Workflow member the current search target locates inside this card
+   * (the search-only context row owner), when the source names one. */
+  private searchContextMember(message: Extract<TranscriptMessage, { kind: 'workflow' }>): { phaseKey: string; seq: number } | undefined {
+    if (!this.searchRevealGranted) return undefined
+    const target = this.searchTarget
+    if (target === undefined || target.message !== message) return undefined
+    const source = target.match.source
+    return source.kind === 'workflow-member' ? { phaseKey: source.phaseKey, seq: source.seq } : undefined
   }
 
   /** Clear every secondary expansion of one turn (the root Collapse All
@@ -6630,6 +6839,10 @@ export class TuiApp {
       if (!isFocusSecondaryDisclosure(message)) continue
       this.expandedOverride.delete(message)
     }
+    // The search-reveal revocation is left to `setFocusTurnExpanded` (called
+    // right after by {@link collapseFocusTurn}): it suppresses AND rebuilds, so
+    // a search-only root actually repaints collapsed. Suppressing here would
+    // bump the revision without a rebuild and leave the stale expanded frame.
   }
 
   /** The explicit user-facing Collapse All: clear the turn's secondary
@@ -6657,8 +6870,9 @@ export class TuiApp {
    * fold — the Ctrl+O state machine follows what the user SEES (plan
    * §22: "any expanded Thought" = an expanded Thought in view). */
   private hasVisibleExpandedFocusRoots(): boolean {
+    const searchTurn = this.searchTargetTurn()
     for (const turn of this.eligibleFocusRootTurns()) {
-      if (this.focusExpandedTurns.has(turn)) return true
+      if (this.focusExpandedTurns.has(turn) || turn === searchTurn) return true
     }
     return false
   }
@@ -6710,7 +6924,10 @@ export class TuiApp {
   private hasVisibleExpandedUserDisclosure(): boolean {
     for (const message of this.messages) {
       if (!isUserMessageDisclosureCandidate(message)) continue
-      if (this.expandedOverride.get(message) !== true) continue
+      // The temporary search reveal counts as a VISIBLE expanded user
+      // disclosure so one Ctrl+O press collapses it (instead of expanding
+      // Thought roots while the bubble stays open).
+      if (this.expandedOverride.get(message) !== true && !this.searchForcesMessageExpanded(message)) continue
       if (!this.isHostUserDisclosure(message)) continue
       if (this.userMessageCompactsAtCurrentWidth(message)) return true
     }
@@ -6799,10 +7016,14 @@ export class TuiApp {
     // Snapshot the expanded roots BEFORE clearing: the secondary
     // override cleanup is scoped to exactly these turns (review P2) —
     // parked/windowed-away roots are still in the set and get cleaned,
-    // while a local shell card's override (turn Infinity) survives.
+    // while a local shell card's override (turn Infinity) survives. A granted
+    // search-only reveal is an effective root too and must be revoked.
+    const searchTurn = this.searchTargetTurn()
     const expandedTurns = new Set(this.focusExpandedTurns)
+    if (searchTurn !== undefined) expandedTurns.add(searchTurn)
     this.focusExpandedTurns.clear()
     this.clearFocusSecondaryExpansionsForTurns(expandedTurns)
+    if (searchTurn !== undefined) this.suppressSearchReveal()
     this.toolOutputExpanded = false
     this.rebuildMessages()
     this.applyFullscreenFocusTurnAnchor(anchorTurn)
@@ -6819,9 +7040,10 @@ export class TuiApp {
     const welcomeHeight = this.welcomeCard.render(width).length
     const top = this.fullscreenScroll.scrollTop - welcomeHeight
     const bottom = top + this.fullscreenScroll.viewportHeight
+    const searchTurn = this.searchTargetTurn()
     let row = 0
     for (const entry of this.messageRows) {
-      if (entry.activity !== undefined && this.focusExpandedTurns.has(entry.activity.turn)) {
+      if (entry.activity !== undefined && (this.focusExpandedTurns.has(entry.activity.turn) || entry.activity.turn === searchTurn)) {
         if (row < bottom && row + entry.height > top) return entry.activity.turn
       }
       row += entry.height
@@ -6847,6 +7069,10 @@ export class TuiApp {
       if (!isFocusSecondaryDisclosure(message)) continue
       this.expandedOverride.delete(message)
     }
+    const target = this.searchTarget?.message
+    if (target !== undefined && 'turn' in target && turns.has(target.turn) && isFocusSecondaryDisclosure(target)) {
+      this.suppressSearchReveal()
+    }
   }
 
   /**
@@ -6871,9 +7097,19 @@ export class TuiApp {
       previousScrollTop?: number
     } = {},
   ): void {
-    if (this.focusExpandedTurns.has(turn) === expanded) return
-    if (expanded) this.focusExpandedTurns.add(turn)
-    else this.focusExpandedTurns.delete(turn)
+    const manualChanged = this.focusExpandedTurns.has(turn) !== expanded
+    // A granted search-only reveal is not in `focusExpandedTurns`, so a
+    // collapse request on it would otherwise early-return without revoking the
+    // reveal (the Thought would stay open).
+    const searchCollapse = !expanded && this.searchTargetTurn() === turn
+    if (!manualChanged && !searchCollapse) return
+    if (manualChanged) {
+      if (expanded) this.focusExpandedTurns.add(turn)
+      else this.focusExpandedTurns.delete(turn)
+    }
+    // Closing a Thought is an explicit user collapse: revoke a search reveal
+    // whose target lives in that turn (the semantic match/highlight stays).
+    if (searchCollapse) this.suppressSearchReveal()
     // 1. flip the set → 2. rebuild the projection (rebuildMessages already
     // requests a render) → 3. re-measure the row map at the current width
     // (a thumbnail that just finished loading must not shift the anchor).
@@ -7059,6 +7295,7 @@ export class TuiApp {
       // pruned with it for the same reason.
       this.subCallHitsByMessage.delete(message)
       this.workflowHitsByMessage.delete(message)
+      this.workflowMemberRangesByMessage.delete(message)
       const component = entry.component as { dispose?: () => void } | undefined
       if (component?.dispose !== undefined) {
         try {
@@ -7077,6 +7314,17 @@ export class TuiApp {
    * master — never written into focusExpandedTurns, so switching to
    * fullscreen does not inherit the keyboard full-reveal). */
   private focusProjectionExpandedTurns(): ReadonlySet<number> {
+    const base = this.focusProjectionExpandedTurnsBase()
+    const targetTurn = this.searchTargetTurn()
+    if (targetTurn === undefined) return base
+    const union = new Set(base)
+    union.add(targetTurn)
+    return union
+  }
+
+  /** The user-owned Focus expansion projection (no search target): manual
+   * disclosures PLUS the regular Ctrl+O derived recent turns. */
+  private focusProjectionExpandedTurnsBase(): ReadonlySet<number> {
     if (!this.focusModeEnabled || this.fullscreen !== undefined || !this.toolOutputExpanded) {
       return this.focusExpandedTurns
     }
@@ -7304,6 +7552,7 @@ export class TuiApp {
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
       let workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined
+      let workflowMemberRanges: ReadonlyArray<WorkflowMemberRange> | undefined
       let userDisclosureHit: UserDisclosureHit | undefined
       const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
       if (block.kind === 'activity') {
@@ -7354,11 +7603,25 @@ export class TuiApp {
         workflowHits = workflowInfo === undefined
           ? undefined
           : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
+        const memberInfo = this.workflowMemberRangesByMessage.get(block.message)
+        workflowMemberRanges = memberInfo === undefined
+          ? undefined
+          : memberInfo.ranges.map(range => ({ ...range, top: range.top + rendered.length - memberInfo.total }))
+      }
+      let mountedComponent: Component | undefined
+      let searchSelection: RenderedSearchSelection | undefined
+      const searchTarget = this.searchTarget
+      if (searchTarget !== undefined && block.kind === 'message' && block.message === searchTarget.message) {
+        const selector = this.searchSelectorFor(searchTarget, subCallHits, workflowHits, workflowMemberRanges)
+        searchSelection = renderedSearchSelection(rendered, selector)
+        mountedComponent = new SearchHighlightComponent(component, selector)
       }
       return {
         block,
         component,
+        ...(mountedComponent === undefined ? {} : { mountedComponent }),
         rendered,
+        ...(searchSelection === undefined ? {} : { searchSelection }),
         truncatedMarker,
         attachments,
         ...(collapseFocusOwnerOnClick === undefined ? {} : { collapseFocusOwnerOnClick }),
@@ -7367,6 +7630,48 @@ export class TuiApp {
         ...(userDisclosureHit === undefined ? {} : { userDisclosureHit }),
       }
     })
+  }
+
+  /** The rendered-occurrence selector for the current search target: the
+   * semantic source maps to a block-relative row range where one exists (PTC
+   * sub-call hit, Workflow run/phase hit, Workflow member row); every other
+   * source searches the whole card. The Workflow member row range covers the
+   * inline row AND the search-only context row, so the selected member is
+   * highlighted/anchored exactly. */
+  private searchSelectorFor(
+    target: TranscriptSearchPresentationTarget,
+    subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined,
+    workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined,
+    workflowMemberRanges: ReadonlyArray<WorkflowMemberRange> | undefined,
+  ): RenderedSearchSelector {
+    const source = target.match.source
+    let range: { start: number; end: number } | undefined
+    let columns: { startCol: number; endCol: number } | undefined
+    if (source.kind === 'subcall-field' && subCallHits !== undefined) {
+      const subCallId = source.subCallIds[source.subCallIds.length - 1]
+      const hit = subCallHits.find(candidate => candidate.subCallId === subCallId)
+      if (hit !== undefined) range = { start: hit.top, end: hit.top + hit.height }
+    } else if (source.kind === 'workflow-phase' && workflowHits !== undefined) {
+      const hit = workflowHits.find(candidate => candidate.hit.kind === 'phase' && candidate.hit.phaseKey === source.phaseKey)
+      if (hit !== undefined) range = { start: hit.top, end: hit.top + hit.height }
+    } else if (source.kind === 'workflow-member' && workflowMemberRanges !== undefined) {
+      const hit = workflowMemberRanges.find(candidate => candidate.phaseKey === source.phaseKey && candidate.seq === source.seq)
+      if (hit !== undefined) {
+        range = { start: hit.top, end: hit.top + hit.height }
+        columns = source.field === 'label'
+          ? { startCol: hit.labelStart, endCol: hit.labelEnd }
+          : { startCol: hit.statusStart, endCol: hit.statusEnd }
+      }
+    } else if (source.kind === 'workflow-run' && workflowHits !== undefined) {
+      const hit = workflowHits.find(candidate => candidate.hit.kind === 'run')
+      if (hit !== undefined) range = { start: hit.top, end: hit.top + hit.height }
+    }
+    return {
+      query: target.query,
+      ...(range === undefined ? {} : { range }),
+      ...(columns === undefined ? {} : { columns }),
+      sourceOccurrence: target.match.sourceOccurrence,
+    }
   }
 
   /** The ONE bidirectional disclosure control of a long-user bubble (durable
@@ -7435,10 +7740,19 @@ export class TuiApp {
       const workflowHits = workflowInfo === undefined
         ? undefined
         : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
+      const memberInfo = this.workflowMemberRangesByMessage.get(entry.block.message)
+      const workflowMemberRanges = memberInfo === undefined
+        ? undefined
+        : memberInfo.ranges.map(range => ({ ...range, top: range.top + rendered.length - memberInfo.total }))
+      const searchTarget = this.searchTarget
+      const searchSelection = searchTarget !== undefined && entry.block.message === searchTarget.message
+        ? renderedSearchSelection(rendered, this.searchSelectorFor(searchTarget, subCallHits, workflowHits, workflowMemberRanges))
+        : undefined
       return {
         ...entry,
         rendered,
         attachments,
+        ...(searchSelection === undefined ? { searchSelection: undefined } : { searchSelection }),
         ...(subCallHits === undefined ? { subCallHits: undefined } : { subCallHits }),
         ...(workflowHits === undefined ? { workflowHits: undefined } : { workflowHits }),
         ...(userDisclosureHit === undefined ? { userDisclosureHit: undefined } : { userDisclosureHit }),
@@ -7601,12 +7915,20 @@ export class TuiApp {
     this.mountedTranscriptBlocks = renderedBlocks
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     const rows: FullscreenRowEntry[] = []
+    // The transcript-relative row of the current search selection (welcome
+    // card excluded), accumulated with the SAME height rule the row map uses
+    // so the exact viewport anchor lands on the rendered occurrence.
+    this.currentSearchTranscriptRow = undefined
+    let transcriptRow = 0
     // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
     // a session never reads as one undifferentiated wall of text. The spacer
     // remains charged to the preceding semantic block. Stabilizer rows are
     // separate inert entries after that existing boundary spacer.
     renderedBlocks.forEach((entry, index) => {
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
+      if (entry.searchSelection !== undefined && entry.searchSelection.selectedRow !== undefined) {
+        this.currentSearchTranscriptRow = transcriptRow + entry.searchSelection.selectedRow
+      }
       if (height === 0) {
         rows.push(this.fullscreenRowEntry(entry, 0, false))
       } else {
@@ -7614,7 +7936,7 @@ export class TuiApp {
         // block — host card or plugin-rendered component — renders inside
         // the transcript content width, so no renderer needs to know the
         // terminal gutter exists (the transcript right-gutter contract).
-        this.messagesView.addChild(new TranscriptGutterComponent(entry.component))
+        this.messagesView.addChild(new TranscriptGutterComponent(entry.mountedComponent ?? entry.component))
         // The max-tokens truncated marker rides under the final assistant
         // (plan §13.8): one muted row, charged to the message's hit region.
         if (entry.truncatedMarker) {
@@ -7643,6 +7965,7 @@ export class TuiApp {
         ))
         rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
       }
+      transcriptRow += height + padding
     })
     if (this.transcriptWindowHint !== '') {
       // This is a presentation hint, not a transcript message: it is rebuilt
@@ -7762,14 +8085,41 @@ export class TuiApp {
     const renderedBlocks = this.remeasureTranscriptBlocks(this.mountedTranscriptBlocks, width)
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     const rows: FullscreenRowEntry[] = []
+    this.currentSearchTranscriptRow = undefined
+    let transcriptRow = 0
     for (let index = 0; index < renderedBlocks.length; index += 1) {
       const entry = renderedBlocks[index]!
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
+      if (entry.searchSelection !== undefined && entry.searchSelection.selectedRow !== undefined) {
+        this.currentSearchTranscriptRow = transcriptRow + entry.searchSelection.selectedRow
+      }
       rows.push(this.fullscreenRowEntry(entry, height, height > 0 && index < renderedBlocks.length - 1))
       const padding = paddingRows.get(index) ?? 0
       if (padding > 0) rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
+      transcriptRow += height + padding
     }
     this.messageRows = rows
+  }
+
+  /** Anchor the fullscreen transcript viewport on the current search
+   * occurrence (plan §9): re-measure AFTER the reveal/rebuild, feed the new
+   * content height, then place the occurrence about one third down the
+   * viewport with follow-end disabled. Regular mode has no app-owned
+   * ScrollView — the materialized window + reveal + highlight are the
+   * contract there. */
+  scrollToSearchTarget(): void {
+    const scroll = this.fullscreenScroll
+    const transcriptRow = this.currentSearchTranscriptRow
+    if (scroll === undefined || transcriptRow === undefined) return
+    this.refreshMessageRows()
+    const width = this.terminal.columns
+    const contentHeight = this.messagesView.render(width).length
+    const viewportHeight = scroll.viewportHeight
+    scroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
+    const welcomeHeight = this.welcomeCard.render(width).length
+    const target = welcomeHeight + this.currentSearchTranscriptRow!
+    const desiredTop = Math.max(0, target - Math.floor(viewportHeight / 3))
+    scroll.scrollTo(desiredTop, { disableFollow: true })
   }
 
   /** The live collapse flag for ONE image-block occurrence (message object
@@ -8797,7 +9147,9 @@ export class TuiApp {
     next: Readonly<{ activity?: TurnActivity; collapseFocusOwnerOnClick?: number }> | undefined,
   ): number | undefined {
     const turn = entry.activity?.turn ?? entry.collapseFocusOwnerOnClick
-    if (turn === undefined || !this.focusExpandedTurns.has(turn)) return undefined
+    if (turn === undefined) return undefined
+    // The EFFECTIVE root open includes a granted search-only reveal.
+    if (!this.focusExpandedTurns.has(turn) && this.searchTargetTurn() !== turn) return undefined
     const nextTurn = next?.activity?.turn ?? next?.collapseFocusOwnerOnClick
     return nextTurn === turn ? turn : undefined
   }
@@ -8817,6 +9169,12 @@ export class TuiApp {
         if (this.pendingUserExpanded.get(hit.target.key) === expanded) return
         this.pendingUserExpanded.set(hit.target.key, expanded)
       }
+      // An explicit collapse of the SEARCH TARGET revokes the temporary reveal
+      // so the collapsed card stays collapsed until the next navigation. An
+      // unrelated card's collapse must not hide the current target.
+      if (!expanded && hit.target.kind === 'durable' && hit.target.message === this.searchTarget?.message) {
+        this.suppressSearchReveal()
+      }
     })
   }
 
@@ -8830,15 +9188,26 @@ export class TuiApp {
    * opposite of the effective state (plan §3.5/E4). */
   private toggleMessageExpanded(message: TranscriptMessage): void {
     if (!isFocusSecondaryDisclosure(message)) return
+    // Only collapsing the SEARCH TARGET revokes the reveal: collapsing an
+    // unrelated card must not hide the current target.
+    const revokesSearchReveal = this.searchTarget?.message === message
     if (message.kind === 'thinking') {
       if (this.effectiveThinkingExpanded(message)) {
         if (this.thinkingExpanded) this.expandedOverride.set(message, false)
+        else if (this.searchForcesMessageExpanded(message)) this.expandedOverride.set(message, false)
         else this.expandedOverride.delete(message)
+        if (revokesSearchReveal) this.suppressSearchReveal()
       } else {
         this.expandedOverride.set(message, true)
       }
     } else if (this.expandedOverride.get(message) === true) {
       this.expandedOverride.delete(message)
+      if (revokesSearchReveal) this.suppressSearchReveal()
+    } else if (this.searchForcesMessageExpanded(message)) {
+      // The card is open only because of the search reveal: a click must
+      // collapse it explicitly (a deleted override would let search re-open).
+      this.expandedOverride.set(message, false)
+      this.suppressSearchReveal()
     } else {
       this.expandedOverride.set(message, true)
     }
@@ -8852,6 +9221,7 @@ export class TuiApp {
    * a clean run closes, a running/abnormal run opens. A completed run with
    * a failed member is abnormal and stays open (PR2 goal: abnormal first). */
   private workflowRunOpen(message: Extract<TranscriptMessage, { kind: 'workflow' }>): boolean {
+    if (this.searchForcesWorkflowRunOpen(message.runId)) return true
     const state = this.workflowDisclosure.get(message.runId)
     if (state?.userOpen !== undefined) return state.userOpen
     return workflowRunMode(message.status, message.members) !== 'clean'
@@ -8863,6 +9233,7 @@ export class TuiApp {
    * so any number of running→clean cycles fold and unfold (Web
    * advanceDisclosureState parity). */
   private workflowPhaseOpen(runId: string, phaseKey: string, phase: WorkflowPhasePresentation): boolean {
+    if (this.searchForcesWorkflowPhaseOpen(runId, phaseKey)) return true
     const state = this.workflowDisclosure.get(runId)?.phases.get(phaseKey)
     if (state?.userOpen !== undefined) return state.userOpen
     return phase.counts.completed !== phase.members.length
@@ -8877,6 +9248,9 @@ export class TuiApp {
     const message = this.workflowMessageOf(runId)
     if (message === undefined) return
     state.userOpen = !(state.userOpen ?? this.workflowRunOpen(message))
+    // An explicit user toggle on the search-target card revokes the temporary
+    // reveal so the user's choice wins (the semantic match stays current).
+    if (this.searchTarget?.message === message) this.suppressSearchReveal()
     this.workflowDisclosureRevision += 1
     this.clearFocusLiveHeightState()
     this.rebuildMessages()
@@ -8893,6 +9267,9 @@ export class TuiApp {
     const phase = workflowPhasePresentations(message.members).find(candidate => candidate.key === phaseKey)
     if (phase === undefined) return
     state.userOpen = !(state.userOpen ?? this.workflowPhaseOpen(runId, phaseKey, phase))
+    // Only a click on the TARGET'S OWN phase revokes the reveal: closing an
+    // unrelated phase must not hide the search target/context row.
+    if (this.searchTarget?.message === message && this.searchTargetPhaseKey() === phaseKey) this.suppressSearchReveal()
     this.workflowDisclosureRevision += 1
     this.clearFocusLiveHeightState()
     this.rebuildMessages()
@@ -9092,6 +9469,17 @@ export class TuiApp {
   clearSessionOverrides(): void {
     this.clearFocusLiveHeightState()
     this.expandedOverride.clear()
+    // The temporary search presentation is session-scoped too: a switched-in
+    // session must never inherit the old session's reveal/highlight or hold
+    // its message objects.
+    if (this.searchTarget !== undefined) {
+      this.searchTarget = undefined
+      this.searchRevealGranted = false
+      this.searchRevealHostOwned = false
+      this.searchPresentationRevision += 1
+      this.currentSearchTranscriptRow = undefined
+    }
+    this.searchSuppressedSubCalls.clear()
     // Pending-user disclosure is presentation-only ephemeral state too: a
     // session switch must drop it with the lane it belongs to.
     this.pendingUserExpanded.clear()
@@ -9137,6 +9525,7 @@ export class TuiApp {
     this.workflowDisclosure.clear()
     this.workflowSeen.clear()
     this.workflowHitsByMessage.clear()
+    this.workflowMemberRangesByMessage.clear()
     this.workflowDisclosureRevision += 1
     // The per-message render cache is session-scoped too: old messages are
     // unreachable after a switch, so drop their cached components — with
@@ -10856,6 +11245,10 @@ export class TuiApp {
    * Focus ON/OFF is irrelevant: there is exactly one Thinking detail
    * state for the whole app. */
   private effectiveThinkingExpanded(message: Extract<TranscriptMessage, { kind: 'thinking' }>): boolean {
+    // The temporary search reveal wins over a stale explicit override while it
+    // is GRANTED (a new navigation re-opens the card); an explicit collapse
+    // revokes the grant instead of writing user state.
+    if (this.searchForcesMessageExpanded(message)) return true
     const override = this.expandedOverride.get(message)
     if (override !== undefined) return override
     return this.thinkingExpanded
@@ -10884,6 +11277,10 @@ export class TuiApp {
       // `toolOutputExpanded` from an earlier surface would otherwise leak an
       // expansion into a surface whose only expand affordance is the compact
       // marker.
+      // The temporary search reveal wins over a stale explicit override while
+      // it is GRANTED (a new navigation re-opens the card); an explicit
+      // collapse revokes the grant instead of writing user state.
+      if (this.searchForcesMessageExpanded(message)) return true
       const override = this.expandedOverride.get(message)
       if (override !== undefined) return override
       if (this.fullscreen !== undefined && this.focusModeEnabled) return false
@@ -10893,12 +11290,15 @@ export class TuiApp {
     // disclosure follows the existing recent-turn Ctrl+O boundary rather than
     // introducing a second expansion state.
     if (message.kind === 'assistant' && message.deliverables !== undefined) {
-      return message.turn >= boundary || this.expandedOverride.get(message) === true
+      return message.turn >= boundary
+        || this.expandedOverride.get(message) === true
+        || this.searchForcesMessageExpanded(message)
     }
     if ('turn' in message && this.isInsideExpandedFocus(message, boundary) && isFocusSecondaryDisclosure(message)) {
       if (this.fullscreen !== undefined) {
-        // Fullscreen: explicit secondary disclosure only.
-        return this.expandedOverride.get(message) === true
+        // Fullscreen: explicit secondary disclosure only (plus the temporary
+        // search reveal, which never writes the user override).
+        return this.expandedOverride.get(message) === true || this.searchForcesMessageExpanded(message)
       }
       // Regular: no mouse, so no compact secondary affordance — ANY
       // expanded Focus root (Ctrl+O-derived OR manually revealed /
@@ -10921,14 +11321,19 @@ export class TuiApp {
       // In FULLSCREEN Focus the Ctrl+O master is NOT consulted (Ctrl+O
       // owns the Thought-root bulk there — documented): a local card
       // keeps its folded state unless the MOUSE full-revealed it (the
-      // per-card override still wins).
+      // per-card override still wins) or the temporary search target
+      // reveals it.
       if (this.fullscreen !== undefined && this.focusModeEnabled) {
-        return this.expandedOverride.get(message) === true
+        return this.expandedOverride.get(message) === true || this.searchForcesMessageExpanded(message)
       }
-      return this.toolOutputExpanded || this.expandedOverride.get(message) === true
+      return this.toolOutputExpanded
+        || this.expandedOverride.get(message) === true
+        || this.searchForcesMessageExpanded(message)
     }
     return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
-      && (message.turn >= boundary || this.expandedOverride.get(message) === true)
+      && (message.turn >= boundary
+        || this.expandedOverride.get(message) === true
+        || this.searchForcesMessageExpanded(message))
   }
 
   /**
@@ -10984,6 +11389,7 @@ export class TuiApp {
     // surface contract — no mouse, so a capped diff would be unreadable);
     // fullscreen keeps the per-card override semantics.
     const fullReveal = this.expandedOverride.get(message) === true
+      || this.searchForcesMessageExpanded(message)
       || (this.fullscreen === undefined && insideFocusSecondary)
     return { expanded, fullReveal, expandHint }
   }
@@ -11050,6 +11456,13 @@ export class TuiApp {
       || entry.themeRev !== this.themeRevision
       || entry.iconStyle !== this.iconStyle
       || entry.keymapRev !== this.keybindings.revision()
+      // Only cards whose RENDERED ROWS depend on the search target (a Workflow
+      // search-only context row, a PTC search-forced sub-call body) need the
+      // search revision in their cache identity — a global key would re-run
+      // every plugin renderer on each search jump. Every other card's search
+      // reveal is already covered by `foldStateChanged` (the effective
+      // expansion/full-reveal), and the highlight lives in the mount wrapper.
+      || (entry.searchPresentationRev !== this.searchPresentationRevision && this.searchPresentationSensitive(message))
       || rendererRevisionChanged
       || this.componentStale(entry, message)) {
       // Dispose the OLD component (a thumbnail's loader subscription) so a
@@ -11073,6 +11486,7 @@ export class TuiApp {
       entry.fullReveal = rebuilt.fullReveal
       entry.expandHint = rebuilt.expandHint
       entry.keymapRev = rebuilt.keymapRev
+      entry.searchPresentationRev = rebuilt.searchPresentationRev
       entry.rendererId = rebuilt.rendererId
       entry.rendererRevision = rebuilt.rendererRevision
       this.captureComponentState(entry, message)
@@ -11154,6 +11568,7 @@ export class TuiApp {
       // (review finding).
       this.subCallHitsByMessage.delete(message)
       this.workflowHitsByMessage.delete(message)
+      this.workflowMemberRangesByMessage.delete(message)
     }
     return {
       // The EFFECTIVE expansion (the surface-adaptive rule) drives the
@@ -11177,6 +11592,7 @@ export class TuiApp {
       rendererId: rendered?.rendererId,
       rendererRevision,
       subCallExpandedRev: this.subCallExpandedRevision,
+      searchPresentationRev: this.searchPresentationRevision,
     }
   }
 
@@ -11906,7 +12322,7 @@ export class TuiApp {
     // bounded preview while the root stays collapsed.
     const bodyExpanded = this.fullscreen === undefined
       ? rootExpanded
-      : this.subCallExpanded.has(child.subCallId ?? '')
+      : this.subCallExpanded.has(child.subCallId ?? '') || this.searchForcesSubCallExpanded(child.subCallId ?? '')
     const disclosure = bodyExpanded ? '▼' : '▶'
     const icon = iconPrefix(toolIconSemantic(child.name), this.iconStyle)
     const head = color.textDim(`${disclosure} ${icon}${header.title}${header.summary === '' ? '' : ` ${header.summary}`}`)
@@ -11944,8 +12360,22 @@ export class TuiApp {
   /** Toggle one PTC sub-call body's disclosure (mouse click on its header
    * row). The state is keyed by the durable subCallId. */
   private toggleSubCallExpanded(subCallId: string): void {
-    if (this.subCallExpanded.has(subCallId)) this.subCallExpanded.delete(subCallId)
-    else this.subCallExpanded.add(subCallId)
+    // Capture the search force BEFORE mutating: a sub-call can be open both
+    // because the user expanded it earlier AND because the search target's
+    // path covers it. An explicit collapse must suppress the search force in
+    // that case too, or the body reopens immediately.
+    const searchForced = this.searchForcesSubCallExpanded(subCallId)
+    if (this.subCallExpanded.has(subCallId)) {
+      this.subCallExpanded.delete(subCallId)
+      if (searchForced) this.searchSuppressedSubCalls.add(subCallId)
+    } else if (searchForced) {
+      // The body is open only because of the search reveal: an explicit click
+      // collapses just that sub-call until the next navigation (the rest of
+      // the reveal path stays).
+      this.searchSuppressedSubCalls.add(subCallId)
+    } else {
+      this.subCallExpanded.add(subCallId)
+    }
     this.subCallExpandedRevision += 1
     this.clearFocusLiveHeightState()
     this.rebuildMessages()
@@ -12115,12 +12545,24 @@ export class TuiApp {
   ): Component {
     const card = new Container()
     const runId = message.runId
+    const contextMember = this.searchContextMember(message)
     const runOpen = this.workflowRunOpen(message)
     const icon = iconPrefix('workflow', this.iconStyle)
     const disclosure = runOpen ? '▼' : '▶'
     const head = `${color.textDim(`${disclosure} ${icon}Workflow ${message.name}`)} ${workflowStatusPill(message.status)}`
     const rows: string[] = []
     const hits: Array<{ top: number; height: number; hit: WorkflowHit }> = []
+    const memberRanges: WorkflowMemberRange[] = []
+    // The visible-column spans of one member row's label/status fields (the
+    // row bakes its own prefix glyph, so the spans must be measured from the
+    // same prefix).
+    const memberSpans = (prefix: string, label: string, status: string | undefined): Pick<WorkflowMemberRange, 'labelStart' | 'labelEnd' | 'statusStart' | 'statusEnd'> => {
+      const labelStart = visibleWidth(prefix)
+      const labelEnd = labelStart + visibleWidth(label)
+      if (status === undefined) return { labelStart, labelEnd, statusStart: labelEnd, statusEnd: labelEnd }
+      const statusStart = labelEnd + visibleWidth(' — ')
+      return { labelStart, labelEnd, statusStart, statusEnd: statusStart + visibleWidth(status) }
+    }
     rows.push(truncateToWidth(head, width, '…'))
     hits.push({ top: 0, height: 1, hit: { kind: 'run', runId } })
     // The aggregate summary renders in BOTH states (plan §5.6: a compact
@@ -12148,11 +12590,16 @@ export class TuiApp {
           // member is a direct navigation target (plan §9.1/§9.4 — terminal
           // members stay visible but never cold-open from the card).
           for (const member of phase.members) {
+            const prefix = `    ${workflowMemberMark(member.status)} `
             rows.push(truncateToWidth(
-              `    ${workflowMemberMark(member.status)} ${member.label} — ${color.textDim(member.status)}`,
+              `${prefix}${member.label} — ${color.textDim(member.status)}`,
               width,
               '…',
             ))
+            memberRanges.push({
+              top: rows.length - 1, height: 1, phaseKey: phase.key, seq: member.seq,
+              ...memberSpans(prefix, member.label, member.status),
+            })
             if (member.status === 'running') {
               hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'member', runId, seq: member.seq, childId: String(member.childId) } })
             }
@@ -12165,13 +12612,42 @@ export class TuiApp {
             rows.push(truncateToWidth(color.textDim(`    ${counts}`), width, '…'))
           }
           for (const member of phase.anomalyPreview) {
-            rows.push(truncateToWidth(`    ${workflowMemberMark(member.status)} ${member.label}`, width, '…'))
+            const prefix = `    ${workflowMemberMark(member.status)} `
+            rows.push(truncateToWidth(`${prefix}${member.label}`, width, '…'))
+            // The anomaly-preview row IS the visible row for that member (the
+            // context row is deliberately suppressed for previewed members), so
+            // it must carry the member range too. Its status text is not
+            // rendered — a status-field hit falls back inexactly.
+            memberRanges.push({
+              top: rows.length - 1, height: 1, phaseKey: phase.key, seq: member.seq,
+              ...memberSpans(prefix, member.label, undefined),
+            })
           }
           if (phase.hiddenAnomalyCount > 0) {
             rows.push(truncateToWidth(color.textDim(`    … ${phase.hiddenAnomalyCount} more abnormal`), width, '…'))
           }
           rows.push(truncateToWidth(`    ${color.textDim('›')} View ${phase.members.length} agents`, width, '…'))
           hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'phase-agents', runId, phaseKey: phase.key } })
+          // Search-only context row (plan §6.6): a member hidden by the large
+          // phase's aggregate still gets ONE visible, highlightable row while
+          // its search target is current. Normal thresholds, `View N agents`
+          // and the Task Browser are untouched; the row disappears when the
+          // target clears.
+          const context = contextMember !== undefined && contextMember.phaseKey === phase.key
+            ? message.members.find(member => member.seq === contextMember.seq)
+            : undefined
+          if (context !== undefined && !phase.anomalyPreview.some(member => member.seq === context.seq)) {
+            const prefix = `    ${color.textDim('↳')} `
+            rows.push(truncateToWidth(
+              `${prefix}${context.label} — ${color.textDim(context.status)}`,
+              width,
+              '…',
+            ))
+            memberRanges.push({
+              top: rows.length - 1, height: 1, phaseKey: phase.key, seq: context.seq,
+              ...memberSpans(prefix, context.label, context.status),
+            })
+          }
         }
       }
       if (workflowRunViewAllVisible(message.members.length, phases.length)) {
@@ -12181,6 +12657,7 @@ export class TuiApp {
     }
     card.addChild(new Text(rows.join('\n'), 0, 0))
     this.workflowHitsByMessage.set(message, { hits, total: rows.length })
+    this.workflowMemberRangesByMessage.set(message, { ranges: memberRanges, total: rows.length })
     return card
   }
 
@@ -13130,6 +13607,9 @@ export class TuiApp {
     this.clearThinkingExpansionOverrides()
     this.clearFocusLiveHeightState()
     this.thinkingExpanded = !this.thinkingExpanded
+    // An explicit collapse of the Thinking DETAIL revokes the temporary search
+    // reveal of a Thinking target (an expand keeps it redundant).
+    if (!this.thinkingExpanded && this.searchTarget?.message.kind === 'thinking') this.suppressSearchReveal()
     this.rebuildMessages()
     return this.thinkingExpanded
   }
@@ -14154,9 +14634,9 @@ export class TuiApp {
 
   /** Whether one long-user candidate ACTUALLY compacts at the current
    * transcript width (the same visual-row threshold the bubble renderer
-   * applies). Shared by the search reveal (never write an override that has
-   * no visible effect) and the Ctrl+O user-collapse predicate (a short — or
-   * resized-short — bubble must not consume the press as a no-op). */
+   * applies). Shared by the search-reveal admission (never force an expansion
+   * that has no visible effect) and the Ctrl+O user-collapse predicate (a
+   * short — or resized-short — bubble must not consume the press as a no-op). */
   private userMessageCompactsAtCurrentWidth(message: Extract<TranscriptMessage, { kind: 'user' }>): boolean {
     const inner = Math.max(1, this.transcriptRenderWidth() - visibleWidth(`${color.roleUser('❯')} `))
     return new Text(message.text, 0, 0).render(inner).length > USER_MESSAGE_COMPACT_THRESHOLD_ROWS
