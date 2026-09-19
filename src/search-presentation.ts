@@ -42,6 +42,11 @@ export interface SearchSourceRegion {
   readonly rowStart: number
   readonly rowEnd: number
   readonly columns?: { readonly startCol: number; readonly endCol: number }
+  /** Whether rendered matches inside this region may be numbered as PROVEN
+   * source occurrences. False means the region is position-only (a transformed
+   * / relativized / truncated projection): it anchors, never enumerates — the
+   * generic layer must not infer provenance from render order. */
+  readonly enumerable?: boolean
 }
 
 /** One PROVEN occurrence mapping: the semantic source-local ordinal and the
@@ -145,11 +150,14 @@ export function buildSourceGeometry(
   const sourceRegions = regions.filter(region => region.sourceKey === sourceKey)
   if (sourceRegions.length === 0) return undefined
   const occurrences: RenderedSourceOccurrence[] = []
-  matches.forEach((match, matchIndex) => {
-    const region = sourceRegions.find(candidate => matchInsideRegion(match, candidate))
-    if (region === undefined) return
-    occurrences.push({ sourceOccurrence: occurrences.length, matchIndex, segments: match.segments })
-  })
+  const enumerable = sourceRegions.some(region => region.enumerable !== false)
+  if (enumerable) {
+    matches.forEach((match, matchIndex) => {
+      const region = sourceRegions.find(candidate => candidate.enumerable !== false && matchInsideRegion(match, candidate))
+      if (region === undefined) return
+      occurrences.push({ sourceOccurrence: occurrences.length, matchIndex, segments: match.segments })
+    })
+  }
   return { sourceKey, anchorRow: sourceRegions[0]!.anchorRow, occurrences }
 }
 
@@ -234,31 +242,50 @@ export function highlightSearchLines(
   return result
 }
 
-/** Compute the selection for one rendered block (pure). */
-export function renderedSearchSelection(
-  lines: readonly string[],
-  selector: RenderedSearchSelector,
-): RenderedSearchSelection {
-  return selectRenderedSearchMatch(findAltScreenSearchMatches(lines, selector.query), selector)
-}
-
 /**
- * Wraps a mounted message component and decorates its rendered lines with
- * the current search selection. The child component (and its render cache)
- * is reused; only the returned lines gain ANSI highlight.
+ * Wraps a mounted message component and decorates its rendered lines with the
+ * current search selection. The child component (and its render cache) is
+ * reused; the selection computed by the caller for THIS render epoch is reused
+ * too (no second matcher scan). `updateSelector` lets a remeasure pass keep the
+ * mounted wrapper on the SAME geometry epoch as the row map / scroll anchor.
  */
 export class SearchHighlightComponent implements Component {
   private readonly child: Component
   private selector: RenderedSearchSelector
+  private selection: RenderedSearchSelection
+  private selectionWidth: number
 
-  constructor(child: Component, selector: RenderedSearchSelector) {
+  constructor(
+    child: Component,
+    selector: RenderedSearchSelector,
+    selection: RenderedSearchSelection,
+    width: number,
+  ) {
     this.child = child
     this.selector = selector
+    this.selection = selection
+    this.selectionWidth = width
+  }
+
+  /** Re-sync the wrapper with the geometry of the current render epoch (the
+   * remeasure pass owns the row map and must not diverge from the paint). */
+  updateSelector(selector: RenderedSearchSelector, selection: RenderedSearchSelection, width: number): void {
+    this.selector = selector
+    this.selection = selection
+    this.selectionWidth = width
   }
 
   render(width: number): string[] {
     const lines = this.child.render(width)
-    return highlightSearchLines(lines, renderedSearchSelection(lines, this.selector))
+    if (width !== this.selectionWidth) {
+      // A width change invalidates the recorded geometry (rows/columns are
+      // width-baked and wrapping shifts). Until the next rebuild recomputes it,
+      // downgrade to a weak-only, anchor-at-top selection rather than paint a
+      // stale strong occurrence.
+      this.selection = { matches: findAltScreenSearchMatches(lines, this.selector.query), selectedIndex: -1, selectedRow: 0, exact: false }
+      this.selectionWidth = width
+    }
+    return highlightSearchLines(lines, this.selection)
   }
 
   invalidate(): void {

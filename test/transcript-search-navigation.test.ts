@@ -205,14 +205,15 @@ test('navigation: a live group reflow keeps the current highlight via stable-mat
   const { vt, app } = startApp()
   app.setFullscreen(true)
   app.setTranscript(project().messages, folder.turnActivities())
-  // 'files' renders in the merged read head (`Read 2 files`) — the read body
-  // itself needs a presenter, so the head is the visible occurrence here.
-  const match = folder.search('files')[0]!
+  // 'read' renders in the merged read head as the tool NAME — a direct
+  // projection, so it is a provable occurrence (the read result body itself
+  // needs a presenter).
+  const match = folder.search('read').find(m => m.source.kind === 'tool-field' && m.source.field === 'name')!
   const message = folder.resolveSearchMatch(match)!
-  app.setTranscriptSearchTarget({ query: 'files', match, message })
+  app.setTranscriptSearchTarget({ query: 'read', match, message })
   let lines = await viewport(vt)
   let row = lines.findIndex(line => line.includes('Read 2 files'))
-  assert.ok(row >= 0 && vt.getCellInverse(row, lines[row]!.indexOf('files')), 'precondition: the target is highlighted')
+  assert.ok(row >= 0 && vt.getCellInverse(row, lines[row]!.indexOf('Read')), 'precondition: the target name is highlighted')
 
   // A late cross-turn read joins the group: the representative card OBJECT is
   // replaced by the reflow, while match.id/source stay stable.
@@ -229,7 +230,7 @@ test('navigation: a live group reflow keeps the current highlight via stable-mat
   lines = await viewport(vt)
   row = lines.findIndex(line => line.includes('Read 3 files'))
   assert.ok(row >= 0, `the reflowed group card is visible:\n${lines.join('\n')}`)
-  assert.ok(vt.getCellInverse(row, lines[row]!.indexOf('files')), 'the rebind keeps the current occurrence strong after reflow')
+  assert.ok(vt.getCellInverse(row, lines[row]!.indexOf('Read')), 'the rebind keeps the current occurrence strong after reflow')
   app.stop()
 })
 
@@ -263,13 +264,15 @@ test('navigation: Next from a tool args hit to a result hit moves the strong hig
 
   app.setTranscriptSearchTarget({ query: 'needle', match: argsMatch, message: card })
   let lines = await viewport(vt)
-  const headerRow = lines.findIndex(line => line.includes('needle') && line.includes('Bash'))
-  assert.ok(headerRow >= 0, `tool header with args must render:\n${lines.join('\n')}`)
-  assert.ok(vt.getCellInverse(headerRow, lines[headerRow]!.indexOf('needle')), 'the ARGS hit is proven on the header summary')
+  const headerRow = lines.findIndex(line => line.includes('Bash'))
+  assert.ok(headerRow >= 0, `tool header must render:\n${lines.join('\n')}`)
+  // The rendered args summary is a presenter projection of the raw args, so it
+  // anchors WITHOUT a strong highlight (a raw ordinal cannot be proven).
+  assert.ok(!vt.getCellInverse(headerRow, lines[headerRow]!.indexOf('needle')), 'the ARGS hit must not strong-highlight the summary')
 
-  // A tool RESULT has no provable rendered occurrence (presenters transform or
-  // duplicate it): the selection anchors without ANY strong highlight, so it
-  // can never mislabel another occurrence as the current N/M hit.
+  // A tool RESULT has no provable rendered occurrence either: it anchors with
+  // no strong highlight, so it can never mislabel another occurrence as the
+  // current N/M hit.
   app.setTranscriptSearchTarget({ query: 'needle', match: resultMatch, message: card })
   lines = await viewport(vt)
   const resultRow = lines.findIndex(line => line.includes('needle output'))
@@ -307,12 +310,15 @@ test('navigation: deliverable path and description map to distinct proven rows',
   let lines = await viewport(vt)
   const pathRow = lines.findIndex(line => line.includes('out/report.md'))
   assert.ok(pathRow >= 0, `delivered path row missing:\n${lines.join('\n')}`)
-  assert.ok(vt.getCellInverse(pathRow, lines[pathRow]!.indexOf('report')), 'the PATH hit is proven on the path row')
+  // The path is RELATIVIZED (raw prefix removed), so a raw ordinal cannot be
+  // proven: anchor only, no strong highlight.
+  assert.ok(!vt.getCellInverse(pathRow, lines[pathRow]!.indexOf('report')), 'the PATH hit must not strong-highlight a relativized path')
 
   app.setTranscriptSearchTarget({ query: 'report', match: descriptionMatch, message: card })
   lines = await viewport(vt)
   const descriptionRow = lines.findIndex(line => line.includes('Final report'))
   assert.ok(descriptionRow >= 0, `delivered description row missing:\n${lines.join('\n')}`)
+  // The description is rendered verbatim, so its ordinal IS provable.
   assert.ok(vt.getCellInverse(descriptionRow, lines[descriptionRow]!.indexOf('report')), 'the DESCRIPTION hit is proven on its own row')
   assert.ok(!vt.getCellInverse(pathRow, lines[pathRow]!.indexOf('report')), 'the path row is not the current occurrence')
   app.stop()
@@ -348,7 +354,9 @@ test('navigation: a PTC child result maps to its body, not the header or the roo
   const lines = await viewport(vt)
   const bodyRow = lines.findIndex(line => line.includes('needle in child result'))
   assert.ok(bodyRow >= 0, `child result body must render:\n${lines.join('\n')}`)
-  assert.ok(vt.getCellInverse(bodyRow, lines[bodyRow]!.indexOf('needle')), 'the child RESULT hit is proven on the result body')
+  // Result lines are width-truncated, so a raw result ordinal is not provable:
+  // the child body anchors without a guessed strong highlight.
+  assert.ok(!vt.getCellInverse(bodyRow, lines[bodyRow]!.indexOf('needle')), 'the child RESULT hit must not strong-highlight a truncated body')
   const headerRow = lines.findIndex(line => line.includes('echo needle'))
   assert.ok(headerRow < 0 || !vt.getCellInverse(headerRow, lines[headerRow]!.indexOf('needle')), 'the header/command row is not the current occurrence')
   app.stop()

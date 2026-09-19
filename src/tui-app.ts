@@ -3108,6 +3108,9 @@ type RenderedTranscriptBlock = {
   rendered: string[]
   /** The current search selection for this block (block-relative rows). */
   searchSelection?: RenderedSearchSelection
+  /** The selector matching {@link searchSelection} for the CURRENT render
+   * epoch: remeasure uses it to re-sync the mounted highlight wrapper. */
+  searchSelector?: RenderedSearchSelector
   truncatedMarker: boolean
   attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
   collapseFocusOwnerOnClick?: number
@@ -7665,10 +7668,12 @@ export class TuiApp {
       }
       let mountedComponent: Component | undefined
       let searchSelection: RenderedSearchSelection | undefined
+      let searchSelector: RenderedSearchSelector | undefined
       const presentation = this.blockSearchPresentation(block, rendered, subCallRegions, deliverableRegions)
       if (presentation.selector !== undefined && presentation.selection !== undefined) {
         searchSelection = presentation.selection
-        mountedComponent = new SearchHighlightComponent(component, presentation.selector)
+        searchSelector = presentation.selector
+        mountedComponent = new SearchHighlightComponent(component, presentation.selector, presentation.selection, width)
       }
       return {
         block,
@@ -7676,6 +7681,7 @@ export class TuiApp {
         ...(mountedComponent === undefined ? {} : { mountedComponent }),
         rendered,
         ...(searchSelection === undefined ? {} : { searchSelection }),
+        ...(searchSelector === undefined ? {} : { searchSelector }),
         truncatedMarker,
         attachments,
         ...(collapseFocusOwnerOnClick === undefined ? {} : { collapseFocusOwnerOnClick }),
@@ -7765,6 +7771,10 @@ export class TuiApp {
               rowStart: row + fieldRow,
               rowEnd: row + fieldRow + 1,
               columns: { startCol, endCol },
+              // The path is RELATIVIZED (a dropped raw prefix shifts every
+              // ordinal); the description is rendered verbatim, so only it can
+              // prove a raw ordinal.
+              ...(field === 'path' ? { enumerable: false } : {}),
             })
           }
           push('path', span.pathRow, span.pathStart, span.pathEnd)
@@ -7852,12 +7862,14 @@ export class TuiApp {
       const workflowHits = workflowInfo === undefined
         ? undefined
         : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
-      const searchSelection = this.blockSearchPresentation(entry.block, rendered, subCallRegions, deliverableRegions).selection
+      const searchPresentation = this.blockSearchPresentation(entry.block, rendered, subCallRegions, deliverableRegions)
+      const searchSelection = searchPresentation.selection
       return {
         ...entry,
         rendered,
         attachments,
         ...(searchSelection === undefined ? { searchSelection: undefined } : { searchSelection }),
+        ...(searchPresentation.selector === undefined ? { searchSelector: undefined } : { searchSelector: searchPresentation.selector }),
         ...(subCallHits === undefined ? { subCallHits: undefined } : { subCallHits }),
         ...(workflowHits === undefined ? { workflowHits: undefined } : { workflowHits }),
         ...(userDisclosureHit === undefined ? { userDisclosureHit: undefined } : { userDisclosureHit }),
@@ -8188,6 +8200,15 @@ export class TuiApp {
     // zero rows (fullscreen Focus transient collapse).
     const projectionExpanded = this.focusProjectionExpandedTurns()
     const renderedBlocks = this.remeasureTranscriptBlocks(this.mountedTranscriptBlocks, width)
+    // Keep the MOUNTED highlight wrapper on the SAME geometry epoch as this
+    // row map / scroll anchor: a stale selector would paint a strong occurrence
+    // for geometry the viewport no longer uses.
+    for (const entry of renderedBlocks) {
+      const mounted = entry.mountedComponent
+      if (mounted instanceof SearchHighlightComponent && entry.searchSelector !== undefined && entry.searchSelection !== undefined) {
+        mounted.updateSelector(entry.searchSelector, entry.searchSelection, width)
+      }
+    }
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     const rows: FullscreenRowEntry[] = []
     this.currentSearchTranscriptRow = undefined
@@ -12212,11 +12233,12 @@ export class TuiApp {
     const statusPart = ` ${pill}`
     const statsPart = diffStatsLabel === '' ? '' : `  ${color.textDim(diffStatsLabel)}`
     const head = `${headIdentity}${statusPart}${statsPart}`
-    // Proven header field regions (row 0): the design title is the tool NAME
-    // and the rendered summary is its ARGS. The body/result has no provable
-    // occurrence mapping (presenters transform or duplicate it), so a
-    // `tool-field.result` hit anchors the card top with NO strong highlight.
-    if (message.name !== 'edit') {
+    // Header field regions (row 0): the design title is the tool NAME (a
+    // direct projection) and the rendered summary is its ARGS. The rendered
+    // summary is a PRESENTER projection of the raw args (description-preferred,
+    // relativized, …), so it anchors but can never prove a raw args ordinal.
+    // The body/result has no provable mapping either: it anchors the card top.
+    {
       const toolRegions: SearchSourceRegion[] = []
       const nameStart = visibleWidth(icon)
       const nameEnd = nameStart + visibleWidth(header.title)
@@ -12226,7 +12248,7 @@ export class TuiApp {
       if (header.summary !== '') {
         const argsStart = nameEnd + visibleWidth(action !== undefined ? ' · ' : ' ')
         const argsEnd = argsStart + visibleWidth(header.summary)
-        toolRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'args' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: argsStart, endCol: argsEnd } })
+        toolRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'args' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: argsStart, endCol: argsEnd }, enumerable: false })
       }
       if (toolRegions.length > 0) this.searchSourceRegionsByMessage.set(message, toolRegions)
     }
@@ -12471,7 +12493,8 @@ export class TuiApp {
     if (header.summary !== '') {
       const argsStart = nameEnd + 1
       const argsEnd = argsStart + visibleWidth(header.summary)
-      regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'args' }), anchorRow: headerRow, rowStart: headerRow, rowEnd: headerRow + 1, columns: { startCol: argsStart, endCol: argsEnd } })
+      // Presenter summary of the raw args: anchor only, never enumerate.
+      regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'args' }), anchorRow: headerRow, rowStart: headerRow, rowEnd: headerRow + 1, columns: { startCol: argsStart, endCol: argsEnd }, enumerable: false })
     }
     if (bodyExpanded) {
       // bash/pwsh: the executed command row — the header summary prefers
@@ -12484,7 +12507,9 @@ export class TuiApp {
       if (child.result !== '') {
         const resultStart = row + rows
         const resultLines = child.result.split('\n').length
-        regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + resultLines })
+        // Result lines are truncated to the width: a dropped match would shift
+        // every later raw ordinal. Anchor the body, never enumerate.
+        regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + resultLines, enumerable: false })
         for (const line of child.result.split('\n')) {
           card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
           rows += 1

@@ -4272,12 +4272,53 @@ export function apply(ctx: Context, config: Config): void {
     let lastSearchQuery = ''
     let lastSearchRevision = 0
     let lastSearchFolder: TranscriptFolder | undefined
+    /** The unique representative card ids of the current result set, and the
+     * published representative objects (weak-highlight scope). */
+    let searchMatchRepresentativeIds: number[] = []
+    let searchMatchMessages: ReadonlySet<TranscriptMessage> = new Set()
+    const sameMessageSet = (left: ReadonlySet<TranscriptMessage>, right: ReadonlySet<TranscriptMessage>): boolean => {
+      if (left.size !== right.size) return false
+      for (const message of left) if (!right.has(message)) return false
+      return true
+    }
+    /** Re-resolve the representative ids against the CURRENT folder projection
+     * and republish them when the set actually changed. Called after every
+     * projection commit, so a live group reflow that replaced a matching card
+     * object does not silently drop that card's weak highlight. */
+    const syncSearchMatchMessages = (): void => {
+      const folder = activeFolder()
+      const next = new Set<TranscriptMessage>()
+      if (lastSearchQuery !== '' && lastSearchFolder === folder) {
+        for (const id of searchMatchRepresentativeIds) {
+          const message = folder.resolveSearchMatch({ id, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 })
+          if (message !== undefined) next.add(message)
+        }
+      }
+      if (sameMessageSet(next, searchMatchMessages)) return
+      searchMatchMessages = next
+      app.setSearchMatchMessages(next)
+    }
+    const refreshSearchMatchMessages = (): void => {
+      const folder = activeFolder()
+      const ids: number[] = []
+      if (lastSearchQuery !== '' && lastSearchFolder === folder) {
+        const seen = new Set<number>()
+        for (const match of searchMatches) {
+          if (seen.has(match.id)) continue
+          seen.add(match.id)
+          ids.push(match.id)
+        }
+      }
+      searchMatchRepresentativeIds = ids
+      syncSearchMatchMessages()
+    }
     const resetSearchState = (): void => {
       searchMatches = []
       searchCurrent = -1
       lastSearchQuery = ''
       lastSearchRevision = 0
       lastSearchFolder = undefined
+      searchMatchRepresentativeIds = []
       searchMatchMessages = new Set()
       if (app !== undefined) app.setSearchMatchMessages(searchMatchMessages)
     }
@@ -4286,32 +4327,13 @@ export function apply(ctx: Context, config: Config): void {
     // replaces the representative card object; without this the reveal and
     // highlight would drop until the next Next/Prev.
     syncSearchTargetAfterRepaint = (): void => {
+      syncSearchMatchMessages()
       if (lastSearchQuery === '' || searchCurrent < 0 || lastSearchFolder === undefined) return
       const folder = activeFolder()
       if (folder !== lastSearchFolder) return
       const match = searchMatches[searchCurrent]
       if (match === undefined) return
       app.rebindTranscriptSearchTarget(folder.resolveSearchMatch(match))
-    }
-    /** Publish the semantic-match REPRESENTATIVE cards (deduped by id) so the
-     * TuiApp only weak-highlights cards that are actually part of the N/M
-     * result set, never a card that merely renders the query in UI chrome. The
-     * Set reference is reused while the result set is unchanged. */
-    let searchMatchMessages: ReadonlySet<TranscriptMessage> = new Set()
-    const refreshSearchMatchMessages = (): void => {
-      const folder = activeFolder()
-      const next = new Set<TranscriptMessage>()
-      if (lastSearchQuery !== '' && lastSearchFolder === folder) {
-        const seen = new Set<number>()
-        for (const match of searchMatches) {
-          if (seen.has(match.id)) continue
-          seen.add(match.id)
-          const message = folder.resolveSearchMatch(match)
-          if (message !== undefined) next.add(message)
-        }
-      }
-      searchMatchMessages = next
-      app.setSearchMatchMessages(next)
     }
     // Monotonic session generation: bumped on EVERY session swap (switch,
     // resume, deferred creation). Late async work (the skill command
