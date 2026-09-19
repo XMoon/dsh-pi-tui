@@ -127,8 +127,11 @@ async function mountSearchRunner(
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
   const input = (data: string): void => {
-    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
-    tui.handleTerminalInput(data)
+    const screens = app as unknown as {
+      tui: { handleTerminalInput(data: string): void }
+      fullscreen?: { handleTerminalInput(data: string): void }
+    }
+    ;(screens.fullscreen ?? screens.tui).handleTerminalInput(data)
   }
   return {
     app,
@@ -236,23 +239,42 @@ test('runner search: an off-window jump re-windows exactly once and rebuilds onc
   assert.equal(app.searchPresentationDiagnosticsForTest().rebuilds, 1, 'the refinement commits exactly one rebuild')
 })
 
-test('runner search: dismiss preserves the current window and clears the presentation', async (t) => {
-  const fixture = await mountSearchRunner(t, 30, [2], 'zzq marker')
-  const { app, projections } = fixture
+test('runner search: fullscreen dismiss preserves the historical result viewport', async (t) => {
+  const longMatch = [
+    ...Array.from({ length: 12 }, (_, index) => `prefix line ${index}`),
+    'zzq marker',
+    ...Array.from({ length: 12 }, (_, index) => `suffix line ${index}`),
+  ].join('\n')
+  const fixture = await mountSearchRunner(t, 30, [2], longMatch)
+  const { app, projections, vt } = fixture
+  app.setFullscreen(true)
+  await fixture.settleRender()
   app.startTranscriptSearch()
   await fixture.settleRender()
   typeQuery(fixture, 'zzq')
   await fixture.settleRender()
-  assert.equal(app.transcriptSearchPresentationForTest()?.matchTurn, 2, 'precondition: the off-window match is current')
+  assert.equal(app.transcriptSearchPresentationForTest()?.matchTurn, 2,
+    'precondition: fullscreen search really jumped to the historical result')
+  const beforeTargetRow = vt.getViewport().findIndex(line => line.includes('zzq marker'))
+  assert.ok(beforeTargetRow > 0,
+    'precondition: the searched middle row is visible below the fullscreen viewport top')
   const beforeScroll = app.fullscreenScrollForTest()?.scrollTop
+  assert.ok(beforeScroll !== undefined && beforeScroll > 0,
+    'precondition: fullscreen owns a real historical scroll position')
 
   projections.reset()
+  app.resetSearchPresentationDiagnosticsForTest()
   app.closeTranscriptSearch()
   await fixture.settleRender()
   assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'closing clears the search target')
   assert.equal(app.isSearching(), false, 'the overlay is gone')
   assert.equal(projections.count(), 0, 'dismiss does not re-window the current transcript')
-  assert.equal(app.fullscreenScrollForTest()?.scrollTop, beforeScroll, 'dismiss preserves the current viewport position')
+  assert.equal(app.searchPresentationDiagnosticsForTest().rebuilds, 1,
+    'dismiss promotes and clears the presentation in one rebuild')
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop, beforeScroll,
+    'dismiss preserves the real fullscreen viewport position')
+  assert.equal(vt.getViewport().findIndex(line => line.includes('zzq marker')), beforeTargetRow,
+    'the searched historical row keeps the same viewport offset after dismiss')
   assert.equal(app.searchMatchMessagesForTest().size, 0, 'closing clears the weak-match set')
 })
 
@@ -434,6 +456,8 @@ test('runner search: Ctrl+End while search is open repaints exactly once', async
   typeQuery(fixture, 'zzq') // off-window: the view sits on a history window
   await fixture.settleRender()
   assert.equal(app.isSearching(), true, 'precondition: the search box is open')
+  assert.equal(app.transcriptSearchPresentationForTest()?.matchTurn, 2,
+    'precondition: fullscreen search really jumped to history')
 
   projections.reset()
   app.resetSearchPresentationDiagnosticsForTest()
@@ -443,8 +467,8 @@ test('runner search: Ctrl+End while search is open repaints exactly once', async
   assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'the search presentation is cleared')
   assert.equal(projections.count(), 1,
     `Ctrl+End must project the transcript exactly ONCE (got ${projections.count()})`)
-  assert.ok(app.searchPresentationDiagnosticsForTest().rebuilds <= 1,
-    `Ctrl+End must not double-rebuild (got ${app.searchPresentationDiagnosticsForTest().rebuilds})`)
+  assert.equal(app.searchPresentationDiagnosticsForTest().rebuilds, 1,
+    'Ctrl+End commits the cleared search and latest window in exactly one rebuild')
 })
 
 test('runner search: every operation performs exactly one representative pass', async (t) => {
