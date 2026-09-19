@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { TuiApp } from '../src/tui-app.ts'
+import { TuiApp, type StreamingToolPreview } from '../src/tui-app.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -107,6 +107,63 @@ test('identical indexed projections are no-op and equivalent summaries reuse the
   assert.equal(diag.contentCommits, 0)
   assert.equal(diag.noopCommits, 1)
   assert.equal(mountedComponents(app).length, 2)
+  const published = (app as unknown as {
+    mountedTranscriptBlocks: Array<{ block: { message?: unknown } }>
+  }).mountedTranscriptBlocks
+  assert.equal(published[0]?.block.message, secondSummary, 'a no-op must publish fresh equivalent block metadata')
+})
+
+test('streaming preview turn movement is structural in regular mode', () => {
+  const { app } = startApp()
+  const preview = (turn: number): StreamingToolPreview => ({
+    callId: 'preview-call',
+    argumentBytes: 1,
+    turn,
+    step: 0,
+    index: 0,
+    name: 'read',
+    summary: 'src/file.ts',
+  })
+  app.setTranscript([], undefined, undefined, [preview(1)])
+  app.resetTranscriptPresentationDiagnosticsForTest()
+
+  app.setTranscript([], undefined, undefined, [preview(2)])
+  const diag = diagnostics(app)
+  assert.equal(diag.structuralCommits, 1)
+  assert.equal(diag.contentCommits, 0)
+  assert.equal(diag.mountReplacements, 0)
+})
+
+test('setTranscript applies window and previews before Focus timing observation', () => {
+  const { app } = startApp()
+  const host = app as unknown as {
+    observeFocusTiming: () => boolean
+    streamingToolPreviews: readonly StreamingToolPreview[]
+    transcriptWindow: unknown
+  }
+  const originalObserve = host.observeFocusTiming
+  const previews: readonly StreamingToolPreview[] = [{
+    callId: 'ordering-preview',
+    argumentBytes: 1,
+    turn: 1,
+    step: 0,
+    index: 0,
+    name: 'read',
+  }]
+  const window = { mode: 'history' as const, endTurn: 1, firstTurn: 1, lastTurn: 1, hasNewer: false }
+  let observed: { previews: readonly StreamingToolPreview[]; window: unknown } | undefined
+  try {
+    host.observeFocusTiming = () => {
+      observed = { previews: host.streamingToolPreviews, window: host.transcriptWindow }
+      return false
+    }
+    app.setTranscript([], undefined, window, previews)
+  } finally {
+    host.observeFocusTiming = originalObserve
+  }
+  assert.ok(observed)
+  assert.equal(observed.window, window)
+  assert.equal(observed.previews[0], previews[0])
 })
 
 test('ordinary assistant streaming replaces only the dirty mounted block', async () => {
@@ -281,6 +338,24 @@ test('zero-height mount transitions fall back structurally', () => {
   diag = diagnostics(app)
   assert.equal(diag.structuralFallbacks, 1)
   assert.equal(diag.structuralCommits, 1)
+  assert.equal(diag.contentCommits, 0)
+})
+
+test('structural fallback diagnostics retain partial dirty work', () => {
+  const { app } = startApp()
+  const first = assistant(1, 'a')
+  const second = assistant(1, '')
+  app.setTranscript([first, second])
+  app.resetTranscriptPresentationDiagnosticsForTest()
+
+  first.text = 'changed'
+  second.text = 'now visible'
+  app.setTranscript([first, second])
+  const diag = diagnostics(app)
+  assert.equal(diag.structuralFallbacks, 1)
+  assert.equal(diag.structuralCommits, 1)
+  assert.equal(diag.dirtyBlocks, 1)
+  assert.equal(diag.mountReplacements, 1)
   assert.equal(diag.contentCommits, 0)
 })
 

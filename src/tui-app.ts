@@ -3033,11 +3033,24 @@ function sameTranscriptBlockShape(left: TranscriptRenderBlock, right: Transcript
     return left.message === right.message && left.truncated === right.truncated
   }
   if (left.kind === 'activity' && right.kind === 'activity') return left.activity === right.activity
-  if (left.kind === 'streaming-tool-previews' && right.kind === 'streaming-tool-previews') return left.turn === right.turn
+  if (left.kind === 'streaming-tool-previews' && right.kind === 'streaming-tool-previews') {
+    return left.turn === right.turn && sameStreamingToolPreviewShape(left.previews, right.previews)
+  }
   if (left.kind === 'pending-user' && right.kind === 'pending-user') {
     return pendingUserDisclosureKey(left.row) === pendingUserDisclosureKey(right.row)
   }
   return false
+}
+
+/** Compare preview slot identity; argument/name changes remain content-only. */
+function sameStreamingToolPreviewShape(left: readonly StreamingToolPreview[], right: readonly StreamingToolPreview[]): boolean {
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]!
+    const b = right[index]!
+    if (a.callId !== b.callId || a.turn !== b.turn || a.step !== b.step || a.index !== b.index) return false
+  }
+  return true
 }
 
 function sameStreamingToolPreviews(left: readonly StreamingToolPreview[], right: readonly StreamingToolPreview[]): boolean {
@@ -6744,11 +6757,11 @@ export class TuiApp {
     if (activitiesChanged || windowChanged) this.clearFocusLiveHeightState()
     this.messages = messages
     if (activities !== undefined) this.turnActivities = activities
+    this.streamingToolPreviews = [...(streamingToolPreviews ?? [])]
+    this.transcriptWindow = window
     // Observe newly published activity objects at the phase they actually
     // entered; this preserves the pre-wait active span.
     if (this.observeFocusTiming()) this.focusTiming.clearPauseWindows()
-    this.streamingToolPreviews = [...(streamingToolPreviews ?? [])]
-    this.transcriptWindow = window
     this.refreshTranscriptWindowHint()
     const windowHintChanged = previousWindowHint !== this.transcriptWindowHint
     // Workflow disclosure transitions fold BEFORE the presentation commit.
@@ -6790,6 +6803,8 @@ export class TuiApp {
     if (result.kind === 'structural') {
       this.transcriptPresentationDiagnostics.structuralFallbacks += 1
       this.transcriptPresentationDiagnostics.structuralCommits += 1
+      this.transcriptPresentationDiagnostics.dirtyBlocks += result.dirtyBlocks
+      this.transcriptPresentationDiagnostics.mountReplacements += result.mountReplacements
       this.rebuildMessages('transcript-structure', projectionExpanded, blocks)
       this.transcriptRenderProfiler.finish(profileStart, classifiedAt, 'structural', {
         reason: 'transcript-structure',
@@ -8629,7 +8644,12 @@ export class TuiApp {
       dirtyBlocks += 1
     }
 
-    if (dirtyBlocks === 0) return { kind: 'noop', dirtyBlocks: 0, mountReplacements: 0 }
+    if (dirtyBlocks === 0) {
+      // Equivalent fresh projections still advance the published block batch;
+      // no-op means no render or geometry work, not stale metadata.
+      this.mountedTranscriptBlocks = refreshed
+      return { kind: 'noop', dirtyBlocks: 0, mountReplacements: 0 }
+    }
     this.mountedTranscriptBlocks = refreshed
     this.updateTranscriptGeometry(refreshed, projectionExpanded, width, false)
     for (const [index, rows] of this.focusLivePaddingRows) {

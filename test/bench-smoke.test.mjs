@@ -21,9 +21,19 @@ test('bench:smoke exercises the maintained benchmark families', { timeout: 120_0
     'fullscreen bounded projection',
     'Focus collapsed streaming',
     'Focus expanded streaming',
+    'append visible message commits',
+    'turn finalization / shape transition',
+    'window move (older) commits',
     'search 5 turns',
     'window nav ×50 older / ×50 newer',
   ]) {
     assert.match(output, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')))
   }
+  assert.match(output, /append visible message commits\s+structural\/content\/no-op 1 \/ 0 \/ 0/)
+  assert.match(output, /turn finalization \/ shape transition\s+structural\/content\/no-op 1 \/ 0 \/ 0/)
+  assert.match(output, /window move \(older\) commits\s+structural\/content\/no-op 1 \/ 0 \/ 0/)
+  const lifecycle = output.match(/benchmark app lifecycle\s+created=(\d+) disposed=(\d+)/)
+  assert.ok(lifecycle, `missing benchmark lifecycle counters:\n${output}`)
+  assert.equal(lifecycle[1], lifecycle[2], `benchmark app leak:\n${output}`)
+  assert.notEqual(lifecycle[1], '0', `benchmark did not create an app:\n${output}`)
 })
