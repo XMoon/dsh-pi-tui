@@ -8,6 +8,47 @@
 > (full sweep without `BENCH_FAST`). The benchmark is NOT part of the test
 > suite — it is a manual, non-default tool by design.
 
+## Transcript invalidation baseline (2026-09-19)
+
+> Repaired-benchmark before SHA: `120ad66c0f7e45140966116dfe8d63b3db48d923`.
+> Optimization SHA: `9549f96` (content-only transcript invalidation). Node
+> `v24.20.0`; `BENCH_FAST=1 pnpm bench:fast`; headless terminals at 24 rows.
+> The renderer fixture hydrates 30 turns, projects a bounded 20-turn indexed
+> window, and drives the live tail through `TranscriptFolder.applyLiveInput()`.
+> Wall-clock values are observational; structural counters are the regression
+> gate.
+
+### Structural work counters
+
+The repaired pre-optimization harness did not emit counters, but every warm
+projection and live flush entered `rebuildMessages()`. The equivalent observed
+counts are shown as `structural / content / no-op`; the optimized values are
+emitted by the benchmark itself:
+
+| scenario | before | after |
+|---|---:|---:|
+| repeated latest projection @40 | 50 / 0 / 0 | 0 / 0 / 50 |
+| ordinary live stream @40 | 50 / 0 / 0 | 0 / 50 / 0 |
+| Focus collapsed streaming | not separately reported | 0 / 50 / 0 |
+| Focus expanded streaming | not separately reported | 0 / 50 / 0 |
+| fullscreen streaming | 20 / 0 / 0 | 0 / 20 / 0 |
+
+### Same-machine timing sample
+
+| scenario | before | after |
+|---|---:|---:|
+| cold bounded projection @40 | 170.62ms | 153.26ms |
+| repeated projection @40 (p50 / p95 / p99 / mean) | 0.70 / 1.38 / 1.72 / 0.79ms | 0.12 / 0.47 / 1.22 / 0.19ms |
+| live stream @40 (p50 / p95 / p99 / mean) | 1.06 / 1.46 / 1.92 / 1.10ms | 0.46 / 0.70 / 1.31 / 0.51ms |
+| fullscreen stream @120 (p50 / p95 / p99 / mean) | 0.56 / 0.76 / 0.78 / 0.61ms | 0.37 / 0.55 / 0.55 / 0.39ms |
+| heap growth per warm projection | 81.8 B/rebuild | -63.2 B/rebuild |
+
+`pnpm bench:smoke` is the runtime-maintenance gate and does not assert timing
+thresholds. `pnpm bench:fast` and the full `pnpm bench` sweep remain manual
+observational measurements. Search-decorated content changes intentionally use
+the one-commit structural fallback when the mounted highlight wrapper cannot be
+proven safe to swap in place.
+
 ## Before (pre-optimization)
 
 | scenario | value |
