@@ -411,33 +411,60 @@ test('runner search: every operation performs exactly one representative pass', 
   try {
     const fixture = await mountSearchRunner(t, 30, [25, 29])
     const { app } = fixture
+    const operations = (): string[] => captured.filter(line => line.includes('[search-profile]') && line.includes('search.total='))
+    const since = (start: number): string[] => operations().slice(start)
+
     app.startTranscriptSearch()
     await fixture.settleRender()
-    typeQuery(fixture, 'transcript') // 10 query operations
-    await fixture.settleRender()
-    fixture.input('\r') // Next
-    await fixture.settleRender()
-    fixture.input('\x1b[13;2u') // Prev
-    await fixture.settleRender()
-    typeQuery(fixture, 'zzz') // 3 no-match (clear) operations
-    await fixture.settleRender()
 
-    const operations = captured.filter(line => line.includes('[search-profile]') && line.includes('search.total='))
-    assert.ok(operations.length >= 15, `expected one profiler line per operation, got ${operations.length}`)
-    for (const operation of operations) {
+    // 1. A query WITH results: every keystroke resolves representatives once and
+    //    commits + rebuilds.
+    let mark = operations().length
+    typeQuery(fixture, 'transcript')
+    await fixture.settleRender()
+    const hitOps = since(mark)
+    assert.equal(hitOps.length, 10, `expected one line per keystroke, got ${hitOps.length}`)
+    for (const operation of hitOps) {
       assert.equal(operation.split('search.resolve-representatives=').length - 1, 1,
         `each operation must resolve representatives exactly ONCE: ${operation.trim()}`)
-      assert.equal(operation.split('search.total=').length - 1, 1,
-        `each operation must report exactly one total: ${operation.trim()}`)
+      assert.ok(operation.includes('search.presentation-commit='), operation.trim())
+      assert.ok(operation.includes('search.rebuild='), `a query with results rebuilds: ${operation.trim()}`)
     }
-    // The no-match clear reports the commit/rebuild it ACTUALLY performed and
-    // never fabricates a projection or a scroll.
-    const clears = operations.filter(operation => !operation.includes('search.scroll='))
-    assert.ok(clears.length >= 1, 'the no-match clear must be reported')
-    for (const clear of clears) {
-      assert.ok(clear.includes('search.presentation-commit='), `the clear reports its commit: ${clear.trim()}`)
-      assert.ok(clear.includes('search.rebuild='), `the clear reports its rebuild: ${clear.trim()}`)
-      assert.ok(!clear.includes('search.window='), 'the clear never fabricates a projection stage')
+
+    // 2. Next / Prev steps over the same result set.
+    mark = operations().length
+    fixture.input('\r')
+    await fixture.settleRender()
+    fixture.input('\x1b[13;2u')
+    await fixture.settleRender()
+    assert.equal(since(mark).length, 2)
+
+    // 3. The FIRST no-match step really clears the presentation (one rebuild).
+    mark = operations().length
+    fixture.input('z') // 'transcriptz' — first no-match
+    await fixture.settleRender()
+    const firstClear = since(mark)
+    assert.equal(firstClear.length, 1, `expected one operation, got ${firstClear.length}`)
+    assert.ok(firstClear[0]!.includes('search.presentation-commit='), 'the clear reports its commit')
+    assert.ok(firstClear[0]!.includes('search.rebuild='), 'the FIRST no-match step commits an empty presentation')
+    assert.ok(!firstClear[0]!.includes('search.window='), 'the clear never fabricates a projection stage')
+    assert.ok(!firstClear[0]!.includes('search.scroll='), 'the clear never fabricates a scroll stage')
+
+    // 4. A REPEAT no-match step changes nothing: the setter is a no-op, so the
+    //    profiler must NOT report a rebuild for it.
+    mark = operations().length
+    typeQuery(fixture, 'zz') // still no match
+    await fixture.settleRender()
+    const noopClears = since(mark)
+    assert.equal(noopClears.length, 2)
+    for (const operation of noopClears) {
+      assert.equal(operation.split('search.resolve-representatives=').length - 1, 1,
+        `the pass still runs exactly once: ${operation.trim()}`)
+      assert.ok(operation.includes('search.presentation-commit='), 'the presentation resolution still runs')
+      assert.ok(!operation.includes('search.rebuild='),
+        `a no-op no-match step must NOT report a rebuild: ${operation.trim()}`)
+      assert.ok(!operation.includes('search.window='), 'no fabricated projection stage')
+      assert.ok(!operation.includes('search.scroll='), 'no fabricated scroll stage')
     }
   } finally {
     process.stderr.write = originalWrite

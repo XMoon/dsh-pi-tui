@@ -8,7 +8,8 @@
  * - `search.resolve-representatives` — the single O(results) representative pass
  * - `search.window` — the anchored projection (off-window jumps only)
  * - `search.presentation-commit` — resolving / building the presentation
- * - `search.rebuild` — the app's atomic commit + message-tree rebuild
+ * - `search.rebuild` — the app's atomic commit + message-tree rebuild; omitted
+ *   when the commit was a NO-OP (a repeat no-match step that changed nothing)
  * - `search.scroll` — the viewport anchor (match jumps only)
  * - `search.total` — always
  *
