@@ -202,54 +202,58 @@ export function selectRenderedSearchMatch(
 /** Decorate every visible occurrence of `selection.matches` without changing
  * row count or visible width. `selectedIndex >= 0` marks that occurrence
  * strong; `-1` with matches present decorates all of them weak (the other
- * visible cards while the current card owns the strong occurrence). */
+ * visible cards while the current card owns the strong occurrence). An
+ * anchor-only current also washes `selectedRow` even when the card has NO
+ * visible occurrence of the query (the source may live behind a transform). */
 export function highlightSearchLines(
   lines: readonly string[],
   selection: RenderedSearchSelection,
 ): string[] {
-  if (selection.matches.length === 0) return [...lines]
-  const rangesByRow = new Map<number, Array<{ startCol: number; endCol: number; current: boolean }>>()
-  selection.matches.forEach((match, matchIndex) => {
-    for (const segment of match.segments) {
-      const ranges = rangesByRow.get(segment.row) ?? []
-      ranges.push({ startCol: segment.startCol, endCol: segment.endCol, current: matchIndex === selection.selectedIndex })
-      rangesByRow.set(segment.row, ranges)
-    }
-  })
   const result = [...lines]
-  for (const [row, ranges] of rangesByRow) {
-    const line = result[row]
-    if (line === undefined || isImageLine(line)) continue
-    const lineWidth = visibleWidth(line)
-    // Assemble ascending from the ORIGINAL line: re-slicing an already
-    // highlighted line could drop a trailing ANSI reset at the slice edge.
-    const sorted = [...ranges].sort((left, right) => left.startCol - right.startCol)
-    let output = ''
-    let cursor = 0
-    for (const range of sorted) {
-      const startCol = Math.min(range.startCol, lineWidth)
-      const endCol = Math.min(range.endCol, lineWidth)
-      if (endCol <= startCol) continue
-      if (startCol > cursor) output += sliceByColumn(line, cursor, startCol - cursor, true)
-      const highlighted = sliceByColumn(line, startCol, endCol - startCol, true)
-      output += styleVisibleText(highlighted, range.current ? SEARCH_CURRENT_MATCH_STYLE : SEARCH_MATCH_STYLE)
-      cursor = endCol
+  if (selection.matches.length > 0) {
+    const rangesByRow = new Map<number, Array<{ startCol: number; endCol: number; current: boolean }>>()
+    selection.matches.forEach((match, matchIndex) => {
+      for (const segment of match.segments) {
+        const ranges = rangesByRow.get(segment.row) ?? []
+        ranges.push({ startCol: segment.startCol, endCol: segment.endCol, current: matchIndex === selection.selectedIndex })
+        rangesByRow.set(segment.row, ranges)
+      }
+    })
+    for (const [row, ranges] of rangesByRow) {
+      const line = result[row]
+      if (line === undefined || isImageLine(line)) continue
+      const lineWidth = visibleWidth(line)
+      // Assemble ascending from the ORIGINAL line: re-slicing an already
+      // highlighted line could drop a trailing ANSI reset at the slice edge.
+      const sorted = [...ranges].sort((left, right) => left.startCol - right.startCol)
+      let output = ''
+      let cursor = 0
+      for (const range of sorted) {
+        const startCol = Math.min(range.startCol, lineWidth)
+        const endCol = Math.min(range.endCol, lineWidth)
+        if (endCol <= startCol) continue
+        if (startCol > cursor) output += sliceByColumn(line, cursor, startCol - cursor, true)
+        const highlighted = sliceByColumn(line, startCol, endCol - startCol, true)
+        output += styleVisibleText(highlighted, range.current ? SEARCH_CURRENT_MATCH_STYLE : SEARCH_MATCH_STYLE)
+        cursor = endCol
+      }
+      if (cursor < lineWidth) output += sliceByColumn(line, cursor, lineWidth - cursor, true)
+      // Zero-width escape sequences at the END of the original line (a color
+      // reset after the visible tail, an OSC8 hyperlink terminator, …) are not
+      // part of any column slice: restore them from the ORIGINAL line unless the
+      // assembled output already ends with them. Keyed on the final output, not
+      // on `cursor >= lineWidth`: a reset can follow visible tail text too.
+      const trailing = trailingZeroWidthSequences(line)
+      if (trailing !== '' && !output.endsWith(trailing)) output += trailing
+      result[row] = output
     }
-    if (cursor < lineWidth) output += sliceByColumn(line, cursor, lineWidth - cursor, true)
-    // Zero-width escape sequences at the END of the original line (a color
-    // reset after the visible tail, an OSC8 hyperlink terminator, …) are not
-    // part of any column slice: restore them from the ORIGINAL line unless the
-    // assembled output already ends with them. Keyed on the final output, not
-    // on `cursor >= lineWidth`: a reset can follow visible tail text too.
-    const trailing = trailingZeroWidthSequences(line)
-    if (trailing !== '' && !output.endsWith(trailing)) output += trailing
-    result[row] = output
   }
   // The ANCHOR-ONLY current result (plan S3 §6.3): no proven occurrence, so
   // every match stays weak — but the owning source/card row gets a weaker
   // background so the user can still see WHERE the current N/M lives. The
   // occurrence provenance (selectedIndex = -1), the count and the scroll anchor
-  // are all unchanged.
+  // are all unchanged. This applies EVEN with no visible occurrence: the
+  // source region is the honest anchor in that case.
   if (selection.selectedIndex < 0 && selection.selectedRow !== undefined) {
     const row = selection.selectedRow
     const line = result[row]

@@ -1172,8 +1172,18 @@ export abstract class TuiBase extends Container implements TUI {
 	 */
 	protected hasBlockingOverlay(): boolean {
 		return this.overlayStack.some(
-			(entry) => this.isOverlayVisible(entry) && entry.options?.viewportPassthrough !== true,
+			(entry) => this.isOverlayVisible(entry) && !this.overlayViewportPassthroughEntry(entry),
 		);
+	}
+
+	/**
+	 * Whether one overlay entry qualifies for the X058 viewport passthrough:
+	 * it must be a CAPTURING overlay that explicitly opted in. `nonCapturing`
+	 * never qualifies — the option is documented as ignored for it, and a
+	 * nonCapturing notice must keep the upstream viewport/scrollbar block.
+	 */
+	private overlayViewportPassthroughEntry(entry: OverlayStackEntry): boolean {
+		return entry.options?.nonCapturing !== true && entry.options?.viewportPassthrough === true;
 	}
 
 	/**
@@ -1187,9 +1197,9 @@ export abstract class TuiBase extends Container implements TUI {
 		const focused = this.overlayStack.find(
 			(entry) => entry.component === this.focusedComponent && this.isOverlayVisible(entry),
 		);
-		if (focused?.options?.viewportPassthrough !== true) return false;
+		if (focused === undefined || !this.overlayViewportPassthroughEntry(focused)) return false;
 		return !this.overlayStack.some(
-			(entry) => entry !== focused && this.isOverlayVisible(entry) && entry.options?.viewportPassthrough !== true,
+			(entry) => entry !== focused && this.isOverlayVisible(entry) && !this.overlayViewportPassthroughEntry(entry),
 		);
 	}
 

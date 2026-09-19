@@ -4835,6 +4835,7 @@ The host transcript-search box is a capturing overlay: it must keep KEYBOARD foc
 - TuiBase.hasBlockingOverlay(): visible overlay that did NOT opt in (nonCapturing still blocks, exactly like hasOverlay()).
 - TuiBase.overlayViewportPassthrough(): the FOCUSED visible overlay opted in AND no other visible overlay blocks the viewport.
 - TuiAltScreen wheel guard, a PageUp/PageDown-only key allow-list, the scrollbar target guard and the selection-anchor guard consult those predicates.
+- Host: src/overlay-broker.ts isOnlyVisibleModal(handle) — the exemption is granted only when the search handle ITSELF is visible and no other visible modal exists (a modal that SUPPRESSES the search box hides it, so it cannot keep the exemption).
 
 #### Dependency map
 
@@ -4853,6 +4854,7 @@ The host transcript-search box is a capturing overlay: it must keep KEYBOARD foc
 **Host**
 - src/tui-app.ts startTranscriptSearch mounts the search overlay with viewportPassthrough: true; every other host overlay (model picker, task browser, question/approval, settings, history search) keeps the upstream block.
 - The host's fullscreen router (routeInput) is unchanged: typing, Esc, Ctrl+F, Enter and Shift+Enter still win through the existing overlay key contract.
+- src/tui-app.ts overlayBlocksTranscriptPointer consults overlayBroker.isOnlyVisibleModal(this.searchOverlay): a modal that suppresses/hides the search box (the search handle stays defined) blocks the transcript exactly like any other modal.
 - Audit note: The option is inert on the main screen, where the terminal (not the fork) owns scrollback.
 
 **Public / extension**
@@ -4865,7 +4867,8 @@ The host transcript-search box is a capturing overlay: it must keep KEYBOARD foc
 - An ordinary modal stacked above stops the passthrough immediately (scrollbar and selection guards re-block); hiding it restores the passthrough.
 - An event the overlay's component handles is still applied only to the overlay (overlay-first pointer dispatch and the mouse-result truncation are unchanged).
 - Every overlay without the option (including nonCapturing ones) keeps the exact upstream viewport, scrollbar and selection blocking.
-- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X058) plus the host fullscreen search-interaction regression.
+- A capturing modal stacked above the search box SUPPRESSES it (the box is hidden, not closed): background transcript disclosure stays blocked while that modal is up, and the passthrough resumes when it closes.
+- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X058) plus the host fullscreen search-interaction and stacked-modal regressions.
 
 #### Guarding tests
 
@@ -4873,6 +4876,7 @@ The host transcript-search box is a capturing overlay: it must keep KEYBOARD foc
 - packages/pi-tui/test/tui-alt-screen.test.ts: keeps the scrollbar and background selection live for a focused viewportPassthrough overlay (X058)
 - packages/pi-tui/test/tui-alt-screen.test.ts: gives wheel and viewport keys to a focused overlay (default block, unchanged)
 - test/transcript-search-interaction.test.ts: fullscreen search keeps the viewport interactive without losing the search input focus
+- test/focus-ui.test.ts: a modal that suppressed the search box blocks an outside-rectangle transcript disclosure, and closing it restores the passthrough (X058)
 
 #### Upstream comparison
 

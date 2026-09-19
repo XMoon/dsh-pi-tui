@@ -2050,16 +2050,31 @@ test('the search overlay keeps background disclosure clicks live (X058)', async 
   assert.ok(revealedRows > previewRows,
     `the Bash card must full-reveal under the search box (${previewRows} -> ${revealedRows}):\n${revealed.join('\n')}`)
 
-  // Stacking an ORDINARY modal with the search box restores the block.
-  const picker = app.openPicker([{ value: 'opt', label: 'option' }], () => {}, () => {})
+  // Stacking an ORDINARY modal SUPPRESSES the search box (it becomes hidden,
+  // not closed): the host must treat the picker as the blocking modal — a
+  // disclosure click OUTSIDE the picker rectangle must stay inert — and must
+  // restore the search passthrough once the picker closes.
+  const picker = app.openPicker([{ value: 'opt', label: 'option' }], () => {}, () => {}, { width: 20, maxHeight: 3 })
   await vt.waitForRender()
-  const stacked = vt.getViewport()
-  const headerY = findFocusHeaderRow(stacked, false)
-  click(vt, 3, headerY)
+  const stacked = vt.getViewport().join('\n')
+  assert.ok(!stacked.includes('Find transcript'), `the picker must suppress the search box:\n${stacked}`)
+  const headerY = findFocusHeaderRow(vt.getViewport(), true)
+  assert.ok(headerY >= 0, `expanded Thought header missing:\n${stacked}`)
+  click(vt, 3, headerY + 1)
   await vt.waitForRender()
   assert.deepEqual([...app.focusExpandedTurnsForTest()], [1],
-    'a modal stacked with the search box must block the transcript again')
+    'a modal that suppressed the search box must block the transcript again')
+
   picker.close()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().some(line => line.includes('Find transcript')),
+    `closing the picker must reveal the search box again:\n${vt.getViewport().join('\n')}`)
+  const restoredHeaderY = findFocusHeaderRow(vt.getViewport(), true)
+  assert.ok(restoredHeaderY >= 0, `expanded Thought header missing after restore:\n${vt.getViewport().join('\n')}`)
+  click(vt, 3, restoredHeaderY + 1)
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [],
+    'the search passthrough is restored once the blocking modal closes')
   app.closeTranscriptSearch()
   app.setFullscreen(false)
   app.stop()
@@ -2832,6 +2847,14 @@ test('search target: clicking the search-opened Thought header collapses it on t
   click(vt, 3, y + 1)
   await vt.waitForRender()
   assert.ok(!hasFocusHeader(vt.getViewport().join('\n'), true), 'the FIRST header click must collapse the search-opened Thought')
+  // A passive reflow that replaces the representative card object must NOT
+  // re-grant the reveal the user just revoked (perf plan S2 §5.1).
+  app.rebindTranscriptSearchTarget({ ...thinking } as typeof thinking)
+  await vt.waitForRender()
+  assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, false,
+    'a passive rebind must preserve the revoked reveal grant')
+  assert.ok(!hasFocusHeader(vt.getViewport().join('\n'), true),
+    'the reflowed card must not resurrect the collapsed Thought')
   app.setFullscreen(false)
   app.stop()
 })

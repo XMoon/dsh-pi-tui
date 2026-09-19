@@ -26,22 +26,26 @@ interface Harness {
   readonly app: TuiApp
   readonly queries: string[]
   readonly submits: string[]
+  readonly copied: string[]
 }
 
 function startSearchApp(width = 80, height = 24): Harness {
   const vt = new VirtualTerminal(width, height)
   const queries: string[] = []
   const submits: string[] = []
+  const copied: string[] = []
   const app = new TuiApp(vt, {
     onSubmit: (text) => { submits.push(text) },
     onExit: () => {},
     onSearchQuery: (query) => { queries.push(query) },
+  }, {
+    copySelection: async (text) => { copied.push(text); return true },
   })
   app.start()
   startedApps.add(app)
   app.setFullscreen(true)
   app.setTranscript(longTranscript())
-  return { vt, app, queries, submits }
+  return { vt, app, queries, submits, copied }
 }
 
 function longTranscript(): TranscriptMessage[] {
@@ -152,5 +156,119 @@ test('interaction: the search box keeps pointer ownership inside its rectangle',
   await vt.waitForRender()
   assert.equal(app.isSearching(), true, 'an in-box wheel never closes the box')
   assert.equal(queries.at(-1), 'aXbc', 'an in-box wheel never edits the query')
+  app.stop()
+})
+
+test('interaction: an ordinary modal blocks the transcript viewport while search is open', async () => {
+  const { vt, app } = startSearchApp()
+  await vt.waitForRender()
+  app.startTranscriptSearch()
+  await vt.waitForRender()
+  vt.sendInput('needle')
+  await vt.waitForRender()
+
+  const before = scrollTop(app)
+  vt.sendInput('\x1b[5~')
+  await vt.waitForRender()
+  assert.ok(scrollTop(app) < before, 'precondition: the search passthrough pages the transcript')
+
+  const paged = scrollTop(app)
+  const picker = app.openPicker([{ value: 'opt', label: 'option' }], () => {}, () => {}, { width: 20, maxHeight: 3 })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[5~')
+  vt.sendInput('\x1b[<64;5;8M')
+  await vt.waitForRender()
+  assert.equal(scrollTop(app), paged, 'an ordinary modal must block PageUp and the wheel')
+
+  picker.close()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[5~')
+  await vt.waitForRender()
+  assert.ok(scrollTop(app) < paged, 'closing the modal restores the search passthrough')
+  app.stop()
+})
+
+test('interaction: the transcript scrollbar stays hoverable and draggable while search is open', async () => {
+  const { vt, app, queries } = startSearchApp()
+  await vt.waitForRender()
+  app.startTranscriptSearch()
+  await vt.waitForRender()
+  vt.sendInput('needle')
+  await vt.waitForRender()
+  const before = scrollTop(app)
+
+  // Hover the right-most column to reveal the auto scrollbar, then press the
+  // track well ABOVE the thumb (the view follows the end): the jump/drag must
+  // move the transcript without touching the search query or closing the box.
+  vt.sendInput('\x1b[<35;80;3M')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[<0;80;6M')
+  await vt.waitForRender()
+  assert.ok(scrollTop(app) < before, `the scrollbar track press must scroll the transcript:\n${vt.getViewport().join('\n')}`)
+  vt.sendInput('\x1b[<32;80;8M')
+  vt.sendInput('\x1b[<0;80;8m')
+  await vt.waitForRender()
+  assert.equal(app.isSearching(), true, 'the box stays open while dragging the scrollbar')
+  assert.equal(queries.at(-1), 'needle', 'dragging the scrollbar never edits the query')
+  app.stop()
+})
+
+test('interaction: boundary paging reaches the host while search is open', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const moves: Array<[-1 | 1, string]> = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSearchQuery: () => {},
+    onTranscriptMoveOlder: (source) => { moves.push([-1, source]); return true },
+    onTranscriptMoveNewer: (source) => { moves.push([1, source]); return true },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  app.setTranscript(longTranscript())
+  await vt.waitForRender()
+  app.startTranscriptSearch()
+  await vt.waitForRender()
+
+  app.scrollToTop({ disableFollow: true })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[5~')
+  await vt.waitForRender()
+  assert.deepEqual(moves, [[-1, 'page']], 'PageUp at the top must reach the host older-boundary callback')
+
+  app.scrollToBottom()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[6~')
+  await vt.waitForRender()
+  assert.deepEqual(moves, [[-1, 'page'], [1, 'page']], 'PageDown at the bottom must reach the newer boundary')
+  app.stop()
+})
+
+test('interaction: background selection copies while an in-box drag never selects the transcript', async () => {
+  const { vt, app, copied } = startSearchApp()
+  await vt.waitForRender()
+  app.startTranscriptSearch()
+  await vt.waitForRender()
+  vt.sendInput('needle')
+  await vt.waitForRender()
+
+  // A drag on a transcript row OUTSIDE the box (the box is top-right) selects
+  // and copies the underlying text.
+  vt.sendInput('\x1b[<0;1;8M')
+  vt.sendInput('\x1b[<32;20;8M')
+  vt.sendInput('\x1b[<0;20;8m')
+  await vt.waitForRender()
+  assert.ok(copied.length >= 1, 'a background drag outside the search box must copy the selection')
+  assert.ok(copied.some(text => text.includes('turn ')), `the copied text must be transcript content: ${JSON.stringify(copied)}`)
+
+  // A drag INSIDE the box owns the pointer: no transcript selection/copy.
+  const before = copied.length
+  vt.sendInput('\x1b[<0;60;2M')
+  vt.sendInput('\x1b[<32;70;2M')
+  vt.sendInput('\x1b[<0;70;2m')
+  await vt.waitForRender()
+  assert.equal(copied.length, before, 'an in-box drag must never copy the transcript underneath')
+  assert.equal(app.isSearching(), true, 'the in-box drag never closes the box')
   app.stop()
 })

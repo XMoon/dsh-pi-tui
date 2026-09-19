@@ -18,6 +18,7 @@ import {
   settingsListTheme,
   themeOptOut,
   validateCustomTheme,
+  withSearchCurrentTokens,
 } from '../src/theme.ts'
 
 test('detectThemeFromBackground picks light for bright backgrounds', () => {
@@ -108,6 +109,29 @@ test('resolveCustomTheme merges overrides onto the base palette', () => {
   const darkResolved = resolveCustomTheme({ name: 'test', colors: { error: '#00FF00' } })
   assert.equal(darkResolved.error, '#00FF00')
   assert.equal(darkResolved.text, darkColors.text)
+})
+
+test('withSearchCurrentTokens inherits the matching family search block (perf plan S3)', () => {
+  const withoutSearchTokens = (palette: typeof darkColors): typeof darkColors => {
+    const { searchCurrentFg: _fg, searchCurrentBg: _bg, searchAnchorBg: _anchor, ...legacy } = palette
+    void _fg
+    void _bg
+    void _anchor
+    return legacy as typeof darkColors
+  }
+  // A light-ink body text is a DARK-family palette: it must inherit the dark
+  // search block, not the light one (the polarity bug the review caught).
+  const darkFamily = withSearchCurrentTokens(withoutSearchTokens(darkColors))
+  assert.equal(darkFamily.searchCurrentBg, darkColors.searchCurrentBg, 'light ink inherits the DARK search block')
+  assert.equal(darkFamily.searchCurrentFg, darkColors.searchCurrentFg)
+  assert.equal(darkFamily.searchAnchorBg, darkColors.searchAnchorBg)
+  const lightFamily = withSearchCurrentTokens(withoutSearchTokens(lightColors))
+  assert.equal(lightFamily.searchCurrentBg, lightColors.searchCurrentBg, 'dark ink inherits the LIGHT search block')
+  assert.equal(lightFamily.searchCurrentFg, lightColors.searchCurrentFg)
+  // An explicit token is never overwritten.
+  const explicit = withSearchCurrentTokens({ ...withoutSearchTokens(darkColors), searchCurrentBg: '#123456' })
+  assert.equal(explicit.searchCurrentBg, '#123456')
+  assert.equal(explicit.searchCurrentFg, darkColors.searchCurrentFg, 'the omitted sibling tokens are still filled')
 })
 
 test('validateCustomTheme accepts a well-formed file and rejects malformed ones', () => {

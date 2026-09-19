@@ -4553,7 +4553,8 @@ export function apply(ctx: Context, config: Config): void {
       // remeasure. The bounds come from the CURRENT projected window, never
       // from the controller mode alone.
       const snapshot = controller.snapshot()
-      const sameWindow = searchBoundRevision === folder.searchRevision()
+      const sameWindow = lastSearchFolder === folder
+        && searchBoundRevision === folder.searchRevision()
         && snapshot.firstTurn !== undefined && snapshot.lastTurn !== undefined
         && match.turn >= snapshot.firstTurn && match.turn <= snapshot.lastTurn
       if (sameWindow) {

@@ -2397,6 +2397,29 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("never lets a nonCapturing overlay opt into viewport passthrough (X058)", async () => {
+		const terminal = new VirtualTerminal(10, 6);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "always" },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+
+		// The option is documented as ignored for a nonCapturing overlay: the
+		// scrollbar must stay blocked exactly like any other visible overlay.
+		// The narrow top-left box leaves the scrollbar column free so the hover
+		// path (not the overlay rectangle) is what is under test.
+		tui.showOverlay(new InputOverlay(), { nonCapturing: true, viewportPassthrough: true, width: 4, anchor: "top-left" });
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<35;10;3M"); // move onto the scrollbar track column
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.isScrollbarActive, false, "a nonCapturing overlay keeps the scrollbar blocked");
+		tui.stop();
+	});
+
 	it("keeps viewport scrolling when an overlay is not focused", async () => {
 		const terminal = new VirtualTerminal(20, 6);
 		const tui = new TuiAltScreen(terminal);

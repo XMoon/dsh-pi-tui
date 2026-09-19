@@ -9144,11 +9144,12 @@ export class TuiApp {
   /** Whether a visible modal overlay blocks fullscreen transcript pointer
    * (disclosure) gestures. The transcript-search box is the ONE exception (fork
    * seam X058): it is a viewport-passthrough overlay, so while it is the ONLY
-   * visible modal the background disclosure clicks stay live. Any other modal —
-   * or a modal stacked with the search box — blocks exactly as before. */
+   * VISIBLE modal the background disclosure clicks stay live. Any other modal —
+   * including one that SUPPRESSES the search box (the box itself is then
+   * hidden) — blocks exactly as before. */
   private overlayBlocksTranscriptPointer(): boolean {
     if (!this.overlayBroker.hasVisibleModalOverlay()) return false
-    return this.searchOverlay === undefined || this.overlayBroker.visibleModalOverlayCount() !== 1
+    return !this.overlayBroker.isOnlyVisibleModal(this.searchOverlay)
   }
 
   private handleFullscreenClick(x: number, y: number): void {
