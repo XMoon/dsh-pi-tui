@@ -53,8 +53,9 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
   type TuiMouseDispatchResult,
+  AltScreenSearchIndex,
   dispatchMouseEvent,
-  findAltScreenSearchMatches,
+  type AltScreenSearchMatch,
 } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
@@ -393,8 +394,10 @@ export interface TranscriptSearchPresentationDiagnostics {
   rebuilds: number
   /** `refreshMessageRows()` entries. */
   remeasures: number
-  /** Rendered matcher scans (`findAltScreenSearchMatches`). */
-  renderedMatchScans: number
+  /** Calls to the indexed rendered-search lookup in the normal host path. */
+  renderedMatchLookups: number
+  /** Full rendered-result cache hits (`AltScreenSearchResult.changed === false`). */
+  renderedMatchResultCacheHits: number
   /** Full `messagesView.render()` height probes. */
   fullRenders: number
   /** `setTranscript()` commits. */
@@ -2976,6 +2979,9 @@ type TranscriptRenderBlock = FocusProjectedBlock | {
 /** One cached component for a transcript message (stage J render cache). */
 interface MessageComponentEntry {
   component: Component
+  /** Lazily-owned rendered-search corpus/results cache. It follows this
+   * message's live component entry and is pruned with it. */
+  renderedSearchIndex?: AltScreenSearchIndex
   /** The fold boundary the component was built at (Ctrl+O / windowing). */
   boundary: number
   /** The long-user fold boundary the component was built at. It is derived
@@ -3468,7 +3474,8 @@ export class TuiApp {
   private readonly searchPresentationDiagnostics: TranscriptSearchPresentationDiagnostics = {
     rebuilds: 0,
     remeasures: 0,
-    renderedMatchScans: 0,
+    renderedMatchLookups: 0,
+    renderedMatchResultCacheHits: 0,
     fullRenders: 0,
     transcriptSets: 0,
   }
@@ -6883,7 +6890,8 @@ export class TuiApp {
   resetSearchPresentationDiagnosticsForTest(): void {
     this.searchPresentationDiagnostics.rebuilds = 0
     this.searchPresentationDiagnostics.remeasures = 0
-    this.searchPresentationDiagnostics.renderedMatchScans = 0
+    this.searchPresentationDiagnostics.renderedMatchLookups = 0
+    this.searchPresentationDiagnostics.renderedMatchResultCacheHits = 0
     this.searchPresentationDiagnostics.fullRenders = 0
     this.searchPresentationDiagnostics.transcriptSets = 0
   }
@@ -7862,6 +7870,23 @@ export class TuiApp {
     })
   }
 
+  /** Resolve rendered matches through the cache owned by the live message
+   * component entry. `componentForMessage()` has already established this
+   * entry before the normal search-presentation pass reaches this helper. */
+  private renderedSearchMatchesFor(
+    message: TranscriptMessage,
+    rendered: readonly string[],
+    query: string,
+  ): readonly AltScreenSearchMatch[] {
+    const entry = this.messageComponents.get(message)
+    if (entry === undefined) throw new Error('rendered search requires a live message component entry')
+    const index = entry.renderedSearchIndex ??= new AltScreenSearchIndex()
+    const result = index.search(rendered, query)
+    this.searchPresentationDiagnostics.renderedMatchLookups += 1
+    if (!result.changed) this.searchPresentationDiagnostics.renderedMatchResultCacheHits += 1
+    return result.matches
+  }
+
   /** The rendered search presentation of ONE block while a search is active.
    * The current target builds PROVEN source geometry from the renderer-declared
    * regions; every other VISIBLE message block that is a semantic match card is
@@ -7878,8 +7903,7 @@ export class TuiApp {
     // Non-current cards must be SEMANTIC match representatives: a card that
     // merely renders the query in UI chrome is never highlighted.
     if (!current && !this.searchMatchMessages.has(block.message)) return { current: false }
-    this.searchPresentationDiagnostics.renderedMatchScans += 1
-    const matches = findAltScreenSearchMatches(rendered, target.query)
+    const matches = this.renderedSearchMatchesFor(block.message, rendered, target.query)
     if (!current && matches.length === 0) return { current: false }
     if (current) {
       const regions = this.searchSourceRegionsFor(block.message, rendered.length, subCallRegions, deliverableRegions)
