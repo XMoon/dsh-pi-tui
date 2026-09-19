@@ -30,7 +30,7 @@ function startApp(width = 100, height = 30): { vt: VirtualTerminal; app: TuiApp 
   return { vt, app }
 }
 
-function userMessage(turn: number, text: string): TranscriptMessage {
+function userMessage(turn: number, text: string): Extract<TranscriptMessage, { kind: 'user' }> {
   return { kind: 'user', turn, text }
 }
 

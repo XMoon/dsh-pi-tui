@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operation and no longer re-measure or re-render the entire window for every
   character; a same-window jump is near-instant and a cross-window jump performs
   exactly one necessary re-projection.
+- **Rendered search matches are reused per live card.** When a card's rendered
+  lines are unchanged, repeated navigation reuses its complete match results;
+  changing the query rescans only the cached corpus, and changed card content
+  rebuilds that corpus automatically without changing semantic `N/M` identity.
+- **Anchor-only results navigate near usable rendered hits when possible.** In
+  fullscreen, source-local or card-level rendered candidates are brought into
+  view; a range that is already fully visible is left alone instead of being
+  snapped back to a fixed position. Approximate navigation never upgrades a
+  result to strong highlight and falls back to the honest source anchor when no
+  rendered candidate exists.
 - **The current search result is more prominent and follows the theme.** A
   provable current occurrence uses an explicit themed foreground/background
   block instead of relying on the terminal's inverse attribute; a

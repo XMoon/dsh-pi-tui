@@ -15,6 +15,7 @@ import {
   buildSourceGeometry,
   highlightSearchLines,
   selectRenderedSearchMatch,
+  selectRenderedSearchScrollRange,
   type RenderedSearchSelector,
   type SearchSourceRegion,
 } from '../src/search-presentation.ts'
@@ -182,6 +183,57 @@ test('presentation: an enumerable:false region anchors and never claims an occur
   assert.equal(selection.selectedIndex, -1, 'no strong highlight')
   assert.equal(selection.selectedRow, 0, 'the region row anchors the viewport')
   assert.equal(selection.exact, false)
+})
+
+test('presentation: exact scroll range follows the selected rendered occurrence', () => {
+  const lines = ['split', 'word', 'split word again']
+  const selector = wholeCardSelector(lines, 'split word')
+  const matches = findAltScreenSearchMatches(lines, 'split word')
+  const selection = selectRenderedSearchMatch(matches, selector)
+  assert.equal(selection.exact, true)
+  assert.deepEqual(selectRenderedSearchScrollRange(matches, selection, selector, [
+    { sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: lines.length },
+  ]), { startRow: 0, endRow: 1 })
+})
+
+test('presentation: anchor-only scroll range prefers source-local position regions', () => {
+  const lines = ['needle top', 'filler', 'needle middle', 'needle outside']
+  const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 0, rowStart: 0, rowEnd: 3, enumerable: false }]
+  const selector = selectorForRegions(lines, 'needle', regions, 's', 1)
+  const matches = findAltScreenSearchMatches(lines, 'needle')
+  const selection = selectRenderedSearchMatch(matches, selector)
+  const range = selectRenderedSearchScrollRange(matches, selection, selector, regions)
+  assert.equal(selection.selectedIndex, -1)
+  assert.equal(selection.exact, false)
+  assert.equal(selection.selectedRow, 0)
+  assert.deepEqual(range, { startRow: 2, endRow: 2 }, 'the second in-region hit wins over an unrelated card hit')
+})
+
+test('presentation: a source region with no rendered hit falls back to its anchor', () => {
+  const lines = ['needle elsewhere', 'source anchor']
+  const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 1, rowStart: 1, rowEnd: 2, enumerable: false }]
+  const selector = selectorForRegions(lines, 'needle', regions, 's')
+  const matches = findAltScreenSearchMatches(lines, 'needle')
+  const selection = selectRenderedSearchMatch(matches, selector)
+  assert.deepEqual(selectRenderedSearchScrollRange(matches, selection, selector, regions), { startRow: 1, endRow: 1 })
+})
+
+test('presentation: no source region allows card-wide approximate navigation', () => {
+  const lines = ['needle first', 'filler', 'needle second']
+  const selector: RenderedSearchSelector = { query: 'needle', sourceOccurrence: 1 }
+  const matches = findAltScreenSearchMatches(lines, 'needle')
+  const selection = selectRenderedSearchMatch(matches, selector)
+  assert.equal(selection.selectedIndex, -1)
+  assert.deepEqual(selectRenderedSearchScrollRange(matches, selection, selector, []), { startRow: 2, endRow: 2 })
+})
+
+test('presentation: no rendered hit keeps the honest anchor row', () => {
+  const lines = ['nothing here', 'source anchor']
+  const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 1, rowStart: 1, rowEnd: 2, enumerable: false }]
+  const selector = selectorForRegions(lines, 'needle', regions, 's')
+  const matches = findAltScreenSearchMatches(lines, 'needle')
+  const selection = selectRenderedSearchMatch(matches, selector)
+  assert.deepEqual(selectRenderedSearchScrollRange(matches, selection, selector, regions), { startRow: 1, endRow: 1 })
 })
 
 test('presentation: a match crossing out of its source region is NOT proven', () => {

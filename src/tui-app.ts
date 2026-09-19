@@ -146,7 +146,9 @@ import {
   SearchHighlightComponent,
   buildSourceGeometry,
   selectRenderedSearchMatch,
+  selectRenderedSearchScrollRange,
   type RenderedSearchSelection,
+  type RenderedSearchScrollRange,
   type RenderedSearchSelector,
   type SearchSourceRegion,
 } from './search-presentation.ts'
@@ -3459,9 +3461,9 @@ export class TuiApp {
   /** PTC sub-calls the user explicitly collapsed while the search reveal had
    * them open: they stay collapsed until the next explicit navigation. */
   private readonly searchSuppressedSubCalls = new Set<string>()
-  /** The block-relative transcript row of the current search selection (welcome
-   * card excluded), recomputed on every rebuild/remeasure. */
-  private currentSearchTranscriptRow: number | undefined
+  /** The block-relative transcript range of the current search selection
+   * (welcome card excluded), recomputed on every rebuild/remeasure. */
+  private currentSearchTranscriptRange: RenderedSearchScrollRange | undefined
   /** The transcript content height (welcome card + rows + hint/notify) measured
    * by the LAST rebuild/remeasure. `scrollToSearchTarget` reads it instead of
    * re-rendering the whole mounted view for every ordinary search jump. */
@@ -7913,7 +7915,13 @@ export class TuiApp {
         sourceOccurrence: target.match.sourceOccurrence,
         ...(geometry === undefined ? {} : { geometry }),
       }
-      return { selector, selection: selectRenderedSearchMatch(matches, selector), current }
+      const selection = selectRenderedSearchMatch(matches, selector)
+      const scrollRange = selectRenderedSearchScrollRange(matches, selection, selector, regions)
+      return {
+        selector,
+        selection: scrollRange === undefined ? selection : { ...selection, scrollRange },
+        current,
+      }
     }
     const selector: RenderedSearchSelector = { query: target.query, sourceOccurrence: 0, weakOnly: true }
     return { selector, selection: selectRenderedSearchMatch(matches, selector), current }
@@ -8248,7 +8256,7 @@ export class TuiApp {
     // The transcript-relative row of the current search selection (welcome
     // card excluded), accumulated with the SAME height rule the row map uses
     // so the exact viewport anchor lands on the rendered occurrence.
-    this.currentSearchTranscriptRow = undefined
+    this.currentSearchTranscriptRange = undefined
     let transcriptRow = 0
     // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
     // a session never reads as one undifferentiated wall of text. The spacer
@@ -8256,8 +8264,12 @@ export class TuiApp {
     // separate inert entries after that existing boundary spacer.
     renderedBlocks.forEach((entry, index) => {
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
-      if (entry.searchSelection !== undefined && entry.searchSelection.selectedRow !== undefined) {
-        this.currentSearchTranscriptRow = transcriptRow + entry.searchSelection.selectedRow
+      const scrollRange = entry.searchSelection?.scrollRange
+      if (scrollRange !== undefined) {
+        this.currentSearchTranscriptRange = {
+          startRow: transcriptRow + scrollRange.startRow,
+          endRow: transcriptRow + scrollRange.endRow,
+        }
       }
       if (height === 0) {
         rows.push(this.fullscreenRowEntry(entry, 0, false))
@@ -8439,13 +8451,17 @@ export class TuiApp {
     }
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     const rows: FullscreenRowEntry[] = []
-    this.currentSearchTranscriptRow = undefined
+    this.currentSearchTranscriptRange = undefined
     let transcriptRow = 0
     for (let index = 0; index < renderedBlocks.length; index += 1) {
       const entry = renderedBlocks[index]!
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
-      if (entry.searchSelection !== undefined && entry.searchSelection.selectedRow !== undefined) {
-        this.currentSearchTranscriptRow = transcriptRow + entry.searchSelection.selectedRow
+      const scrollRange = entry.searchSelection?.scrollRange
+      if (scrollRange !== undefined) {
+        this.currentSearchTranscriptRange = {
+          startRow: transcriptRow + scrollRange.startRow,
+          endRow: transcriptRow + scrollRange.endRow,
+        }
       }
       rows.push(this.fullscreenRowEntry(entry, height, height > 0 && index < renderedBlocks.length - 1))
       const padding = paddingRows.get(index) ?? 0
@@ -8457,20 +8473,27 @@ export class TuiApp {
     this.messageRows = rows
   }
 
-  /** Anchor the fullscreen transcript viewport on the current search
-   * occurrence (plan §9): reuse the geometry the last rebuild/remeasure already
+  /** Reveal the fullscreen transcript viewport on the current search range
+   * (plan S7 §12): reuse the geometry the last rebuild/remeasure already
    * measured (perf plan S2 §5.6 — an ordinary search jump must NOT re-render
-   * the whole mounted view), then place the occurrence about one third down the
-   * viewport with follow-end disabled. Regular mode has no app-owned ScrollView
-   * — the materialized window + reveal + highlight are the contract there. */
+   * the whole mounted view). An already-visible range is left in place; an
+   * outside range is positioned about one third down the viewport. Regular mode
+   * has no app-owned ScrollView — its materialized window is the contract. */
   scrollToSearchTarget(): void {
     const scroll = this.fullscreenScroll
-    const transcriptRow = this.currentSearchTranscriptRow
-    if (scroll === undefined || transcriptRow === undefined) return
+    const searchRange = this.currentSearchTranscriptRange
+    if (scroll === undefined || searchRange === undefined) return
     const viewportHeight = scroll.viewportHeight
     scroll.updateLayout(this.transcriptContentHeight, viewportHeight, () => this.requestRender())
-    const target = this.transcriptWelcomeHeight + transcriptRow
-    const desiredTop = Math.max(0, target - Math.floor(viewportHeight / 3))
+    if (viewportHeight <= 0) return
+
+    const before = scroll.scrollTop
+    const targetStart = this.transcriptWelcomeHeight + searchRange.startRow
+    const targetEnd = this.transcriptWelcomeHeight + searchRange.endRow
+    const visibleBottom = before + viewportHeight - 1
+    if (targetStart >= before && targetEnd <= visibleBottom) return
+
+    const desiredTop = Math.max(0, targetStart - Math.floor(viewportHeight / 3))
     scroll.scrollTo(desiredTop, { disableFollow: true })
   }
 
@@ -9840,7 +9863,7 @@ export class TuiApp {
       this.searchRevealGranted = false
       this.searchRevealHostOwned = false
       this.searchPresentationRevision += 1
-      this.currentSearchTranscriptRow = undefined
+      this.currentSearchTranscriptRange = undefined
     }
     this.searchSuppressedSubCalls.clear()
     this.searchMatchMessages = new Set()
