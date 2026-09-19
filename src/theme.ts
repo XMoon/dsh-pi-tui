@@ -168,12 +168,13 @@ export function setTheme(theme: ThemeMode, custom?: ColorPalette): void {
 
 /** Whether a palette's body text is LIGHT ink — i.e. a DARK-family palette
  * (`darkColors.text` is light on a dark background). Used only to pick the
- * inherited search block. */
+ * inherited search block. Accepts the same `#rgb` / `#rrggbb` / `#rrggbbaa`
+ * forms the custom-theme validator does (alpha is ignored). */
 function bodyTextIsLight(color: string): boolean {
-  const match = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/u.exec(color.trim())
+  const match = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/u.exec(color.trim())
   if (match === null) return false
   const hex = match[1]!
-  const full = hex.length === 3 ? hex.split('').map(ch => ch + ch).join('') : hex
+  const full = hex.length === 3 ? hex.split('').map(ch => ch + ch).join('') : hex.slice(0, 6)
   // Perceived luminance (ITU-R BT.601); > 0.5 = light ink.
   const luminance = (0.299 * parseInt(full.slice(0, 2), 16)
     + 0.587 * parseInt(full.slice(2, 4), 16)

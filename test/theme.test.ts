@@ -132,6 +132,12 @@ test('withSearchCurrentTokens inherits the matching family search block (perf pl
   const explicit = withSearchCurrentTokens({ ...withoutSearchTokens(darkColors), searchCurrentBg: '#123456' })
   assert.equal(explicit.searchCurrentBg, '#123456')
   assert.equal(explicit.searchCurrentFg, darkColors.searchCurrentFg, 'the omitted sibling tokens are still filled')
+  // The validator accepts 8-digit hex too, so the family heuristic must as well
+  // (alpha is ignored).
+  const alphaLight = withSearchCurrentTokens({ ...withoutSearchTokens(darkColors), text: '#E0E0E0FF' })
+  assert.equal(alphaLight.searchCurrentBg, darkColors.searchCurrentBg, 'an 8-digit light-ink body text picks the dark family')
+  const alphaDark = withSearchCurrentTokens({ ...withoutSearchTokens(lightColors), text: '#1A1A1AFF' })
+  assert.equal(alphaDark.searchCurrentBg, lightColors.searchCurrentBg, 'an 8-digit dark-ink body text picks the light family')
 })
 
 test('validateCustomTheme accepts a well-formed file and rejects malformed ones', () => {

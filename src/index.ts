@@ -4342,6 +4342,11 @@ export function apply(ctx: Context, config: Config): void {
       searchMatchRepresentativeIds = ids
     }
     const resetSearchState = (): void => {
+      // Only a runner that actually holds search state needs to publish the
+      // atomic clear: an unconditional empty commit would force a pointless
+      // message-tree rebuild on every Ctrl+End in regular fullscreen use.
+      const hadState = lastSearchQuery !== '' || searchMatches.length > 0
+        || searchMatchRepresentativeIds.length > 0 || searchMatchMessages.size > 0
       searchMatches = []
       searchCurrent = -1
       lastSearchQuery = ''
@@ -4353,7 +4358,7 @@ export function apply(ctx: Context, config: Config): void {
       // ONE atomic commit: an empty representative set AND no target, so a
       // session swap / close can never leave the old session's card bound as
       // the search highlight or keep a temporary reveal alive.
-      if (app !== undefined) {
+      if (hadState && app !== undefined) {
         app.setTranscriptSearchPresentation({ matchMessages: searchMatchMessages, target: undefined, grantReveal: true })
       }
     }
@@ -4540,15 +4545,26 @@ export function apply(ctx: Context, config: Config): void {
     }
     const jumpToSearchMatch = (): void => {
       refreshSearchMatchesIfStale()
+      // Refresh the representative ids FIRST: the no-match branch below must be
+      // able to publish the CURRENT (empty) set, and the match branch needs the
+      // same ids for its navigation presentation.
+      refreshSearchMatchMessages()
       const match = searchMatches[searchCurrent]
       if (match === undefined) {
-        app.setTranscriptSearchTarget(undefined)
+        // Publish the current (empty) representative set AND the cleared target
+        // in ONE atomic commit. A bare setTranscriptSearchTarget(undefined)
+        // would carry the PREVIOUS published set, leaving the presentation's
+        // representative half stale until the search closes.
+        app.setTranscriptSearchPresentation({
+          matchMessages: resolveSearchMatchMessages(),
+          target: undefined,
+          grantReveal: false,
+        })
         app.setSearchResult(0, 0)
         return
       }
       const folder = activeFolder()
       const controller = activeWindow()
-      refreshSearchMatchMessages()
       // Same-window fast path (perf plan S2 §5.4): the match is already inside
       // the projected bounds AND the projection is the live epoch, so bind the
       // new presentation to it directly — one rebuild, no re-window, no
@@ -7246,15 +7262,24 @@ export function apply(ctx: Context, config: Config): void {
         // fall through so the editor retains its own Ctrl+End behavior.
         if (!app.isFullscreen()) return false
         // Ctrl+End is a semantic reset, not merely a viewport scroll. Clear
-        // the search origin before closing the overlay so its close callback
+        // the search origin BEFORE closing the overlay so its close callback
         // cannot restore the historical anchor we are explicitly leaving.
         searchOrigin = undefined
+        if (app.isSearching()) {
+          // With the search open, `onSearchClose` already performs exactly this
+          // reset: it latches `latest()`, repaints ONCE and scrolls to the
+          // bottom. Repainting here as well would double the projection for one
+          // action (and the search presentation is cleared atomically by the
+          // close path).
+          app.closeTranscriptSearch()
+          app.setSearchResult(0, 0)
+          return true
+        }
         resetSearchState()
         app.setTranscriptSearchTarget(undefined)
-        const closedSearch = app.closeTranscriptSearch()
         const controller = activeWindow()
         const changed = controller.latest()
-        if (!changed && !closedSearch && !app.isFullscreen()) return false
+        if (!changed && !app.isFullscreen()) return false
         repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
         app.scrollToBottom()
         app.setSearchResult(0, 0)
