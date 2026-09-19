@@ -165,6 +165,17 @@ test('presentation: tool args and result map through distinct proven regions', (
   assert.ok(highlightSearchLines(lines, result)[1]!.includes('\x1b[1;7mneedle'), 'result strong on the body')
 })
 
+test('presentation: an enumerable:false region anchors and never claims an occurrence', () => {
+  const lines = ['Bash needle summary']
+  const regions: SearchSourceRegion[] = [{ sourceKey: 'tool.args', anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: 5, endCol: 11 }, enumerable: false }]
+  const selector = selectorForRegions(lines, 'needle', regions, 'tool.args')
+  assert.equal(selector.geometry?.occurrences.length, 0, 'a transformed projection never claims a raw ordinal')
+  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selector)
+  assert.equal(selection.selectedIndex, -1, 'no strong highlight')
+  assert.equal(selection.selectedRow, 0, 'the region row anchors the viewport')
+  assert.equal(selection.exact, false)
+})
+
 test('presentation: a match crossing out of its source region is NOT proven', () => {
   const lines = ['alpha beta']
   const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: 0, endCol: 5 } }]
@@ -218,9 +229,21 @@ test('presentation: weakOnly decorates every occurrence and selects none', () =>
 test('presentation: SearchHighlightComponent reuses the child render and decorates it', () => {
   const lines = ['alpha needle beta']
   const child = linesComponent(lines)
-  const component = new SearchHighlightComponent(child, wholeCardSelector(lines, 'needle'))
+  const selector = wholeCardSelector(lines, 'needle')
+  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selector)
+  const component = new SearchHighlightComponent(child, selector, selection, 40)
   const rendered = component.render(40)
   assert.equal(rendered.length, 1)
   assert.ok(rendered[0]!.includes('\x1b[1;7mneedle\x1b[22;27m'))
   assert.equal(stripTerminalSequences(rendered[0]!), 'alpha needle beta')
+})
+
+test('presentation: a width change downgrades to weak (no stale strong geometry)', () => {
+  const lines = ['alpha needle beta']
+  const child = linesComponent(lines)
+  const selector = wholeCardSelector(lines, 'needle')
+  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selector)
+  const component = new SearchHighlightComponent(child, selector, selection, 40)
+  const rendered = component.render(10)
+  assert.ok(!rendered.some(line => line.includes('\x1b[1;7m')), 'no strong highlight on a width the geometry was not measured at')
 })
