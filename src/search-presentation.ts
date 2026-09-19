@@ -242,48 +242,73 @@ export function highlightSearchLines(
   return result
 }
 
+/** Structural line-identity compare: the fork caches render output by
+ * reference while content/width are unchanged, so a changed line array means
+ * the recorded geometry no longer describes the render. */
+function sameSourceLines(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  if (left === undefined || right === undefined) return false
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) if (left[index] !== right[index]) return false
+  return true
+}
+
 /**
  * Wraps a mounted message component and decorates its rendered lines with the
  * current search selection. The child component (and its render cache) is
- * reused; the selection computed by the caller for THIS render epoch is reused
- * too (no second matcher scan). `updateSelector` lets a remeasure pass keep the
- * mounted wrapper on the SAME geometry epoch as the row map / scroll anchor.
+ * reused; the caller's selection for THIS render epoch is reused too (no second
+ * matcher scan). The wrapper NEVER reuses a strong selection against lines the
+ * geometry was not measured on: a same-width content change (dynamic component,
+ * image load, …) or a width change downgrades to weak-only until the next
+ * rebuild recomputes geometry. `updateSelector`/`clear` keep the mounted
+ * wrapper on the same epoch as the row map.
  */
 export class SearchHighlightComponent implements Component {
   private readonly child: Component
   private selector: RenderedSearchSelector
   private selection: RenderedSearchSelection
   private selectionWidth: number
+  private sourceLines: readonly string[]
+  private disabled = false
 
   constructor(
     child: Component,
     selector: RenderedSearchSelector,
     selection: RenderedSearchSelection,
     width: number,
+    lines: readonly string[],
   ) {
     this.child = child
     this.selector = selector
     this.selection = selection
     this.selectionWidth = width
+    this.sourceLines = lines
   }
 
   /** Re-sync the wrapper with the geometry of the current render epoch (the
    * remeasure pass owns the row map and must not diverge from the paint). */
-  updateSelector(selector: RenderedSearchSelector, selection: RenderedSearchSelection, width: number): void {
+  updateSelector(selector: RenderedSearchSelector, selection: RenderedSearchSelection, width: number, lines: readonly string[]): void {
     this.selector = selector
     this.selection = selection
     this.selectionWidth = width
+    this.sourceLines = lines
+    this.disabled = false
+  }
+
+  /** The block is no longer part of the search presentation: stop decorating
+   * (a mounted wrapper survives a measurement-only remeasure). */
+  clear(): void {
+    this.disabled = true
   }
 
   render(width: number): string[] {
     const lines = this.child.render(width)
-    if (width !== this.selectionWidth) {
-      // A width change invalidates the recorded geometry (rows/columns are
-      // width-baked and wrapping shifts). Until the next rebuild recomputes it,
-      // downgrade to a weak-only, anchor-at-top selection rather than paint a
-      // stale strong occurrence.
+    if (this.disabled) return lines
+    if (width !== this.selectionWidth || !sameSourceLines(lines, this.sourceLines)) {
+      // The recorded geometry does not describe these lines: decorate the
+      // visible matches weak-only and never paint a stale strong occurrence.
       this.selection = { matches: findAltScreenSearchMatches(lines, this.selector.query), selectedIndex: -1, selectedRow: 0, exact: false }
       this.selectionWidth = width
+      this.sourceLines = lines
     }
     return highlightSearchLines(lines, this.selection)
   }

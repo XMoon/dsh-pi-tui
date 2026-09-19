@@ -7673,7 +7673,7 @@ export class TuiApp {
       if (presentation.selector !== undefined && presentation.selection !== undefined) {
         searchSelection = presentation.selection
         searchSelector = presentation.selector
-        mountedComponent = new SearchHighlightComponent(component, presentation.selector, presentation.selection, width)
+        mountedComponent = new SearchHighlightComponent(component, presentation.selector, presentation.selection, width, rendered)
       }
       return {
         block,
@@ -7738,12 +7738,26 @@ export class TuiApp {
     const cardRegions = this.searchSourceRegionsByMessage.get(message)
     if (cardRegions !== undefined) regions.push(...cardRegions)
     if (deliverableRegions !== undefined) regions.push(...deliverableRegions)
-    // A message-kind card's whole rendered body IS the `message` source (tool
-    // and workflow cards have no `message` chunk).
+    // A message-kind card's whole rendered body is ONLY the `message` source
+    // when the renderer provably emits the source text without insertion,
+    // deletion, reordering or duplication. Thinking and SHORT text-only user
+    // bubbles qualify; markdown/attachments/system/compaction chrome does not,
+    // so those anchor instead.
     if (message.kind !== 'tool' && message.kind !== 'workflow') {
-      regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength })
+      regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength, enumerable: this.messageSourceEnumerable(message) })
     }
     return regions
+  }
+
+  /** Whether a message-kind card renders its `message` source as an
+   * occurrence-ordinal-preserving projection. */
+  private messageSourceEnumerable(message: TranscriptMessage): boolean {
+    if (message.kind === 'thinking') return true
+    if (message.kind !== 'user') return false
+    if (message.content !== undefined && message.content.some(block => block.type !== 'text')) return false
+    // A compact-capable bubble inserts marker/tail chrome rows between the
+    // head and tail: only a SHORT bubble renders exactly the source text.
+    return !this.userMessageCompactsAtCurrentWidth(message)
   }
 
   /** The PROVEN path/description regions of an assistant card's delivered-files
@@ -8205,8 +8219,13 @@ export class TuiApp {
     // for geometry the viewport no longer uses.
     for (const entry of renderedBlocks) {
       const mounted = entry.mountedComponent
-      if (mounted instanceof SearchHighlightComponent && entry.searchSelector !== undefined && entry.searchSelection !== undefined) {
-        mounted.updateSelector(entry.searchSelector, entry.searchSelection, width)
+      if (!(mounted instanceof SearchHighlightComponent)) continue
+      if (entry.searchSelector !== undefined && entry.searchSelection !== undefined) {
+        mounted.updateSelector(entry.searchSelector, entry.searchSelection, width, entry.rendered)
+      } else {
+        // The block is no longer part of the presentation: a measurement-only
+        // remeasure keeps the mounted wrapper, so explicitly stop decorating.
+        mounted.clear()
       }
     }
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
@@ -12243,7 +12262,9 @@ export class TuiApp {
       const nameStart = visibleWidth(icon)
       const nameEnd = nameStart + visibleWidth(header.title)
       if (nameEnd > nameStart) {
-        toolRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'name' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: nameStart, endCol: nameEnd } })
+        // `header.title` is a DESIGN TITLE (`web_search` → `Search`,
+        // unknown → `Tool call`), not the raw name: anchor only.
+        toolRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'name' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: nameStart, endCol: nameEnd }, enumerable: false })
       }
       if (header.summary !== '') {
         const argsStart = nameEnd + visibleWidth(action !== undefined ? ' · ' : ' ')
@@ -12488,7 +12509,8 @@ export class TuiApp {
     const nameStart = indent + visibleWidth(`${disclosure} ${icon}`)
     const nameEnd = nameStart + visibleWidth(header.title)
     if (nameEnd > nameStart) {
-      regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'name' }), anchorRow: headerRow, rowStart: headerRow, rowEnd: headerRow + 1, columns: { startCol: nameStart, endCol: nameEnd } })
+      // `header.title` is a design title, not the raw sub-call name: anchor only.
+      regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'name' }), anchorRow: headerRow, rowStart: headerRow, rowEnd: headerRow + 1, columns: { startCol: nameStart, endCol: nameEnd }, enumerable: false })
     }
     if (header.summary !== '') {
       const argsStart = nameEnd + 1
