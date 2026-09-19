@@ -10,7 +10,7 @@ import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../src/tui-app.ts'
-import { TranscriptFolder, type TranscriptMessage, type TranscriptToolMessage } from '../src/transcript.ts'
+import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type TranscriptToolMessage } from '../src/transcript.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -45,18 +45,27 @@ function occurrenceCells(lines: readonly string[]): { row: number; first: number
   return { row, first, second }
 }
 
-test('navigation: the current strong highlight moves between occurrences in one card', async () => {
+test('navigation: the current strong highlight moves between occurrences in one source', async () => {
   const { vt, app } = startApp()
-  const message: TranscriptMessage = { kind: 'user', turn: 0, text: 'needle alpha needle beta' }
+  // A Workflow member label is a direct projection with proven columns, so its
+  // two occurrences can each be the exact current occurrence.
+  const card = {
+    kind: 'workflow', turn: 0, runId: 'run-1' as never, name: 'audit', status: 'running',
+    members: [{ seq: 0, label: 'needle alpha needle beta', phase: 'P', childId: 'child-0' as never, status: 'running' }],
+  } as Extract<TranscriptMessage, { kind: 'workflow' }>
   app.setFullscreen(true)
-  app.setTranscript([message])
+  app.setTranscript([card])
   let lines = await viewport(vt)
   let cells = occurrenceCells(lines)
 
   const target = (occurrence: number) => ({
     query: 'needle',
-    match: { id: 0, turn: 0, occurrence, source: { kind: 'message' as const }, sourceOccurrence: occurrence },
-    message,
+    match: {
+      id: 0, turn: 0, occurrence,
+      source: { kind: 'workflow-member' as const, phaseKey: workflowPhaseKey('P'), seq: 0, field: 'label' as const },
+      sourceOccurrence: occurrence,
+    },
+    message: card,
   })
   app.setTranscriptSearchTarget(target(0))
   lines = await viewport(vt)
@@ -98,7 +107,7 @@ test('navigation: a reveal still expands an anchor-only card and anchors its top
   app.stop()
 })
 
-test('navigation: clearing the target removes the reveal and every highlight', async () => {
+test('navigation: clearing the target removes the reveal and every decoration', async () => {
   const { vt, app } = startApp()
   const message: TranscriptMessage = { kind: 'user', turn: 0, text: 'needle alpha needle beta' }
   app.setFullscreen(true)
@@ -110,13 +119,17 @@ test('navigation: clearing the target removes the reveal and every highlight', a
   })
   let lines = await viewport(vt)
   let cells = occurrenceCells(lines)
-  assert.ok(vt.getCellInverse(cells.row, cells.first), 'precondition: the target highlights the first occurrence')
+  // A user bubble's whole card injects the `❯` marker: anchor-only, so the
+  // current card's matches are decorated WEAKLY.
+  assert.ok(vt.getCellUnderline(cells.row, cells.first), 'precondition: the target occurrence is weak-decorated')
+  assert.ok(!vt.getCellInverse(cells.row, cells.first), 'a message-kind card is anchor-only')
 
   app.setTranscriptSearchTarget(undefined)
   lines = await viewport(vt)
   cells = occurrenceCells(lines)
-  assert.ok(!vt.getCellInverse(cells.row, cells.first), 'clearing removes the highlight')
-  assert.ok(!vt.getCellInverse(cells.row, cells.second), 'clearing removes every occurrence highlight')
+  assert.ok(!vt.getCellUnderline(cells.row, cells.first), 'clearing removes the first decoration')
+  assert.ok(!vt.getCellUnderline(cells.row, cells.second), 'clearing removes every decoration')
+  assert.ok(!vt.getCellInverse(cells.row, cells.first), 'clearing leaves no strong highlight')
   app.stop()
 })
 
@@ -151,7 +164,11 @@ test('navigation: a two-level PTC path reveals the grandchild body', async () =>
 
 test('navigation: every visible matching card is weak-highlighted, the current card strong', async () => {
   const { vt, app } = startApp()
-  const a: TranscriptMessage = { kind: 'user', turn: 0, text: 'alpha needle one' }
+  // The current card needs a PROVABLE source: a Workflow member label.
+  const a = {
+    kind: 'workflow', turn: 0, runId: 'run-1' as never, name: 'audit', status: 'running',
+    members: [{ seq: 0, label: 'alpha needle one', phase: 'P', childId: 'child-0' as never, status: 'running' }],
+  } as Extract<TranscriptMessage, { kind: 'workflow' }>
   const b: TranscriptMessage = { kind: 'user', turn: 1, text: 'beta needle two' }
   const c: TranscriptMessage = { kind: 'user', turn: 2, text: 'gamma without the term' }
   app.setFullscreen(true)
@@ -160,18 +177,17 @@ test('navigation: every visible matching card is weak-highlighted, the current c
   app.setSearchMatchMessages(new Set([a, b]))
   app.setTranscriptSearchTarget({
     query: 'needle',
-    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('P'), seq: 0, field: 'label' }, sourceOccurrence: 0 },
     message: a,
   })
   const lines = await viewport(vt)
-  const aRow = lines.findIndex(line => line.includes('alpha needle one'))
+  const aRow = lines.findIndex(line => line.includes('alpha needle one') && line.includes('—'))
   const bRow = lines.findIndex(line => line.includes('beta needle two'))
   const cRow = lines.findIndex(line => line.includes('gamma without the term'))
   assert.ok(aRow >= 0 && bRow >= 0 && cRow >= 0, `all cards visible:\n${lines.join('\n')}`)
   const aCol = lines[aRow]!.indexOf('needle')
   const bCol = lines[bRow]!.indexOf('needle')
   assert.ok(vt.getCellInverse(aRow, aCol), 'the target occurrence is strong (inverse)')
-  assert.ok(!vt.getCellUnderline(aRow, aCol), 'the target occurrence is not weak')
   assert.ok(vt.getCellUnderline(bRow, bCol), 'the other VISIBLE matching card is weak (underline)')
   assert.ok(!vt.getCellInverse(bRow, bCol), 'the other matching card is not strong')
   assert.ok(!vt.getCellUnderline(cRow, lines[cRow]!.indexOf('gamma')), 'a non-matching card is untouched')
@@ -363,5 +379,44 @@ test('navigation: a PTC child result maps to its body, not the header or the roo
   assert.ok(!vt.getCellInverse(bodyRow, lines[bodyRow]!.indexOf('needle')), 'the child RESULT hit must not strong-highlight a truncated body')
   const headerRow = lines.findIndex(line => line.includes('echo needle'))
   assert.ok(headerRow < 0 || !vt.getCellInverse(headerRow, lines[headerRow]!.indexOf('needle')), 'the header/command row is not the current occurrence')
+  app.stop()
+})
+
+test('navigation: a Thinking header chrome is never strong-highlighted for a body hit', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'thinking', turn: 0, text: 'thinking about search' }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'thinking',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  const lines = await viewport(vt)
+  const headerRow = lines.findIndex(line => /Thinking/.test(line))
+  assert.ok(headerRow >= 0, `thinking header must render:\n${lines.join('\n')}`)
+  assert.ok(!vt.getCellInverse(headerRow, 0), 'the injected Thinking header must NOT be the current occurrence')
+  const bodyRow = lines.findIndex(line => line.includes('about search'))
+  assert.ok(bodyRow >= 0, `thinking body must render:\n${lines.join('\n')}`)
+  assert.ok(!vt.getCellInverse(bodyRow, lines[bodyRow]!.indexOf('about')), 'the thinking body is anchor-only (no strong)')
+  app.stop()
+})
+
+test('navigation: the user bubble marker is never strong-highlighted for a body hit', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'user', turn: 0, text: '❯ body' }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: '❯',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  const lines = await viewport(vt)
+  const row = lines.findIndex(line => line.includes('body'))
+  assert.ok(row >= 0, `user bubble must render:\n${lines.join('\n')}`)
+  const markerCol = lines[row]!.indexOf('❯')
+  assert.ok(markerCol >= 0, `the bubble marker must render:\n${lines.join('\n')}`)
+  assert.ok(!vt.getCellInverse(row, markerCol), 'the injected bubble marker must NOT be the current occurrence')
   app.stop()
 })

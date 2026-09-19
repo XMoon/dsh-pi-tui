@@ -7738,26 +7738,16 @@ export class TuiApp {
     const cardRegions = this.searchSourceRegionsByMessage.get(message)
     if (cardRegions !== undefined) regions.push(...cardRegions)
     if (deliverableRegions !== undefined) regions.push(...deliverableRegions)
-    // A message-kind card's whole rendered body is ONLY the `message` source
-    // when the renderer provably emits the source text without insertion,
-    // deletion, reordering or duplication. Thinking and SHORT text-only user
-    // bubbles qualify; markdown/attachments/system/compaction chrome does not,
-    // so those anchor instead.
+    // A message-kind card's rendered body ALWAYS includes UI chrome (a
+    // `Thinking` header, the user bubble's `❯` marker/continuation indent,
+    // markdown transforms, attachments, the delivered-files tail, …), so the
+    // whole card is never an occurrence-ordinal-preserving projection of
+    // `message.text`: anchor-only. A renderer may later register a
+    // source-only region to upgrade it.
     if (message.kind !== 'tool' && message.kind !== 'workflow') {
-      regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength, enumerable: this.messageSourceEnumerable(message) })
+      regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength, enumerable: false })
     }
     return regions
-  }
-
-  /** Whether a message-kind card renders its `message` source as an
-   * occurrence-ordinal-preserving projection. */
-  private messageSourceEnumerable(message: TranscriptMessage): boolean {
-    if (message.kind === 'thinking') return true
-    if (message.kind !== 'user') return false
-    if (message.content !== undefined && message.content.some(block => block.type !== 'text')) return false
-    // A compact-capable bubble inserts marker/tail chrome rows between the
-    // head and tail: only a SHORT bubble renders exactly the source text.
-    return !this.userMessageCompactsAtCurrentWidth(message)
   }
 
   /** The PROVEN path/description regions of an assistant card's delivered-files
