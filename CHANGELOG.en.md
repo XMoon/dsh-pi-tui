@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Ctrl+F full-text search now works per occurrence, not per card.** The `N/M`
+  counter and `↑`/`↓` step through every occurrence inside one card; every
+  visible match is marked and the current one uses the strongest style. In
+  fullscreen the view jumps precisely to the current occurrence (no longer to
+  the window bottom).
+- **The search reveal is temporary.** Closing search with `Esc` restores your
+  previous fold state; a search can temporarily reveal collapsed Thinking,
+  tool/system/compaction cards, long user prompts, nested PTC sub-calls, and
+  members hidden by a large Workflow phase summary, without overwriting your own
+  manual expand/collapse choices. No search highlight or reveal survives the
+  close.
+
 ## [0.4.7-alpha.2] - 2026-09-18
 
 ### Installation and version pairing

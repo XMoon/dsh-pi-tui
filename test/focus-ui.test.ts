@@ -16,7 +16,7 @@ import { afterEach, test } from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { TranscriptFolder, windowMessages } from '../src/transcript.ts'
+import { TranscriptFolder, windowMessages, type TranscriptToolMessage } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth, type StreamingToolPreview } from '../src/tui-app.ts'
 import type { ToolPresenter } from '../src/present.ts'
@@ -2668,6 +2668,146 @@ test('Collapse All keeps a local shell card mouse-expanded (its override is not 
   const after = vt.getViewport().join('\n')
   assert.ok(hasFocusHeader(after, false), `the Thought must be collapsed:\n${after}`)
   assert.ok(after.includes('shell line 0'), `the shell card must keep its mouse full-reveal:\n${after}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+// ---------------------------------------------------------------------------
+// Temporary search presentation target (plan §6, §9)
+// ---------------------------------------------------------------------------
+
+test('search target: clearing restores the user collapsed Thought (runtime-like sequence)', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  applyMixed(folder, runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const messages = folder.messages()
+  const thinking = messages.find(m => m.kind === 'thinking')
+  assert.ok(thinking !== undefined, 'fixture: the thinking card exists')
+  assert.ok(!hasFocusHeader(vt.getViewport().join('\n'), true), 'precondition: the Thought is collapsed')
+
+  app.setTranscriptSearchTarget({
+    query: 'locating',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: thinking,
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(hasFocusHeader(view, true), 'the temporary reveal opens the owner Thought')
+  assert.ok(view.includes('\n  locating the transcript path'), 'the matched reasoning is full')
+  assert.equal(app.isThinkingExpanded(), false, 'the bulk preference is never written by search')
+
+  app.setTranscriptSearchTarget(undefined)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!hasFocusHeader(view, true), 'clearing the target restores the collapsed Thought')
+  assert.ok(!view.includes('\n  locating the transcript path'), 'the temporary full reveal is gone')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('search target: a nested PTC hit expands the ancestor path to the child body', async () => {
+  const child: TranscriptToolMessage = {
+    kind: 'tool', turn: 1, name: 'bash', args: '{"cmd":"tests"}', result: 'grandchild-needle output',
+    status: 'ok', subCallId: 'child-1', parentCallId: 'root-1', rootCallId: 'root-1',
+  }
+  const root: TranscriptToolMessage = {
+    kind: 'tool', turn: 1, name: 'run_code', args: '{}', result: 'ok', status: 'ok',
+    subCalls: [child], subCallId: undefined,
+  }
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript([root])
+  app.setTranscriptSearchTarget({
+    query: 'grandchild-needle',
+    match: {
+      id: 0, turn: 1, occurrence: 0,
+      source: { kind: 'subcall-field', subCallIds: ['child-1'], field: 'result' },
+      sourceOccurrence: 0,
+    },
+    message: root,
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('grandchild-needle output'), `the matched sub-call body must be visible:\n${view}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('search target: scrollToSearchTarget anchors an old occurrence in fullscreen', async () => {
+  const { vt, app } = startApp()
+  const messages: Array<{ kind: 'user'; turn: number; text: string }> = []
+  for (let turn = 0; turn < 60; turn += 1) messages.push({ kind: 'user', turn, text: `turn ${turn} filler content` })
+  // A deep historical target in the middle of a long transcript.
+  const target = { kind: 'user' as const, turn: 5, text: 'a uniquely deep needle target' }
+  messages[5] = target
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  app.scrollToBottom()
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('deep needle'), 'precondition: the target is scrolled away')
+
+  app.setTranscriptSearchTarget({
+    query: 'deep needle',
+    match: { id: 5, turn: 5, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: target,
+  })
+  app.scrollToSearchTarget()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('deep needle'), 'the exact occurrence must be anchored into view')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('search target: clicking the search-opened Thought header collapses it on the first click', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  applyMixed(folder, runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined, 'fixture: the thinking card exists')
+  app.setTranscriptSearchTarget({
+    query: 'locating',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: thinking,
+  })
+  await vt.waitForRender()
+  assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), 'precondition: the search target opens the Thought')
+  const y = findFocusHeaderRow(vt.getViewport(), true)
+  assert.ok(y >= 0)
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  assert.ok(!hasFocusHeader(vt.getViewport().join('\n'), true), 'the FIRST header click must collapse the search-opened Thought')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('search target: Ctrl+O collapses a search-only Thought instead of expanding recent roots', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  applyMixed(folder, runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined)
+  app.setTranscriptSearchTarget({
+    query: 'locating',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: thinking,
+  })
+  await vt.waitForRender()
+  assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), 'precondition: the search target opens the Thought')
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.ok(!hasFocusHeader(vt.getViewport().join('\n'), true), 'Ctrl+O must Collapse All (revoke the search reveal), not expand recent roots')
   app.setFullscreen(false)
   app.stop()
 })
