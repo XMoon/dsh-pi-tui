@@ -155,6 +155,8 @@ test('navigation: every visible matching card is weak-highlighted, the current c
   const c: TranscriptMessage = { kind: 'user', turn: 2, text: 'gamma without the term' }
   app.setFullscreen(true)
   app.setTranscript([a, b, c])
+  // The runner publishes the semantic match representatives (deduped cards).
+  app.setSearchMatchMessages(new Set([a, b]))
   app.setTranscriptSearchTarget({
     query: 'needle',
     match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
@@ -228,5 +230,126 @@ test('navigation: a live group reflow keeps the current highlight via stable-mat
   row = lines.findIndex(line => line.includes('Read 3 files'))
   assert.ok(row >= 0, `the reflowed group card is visible:\n${lines.join('\n')}`)
   assert.ok(vt.getCellInverse(row, lines[row]!.indexOf('files')), 'the rebind keeps the current occurrence strong after reflow')
+  app.stop()
+})
+
+test('navigation: Next from a tool args hit to a result hit moves the strong highlight', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'echo needle' }) }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'needle output' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  const matches = folder.search('needle')
+  const argsMatch = matches.find(m => m.source.kind === 'tool-field' && m.source.field === 'args')
+  const resultMatch = matches.find(m => m.source.kind === 'tool-field' && m.source.field === 'result')
+  assert.ok(argsMatch !== undefined && resultMatch !== undefined, `both field hits expected: ${JSON.stringify(matches)}`)
+
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const messages = folder.window({ maxTurns: 50 }).messages
+  app.setTranscript(messages, folder.turnActivities())
+  const card = messages[0]!
+
+  app.setTranscriptSearchTarget({ query: 'needle', match: argsMatch, message: card })
+  let lines = await viewport(vt)
+  const headerRow = lines.findIndex(line => line.includes('needle') && line.includes('Bash'))
+  assert.ok(headerRow >= 0, `tool header with args must render:\n${lines.join('\n')}`)
+  assert.ok(vt.getCellInverse(headerRow, lines[headerRow]!.indexOf('needle')), 'the ARGS hit is proven on the header summary')
+
+  // A tool RESULT has no provable rendered occurrence (presenters transform or
+  // duplicate it): the selection anchors without ANY strong highlight, so it
+  // can never mislabel another occurrence as the current N/M hit.
+  app.setTranscriptSearchTarget({ query: 'needle', match: resultMatch, message: card })
+  lines = await viewport(vt)
+  const resultRow = lines.findIndex(line => line.includes('needle output'))
+  assert.ok(resultRow >= 0, `tool result body must render:\n${lines.join('\n')}`)
+  assert.ok(!vt.getCellInverse(resultRow, lines[resultRow]!.indexOf('needle')), 'the RESULT hit must NOT strong-highlight a guessed occurrence')
+  assert.ok(!vt.getCellInverse(headerRow, lines[headerRow]!.indexOf('needle')), 'the args header is not current either')
+  app.stop()
+})
+
+test('navigation: deliverable path and description map to distinct proven rows', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 1 }, 0),
+    event('deliverables/presented', { turn: 1, callId: 'present-1', files: [{ path: 'out/report.md', description: 'Final report' }] }, 1),
+    event('assistant/message', {
+      turn: 1, step: 0,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 2),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+  ])
+  const matches = folder.search('report')
+  const pathMatch = matches.find(m => m.source.kind === 'assistant-deliverable' && m.source.field === 'path')
+  const descriptionMatch = matches.find(m => m.source.kind === 'assistant-deliverable' && m.source.field === 'description')
+  assert.ok(pathMatch !== undefined && descriptionMatch !== undefined, `both deliverable fields must match: ${JSON.stringify(matches)}`)
+
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const card = folder.messages()[0]!
+  app.setTranscript([card], folder.turnActivities())
+
+  app.setTranscriptSearchTarget({ query: 'report', match: pathMatch, message: card })
+  let lines = await viewport(vt)
+  const pathRow = lines.findIndex(line => line.includes('out/report.md'))
+  assert.ok(pathRow >= 0, `delivered path row missing:\n${lines.join('\n')}`)
+  assert.ok(vt.getCellInverse(pathRow, lines[pathRow]!.indexOf('report')), 'the PATH hit is proven on the path row')
+
+  app.setTranscriptSearchTarget({ query: 'report', match: descriptionMatch, message: card })
+  lines = await viewport(vt)
+  const descriptionRow = lines.findIndex(line => line.includes('Final report'))
+  assert.ok(descriptionRow >= 0, `delivered description row missing:\n${lines.join('\n')}`)
+  assert.ok(vt.getCellInverse(descriptionRow, lines[descriptionRow]!.indexOf('report')), 'the DESCRIPTION hit is proven on its own row')
+  assert.ok(!vt.getCellInverse(pathRow, lines[pathRow]!.indexOf('report')), 'the path row is not the current occurrence')
+  app.stop()
+})
+
+test('navigation: a PTC child result maps to its body, not the header or the root card', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: JSON.stringify({ code: 'print(1)' }) }, 1),
+    event('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-1'), parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('child-1'), name: 'bash', arguments: { command: 'echo needle' },
+    }, 2),
+    event('tool/ptc-dispatch', {
+      rootCallId: ToolCallId('code-1'), parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('child-1'), name: 'bash', arguments: { command: 'echo needle' },
+      isError: false, content: [{ type: 'text', text: 'needle in child result' }],
+    }, 3),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+  ])
+  const matches = folder.search('needle')
+  const resultMatch = matches.find(m => m.source.kind === 'subcall-field' && m.source.field === 'result')
+  assert.ok(resultMatch !== undefined, `child result hit expected: ${JSON.stringify(matches)}`)
+
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const card = folder.messages()[0]!
+  app.setTranscript([card], folder.turnActivities())
+  app.setTranscriptSearchTarget({ query: 'needle', match: resultMatch, message: card })
+  const lines = await viewport(vt)
+  const bodyRow = lines.findIndex(line => line.includes('needle in child result'))
+  assert.ok(bodyRow >= 0, `child result body must render:\n${lines.join('\n')}`)
+  assert.ok(vt.getCellInverse(bodyRow, lines[bodyRow]!.indexOf('needle')), 'the child RESULT hit is proven on the result body')
+  const headerRow = lines.findIndex(line => line.includes('echo needle'))
+  assert.ok(headerRow < 0 || !vt.getCellInverse(headerRow, lines[headerRow]!.indexOf('needle')), 'the header/command row is not the current occurrence')
   app.stop()
 })

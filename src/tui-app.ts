@@ -54,6 +54,7 @@ import {
   type TuiMouseEventResult,
   type TuiMouseDispatchResult,
   dispatchMouseEvent,
+  findAltScreenSearchMatches,
 } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
@@ -139,12 +140,14 @@ import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
-import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
+import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
 import {
   SearchHighlightComponent,
-  renderedSearchSelection,
+  buildSourceGeometry,
+  selectRenderedSearchMatch,
   type RenderedSearchSelection,
   type RenderedSearchSelector,
+  type SearchSourceRegion,
 } from './search-presentation.ts'
 import {
   workflowCountsText,
@@ -353,19 +356,6 @@ export type WorkflowHit =
   | { readonly kind: 'member'; readonly runId: string; readonly seq: number; readonly childId: string }
   | { readonly kind: 'phase-agents'; readonly runId: string; readonly phaseKey: string }
   | { readonly kind: 'run-agents'; readonly runId: string }
-
-/** One rendered Workflow member row's block-relative position plus the visible
- * column SPANS of its label/status fields (a row renders both). */
-type WorkflowMemberRange = {
-  readonly top: number
-  readonly height: number
-  readonly phaseKey: string
-  readonly seq: number
-  readonly labelStart: number
-  readonly labelEnd: number
-  readonly statusStart: number
-  readonly statusEnd: number
-}
 
 /** The temporary search presentation target (plan §6): the current match, its
  * query and the resolved CURRENT visible card. It drives presentation ONLY —
@@ -1630,6 +1620,16 @@ class DeliveredFilesComponent implements Component {
   private readonly workspaceRoot: string | undefined
   private readonly expanded: boolean
   private readonly cached = new Map<number, string[]>()
+  /** The visible row/column spans of every rendered path/description field,
+   * relative to THIS component's rows (render output, refreshed on every
+   * width). Consumed by the search source-geometry walker. */
+  lastFieldSpans: ReadonlyArray<{
+    readonly index: number
+    readonly pathRow: number
+    readonly pathStart: number
+    readonly pathEnd: number
+    readonly descriptionRows: ReadonlyArray<{ readonly row: number; readonly start: number; readonly end: number }>
+  }> = []
 
   constructor(
     files: readonly PresentedFilePresentation[],
@@ -1652,18 +1652,34 @@ class DeliveredFilesComponent implements Component {
 
     const shown = this.expanded ? this.files : this.files.slice(0, DeliveredFilesComponent.FOLDED_LIMIT)
     const rows = [truncateToWidth(color.textDim(`Delivered files · ${this.files.length}`), safeWidth, '…')]
-    for (const file of shown) {
+    const spans: Array<{
+      index: number
+      pathRow: number
+      pathStart: number
+      pathEnd: number
+      descriptionRows: Array<{ row: number; start: number; end: number }>
+    }> = []
+    for (const [index, file] of shown.entries()) {
       const path = relativizeToCwd(file.path, this.workspaceRoot).replace(/\r\n|\r|\n/g, ' ')
+      const pathRow = rows.length
+      const pathStart = visibleWidth('  ')
       rows.push(truncateToWidth(color.textDim(`  ${path}`), safeWidth, '…'))
-      if (file.description === undefined || file.description === '') continue
-      const descriptionWidth = Math.max(1, safeWidth - 4)
-      for (const line of wrapTextWithAnsi(file.description, descriptionWidth)) {
-        rows.push(truncateToWidth(color.textDim(`    ${line}`), safeWidth, '…'))
+      const descriptionRows: Array<{ row: number; start: number; end: number }> = []
+      if (file.description !== undefined && file.description !== '') {
+        const descriptionWidth = Math.max(1, safeWidth - 4)
+        for (const line of wrapTextWithAnsi(file.description, descriptionWidth)) {
+          const descriptionRow = rows.length
+          const start = visibleWidth('    ')
+          rows.push(truncateToWidth(color.textDim(`    ${line}`), safeWidth, '…'))
+          descriptionRows.push({ row: descriptionRow, start, end: start + visibleWidth(line) })
+        }
       }
+      spans.push({ index, pathRow, pathStart, pathEnd: pathStart + visibleWidth(path), descriptionRows })
     }
     if (!this.expanded && this.files.length > shown.length) {
       rows.push(truncateToWidth(color.textDim(`  … +${this.files.length - shown.length}`), safeWidth, '…'))
     }
+    this.lastFieldSpans = spans
     this.cached.set(safeWidth, rows)
     return rows
   }
@@ -3363,6 +3379,10 @@ export class TuiApp {
    * card is revealed and the query highlighted — presentation only, never
    * written into any user disclosure map. */
   private searchTarget: TranscriptSearchPresentationTarget | undefined
+  /** The representative cards of the CURRENT semantic search result set
+   * (runner-owned). Only these cards may receive a weak visual highlight; a
+   * card that merely renders the query in UI chrome is never decorated. */
+  private searchMatchMessages: ReadonlySet<TranscriptMessage> = new Set()
   /** Bumped whenever the search presentation target changes: part of the
    * message-component cache identity so a Workflow search context row / PTC
    * search reveal is rebuilt even when the semantic expansion is unchanged. */
@@ -3623,17 +3643,16 @@ export class TuiApp {
   private subCallExpandedRevision = 0
   /** The block-relative sub-call hit rows recorded at render time, keyed by
    * the root message object (the renderer knows the exact layout). */
-  private readonly subCallHitsByMessage = new Map<TranscriptMessage, { hits: ReadonlyArray<{ top: number; height: number; subCallId: string }>; total: number }>()
+  private readonly subCallHitsByMessage = new Map<TranscriptMessage, { hits: ReadonlyArray<{ top: number; height: number; subCallId: string }>; regions: ReadonlyArray<SearchSourceRegion>; total: number }>()
   /** The block-relative Workflow card hit rows recorded at render time,
    * keyed by the message object (the renderer owns the exact layout). */
   private readonly workflowHitsByMessage = new Map<TranscriptMessage, { hits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>; total: number }>()
-  /** The block-relative rendered row of every Workflow member row (inline,
-   * anomaly preview OR the search-only context row), keyed by the message
-   * object, with the visible-column spans of the label/status fields so a
-   * member occurrence maps to its exact field. Search selection uses it
-   * instead of a whole-card ordinal that could pick the run status or another
-   * member/field. */
-  private readonly workflowMemberRangesByMessage = new Map<TranscriptMessage, { ranges: ReadonlyArray<WorkflowMemberRange>; total: number }>()
+  /** PROVEN search source regions in absolute block coordinates, recorded by
+   * the owning renderer (Workflow rows, tool header fields, …). Search
+   * selection consumes them to map a semantic occurrence to its rendered
+   * occurrence; a source with no provable occurrence anchors at its region row
+   * and shows NO strong highlight. */
+  private readonly searchSourceRegionsByMessage = new Map<TranscriptMessage, readonly SearchSourceRegion[]>()
   /** Per-run Workflow disclosure state (PR2 plan §7), keyed by the durable
    * `runId`. Session-scoped: cleared on session switch. */
   private readonly workflowDisclosure = new Map<string, WorkflowRunDisclosureState>()
@@ -6713,6 +6732,16 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
+  /** Publish the current semantic-match representatives (deduped by card, the
+   * runner owns this). Weak highlights are limited to this set; passing the
+   * same reference is a no-op. */
+  setSearchMatchMessages(messages: ReadonlySet<TranscriptMessage>): void {
+    if (this.searchMatchMessages === messages) return
+    this.searchMatchMessages = messages
+    this.searchPresentationRevision += 1
+    this.rebuildMessages()
+  }
+
   /** Rebind the CURRENT search target to the freshly projected card object for
    * the SAME match (a live group reflow replaces the representative object).
    * The runner calls this after every passive repaint while search is active,
@@ -7314,7 +7343,7 @@ export class TuiApp {
       // pruned with it for the same reason.
       this.subCallHitsByMessage.delete(message)
       this.workflowHitsByMessage.delete(message)
-      this.workflowMemberRangesByMessage.delete(message)
+      this.searchSourceRegionsByMessage.delete(message)
       const component = entry.component as { dispose?: () => void } | undefined
       if (component?.dispose !== undefined) {
         try {
@@ -7570,8 +7599,9 @@ export class TuiApp {
       let truncatedMarker = false
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
+      let subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined
+      let deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined
       let workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined
-      let workflowMemberRanges: ReadonlyArray<WorkflowMemberRange> | undefined
       let userDisclosureHit: UserDisclosureHit | undefined
       const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
       if (block.kind === 'activity') {
@@ -7618,18 +7648,24 @@ export class TuiApp {
         subCallHits = subCallInfo === undefined
           ? undefined
           : subCallInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - subCallInfo.total }))
+        if (subCallInfo !== undefined) {
+          const offset = rendered.length - subCallInfo.total
+          subCallRegions = subCallInfo.regions.map(region => ({
+            ...region,
+            anchorRow: region.anchorRow + offset,
+            rowStart: region.rowStart + offset,
+            rowEnd: region.rowEnd + offset,
+          }))
+        }
+        deliverableRegions = this.deliverableFieldRegionsOf(component, width, block.message)
         const workflowInfo = this.workflowHitsByMessage.get(block.message)
         workflowHits = workflowInfo === undefined
           ? undefined
           : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
-        const memberInfo = this.workflowMemberRangesByMessage.get(block.message)
-        workflowMemberRanges = memberInfo === undefined
-          ? undefined
-          : memberInfo.ranges.map(range => ({ ...range, top: range.top + rendered.length - memberInfo.total }))
       }
       let mountedComponent: Component | undefined
       let searchSelection: RenderedSearchSelection | undefined
-      const presentation = this.blockSearchPresentation(block, rendered, subCallHits, workflowHits, workflowMemberRanges)
+      const presentation = this.blockSearchPresentation(block, rendered, subCallRegions, deliverableRegions)
       if (presentation.selector !== undefined && presentation.selection !== undefined) {
         searchSelection = presentation.selection
         mountedComponent = new SearchHighlightComponent(component, presentation.selector)
@@ -7650,69 +7686,95 @@ export class TuiApp {
     })
   }
 
-  /** The rendered search presentation of ONE block while a search is active:
-   * the current target block selects its semantic occurrence (strong), every
-   * other VISIBLE message block with rendered matches is decorated WEAKLY so
-   * the whole on-screen match set is visible. Returns no selector for a block
-   * with no rendered occurrence (or when no search is active). */
+  /** The rendered search presentation of ONE block while a search is active.
+   * The current target builds PROVEN source geometry from the renderer-declared
+   * regions; every other VISIBLE message block that is a semantic match card is
+   * decorated WEAKLY (approximate visual hint, never semantic identity). */
   private blockSearchPresentation(
     block: TranscriptRenderBlock,
     rendered: readonly string[],
-    subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined,
-    workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined,
-    workflowMemberRanges: ReadonlyArray<WorkflowMemberRange> | undefined,
+    subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined,
+    deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined,
   ): { selector?: RenderedSearchSelector; selection?: RenderedSearchSelection; current: boolean } {
     const target = this.searchTarget
     if (target === undefined || target.query === '' || block.kind !== 'message') return { current: false }
     const current = block.message === target.message
-    const selector: RenderedSearchSelector = current
-      ? this.searchSelectorFor(target, subCallHits, workflowHits, workflowMemberRanges)
-      : { query: target.query, weakOnly: true, sourceOccurrence: 0 }
-    const selection = renderedSearchSelection(rendered, selector)
-    if (!current && selection.matches.length === 0) return { current }
-    return { selector, selection, current }
+    // Non-current cards must be SEMANTIC match representatives: a card that
+    // merely renders the query in UI chrome is never highlighted.
+    if (!current && !this.searchMatchMessages.has(block.message)) return { current: false }
+    const matches = findAltScreenSearchMatches(rendered, target.query)
+    if (!current && matches.length === 0) return { current: false }
+    if (current) {
+      const regions = this.searchSourceRegionsFor(block.message, rendered.length, subCallRegions, deliverableRegions)
+      const geometry = buildSourceGeometry(matches, regions, transcriptSearchSourceKey(target.match.source))
+      const selector: RenderedSearchSelector = {
+        query: target.query,
+        sourceOccurrence: target.match.sourceOccurrence,
+        ...(geometry === undefined ? {} : { geometry }),
+      }
+      return { selector, selection: selectRenderedSearchMatch(matches, selector), current }
+    }
+    const selector: RenderedSearchSelector = { query: target.query, sourceOccurrence: 0, weakOnly: true }
+    return { selector, selection: selectRenderedSearchMatch(matches, selector), current }
   }
 
-  /** The rendered-occurrence selector for the current search target: the
-   * semantic source maps to a block-relative row range where one exists (PTC
-   * sub-call hit, Workflow run/phase hit, Workflow member row); every other
-   * source searches the whole card. The Workflow member row range covers the
-   * inline row AND the search-only context row, so the selected member is
-   * highlighted/anchored exactly. */
-  private searchSelectorFor(
-    target: TranscriptSearchPresentationTarget,
-    subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined,
-    workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined,
-    workflowMemberRanges: ReadonlyArray<WorkflowMemberRange> | undefined,
-  ): RenderedSearchSelector {
-    const source = target.match.source
-    let range: { start: number; end: number } | undefined
-    let columns: { startCol: number; endCol: number } | undefined
-    if (source.kind === 'subcall-field' && subCallHits !== undefined) {
-      const subCallId = source.subCallIds[source.subCallIds.length - 1]
-      const hit = subCallHits.find(candidate => candidate.subCallId === subCallId)
-      if (hit !== undefined) range = { start: hit.top, end: hit.top + hit.height }
-    } else if (source.kind === 'workflow-phase' && workflowHits !== undefined) {
-      const hit = workflowHits.find(candidate => candidate.hit.kind === 'phase' && candidate.hit.phaseKey === source.phaseKey)
-      if (hit !== undefined) range = { start: hit.top, end: hit.top + hit.height }
-    } else if (source.kind === 'workflow-member' && workflowMemberRanges !== undefined) {
-      const hit = workflowMemberRanges.find(candidate => candidate.phaseKey === source.phaseKey && candidate.seq === source.seq)
-      if (hit !== undefined) {
-        range = { start: hit.top, end: hit.top + hit.height }
-        columns = source.field === 'label'
-          ? { startCol: hit.labelStart, endCol: hit.labelEnd }
-          : { startCol: hit.statusStart, endCol: hit.statusEnd }
+  /** The proven source regions of one rendered card: renderer-recorded absolute
+   * regions, offset-adjusted PTC sub-call regions, deliverable field regions,
+   * and (for message-kind cards) the whole card as the `message` source region. */
+  private searchSourceRegionsFor(
+    message: TranscriptMessage,
+    renderedLength: number,
+    subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined,
+    deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined,
+  ): SearchSourceRegion[] {
+    const regions: SearchSourceRegion[] = []
+    if (subCallRegions !== undefined) regions.push(...subCallRegions)
+    const cardRegions = this.searchSourceRegionsByMessage.get(message)
+    if (cardRegions !== undefined) regions.push(...cardRegions)
+    if (deliverableRegions !== undefined) regions.push(...deliverableRegions)
+    // A message-kind card's whole rendered body IS the `message` source (tool
+    // and workflow cards have no `message` chunk).
+    if (message.kind !== 'tool' && message.kind !== 'workflow') {
+      regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength })
+    }
+    return regions
+  }
+
+  /** The PROVEN path/description regions of an assistant card's delivered-files
+   * tail. The owning component records each field's row/column span on render;
+   * the walker only adds the component's block-relative offset (prior children
+   * heights), so the geometry belongs to the CURRENT render output. */
+  private deliverableFieldRegionsOf(
+    component: Component,
+    width: number,
+    message: TranscriptMessage,
+  ): ReadonlyArray<SearchSourceRegion> | undefined {
+    if (message.kind !== 'assistant' || message.deliverables === undefined || message.deliverables.length === 0) return undefined
+    if (!(component instanceof Container)) return undefined
+    let row = 0
+    for (const child of component.children) {
+      if (child instanceof DeliveredFilesComponent) {
+        child.render(width)
+        const regions: SearchSourceRegion[] = []
+        for (const span of child.lastFieldSpans) {
+          const push = (field: 'path' | 'description', fieldRow: number, startCol: number, endCol: number): void => {
+            if (endCol <= startCol) return
+            regions.push({
+              sourceKey: transcriptSearchSourceKey({ kind: 'assistant-deliverable', index: span.index, field }),
+              anchorRow: row + fieldRow,
+              rowStart: row + fieldRow,
+              rowEnd: row + fieldRow + 1,
+              columns: { startCol, endCol },
+            })
+          }
+          push('path', span.pathRow, span.pathStart, span.pathEnd)
+          for (const description of span.descriptionRows) push('description', description.row, description.start, description.end)
+        }
+        return regions
       }
-    } else if (source.kind === 'workflow-run' && workflowHits !== undefined) {
-      const hit = workflowHits.find(candidate => candidate.hit.kind === 'run')
-      if (hit !== undefined) range = { start: hit.top, end: hit.top + hit.height }
+      row += child.render(width).length
     }
-    return {
-      query: target.query,
-      ...(range === undefined ? {} : { range }),
-      ...(columns === undefined ? {} : { columns }),
-      sourceOccurrence: target.match.sourceOccurrence,
-    }
+    return undefined
   }
 
   /** The ONE bidirectional disclosure control of a long-user bubble (durable
@@ -7777,15 +7839,20 @@ export class TuiApp {
       const subCallHits = subCallInfo === undefined
         ? undefined
         : subCallInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - subCallInfo.total }))
+      const subCallRegions = subCallInfo === undefined
+        ? undefined
+        : subCallInfo.regions.map(region => ({
+          ...region,
+          anchorRow: region.anchorRow + (rendered.length - subCallInfo.total),
+          rowStart: region.rowStart + (rendered.length - subCallInfo.total),
+          rowEnd: region.rowEnd + (rendered.length - subCallInfo.total),
+        }))
+      const deliverableRegions = this.deliverableFieldRegionsOf(entry.component, width, entry.block.message)
       const workflowInfo = this.workflowHitsByMessage.get(entry.block.message)
       const workflowHits = workflowInfo === undefined
         ? undefined
         : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
-      const memberInfo = this.workflowMemberRangesByMessage.get(entry.block.message)
-      const workflowMemberRanges = memberInfo === undefined
-        ? undefined
-        : memberInfo.ranges.map(range => ({ ...range, top: range.top + rendered.length - memberInfo.total }))
-      const searchSelection = this.blockSearchPresentation(entry.block, rendered, subCallHits, workflowHits, workflowMemberRanges).selection
+      const searchSelection = this.blockSearchPresentation(entry.block, rendered, subCallRegions, deliverableRegions).selection
       return {
         ...entry,
         rendered,
@@ -9518,6 +9585,8 @@ export class TuiApp {
       this.currentSearchTranscriptRow = undefined
     }
     this.searchSuppressedSubCalls.clear()
+    this.searchMatchMessages = new Set()
+    this.searchSourceRegionsByMessage.clear()
     // Pending-user disclosure is presentation-only ephemeral state too: a
     // session switch must drop it with the lane it belongs to.
     this.pendingUserExpanded.clear()
@@ -9563,7 +9632,7 @@ export class TuiApp {
     this.workflowDisclosure.clear()
     this.workflowSeen.clear()
     this.workflowHitsByMessage.clear()
-    this.workflowMemberRangesByMessage.clear()
+    this.searchSourceRegionsByMessage.clear()
     this.workflowDisclosureRevision += 1
     // The per-message render cache is session-scoped too: old messages are
     // unreachable after a switch, so drop their cached components — with
@@ -11606,7 +11675,7 @@ export class TuiApp {
       // (review finding).
       this.subCallHitsByMessage.delete(message)
       this.workflowHitsByMessage.delete(message)
-      this.workflowMemberRangesByMessage.delete(message)
+      this.searchSourceRegionsByMessage.delete(message)
     }
     return {
       // The EFFECTIVE expansion (the surface-adaptive rule) drives the
@@ -12143,6 +12212,24 @@ export class TuiApp {
     const statusPart = ` ${pill}`
     const statsPart = diffStatsLabel === '' ? '' : `  ${color.textDim(diffStatsLabel)}`
     const head = `${headIdentity}${statusPart}${statsPart}`
+    // Proven header field regions (row 0): the design title is the tool NAME
+    // and the rendered summary is its ARGS. The body/result has no provable
+    // occurrence mapping (presenters transform or duplicate it), so a
+    // `tool-field.result` hit anchors the card top with NO strong highlight.
+    if (message.name !== 'edit') {
+      const toolRegions: SearchSourceRegion[] = []
+      const nameStart = visibleWidth(icon)
+      const nameEnd = nameStart + visibleWidth(header.title)
+      if (nameEnd > nameStart) {
+        toolRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'name' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: nameStart, endCol: nameEnd } })
+      }
+      if (header.summary !== '') {
+        const argsStart = nameEnd + visibleWidth(action !== undefined ? ' · ' : ' ')
+        const argsEnd = argsStart + visibleWidth(header.summary)
+        toolRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'args' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: argsStart, endCol: argsEnd } })
+      }
+      if (toolRegions.length > 0) this.searchSourceRegionsByMessage.set(message, toolRegions)
+    }
     const visibleStatus = truncateToWidth(statusPart, width, '…')
     const identityBudget = Math.max(0, width - visibleWidth(visibleStatus))
     const visibleIdentity = identityBudget === 0 ? '' : truncateToWidth(headIdentity, identityBudget, '…')
@@ -12312,14 +12399,15 @@ export class TuiApp {
     // layout) and consumed by the fullscreen click map.
     if (message.subCalls !== undefined && message.subCalls.length > 0) {
       const hits: Array<{ top: number; height: number; subCallId: string }> = []
+      const regions: SearchSourceRegion[] = []
       let row = 0
       let total = 0
       for (const child of message.subCalls) {
-        const rows = this.renderSubCall(card, child, width, 2, hits, row, expanded, 0)
+        const rows = this.renderSubCall(card, child, width, 2, hits, regions, row, [child.subCallId ?? ''], expanded, 0)
         row += rows
         total += rows
       }
-      this.subCallHitsByMessage.set(message, { hits, total })
+      this.subCallHitsByMessage.set(message, { hits, regions, total })
     }
     return card
   }
@@ -12337,7 +12425,9 @@ export class TuiApp {
     width: number,
     indent: number,
     hits: Array<{ top: number; height: number; subCallId: string }>,
+    regions: SearchSourceRegion[],
     row: number,
+    path: readonly string[],
     rootExpanded: boolean,
     depth: number,
   ): number {
@@ -12367,6 +12457,22 @@ export class TuiApp {
     const pad = ' '.repeat(indent)
     card.addChild(new Text(truncateToWidth(`${pad}${head} ${pill}`, width, '…'), 0, 0))
     hits.push({ top: row, height: 1, subCallId: child.subCallId ?? '' })
+    // Proven regions for this child's fields. Header row: the title is the
+    // tool NAME and the summary its ARGS; the executed `$ command` row below is
+    // a SECOND projection of args and is deliberately NOT a region (the header
+    // summary is the provable primary display). Result rows are one body
+    // region with no column split.
+    const headerRow = row
+    const nameStart = indent + visibleWidth(`${disclosure} ${icon}`)
+    const nameEnd = nameStart + visibleWidth(header.title)
+    if (nameEnd > nameStart) {
+      regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'name' }), anchorRow: headerRow, rowStart: headerRow, rowEnd: headerRow + 1, columns: { startCol: nameStart, endCol: nameEnd } })
+    }
+    if (header.summary !== '') {
+      const argsStart = nameEnd + 1
+      const argsEnd = argsStart + visibleWidth(header.summary)
+      regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'args' }), anchorRow: headerRow, rowStart: headerRow, rowEnd: headerRow + 1, columns: { startCol: argsStart, endCol: argsEnd } })
+    }
     if (bodyExpanded) {
       // bash/pwsh: the executed command row — the header summary prefers
       // the description, so the real command must never be lost.
@@ -12376,6 +12482,9 @@ export class TuiApp {
         rows += 1
       }
       if (child.result !== '') {
+        const resultStart = row + rows
+        const resultLines = child.result.split('\n').length
+        regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + resultLines })
         for (const line of child.result.split('\n')) {
           card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
           rows += 1
@@ -12384,7 +12493,7 @@ export class TuiApp {
     }
     if (child.subCalls !== undefined) {
       for (const grand of child.subCalls) {
-        rows += this.renderSubCall(card, grand, width, indent + 2, hits, row + rows, rootExpanded, depth + 1)
+        rows += this.renderSubCall(card, grand, width, indent + 2, hits, regions, row + rows, [...path, grand.subCallId ?? ''], rootExpanded, depth + 1)
       }
     }
     return rows
@@ -12590,19 +12699,34 @@ export class TuiApp {
     const head = `${color.textDim(`${disclosure} ${icon}Workflow ${message.name}`)} ${workflowStatusPill(message.status)}`
     const rows: string[] = []
     const hits: Array<{ top: number; height: number; hit: WorkflowHit }> = []
-    const memberRanges: WorkflowMemberRange[] = []
-    // The visible-column spans of one member row's label/status fields (the
-    // row bakes its own prefix glyph, so the spans must be measured from the
-    // same prefix).
-    const memberSpans = (prefix: string, label: string, status: string | undefined): Pick<WorkflowMemberRange, 'labelStart' | 'labelEnd' | 'statusStart' | 'statusEnd'> => {
+    const regions: SearchSourceRegion[] = []
+    // The visible-column spans of one row's fields (each row bakes its own
+    // prefix glyph, so the spans must be measured from the same prefix).
+    const fieldSpans = (prefix: string, label: string, status: string | undefined): { labelStart: number; labelEnd: number; statusStart: number; statusEnd: number } => {
       const labelStart = visibleWidth(prefix)
       const labelEnd = labelStart + visibleWidth(label)
       if (status === undefined) return { labelStart, labelEnd, statusStart: labelEnd, statusEnd: labelEnd }
       const statusStart = labelEnd + visibleWidth(' — ')
       return { labelStart, labelEnd, statusStart, statusEnd: statusStart + visibleWidth(status) }
     }
+    const pushFieldRegion = (sourceKey: string, row: number, startCol: number, endCol: number): void => {
+      if (endCol > startCol) regions.push({ sourceKey, anchorRow: row, rowStart: row, rowEnd: row + 1, columns: { startCol, endCol } })
+    }
     rows.push(truncateToWidth(head, width, '…'))
     hits.push({ top: 0, height: 1, hit: { kind: 'run', runId } })
+    // The run header row carries the kind word, the run name and the status
+    // pill: distinct visible-column spans so each semantic field maps to its
+    // own occurrence.
+    const runHeadPrefix = `${disclosure} ${icon}`
+    const runKindStart = visibleWidth(runHeadPrefix)
+    const runKindEnd = runKindStart + visibleWidth('Workflow')
+    const runNameStart = runKindEnd + 1
+    const runNameEnd = runNameStart + visibleWidth(message.name)
+    const runStatusStart = runNameEnd + 1
+    const runStatusEnd = runStatusStart + visibleWidth(workflowStatusPill(message.status))
+    pushFieldRegion('workflow-run.kind', 0, runKindStart, runKindEnd)
+    pushFieldRegion('workflow-run.name', 0, runNameStart, runNameEnd)
+    pushFieldRegion('workflow-run.status', 0, runStatusStart, runStatusEnd)
     // The aggregate summary renders in BOTH states (plan §5.6: a compact
     // completed run still shows `126 agents · completed` — the phases and
     // members stay hidden, the aggregate never does).
@@ -12622,6 +12746,9 @@ export class TuiApp {
           '…',
         ))
         hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'phase', runId, phaseKey: phase.key } })
+        const phasePrefix = `  ${phaseDisclosure} `
+        const phaseSpan = fieldSpans(phasePrefix, phase.label, undefined)
+        pushFieldRegion(`workflow-phase.${phase.key}`, rows.length - 1, phaseSpan.labelStart, phaseSpan.labelEnd)
         if (!phaseOpen) continue
         if (phase.mode === 'inline') {
           // Small phase: every member in durable seq order. Only a RUNNING
@@ -12634,10 +12761,10 @@ export class TuiApp {
               width,
               '…',
             ))
-            memberRanges.push({
-              top: rows.length - 1, height: 1, phaseKey: phase.key, seq: member.seq,
-              ...memberSpans(prefix, member.label, member.status),
-            })
+            const spans = fieldSpans(prefix, member.label, member.status)
+            const memberBase = `workflow-member.${phase.key}.${member.seq}`
+            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
+            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd)
             if (member.status === 'running') {
               hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'member', runId, seq: member.seq, childId: String(member.childId) } })
             }
@@ -12653,13 +12780,10 @@ export class TuiApp {
             const prefix = `    ${workflowMemberMark(member.status)} `
             rows.push(truncateToWidth(`${prefix}${member.label}`, width, '…'))
             // The anomaly-preview row IS the visible row for that member (the
-            // context row is deliberately suppressed for previewed members), so
-            // it must carry the member range too. Its status text is not
-            // rendered — a status-field hit falls back inexactly.
-            memberRanges.push({
-              top: rows.length - 1, height: 1, phaseKey: phase.key, seq: member.seq,
-              ...memberSpans(prefix, member.label, undefined),
-            })
+            // context row is deliberately suppressed for previewed members).
+            // Its status text is not rendered, so only the label region exists.
+            const spans = fieldSpans(prefix, member.label, undefined)
+            pushFieldRegion(`workflow-member.${phase.key}.${member.seq}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
           }
           if (phase.hiddenAnomalyCount > 0) {
             rows.push(truncateToWidth(color.textDim(`    … ${phase.hiddenAnomalyCount} more abnormal`), width, '…'))
@@ -12681,10 +12805,10 @@ export class TuiApp {
               width,
               '…',
             ))
-            memberRanges.push({
-              top: rows.length - 1, height: 1, phaseKey: phase.key, seq: context.seq,
-              ...memberSpans(prefix, context.label, context.status),
-            })
+            const spans = fieldSpans(prefix, context.label, context.status)
+            const memberBase = `workflow-member.${phase.key}.${context.seq}`
+            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
+            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd)
           }
         }
       }
@@ -12695,7 +12819,7 @@ export class TuiApp {
     }
     card.addChild(new Text(rows.join('\n'), 0, 0))
     this.workflowHitsByMessage.set(message, { hits, total: rows.length })
-    this.workflowMemberRangesByMessage.set(message, { ranges: memberRanges, total: rows.length })
+    this.searchSourceRegionsByMessage.set(message, regions)
     return card
   }
 

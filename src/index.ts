@@ -4278,6 +4278,8 @@ export function apply(ctx: Context, config: Config): void {
       lastSearchQuery = ''
       lastSearchRevision = 0
       lastSearchFolder = undefined
+      searchMatchMessages = new Set()
+      if (app !== undefined) app.setSearchMatchMessages(searchMatchMessages)
     }
     // After EVERY projection commit, re-resolve the current target from its
     // stable match on the folder that produced it. A passive live reflow
@@ -4290,6 +4292,26 @@ export function apply(ctx: Context, config: Config): void {
       const match = searchMatches[searchCurrent]
       if (match === undefined) return
       app.rebindTranscriptSearchTarget(folder.resolveSearchMatch(match))
+    }
+    /** Publish the semantic-match REPRESENTATIVE cards (deduped by id) so the
+     * TuiApp only weak-highlights cards that are actually part of the N/M
+     * result set, never a card that merely renders the query in UI chrome. The
+     * Set reference is reused while the result set is unchanged. */
+    let searchMatchMessages: ReadonlySet<TranscriptMessage> = new Set()
+    const refreshSearchMatchMessages = (): void => {
+      const folder = activeFolder()
+      const next = new Set<TranscriptMessage>()
+      if (lastSearchQuery !== '' && lastSearchFolder === folder) {
+        const seen = new Set<number>()
+        for (const match of searchMatches) {
+          if (seen.has(match.id)) continue
+          seen.add(match.id)
+          const message = folder.resolveSearchMatch(match)
+          if (message !== undefined) next.add(message)
+        }
+      }
+      searchMatchMessages = next
+      app.setSearchMatchMessages(next)
     }
     // Monotonic session generation: bumped on EVERY session swap (switch,
     // resume, deferred creation). Late async work (the skill command
@@ -4444,6 +4466,7 @@ export function apply(ctx: Context, config: Config): void {
       searchCurrent = refreshed.current
       lastSearchRevision = refreshed.revision
       lastSearchFolder = folder
+      refreshSearchMatchMessages()
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
     const jumpToSearchMatch = (): void => {
@@ -7179,6 +7202,7 @@ export function apply(ctx: Context, config: Config): void {
         lastSearchRevision = folder.searchRevision()
         lastSearchFolder = folder
         searchCurrent = searchMatches.length > 0 ? 0 : -1
+        refreshSearchMatchMessages()
         // Always run the jump path: an empty/no-match query must CLEAR the
         // stale search presentation target (0/0), not leave the previous
         // reveal/highlight on screen.
@@ -7200,6 +7224,7 @@ export function apply(ctx: Context, config: Config): void {
         searchCurrent = stepped.current
         lastSearchRevision = stepped.revision
         lastSearchFolder = folder
+        refreshSearchMatchMessages()
         // An emptied list steps to -1: the jump path still runs so the
         // stale target/highlight is cleared (0/0).
         jumpToSearchMatch()
@@ -7215,6 +7240,7 @@ export function apply(ctx: Context, config: Config): void {
         searchCurrent = stepped.current
         lastSearchRevision = stepped.revision
         lastSearchFolder = folder
+        refreshSearchMatchMessages()
         jumpToSearchMatch()
       },
       onSearchClose: () => {
