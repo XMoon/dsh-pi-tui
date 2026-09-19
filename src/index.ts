@@ -1087,6 +1087,7 @@ function repaint(
   folder: TranscriptFolder,
   windowController: TranscriptWindowController,
   streamingToolPreviews: readonly StreamingToolPreview[],
+  afterProjection?: () => void,
 ): TranscriptWindow {
   windowController.setTurns(folder.groupedTurns())
   const endTurn = windowController.endTurn()
@@ -1100,6 +1101,10 @@ function repaint(
     lastTurn: projection.lastTurn,
     hasNewer: projection.hasNewer,
   }, streamingToolPreviews)
+  // The search target is rebound AFTER the projection commits: a live group
+  // reflow replaced the representative card object, and the presentation must
+  // follow the stable match, never the stale object identity.
+  afterProjection?.()
   return projection
 }
 
@@ -3084,6 +3089,11 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     let app: TuiApp
+    // Rebind hook passed to every repaint: after the projection commits, the
+    // current search target is re-resolved from its STABLE match so a live
+    // group reflow never strands the highlight/reveal on a stale card object.
+    // Assigned once the search state below exists; undefined before that.
+    let syncSearchTargetAfterRepaint: (() => void) | undefined
     // M0: the unified status projection store — the footer's future single
     // input. The runner derives the DSH-owned sections (composition/access/
     // workspace/usage/host/plan); the app projects its own surface state
@@ -4195,7 +4205,7 @@ export function apply(ctx: Context, config: Config): void {
         const controller = activeWindow()
         if (!controller.isLatest()) {
           controller.latest()
-          repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
+          repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
         }
         app.setPendingInputPresentation({ queued, steering, running })
         app.scrollToBottom()
@@ -4232,13 +4242,13 @@ export function apply(ctx: Context, config: Config): void {
         clearTimeout(repaintTimer)
         repaintTimer = undefined
       }
-      repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews())
+      repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
     }
     const schedulePaint = (): void => {
       if (repaintTimer !== undefined) return
       repaintTimer = setTimeout(() => {
         repaintTimer = undefined
-        repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews())
+        repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
       }, REPAINT_FLUSH_MS)
     }
     // Tool-call arguments by callId, for the approval-preview dialog.
@@ -4268,6 +4278,18 @@ export function apply(ctx: Context, config: Config): void {
       lastSearchQuery = ''
       lastSearchRevision = 0
       lastSearchFolder = undefined
+    }
+    // After EVERY projection commit, re-resolve the current target from its
+    // stable match on the folder that produced it. A passive live reflow
+    // replaces the representative card object; without this the reveal and
+    // highlight would drop until the next Next/Prev.
+    syncSearchTargetAfterRepaint = (): void => {
+      if (lastSearchQuery === '' || searchCurrent < 0 || lastSearchFolder === undefined) return
+      const folder = activeFolder()
+      if (folder !== lastSearchFolder) return
+      const match = searchMatches[searchCurrent]
+      if (match === undefined) return
+      app.rebindTranscriptSearchTarget(folder.resolveSearchMatch(match))
     }
     // Monotonic session generation: bumped on EVERY session swap (switch,
     // resume, deferred creation). Late async work (the skill command
@@ -4397,7 +4419,7 @@ export function apply(ctx: Context, config: Config): void {
         // keeps the teardown's intent explicit and ordering-safe). The
         // Esc path uses exitFocusViewerScope instead (restore).
         app.discardFocusViewerScope()
-        repaint(app, folder, windowController, activeStreamingToolPreviews())
+        repaint(app, folder, windowController, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
         windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
         // The new session's own measurement comes from its initLiveSession
         // deferred path — the teardown refresh is UI-only.
@@ -4447,7 +4469,7 @@ export function apply(ctx: Context, config: Config): void {
         match,
         message,
       })
-      repaint(app, folder, controller, activeStreamingToolPreviews())
+      repaint(app, folder, controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
       app.scrollToSearchTarget()
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
@@ -4623,7 +4645,7 @@ export function apply(ctx: Context, config: Config): void {
       // disclosures must not leak into the child transcript (plan §26).
       setViewedQueueAgent(childAgent)
       app.enterFocusViewerScope()
-      repaint(app, childFolder, childWindow, activeStreamingToolPreviews())
+      repaint(app, childFolder, childWindow, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
       // The viewer bar covers the editor (a read-only placeholder for
       // one-shot, the child's own draft for continuable) and the header
       // badges the mode — the transient notify is no longer the only "you
@@ -4664,7 +4686,7 @@ export function apply(ctx: Context, config: Config): void {
       // Restore the parent's Focus disclosures BEFORE the repaint so the
       // projection uses them (plan §26).
       app.exitFocusViewerScope()
-      repaint(app, folder, windowController, activeStreamingToolPreviews())
+      repaint(app, folder, windowController, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
       // The main transcript may have grown while the viewer covered it (the
       // child's result, the parent's streaming): restore the parent's semantic latest/history position
       // so the pop never loses an intentional history anchor.
@@ -7063,7 +7085,7 @@ export function apply(ctx: Context, config: Config): void {
         const anchor = app.captureTranscriptViewportAnchor()
         const controller = activeWindow()
         if (!controller.moveOlder()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
         // Preserve the old top edge at the same rendered row in the overlap.
         if (anchor === undefined) app.scrollToBottom({ disableFollow: true })
         else app.restoreTranscriptViewportAnchor(anchor, 'top')
@@ -7076,7 +7098,7 @@ export function apply(ctx: Context, config: Config): void {
         if (!app.isFullscreen()) return false
         const controller = activeWindow()
         if (!controller.turnOlder()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
         app.scrollToBottom({ disableFollow: true })
         return true
       },
@@ -7084,7 +7106,7 @@ export function apply(ctx: Context, config: Config): void {
         if (!app.isFullscreen()) return false
         const controller = activeWindow()
         if (!controller.turnNewer()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
         app.scrollToBottom({ disableFollow: true })
         return true
       },
@@ -7092,7 +7114,7 @@ export function apply(ctx: Context, config: Config): void {
         const anchor = app.captureTranscriptViewportAnchor()
         const controller = activeWindow()
         if (!controller.moveNewer()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
         if (controller.isLatest()) app.scrollToBottom()
         else if (anchor === undefined) app.scrollToTop({ disableFollow: true })
         else app.restoreTranscriptViewportAnchor(anchor, 'bottom')
@@ -7112,7 +7134,7 @@ export function apply(ctx: Context, config: Config): void {
         const controller = activeWindow()
         const changed = controller.latest()
         if (!changed && !closedSearch && !app.isFullscreen()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
         app.scrollToBottom()
         app.setSearchResult(0, 0)
         return true
@@ -7209,7 +7231,7 @@ export function apply(ctx: Context, config: Config): void {
         } else {
           controller.latest()
         }
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews())
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
         if (controller.isLatest()) app.scrollToBottom()
         else app.scrollToTop({ disableFollow: true })
       },
@@ -9131,7 +9153,7 @@ export function apply(ctx: Context, config: Config): void {
       // Issue #8: a stale keyboard exit confirmation must not exit the NEW
       // session.
       app.clearExitConfirmation()
-      repaint(app, folder, windowController, activeStreamingToolPreviews())
+      repaint(app, folder, windowController, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
       // PR D2: the first usable frame paints with the cached measurement
       // (or none); the context measure is deferred one event-loop turn so
       // cold resume never blocks first paint on a long-session scan.

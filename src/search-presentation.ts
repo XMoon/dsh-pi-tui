@@ -42,6 +42,9 @@ export interface RenderedSearchSelector {
    * selection: a Workflow member row renders `label` and `status` on one row,
    * so a row-only range cannot tell the two fields apart. */
   readonly columns?: { readonly startCol: number; readonly endCol: number }
+  /** Decorate every occurrence WEAKLY and select none: used for the other
+   * visible cards while the current card owns the strong occurrence. */
+  readonly weakOnly?: boolean
   readonly sourceOccurrence: number
 }
 
@@ -98,6 +101,10 @@ export function selectRenderedSearchMatch(
   matches: readonly AltScreenSearchMatch[],
   selector: RenderedSearchSelector,
 ): RenderedSearchSelection {
+  if (selector.weakOnly === true) {
+    // Every visible occurrence is decorated weak; no card is "current".
+    return { matches, selectedIndex: -1, selectedRow: undefined, exact: false }
+  }
   const range = selector.range
   const columns = range === undefined ? undefined : selector.columns
   const scoped = range === undefined
@@ -137,12 +144,14 @@ export function selectRenderedSearchMatch(
 }
 
 /** Decorate every visible occurrence of `selection.matches` without changing
- * row count or visible width; the current occurrence uses the strong style. */
+ * row count or visible width. `selectedIndex >= 0` marks that occurrence
+ * strong; `-1` with matches present decorates all of them weak (the other
+ * visible cards while the current card owns the strong occurrence). */
 export function highlightSearchLines(
   lines: readonly string[],
   selection: RenderedSearchSelection,
 ): string[] {
-  if (selection.selectedIndex < 0 || selection.matches.length === 0) return [...lines]
+  if (selection.matches.length === 0) return [...lines]
   const rangesByRow = new Map<number, Array<{ startCol: number; endCol: number; current: boolean }>>()
   selection.matches.forEach((match, matchIndex) => {
     for (const segment of match.segments) {

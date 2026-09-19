@@ -1582,6 +1582,9 @@ export class TranscriptFolder {
   private searchDirtyScanCount = 0
   private searchFullScanCount = 0
   private searchRefineCount = 0
+  /** Test-only: the number of CANDIDATE CARDS re-scanned by refinement
+   * (proves refinement is O(candidate cards), never O(previous occurrences)). */
+  private searchRefineCandidates = 0
   private groupingRebuildCount = 0
 
   /**
@@ -3459,7 +3462,15 @@ export class TranscriptFolder {
       }
     }
     if (canRefine) {
-      for (const match of refinement.previousMatches) consider(match.id)
+      // Dedupe the previous matches to their CURRENT representatives FIRST:
+      // a card with 10k occurrences would otherwise re-run the same failing
+      // `includes()` 10k times. Refinement cost is O(candidate CARDS).
+      const representatives = new Set<number>()
+      for (const match of refinement.previousMatches) representatives.add(this.representativeOf(match.id))
+      for (const id of representatives) {
+        this.searchRefineCandidates += 1
+        consider(id)
+      }
       this.searchRefineCount += 1
     } else {
       for (let id = 0; id < this.searchEntries.length; id += 1) consider(id)
@@ -3487,6 +3498,7 @@ export class TranscriptFolder {
     dirtyScans: number
     fullScans: number
     refinedScans: number
+    refinedCandidates: number
   } {
     return {
       entries: this.searchEntries.length,
@@ -3495,6 +3507,7 @@ export class TranscriptFolder {
       dirtyScans: this.searchDirtyScanCount,
       fullScans: this.searchFullScanCount,
       refinedScans: this.searchRefineCount,
+      refinedCandidates: this.searchRefineCandidates,
     }
   }
 
