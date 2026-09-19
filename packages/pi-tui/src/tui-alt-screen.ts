@@ -1029,7 +1029,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					consumed = true;
 					return;
 				}
-				if (this.shouldDeferViewportInputToOverlay()) return;
+				// A `viewportPassthrough` overlay (X058) does not own the wheel:
+				// when it leaves the event unhandled the primary viewport still
+				// scrolls, on either side of the overlay rectangle. The overlay's
+				// rectangle keeps pointer ownership for every event it DOES
+				// handle (the dispatch above).
+				if (this.shouldDeferViewportInputToOverlay() && !this.overlayViewportPassthrough()) return;
 				this.routeWheel(wheelEvent);
 				consumed = true;
 			});
@@ -1049,6 +1054,22 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// a host-claimed viewport key (Home/End, search chords). The search
 		// overlay is excluded so the host seam below can still suppress the
 		// built-in search key while the search input is focused.
+		// A `viewportPassthrough` overlay (X058) keeps its keyboard focus but
+		// lets the PRIMARY VIEWPORT's page navigation through when the overlay
+		// does not consume the key. Deliberately limited to PageUp/PageDown:
+		// Home/End, Ctrl+U/Ctrl+D, Up/Down and the prompt keys stay available to
+		// the overlay's own focused input, so the narrow allow-list never steals
+		// an editing key from the search box.
+		if (this.overlayViewportPassthrough()) {
+			if (keybindings.matches(data, "tui.altScreen.pageUp")) {
+				const handled = this.pageViewport(-1, isRelease);
+				if (handled !== undefined) return handled;
+			}
+			if (keybindings.matches(data, "tui.altScreen.pageDown")) {
+				const handled = this.pageViewport(1, isRelease);
+				if (handled !== undefined) return handled;
+			}
+		}
 		if (this.shouldDeferViewportInputToOverlay()) return undefined;
 		if (!isRelease && this.onBeforeViewportInput?.(data) === true) return { consume: true };
 		// When the primary scroll view has nothing to scroll (short content, or a
@@ -1074,32 +1095,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			}
 		}
 		if (keybindings.matches(data, "tui.altScreen.pageUp")) {
-			if (!primaryScrollable) {
-				if (!isRelease && this.onScrollBoundary?.(-1, "page") === true) return { consume: true };
-				return undefined;
-			}
-			if (!isRelease) {
-				const remaining = this.getPrimaryScrollView().scrollBy(
-					-Math.max(1, this.getPrimaryScrollView().viewportHeight - PAGE_SCROLL_OVERLAP),
-				);
-				if (remaining < 0) this.onScrollBoundary?.(-1, "page");
-				this.requestRender();
-			}
-			return { consume: true };
+			return this.pageViewport(-1, isRelease);
 		}
 		if (keybindings.matches(data, "tui.altScreen.pageDown")) {
-			if (!primaryScrollable) {
-				if (!isRelease && this.onScrollBoundary?.(1, "page") === true) return { consume: true };
-				return undefined;
-			}
-			if (!isRelease) {
-				const remaining = this.getPrimaryScrollView().scrollBy(
-					Math.max(1, this.getPrimaryScrollView().viewportHeight - PAGE_SCROLL_OVERLAP),
-				);
-				if (remaining > 0) this.onScrollBoundary?.(1, "page");
-				this.requestRender();
-			}
-			return { consume: true };
+			return this.pageViewport(1, isRelease);
 		}
 		if (primaryScrollable && keybindings.matches(data, "tui.altScreen.halfPageUp")) {
 			if (!isRelease) this.scrollBy(-Math.max(1, Math.floor(this.getPrimaryScrollView().viewportHeight / 2)));
@@ -1134,6 +1133,28 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			return { consume: true };
 		}
 		return undefined;
+	}
+
+	/**
+	 * One primary-viewport page step (shared by the normal viewport key chain
+	 * and the X058 `viewportPassthrough` allow-list). Preserves the upstream
+	 * semantics exactly: a key RELEASE never scrolls but is still consumed when
+	 * the viewport can scroll; a non-scrollable viewport falls through to the
+	 * boundary callback and otherwise returns undefined (so the key reaches the
+	 * focused component).
+	 */
+	private pageViewport(direction: -1 | 1, isRelease: boolean): { consume: true } | undefined {
+		const view = this.getPrimaryScrollView();
+		if (!view.canScroll) {
+			if (!isRelease && this.onScrollBoundary?.(direction, "page") === true) return { consume: true };
+			return undefined;
+		}
+		if (!isRelease) {
+			const remaining = view.scrollBy(direction * Math.max(1, view.viewportHeight - PAGE_SCROLL_OVERLAP));
+			if (direction < 0 ? remaining < 0 : remaining > 0) this.onScrollBoundary?.(direction, "page");
+			this.requestRender();
+		}
+		return { consume: true };
 	}
 
 	private decodeMouseButton(button: number): TuiMouseButton {
@@ -1522,7 +1543,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private getScrollbarTargetAt(x: number, y: number, includeHiddenAuto = false): ScrollbarTarget | undefined {
-		if (this.hasOverlay() || !this.currentLayout) return undefined;
+		// A `viewportPassthrough` overlay (X058) leaves the SCROLLBAR live; every
+		// other visible overlay keeps the upstream block.
+		if (this.hasBlockingOverlay() || !this.currentLayout) return undefined;
 		for (const scrollView of getScrollViewsAt(this.currentLayout, x, y)) {
 			const box = getScrollViewBox(this.currentLayout, scrollView);
 			const geometry = box ? getScrollbarGeometry(box, includeHiddenAuto) : undefined;
@@ -1928,7 +1951,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// divergence X018.)
 		this.onCellPress?.(event.x, event.y);
 		const scrollView =
-			!this.hasOverlay() && this.currentLayout
+			// A `viewportPassthrough` overlay (X058) keeps background selection
+			// anchored in scroll-content coordinates; every other visible overlay
+			// keeps the upstream screen-coordinate block. The overlay rectangle
+			// itself already rejects selection through the pointer-ownership
+			// truncation above.
+			!this.hasBlockingOverlay() && this.currentLayout
 				? getScrollViewsAt(this.currentLayout, event.x, event.y)[0]
 				: undefined;
 		const anchor = this.getSelectionPoint(event, scrollView);

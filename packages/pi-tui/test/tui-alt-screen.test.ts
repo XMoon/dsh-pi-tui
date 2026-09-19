@@ -2296,6 +2296,107 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("keeps the viewport interactive for a focused viewportPassthrough overlay (X058)", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		const overlay = new InputOverlay();
+		tui.start();
+		await terminal.waitForRender();
+		const topBefore = tui.viewportTop;
+		const handle = tui.showOverlay(overlay, { viewportPassthrough: true, width: 6, anchor: "top-left" });
+		await terminal.waitForRender();
+		assert.strictEqual(overlay.focused, true, "the passthrough overlay still owns the keyboard");
+
+		// Editing keys the focused component can consume stay with the overlay:
+		// the narrow allow-list never steals Home/End, Ctrl+U/Ctrl+D or typing.
+		const editing = ["a", "\x1bOH", "\x1bOF", "\x15", "\x04"];
+		for (const key of editing) terminal.sendInput(key);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(overlay.inputs, editing);
+		assert.strictEqual(tui.viewportTop, topBefore, "editing keys never scroll the viewport");
+
+		// PageUp/PageDown page the viewport and are consumed BEFORE the overlay.
+		terminal.sendInput("\x1b[5~");
+		await terminal.waitForRender();
+		assert.ok(tui.viewportTop < topBefore, "PageUp pages the viewport");
+		assert.ok(!overlay.inputs.includes("\x1b[5~"), "PageUp was consumed by the viewport");
+		const paged = tui.viewportTop;
+		terminal.sendInput("\x1b[6~");
+		await terminal.waitForRender();
+		assert.ok(tui.viewportTop > paged, "PageDown pages back down");
+		assert.ok(!overlay.inputs.includes("\x1b[6~"), "PageDown was consumed by the viewport");
+
+		// The wheel scrolls the primary viewport on BOTH sides of the overlay
+		// rectangle when the overlay's component does not handle it.
+		const topBeforeWheel = tui.viewportTop;
+		terminal.sendInput("\x1b[<64;3;1M"); // inside the overlay rectangle (row 0)
+		terminal.sendInput("\x1b[<64;10;4M"); // outside the overlay rectangle
+		await terminal.waitForRender();
+		assert.ok(tui.viewportTop < topBeforeWheel, "wheel scrolls on both sides of the overlay");
+		assert.ok(!overlay.inputs.includes("\x1b[<64;3;1M"), "the wheel never reaches the overlay component");
+
+		// An ordinary modal above stops the passthrough immediately; hiding it
+		// restores the overlay's passthrough.
+		const modal = new InputOverlay();
+		const modalHandle = tui.showOverlay(modal);
+		await terminal.waitForRender();
+		const topWithModal = tui.viewportTop;
+		terminal.sendInput("\x1b[5~");
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.viewportTop, topWithModal, "an ordinary modal above blocks the viewport");
+		assert.deepStrictEqual(modal.inputs, ["\x1b[5~", "\x1b[<64;1;1M"]);
+		modalHandle.hide();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[5~");
+		await terminal.waitForRender();
+		assert.ok(tui.viewportTop < topWithModal, "hiding the modal restores the passthrough");
+		handle.hide();
+		tui.stop();
+	});
+
+	it("keeps the scrollbar and background selection live for a focused viewportPassthrough overlay (X058)", async () => {
+		const terminal = new VirtualTerminal(10, 6);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "always" },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+
+		const handle = tui.showOverlay(new InputOverlay(), { viewportPassthrough: true, width: 6, anchor: "top-left" });
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<35;10;3M"); // move onto the scrollbar track column
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.isScrollbarActive, true, "the scrollbar stays hoverable");
+
+		terminal.sendInput("\x1b[<0;10;6M"); // press the track
+		await terminal.waitForRender();
+		assert.ok(scrollView.scrollTop > 0, "dragging the scrollbar still scrolls");
+		terminal.sendInput("\x1b[<0;10;6m"); // release the track
+		await terminal.waitForRender();
+
+		// Background selection outside the overlay rectangle still works.
+		terminal.sendInput("\x1b[<0;1;2M");
+		terminal.sendInput("\x1b[<32;5;2M");
+		terminal.sendInput("\x1b[<0;5;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasActiveSelection(), true, "background text selection still works");
+
+		// An ordinary modal above blocks the scrollbar again.
+		const modalHandle = tui.showOverlay(new InputOverlay());
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<35;10;3M");
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.isScrollbarActive, false, "a blocking modal disables the scrollbar");
+		modalHandle.hide();
+		handle.hide();
+		tui.stop();
+	});
+
 	it("keeps viewport scrolling when an overlay is not focused", async () => {
 		const terminal = new VirtualTerminal(20, 6);
 		const tui = new TuiAltScreen(terminal);

@@ -80,8 +80,8 @@
 
 ## Summary
 
-- Records: 58
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 47, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
+- Records: 59
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 48, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -143,6 +143,7 @@
 | X055 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM, LOCAL_UX | NO |
 | X056 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT | NO |
 | X057 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
+| X058 | ACTIVE | MEDIUM | LOCAL_UX | NO |
 
 ## Divergences
 
@@ -4814,3 +4815,90 @@ The host paints presentation-only chrome inside the transcript scroll content (t
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Confirmed upstream getActiveSelectionText slices the rendered scroll lines with no host override hook; the fork adds one optional lookup on the copy path only.
+
+### X058 — Viewport passthrough for a focused capturing overlay
+
+- Status: `ACTIVE`
+- Category: `LOCAL_UX`
+- Risk: `MEDIUM`
+- Files: `src/tui.ts`, `src/tui-alt-screen.ts`
+- Last audited: `2026-09-19`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+The host transcript-search box is a capturing overlay: it must keep KEYBOARD focus (typing must reach its Input, Esc/Ctrl+F/Enter are fixed overlay contracts), so `nonCapturing` is not an option. But while it is open the user must still be able to move around the transcript they are searching: wheel / Alt+wheel, PageUp/PageDown, scrollbar hover/drag, and background text selection outside the box. Upstream ties ALL of those to `hasOverlay()` / `isOverlayFocused()`: a focused overlay blocks the wheel, PageUp and PageDown (the early viewport-key return), `getScrollbarTargetAt` returns undefined whenever ANY overlay is visible, and the selection-anchor scrollView lookup is skipped under any overlay. A host-only implementation cannot restore those: the scrollbar hit-test/drag and the selection anchor live entirely inside TuiAltScreen, and reimplementing them in the host would duplicate pointer ownership rather than narrow it. The seam is therefore one optional boolean with a single predicate pair, and every non-opted-in overlay keeps the upstream behavior byte-for-byte.
+
+#### Changed surface
+
+- OverlayOptions.viewportPassthrough?: boolean — opt-in: the capturing overlay keeps keyboard focus and its own rectangle's pointer ownership, while the primary viewport additionally stays live for scroll/navigation the overlay did not consume.
+- TuiBase.hasBlockingOverlay(): visible overlay that did NOT opt in (nonCapturing still blocks, exactly like hasOverlay()).
+- TuiBase.overlayViewportPassthrough(): the FOCUSED visible overlay opted in AND no other visible overlay blocks the viewport.
+- TuiAltScreen wheel guard, a PageUp/PageDown-only key allow-list, the scrollbar target guard and the selection-anchor guard consult those predicates.
+
+#### Dependency map
+
+**Vendor internal**
+- shouldDeferViewportInputToOverlay() keeps its upstream meaning for every overlay; the wheel path adds `&& !overlayViewportPassthrough()` on the deferral only, after the overlay-first dispatch (an event the overlay handles is never also applied to the background).
+- The viewport key chain's early `shouldDeferViewportInputToOverlay()` return is NOT relaxed; a narrow pre-branch allows ONLY PageUp/PageDown through, so Home/End (top/bottom), Ctrl+U/Ctrl+D (halfPage), Up/Down and previous/nextPrompt stay available to the overlay's focused component.
+- getScrollbarTargetAt and the selection-anchor scrollView lookup switch from hasOverlay() to hasBlockingOverlay(); these are the only two hasOverlay() call sites in tui-alt-screen.ts.
+- The shared pageViewport() helper preserves the upstream page semantics (release never scrolls but is consumed when scrollable; a non-scrollable viewport falls through to onScrollBoundary and otherwise returns undefined; PAGE_SCROLL_OVERLAP unchanged).
+- Audit note: All lookups are additive booleans read on the existing input paths; the painting, hit map, gesture liveness and copy paths are untouched.
+
+**Inheritance / structural**
+- The predicates live on TuiBase so TuiAltScreen reads its own private overlayStack without exposing entries, options, focusOrder or visibility.
+- No subclass or structural edge: `viewportPassthrough` is a plain optional field on OverlayOptions, and the entry's options object is already retained by the stack.
+- Audit note: The predicates are protected and cannot be overridden into a wider passthrough by a subclass without an explicit new API.
+
+**Host**
+- src/tui-app.ts startTranscriptSearch mounts the search overlay with viewportPassthrough: true; every other host overlay (model picker, task browser, question/approval, settings, history search) keeps the upstream block.
+- The host's fullscreen router (routeInput) is unchanged: typing, Esc, Ctrl+F, Enter and Shift+Enter still win through the existing overlay key contract.
+- Audit note: The option is inert on the main screen, where the terminal (not the fork) owns scrollback.
+
+**Public / extension**
+- OverlayOptions is a public type; the new field is optional and additive, so existing consumers compile and behave unchanged.
+- The extension-facing TuiOverlayOptions surface is deliberately NOT widened: no plugin-facing behavior changes.
+- Audit note: Absent option = upstream behavior.
+
+**Behavioral coupling**
+- Focused opted-in overlay, nothing above it: wheel/Alt+wheel scroll the primary viewport on both sides of the overlay rectangle; PageUp/PageDown page it; the scrollbar hovers and drags; background selection outside the rectangle works; the overlay keeps keyboard focus and receives every key it can consume.
+- An ordinary modal stacked above stops the passthrough immediately (scrollbar and selection guards re-block); hiding it restores the passthrough.
+- An event the overlay's component handles is still applied only to the overlay (overlay-first pointer dispatch and the mouse-result truncation are unchanged).
+- Every overlay without the option (including nonCapturing ones) keeps the exact upstream viewport, scrollbar and selection blocking.
+- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X058) plus the host fullscreen search-interaction regression.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: keeps the viewport interactive for a focused viewportPassthrough overlay (X058)
+- packages/pi-tui/test/tui-alt-screen.test.ts: keeps the scrollbar and background selection live for a focused viewportPassthrough overlay (X058)
+- packages/pi-tui/test/tui-alt-screen.test.ts: gives wheel and viewport keys to a focused overlay (default block, unchanged)
+- test/transcript-search-interaction.test.ts: fullscreen search keeps the viewport interactive without losing the search input focus
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/tui.ts
+- packages/tui/src/tui-alt-screen.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream has no overlay option that keeps the primary viewport live under a capturing overlay; the fork adds one optional opt-in consulted only on the wheel deferral, the PageUp/PageDown allow-list, the scrollbar target guard and the selection-anchor guard. Default behavior is unchanged.
+
+#### Retirement conditions
+
+- Retire when upstream exposes an equivalent focused-overlay viewport passthrough (or the host stops needing a capturing, keyboard-focused search box), then run the X058 fork and host search-interaction regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed upstream blocks wheel, PageUp/PageDown, the scrollbar and the selection anchor under ANY visible overlay; the fork adds one optional passthrough keyed on the focused opted-in overlay with no other blocking overlay.

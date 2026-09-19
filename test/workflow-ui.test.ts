@@ -982,7 +982,7 @@ test('workflow search: a hidden large-phase member gets ONE search-only context 
   const contextRow = rows.findIndex(line => stripTerminalSequences(line).includes('shard-5'))
   assert.ok(contextRow >= 0, `context row missing:\n${rows.join('\n')}`)
   const contextCol = stripTerminalSequences(rows[contextRow]!).indexOf('shard-5')
-  assert.ok(vt.getCellInverse(contextRow, contextCol), 'the matched member cell is the current highlight')
+  assert.equal(vt.getCellBgRgb(contextRow, contextCol), 0xf5c542, 'the matched member cell is the current highlight')
 
   // Clearing the target removes the search-only context row (the run stays
   // open because its facts are abnormal).
@@ -1078,9 +1078,9 @@ test('workflow search: the status field is disambiguated from the label on one r
   assert.ok(row >= 0, `member row missing:\n${vt.getViewport().join('\n')}`)
   const plain = stripTerminalSequences(vt.getViewport()[row]!)
   const statusCol = plain.indexOf('failed') + 1 // the 'a' of failed
-  assert.ok(vt.getCellInverse(row, statusCol), `the STATUS 'a' must be the current occurrence:\n${plain}`)
+  assert.equal(vt.getCellBgRgb(row, statusCol), 0xf5c542, `the STATUS 'a' must be the current occurrence:\n${plain}`)
   const labelCol = plain.indexOf('alpha')
-  assert.ok(!vt.getCellInverse(row, labelCol), 'the label occurrence must NOT be current')
+  assert.equal(vt.getCellBgRgb(row, labelCol), undefined, 'the label occurrence must NOT be current')
   app.stop()
 })
 
@@ -1110,7 +1110,7 @@ test('workflow search: an anomaly-preview member row carries the member range', 
   })
   await viewport(vt)
   const cell = cellOf(vt, 'bad-a', 0)
-  assert.ok(vt.getCellInverse(cell.row, cell.col), `the visible anomaly row must be the current occurrence:\n${cell.line}`)
+  assert.equal(vt.getCellBgRgb(cell.row, cell.col), 0xf5c542, `the visible anomaly row must be the current occurrence:\n${cell.line}`)
   const rows = vt.getViewport()
   assert.ok(!rows.some(line => stripTerminalSequences(line).includes('↳')), 'no duplicate context row is inserted')
   app.stop()

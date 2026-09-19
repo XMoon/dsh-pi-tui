@@ -368,6 +368,53 @@ export interface TranscriptSearchPresentationTarget {
   readonly message: TranscriptMessage
 }
 
+/** One ATOMIC search-presentation commit (perf plan S2 §5.1): the weak-match
+ * representative set and the current target are published together, so a query
+ * change / Next / Prev rebuilds the message tree AT MOST ONCE per projection
+ * epoch. `grantReveal` marks an explicit navigation (which re-grants the
+ * temporary reveal); a passive projection rebind leaves the current grant —
+ * including a user collapse — intact.
+ *
+ * `matchMessages` is compared by REFERENCE: the runner must pass the SAME set
+ * object while the resolved representative cards are unchanged (it does — see
+ * the runner's `resolveSearchMatchMessages`). A fresh equal set is treated as a
+ * change, which is why the runner mirrors the published identity. */
+export interface TranscriptSearchPresentation {
+  readonly matchMessages: ReadonlySet<TranscriptMessage>
+  readonly target?: TranscriptSearchPresentationTarget
+  readonly grantReveal?: boolean
+}
+
+/** Test-only structural counters for the search presentation hot path
+ * (perf plan S1 §4.1): prove a same-window search interaction performs at most
+ * one rebuild, no remeasure and no full transcript render. */
+export interface TranscriptSearchPresentationDiagnostics {
+  /** `rebuildMessages()` entries. */
+  rebuilds: number
+  /** `refreshMessageRows()` entries. */
+  remeasures: number
+  /** Rendered matcher scans (`findAltScreenSearchMatches`). */
+  renderedMatchScans: number
+  /** Full `messagesView.render()` height probes. */
+  fullRenders: number
+  /** `setTranscript()` commits. */
+  transcriptSets: number
+}
+
+/** Whether two search targets denote the SAME semantic navigation: the query,
+ * the stable match identity (id + ordinals + source key) and the resolved card
+ * object. Object reference is deliberately NOT the authority — the runner
+ * builds a fresh target per projection commit, and a reference compare would
+ * re-grant a user-collapsed reveal on every passive repaint. */
+function sameSearchTarget(left: TranscriptSearchPresentationTarget | undefined, right: TranscriptSearchPresentationTarget | undefined): boolean {
+  if (left === right) return true
+  if (left === undefined || right === undefined) return false
+  if (left.query !== right.query || left.message !== right.message) return false
+  if (left.match.id !== right.match.id || left.match.turn !== right.match.turn) return false
+  if (left.match.occurrence !== right.match.occurrence || left.match.sourceOccurrence !== right.match.sourceOccurrence) return false
+  return transcriptSearchSourceKey(left.match.source) === transcriptSearchSourceKey(right.match.source)
+}
+
 /** The compaction lifecycle phase the working row advertises: idle (no
  * compaction), summarizing (compaction/start seen, the summary is being
  * generated), or applying (the summary landed, the compacted surface is
@@ -3409,6 +3456,22 @@ export class TuiApp {
   /** The block-relative transcript row of the current search selection (welcome
    * card excluded), recomputed on every rebuild/remeasure. */
   private currentSearchTranscriptRow: number | undefined
+  /** The transcript content height (welcome card + rows + hint/notify) measured
+   * by the LAST rebuild/remeasure. `scrollToSearchTarget` reads it instead of
+   * re-rendering the whole mounted view for every ordinary search jump. */
+  private transcriptContentHeight = 0
+  /** The welcome card's height as of the last rebuild/remeasure. */
+  private transcriptWelcomeHeight = 0
+  /** The window-hint + notify chrome rows as of the last rebuild. */
+  private transcriptChromeHeight = 0
+  /** Test-only structural counters for the search presentation hot path. */
+  private readonly searchPresentationDiagnostics: TranscriptSearchPresentationDiagnostics = {
+    rebuilds: 0,
+    remeasures: 0,
+    renderedMatchScans: 0,
+    fullRenders: 0,
+    transcriptSets: 0,
+  }
   /** The Ctrl+R input-history panel, while one is open. */
   private historyPanel: HistoryPanel | undefined
   /** The overlay handle of the history panel (hide() closes it). */
@@ -6405,6 +6468,12 @@ export class TuiApp {
       width: '40%',
       minWidth: 24,
       margin: 1,
+      // Fullscreen: the search box keeps keyboard focus, but the transcript
+      // viewport stays interactive (wheel/PageUp/PageDown/scrollbar/background
+      // selection) while the box itself did not handle the event
+      // (fork seam X058; inert on the main screen, where the terminal owns
+      // scrollback).
+      viewportPassthrough: true,
     })
   }
 
@@ -6551,7 +6620,9 @@ export class TuiApp {
     activities?: ReadonlyMap<number, TurnActivity>,
     window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
     streamingToolPreviews?: readonly StreamingToolPreview[],
+    searchPresentation?: TranscriptSearchPresentation,
   ): void {
+    this.searchPresentationDiagnostics.transcriptSets += 1
     const previousWindow = this.transcriptWindow
     const windowChanged = previousWindow?.mode !== window?.mode
       || previousWindow?.endTurn !== window?.endTurn
@@ -6586,6 +6657,11 @@ export class TuiApp {
     // error blocks — flash for a frame. The notify expires via
     // its 8s auto-clear timer or an explicit clear (user submit, session
     // switch, stop).
+    // The search presentation (weak-match representatives + current target) is
+    // applied BEFORE the rebuild: the render blocks, reveal and occurrence
+    // geometry all read it, and the whole projection epoch commits as ONE
+    // rebuild (perf plan S2 §5.2/§5.3).
+    if (searchPresentation !== undefined) this.applySearchPresentation(searchPresentation)
     // (The component cache is pruned inside rebuildMessages below.)
     this.rebuildMessages()
   }
@@ -6702,47 +6778,76 @@ export class TuiApp {
    * user's own disclosure state exactly (including any manual operation the
    * user performed while the search was open). */
   setTranscriptSearchTarget(target: TranscriptSearchPresentationTarget | undefined): void {
-    if (this.searchTarget === target && (target === undefined || this.searchRevealGranted)) return
-    this.searchTarget = target
-    if (target === undefined) {
-      this.searchRevealGranted = false
-      this.searchRevealHostOwned = false
-      this.searchRevealAffordance = 'none'
-    } else {
-      // Every target set is an explicit navigation and (re-)grants the
-      // temporary reveal. A long-user reveal latches HOST ownership and the
-      // surface affordance here so a later plugin unload / surface swap
-      // cannot resurrect an expansion that was not admitted at navigation
-      // time.
-      this.searchRevealGranted = true
-      // The runner sets the target BEFORE the anchored window is repainted, so
-      // a long-user hit may not have a cached component yet. Seed it first so
-      // the Host-ownership decision is real rather than a false "not owned".
-      if (isUserMessageDisclosureCandidate(target.message) && this.messageComponents.get(target.message) === undefined) {
-        this.componentForMessage(target.message, this.expandBoundary(), this.transcriptRenderWidth(), this.userExpandBoundary())
-      }
-      this.searchRevealHostOwned = !isUserMessageDisclosureCandidate(target.message)
-        || this.isHostUserDisclosure(target.message)
-      this.searchRevealAffordance = this.fullscreen !== undefined
-        ? 'fullscreen'
-        : this.keybindings.keyHint('app.transcript.toggleExpand') !== '' ? 'key' : 'none'
-      // A new navigation re-opens every PTC sub-call the previous target's
-      // reveal had covered.
-      this.searchSuppressedSubCalls.clear()
+    this.setTranscriptSearchPresentation({ matchMessages: this.searchMatchMessages, target, grantReveal: true })
+  }
+
+  /** Commit the representative set and the current target ATOMICALLY (perf plan
+   * S2 §5.1): a query change / Next / Prev reaches the message tree as ONE
+   * rebuild. Returns whether anything actually changed. */
+  setTranscriptSearchPresentation(presentation: TranscriptSearchPresentation): boolean {
+    if (!this.applySearchPresentation(presentation)) return false
+    this.rebuildMessages()
+    return true
+  }
+
+  /** Apply a search presentation to the live state WITHOUT rebuilding. The
+   * projection-commit path calls this before the single `setTranscript()`
+   * rebuild, so the target/reveal is in effect when the render blocks are
+   * built. Returns whether anything changed. */
+  private applySearchPresentation(presentation: TranscriptSearchPresentation): boolean {
+    let changed = false
+    if (this.searchMatchMessages !== presentation.matchMessages) {
+      this.searchMatchMessages = presentation.matchMessages
+      changed = true
     }
+    const next = presentation.target
+    // Compare SEMANTICALLY, never by object reference: the runner builds a
+    // fresh target object per repaint, and reference inequality would re-grant
+    // the reveal (undoing a user collapse) on every passive projection.
+    const sameTarget = sameSearchTarget(this.searchTarget, next)
+    const regrant = presentation.grantReveal === true && next !== undefined && !this.searchRevealGranted
+    if (!sameTarget || regrant) {
+      this.searchTarget = next
+      if (next === undefined) {
+        this.searchRevealGranted = false
+        this.searchRevealHostOwned = false
+        this.searchRevealAffordance = 'none'
+      } else if (presentation.grantReveal === true) {
+        // Every explicit navigation (re-)grants the temporary reveal. A long
+        // user reveal latches HOST ownership and the surface affordance here so
+        // a later plugin unload / surface swap cannot resurrect an expansion
+        // that was not admitted at navigation time.
+        this.searchRevealGranted = true
+        // The runner sets the target BEFORE the anchored window is repainted, so
+        // a long-user hit may not have a cached component yet. Seed it first so
+        // the Host-ownership decision is real rather than a false "not owned".
+        if (isUserMessageDisclosureCandidate(next.message) && this.messageComponents.get(next.message) === undefined) {
+          this.componentForMessage(next.message, this.expandBoundary(), this.transcriptRenderWidth(), this.userExpandBoundary())
+        }
+        this.searchRevealHostOwned = !isUserMessageDisclosureCandidate(next.message)
+          || this.isHostUserDisclosure(next.message)
+        this.searchRevealAffordance = this.fullscreen !== undefined
+          ? 'fullscreen'
+          : this.keybindings.keyHint('app.transcript.toggleExpand') !== '' ? 'key' : 'none'
+        // A new navigation re-opens every PTC sub-call the previous target's
+        // reveal had covered.
+        this.searchSuppressedSubCalls.clear()
+      }
+      // A passive rebind (grantReveal !== true) with a replaced card object
+      // keeps the existing grant/reveal flags — a user collapse stays revoked.
+      changed = true
+    }
+    if (!changed) return false
     this.searchPresentationRevision += 1
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    return true
   }
 
   /** Publish the current semantic-match representatives (deduped by card, the
    * runner owns this). Weak highlights are limited to this set; passing the
    * same reference is a no-op. */
   setSearchMatchMessages(messages: ReadonlySet<TranscriptMessage>): void {
-    if (this.searchMatchMessages === messages) return
-    this.searchMatchMessages = messages
-    this.searchPresentationRevision += 1
-    this.rebuildMessages()
+    this.setTranscriptSearchPresentation({ matchMessages: messages, target: this.searchTarget, grantReveal: false })
   }
 
   /** Rebind the CURRENT search target to the freshly projected card object for
@@ -6758,10 +6863,63 @@ export class TuiApp {
       return
     }
     if (target.message === message) return
-    this.searchTarget = { query: target.query, match: target.match, message }
-    this.searchPresentationRevision += 1
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.setTranscriptSearchPresentation({
+      matchMessages: this.searchMatchMessages,
+      target: { query: target.query, match: target.match, message },
+      grantReveal: false,
+    })
+  }
+
+  /** Test-only presentation work counters (perf plan S1 §4.1). */
+  searchPresentationDiagnosticsForTest(): TranscriptSearchPresentationDiagnostics {
+    return { ...this.searchPresentationDiagnostics }
+  }
+
+  /** Reset the test-only presentation work counters. */
+  resetSearchPresentationDiagnosticsForTest(): void {
+    this.searchPresentationDiagnostics.rebuilds = 0
+    this.searchPresentationDiagnostics.remeasures = 0
+    this.searchPresentationDiagnostics.renderedMatchScans = 0
+    this.searchPresentationDiagnostics.fullRenders = 0
+    this.searchPresentationDiagnostics.transcriptSets = 0
+  }
+
+  /** The cached transcript content geometry (perf plan S2 §5.6): the height the
+   * last rebuild/remeasure published for the search viewport anchor. Test-only. */
+  transcriptContentHeightForTest(): number {
+    return this.transcriptContentHeight
+  }
+
+  /** The live search presentation identity (perf plan S5 §8.1 harness): the
+   * current target's stable match key, the resolved card object and the reveal
+   * grant. Test-only. */
+  transcriptSearchPresentationForTest(): {
+    readonly query: string
+    readonly matchId: number
+    readonly matchTurn: number
+    readonly occurrence: number
+    readonly sourceOccurrence: number
+    readonly sourceKey: string
+    readonly message: TranscriptMessage | undefined
+    readonly revealGranted: boolean
+  } | undefined {
+    const target = this.searchTarget
+    if (target === undefined) return undefined
+    return {
+      query: target.query,
+      matchId: target.match.id,
+      matchTurn: target.match.turn,
+      occurrence: target.match.occurrence,
+      sourceOccurrence: target.match.sourceOccurrence,
+      sourceKey: transcriptSearchSourceKey(target.match.source),
+      message: target.message,
+      revealGranted: this.searchRevealGranted,
+    }
+  }
+
+  /** The published weak-match representative cards. Test-only. */
+  searchMatchMessagesForTest(): ReadonlySet<TranscriptMessage> {
+    return this.searchMatchMessages
   }
 
   /** Revoke the temporary search reveal (an explicit user collapse): the
@@ -7181,6 +7339,14 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /** The mounted view's content height. Every fullscreen viewport pass measures
+   * through here so the test-only `fullRenders` counter observes a real render
+   * (perf plan S1 §4.1). */
+  private renderedTranscriptContentHeight(width: number): number {
+    this.searchPresentationDiagnostics.fullRenders += 1
+    return this.messagesView.render(width).length
+  }
+
   /** The fullscreen FOLLOW-END viewport pass (plan 2026-08-25 §13): re-measure
    * the row map, feed the layout the NEW projected content height (a stale
    * height would clamp the scroll), then scroll to the end and keep
@@ -7190,7 +7356,7 @@ export class TuiApp {
     if (this.fullscreenScroll === undefined) return
     this.refreshMessageRows()
     const width = this.terminal.columns
-    const contentHeight = this.messagesView.render(width).length
+    const contentHeight = this.renderedTranscriptContentHeight(width)
     const viewportHeight = this.fullscreenScroll.viewportHeight
     this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
     this.fullscreenScroll.scrollToEnd()
@@ -7207,7 +7373,7 @@ export class TuiApp {
     if (this.fullscreenScroll === undefined) return
     this.refreshMessageRows()
     const width = this.terminal.columns
-    const contentHeight = this.messagesView.render(width).length
+    const contentHeight = this.renderedTranscriptContentHeight(width)
     const viewportHeight = this.fullscreenScroll.viewportHeight
     this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
     this.fullscreenScroll.scrollTo(previousScrollTop, { disableFollow: true })
@@ -7226,7 +7392,7 @@ export class TuiApp {
     if (this.fullscreenScroll === undefined) return
     this.refreshMessageRows()
     const width = this.terminal.columns
-    const contentHeight = this.messagesView.render(width).length
+    const contentHeight = this.renderedTranscriptContentHeight(width)
     const viewportHeight = this.fullscreenScroll.viewportHeight
     this.fullscreenScroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
     if (turn === undefined) return
@@ -7708,6 +7874,7 @@ export class TuiApp {
     // Non-current cards must be SEMANTIC match representatives: a card that
     // merely renders the query in UI chrome is never highlighted.
     if (!current && !this.searchMatchMessages.has(block.message)) return { current: false }
+    this.searchPresentationDiagnostics.renderedMatchScans += 1
     const matches = findAltScreenSearchMatches(rendered, target.query)
     if (!current && matches.length === 0) return { current: false }
     if (current) {
@@ -8029,6 +8196,7 @@ export class TuiApp {
 
   /** Rebuild the message component tree from the current transcript state. */
   private rebuildMessages(): void {
+    this.searchPresentationDiagnostics.rebuilds += 1
     // Every rebuild path (transcript updates AND local-card push/replace/
     // clear) prunes the cache to the live set first. The derived
     // projection set is computed ONCE per rebuild and shared by the
@@ -8042,6 +8210,7 @@ export class TuiApp {
     // the transcript CONTENT width — the same width the gutter wrapper feeds
     // the frame pass — so the heights match the screen exactly.
     const width = this.transcriptRenderWidth()
+    this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
     const renderedBlocks = this.renderTranscriptBlocks(projectionExpanded, width)
     // Publish the batch that this rebuild is about to mount. Measurement paths
     // (refreshMessageRows) read it instead of projecting a second batch.
@@ -8100,13 +8269,16 @@ export class TuiApp {
       }
       transcriptRow += height + padding
     })
+    let chromeHeight = 0
     if (this.transcriptWindowHint !== '') {
       // This is a presentation hint, not a transcript message: it is rebuilt
       // with the bounded projection and never enters the full-history search
       // corpus or Focus activity rows.
-      this.messagesView.addChild(new TranscriptGutterComponent(
+      const hint = new TranscriptGutterComponent(
         new Text(color.textDim(this.transcriptWindowHint), 0, 0),
-      ))
+      )
+      this.messagesView.addChild(hint)
+      chromeHeight += hint.render(this.terminal.columns).length
     }
     if (this.notifyText !== '') {
       // Errors flash red with a ✗; informational notices render dim with a ℹ
@@ -8116,8 +8288,14 @@ export class TuiApp {
       const line = this.notifyKind === 'info'
         ? color.textDim(`ℹ ${this.notifyText}`)
         : color.error(`✗ ${this.notifyText}`)
-      this.messagesView.addChild(new TranscriptGutterComponent(new Text(line, 0, 0)))
+      const notice = new TranscriptGutterComponent(new Text(line, 0, 0))
+      this.messagesView.addChild(notice)
+      chromeHeight += notice.render(this.terminal.columns).length
     }
+    // Publish the measured content geometry: an ordinary search jump reads it
+    // instead of re-rendering the whole mounted view (perf plan S2 §5.6).
+    this.transcriptChromeHeight = chromeHeight
+    this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + chromeHeight
     this.messageRows = rows
     this.renderTodoPanel()
     this.requestRender()
@@ -8207,6 +8385,7 @@ export class TuiApp {
    * Must measure at the SAME transcript content width the frame paints at
    * (the gutter contract), or the hit map drifts from the layout. */
   private refreshMessageRows(): void {
+    this.searchPresentationDiagnostics.remeasures += 1
     const width = this.transcriptRenderWidth()
     // Measurement-only: the derived projection set is read once, and the
     // MOUNTED batch is remeasured in place. Projecting a second component batch
@@ -8245,26 +8424,24 @@ export class TuiApp {
       if (padding > 0) rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
       transcriptRow += height + padding
     }
+    this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
+    this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + this.transcriptChromeHeight
     this.messageRows = rows
   }
 
   /** Anchor the fullscreen transcript viewport on the current search
-   * occurrence (plan §9): re-measure AFTER the reveal/rebuild, feed the new
-   * content height, then place the occurrence about one third down the
-   * viewport with follow-end disabled. Regular mode has no app-owned
-   * ScrollView — the materialized window + reveal + highlight are the
-   * contract there. */
+   * occurrence (plan §9): reuse the geometry the last rebuild/remeasure already
+   * measured (perf plan S2 §5.6 — an ordinary search jump must NOT re-render
+   * the whole mounted view), then place the occurrence about one third down the
+   * viewport with follow-end disabled. Regular mode has no app-owned ScrollView
+   * — the materialized window + reveal + highlight are the contract there. */
   scrollToSearchTarget(): void {
     const scroll = this.fullscreenScroll
     const transcriptRow = this.currentSearchTranscriptRow
     if (scroll === undefined || transcriptRow === undefined) return
-    this.refreshMessageRows()
-    const width = this.terminal.columns
-    const contentHeight = this.messagesView.render(width).length
     const viewportHeight = scroll.viewportHeight
-    scroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
-    const welcomeHeight = this.welcomeCard.render(width).length
-    const target = welcomeHeight + this.currentSearchTranscriptRow!
+    scroll.updateLayout(this.transcriptContentHeight, viewportHeight, () => this.requestRender())
+    const target = this.transcriptWelcomeHeight + transcriptRow
     const desiredTop = Math.max(0, target - Math.floor(viewportHeight / 3))
     scroll.scrollTo(desiredTop, { disableFollow: true })
   }
@@ -8434,7 +8611,7 @@ export class TuiApp {
     if (scroll === undefined) return false
     this.refreshMessageRows()
     const width = this.terminal.columns
-    const contentHeight = this.messagesView.render(width).length
+    const contentHeight = this.renderedTranscriptContentHeight(width)
     const viewportHeight = scroll.viewportHeight
     scroll.updateLayout(contentHeight, viewportHeight, () => this.requestRender())
     const welcomeHeight = this.welcomeCard.render(width).length
@@ -8899,7 +9076,7 @@ export class TuiApp {
     // Any OTHER CAPTURING overlay owns the press: no transcript / dock /
     // todo identity below is reachable (the click is inert behind it). A
     // nonCapturing notice is non-modal, so background clicks still resolve.
-    if (this.overlayBroker.hasVisibleModalOverlay()) {
+    if (this.overlayBlocksTranscriptPointer()) {
       this.fullscreenCellGesture = undefined
       return
     }
@@ -8964,6 +9141,16 @@ export class TuiApp {
     this.fullscreenCellGesture = undefined
   }
 
+  /** Whether a visible modal overlay blocks fullscreen transcript pointer
+   * (disclosure) gestures. The transcript-search box is the ONE exception (fork
+   * seam X058): it is a viewport-passthrough overlay, so while it is the ONLY
+   * visible modal the background disclosure clicks stay live. Any other modal —
+   * or a modal stacked with the search box — blocks exactly as before. */
+  private overlayBlocksTranscriptPointer(): boolean {
+    if (!this.overlayBroker.hasVisibleModalOverlay()) return false
+    return this.searchOverlay === undefined || this.overlayBroker.visibleModalOverlayCount() !== 1
+  }
+
   private handleFullscreenClick(x: number, y: number): void {
     // A question owns the modal front: clicks inside its frame (the editor
     // seat, pinned above the footer) route to the flow — option rows select,
@@ -9023,7 +9210,7 @@ export class TuiApp {
     // todo/transcript gesture is dead (a cross-mode close before the
     // release must not resurrect it on the background surface). A
     // nonCapturing notice is non-modal and does not own the release.
-    if (this.overlayBroker.hasVisibleModalOverlay()) {
+    if (this.overlayBlocksTranscriptPointer()) {
       this.fullscreenCellGesture = undefined
       return
     }

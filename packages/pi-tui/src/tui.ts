@@ -309,6 +309,22 @@ export interface OverlayOptions {
 	 * capturing policy for later show/focus.
 	 */
 	initialFocus?: boolean;
+	/**
+	 * Let the primary viewport keep receiving scroll/navigation input while
+	 * THIS capturing overlay holds keyboard focus (dsh-pi-tui divergence
+	 * X058). The overlay still owns the keyboard (unlike `nonCapturing`) and
+	 * still owns the pointer INSIDE its own rectangle — an event the overlay
+	 * handles is never also applied to the background. Only the primary
+	 * viewport's SCROLL/navigation additionally stays live when the overlay
+	 * does not consume the event: wheel / Alt+wheel anywhere, PageUp/PageDown,
+	 * scrollbar hit-testing/dragging, and background text selection outside the
+	 * overlay rectangle. Keyboard keys the overlay's focused component can
+	 * consume (Home/End, Ctrl+U/Ctrl+D, Up/Down, typing) still win.
+	 *
+	 * Default false: an ordinary capturing overlay keeps upstream's full
+	 * viewport block. Ignored for `nonCapturing` overlays.
+	 */
+	viewportPassthrough?: boolean;
 }
 
 /** Options for {@link OverlayHandle.unfocus}. */
@@ -1144,6 +1160,36 @@ export abstract class TuiBase extends Container implements TUI {
 	protected isOverlayFocused(): boolean {
 		return this.overlayStack.some(
 			(entry) => entry.component === this.focusedComponent && this.isOverlayVisible(entry),
+		);
+	}
+
+	/**
+	 * Whether a visible overlay currently BLOCKS the primary viewport's
+	 * scroll/navigation input and pointer gestures. An overlay opted into
+	 * `viewportPassthrough` (dsh-pi-tui divergence X058) does not block; every
+	 * other visible overlay, including `nonCapturing` ones, keeps the upstream
+	 * block so this predicate is exactly `hasOverlay()` minus opted-in entries.
+	 */
+	protected hasBlockingOverlay(): boolean {
+		return this.overlayStack.some(
+			(entry) => this.isOverlayVisible(entry) && entry.options?.viewportPassthrough !== true,
+		);
+	}
+
+	/**
+	 * Whether the primary viewport currently PASSTHROUGHS scroll/navigation
+	 * input while an overlay owns the keyboard (dsh-pi-tui divergence X058):
+	 * the FOCUSED visible overlay opted in, and no other visible overlay blocks
+	 * the viewport. Stacking an ordinary modal above stops the passthrough
+	 * immediately; hiding it restores it.
+	 */
+	protected overlayViewportPassthrough(): boolean {
+		const focused = this.overlayStack.find(
+			(entry) => entry.component === this.focusedComponent && this.isOverlayVisible(entry),
+		);
+		if (focused?.options?.viewportPassthrough !== true) return false;
+		return !this.overlayStack.some(
+			(entry) => entry !== focused && this.isOverlayVisible(entry) && entry.options?.viewportPassthrough !== true,
 		);
 	}
 
