@@ -166,6 +166,17 @@ test('presentation: a trailing OSC8 hyperlink terminator survives', () => {
   assert.equal(visibleWidth(decorated[0]!), visibleWidth(lines[0]!))
 })
 
+test('presentation: weakOnly decorates every occurrence and selects none', () => {
+  const lines = ['foo bar foo']
+  const selection = renderedSearchSelection(lines, { query: 'foo', weakOnly: true, sourceOccurrence: 0 })
+  assert.equal(selection.selectedIndex, -1, 'no occurrence is current')
+  const decorated = highlightSearchLines(lines, selection)
+  assert.equal(decorated[0]!.split('\x1b[4m').length - 1, 2, 'both occurrences are weak')
+  assert.ok(!decorated[0]!.includes('\x1b[1;7m'), 'no strong occurrence')
+  assert.equal(stripTerminalSequences(decorated[0]!), 'foo bar foo')
+  assert.equal(visibleWidth(decorated[0]!), visibleWidth(lines[0]!))
+})
+
 test('presentation: SearchHighlightComponent reuses the child render and decorates it', () => {
   const child = linesComponent(['alpha needle beta'])
   const component = new SearchHighlightComponent(child, selector('needle'))

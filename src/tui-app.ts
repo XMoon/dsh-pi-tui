@@ -6713,6 +6713,25 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
+  /** Rebind the CURRENT search target to the freshly projected card object for
+   * the SAME match (a live group reflow replaces the representative object).
+   * The runner calls this after every passive repaint while search is active,
+   * so object identity is never the long-lived authority. Presentation-only:
+   * it does NOT re-grant the reveal, so a user collapse stays collapsed. */
+  rebindTranscriptSearchTarget(message: TranscriptMessage | undefined): void {
+    const target = this.searchTarget
+    if (target === undefined) return
+    if (message === undefined) {
+      this.setTranscriptSearchTarget(undefined)
+      return
+    }
+    if (target.message === message) return
+    this.searchTarget = { query: target.query, match: target.match, message }
+    this.searchPresentationRevision += 1
+    this.clearFocusLiveHeightState()
+    this.rebuildMessages()
+  }
+
   /** Revoke the temporary search reveal (an explicit user collapse): the
    * semantic match/highlight stay current, but the target no longer forces
    * its card open until the next explicit navigation. */
@@ -7610,11 +7629,10 @@ export class TuiApp {
       }
       let mountedComponent: Component | undefined
       let searchSelection: RenderedSearchSelection | undefined
-      const searchTarget = this.searchTarget
-      if (searchTarget !== undefined && block.kind === 'message' && block.message === searchTarget.message) {
-        const selector = this.searchSelectorFor(searchTarget, subCallHits, workflowHits, workflowMemberRanges)
-        searchSelection = renderedSearchSelection(rendered, selector)
-        mountedComponent = new SearchHighlightComponent(component, selector)
+      const presentation = this.blockSearchPresentation(block, rendered, subCallHits, workflowHits, workflowMemberRanges)
+      if (presentation.selector !== undefined && presentation.selection !== undefined) {
+        searchSelection = presentation.selection
+        mountedComponent = new SearchHighlightComponent(component, presentation.selector)
       }
       return {
         block,
@@ -7630,6 +7648,29 @@ export class TuiApp {
         ...(userDisclosureHit === undefined ? {} : { userDisclosureHit }),
       }
     })
+  }
+
+  /** The rendered search presentation of ONE block while a search is active:
+   * the current target block selects its semantic occurrence (strong), every
+   * other VISIBLE message block with rendered matches is decorated WEAKLY so
+   * the whole on-screen match set is visible. Returns no selector for a block
+   * with no rendered occurrence (or when no search is active). */
+  private blockSearchPresentation(
+    block: TranscriptRenderBlock,
+    rendered: readonly string[],
+    subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined,
+    workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined,
+    workflowMemberRanges: ReadonlyArray<WorkflowMemberRange> | undefined,
+  ): { selector?: RenderedSearchSelector; selection?: RenderedSearchSelection; current: boolean } {
+    const target = this.searchTarget
+    if (target === undefined || target.query === '' || block.kind !== 'message') return { current: false }
+    const current = block.message === target.message
+    const selector: RenderedSearchSelector = current
+      ? this.searchSelectorFor(target, subCallHits, workflowHits, workflowMemberRanges)
+      : { query: target.query, weakOnly: true, sourceOccurrence: 0 }
+    const selection = renderedSearchSelection(rendered, selector)
+    if (!current && selection.matches.length === 0) return { current }
+    return { selector, selection, current }
   }
 
   /** The rendered-occurrence selector for the current search target: the
@@ -7744,10 +7785,7 @@ export class TuiApp {
       const workflowMemberRanges = memberInfo === undefined
         ? undefined
         : memberInfo.ranges.map(range => ({ ...range, top: range.top + rendered.length - memberInfo.total }))
-      const searchTarget = this.searchTarget
-      const searchSelection = searchTarget !== undefined && entry.block.message === searchTarget.message
-        ? renderedSearchSelection(rendered, this.searchSelectorFor(searchTarget, subCallHits, workflowHits, workflowMemberRanges))
-        : undefined
+      const searchSelection = this.blockSearchPresentation(entry.block, rendered, subCallHits, workflowHits, workflowMemberRanges).selection
       return {
         ...entry,
         rendered,

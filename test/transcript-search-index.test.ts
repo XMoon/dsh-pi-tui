@@ -1156,7 +1156,7 @@ test('occurrence: a nested PTC hit carries its full ancestor subCallId path', ()
   assert.equal(matches[0]!.id, 0, 'the hit still locates the root Code card')
 })
 
-test('occurrence: prefix refinement rescans candidate cards for every occurrence', () => {
+test('occurrence: prefix refinement rescans each candidate card once', () => {
   const folder = new TranscriptFolder()
   folder.hydrate([
     turnStart(0, 0),
@@ -1177,6 +1177,32 @@ test('occurrence: prefix refinement rescans candidate cards for every occurrence
   assert.equal(matches.length, 4, 'refinement must not lose duplicate-id occurrences')
   assert.deepEqual(matches.map(match => match.occurrence), [0, 1, 2, 0])
   assert.equal(folder.searchDiagnosticsForTest().fullScans, fullScansBefore, 'refinement never full-scans')
+})
+
+test('refinement: a high-occurrence card eliminated by the next character is scanned once', () => {
+  const folder = new TranscriptFolder()
+  // One card with 20k `a` occurrences that the NEXT character eliminates, plus
+  // a second card that keeps matching. Refinement must rescan CARDS, not
+  // occurrences (the old per-match loop re-ran the same failing `includes()`
+  // 20k times and stalled Ctrl+F on large tool output).
+  folder.hydrate([
+    turnStart(0, 0),
+    userMessage(1, 'a'.repeat(20_000)),
+    turnEnd(2, 0),
+    turnStart(3, 1),
+    userMessage(4, 'ab'),
+    turnEnd(5, 1),
+  ])
+  const previous = folder.search('a')
+  assert.equal(previous.length, 20_001, '20k occurrences in card one plus one in card two')
+  const candidatesBefore = folder.searchDiagnosticsForTest().refinedCandidates
+  const after = folder.search('ab', { previousQuery: 'a', previousMatches: previous, revision: folder.searchRevision() })
+  assert.equal(after.length, 1, 'only the second card still matches')
+  assert.equal(
+    folder.searchDiagnosticsForTest().refinedCandidates - candidatesBefore,
+    2,
+    'one rescan per candidate CARD, never per previous occurrence',
+  )
 })
 
 test('occurrence: live append refreshes the occurrence count', () => {
