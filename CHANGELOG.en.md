@@ -46,12 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   occurrence, otherwise it is anchored to the owning source region without a
   strong highlight (never a wrong one). Fullscreen follows the same rule
   instead of jumping to the window bottom.
-- **The search reveal is temporary.** Closing search with `Esc` restores your
-  previous fold state; a search can temporarily reveal collapsed Thinking,
-  tool/system/compaction cards, long user prompts, nested PTC sub-calls, and
-  members hidden by a large Workflow phase summary, without overwriting your own
-  manual expand/collapse choices. No search highlight or reveal survives the
-  close.
+- **Closing search keeps the current position and representable disclosure.** Closing with
+  `Esc` or the search toggle no longer returns to the window that was visible before
+  search; a card, Thought, PTC path, or Workflow Run/Phase temporarily opened to show
+  the current result remains open when it has an existing user disclosure owner.
+  Search highlights, search-only rows, reveals without a durable owner, and content the
+  user explicitly collapsed during search are still cleared. `Ctrl+End` still returns
+  explicitly to the latest content.
 - **A session switch no longer leaves the previous search's current hit
   behind.** A new session never inherits the old session's search highlight or
   temporary reveal.

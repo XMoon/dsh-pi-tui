@@ -274,6 +274,125 @@ test('navigation: a passive transcript repaint does not snap back to the search 
   app.stop()
 })
 
+test('dismiss promotion: Focus root and fullscreen secondary card keep a searched tool open', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('u-focus'), role: 'user', content: [{ type: 'text', text: 'run the tool' }], source: { kind: 'user' },
+    }, 1),
+    event('tool/call', {
+      turn: 0, step: 0, callId: ToolCallId('focus-tool'), name: 'bash', arguments: JSON.stringify({ command: 'echo needle' }),
+    }, 2),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('focus-result'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('focus-tool'), content: [{ type: 'text', text: 'needle output' }] }],
+        source: { kind: 'tool', callId: ToolCallId('focus-tool') },
+      },
+    }, 3),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('focus-answer'), role: 'assistant', content: [{ type: 'text', text: 'done' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+  ])
+  const match = folder.search('needle').find(candidate => candidate.source.kind === 'tool-field' && candidate.source.field === 'result')
+  assert.ok(match !== undefined, 'the tool result search hit exists')
+  const message = folder.resolveSearchMatch(match)
+  assert.ok(message !== undefined, 'the tool result resolves to its tool card')
+
+  const { vt, app } = startApp()
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  app.setTranscriptSearchTarget({ query: 'needle', match, message })
+  let lines = await viewport(vt)
+  assert.ok(lines.some(line => line.includes('needle output')), `the search reveal opens the tool body:\n${lines.join('\n')}`)
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  lines = await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride
+  assert.equal(app.focusExpandedTurnsForTest().has(0), true, 'dismiss promotes the real Focus Thought root')
+  assert.equal(overrides.get(message), true, 'dismiss promotes the fullscreen secondary owner')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears search presentation')
+  assert.ok(lines.some(line => line.includes('needle output')), `the searched tool remains open:\n${lines.join('\n')}`)
+  app.stop()
+})
+
+test('dismiss promotion: Workflow Run and Phase owners become durable after dismiss', async () => {
+  const card = {
+    kind: 'workflow', turn: 0, runId: 'run-close' as never, name: 'audit', status: 'completed',
+    members: Array.from({ length: 6 }, (_, seq) => ({
+      seq, label: seq === 5 ? 'needle member' : `member ${seq}`, phase: 'P', childId: `child-${seq}` as never, status: 'completed',
+    })),
+  } as Extract<TranscriptMessage, { kind: 'workflow' }>
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  app.setTranscript([card])
+  const match = {
+    id: 0, turn: 0, occurrence: 0,
+    source: { kind: 'workflow-member' as const, phaseKey: workflowPhaseKey('P'), seq: 5, field: 'label' as const },
+    sourceOccurrence: 0,
+  }
+  app.setTranscriptSearchTarget({ query: 'needle', match, message: card })
+  let lines = await viewport(vt)
+  assert.ok(lines.some(line => line.includes('needle member')), `the search reveal opens the member context:\\n${lines.join('\n')}`)
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  lines = await viewport(vt)
+  const disclosure = (app as unknown as {
+    workflowDisclosure: Map<string, { userOpen?: boolean; phases: Map<string, { userOpen?: boolean }> }>
+  }).workflowDisclosure
+  const state = disclosure.get('run-close')
+  assert.equal(state?.userOpen, true, 'dismiss promotes the Workflow Run owner')
+  assert.equal(state?.phases.get(workflowPhaseKey('P'))?.userOpen, true, 'dismiss promotes the Workflow Phase owner')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears search presentation')
+  assert.ok(lines.some(line => line.includes('Workflow')), `the durable Workflow card remains:\\n${lines.join('\n')}`)
+  app.stop()
+})
+
+test('dismiss promotion: regular secondary reveal has no per-card owner to promote', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'thinking', turn: 0, text: 'needle reasoning' }
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  assert.ok((await viewport(vt)).some(line => line.includes('needle reasoning')), 'the regular search reveal is visible')
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  const overrides = (app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride
+  assert.notEqual(overrides.get(message), true, 'regular Thinking has no per-card owner to promote')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears search presentation')
+  app.stop()
+})
+
+test('dismiss promotion: generic assistant presentation has no durable expansion owner', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'assistant', turn: 0, text: 'needle assistant body' }
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  await viewport(vt)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride
+  assert.notEqual(overrides.get(message), true, 'generic assistant search presentation is not made durable')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears search presentation')
+  app.stop()
+})
+
 test('navigation: a two-level PTC path reveals the grandchild body', async () => {
   const grandchild: TranscriptToolMessage = {
     kind: 'tool', turn: 0, name: 'bash', args: '{}', result: 'deepest-needle output', status: 'ok',
@@ -787,11 +906,29 @@ test('navigation: an explicit re-navigation re-opens a manually collapsed PTC su
   assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, true,
     'a PTC sub-call collapse keeps the reveal grant (plan §7.5)')
 
+  // Dismissing after the manual collapse must NOT promote that suppressed path
+  // into durable disclosure, but it must clear the presentation atomically.
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  lines = await viewport(vt)
+  const subCallExpanded = (app as unknown as { subCallExpanded: Set<string> }).subCallExpanded
+  assert.equal(subCallExpanded.has('grand-1'), false, 'a manually collapsed PTC child is not promoted on dismiss')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears the search target')
+  assert.equal(app.searchPresentationDiagnosticsForTest().rebuilds, 1, 'dismiss clears presentation in one rebuild')
+  assert.ok(!lines.some(line => line.includes('deepest-needle output')),
+    `the suppressed child stays collapsed after dismiss:\n${lines.join('\n')}`)
+
   // An explicit navigation that wraps to the SAME semantic target must still
   // re-open the sub-call (plan §10.4: only the next explicit Next/Prev re-reveals).
   app.setTranscriptSearchTarget(target())
   lines = await viewport(vt)
   assert.ok(lines.some(line => line.includes('deepest-needle output')),
     `an explicit re-navigation must re-open the collapsed sub-call:\n${lines.join('\n')}`)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  lines = await viewport(vt)
+  assert.equal(subCallExpanded.has('child-1'), true, 'the ancestor child is promoted on dismiss')
+  assert.equal(subCallExpanded.has('grand-1'), true, 'the current PTC child is promoted on dismiss')
+  assert.ok(lines.some(line => line.includes('deepest-needle output')),
+    `a non-suppressed search reveal stays open after dismiss:\n${lines.join('\n')}`)
   app.stop()
 })

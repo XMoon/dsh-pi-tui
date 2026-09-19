@@ -327,6 +327,33 @@ test('revealSearchMatch leaves an already-expanded user message untouched', asyn
   app.stop()
 })
 
+test('dismiss promotes a current long-user reveal but honors an explicit collapse', async () => {
+  const { vt, app } = startApp(100, 30)
+  const message = user(lines(11))
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  assert.equal(compactMarkerCount(await viewRows(vt)), 1, 'the long user starts compact')
+  app.revealSearchMatch(message)
+  assert.equal(compactMarkerCount(await viewRows(vt)), 0, 'search temporarily expands the long user')
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  assert.equal(compactMarkerCount(await viewRows(vt)), 0, 'dismiss keeps the promoted long user expanded')
+  assert.equal((app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride.get(message), true,
+    'dismiss promotes the existing long-user disclosure owner')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears search presentation')
+  app.clearSessionOverrides()
+  const collapsedMessage = user(lines(11))
+  app.setTranscript([collapsedMessage])
+  app.revealSearchMatch(collapsedMessage)
+  assert.equal(compactMarkerCount(await viewRows(vt)), 0, 'precondition: search reveal is open')
+  vt.sendInput('\x0f')
+  assert.equal(compactMarkerCount(await viewRows(vt)), 1, 'the explicit collapse revokes the search reveal')
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  assert.equal(compactMarkerCount(await viewRows(vt)), 1, 'dismiss does not re-open an explicitly collapsed user')
+  assert.notEqual((app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride.get(collapsedMessage), true,
+    'an explicit collapse is not promoted')
+  app.stop()
+})
+
 // ── Non-candidates keep the existing presentation ────────────────────────
 
 test('mixed-content user messages are never compacted', async () => {
