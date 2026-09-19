@@ -209,7 +209,11 @@
     "build": "pnpm build:fork && pnpm build:bundle",
     "typecheck:fork": "pnpm --dir packages/pi-tui typecheck",
     "typecheck:bundle": "tsc -p tsconfig.json --noEmit",
-    "typecheck": "pnpm typecheck:fork && pnpm typecheck:bundle",
+    "typecheck:bench": "tsc -p tsconfig.bench.json --noEmit",
+    "typecheck": "pnpm typecheck:fork && pnpm typecheck:bundle && pnpm typecheck:bench",
+    "bench": "node --expose-gc --import tsx/esm scripts/bench.mts",
+    "bench:fast": "BENCH_FAST=1 node --expose-gc --import tsx/esm scripts/bench.mts",
+    "bench:smoke": "BENCH_SMOKE=1 node --expose-gc --import tsx/esm scripts/bench.mts",
     "test:fork": "node scripts/run-with-temp-root.mjs pnpm --dir packages/pi-tui test",
     "test:bundle": "pnpm test:product && pnpm test:tooling",
     "test:docs": "node scripts/run-with-temp-root.mjs node --test docs/tmux/*.test.mjs",
@@ -262,7 +266,7 @@
     "prepare": "husky",
     "gate:boundary": "node scripts/client-boundary-gate.mjs",
     "gate:keybindings": "node --import tsx/esm scripts/check-host-keybindings.mts",
-    "test:tooling": "node scripts/run-with-temp-root.mjs node --test test/dev-environment.test.mjs test/dev-bootstrap-ephemeral.test.mjs test/client-server-migration.test.mjs test/pre-push-hook.test.mjs test/pre-push-stages.test.mjs test/dsh-ci-context.test.mjs test/dsh-distribution.test.mjs test/dsh-npm-verify.test.mjs test/dsh-peer-window.test.mjs test/dsh-process.test.mjs test/dsh-runtime-boundary.test.mjs test/dsh-source-identity.test.mjs test/dsh-source-leak.test.mjs test/release-context.test.mjs test/release-notes.test.mjs test/source-mode-rules.test.mjs test/client-boundary-gate.test.mjs test/tarball-source-install.test.mjs test/pi2dsh-compat-smoke.test.mjs test/temp-hygiene-gate.test.mjs test/pi-vendor-diff-gate.test.mjs test/pi-divergence-ledger-gate.test.mjs test/run-with-temp-root.test.mjs test/raw-persistence-coupling-gate.test.mjs",
+    "test:tooling": "node scripts/run-with-temp-root.mjs node --test test/bench-smoke.test.mjs test/dev-environment.test.mjs test/dev-bootstrap-ephemeral.test.mjs test/client-server-migration.test.mjs test/pre-push-hook.test.mjs test/pre-push-stages.test.mjs test/dsh-ci-context.test.mjs test/dsh-distribution.test.mjs test/dsh-npm-verify.test.mjs test/dsh-peer-window.test.mjs test/dsh-process.test.mjs test/dsh-runtime-boundary.test.mjs test/dsh-source-identity.test.mjs test/dsh-source-leak.test.mjs test/release-context.test.mjs test/release-notes.test.mjs test/source-mode-rules.test.mjs test/client-boundary-gate.test.mjs test/tarball-source-install.test.mjs test/pi2dsh-compat-smoke.test.mjs test/temp-hygiene-gate.test.mjs test/pi-vendor-diff-gate.test.mjs test/pi-divergence-ledger-gate.test.mjs test/run-with-temp-root.test.mjs test/raw-persistence-coupling-gate.test.mjs",
     "test:product": "node scripts/run-with-temp-root.mjs node --test test/*.test.ts test/tarball-smoke.test.mjs"
   }
 }
