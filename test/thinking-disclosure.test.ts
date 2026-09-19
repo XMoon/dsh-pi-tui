@@ -1060,7 +1060,9 @@ test('H3: collapsing an unrelated Thinking card keeps the current search reveal'
   let alphaRow = rows.findIndex(line => stripTerminalSequences(line).includes('alpha reasoning'))
   assert.ok(alphaRow >= 0, `the search target expands alpha:\n${rows.join('\n')}`)
   let alphaCol = stripTerminalSequences(rows[alphaRow]!).indexOf('alpha')
-  assert.ok(vt.getCellInverse(alphaRow, alphaCol), 'precondition: alpha is the current occurrence')
+  // A Thinking card renders a `Thinking` header + indented body, so its whole
+  // card is not an occurrence-preserving projection: anchor-only, no strong.
+  assert.ok(!vt.getCellInverse(alphaRow, alphaCol), 'a Thinking card is anchor-only')
 
   // Collapse the UNRELATED beta card (click its own row).
   const betaRow = rows.findIndex(line => stripTerminalSequences(line).includes('beta reasoning'))
@@ -1070,9 +1072,7 @@ test('H3: collapsing an unrelated Thinking card keeps the current search reveal'
   rows = vt.getViewport()
   assert.ok(!rows.join('\n').includes('\n  beta reasoning'), 'beta collapsed')
   alphaRow = rows.findIndex(line => stripTerminalSequences(line).includes('alpha reasoning'))
-  assert.ok(alphaRow >= 0, 'alpha stays expanded')
-  alphaCol = stripTerminalSequences(rows[alphaRow]!).indexOf('alpha')
-  assert.ok(vt.getCellInverse(alphaRow, alphaCol), 'the unrelated Thinking collapse must NOT revoke the search reveal')
+  assert.ok(alphaRow >= 0, 'the unrelated Thinking collapse must NOT revoke alpha search reveal (alpha stays expanded)')
   app.setFullscreen(false)
   app.stop()
 })
