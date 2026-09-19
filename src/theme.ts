@@ -60,6 +60,19 @@ export interface ColorPalette {
   roleUserBg?: string
   /** Shell-mode accent (reserved for `!` shell mode). */
   shellMode: string
+  /** Transcript search: THE CURRENT exact occurrence's foreground. Paired with
+   * {@link ColorPalette.searchCurrentBg}. Optional like `roleUserBg`: a plugin
+   * palette that omits it keeps the terminal-inverse highlight. */
+  searchCurrentFg?: string
+  /** Transcript search: the current exact occurrence's background. Absent (a
+   * plugin palette that predates the tokens) falls back to the terminal-inverse
+   * style, never to an invisible highlight. */
+  searchCurrentBg?: string
+  /** Transcript search: the ANCHOR-ONLY current result's row background. The
+   * query occurrences on that row stay weak-underlined — the background marks
+   * the owning source/card row, never a proven occurrence. Deliberately weaker
+   * than {@link ColorPalette.searchCurrentBg}; absent = no wash. */
+  searchAnchorBg?: string
 }
 
 /** Dark palette (default), tuned for ≥ 4.5:1 contrast on black. */
@@ -85,6 +98,12 @@ export const darkColors: ColorPalette = {
   shellMode: '#BD93F9',
   /** dsh-web `--dsw-specific-bubble` (dark): neutral bluish-850. */
   roleUserBg: '#2C2C2F',
+  /** Search current occurrence (dark): dark ink on a bright amber block. */
+  searchCurrentFg: '#141410',
+  searchCurrentBg: '#F5C542',
+  /** Search anchor-only row (dark): a dim amber-tinted wash, clearly weaker
+   * than the exact occurrence block. */
+  searchAnchorBg: '#3A3220',
 }
 
 /** Light palette, tuned for ≥ 4.5:1 contrast on white (pi's values). */
@@ -110,6 +129,11 @@ export const lightColors: ColorPalette = {
   shellMode: '#7C3AED',
   /** dsh-web `--dsw-specific-bubble` (light): deepseek-100. */
   roleUserBg: '#E4EDFD',
+  /** Search current occurrence (light): dark ink on a saturated amber block. */
+  searchCurrentFg: '#1A1A1A',
+  searchCurrentBg: '#FFD75E',
+  /** Search anchor-only row (light): a pale amber wash. */
+  searchAnchorBg: '#FFF0C2',
 }
 
 /** The active palette; style helpers read it on every call, so swapping is live. */
@@ -174,6 +198,7 @@ const PALETTE_KEYS: readonly (keyof ColorPalette)[] = [
   'diffAdded', 'diffRemoved', 'diffAddedStrong', 'diffRemovedStrong',
   'diffGutter', 'diffMeta',
   'roleUser', 'roleUserBg', 'shellMode',
+  'searchCurrentFg', 'searchCurrentBg', 'searchAnchorBg',
 ]
 
 /**
@@ -327,6 +352,20 @@ export const color = {
     ? text
     : chalk.bgHex(currentPalette.roleUserBg)(text),
   shellMode: (text: string) => hex('shellMode')(text),
+  /** The current EXACT search occurrence: bold with an explicit themed
+   * foreground AND background. Never the terminal's inverse attribute when the
+   * palette declares the tokens — a themed block is unambiguous and cannot be
+   * inverted away by the emulator. A palette that predates the tokens (a plugin
+   * theme) keeps the historical inverse fallback. */
+  searchCurrent: (text: string) => currentPalette.searchCurrentBg === undefined
+    ? `\x1b[1;7m${text}\x1b[22;27m`
+    : chalk.bold.hex(currentPalette.searchCurrentFg ?? currentPalette.textStrong).bgHex(currentPalette.searchCurrentBg)(text),
+  /** The anchor-only current result's ROW background: it marks the owning
+   * source/card row while every query occurrence on it stays weak-underlined.
+   * Never a proven occurrence — provenance is unchanged. Absent = no wash. */
+  searchAnchorBg: (text: string) => currentPalette.searchAnchorBg === undefined
+    ? text
+    : chalk.bgHex(currentPalette.searchAnchorBg)(text),
   /** Plain italics (kimi thinking parity); an optional tone override
    * colors the italic run. */
   italic: (text: string, tone?: string) => tone === undefined

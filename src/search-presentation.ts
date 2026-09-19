@@ -19,13 +19,19 @@ import {
   type AltScreenSearchSegment,
   type Component,
 } from '@xmoon76/pi-tui'
+import { color } from './theme.ts'
 
 /** The weak highlight of a visible non-current occurrence — the native
  * fullscreen search default. */
 const SEARCH_MATCH_STYLE = (text: string): string => `\x1b[4m${text}\x1b[24m`
 
-/** The strong highlight of the current occurrence — the native default. */
-const SEARCH_CURRENT_MATCH_STYLE = (text: string): string => `\x1b[1;7m${text}\x1b[22;27m`
+/** The strong highlight of the current occurrence: bold + explicit theme-aware
+ * foreground/background (plan S3 §6.2). Deliberately NOT the terminal's inverse
+ * attribute — provenance is unchanged, only the rendering is themed. */
+const SEARCH_CURRENT_MATCH_STYLE = (text: string): string => color.searchCurrent(text)
+
+/** The anchor-only current result's row wash (weaker than the exact block). */
+const SEARCH_ANCHOR_STYLE = (text: string): string => color.searchAnchorBg(text)
 
 const KITTY_IMAGE_PREFIX = '\x1b_G'
 const ITERM2_IMAGE_PREFIX = '\x1b]1337;File='
@@ -239,6 +245,16 @@ export function highlightSearchLines(
     if (trailing !== '' && !output.endsWith(trailing)) output += trailing
     result[row] = output
   }
+  // The ANCHOR-ONLY current result (plan S3 §6.3): no proven occurrence, so
+  // every match stays weak — but the owning source/card row gets a weaker
+  // background so the user can still see WHERE the current N/M lives. The
+  // occurrence provenance (selectedIndex = -1), the count and the scroll anchor
+  // are all unchanged.
+  if (selection.selectedIndex < 0 && selection.selectedRow !== undefined) {
+    const row = selection.selectedRow
+    const line = result[row]
+    if (line !== undefined && !isImageLine(line)) result[row] = styleVisibleText(line, SEARCH_ANCHOR_STYLE)
+  }
   return result
 }
 
@@ -305,8 +321,9 @@ export class SearchHighlightComponent implements Component {
     if (this.disabled) return lines
     if (width !== this.selectionWidth || !sameSourceLines(lines, this.sourceLines)) {
       // The recorded geometry does not describe these lines: decorate the
-      // visible matches weak-only and never paint a stale strong occurrence.
-      this.selection = { matches: findAltScreenSearchMatches(lines, this.selector.query), selectedIndex: -1, selectedRow: 0, exact: false }
+      // visible matches weak-only and never paint a stale strong occurrence or
+      // a stale anchor row.
+      this.selection = { matches: findAltScreenSearchMatches(lines, this.selector.query), selectedIndex: -1, selectedRow: undefined, exact: false }
       this.selectionWidth = width
       this.sourceLines = lines
     }

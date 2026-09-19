@@ -1974,7 +1974,7 @@ test('clicks on the editor seat and the footer never collapse a Thought (plan §
   app.stop()
 })
 
-test('the blank-row fallback never pierces an open overlay (plan §23.7)', async () => {
+test('the blank-row fallback never pierces an open modal overlay (plan §23.7)', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -1989,11 +1989,13 @@ test('the blank-row fallback never pierces an open overlay (plan §23.7)', async
   click(vt, 3, y + 1)
   await vt.waitForRender()
   assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), 'precondition: root expanded')
-  // An open overlay owns the click: the blank row between Thinking and
+  // An open MODAL overlay owns the click: the blank row between Thinking and
   // Bash is INSIDE the expanded Thought, yet must NOT collapse it — and
   // must not even reach the secondary (the Thinking card stays compact:
-  // pre-fix the spacer click toggled it behind the overlay).
-  app.startTranscriptSearch()
+  // pre-fix the spacer click toggled it behind the overlay). The transcript
+  // search box is the ONE exempt overlay (fork X058); every other modal keeps
+  // this block, including a modal stacked WITH the search box.
+  const picker = app.openPicker([{ value: 'opt', label: 'option' }], () => {}, () => {})
   await vt.waitForRender()
   const overlayView = vt.getViewport()
   const bashY = findRow(overlayView, 'Bash cmd 1')
@@ -2001,7 +2003,7 @@ test('the blank-row fallback never pierces an open overlay (plan §23.7)', async
   assert.ok(isBlankRow(overlayView[bashY - 1]), `the clicked row must be blank:\n${overlayView.join('\n')}`)
   click(vt, 3, bashY)
   await vt.waitForRender()
-  assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'an open overlay must block the blank-row collapse')
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'an open modal must block the blank-row collapse')
   const after = vt.getViewport().join('\n')
   assert.ok(after.includes('(click to expand)'), `the Thinking card must stay untouched behind the overlay:\n${after}`)
   // CONCRETE rows are equally inert behind the overlay: the guard covers
@@ -2012,6 +2014,52 @@ test('the blank-row fallback never pierces an open overlay (plan §23.7)', async
   assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'a content row must not reach the transcript behind the overlay')
   const after2 = vt.getViewport().join('\n')
   assert.ok(!after2.includes('out 1 line 39'), `the Bash card must not full-reveal behind the overlay:\n${after2}`)
+  picker.close()
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('the search overlay keeps background disclosure clicks live (X058)', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const y = findFocusHeaderRow(vt.getViewport(), false)
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), 'precondition: root expanded')
+
+  // The search box is the ONLY visible modal: it is a viewport-passthrough
+  // overlay, so the transcript disclosure underneath stays clickable.
+  app.startTranscriptSearch()
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const bashY = findRow(view, 'Bash cmd 1')
+  assert.ok(bashY >= 0, `Bash card missing:\n${view.join('\n')}`)
+  const previewRows = view.filter(line => line.includes('out 1 line')).length
+  click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  const revealed = vt.getViewport()
+  const revealedRows = revealed.filter(line => line.includes('out 1 line')).length
+  assert.ok(revealedRows > previewRows,
+    `the Bash card must full-reveal under the search box (${previewRows} -> ${revealedRows}):\n${revealed.join('\n')}`)
+
+  // Stacking an ORDINARY modal with the search box restores the block.
+  const picker = app.openPicker([{ value: 'opt', label: 'option' }], () => {}, () => {})
+  await vt.waitForRender()
+  const stacked = vt.getViewport()
+  const headerY = findFocusHeaderRow(stacked, false)
+  click(vt, 3, headerY)
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [1],
+    'a modal stacked with the search box must block the transcript again')
+  picker.close()
   app.closeTranscriptSearch()
   app.setFullscreen(false)
   app.stop()

@@ -458,10 +458,19 @@ export class OverlayBroker {
   /** Whether a visible auto-capturing (modal) overlay exists — the POINTER /
    * background-modal fact, not the keyboard fact. */
   hasVisibleModalOverlay(): boolean {
+    return this.visibleModalOverlayCount() > 0
+  }
+
+  /** The number of visible auto-capturing (modal) overlays. The caller uses the
+   * COUNT (not just the boolean) to exempt exactly ONE viewport-passthrough
+   * overlay (fork X058: the fullscreen transcript-search box) without ever
+   * unblocking a real modal stacked with — or replacing — it. */
+  visibleModalOverlayCount(): number {
+    let count = 0
     for (const node of this.nodes.values()) {
-      if (!node.nonCapturing && this.isVisible(node) && !node.explicitHidden) return true
+      if (!node.nonCapturing && this.isVisible(node) && !node.explicitHidden) count += 1
     }
-    return false
+    return count
   }
 
   /** Whether a managed overlay currently holds PHYSICAL keyboard focus — the

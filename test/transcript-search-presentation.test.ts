@@ -18,6 +18,11 @@ import {
   type RenderedSearchSelector,
   type SearchSourceRegion,
 } from '../src/search-presentation.ts'
+import { color, darkColors, setTheme } from '../src/theme.ts'
+
+/** The exact-current style for one run: bold + explicit themed fg/bg (never the
+ * terminal's inverse attribute, plan S3 §6.2). */
+const strong = (text: string): string => color.searchCurrent(text)
 
 function linesComponent(lines: readonly string[]): Component {
   return {
@@ -55,7 +60,8 @@ test('presentation: the current occurrence is strong, the others weak', () => {
   assert.equal(selection.exact, true)
   const decorated = highlightSearchLines(lines, selection)
   assert.ok(decorated[0]!.includes('\x1b[4mfoo\x1b[24m'), 'first occurrence weak underline')
-  assert.ok(decorated[0]!.includes('\x1b[1;7mfoo\x1b[22;27m'), 'second occurrence strong')
+  assert.ok(decorated[0]!.includes(strong('foo')), 'second occurrence strong (themed block, no inverse)')
+  assert.ok(!decorated[0]!.includes('\x1b[1;7m'), 'the strong style never uses the terminal inverse attribute')
   assert.equal(stripTerminalSequences(decorated[0]!), 'foo bar foo', 'stripped text preserved')
   assert.equal(visibleWidth(decorated[0]!), visibleWidth(lines[0]!), 'visible width preserved')
 })
@@ -78,7 +84,7 @@ test('presentation: CJK occurrences map to grapheme-safe columns', () => {
   const decorated = highlightSearchLines(lines, selection)
   assert.equal(stripTerminalSequences(decorated[0]!), '检索 目标词 检索')
   assert.equal(visibleWidth(decorated[0]!), visibleWidth(lines[0]!))
-  assert.ok(decorated[0]!.includes('\x1b[1;7m检索\x1b[22;27m'))
+  assert.ok(decorated[0]!.includes(strong('检索')))
 })
 
 test('presentation: an occurrence wrapped across two lines highlights both rows', () => {
@@ -99,7 +105,7 @@ test('presentation: image protocol lines are never text-highlighted', () => {
   const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), wholeCardSelector(lines, 'needle'))
   const decorated = highlightSearchLines(lines, selection)
   assert.equal(decorated[0], lines[0], 'the image line is untouched')
-  assert.ok(decorated[1]!.includes('\x1b[1;7mneedle\x1b[22;27m'))
+  assert.ok(decorated[1]!.includes(strong('needle')))
 })
 
 test('presentation: a proven source region scopes the exact occurrence', () => {
@@ -108,9 +114,9 @@ test('presentation: a proven source region scopes the exact occurrence', () => {
   const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selectorForRegions(lines, 'needle', regions, 's'))
   assert.equal(selection.exact, true, 'the in-region occurrence is exact')
   const decorated = highlightSearchLines(lines, selection)
-  assert.ok(!decorated[0]!.includes('\x1b[1;7m'), 'the header occurrence is not current')
-  assert.ok(decorated[1]!.includes('\x1b[1;7mneedle\x1b[22;27m'), 'the body occurrence is current')
-  assert.ok(!decorated[2]!.includes('\x1b[1;7m'), 'the footer occurrence is not current')
+  assert.ok(!decorated[0]!.includes(strong('needle')), 'the header occurrence is not current')
+  assert.ok(decorated[1]!.includes(strong('needle')), 'the body occurrence is current')
+  assert.ok(!decorated[2]!.includes(strong('needle')), 'the footer occurrence is not current')
 })
 
 test('presentation: a visible source region with no provable occurrence anchors it (no strong)', () => {
@@ -161,8 +167,8 @@ test('presentation: tool args and result map through distinct proven regions', (
   assert.equal(args.exact, true)
   assert.equal(result.selectedRow, 1, 'the result hit selects the body region')
   assert.equal(result.exact, true)
-  assert.ok(highlightSearchLines(lines, args)[0]!.includes('\x1b[1;7mneedle'), 'args strong on the header')
-  assert.ok(highlightSearchLines(lines, result)[1]!.includes('\x1b[1;7mneedle'), 'result strong on the body')
+  assert.ok(highlightSearchLines(lines, args)[0]!.includes(strong('needle')), 'args strong on the header')
+  assert.ok(highlightSearchLines(lines, result)[1]!.includes(strong('needle')), 'result strong on the body')
 })
 
 test('presentation: an enumerable:false region anchors and never claims an occurrence', () => {
@@ -234,7 +240,7 @@ test('presentation: SearchHighlightComponent reuses the child render and decorat
   const component = new SearchHighlightComponent(child, selector, selection, 40, lines)
   const rendered = component.render(40)
   assert.equal(rendered.length, 1)
-  assert.ok(rendered[0]!.includes('\x1b[1;7mneedle\x1b[22;27m'))
+  assert.ok(rendered[0]!.includes(strong('needle')))
   assert.equal(stripTerminalSequences(rendered[0]!), 'alpha needle beta')
 })
 
@@ -254,7 +260,7 @@ test('presentation: a same-width content change never reuses stale strong geomet
   const selector = wholeCardSelector(lines, 'needle')
   const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selector)
   const component = new SearchHighlightComponent(child, selector, selection, 40, lines)
-  assert.ok(component.render(40)[0]!.includes('\x1b[1;7mneedle'), 'precondition: the proven occurrence is strong')
+  assert.ok(component.render(40)[0]!.includes(strong('needle')), 'precondition: the proven occurrence is strong')
   lines = ['foobar here']
   const second = component.render(40)
   assert.ok(!second.some(line => line.includes('\x1b[1;7m')), 'changed content must not inherit a stale strong occurrence')
@@ -270,4 +276,49 @@ test('presentation: clear() stops decorating a mounted wrapper', () => {
   component.clear()
   const rendered = component.render(40)
   assert.deepEqual(rendered, ['alpha needle beta'], 'a cleared wrapper returns the raw child lines')
+})
+
+test('presentation: an anchor-only current washes ONLY the anchor row and keeps every occurrence weak', () => {
+  const lines = ['needle A', 'needle B']
+  const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 0, rowStart: 0, rowEnd: 1, enumerable: false }]
+  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selectorForRegions(lines, 'needle', regions, 's'))
+  assert.equal(selection.selectedIndex, -1, 'no occurrence is proven')
+  assert.equal(selection.selectedRow, 0, 'the anchor row is the region row')
+  const decorated = highlightSearchLines(lines, selection)
+  assert.ok(decorated[0]!.includes('\x1b[4m'), 'the anchor row occurrence is still only weak')
+  assert.ok(decorated[0]!.includes(color.searchAnchorBg('needle')), 'the anchor row carries the weaker current wash')
+  assert.ok(decorated[0]!.includes(color.searchAnchorBg(' A')), 'the wash covers the whole anchor row, not just the occurrence')
+  assert.ok(!decorated[0]!.includes(strong('needle')), 'an anchor-only selection never strong-highlights a guess')
+  assert.ok(!decorated[1]!.includes(color.searchAnchorBg('needle')), 'the other rows are untouched')
+  assert.ok(decorated[1]!.includes('\x1b[4m'), 'the other visible occurrence stays weak')
+})
+
+test('presentation: the exact occurrence is NOT row-washed', () => {
+  const lines = ['needle A', 'needle B']
+  const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 1, rowStart: 1, rowEnd: 2 }]
+  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), selectorForRegions(lines, 'needle', regions, 's'))
+  assert.equal(selection.exact, true)
+  assert.equal(selection.selectedRow, 1)
+  const decorated = highlightSearchLines(lines, selection)
+  assert.ok(decorated[1]!.includes(strong('needle')), 'the exact occurrence carries the themed block')
+  assert.ok(!decorated[1]!.includes(color.searchAnchorBg('needle')), 'the exact occurrence is never row-washed')
+})
+
+test('presentation: the current styles follow the active palette (light + custom)', () => {
+  const lines = ['alpha needle beta']
+  const selection = selectRenderedSearchMatch(findAltScreenSearchMatches(lines, 'needle'), wholeCardSelector(lines, 'needle'))
+  try {
+    setTheme('light')
+    assert.ok(highlightSearchLines(lines, selection)[0]!.includes(color.searchCurrent('needle')),
+      'the light palette paints the current occurrence')
+    assert.equal(color.searchCurrent('needle').includes('\x1b[48;2;245;197;66m'), false,
+      'the light current block is not the dark background')
+    setTheme('custom', { ...darkColors, searchCurrentBg: '#123456' })
+    assert.ok(highlightSearchLines(lines, selection)[0]!.includes(color.searchCurrent('needle')),
+      'a custom palette override flows into the highlight')
+    assert.ok(highlightSearchLines(lines, selection)[0]!.includes('\x1b[48;2;18;52;86m'),
+      'the custom background is the one actually painted')
+  } finally {
+    setTheme('dark')
+  }
 })

@@ -123,7 +123,7 @@ import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type Foot
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
-import { isEmptyAcceleratedViewerSubmit, startProcessTui, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TuiApp } from './tui-app.ts'
+import { isEmptyAcceleratedViewerSubmit, startProcessTui, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TranscriptSearchPresentation, type TranscriptSearchPresentationTarget, type TuiApp } from './tui-app.ts'
 import {
   clearStreamingToolPreviewsForStep,
   clearStreamingToolPreviewsForTurn,
@@ -148,6 +148,7 @@ import { isIndeterminateSkillWrite, resolveComposerDelivery, registerTuiCommands
 import { DefaultIntentTracker } from './default-intent.ts'
 import { DefaultWriteBarrier } from './default-write-barrier.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from './theme-source.ts'
+import { createSearchProfiler, searchProfilingEnabled, type SearchProfile } from './search-profile.ts'
 import { diagFromEnv, dshHome, type Diag } from './diag.ts'
 import { runDetached, runOwned, isCancellation, cancellationError, observeSettled, type OwnedTaskOptions } from './detached.ts'
 import { appendHistoryLine, historyFilePath, loadHistoryFile, loadHistoryRecords, recallHistoryForSession } from './history.ts'
@@ -1081,13 +1082,19 @@ function mergeSessionEventCut(
  * navigation facts, turn activities and live preparing rows come from one
  * presentation snapshot so a repaint can never show a stale Thought header
  * against fresh rows.
+ *
+ * `searchPresentation` (perf plan S2 §5.2) resolves the search presentation for
+ * THIS projection epoch. It runs AFTER `folder.window()` and BEFORE
+ * `setTranscript()`, so the target / weak-match objects are bound before the
+ * single rebuild — a live group reflow can no longer force a second rebuild
+ * through a post-projection rebind.
  */
 function repaint(
   app: TuiApp,
   folder: TranscriptFolder,
   windowController: TranscriptWindowController,
   streamingToolPreviews: readonly StreamingToolPreview[],
-  afterProjection?: () => void,
+  searchPresentation?: () => TranscriptSearchPresentation | undefined,
 ): TranscriptWindow {
   windowController.setTurns(folder.groupedTurns())
   const endTurn = windowController.endTurn()
@@ -1100,11 +1107,7 @@ function repaint(
     firstTurn: projection.firstTurn,
     lastTurn: projection.lastTurn,
     hasNewer: projection.hasNewer,
-  }, streamingToolPreviews)
-  // The search target is rebound AFTER the projection commits: a live group
-  // reflow replaced the representative card object, and the presentation must
-  // follow the stable match, never the stale object identity.
-  afterProjection?.()
+  }, streamingToolPreviews, searchPresentation?.())
   return projection
 }
 
@@ -3089,11 +3092,13 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     let app: TuiApp
-    // Rebind hook passed to every repaint: after the projection commits, the
-    // current search target is re-resolved from its STABLE match so a live
-    // group reflow never strands the highlight/reveal on a stale card object.
-    // Assigned once the search state below exists; undefined before that.
-    let syncSearchTargetAfterRepaint: (() => void) | undefined
+    // Per-repaint search binding (perf plan S2 §5.2): resolves the weak-match
+    // representatives + the current target against the folder state that
+    // produced the projection, so a live group reflow never strands the
+    // highlight/reveal on a stale card object AND never causes a second
+    // rebuild. Assigned once the search state below exists; undefined before
+    // that (and while no search is active it returns undefined).
+    let searchBindingForRepaint: (() => TranscriptSearchPresentation | undefined) | undefined
     // M0: the unified status projection store — the footer's future single
     // input. The runner derives the DSH-owned sections (composition/access/
     // workspace/usage/host/plan); the app projects its own surface state
@@ -4205,7 +4210,7 @@ export function apply(ctx: Context, config: Config): void {
         const controller = activeWindow()
         if (!controller.isLatest()) {
           controller.latest()
-          repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+          repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
         }
         app.setPendingInputPresentation({ queued, steering, running })
         app.scrollToBottom()
@@ -4242,13 +4247,13 @@ export function apply(ctx: Context, config: Config): void {
         clearTimeout(repaintTimer)
         repaintTimer = undefined
       }
-      repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+      repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews(), searchBindingForRepaint)
     }
     const schedulePaint = (): void => {
       if (repaintTimer !== undefined) return
       repaintTimer = setTimeout(() => {
         repaintTimer = undefined
-        repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+        repaint(app, activeFolder(), activeWindow(), activeStreamingToolPreviews(), searchBindingForRepaint)
       }, REPAINT_FLUSH_MS)
     }
     // Tool-call arguments by callId, for the approval-preview dialog.
@@ -4263,6 +4268,9 @@ export function apply(ctx: Context, config: Config): void {
     // materializes the grouped transcript nor re-lowercases history.
     let searchMatches: TranscriptSearchMatch[] = []
     let searchCurrent = -1
+    // Opt-in local wall-clock profiling of the Ctrl+F hot path (perf plan S1
+    // §4.2). A no-op unless DSH_TUI_SEARCH_PROFILE=1.
+    const searchProfiler: SearchProfile = createSearchProfiler(searchProfilingEnabled())
      let searchOrigin: { controller: TranscriptWindowController; state: TranscriptWindowState } | undefined
     // Query-refinement state (D1): the previous query's matches are reused
     // only when the new query PREFIX-extends the previous one on the SAME
@@ -4272,6 +4280,10 @@ export function apply(ctx: Context, config: Config): void {
     let lastSearchQuery = ''
     let lastSearchRevision = 0
     let lastSearchFolder: TranscriptFolder | undefined
+    /** The folder's search revision at the last COMMITTED projection epoch: the
+     * same-window fast path is valid only while this still matches the live
+     * folder (otherwise the projected bounds/objects are stale). */
+    let searchBoundRevision = -1
     /** The unique representative card ids of the current result set, and the
      * published representative objects (weak-highlight scope). */
     let searchMatchRepresentativeIds: number[] = []
@@ -4281,11 +4293,11 @@ export function apply(ctx: Context, config: Config): void {
       for (const message of left) if (!right.has(message)) return false
       return true
     }
-    /** Re-resolve the representative ids against the CURRENT folder projection
-     * and republish them when the set actually changed. Called after every
-     * projection commit, so a live group reflow that replaced a matching card
-     * object does not silently drop that card's weak highlight. */
-    const syncSearchMatchMessages = (): void => {
+    /** Re-resolve the representative ids against the CURRENT folder projection.
+     * The published SET keeps its identity when the resolved cards are
+     * unchanged, so a passive projection does not bump the presentation
+     * revision for nothing. */
+    const resolveSearchMatchMessages = (): ReadonlySet<TranscriptMessage> => {
       const folder = activeFolder()
       const next = new Set<TranscriptMessage>()
       if (lastSearchQuery !== '' && lastSearchFolder === folder) {
@@ -4294,9 +4306,25 @@ export function apply(ctx: Context, config: Config): void {
           if (message !== undefined) next.add(message)
         }
       }
-      if (sameMessageSet(next, searchMatchMessages)) return
+      if (sameMessageSet(next, searchMatchMessages)) return searchMatchMessages
+      // Mirror the authoritative published set so the NEXT resolution keeps
+      // object identity when the cards are unchanged (a fresh Set every
+      // repaint would bump the presentation revision and clear the Focus
+      // live-height floors for nothing).
       searchMatchMessages = next
-      app.setSearchMatchMessages(next)
+      return next
+    }
+    /** The current target resolved against the LIVE folder (stable match →
+     * current card object). Undefined while no match is current. */
+    const resolveSearchTarget = (): TranscriptSearchPresentationTarget | undefined => {
+      if (lastSearchQuery === '' || searchCurrent < 0 || lastSearchFolder === undefined) return undefined
+      const folder = activeFolder()
+      if (folder !== lastSearchFolder) return undefined
+      const match = searchMatches[searchCurrent]
+      if (match === undefined) return undefined
+      const message = folder.resolveSearchMatch(match)
+      if (message === undefined) return undefined
+      return { query: lastSearchQuery, match, message }
     }
     const refreshSearchMatchMessages = (): void => {
       const folder = activeFolder()
@@ -4310,7 +4338,6 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       searchMatchRepresentativeIds = ids
-      syncSearchMatchMessages()
     }
     const resetSearchState = (): void => {
       searchMatches = []
@@ -4320,20 +4347,26 @@ export function apply(ctx: Context, config: Config): void {
       lastSearchFolder = undefined
       searchMatchRepresentativeIds = []
       searchMatchMessages = new Set()
-      if (app !== undefined) app.setSearchMatchMessages(searchMatchMessages)
+      searchBoundRevision = -1
+      // ONE atomic commit: an empty representative set AND no target, so a
+      // session swap / close can never leave the old session's card bound as
+      // the search highlight or keep a temporary reveal alive.
+      if (app !== undefined) {
+        app.setTranscriptSearchPresentation({ matchMessages: searchMatchMessages, target: undefined, grantReveal: true })
+      }
     }
-    // After EVERY projection commit, re-resolve the current target from its
-    // stable match on the folder that produced it. A passive live reflow
-    // replaces the representative card object; without this the reveal and
-    // highlight would drop until the next Next/Prev.
-    syncSearchTargetAfterRepaint = (): void => {
-      syncSearchMatchMessages()
-      if (lastSearchQuery === '' || searchCurrent < 0 || lastSearchFolder === undefined) return
+    // After EVERY projection commit, resolve the presentation for THAT epoch:
+    // a passive live reflow replaces the representative card object, and the
+    // reveal/highlight must follow the stable match without a second rebuild.
+    // `grantReveal` stays false so a user collapse is never resurrected.
+    searchBindingForRepaint = (): TranscriptSearchPresentation | undefined => {
+      // Record the committed projection epoch even with no search active: the
+      // first query after opening the overlay must be able to take the
+      // same-window fast path against the projection the user is looking at.
       const folder = activeFolder()
-      if (folder !== lastSearchFolder) return
-      const match = searchMatches[searchCurrent]
-      if (match === undefined) return
-      app.rebindTranscriptSearchTarget(folder.resolveSearchMatch(match))
+      searchBoundRevision = folder.searchRevision()
+      if (lastSearchQuery === '' || lastSearchFolder === undefined || folder !== lastSearchFolder) return undefined
+      return { matchMessages: resolveSearchMatchMessages(), target: resolveSearchTarget(), grantReveal: false }
     }
     // Monotonic session generation: bumped on EVERY session swap (switch,
     // resume, deferred creation). Late async work (the skill command
@@ -4463,7 +4496,7 @@ export function apply(ctx: Context, config: Config): void {
         // keeps the teardown's intent explicit and ordering-safe). The
         // Esc path uses exitFocusViewerScope instead (restore).
         app.discardFocusViewerScope()
-        repaint(app, folder, windowController, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+        repaint(app, folder, windowController, activeStreamingToolPreviews(), searchBindingForRepaint)
         windowController.isLatest() ? app.scrollToBottom() : app.scrollToTop({ disableFollow: true })
         // The new session's own measurement comes from its initLiveSession
         // deferred path — the teardown refresh is UI-only.
@@ -4491,6 +4524,18 @@ export function apply(ctx: Context, config: Config): void {
       refreshSearchMatchMessages()
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
+    /** The search presentation for an EXPLICIT navigation: `grantReveal` so the
+     * temporary reveal is (re-)granted, and the representative set / target
+     * resolved against the live folder. */
+    const navigationSearchPresentation = (match: TranscriptSearchMatch): TranscriptSearchPresentation => {
+      const folder = activeFolder()
+      const message = folder.resolveSearchMatch(match)
+      return {
+        matchMessages: resolveSearchMatchMessages(),
+        ...(message === undefined ? {} : { target: { query: lastSearchQuery, match, message } }),
+        grantReveal: true,
+      }
+    }
     const jumpToSearchMatch = (): void => {
       refreshSearchMatchesIfStale()
       const match = searchMatches[searchCurrent]
@@ -4499,23 +4544,38 @@ export function apply(ctx: Context, config: Config): void {
         app.setSearchResult(0, 0)
         return
       }
-      // ONE fold snapshot: the anchored message window and the activities
-      // come from the same folder call (plan §19 — a jump must never
-      // combine a fresh window with stale activity data). Order is the
-      // contract (plan §22): materialize the target window FIRST, then
-      // resolve the semantic target, publish the temporary search reveal,
-      // repaint/measure, and only THEN anchor the exact rendered occurrence.
       const folder = activeFolder()
       const controller = activeWindow()
+      refreshSearchMatchMessages()
+      // Same-window fast path (perf plan S2 §5.4): the match is already inside
+      // the projected bounds AND the projection is the live epoch, so bind the
+      // new presentation to it directly — one rebuild, no re-window, no
+      // remeasure. The bounds come from the CURRENT projected window, never
+      // from the controller mode alone.
+      const snapshot = controller.snapshot()
+      const sameWindow = searchBoundRevision === folder.searchRevision()
+        && snapshot.firstTurn !== undefined && snapshot.lastTurn !== undefined
+        && match.turn >= snapshot.firstTurn && match.turn <= snapshot.lastTurn
+      if (sameWindow) {
+        app.setTranscriptSearchPresentation(navigationSearchPresentation(match))
+        searchProfiler.stage('search.presentation-commit')
+        app.scrollToSearchTarget()
+        searchProfiler.stage('search.scroll')
+        app.setSearchResult(searchCurrent + 1, searchMatches.length)
+        return
+      }
+      // Off-window: ONE fold snapshot (plan §19) — the anchored message window
+      // and the activities come from the same folder call. Order is the
+      // contract (plan §22): anchor the window FIRST, then repaint with the
+      // presentation bound to THAT projection epoch (the target/weak-match
+      // objects are in place before the single rebuild), and only THEN anchor
+      // the exact rendered occurrence.
       controller.anchorAt(match.turn)
-      const message = folder.resolveSearchMatch(match)
-      app.setTranscriptSearchTarget(message === undefined ? undefined : {
-        query: lastSearchQuery,
-        match,
-        message,
-      })
-      repaint(app, folder, controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+      repaint(app, folder, controller, activeStreamingToolPreviews(), () => navigationSearchPresentation(match))
+      searchBoundRevision = folder.searchRevision()
+      searchProfiler.stage('search.window')
       app.scrollToSearchTarget()
+      searchProfiler.stage('search.scroll')
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
     /** Enter the subagent viewer for one session (live or persisted). The
@@ -4690,7 +4750,7 @@ export function apply(ctx: Context, config: Config): void {
       // disclosures must not leak into the child transcript (plan §26).
       setViewedQueueAgent(childAgent)
       app.enterFocusViewerScope()
-      repaint(app, childFolder, childWindow, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+      repaint(app, childFolder, childWindow, activeStreamingToolPreviews(), searchBindingForRepaint)
       // The viewer bar covers the editor (a read-only placeholder for
       // one-shot, the child's own draft for continuable) and the header
       // badges the mode — the transient notify is no longer the only "you
@@ -4731,7 +4791,7 @@ export function apply(ctx: Context, config: Config): void {
       // Restore the parent's Focus disclosures BEFORE the repaint so the
       // projection uses them (plan §26).
       app.exitFocusViewerScope()
-      repaint(app, folder, windowController, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+      repaint(app, folder, windowController, activeStreamingToolPreviews(), searchBindingForRepaint)
       // The main transcript may have grown while the viewer covered it (the
       // child's result, the parent's streaming): restore the parent's semantic latest/history position
       // so the pop never loses an intentional history anchor.
@@ -7130,7 +7190,7 @@ export function apply(ctx: Context, config: Config): void {
         const anchor = app.captureTranscriptViewportAnchor()
         const controller = activeWindow()
         if (!controller.moveOlder()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
         // Preserve the old top edge at the same rendered row in the overlap.
         if (anchor === undefined) app.scrollToBottom({ disableFollow: true })
         else app.restoreTranscriptViewportAnchor(anchor, 'top')
@@ -7143,7 +7203,7 @@ export function apply(ctx: Context, config: Config): void {
         if (!app.isFullscreen()) return false
         const controller = activeWindow()
         if (!controller.turnOlder()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
         app.scrollToBottom({ disableFollow: true })
         return true
       },
@@ -7151,7 +7211,7 @@ export function apply(ctx: Context, config: Config): void {
         if (!app.isFullscreen()) return false
         const controller = activeWindow()
         if (!controller.turnNewer()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
         app.scrollToBottom({ disableFollow: true })
         return true
       },
@@ -7159,7 +7219,7 @@ export function apply(ctx: Context, config: Config): void {
         const anchor = app.captureTranscriptViewportAnchor()
         const controller = activeWindow()
         if (!controller.moveNewer()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
         if (controller.isLatest()) app.scrollToBottom()
         else if (anchor === undefined) app.scrollToTop({ disableFollow: true })
         else app.restoreTranscriptViewportAnchor(anchor, 'bottom')
@@ -7179,7 +7239,7 @@ export function apply(ctx: Context, config: Config): void {
         const controller = activeWindow()
         const changed = controller.latest()
         if (!changed && !closedSearch && !app.isFullscreen()) return false
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
         app.scrollToBottom()
         app.setSearchResult(0, 0)
         return true
@@ -7212,6 +7272,7 @@ export function apply(ctx: Context, config: Config): void {
         app.setTranscriptSearchTarget(undefined)
       },
       onSearchQuery: (query) => {
+        searchProfiler.start()
         const folder = activeFolder()
         // Prefix refinement reuses the previous candidate set only when the
         // query EXTENDS it on the SAME folder; the folder itself also
@@ -7220,17 +7281,21 @@ export function apply(ctx: Context, config: Config): void {
         searchMatches = folder.search(query, lastSearchQuery !== '' && folder === lastSearchFolder
           ? { previousQuery: lastSearchQuery, previousMatches: searchMatches, revision: lastSearchRevision }
           : undefined)
+        searchProfiler.stage('search.semantic')
         lastSearchQuery = query
         lastSearchRevision = folder.searchRevision()
         lastSearchFolder = folder
         searchCurrent = searchMatches.length > 0 ? 0 : -1
         refreshSearchMatchMessages()
+        searchProfiler.stage('search.resolve-representatives')
         // Always run the jump path: an empty/no-match query must CLEAR the
         // stale search presentation target (0/0), not leave the previous
         // reveal/highlight on screen.
         jumpToSearchMatch()
+        searchProfiler.end()
       },
       onSearchNext: () => {
+        searchProfiler.start()
         // PR D1 P1: refresh BEFORE stepping — an empty candidate list
         // still refreshes (a match that arrived while the overlay stayed
         // open must be discoverable), and the step is computed on the
@@ -7247,11 +7312,14 @@ export function apply(ctx: Context, config: Config): void {
         lastSearchRevision = stepped.revision
         lastSearchFolder = folder
         refreshSearchMatchMessages()
+        searchProfiler.stage('search.resolve-representatives')
         // An emptied list steps to -1: the jump path still runs so the
         // stale target/highlight is cleared (0/0).
         jumpToSearchMatch()
+        searchProfiler.end()
       },
       onSearchPrev: () => {
+        searchProfiler.start()
         const folder = activeFolder()
         const stepped = steppedSearchOverlayState(
           { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
@@ -7263,7 +7331,9 @@ export function apply(ctx: Context, config: Config): void {
         lastSearchRevision = stepped.revision
         lastSearchFolder = folder
         refreshSearchMatchMessages()
+        searchProfiler.stage('search.resolve-representatives')
         jumpToSearchMatch()
+        searchProfiler.end()
       },
       onSearchClose: () => {
         resetSearchState()
@@ -7279,7 +7349,7 @@ export function apply(ctx: Context, config: Config): void {
         } else {
           controller.latest()
         }
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
         if (controller.isLatest()) app.scrollToBottom()
         else app.scrollToTop({ disableFollow: true })
       },
@@ -9201,7 +9271,7 @@ export function apply(ctx: Context, config: Config): void {
       // Issue #8: a stale keyboard exit confirmation must not exit the NEW
       // session.
       app.clearExitConfirmation()
-      repaint(app, folder, windowController, activeStreamingToolPreviews(), syncSearchTargetAfterRepaint)
+      repaint(app, folder, windowController, activeStreamingToolPreviews(), searchBindingForRepaint)
       // PR D2: the first usable frame paints with the cached measurement
       // (or none); the context measure is deferred one event-loop turn so
       // cold resume never blocks first paint on a long-session scan.

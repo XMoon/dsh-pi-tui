@@ -70,14 +70,15 @@ test('navigation: the current strong highlight moves between occurrences in one 
   app.setTranscriptSearchTarget(target(0))
   lines = await viewport(vt)
   cells = occurrenceCells(lines)
-  assert.ok(vt.getCellInverse(cells.row, cells.first), `the FIRST occurrence is current:\n${lines.join('\n')}`)
-  assert.ok(!vt.getCellInverse(cells.row, cells.second), 'the second occurrence is not current')
+  assert.equal(vt.getCellBgRgb(cells.row, cells.first), 0xf5c542, `the FIRST occurrence is current:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(cells.row, cells.second), undefined, 'the second occurrence is not current')
+  assert.ok(!vt.getCellInverse(cells.row, cells.first), 'the themed block never uses the terminal inverse attribute')
 
   app.setTranscriptSearchTarget(target(1))
   lines = await viewport(vt)
   cells = occurrenceCells(lines)
-  assert.ok(!vt.getCellInverse(cells.row, cells.first), 'the first occurrence is no longer current')
-  assert.ok(vt.getCellInverse(cells.row, cells.second), 'the SECOND occurrence is current')
+  assert.equal(vt.getCellBgRgb(cells.row, cells.first), undefined, 'the first occurrence is no longer current')
+  assert.equal(vt.getCellBgRgb(cells.row, cells.second), 0xf5c542, 'the SECOND occurrence is current')
   app.stop()
 })
 
@@ -187,9 +188,9 @@ test('navigation: every visible matching card is weak-highlighted, the current c
   assert.ok(aRow >= 0 && bRow >= 0 && cRow >= 0, `all cards visible:\n${lines.join('\n')}`)
   const aCol = lines[aRow]!.indexOf('needle')
   const bCol = lines[bRow]!.indexOf('needle')
-  assert.ok(vt.getCellInverse(aRow, aCol), 'the target occurrence is strong (inverse)')
+  assert.equal(vt.getCellBgRgb(aRow, aCol), 0xf5c542, 'the target occurrence is strong (themed block)')
   assert.ok(vt.getCellUnderline(bRow, bCol), 'the other VISIBLE matching card is weak (underline)')
-  assert.ok(!vt.getCellInverse(bRow, bCol), 'the other matching card is not strong')
+  assert.notEqual(vt.getCellBgRgb(bRow, bCol), 0xf5c542, 'the other matching card is not strong')
   assert.ok(!vt.getCellUnderline(cRow, lines[cRow]!.indexOf('gamma')), 'a non-matching card is untouched')
   app.stop()
 })
@@ -419,6 +420,107 @@ test('navigation: the user bubble marker is never strong-highlighted for a body 
   const markerCol = lines[row]!.indexOf('❯')
   assert.ok(markerCol >= 0, `the bubble marker must render:\n${lines.join('\n')}`)
   assert.ok(!vt.getCellInverse(row, markerCol), 'the injected bubble marker must NOT be the current occurrence')
+  app.stop()
+})
+
+test('navigation: an anchor-only current shows a weaker anchor wash and no strong occurrence', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'user', turn: 0, text: 'needle alpha needle beta' }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  const lines = await viewport(vt)
+  const cells = occurrenceCells(lines)
+  // The occurrences stay WEAK; the card's anchor row carries the weaker
+  // "current result lives here" wash — never the exact occurrence block.
+  assert.ok(vt.getCellUnderline(cells.row, cells.first), 'the occurrence is weak-decorated')
+  assert.notEqual(vt.getCellBgRgb(cells.row, 0), 0xf5c542, 'an anchor-only current never paints the exact block')
+  assert.equal(vt.getCellBgRgb(cells.row, 0), 0x3a3220, `the anchor row carries the weaker current wash:\n${lines.join('\n')}`)
+  app.stop()
+})
+
+test('navigation: the anchor wash never leaks past the anchor row', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'assistant', turn: 0, text: 'needle first\nplain second' }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  const lines = await viewport(vt)
+  const first = lines.findIndex(line => line.includes('needle first'))
+  const second = lines.findIndex(line => line.includes('plain second'))
+  assert.ok(first >= 0 && second >= 0, `both rows must render:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(first, 0), 0x3a3220, 'the anchor row is washed')
+  // The background must have been RESET before the next row: no bleed.
+  assert.notEqual(vt.getCellBgRgb(second, 0), 0x3a3220, 'the wash must not bleed into the following row')
+  app.stop()
+})
+
+test('navigation: a narrow width still paints the exact current occurrence', async () => {
+  const { vt, app } = startApp(40, 20)
+  const card = {
+    kind: 'workflow', turn: 0, runId: 'run-1' as never, name: 'audit', status: 'running',
+    members: [{ seq: 0, label: 'needle alpha needle beta', phase: 'P', childId: 'child-0' as never, status: 'running' }],
+  } as Extract<TranscriptMessage, { kind: 'workflow' }>
+  app.setFullscreen(true)
+  app.setTranscript([card])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: {
+      id: 0, turn: 0, occurrence: 1,
+      source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('P'), seq: 0, field: 'label' },
+      sourceOccurrence: 1,
+    },
+    message: card,
+  })
+  const lines = await viewport(vt)
+  const cells = occurrenceCells(lines)
+  assert.equal(vt.getCellBgRgb(cells.row, cells.first), undefined, 'the first occurrence is not current')
+  assert.equal(vt.getCellBgRgb(cells.row, cells.second), 0xf5c542, 'the second occurrence is the exact current block at 40 cols')
+  app.stop()
+})
+
+test('navigation: tool args and result anchor rows are visually distinct without a strong occurrence', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'echo needle' }) }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'needle output' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  const matches = folder.search('needle')
+  const resultMatch = matches.find(m => m.source.kind === 'tool-field' && m.source.field === 'result')!
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const messages = folder.window({ maxTurns: 50 }).messages
+  app.setTranscript(messages, folder.turnActivities())
+  app.setTranscriptSearchTarget({ query: 'needle', match: resultMatch, message: messages[0]! })
+  const lines = await viewport(vt)
+  const resultRow = lines.findIndex(line => line.includes('needle output'))
+  assert.ok(resultRow >= 0, `tool result body must render:\n${lines.join('\n')}`)
+  // Anchor-only: the occurrence never gets the exact block. The result field has
+  // no renderer-proven region, so the selection anchors at the owning card top —
+  // that row carries the weaker wash so the current N/M is still findable.
+  assert.notEqual(vt.getCellBgRgb(resultRow, lines[resultRow]!.indexOf('needle')), 0xf5c542, 'the result hit is not a proven occurrence')
+  const cardTop = lines.findIndex(line => line.includes('Bash'))
+  assert.ok(cardTop >= 0, `tool card header missing:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(cardTop, 0), 0x3a3220, 'the owning card top carries the anchor wash')
   app.stop()
 })
 

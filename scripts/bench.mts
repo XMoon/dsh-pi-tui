@@ -684,6 +684,110 @@ async function main(): Promise<void> {
     }
   }
 
+  // 6b. Ctrl+F PRESENTATION hot path (perf plan S1 §4.3): a 20-turn mounted
+  //     window over a 30-turn log (long bodies, a COMMON needle so nearly every
+  //     card is a weak match). For each operation this reports the semantic
+  //     scan, the presentation commit (the app's atomic setter + viewport
+  //     anchor) and the STRUCTURAL counters the CI gates assert — a same-window
+  //     step must show 0 projections / 0 remeasures / 0 full renders, and an
+  //     off-window jump exactly 1 projection.
+  {
+    const folder = new TranscriptFolder()
+    folder.hydrate(buildSearchEvents(30))
+    const app = new TuiApp(new BenchTerminal(120, 40) as never, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+    app.setFullscreen(true)
+    const controller = new TranscriptWindowController({ turns: folder.groupedTurns() })
+    let windowCalls = 0
+    const originalWindow = TranscriptFolder.prototype.window
+    TranscriptFolder.prototype.window = function (this: TranscriptFolder, options: Parameters<TranscriptFolder['window']>[0]) {
+      windowCalls += 1
+      return originalWindow.call(this, options)
+    }
+    const project = (): void => {
+      controller.setTurns(folder.groupedTurns())
+      const endTurn = controller.endTurn()
+      const projection = folder.window({ maxTurns: controller.windowTurns, ...(endTurn === undefined ? {} : { endTurn }) })
+      app.setTranscript(projection.messages, folder.turnActivities(), {
+        ...controller.state(),
+        firstTurn: projection.firstTurn,
+        lastTurn: projection.lastTurn,
+        hasNewer: projection.hasNewer,
+      }, [])
+    }
+    project()
+    let matches = folder.search('transcript')
+    let current = 0
+    const representatives = (): ReadonlySet<TranscriptMessage> => {
+      const set = new Set<TranscriptMessage>()
+      for (const match of matches) {
+        const message = folder.resolveSearchMatch(match)
+        if (message !== undefined) set.add(message)
+      }
+      return set
+    }
+    const presentationStep = (): { semanticMs: number; commitMs: number } & Record<string, number> => {
+      app.resetSearchPresentationDiagnosticsForTest()
+      windowCalls = 0
+      const semantic = timeIt(1, () => { matches = folder.search('transcript') })
+      const commit = timeIt(1, () => {
+        const match = matches[current]
+        const message = match === undefined ? undefined : folder.resolveSearchMatch(match)
+        if (match === undefined || message === undefined) {
+          app.setTranscriptSearchTarget(undefined)
+          return
+        }
+        const target = { query: 'transcript', match, message }
+        const snapshot = controller.snapshot()
+        const inWindow = snapshot.firstTurn !== undefined && snapshot.lastTurn !== undefined
+          && match.turn >= snapshot.firstTurn && match.turn <= snapshot.lastTurn
+        if (inWindow) {
+          app.setTranscriptSearchPresentation({ matchMessages: representatives(), target, grantReveal: true })
+        } else {
+          controller.anchorAt(match.turn)
+          controller.setTurns(folder.groupedTurns())
+          const endTurn = controller.endTurn()
+          const projection = folder.window({ maxTurns: controller.windowTurns, ...(endTurn === undefined ? {} : { endTurn }) })
+          app.setTranscript(projection.messages, folder.turnActivities(), {
+            ...controller.state(),
+            firstTurn: projection.firstTurn,
+            lastTurn: projection.lastTurn,
+            hasNewer: projection.hasNewer,
+          }, [], { matchMessages: representatives(), target, grantReveal: true })
+        }
+        app.scrollToSearchTarget()
+      })
+      const diagnostics = app.searchPresentationDiagnosticsForTest()
+      return {
+        semanticMs: semantic[0]!,
+        commitMs: commit[0]!,
+        projections: windowCalls,
+        rebuilds: diagnostics.rebuilds,
+        remeasures: diagnostics.remeasures,
+        fullRenders: diagnostics.fullRenders,
+        weakMatches: matches.length,
+      }
+    }
+    const report = (label: string, step: ReturnType<typeof presentationStep>): void => {
+      row(label, `semantic ${fmtMs(step.semanticMs)} · commit ${fmtMs(step.commitMs)} · hits ${step.weakMatches} · projections ${step.projections} · rebuilds ${step.rebuilds} · remeasures ${step.remeasures} · fullRenders ${step.fullRenders}`)
+    }
+    const bounds = controller.snapshot()
+    const first = bounds.firstTurn ?? 0
+    const last = bounds.lastTurn ?? Number.MAX_SAFE_INTEGER
+    const inWindow = matches.findIndex(match => match.turn >= first && match.turn <= last)
+    current = inWindow >= 0 ? inWindow : 0
+    report('  query → in-window match', presentationStep())
+    if (current + 1 < matches.length) report('  Next (same window)', (current += 1, presentationStep()))
+    report('  Prev (same window)', (current -= 1, presentationStep()))
+    controller.latest()
+    project()
+    const offWindow = matches.findIndex(match => match.turn < first)
+    current = offWindow >= 0 ? offWindow : 0
+    report('  off-window jump', presentationStep())
+    TranscriptFolder.prototype.window = originalWindow
+    app.stop()
+  }
+
   // 7. PR C navigation baseline (unchanged by D1/D2 — recorded so a
   //    regression in grouped/window indexes or a D2 measurement leak into
   //    navigation stays visible): moveOlder ×50 + moveNewer ×50.

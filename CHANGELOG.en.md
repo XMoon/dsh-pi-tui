@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Full-text search in long sessions is much faster.** Typing and stepping
+  with `Enter`/`Shift+Enter` no longer rebuild the whole transcript tree,
+  re-measure, or re-render the entire window for every character; a
+  same-window jump is near-instant and a cross-window jump performs exactly one
+  necessary re-projection.
+- **The current search result is more prominent and follows the theme.** A
+  provable current occurrence uses an explicit themed foreground/background
+  block instead of relying on the terminal's inverse attribute; a
+  source-anchored-only hit instead washes a weaker background over its owning
+  card/source row, while every other hit stays weakly underlined — prominence
+  never disguises an occurrence as "proven".
+- **The transcript stays browsable and interactive while the search box is
+  open.** In fullscreen you can keep scrolling with the wheel / `PageUp` /
+  `PageDown`, drag the scrollbar, select and copy text, and expand/collapse
+  cards with the mouse while the search box keeps keyboard focus
+  (`Home`/`End`, `Ctrl+U`/`Ctrl+D` and typing still belong to the box); the
+  editor, submit and other modals stay blocked by the search box.
+
 ### Fixed
 
 - **Ctrl+F full-text search now works per occurrence, not per card.** The `N/M`
@@ -22,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   members hidden by a large Workflow phase summary, without overwriting your own
   manual expand/collapse choices. No search highlight or reveal survives the
   close.
+- **A session switch no longer leaves the previous search's current hit
+  behind.** A new session never inherits the old session's search highlight or
+  temporary reveal.
 
 ## [0.4.7-alpha.2] - 2026-09-18
 
