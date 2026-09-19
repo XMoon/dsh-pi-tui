@@ -2363,8 +2363,8 @@ fd output can identify a directory without a trailing slash, including through s
 - Status: `ACTIVE`
 - Category: `HARD_HOST_API`
 - Risk: `CRITICAL`
-- Files: `src/tui-alt-screen.ts`, `src/components/scroll-view.ts`
-- Last audited: `2026-09-03`
+- Files: `src/tui-alt-screen.ts`, `src/components/scroll-view.ts`, `src/alt-screen-search.ts`, `src/index.ts`
+- Last audited: `2026-09-18`
 - Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
@@ -2379,6 +2379,7 @@ The host virtual transcript owns paging, search, and the jump-to-latest semantic
 - clearSearch and previous/next prompt routing
 - shouldShowScrollToEndIndicator so a host virtual-history window keeps the jump-to-end label even while its local view follows the end
 - onScrollToEndIndicator so a host can consume the label click and run its own semantic jump-to-latest instead of the local scrollToBottom fallback
+- root re-export of the pure rendered search matcher (findAltScreenSearchMatches with AltScreenSearchMatch/AltScreenSearchSegment) so the host highlights the same ANSI/grapheme/cell occurrence geometry the native fullscreen search uses instead of implementing a second Unicode column mapper
 
 #### Dependency map
 
@@ -2392,10 +2393,12 @@ The host virtual transcript owns paging, search, and the jump-to-latest semantic
 
 **Host**
 - src/tui-app.ts wires onBeforeViewportInput and onScrollBoundary, owns virtual transcript paging/Home/End, calls clearSearch for jumpLatest and prompt navigation, and wires scrollToEndIndicator/shouldShowScrollToEndIndicator/onScrollToEndIndicator to the semantic TranscriptWindowController state
+- src/search-presentation.ts consumes the root matcher export to decorate the host full-history search occurrences (weak/current styles, image lines untouched, visible width and stripped text preserved)
 - Audit note: Host wires the callbacks and clearSearch; ScrollView.canScroll is consumed internally by TuiAltScreen as fallback state, not called by the host.
 
 **Public / extension**
 - TuiAltScreenOptions viewport callbacks, the scrollToEndIndicator/shouldShowScrollToEndIndicator/onScrollToEndIndicator options, and ScrollView.canScroll public component shape.
+- root exports findAltScreenSearchMatches plus the AltScreenSearchMatch/AltScreenSearchSegment types.
 - Audit note: The seams are part of compatibility tests.
 
 **Behavioral coupling**
@@ -2404,6 +2407,7 @@ The host virtual transcript owns paging, search, and the jump-to-latest semantic
 - short transcripts let keys fall through to focused components
 - jump-latest resets built-in search
 - the jump-to-end label is host-forced for a virtual-history window and a host-consumed click skips the local scrollToBottom fallback
+- the exported matcher computes the same occurrence segments as the native fullscreen search (query normalization, ANSI stripping, grapheme-safe columns)
 - Audit note: Restoring upstream can silently consume navigation keys or bypass virtual transcript ownership.
 
 #### Guarding tests
@@ -2411,6 +2415,7 @@ The host virtual transcript owns paging, search, and the jump-to-latest semantic
 - packages/pi-tui/test/tui-alt-screen.test.ts: boundary, overscroll, page, scrollbar, search reset, and host-forced/host-consumed jump-to-end indicator
 - packages/pi-tui/test/tui-shrink.test.ts and ScrollView canScroll coverage
 - test/home-end-keys.test.ts: bundle Home/End ownership and the fullscreen jump-to-latest indicator
+- test/transcript-search-presentation.test.ts: host consumes the root matcher (ANSI/CJK/wrap, current vs weak style, width/text preserved)
 
 #### Upstream comparison
 
@@ -2440,7 +2445,7 @@ The host virtual transcript owns paging, search, and the jump-to-latest semantic
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Rechecked all four seams and the short-transcript fallthrough; KEEP HARD.
+- Notes: Rechecked the viewport seams, the short-transcript fallthrough, and the added pure-matcher root export consumed by the host search highlight; KEEP HARD.
 
 ### X029 — Editor history callbacks
 
