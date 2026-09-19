@@ -7767,22 +7767,34 @@ export class TuiApp {
         child.render(width)
         const regions: SearchSourceRegion[] = []
         for (const span of child.lastFieldSpans) {
-          const push = (field: 'path' | 'description', fieldRow: number, startCol: number, endCol: number): void => {
-            if (endCol <= startCol) return
+          // The path is RELATIVIZED (a dropped raw prefix shifts every
+          // ordinal): position-only, anchor the path row.
+          if (span.pathEnd > span.pathStart) {
             regions.push({
-              sourceKey: transcriptSearchSourceKey({ kind: 'assistant-deliverable', index: span.index, field }),
-              anchorRow: row + fieldRow,
-              rowStart: row + fieldRow,
-              rowEnd: row + fieldRow + 1,
-              columns: { startCol, endCol },
-              // The path is RELATIVIZED (a dropped raw prefix shifts every
-              // ordinal); the description is rendered verbatim, so only it can
-              // prove a raw ordinal.
-              ...(field === 'path' ? { enumerable: false } : {}),
+              sourceKey: transcriptSearchSourceKey({ kind: 'assistant-deliverable', index: span.index, field: 'path' }),
+              anchorRow: row + span.pathRow,
+              rowStart: row + span.pathRow,
+              rowEnd: row + span.pathRow + 1,
+              columns: { startCol: span.pathStart, endCol: span.pathEnd },
+              enumerable: false,
             })
           }
-          push('path', span.pathRow, span.pathStart, span.pathEnd)
-          for (const description of span.descriptionRows) push('description', description.row, description.start, description.end)
+          // The description is rendered verbatim but WRAPPED: `wrapTextWithAnsi`
+          // hard-breaks over-wide tokens, and the rendered matcher turns every
+          // physical line boundary into a space — so a raw occurrence can
+          // disappear and a surviving one would be renumbered. Anchor at the
+          // first description row; never enumerate.
+          const first = span.descriptionRows[0]
+          const last = span.descriptionRows[span.descriptionRows.length - 1]
+          if (first !== undefined && last !== undefined) {
+            regions.push({
+              sourceKey: transcriptSearchSourceKey({ kind: 'assistant-deliverable', index: span.index, field: 'description' }),
+              anchorRow: row + first.row,
+              rowStart: row + first.row,
+              rowEnd: row + last.row + 1,
+              enumerable: false,
+            })
+          }
         }
         return regions
       }

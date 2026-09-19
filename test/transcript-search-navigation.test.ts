@@ -302,7 +302,7 @@ test('navigation: tool args and result hits are anchor-only (no guessed strong)'
   app.stop()
 })
 
-test('navigation: deliverable path and description map to distinct proven rows', async () => {
+test('navigation: deliverable path and description hits are anchor-only', async () => {
   const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
     ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
   const folder = new TranscriptFolder()
@@ -338,8 +338,9 @@ test('navigation: deliverable path and description map to distinct proven rows',
   lines = await viewport(vt)
   const descriptionRow = lines.findIndex(line => line.includes('Final report'))
   assert.ok(descriptionRow >= 0, `delivered description row missing:\n${lines.join('\n')}`)
-  // The description is rendered verbatim, so its ordinal IS provable.
-  assert.ok(vt.getCellInverse(descriptionRow, lines[descriptionRow]!.indexOf('report')), 'the DESCRIPTION hit is proven on its own row')
+  // The description is WRAPPED (and hard-broken for over-wide tokens), which
+  // can drop a raw occurrence from the rendered corpus: anchor only.
+  assert.ok(!vt.getCellInverse(descriptionRow, lines[descriptionRow]!.indexOf('report')), 'the DESCRIPTION hit must not strong-highlight a wrapped description')
   assert.ok(!vt.getCellInverse(pathRow, lines[pathRow]!.indexOf('report')), 'the path row is not the current occurrence')
   app.stop()
 })
@@ -418,5 +419,74 @@ test('navigation: the user bubble marker is never strong-highlighted for a body 
   const markerCol = lines[row]!.indexOf('❯')
   assert.ok(markerCol >= 0, `the bubble marker must render:\n${lines.join('\n')}`)
   assert.ok(!vt.getCellInverse(row, markerCol), 'the injected bubble marker must NOT be the current occurrence')
+  app.stop()
+})
+
+test('navigation: a wrapped deliverable description never strong-highlights a renumbered occurrence', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  // The filler pushes `alpha` to the END of line 1, so `alpha beta` SPANS the
+  // wrap and a second `alpha beta` sits on line 2. Wrapping can drop a raw
+  // occurrence from the rendered corpus, so a surviving match must never be
+  // renumbered as sourceOccurrence 0 and strong-highlighted.
+  const description = `${'x'.repeat(84)} alpha beta alpha beta`
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 1 }, 0),
+    event('deliverables/presented', { turn: 1, callId: 'present-1', files: [{ path: 'out/report.md', description }] }, 1),
+    event('assistant/message', {
+      turn: 1, step: 0,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 2),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+  ])
+  const match = folder.search('alpha beta')[0]!
+  assert.deepEqual(match.source, { kind: 'assistant-deliverable', index: 0, field: 'description' })
+
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const card = folder.messages()[0]!
+  app.setTranscript([card], folder.turnActivities())
+  app.setTranscriptSearchTarget({ query: 'alpha beta', match, message: card })
+  const lines = await viewport(vt)
+  const line1 = lines.findIndex(line => line.includes('xxxx') && line.includes('alpha'))
+  const line2 = lines.findIndex(line => line.includes('alpha') && line.includes('beta') && !line.includes('xxxx'))
+  assert.ok(line1 >= 0 && line2 >= 0, `wrapped description must render:\n${lines.join('\n')}`)
+  assert.ok(!vt.getCellInverse(line1, lines[line1]!.indexOf('alpha')), 'line 1 must not be a guessed strong occurrence')
+  assert.ok(!vt.getCellInverse(line2, lines[line2]!.indexOf('beta')), 'line 2 must not be renumbered as the current occurrence')
+  app.stop()
+})
+
+test('navigation: a hard-wrapped description token never strong-highlights a surviving occurrence', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  // A long no-space token is hard-broken by the wrapper, so a query spanning
+  // the break (`ghij`) disappears from the rendered corpus while a later
+  // `ghij` survives — it must NOT be renumbered as sourceOccurrence 0.
+  const description = `${'abcdefghij'.repeat(12)}ijklmnop needle ghij`
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 1 }, 0),
+    event('deliverables/presented', { turn: 1, callId: 'present-1', files: [{ path: 'out/report.md', description }] }, 1),
+    event('assistant/message', {
+      turn: 1, step: 0,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 2),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+  ])
+  const match = folder.search('ghij')[0]!
+  assert.deepEqual(match.source, { kind: 'assistant-deliverable', index: 0, field: 'description' })
+
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const card = folder.messages()[0]!
+  app.setTranscript([card], folder.turnActivities())
+  app.setTranscriptSearchTarget({ query: 'ghij', match, message: card })
+  const lines = await viewport(vt)
+  const surviving = lines.findIndex(line => line.includes('ghij'))
+  assert.ok(surviving >= 0, `the surviving occurrence must render:\n${lines.join('\n')}`)
+  assert.ok(!vt.getCellInverse(surviving, lines[surviving]!.indexOf('ghij')), 'a surviving hard-wrap match must not be the current occurrence')
   app.stop()
 })
