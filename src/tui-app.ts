@@ -163,6 +163,7 @@ import {
 } from './workflow-presentation.ts'
 import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
+import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
 import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
 import { FocusTimingStore } from './focus-timing.ts'
@@ -410,6 +411,31 @@ export interface TranscriptSearchPresentationDiagnostics {
   /** `setTranscript()` commits. */
   transcriptSets: number
 }
+
+/** Test-only counters for transcript presentation invalidation. These counters
+ * describe work that actually happened, not the intended branch. */
+export interface TranscriptPresentationDiagnostics {
+  setCalls: number
+  structuralCommits: number
+  contentCommits: number
+  noopCommits: number
+  dirtyBlocks: number
+  mountReplacements: number
+  rowMapRefreshes: number
+  structuralFallbacks: number
+}
+
+/** Internal labels for the structural rebuild sites. */
+type TranscriptRebuildReason =
+  | 'transcript-structure'
+  | 'search-presentation'
+  | 'focus-disclosure'
+  | 'window'
+  | 'resize'
+  | 'renderer-registry'
+  | 'theme-keymap'
+  | 'local-card'
+  | 'other'
 
 /** Whether two search targets denote the SAME semantic navigation: the query,
  * the stable match identity (id + ordinals + source key) and the resolved card
@@ -1283,9 +1309,15 @@ export function transcriptContentWidth(width: number): number {
  * tree).
  */
 export class TranscriptGutterComponent implements Component {
-  private readonly child: Component
+  private child: Component
 
   constructor(child: Component) {
+    this.child = child
+  }
+
+  /** Replace the mounted presentation child without taking ownership of either
+   * the old or new component. The message/focus caches own disposal. */
+  replace(child: Component): void {
     this.child = child
   }
 
@@ -2983,6 +3015,48 @@ type TranscriptRenderBlock = FocusProjectedBlock | {
   row: PendingUserRow
 }
 
+function sameCollapseOwner(left: TranscriptRenderBlock, right: TranscriptRenderBlock): boolean {
+  const leftOwner = 'collapseFocusOwnerOnClick' in left ? left.collapseFocusOwnerOnClick : undefined
+  const rightOwner = 'collapseFocusOwnerOnClick' in right ? right.collapseFocusOwnerOnClick : undefined
+  return leftOwner === rightOwner
+}
+
+/** Compare only the mounted block topology. Content and activity revisions are
+ * deliberately excluded so they can use the in-place refresh path. */
+function sameTranscriptBlockShape(left: TranscriptRenderBlock, right: TranscriptRenderBlock): boolean {
+  if (left.kind !== right.kind || !sameCollapseOwner(left, right)) return false
+  if (left.kind === 'message' && right.kind === 'message') {
+    if (left.message.kind === 'summary' || right.message.kind === 'summary') {
+      return left.message.kind === 'summary' && right.message.kind === 'summary'
+        && left.message.text === right.message.text
+    }
+    return left.message === right.message && left.truncated === right.truncated
+  }
+  if (left.kind === 'activity' && right.kind === 'activity') return left.activity === right.activity
+  if (left.kind === 'streaming-tool-previews' && right.kind === 'streaming-tool-previews') return left.turn === right.turn
+  if (left.kind === 'pending-user' && right.kind === 'pending-user') {
+    return pendingUserDisclosureKey(left.row) === pendingUserDisclosureKey(right.row)
+  }
+  return false
+}
+
+function sameStreamingToolPreviews(left: readonly StreamingToolPreview[], right: readonly StreamingToolPreview[]): boolean {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]!
+    const b = right[index]!
+    if (a.callId !== b.callId || a.turn !== b.turn || a.step !== b.step || a.index !== b.index
+      || a.name !== b.name || a.argumentBytes !== b.argumentBytes || a.summary !== b.summary || a.scanPrefix !== b.scanPrefix) return false
+  }
+  return true
+}
+
+function samePendingUserRow(left: PendingUserRow, right: PendingUserRow): boolean {
+  return left.id === right.id && left.rpcId === right.rpcId && left.text === right.text
+    && left.local === right.local && left.status === right.status && left.foldableText === right.foldableText
+}
+
 /** One cached component for a transcript message (stage J render cache). */
 interface MessageComponentEntry {
   component: Component
@@ -3171,6 +3245,8 @@ type RenderedTranscriptBlock = {
   /** The selector matching {@link searchSelection} for the CURRENT render
    * epoch: remeasure uses it to re-sync the mounted highlight wrapper. */
   searchSelector?: RenderedSearchSelector
+  /** Physical non-owning gutter mount; absent for zero-height blocks. */
+  mount?: TranscriptGutterComponent
   truncatedMarker: boolean
   attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
   collapseFocusOwnerOnClick?: number
@@ -3410,7 +3486,7 @@ export class TuiApp {
     if (this.toolOutputExpanded === expanded) return
     this.clearFocusLiveHeightState()
     this.toolOutputExpanded = expanded
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
@@ -3486,6 +3562,18 @@ export class TuiApp {
     fullRenders: 0,
     transcriptSets: 0,
   }
+  /** Test-only structural/content invalidation counters. */
+  private readonly transcriptPresentationDiagnostics: TranscriptPresentationDiagnostics = {
+    setCalls: 0,
+    structuralCommits: 0,
+    contentCommits: 0,
+    noopCommits: 0,
+    dirtyBlocks: 0,
+    mountReplacements: 0,
+    rowMapRefreshes: 0,
+    structuralFallbacks: 0,
+  }
+  private readonly transcriptRenderProfiler = createTranscriptRenderProfiler()
   /** The Ctrl+R input-history panel, while one is open. */
   private historyPanel: HistoryPanel | undefined
   /** The overlay handle of the history panel (hide() closes it). */
@@ -3827,6 +3915,8 @@ export class TuiApp {
    * `docs/focus-replay-harness.md`.
    */
   private mountedTranscriptBlocks: readonly RenderedTranscriptBlock[] = []
+  /** Whether one structural transcript batch has been mounted. */
+  private transcriptPresentationCommitted = false
   /** The currently measured inert padding after a Focus turn's boundary
    * spacer. Padding components read this map at paint time, retaining the
    * compatible floor while historical and releasing it with the same explicit
@@ -4046,7 +4136,7 @@ export class TuiApp {
         this.clearExitConfirmation()
         if (this.messagesView !== undefined) {
           this.refreshTranscriptWindowHint()
-          this.rebuildMessages()
+          this.rebuildMessages('theme-keymap')
         }
         this.requestRender()
       },
@@ -6083,7 +6173,7 @@ export class TuiApp {
   pushLocalMessage(message: TranscriptMessage): TranscriptMessage {
     this.localMessages.push(message)
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.rebuildMessages('local-card')
     return message
   }
 
@@ -6115,7 +6205,7 @@ export class TuiApp {
     if (token !== undefined) this.identityTokens.set(next, token)
     this.localMessages[index] = next
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.rebuildMessages('local-card')
     return next
   }
 
@@ -6129,7 +6219,7 @@ export class TuiApp {
     if (token !== undefined) this.identityTokens.set(message, token)
     this.localMessages[index] = message
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.rebuildMessages('local-card')
   }
 
   /** Drop all local cards (session switch). */
@@ -6137,7 +6227,7 @@ export class TuiApp {
     if (this.localMessages.length === 0) return
     this.localMessages.length = 0
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.rebuildMessages('local-card')
   }
 
   /**
@@ -6153,7 +6243,7 @@ export class TuiApp {
     this.localMessages.length = 0
     this.localMessages.push(...running)
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.rebuildMessages('local-card')
   }
 
   /**
@@ -6615,7 +6705,8 @@ export class TuiApp {
   }
 
   /**
-   * Replace the transcript and rebuild the message components. Collapsible
+   * Replace the transcript and commit its structural/content/no-op presentation.
+   * Collapsible
    * entries (tool, system cards) render folded unless the Ctrl+O master
    * switch is on and the entry belongs to the most recent turns (or, in
    * REGULAR Focus, an expanded Thought root full-reveals its process —
@@ -6637,47 +6728,93 @@ export class TuiApp {
     searchPresentation?: TranscriptSearchPresentation,
   ): void {
     this.searchPresentationDiagnostics.transcriptSets += 1
+    this.transcriptPresentationDiagnostics.setCalls += 1
+    const profileStart = this.transcriptRenderProfiler.begin()
     const previousWindow = this.transcriptWindow
+    const previousWindowHint = this.transcriptWindowHint
+    const activitiesChanged = activities !== undefined && activities !== this.turnActivities
     const windowChanged = previousWindow?.mode !== window?.mode
       || previousWindow?.endTurn !== window?.endTurn
+      || previousWindow?.firstTurn !== window?.firstTurn
+      || previousWindow?.lastTurn !== window?.lastTurn
+      || previousWindow?.hasNewer !== window?.hasNewer
     // Passive legacy callers may omit activities while retaining the host's
-    // current map; only an explicit map replacement or window-value change
-    // is a structural transcript signal here.
-    if ((activities !== undefined && activities !== this.turnActivities) || windowChanged) {
-      this.clearFocusLiveHeightState()
-    }
+    // current map; an explicit map replacement stays on the structural path
+    // because the activity ownership epoch cannot be proven in place.
+    if (activitiesChanged || windowChanged) this.clearFocusLiveHeightState()
     this.messages = messages
     if (activities !== undefined) this.turnActivities = activities
-    // An activity becomes known the moment its map is published — observe it
-    // at the phase it is actually in. The runner can open an approval/question
-    // before this (delayed) repaint publishes the map, and the recorded pause
-    // boundaries preserve the pre-wait active span (review P1). Clear the
-    // windows only AFTER a pass that seeded a LIVE activity: a history window
-    // full of completed turns must not drop a boundary a live turn still
-    // needs, and every live activity first seen in the pass shares the same
-    // window snapshot.
+    // Observe newly published activity objects at the phase they actually
+    // entered; this preserves the pre-wait active span.
     if (this.observeFocusTiming()) this.focusTiming.clearPauseWindows()
     this.streamingToolPreviews = [...(streamingToolPreviews ?? [])]
     this.transcriptWindow = window
     this.refreshTranscriptWindowHint()
-    // The Workflow disclosure transitions fold BEFORE the rebuild: the
-    // renderer reads the advanced state (PR2 plan §7.5–§7.7). A changed
-    // workflow snapshot is a structural presentation epoch even when the
-    // automatic fold did not mutate a user override.
-    if (this.updateWorkflowDisclosure(messages)) this.clearFocusLiveHeightState()
-    // Repaints do NOT clear the transient notify line: an active session
-    // repaints every frame (streaming chunks, tool cards), and clearing on
-    // each repaint would make every notice — including error blocks like
-    // error blocks — flash for a frame. The notify expires via
-    // its 8s auto-clear timer or an explicit clear (user submit, session
-    // switch, stop).
-    // The search presentation (weak-match representatives + current target) is
-    // applied BEFORE the rebuild: the render blocks, reveal and occurrence
-    // geometry all read it, and the whole projection epoch commits as ONE
-    // rebuild (perf plan S2 §5.2/§5.3).
-    if (searchPresentation !== undefined) this.applySearchPresentation(searchPresentation)
-    // (The component cache is pruned inside rebuildMessages below.)
-    this.rebuildMessages()
+    const windowHintChanged = previousWindowHint !== this.transcriptWindowHint
+    // Workflow disclosure transitions fold BEFORE the presentation commit.
+    const workflowChanged = this.updateWorkflowDisclosure(messages)
+    if (workflowChanged) this.clearFocusLiveHeightState()
+    // Search presentation is applied before deriving the visible blocks so the
+    // commit remains one semantic presentation epoch.
+    const searchChanged = searchPresentation !== undefined
+      ? this.applySearchPresentation(searchPresentation)
+      : false
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    const blocks = this.transcriptBlocks(projectionExpanded)
+    const classifiedAt = this.transcriptRenderProfiler.mark(profileStart)
+    const structural = !this.transcriptPresentationCommitted
+      || activitiesChanged
+      || windowChanged
+      || windowHintChanged
+      || workflowChanged
+      || searchChanged
+    if (structural) {
+      this.transcriptPresentationDiagnostics.structuralCommits += 1
+      const reason: TranscriptRebuildReason = searchChanged
+        ? 'search-presentation'
+        : windowChanged || windowHintChanged
+          ? 'window'
+          : workflowChanged
+            ? 'focus-disclosure'
+            : 'transcript-structure'
+      this.rebuildMessages(reason, projectionExpanded, blocks)
+      this.transcriptRenderProfiler.finish(profileStart, classifiedAt, 'structural', {
+        reason,
+        visible: blocks.length,
+        rows: this.messageRows.length,
+      })
+      return
+    }
+
+    const result = this.refreshTranscriptContent(blocks, projectionExpanded, this.transcriptRenderWidth())
+    if (result.kind === 'structural') {
+      this.transcriptPresentationDiagnostics.structuralFallbacks += 1
+      this.transcriptPresentationDiagnostics.structuralCommits += 1
+      this.rebuildMessages('transcript-structure', projectionExpanded, blocks)
+      this.transcriptRenderProfiler.finish(profileStart, classifiedAt, 'structural', {
+        reason: 'transcript-structure',
+        dirty: result.dirtyBlocks,
+        visible: blocks.length,
+        rows: this.messageRows.length,
+      })
+      return
+    }
+    if (result.kind === 'content') {
+      this.transcriptPresentationDiagnostics.contentCommits += 1
+      this.transcriptPresentationDiagnostics.dirtyBlocks += result.dirtyBlocks
+      this.transcriptPresentationDiagnostics.mountReplacements += result.mountReplacements
+      this.transcriptPresentationDiagnostics.rowMapRefreshes += 1
+      this.requestRender()
+      this.transcriptRenderProfiler.finish(profileStart, classifiedAt, 'content', {
+        dirty: result.dirtyBlocks,
+        visible: blocks.length,
+        rows: this.messageRows.length,
+      })
+      return
+    }
+    this.transcriptPresentationDiagnostics.noopCommits += 1
+    this.transcriptRenderProfiler.finish(profileStart, classifiedAt, 'noop', { visible: blocks.length, rows: this.messageRows.length })
+
   }
 
   /** Replace ONLY the turn activities (the messages stay). The runner
@@ -6690,7 +6827,7 @@ export class TuiApp {
     // current phase so the Focus timer keeps its pre-wait active span; the
     // windows are cleared once the pass has seeded a live activity.
     if (this.observeFocusTiming()) this.focusTiming.clearPauseWindows()
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
   }
 
   /** Whether Focus Mode is currently projecting the transcript. */
@@ -6711,7 +6848,7 @@ export class TuiApp {
     // bulk preference untouched (plan §17). The rebuild re-derives the
     // projection for the new mode.
     this.projectStatus({ interaction: { focusMode: enabled } })
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
     this.requestRender()
   }
 
@@ -6729,7 +6866,7 @@ export class TuiApp {
     // Default working frames follow the style; an explicit custom frame
     // set (extension/advanced indicator) is never overwritten.
     this.working.setIconStyleFrames(workingFramesFor(style))
-    this.rebuildMessages()
+    this.rebuildMessages('theme-keymap')
     this.requestRender()
   }
 
@@ -6798,7 +6935,7 @@ export class TuiApp {
    * rebuild. Returns whether anything actually changed. */
   setTranscriptSearchPresentation(presentation: TranscriptSearchPresentation): boolean {
     if (!this.applySearchPresentation(presentation)) return false
-    this.rebuildMessages()
+    this.rebuildMessages('search-presentation')
     return true
   }
 
@@ -6812,7 +6949,7 @@ export class TuiApp {
     if (options.preserveCurrentReveal === true) this.promoteCurrentSearchReveal()
     this.searchSuppressedSubCalls.clear()
     if (!this.applySearchPresentation({ matchMessages, target: undefined, grantReveal: false })) return false
-    if (options.rebuild !== false) this.rebuildMessages()
+    if (options.rebuild !== false) this.rebuildMessages('search-presentation')
     return true
   }
 
@@ -6986,6 +7123,18 @@ export class TuiApp {
     this.searchPresentationDiagnostics.renderedMatchResultCacheHits = 0
     this.searchPresentationDiagnostics.fullRenders = 0
     this.searchPresentationDiagnostics.transcriptSets = 0
+  }
+
+  /** Test-only transcript presentation counters. */
+  transcriptPresentationDiagnosticsForTest(): TranscriptPresentationDiagnostics {
+    return { ...this.transcriptPresentationDiagnostics }
+  }
+
+  /** Reset test-only transcript presentation counters. */
+  resetTranscriptPresentationDiagnosticsForTest(): void {
+    for (const key of Object.keys(this.transcriptPresentationDiagnostics) as Array<keyof TranscriptPresentationDiagnostics>) {
+      this.transcriptPresentationDiagnostics[key] = 0
+    }
   }
 
   /** The cached transcript content geometry (perf plan S2 §5.6): the height the
@@ -7303,7 +7452,7 @@ export class TuiApp {
       return activity !== undefined && !activity.completed
     })
     for (const turn of recent) this.focusExpandedTurns.add(turn)
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
     if (wasFollowingEnd && containsRunning) {
       this.applyFullscreenFollowEndViewport()
     } else {
@@ -7338,7 +7487,7 @@ export class TuiApp {
     this.clearFocusSecondaryExpansionsForTurns(expandedTurns)
     if (searchTurn !== undefined) this.suppressSearchReveal()
     this.toolOutputExpanded = false
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
     this.applyFullscreenFocusTurnAnchor(anchorTurn)
     this.requestRender()
   }
@@ -7426,7 +7575,7 @@ export class TuiApp {
     // 1. flip the set → 2. rebuild the projection (rebuildMessages already
     // requests a render) → 3. re-measure the row map at the current width
     // (a thumbnail that just finished loading must not shift the anchor).
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
     if (options.fullscreenViewport !== undefined && this.fullscreenScroll !== undefined) {
       switch (options.fullscreenViewport) {
         case 'follow-end':
@@ -7525,7 +7674,7 @@ export class TuiApp {
       : this.captureTranscriptViewportAnchor()
     mutate()
     this.clearFocusLiveHeightState()
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
     if (scroll !== undefined) {
       if (wasFollowingEnd) this.applyFullscreenFollowEndViewport()
       else if (anchor !== undefined) this.restoreTranscriptViewportAnchor(anchor, 'top')
@@ -7555,7 +7704,7 @@ export class TuiApp {
     this.clearFocusLiveHeightState()
     this.focusExpansionsStack.push(new Set(this.focusExpandedTurns))
     this.focusExpandedTurns.clear()
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
   }
 
   /** Leave the subagent-viewer scope, restoring the parent's disclosures. */
@@ -7565,7 +7714,7 @@ export class TuiApp {
     this.clearFocusLiveHeightState()
     this.focusExpandedTurns.clear()
     for (const turn of restored) this.focusExpandedTurns.add(turn)
-    this.rebuildMessages()
+    this.rebuildMessages('focus-disclosure')
   }
 
   /** Leave the subagent-viewer scope WITHOUT restoring: the parent session
@@ -7589,7 +7738,10 @@ export class TuiApp {
    * START of every rebuild, so local-card push/replace/clear paths prune
    * too (a replaced running card must not linger in the cache).
    */
-  private pruneMessageComponents(projectionExpanded: ReadonlySet<number>): void {
+  private pruneMessageComponents(
+    projectionExpanded: ReadonlySet<number>,
+    blocks: readonly TranscriptRenderBlock[] = this.projectedBlocks(projectionExpanded),
+  ): void {
     // The FocusActivityComponent cache is pruned to the LIVE projected
     // blocks INDEPENDENTLY of the message cache: a turn that left the
     // window — or Focus turned off — must not keep a stale Thought
@@ -7597,7 +7749,7 @@ export class TuiApp {
     // either.
     if (this.focusActivityComponents.size > 0) {
       const liveTurns = new Set<number>()
-      for (const block of this.projectedBlocks(projectionExpanded)) {
+      for (const block of blocks) {
         if (block.kind === 'activity') liveTurns.add(block.activity.turn)
       }
       for (const turn of this.focusActivityComponents.keys()) {
@@ -7856,19 +8008,41 @@ export class TuiApp {
     return transcriptContentWidth(this.terminal.columns)
   }
 
-  /** Render every projected transcript block once for this rebuild. The same
-   * metadata feeds the mounted component tree and the fullscreen row map. */
-  private renderTranscriptBlocks(
+  /** Resolve one block's live component without rendering it. */
+  private componentForTranscriptBlock(
+    block: TranscriptRenderBlock,
     projectionExpanded: ReadonlySet<number>,
+    boundary: number,
+    userBoundary: number,
     width: number,
-  ): RenderedTranscriptBlock[] {
-    const boundary = this.expandBoundary()
-    // Computed ONCE per render pass (never per user component): the process
-    // and long-user folds have independent recent-turn boundaries.
-    const userBoundary = this.userExpandBoundary()
-    return this.transcriptBlocks(projectionExpanded).map(block => {
-      let component: Component
-      let rendered: string[]
+  ): Component {
+    if (block.kind === 'activity') {
+      return this.focusActivityComponentFor(
+        block.activity,
+        projectionExpanded.has(block.activity.turn),
+        this.focusToolDisplayFor(block.activity),
+        this.focusModeEnabled && !projectionExpanded.has(block.activity.turn)
+          ? focusPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
+          : undefined,
+      )
+    }
+    if (block.kind === 'streaming-tool-previews') return this.streamingToolPreviewComponent(block.previews, width)
+    if (block.kind === 'pending-user') return this.pendingUserComponentFor(block.row)
+    return this.componentForMessage(block.message, boundary, width, userBoundary)
+  }
+
+  /** Render one projected transcript block. The same helper serves the
+   * structural mount and the content-only refresh path. */
+  private renderTranscriptBlock(
+    block: TranscriptRenderBlock,
+    projectionExpanded: ReadonlySet<number>,
+    boundary: number,
+    userBoundary: number,
+    width: number,
+    resolvedComponent?: Component,
+  ): RenderedTranscriptBlock {
+      const component = resolvedComponent ?? this.componentForTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width)
+      const rendered = component.render(width)
       let truncatedMarker = false
       let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
@@ -7877,38 +8051,12 @@ export class TuiApp {
       let workflowHits: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }> | undefined
       let userDisclosureHit: UserDisclosureHit | undefined
       const collapseFocusOwnerOnClick = this.focusOwnerForRenderBlock(block)
-      if (block.kind === 'activity') {
-        // The live Thought disclosure; the hidden process rows (if any)
-        // render as ordinary message blocks below it (plan §15).
-        component = this.focusActivityComponentFor(
-          block.activity,
-          projectionExpanded.has(block.activity.turn),
-          this.focusToolDisplayFor(block.activity),
-          this.focusModeEnabled && !projectionExpanded.has(block.activity.turn)
-            ? focusPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
-            : undefined,
-        )
-        rendered = component.render(width)
-      } else if (block.kind === 'streaming-tool-previews') {
-        // Live-only preview block.
-        component = this.streamingToolPreviewComponent(block.previews, width)
-        rendered = component.render(width)
-      } else if (block.kind === 'pending-user') {
-        // The ephemeral pending user lane: user-bubble visual language plus a
-        // dim pending status. Never cached with durable messages (it leaves
-        // the presentation once its authoritative/durable counterpart lands).
-        component = this.pendingUserComponentFor(block.row)
-        rendered = component.render(width)
+      if (block.kind === 'pending-user') {
         userDisclosureHit = this.userDisclosureHitFor(component, rendered, truncatedMarker, {
           kind: 'pending',
           key: pendingUserDisclosureKey(block.row),
         })
-      } else {
-        // Persistent per-message components (stage J): unchanged messages
-        // reuse their component, so the fork's text-identity render caches
-        // actually hit — markdown is not re-parsed for unchanged content.
-        component = this.componentForMessage(block.message, boundary, width, userBoundary)
-        rendered = component.render(width)
+      } else if (block.kind === 'message') {
         truncatedMarker = block.truncated === true
         attachments = this.attachmentRangesOf(component, width)
         if (isUserMessageDisclosureCandidate(block.message)) {
@@ -7959,7 +8107,19 @@ export class TuiApp {
         ...(workflowHits === undefined ? {} : { workflowHits }),
         ...(userDisclosureHit === undefined ? {} : { userDisclosureHit }),
       }
-    })
+  }
+
+  /** Render every projected transcript block once for a structural rebuild. */
+  private renderTranscriptBlocks(
+    projectionExpanded: ReadonlySet<number>,
+    width: number,
+    blocks = this.transcriptBlocks(projectionExpanded),
+  ): RenderedTranscriptBlock[] {
+    const boundary = this.expandBoundary()
+    const userBoundary = this.userExpandBoundary()
+    return blocks.map(block =>
+      this.renderTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width),
+    )
   }
 
   /** Resolve rendered matches through the cache owned by the live message
@@ -8320,38 +8480,18 @@ export class TuiApp {
     }
   }
 
-  /** Rebuild the message component tree from the current transcript state. */
-  private rebuildMessages(): void {
-    this.searchPresentationDiagnostics.rebuilds += 1
-    // Every rebuild path (transcript updates AND local-card push/replace/
-    // clear) prunes the cache to the live set first. The derived
-    // projection set is computed ONCE per rebuild and shared by the
-    // pruning pass, the projection and every activity-component
-    // construction (review findings).
-    const projectionExpanded = this.focusProjectionExpandedTurns()
-    this.pruneMessageComponents(projectionExpanded)
-    this.messagesView.clear()
-    this.messagesView.addChild(this.welcomeCard)
-    // Row heights for mouse hit-testing: components render (and cache) at
-    // the transcript CONTENT width — the same width the gutter wrapper feeds
-    // the frame pass — so the heights match the screen exactly.
-    const width = this.transcriptRenderWidth()
-    this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
-    const renderedBlocks = this.renderTranscriptBlocks(projectionExpanded, width)
-    // Publish the batch that this rebuild is about to mount. Measurement paths
-    // (refreshMessageRows) read it instead of projecting a second batch.
-    this.mountedTranscriptBlocks = renderedBlocks
+  /** Publish row geometry from one already-rendered block batch. Structural
+   * rebuilds also mount the batch; content commits reuse the existing mounts. */
+  private updateTranscriptGeometry(
+    renderedBlocks: readonly RenderedTranscriptBlock[],
+    projectionExpanded: ReadonlySet<number>,
+    width: number,
+    mount: boolean,
+  ): void {
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     const rows: FullscreenRowEntry[] = []
-    // The transcript-relative row of the current search selection (welcome
-    // card excluded), accumulated with the SAME height rule the row map uses
-    // so the exact viewport anchor lands on the rendered occurrence.
     this.currentSearchTranscriptRange = undefined
     let transcriptRow = 0
-    // One blank row separates consecutive blocks (pi/kimi Spacer parity), so
-    // a session never reads as one undifferentiated wall of text. The spacer
-    // remains charged to the preceding semantic block. Stabilizer rows are
-    // separate inert entries after that existing boundary spacer.
     renderedBlocks.forEach((entry, index) => {
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
       const scrollRange = entry.searchSelection?.scrollRange
@@ -8364,69 +8504,168 @@ export class TuiApp {
       if (height === 0) {
         rows.push(this.fullscreenRowEntry(entry, 0, false))
       } else {
-        // The host-owned transcript gutter applies at THIS boundary: every
-        // block — host card or plugin-rendered component — renders inside
-        // the transcript content width, so no renderer needs to know the
-        // terminal gutter exists (the transcript right-gutter contract).
-        this.messagesView.addChild(new TranscriptGutterComponent(entry.mountedComponent ?? entry.component))
-        // The max-tokens truncated marker rides under the final assistant
-        // (plan §13.8): one muted row, charged to the message's hit region.
-        if (entry.truncatedMarker) {
-          const marker = truncateToWidth(color.textMuted('  (output may be truncated)'), width, '…')
-          this.messagesView.addChild(new TranscriptGutterComponent(new Text(marker, 0, 0)))
+        if (mount) {
+          const gutter = new TranscriptGutterComponent(entry.mountedComponent ?? entry.component)
+          entry.mount = gutter
+          this.messagesView.addChild(gutter)
+          if (entry.truncatedMarker) {
+            const marker = truncateToWidth(color.textMuted('  (output may be truncated)'), width, '…')
+            this.messagesView.addChild(new TranscriptGutterComponent(new Text(marker, 0, 0)))
+          }
+          const hasTrailingSpacer = index < renderedBlocks.length - 1
+          if (entry.userDisclosureHit?.action === 'collapse') {
+            this.messagesView.addChild(new TranscriptGutterComponent(this.userCollapseControlText(width)))
+          } else if (hasTrailingSpacer) {
+            this.messagesView.addChild(new Spacer())
+          }
         }
-        const hasTrailingSpacer = index < renderedBlocks.length - 1
-        rows.push(this.fullscreenRowEntry(entry, height, hasTrailingSpacer))
-        if (entry.userDisclosureHit?.action === 'collapse') {
-          // The expanded long-user tail control: presentation chrome at the
-          // message tail. It REUSES the separator row when one follows, and
-          // is one dedicated row for the final block — never a row inside the
-          // user body, so ordinary text keeps selection/copy semantics.
-          this.messagesView.addChild(new TranscriptGutterComponent(
-            this.userCollapseControlText(width),
-          ))
-        } else if (hasTrailingSpacer) {
-          this.messagesView.addChild(new Spacer())
-        }
+        rows.push(this.fullscreenRowEntry(entry, height, index < renderedBlocks.length - 1))
       }
       const padding = paddingRows.get(index) ?? 0
       if (padding > 0) {
-        this.messagesView.addChild(new FocusLivePaddingComponent(
-          () => this.focusLivePaddingRows.get(index) ?? 0,
-          () => this.focusLivePaddingEnabled(),
-        ))
+        if (mount) {
+          this.messagesView.addChild(new FocusLivePaddingComponent(
+            () => this.focusLivePaddingRows.get(index) ?? 0,
+            () => this.focusLivePaddingEnabled(),
+          ))
+        }
         rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
       }
       transcriptRow += height + padding
     })
-    let chromeHeight = 0
-    if (this.transcriptWindowHint !== '') {
-      // This is a presentation hint, not a transcript message: it is rebuilt
-      // with the bounded projection and never enters the full-history search
-      // corpus or Focus activity rows.
-      const hint = new TranscriptGutterComponent(
-        new Text(color.textDim(this.transcriptWindowHint), 0, 0),
-      )
-      this.messagesView.addChild(hint)
-      chromeHeight += hint.render(this.terminal.columns).length
+    let chromeHeight = this.transcriptChromeHeight
+    if (mount) {
+      chromeHeight = 0
+      if (this.transcriptWindowHint !== '') {
+        const hint = new TranscriptGutterComponent(new Text(color.textDim(this.transcriptWindowHint), 0, 0))
+        this.messagesView.addChild(hint)
+        chromeHeight += hint.render(this.terminal.columns).length
+      }
+      if (this.notifyText !== '') {
+        const line = this.notifyKind === 'info'
+          ? color.textDim(`ℹ ${this.notifyText}`)
+          : color.error(`✗ ${this.notifyText}`)
+        const notice = new TranscriptGutterComponent(new Text(line, 0, 0))
+        this.messagesView.addChild(notice)
+        chromeHeight += notice.render(this.terminal.columns).length
+      }
     }
-    if (this.notifyText !== '') {
-      // Errors flash red with a ✗; informational notices render dim with a ℹ
-      // so a successful action never reads as a failure. The notify row is
-      // part of the transcript visual surface: it shares the content width
-      // (plan §6.1), so a long notice wraps inside the gutter too.
-      const line = this.notifyKind === 'info'
-        ? color.textDim(`ℹ ${this.notifyText}`)
-        : color.error(`✗ ${this.notifyText}`)
-      const notice = new TranscriptGutterComponent(new Text(line, 0, 0))
-      this.messagesView.addChild(notice)
-      chromeHeight += notice.render(this.terminal.columns).length
-    }
-    // Publish the measured content geometry: an ordinary search jump reads it
-    // instead of re-rendering the whole mounted view (perf plan S2 §5.6).
     this.transcriptChromeHeight = chromeHeight
+    if (mount) this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
     this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + chromeHeight
     this.messageRows = rows
+  }
+
+  /** Refresh aligned transcript blocks without clearing the mounted tree.
+   * Component caches decide which blocks are dirty; unchanged metadata remains
+   * reference-stable and is reused for the new row map. */
+  private refreshTranscriptContent(
+    blocks: readonly TranscriptRenderBlock[],
+    projectionExpanded: ReadonlySet<number>,
+    width: number,
+  ): { kind: 'content' | 'noop' | 'structural'; dirtyBlocks: number; mountReplacements: number } {
+    const mounted = this.mountedTranscriptBlocks
+    if (mounted.length !== blocks.length) return { kind: 'structural', dirtyBlocks: 0, mountReplacements: 0 }
+    for (let index = 0; index < blocks.length; index += 1) {
+      if (!sameTranscriptBlockShape(mounted[index]!.block, blocks[index]!)) {
+        return { kind: 'structural', dirtyBlocks: 0, mountReplacements: 0 }
+      }
+    }
+
+    const boundary = this.expandBoundary()
+    const userBoundary = this.userExpandBoundary()
+    const previousPadding = new Map(this.focusLivePaddingRows)
+    const refreshed: RenderedTranscriptBlock[] = []
+    let dirtyBlocks = 0
+    let mountReplacements = 0
+    for (let index = 0; index < blocks.length; index += 1) {
+      const previous = mounted[index]!
+      const block = blocks[index]!
+      let component: Component
+      if (block.kind === 'message' && previous.block.kind === 'message'
+        && block.message.kind === 'summary' && previous.block.message.kind === 'summary'
+        && block.message.text === previous.block.message.text) {
+        // `window()` creates a fresh summary object for equivalent projections;
+        // keep the already-mounted summary component instead of growing a
+        // cache entry for an object whose semantic presentation is unchanged.
+        component = previous.component
+      } else if (block.kind === 'streaming-tool-previews' && previous.block.kind === 'streaming-tool-previews'
+        && sameStreamingToolPreviews(block.previews, previous.block.previews)) {
+        component = previous.component
+      } else if (block.kind === 'pending-user' && previous.block.kind === 'pending-user'
+        && samePendingUserRow(block.row, previous.block.row)) {
+        component = previous.component
+      } else {
+        component = this.componentForTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width)
+      }
+
+      if (component === previous.component) {
+        refreshed.push({ ...previous, block })
+        continue
+      }
+      // Search highlight wrappers carry geometry tied to the old rendered
+      // text. Until an in-place wrapper update is proven safe, one structural
+      // rebuild is the correctness-preserving fallback.
+      if (this.searchTarget !== undefined) {
+        return { kind: 'structural', dirtyBlocks, mountReplacements }
+      }
+      const next = this.renderTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width, component)
+      const oldZero = previous.rendered.length === 0 && !previous.truncatedMarker
+      const nextZero = next.rendered.length === 0 && !next.truncatedMarker
+      if (oldZero !== nextZero
+        || previous.truncatedMarker !== next.truncatedMarker
+        || previous.userDisclosureHit?.action !== next.userDisclosureHit?.action) {
+        return { kind: 'structural', dirtyBlocks, mountReplacements }
+      }
+      if (nextZero) {
+        refreshed.push({ ...next, mount: undefined })
+      } else {
+        const mount = previous.mount
+        if (mount === undefined) return { kind: 'structural', dirtyBlocks, mountReplacements }
+        mount.replace(next.mountedComponent ?? next.component)
+        refreshed.push({ ...next, mount })
+        mountReplacements += 1
+      }
+      dirtyBlocks += 1
+    }
+
+    if (dirtyBlocks === 0) return { kind: 'noop', dirtyBlocks: 0, mountReplacements: 0 }
+    this.mountedTranscriptBlocks = refreshed
+    this.updateTranscriptGeometry(refreshed, projectionExpanded, width, false)
+    for (const [index, rows] of this.focusLivePaddingRows) {
+      if ((previousPadding.has(index)) !== (rows > 0)) {
+        return { kind: 'structural', dirtyBlocks, mountReplacements }
+      }
+    }
+    for (const index of previousPadding.keys()) {
+      if (!this.focusLivePaddingRows.has(index)) {
+        return { kind: 'structural', dirtyBlocks, mountReplacements }
+      }
+    }
+    return { kind: 'content', dirtyBlocks, mountReplacements }
+  }
+
+  /** Rebuild the message component tree from the current transcript state. */
+  private rebuildMessages(
+    reason: TranscriptRebuildReason = 'other',
+    projectionExpanded = this.focusProjectionExpandedTurns(),
+    blocks = this.transcriptBlocks(projectionExpanded),
+  ): void {
+    void reason
+    this.searchPresentationDiagnostics.rebuilds += 1
+    // Every rebuild path prunes the cache to the live set first. The caller
+    // supplies the already-derived projection blocks when setTranscript() has
+    // classified the commit, so the semantic epoch is projected once.
+    this.pruneMessageComponents(projectionExpanded, blocks)
+    this.messagesView.clear()
+    this.messagesView.addChild(this.welcomeCard)
+    const width = this.transcriptRenderWidth()
+    const renderedBlocks = this.renderTranscriptBlocks(projectionExpanded, width, blocks)
+    // Publish the batch that this rebuild is about to mount. Measurement paths
+    // (refreshMessageRows) read it instead of projecting a second batch.
+    this.mountedTranscriptBlocks = renderedBlocks
+    this.updateTranscriptGeometry(renderedBlocks, projectionExpanded, width, true)
+    this.transcriptPresentationCommitted = true
     this.renderTodoPanel()
     this.requestRender()
   }
@@ -8539,6 +8778,9 @@ export class TuiApp {
         mounted.clear()
       }
     }
+    // Publish the remeasured metadata too. Otherwise the next no-op/content
+    // commit could reuse stale rendered lengths after an async image resize.
+    this.mountedTranscriptBlocks = renderedBlocks
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
     const rows: FullscreenRowEntry[] = []
     this.currentSearchTranscriptRange = undefined
@@ -8609,7 +8851,7 @@ export class TuiApp {
     // Rebuild so the row map reflects the new heights immediately (the
     // thumbnail's render cache key carries the collapse bit, so the cached
     // message component re-renders in place).
-    this.rebuildMessages()
+    this.rebuildMessages('transcript-structure')
   }
 
   /**
@@ -10010,6 +10252,7 @@ export class TuiApp {
     // disposal so thumbnail loader subscriptions never leak (round-2
     // finding 2).
     this.disposeMessageComponents()
+    this.transcriptPresentationCommitted = false
   }
 
   /** Dispose every cached message component, then clear the cache. The

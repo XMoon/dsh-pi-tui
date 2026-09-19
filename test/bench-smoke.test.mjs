@@ -19,6 +19,8 @@ test('bench:smoke exercises the maintained benchmark families', { timeout: 120_0
     'bounded 20-turn projection',
     'real live stream 1 token/flush',
     'fullscreen bounded projection',
+    'Focus collapsed streaming',
+    'Focus expanded streaming',
     'search 5 turns',
     'window nav ×50 older / ×50 newer',
   ]) {

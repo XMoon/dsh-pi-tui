@@ -38,22 +38,14 @@ const XtermTerminal = xterm.Terminal
 /** A minimal headless terminal for TuiApp (render target only). */
 class BenchTerminal implements Terminal {
   private readonly xterm: InstanceType<typeof XtermTerminal>
-  private inputHandler: ((data: string) => void) | undefined
-  private resizeHandler: (() => void) | undefined
 
   constructor(columns: number, rows: number) {
     this.xterm = new XtermTerminal({ cols: columns, rows, disableStdin: true, allowProposedApi: true })
   }
 
-  start(onInput: (data: string) => void, onResize: () => void): void {
-    this.inputHandler = onInput
-    this.resizeHandler = onResize
-  }
+  start(_onInput: (data: string) => void, _onResize: () => void): void {}
 
-  stop(): void {
-    this.inputHandler = undefined
-    this.resizeHandler = undefined
-  }
+  stop(): void {}
 
   async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
   write(data: string): void { this.xterm.write(data) }
@@ -542,6 +534,10 @@ function applyLiveFrame(fixture: RenderFixture, frame: number): void {
   })
 }
 
+function formatPresentationDiagnostics(diagnostics: ReturnType<TuiApp['transcriptPresentationDiagnosticsForTest']>): string {
+  return `structural/content/no-op ${diagnostics.structuralCommits} / ${diagnostics.contentCommits} / ${diagnostics.noopCommits}`
+}
+
 // --- the benchmark ----------------------------------------------------------
 
 async function main(): Promise<void> {
@@ -627,20 +623,27 @@ async function main(): Promise<void> {
     const warmFixture = buildRenderFixture(renderTurns)
     const warm = withBenchApp(width, 24, app => {
       projectRenderFixture(app, warmFixture)
-      return timeIt(WARM_SAMPLES, () => projectRenderFixture(app, warmFixture))
+      app.resetTranscriptPresentationDiagnosticsForTest()
+      const timings = timeIt(WARM_SAMPLES, () => projectRenderFixture(app, warmFixture))
+      return { timings, diagnostics: app.transcriptPresentationDiagnosticsForTest() }
     })
-    row(`  same indexed projection (warm cache)`, fmt(stats(warm)))
+    row(`  same indexed projection (warm cache)`, fmt(stats(warm.timings)))
+    row(`  warm structural/content/no-op`, `${warm.diagnostics.structuralCommits} / ${warm.diagnostics.contentCommits} / ${warm.diagnostics.noopCommits}`)
 
     const streamingFixture = buildRenderFixture(renderTurns, true)
     const streaming = withBenchApp(width, 24, app => {
       projectRenderFixture(app, streamingFixture)
+      app.resetTranscriptPresentationDiagnosticsForTest()
       let frame = 1
-      return timeIt(STREAM_SAMPLES, () => {
+      const timings = timeIt(STREAM_SAMPLES, () => {
         applyLiveFrame(streamingFixture, frame++)
         projectRenderFixture(app, streamingFixture)
       })
+      return { timings, diagnostics: app.transcriptPresentationDiagnosticsForTest() }
     })
-    row(`  real live stream 1 token/flush @${width}`, fmt(stats(streaming)))
+    row(`  real live stream 1 token/flush @${width}`, fmt(stats(streaming.timings)))
+    row(`  live structural/content/no-op`, `${streaming.diagnostics.structuralCommits} / ${streaming.diagnostics.contentCommits} / ${streaming.diagnostics.noopCommits}`)
+    row(`  live dirty/mount/row-map`, `${streaming.diagnostics.dirtyBlocks} / ${streaming.diagnostics.mountReplacements} / ${streaming.diagnostics.rowMapRefreshes}`)
 
     const themeFixture = buildRenderFixture(renderTurns)
     const theme = withBenchApp(width, 24, app => {
@@ -651,19 +654,57 @@ async function main(): Promise<void> {
     row(`  theme dark↔light @${width}`, fmt(stats(theme)))
   }
 
+  // Focus keeps the same bounded/live fixture but exercises both stable
+  // collapsed and expanded process projections.
+  {
+    const focusFixture = buildRenderFixture(renderTurns, true)
+    const collapsed = withBenchApp(80, 24, app => {
+      app.setFocusMode(true)
+      projectRenderFixture(app, focusFixture)
+      app.resetTranscriptPresentationDiagnosticsForTest()
+      let frame = 1
+      const timings = timeIt(STREAM_SAMPLES, () => {
+        applyLiveFrame(focusFixture, frame++)
+        projectRenderFixture(app, focusFixture)
+      })
+      return { timings, diagnostics: app.transcriptPresentationDiagnosticsForTest() }
+    })
+    row('Focus collapsed streaming', fmt(stats(collapsed.timings)))
+    row('  Focus collapsed commits', formatPresentationDiagnostics(collapsed.diagnostics))
+
+    const expandedFixture = buildRenderFixture(renderTurns, true)
+    const expanded = withBenchApp(80, 24, app => {
+      app.setFocusMode(true)
+      projectRenderFixture(app, expandedFixture)
+      app.toggleFocusTurn(expandedFixture.liveTurn)
+      app.resetTranscriptPresentationDiagnosticsForTest()
+      let frame = 1
+      const timings = timeIt(STREAM_SAMPLES, () => {
+        applyLiveFrame(expandedFixture, frame++)
+        projectRenderFixture(app, expandedFixture)
+      })
+      return { timings, diagnostics: app.transcriptPresentationDiagnosticsForTest() }
+    })
+    row('Focus expanded streaming', fmt(stats(expanded.timings)))
+    row('  Focus expanded commits', formatPresentationDiagnostics(expanded.diagnostics))
+  }
+
   // 3. Fullscreen uses the same bounded projection and live folder fixture.
   {
     const fixture = buildRenderFixture(renderTurns, true)
     const full = withBenchApp(120, 24, app => {
       projectRenderFixture(app, fixture)
       app.setFullscreen(true)
+      app.resetTranscriptPresentationDiagnosticsForTest()
       let frame = 1
-      return timeIt(FULL_SAMPLES, () => {
+      const timings = timeIt(FULL_SAMPLES, () => {
         applyLiveFrame(fixture, frame++)
         projectRenderFixture(app, fixture)
       })
+      return { timings, diagnostics: app.transcriptPresentationDiagnosticsForTest() }
     })
-    row(`fullscreen bounded projection @120`, fmt(stats(full)))
+    row(`fullscreen bounded projection @120`, fmt(stats(full.timings)))
+    row(`  fullscreen structural/content/no-op`, `${full.diagnostics.structuralCommits} / ${full.diagnostics.contentCommits} / ${full.diagnostics.noopCommits}`)
   }
 
   // 4. Heap (requires --expose-gc).
