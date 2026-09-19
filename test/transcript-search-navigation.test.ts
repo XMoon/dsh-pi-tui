@@ -45,6 +45,13 @@ function occurrenceCells(lines: readonly string[]): { row: number; first: number
   return { row, first, second }
 }
 
+/** Whether a rendered cell carries the EXACT-current themed block. This is the
+ * real "is this occurrence the proven current one" signal now that the exact
+ * style deliberately no longer uses the terminal inverse attribute. */
+function isStrongCell(vt: VirtualTerminal, row: number, col: number): boolean {
+  return vt.getCellBgRgb(row, col) === 0xf5c542
+}
+
 test('navigation: the current strong highlight moves between occurrences in one source', async () => {
   const { vt, app } = startApp()
   // A Workflow member label is a direct projection with proven columns, so its
@@ -72,7 +79,7 @@ test('navigation: the current strong highlight moves between occurrences in one 
   cells = occurrenceCells(lines)
   assert.equal(vt.getCellBgRgb(cells.row, cells.first), 0xf5c542, `the FIRST occurrence is current:\n${lines.join('\n')}`)
   assert.equal(vt.getCellBgRgb(cells.row, cells.second), undefined, 'the second occurrence is not current')
-  assert.ok(!vt.getCellInverse(cells.row, cells.first), 'the themed block never uses the terminal inverse attribute')
+  assert.ok(!vt.getCellInverse(cells.row, cells.first), 'the exact current block never uses the terminal inverse attribute')
 
   app.setTranscriptSearchTarget(target(1))
   lines = await viewport(vt)
@@ -123,14 +130,14 @@ test('navigation: clearing the target removes the reveal and every decoration', 
   // A user bubble's whole card injects the `❯` marker: anchor-only, so the
   // current card's matches are decorated WEAKLY.
   assert.ok(vt.getCellUnderline(cells.row, cells.first), 'precondition: the target occurrence is weak-decorated')
-  assert.ok(!vt.getCellInverse(cells.row, cells.first), 'a message-kind card is anchor-only')
+  assert.ok(!isStrongCell(vt, cells.row, cells.first), 'a message-kind card is anchor-only')
 
   app.setTranscriptSearchTarget(undefined)
   lines = await viewport(vt)
   cells = occurrenceCells(lines)
   assert.ok(!vt.getCellUnderline(cells.row, cells.first), 'clearing removes the first decoration')
   assert.ok(!vt.getCellUnderline(cells.row, cells.second), 'clearing removes every decoration')
-  assert.ok(!vt.getCellInverse(cells.row, cells.first), 'clearing leaves no strong highlight')
+  assert.ok(!isStrongCell(vt, cells.row, cells.first), 'clearing leaves no strong highlight')
   app.stop()
 })
 
@@ -251,7 +258,7 @@ test('navigation: a live group reflow keeps the current highlight via stable-mat
   // The rebind re-attached the presentation to the NEW card object: without it
   // the card would not even be decorated (identity would not match).
   assert.ok(vt.getCellUnderline(row, lines[row]!.indexOf('Read')), 'the rebind keeps the reflowed card decorated')
-  assert.ok(!vt.getCellInverse(row, lines[row]!.indexOf('Read')), 'a tool name/args source stays anchor-only (no guessed strong)')
+  assert.ok(!isStrongCell(vt, row, lines[row]!.indexOf('Read')), 'a tool name/args source stays anchor-only (no guessed strong)')
   app.stop()
 })
 
@@ -289,7 +296,7 @@ test('navigation: tool args and result hits are anchor-only (no guessed strong)'
   assert.ok(headerRow >= 0, `tool header must render:\n${lines.join('\n')}`)
   // The rendered args summary is a presenter projection of the raw args, so it
   // anchors WITHOUT a strong highlight (a raw ordinal cannot be proven).
-  assert.ok(!vt.getCellInverse(headerRow, lines[headerRow]!.indexOf('needle')), 'the ARGS hit must not strong-highlight the summary')
+  assert.ok(!isStrongCell(vt, headerRow, lines[headerRow]!.indexOf('needle')), 'the ARGS hit must not strong-highlight the summary')
 
   // A tool RESULT has no provable rendered occurrence either: it anchors with
   // no strong highlight, so it can never mislabel another occurrence as the
@@ -298,8 +305,8 @@ test('navigation: tool args and result hits are anchor-only (no guessed strong)'
   lines = await viewport(vt)
   const resultRow = lines.findIndex(line => line.includes('needle output'))
   assert.ok(resultRow >= 0, `tool result body must render:\n${lines.join('\n')}`)
-  assert.ok(!vt.getCellInverse(resultRow, lines[resultRow]!.indexOf('needle')), 'the RESULT hit must NOT strong-highlight a guessed occurrence')
-  assert.ok(!vt.getCellInverse(headerRow, lines[headerRow]!.indexOf('needle')), 'the args header is not current either')
+  assert.ok(!isStrongCell(vt, resultRow, lines[resultRow]!.indexOf('needle')), 'the RESULT hit must NOT strong-highlight a guessed occurrence')
+  assert.ok(!isStrongCell(vt, headerRow, lines[headerRow]!.indexOf('needle')), 'the args header is not current either')
   app.stop()
 })
 
@@ -333,7 +340,7 @@ test('navigation: deliverable path and description hits are anchor-only', async 
   assert.ok(pathRow >= 0, `delivered path row missing:\n${lines.join('\n')}`)
   // The path is RELATIVIZED (raw prefix removed), so a raw ordinal cannot be
   // proven: anchor only, no strong highlight.
-  assert.ok(!vt.getCellInverse(pathRow, lines[pathRow]!.indexOf('report')), 'the PATH hit must not strong-highlight a relativized path')
+  assert.ok(!isStrongCell(vt, pathRow, lines[pathRow]!.indexOf('report')), 'the PATH hit must not strong-highlight a relativized path')
 
   app.setTranscriptSearchTarget({ query: 'report', match: descriptionMatch, message: card })
   lines = await viewport(vt)
@@ -341,8 +348,8 @@ test('navigation: deliverable path and description hits are anchor-only', async 
   assert.ok(descriptionRow >= 0, `delivered description row missing:\n${lines.join('\n')}`)
   // The description is WRAPPED (and hard-broken for over-wide tokens), which
   // can drop a raw occurrence from the rendered corpus: anchor only.
-  assert.ok(!vt.getCellInverse(descriptionRow, lines[descriptionRow]!.indexOf('report')), 'the DESCRIPTION hit must not strong-highlight a wrapped description')
-  assert.ok(!vt.getCellInverse(pathRow, lines[pathRow]!.indexOf('report')), 'the path row is not the current occurrence')
+  assert.ok(!isStrongCell(vt, descriptionRow, lines[descriptionRow]!.indexOf('report')), 'the DESCRIPTION hit must not strong-highlight a wrapped description')
+  assert.ok(!isStrongCell(vt, pathRow, lines[pathRow]!.indexOf('report')), 'the path row is not the current occurrence')
   app.stop()
 })
 
@@ -378,9 +385,9 @@ test('navigation: a PTC child result maps to its body, not the header or the roo
   assert.ok(bodyRow >= 0, `child result body must render:\n${lines.join('\n')}`)
   // Result lines are width-truncated, so a raw result ordinal is not provable:
   // the child body anchors without a guessed strong highlight.
-  assert.ok(!vt.getCellInverse(bodyRow, lines[bodyRow]!.indexOf('needle')), 'the child RESULT hit must not strong-highlight a truncated body')
+  assert.ok(!isStrongCell(vt, bodyRow, lines[bodyRow]!.indexOf('needle')), 'the child RESULT hit must not strong-highlight a truncated body')
   const headerRow = lines.findIndex(line => line.includes('echo needle'))
-  assert.ok(headerRow < 0 || !vt.getCellInverse(headerRow, lines[headerRow]!.indexOf('needle')), 'the header/command row is not the current occurrence')
+  assert.ok(headerRow < 0 || !isStrongCell(vt, headerRow, lines[headerRow]!.indexOf('needle')), 'the header/command row is not the current occurrence')
   app.stop()
 })
 
@@ -397,10 +404,10 @@ test('navigation: a Thinking header chrome is never strong-highlighted for a bod
   const lines = await viewport(vt)
   const headerRow = lines.findIndex(line => /Thinking/.test(line))
   assert.ok(headerRow >= 0, `thinking header must render:\n${lines.join('\n')}`)
-  assert.ok(!vt.getCellInverse(headerRow, 0), 'the injected Thinking header must NOT be the current occurrence')
+  assert.ok(!isStrongCell(vt, headerRow, 0), 'the injected Thinking header must NOT be the current occurrence')
   const bodyRow = lines.findIndex(line => line.includes('about search'))
   assert.ok(bodyRow >= 0, `thinking body must render:\n${lines.join('\n')}`)
-  assert.ok(!vt.getCellInverse(bodyRow, lines[bodyRow]!.indexOf('about')), 'the thinking body is anchor-only (no strong)')
+  assert.ok(!isStrongCell(vt, bodyRow, lines[bodyRow]!.indexOf('about')), 'the thinking body is anchor-only (no strong)')
   app.stop()
 })
 
@@ -419,7 +426,7 @@ test('navigation: the user bubble marker is never strong-highlighted for a body 
   assert.ok(row >= 0, `user bubble must render:\n${lines.join('\n')}`)
   const markerCol = lines[row]!.indexOf('❯')
   assert.ok(markerCol >= 0, `the bubble marker must render:\n${lines.join('\n')}`)
-  assert.ok(!vt.getCellInverse(row, markerCol), 'the injected bubble marker must NOT be the current occurrence')
+  assert.ok(!isStrongCell(vt, row, markerCol), 'the injected bubble marker must NOT be the current occurrence')
   app.stop()
 })
 
@@ -555,8 +562,8 @@ test('navigation: a wrapped deliverable description never strong-highlights a re
   const line1 = lines.findIndex(line => line.includes('xxxx') && line.includes('alpha'))
   const line2 = lines.findIndex(line => line.includes('alpha') && line.includes('beta') && !line.includes('xxxx'))
   assert.ok(line1 >= 0 && line2 >= 0, `wrapped description must render:\n${lines.join('\n')}`)
-  assert.ok(!vt.getCellInverse(line1, lines[line1]!.indexOf('alpha')), 'line 1 must not be a guessed strong occurrence')
-  assert.ok(!vt.getCellInverse(line2, lines[line2]!.indexOf('beta')), 'line 2 must not be renumbered as the current occurrence')
+  assert.ok(!isStrongCell(vt, line1, lines[line1]!.indexOf('alpha')), 'line 1 must not be a guessed strong occurrence')
+  assert.ok(!isStrongCell(vt, line2, lines[line2]!.indexOf('beta')), 'line 2 must not be renumbered as the current occurrence')
   app.stop()
 })
 
@@ -589,6 +596,6 @@ test('navigation: a hard-wrapped description token never strong-highlights a sur
   const lines = await viewport(vt)
   const surviving = lines.findIndex(line => line.includes('ghij'))
   assert.ok(surviving >= 0, `the surviving occurrence must render:\n${lines.join('\n')}`)
-  assert.ok(!vt.getCellInverse(surviving, lines[surviving]!.indexOf('ghij')), 'a surviving hard-wrap match must not be the current occurrence')
+  assert.ok(!isStrongCell(vt, surviving, lines[surviving]!.indexOf('ghij')), 'a surviving hard-wrap match must not be the current occurrence')
   app.stop()
 })

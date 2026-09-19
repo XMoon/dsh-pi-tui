@@ -473,6 +473,17 @@ export class OverlayBroker {
     return count
   }
 
+  /** Whether the given managed overlay IS the one visible auto-capturing
+   * overlay (the X058 passthrough exemption): it must itself be visible — a
+   * search box suppressed by a modal stacked above it is NOT — and no other
+   * visible modal may exist. */
+  isOnlyVisibleModal(handle: OverlayHandle | undefined): boolean {
+    if (handle === undefined) return false
+    const node = this.nodes.get(handle)
+    if (node === undefined || node.closed || !this.isVisible(node) || node.explicitHidden) return false
+    return this.visibleModalOverlayCount() === 1
+  }
+
   /** Whether a managed overlay currently holds PHYSICAL keyboard focus — the
    * keyboard-ownership fact (any policy). */
   hasFocusedOverlay(): boolean {

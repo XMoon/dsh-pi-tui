@@ -144,7 +144,9 @@ test('presentation: no geometry anchors the card top with no strong highlight', 
   assert.equal(selection.selectedIndex, -1)
   assert.equal(selection.selectedRow, 0, 'the owning card top is the anchor')
   assert.equal(selection.exact, false)
-  assert.deepEqual(highlightSearchLines(['nothing here'], selection), ['nothing here'])
+  // The card top is still an ANCHOR-ONLY current: it carries the weaker wash
+  // even though the card has no rendered occurrence at all.
+  assert.deepEqual(highlightSearchLines(['nothing here'], selection), [color.searchAnchorBg('nothing here')])
 })
 
 test('presentation: tool args and result map through distinct proven regions', () => {
@@ -318,6 +320,41 @@ test('presentation: the current styles follow the active palette (light + custom
       'a custom palette override flows into the highlight')
     assert.ok(highlightSearchLines(lines, selection)[0]!.includes('\x1b[48;2;18;52;86m'),
       'the custom background is the one actually painted')
+  } finally {
+    setTheme('dark')
+  }
+})
+
+test('presentation: an anchor-only current with NO visible occurrence still washes its anchor row', () => {
+  const lines = ['nothing here', 'nor here either']
+  const matches = findAltScreenSearchMatches(lines, 'needle')
+  assert.equal(matches.length, 0, 'precondition: no rendered occurrence exists')
+  const regions: SearchSourceRegion[] = [{ sourceKey: 's', anchorRow: 1, rowStart: 1, rowEnd: 2, enumerable: false }]
+  const selection = selectRenderedSearchMatch(matches, selectorForRegions(lines, 'needle', regions, 's'))
+  assert.equal(selection.selectedIndex, -1, 'nothing is strong-highlighted')
+  assert.equal(selection.selectedRow, 1, 'the source region anchors the viewport')
+  const decorated = highlightSearchLines(lines, selection)
+  assert.equal(decorated[1], color.searchAnchorBg(lines[1]!), 'the anchor row is washed even with no visible occurrence')
+  assert.equal(decorated[0], lines[0], 'the other rows are untouched')
+  assert.ok(!decorated[1]!.includes(strong('needle')), 'no occurrence is fabricated')
+})
+
+test('presentation: a palette that predates the search tokens still paints an explicit themed block', () => {
+  const { searchCurrentFg: _fg, searchCurrentBg: _bg, searchAnchorBg: _anchor, ...legacy } = darkColors
+  void _fg
+  void _bg
+  void _anchor
+  try {
+    setTheme('custom', legacy as never)
+    const styled = color.searchCurrent('needle')
+    assert.ok(!styled.includes('\x1b[1;7m'), 'a legacy palette NEVER falls back to the terminal inverse attribute')
+    assert.ok(styled.includes('\x1b[48;2;'), 'the current occurrence has an explicit inherited background')
+    assert.ok(color.searchAnchorBg('needle').includes('\x1b[48;2;'), 'the anchor wash also has an explicit background')
+
+    // The body-text luminance picks the inherited family.
+    setTheme('custom', { ...legacy, text: '#1A1A1A' } as never)
+    assert.ok(color.searchCurrent('x').includes('\x1b[48;2;255;215;94m'),
+      'a light-family body text inherits the light search block')
   } finally {
     setTheme('dark')
   }
