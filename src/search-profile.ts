@@ -2,13 +2,20 @@
  * Opt-in wall-clock profiling for the Ctrl+F search hot path (perf plan S1
  * §4.2). Disabled by default: with `DSH_TUI_SEARCH_PROFILE` unset every method
  * is a no-op, so the hot path pays nothing. Enabled, ONE line per operation is
- * written with the plan's stage set — `search.semantic`,
- * `search.resolve-representatives`, `search.window` (the anchored projection),
- * `search.presentation-commit` (resolving the presentation for that epoch),
- * `search.rebuild` (the app's atomic commit + message-tree rebuild),
- * `search.scroll` (the viewport anchor) and `search.total`. That makes a real
- * long-session before/after comparison possible without a machine-dependent CI
- * threshold.
+ * written with the APPLICABLE stages of that operation:
+ *
+ * - `search.semantic` — the indexed scan / prefix refinement (query changes only)
+ * - `search.resolve-representatives` — the single O(results) representative pass
+ * - `search.window` — the anchored projection (off-window jumps only)
+ * - `search.presentation-commit` — resolving / building the presentation
+ * - `search.rebuild` — the app's atomic commit + message-tree rebuild
+ * - `search.scroll` — the viewport anchor (match jumps only)
+ * - `search.total` — always
+ *
+ * A no-match/cleared operation therefore reports semantic/resolve/commit/rebuild
+ * (there is nothing to project or scroll), and a same-window jump omits
+ * `window`. That is enough for a real long-session before/after comparison
+ * without a machine-dependent CI threshold.
  * @module @xmoon76/dsh-pi-tui/search-profile
  */
 
@@ -44,19 +51,27 @@ export function createSearchProfiler(
   }
   let startedAt = 0
   let last = 0
+  let active = false
   const parts: string[] = []
   return {
     start(): void {
       startedAt = now()
       last = startedAt
       parts.length = 0
+      active = true
     },
     stage(name: string): void {
+      // A stage outside an operation window is DROPPED rather than appended to
+      // a stale line: a duplicated pass then surfaces as a duplicated stage in
+      // the operation that actually ran it.
+      if (!active) return
       const at = now()
       parts.push(`${name}=${(at - last).toFixed(1)}ms`)
       last = at
     },
     end(): void {
+      if (!active) return
+      active = false
       const at = now()
       parts.push(`search.total=${(at - startedAt).toFixed(1)}ms`)
       write(`[search-profile] ${parts.join(' ')}\n`)

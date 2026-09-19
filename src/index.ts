@@ -4340,6 +4340,9 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       searchMatchRepresentativeIds = ids
+      // The stage lives HERE, next to the pass it measures: a duplicate
+      // representative pass can never hide behind a single stage emission.
+      searchProfiler.stage('search.resolve-representatives')
     }
     const resetSearchState = (): void => {
       // Only a runner that actually holds search state needs to publish the
@@ -4528,7 +4531,6 @@ export function apply(ctx: Context, config: Config): void {
       searchCurrent = refreshed.current
       lastSearchRevision = refreshed.revision
       lastSearchFolder = folder
-      refreshSearchMatchMessages()
       app.setSearchResult(searchCurrent + 1, searchMatches.length)
     }
     /** The search presentation for an EXPLICIT navigation: `grantReveal` so the
@@ -4544,10 +4546,11 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
     const jumpToSearchMatch = (): void => {
+      // `jumpToSearchMatch` is the ONLY caller of the stale refresh and the ONLY
+      // place that derives the representative ids: one O(searchMatches) dedupe
+      // pass per operation, over the FINAL result set (a 3000-result query must
+      // not pay it two or three times per keystroke).
       refreshSearchMatchesIfStale()
-      // Refresh the representative ids FIRST: the no-match branch below must be
-      // able to publish the CURRENT (empty) set, and the match branch needs the
-      // same ids for its navigation presentation.
       refreshSearchMatchMessages()
       const match = searchMatches[searchCurrent]
       if (match === undefined) {
@@ -4555,11 +4558,14 @@ export function apply(ctx: Context, config: Config): void {
         // in ONE atomic commit. A bare setTranscriptSearchTarget(undefined)
         // would carry the PREVIOUS published set, leaving the presentation's
         // representative half stale until the search closes.
-        app.setTranscriptSearchPresentation({
+        const presentation: TranscriptSearchPresentation = {
           matchMessages: resolveSearchMatchMessages(),
           target: undefined,
           grantReveal: false,
-        })
+        }
+        searchProfiler.stage('search.presentation-commit')
+        app.setTranscriptSearchPresentation(presentation)
+        searchProfiler.stage('search.rebuild')
         app.setSearchResult(0, 0)
         return
       }
@@ -7327,8 +7333,7 @@ export function apply(ctx: Context, config: Config): void {
         lastSearchRevision = folder.searchRevision()
         lastSearchFolder = folder
         searchCurrent = searchMatches.length > 0 ? 0 : -1
-        refreshSearchMatchMessages()
-        searchProfiler.stage('search.resolve-representatives')
+        // The jump owns the single representative pass for this operation.
         // Always run the jump path: an empty/no-match query must CLEAR the
         // stale search presentation target (0/0), not leave the previous
         // reveal/highlight on screen.
@@ -7352,8 +7357,7 @@ export function apply(ctx: Context, config: Config): void {
         searchCurrent = stepped.current
         lastSearchRevision = stepped.revision
         lastSearchFolder = folder
-        refreshSearchMatchMessages()
-        searchProfiler.stage('search.resolve-representatives')
+        // The jump owns the single representative pass for this operation.
         // An emptied list steps to -1: the jump path still runs so the
         // stale target/highlight is cleared (0/0).
         jumpToSearchMatch()
@@ -7371,8 +7375,7 @@ export function apply(ctx: Context, config: Config): void {
         searchCurrent = stepped.current
         lastSearchRevision = stepped.revision
         lastSearchFolder = folder
-        refreshSearchMatchMessages()
-        searchProfiler.stage('search.resolve-representatives')
+        // The jump owns the single representative pass for this operation.
         jumpToSearchMatch()
         searchProfiler.end()
       },

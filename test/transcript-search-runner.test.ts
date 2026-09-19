@@ -399,3 +399,48 @@ test('runner search: Ctrl+End while search is open repaints exactly once', async
   assert.ok(app.searchPresentationDiagnosticsForTest().rebuilds <= 1,
     `Ctrl+End must not double-rebuild (got ${app.searchPresentationDiagnosticsForTest().rebuilds})`)
 })
+
+test('runner search: every operation performs exactly one representative pass', async (t) => {
+  const originalWrite = process.stderr.write
+  const captured: string[] = []
+  process.stderr.write = ((chunk: unknown) => {
+    captured.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  process.env.DSH_TUI_SEARCH_PROFILE = '1'
+  try {
+    const fixture = await mountSearchRunner(t, 30, [25, 29])
+    const { app } = fixture
+    app.startTranscriptSearch()
+    await fixture.settleRender()
+    typeQuery(fixture, 'transcript') // 10 query operations
+    await fixture.settleRender()
+    fixture.input('\r') // Next
+    await fixture.settleRender()
+    fixture.input('\x1b[13;2u') // Prev
+    await fixture.settleRender()
+    typeQuery(fixture, 'zzz') // 3 no-match (clear) operations
+    await fixture.settleRender()
+
+    const operations = captured.filter(line => line.includes('[search-profile]') && line.includes('search.total='))
+    assert.ok(operations.length >= 15, `expected one profiler line per operation, got ${operations.length}`)
+    for (const operation of operations) {
+      assert.equal(operation.split('search.resolve-representatives=').length - 1, 1,
+        `each operation must resolve representatives exactly ONCE: ${operation.trim()}`)
+      assert.equal(operation.split('search.total=').length - 1, 1,
+        `each operation must report exactly one total: ${operation.trim()}`)
+    }
+    // The no-match clear reports the commit/rebuild it ACTUALLY performed and
+    // never fabricates a projection or a scroll.
+    const clears = operations.filter(operation => !operation.includes('search.scroll='))
+    assert.ok(clears.length >= 1, 'the no-match clear must be reported')
+    for (const clear of clears) {
+      assert.ok(clear.includes('search.presentation-commit='), `the clear reports its commit: ${clear.trim()}`)
+      assert.ok(clear.includes('search.rebuild='), `the clear reports its rebuild: ${clear.trim()}`)
+      assert.ok(!clear.includes('search.window='), 'the clear never fabricates a projection stage')
+    }
+  } finally {
+    process.stderr.write = originalWrite
+    delete process.env.DSH_TUI_SEARCH_PROFILE
+  }
+})

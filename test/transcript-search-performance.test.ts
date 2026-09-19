@@ -166,4 +166,10 @@ test('perf: the search profiler is a no-op unless enabled and emits the plan sta
   for (const stage of ['search.semantic=', 'search.resolve-representatives=', 'search.window=', 'search.presentation-commit=', 'search.rebuild=', 'search.scroll=', 'search.total=']) {
     assert.ok(lines[0]!.includes(stage), `stage ${stage} missing from ${lines[0]!}`)
   }
+  // A stage outside an operation window is dropped, and a second end() is a
+  // no-op — a stray pass can never append to a stale line.
+  lines.length = 0
+  enabled.stage('search.stray')
+  enabled.end()
+  assert.deepEqual(lines, [], 'stages/end outside a window are dropped')
 })
