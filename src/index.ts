@@ -97,7 +97,6 @@ import type { SaveLocationResult } from './save-location.ts'
 import { completeDirectory } from './file-completion/directory-completion.ts'
 import { LocalFileSource } from './file-completion/local-file-source.ts'
 import { TranscriptWindowController } from './transcript-window.ts'
-import type { TranscriptWindowState } from './transcript-window.ts'
 import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
 import { CompletionNotificationController } from './notification/controller.ts'
 import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
@@ -123,7 +122,7 @@ import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type Foot
 import { FooterCommandRunner } from './footer/command-runner.ts'
 import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from './footer/dynamic-item-runtime.ts'
 import { color, type ColorPalette } from './theme.ts'
-import { isEmptyAcceleratedViewerSubmit, startProcessTui, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TranscriptSearchPresentation, type TranscriptSearchPresentationTarget, type TuiApp } from './tui-app.ts'
+import { isEmptyAcceleratedViewerSubmit, startProcessTui, type CompactionPhase, type QueueItem, type StreamingToolPreview, type TranscriptSearchPresentation, type TranscriptSearchPresentationTarget, type TranscriptSearchCloseReason, type TuiApp } from './tui-app.ts'
 import {
   clearStreamingToolPreviewsForStep,
   clearStreamingToolPreviewsForTurn,
@@ -4273,7 +4272,6 @@ export function apply(ctx: Context, config: Config): void {
     // Opt-in local wall-clock profiling of the Ctrl+F hot path (perf plan S1
     // §4.2). A no-op unless DSH_TUI_SEARCH_PROFILE=1.
     const searchProfiler: SearchProfile = createSearchProfiler(searchProfilingEnabled())
-     let searchOrigin: { controller: TranscriptWindowController; state: TranscriptWindowState } | undefined
     // Query-refinement state (D1): the previous query's matches are reused
     // only when the new query PREFIX-extends the previous one on the SAME
     // folder with an UNCHANGED projection revision (the folder validates
@@ -4344,7 +4342,7 @@ export function apply(ctx: Context, config: Config): void {
       // representative pass can never hide behind a single stage emission.
       searchProfiler.stage('search.resolve-representatives')
     }
-    const resetSearchState = (): void => {
+    const resetSearchState = (options: { preserveCurrentReveal?: boolean; rebuild?: boolean } = {}): void => {
       // Only a runner that actually holds search state needs to publish the
       // atomic clear: an unconditional empty commit would force a pointless
       // message-tree rebuild on every Ctrl+End in regular fullscreen use.
@@ -4359,10 +4357,10 @@ export function apply(ctx: Context, config: Config): void {
       searchMatchMessages = new Set()
       searchBoundRevision = -1
       // ONE atomic commit: an empty representative set AND no target, so a
-      // session swap / close can never leave the old session's card bound as
+      // session/surface reset can never leave the old card bound as
       // the search highlight or keep a temporary reveal alive.
       if (hadState && app !== undefined) {
-        app.setTranscriptSearchPresentation({ matchMessages: searchMatchMessages, target: undefined, grantReveal: true })
+        app.finishTranscriptSearchPresentation(searchMatchMessages, options)
       }
     }
     // After EVERY projection commit, resolve the presentation for THAT epoch:
@@ -4442,7 +4440,6 @@ export function apply(ctx: Context, config: Config): void {
       pendingSubagentCalls.length = 0
       viewCallToChild.clear()
       resetSearchState()
-      searchOrigin = undefined
       windowController.latest()
       windowController.setTurns(folder.groupedTurns())
       app.setSearchResult(0, 0)
@@ -7268,17 +7265,11 @@ export function apply(ctx: Context, config: Config): void {
         // Ctrl+End is a fullscreen transcript action. In regular mode it must
         // fall through so the editor retains its own Ctrl+End behavior.
         if (!app.isFullscreen()) return false
-        // Ctrl+End is a semantic reset, not merely a viewport scroll. Clear
-        // the search origin BEFORE closing the overlay so its close callback
-        // cannot restore the historical anchor we are explicitly leaving.
-        searchOrigin = undefined
+        // Ctrl+End is a semantic reset, not merely a viewport scroll. With
+        // search open, the explicit `jump-latest` close reason owns the reset
+        // and latest projection so this path does not repaint twice.
         if (app.isSearching()) {
-          // With the search open, `onSearchClose` already performs exactly this
-          // reset: it latches `latest()`, repaints ONCE and scrolls to the
-          // bottom. Repainting here as well would double the projection for one
-          // action (and the search presentation is cleared atomically by the
-          // close path).
-          app.closeTranscriptSearch()
+          app.closeTranscriptSearch('jump-latest')
           app.setSearchResult(0, 0)
           return true
         }
@@ -7313,8 +7304,6 @@ export function apply(ctx: Context, config: Config): void {
       // materialization); each jump re-windows the view so the matched turn
       // is visible (older turns collapse above it into the summary entry).
       onSearchOpen: () => {
-        const controller = activeWindow()
-        searchOrigin = { controller, state: controller.state() }
         // A stale search presentation from a previous session must never
         // leak its reveal/highlight into the fresh overlay.
         app.setTranscriptSearchTarget(undefined)
@@ -7380,23 +7369,24 @@ export function apply(ctx: Context, config: Config): void {
         jumpToSearchMatch()
         searchProfiler.end()
       },
-      onSearchClose: () => {
-        resetSearchState()
-        // Clear the temporary search presentation BEFORE restoring the origin
-        // window so no stale reveal/highlight survives the close (the user's
-        // own disclosure state was never written by search).
-        app.setTranscriptSearchTarget(undefined)
-        const origin = searchOrigin
-        searchOrigin = undefined
-        const controller = activeWindow()
-        if (origin?.controller === controller && origin.state.mode === 'history' && origin.state.endTurn !== undefined) {
-          controller.anchorAt(origin.state.endTurn)
-        } else {
-          controller.latest()
+      onSearchClose: (reason: TranscriptSearchCloseReason) => {
+        if (reason === 'dismiss') {
+          const anchor = app.captureTranscriptViewportAnchor()
+          resetSearchState({ preserveCurrentReveal: true })
+          if (anchor !== undefined) app.restoreTranscriptViewportAnchor(anchor, 'top')
+          return
         }
-        repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
-        if (controller.isLatest()) app.scrollToBottom()
-        else app.scrollToTop({ disableFollow: true })
+        if (reason === 'jump-latest') {
+          resetSearchState()
+          const controller = activeWindow()
+          controller.latest()
+          repaint(app, activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
+          app.scrollToBottom()
+          return
+        }
+        // A physical surface swap owns the next projection. Clear the search
+        // state without rebuilding the old screen or promoting its reveal.
+        resetSearchState({ rebuild: false })
       },
       // P7d: a single Esc with no overlay up exits the subagent viewer
       // instead of arming the double-Esc cancel.

@@ -234,6 +234,11 @@ export type FocusFullscreenViewportIntent = 'follow-end' | 'preserve' | 'anchor-
  * a virtual transcript window is replaced by its overlapping neighbor. */
 export type TranscriptViewportAnchorEdge = 'top' | 'bottom'
 
+/** Why the transcript-search overlay is closing. The runner uses this explicit
+ * intent to distinguish an in-place dismiss from a latest reset or a physical
+ * surface swap. */
+export type TranscriptSearchCloseReason = 'dismiss' | 'jump-latest' | 'surface-change'
+
 /** One rendered transcript row used to restore a viewport after re-windowing.
  * Object identity is preferred for overlapping folder projections; row kind and
  * occurrence preserve the discriminator when a caller supplies fresh objects.
@@ -361,10 +366,10 @@ export type WorkflowHit =
   | { readonly kind: 'run-agents'; readonly runId: string }
 
 /** The temporary search presentation target (plan §6): the current match, its
- * query and the resolved CURRENT visible card. It drives presentation ONLY —
- * effective Focus/secondary/PTC/Workflow reveal and the rendered highlight —
- * and NEVER mutates user disclosure state, so clearing it restores exactly the
- * user's own disclosure. */
+ * query and the resolved CURRENT visible card. While search is open it drives
+ * presentation only — effective Focus/secondary/PTC/Workflow reveal and the
+ * rendered highlight. An ordinary dismiss may promote the CURRENT effective
+ * reveal through the close transaction into an existing user disclosure owner. */
 export interface TranscriptSearchPresentationTarget {
   readonly query: string
   readonly match: TranscriptSearchMatch
@@ -2228,9 +2233,9 @@ export interface TuiAppEventsBase {
    * write — the toggle action has no default key; Ctrl+F is transcript
    * search). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
-   /** The transcript search overlay opened; the host may capture its window
-    * origin before a match moves the presentation into history. */
-   onSearchOpen?: () => void
+  /** The transcript search overlay opened; the host may clear
+   * stale presentation before a match moves the view into history. */
+  onSearchOpen?: () => void
   /** The transcript-search query changed (the search action opened it;
    * the search keys are fixed overlay contracts). Optional. */
   onSearchQuery?: (query: string) => void
@@ -2238,8 +2243,8 @@ export interface TuiAppEventsBase {
   onSearchNext?: () => void
   /** The search's previous-match key (fixed): jump to the previous match. Optional. */
   onSearchPrev?: () => void
-  /** The search was closed (its close key, fixed). Optional. */
-  onSearchClose?: () => void
+  /** The search was closed with an explicit lifecycle reason. Optional. */
+  onSearchClose?: (reason: TranscriptSearchCloseReason) => void
   /**
    * A fullscreen viewport reached the older edge. Returning true means the
    * host replaced the transcript window and consumed the boundary gesture;
@@ -6233,7 +6238,7 @@ export class TuiApp {
     if (this.searchOverlay !== undefined) {
       this.searchOverlay = undefined
       this.searchComponent = undefined
-      this.events.onSearchClose?.()
+      this.events.onSearchClose?.('surface-change')
     }
     if (enabled) {
       // The alt screen owns mouse handling (wheel scroll, drag selection,
@@ -6487,13 +6492,13 @@ export class TuiApp {
   }
 
   /** Close host/fullscreen transcript search and report whether either closed. */
-  closeTranscriptSearch(): boolean {
+  closeTranscriptSearch(reason: TranscriptSearchCloseReason = 'dismiss'): boolean {
     const closedFullscreen = this.fullscreen?.clearSearch() ?? false
     if (this.searchOverlay === undefined) return closedFullscreen
     this.searchOverlay.hide()
     this.searchOverlay = undefined
     this.searchComponent = undefined
-    this.events.onSearchClose?.()
+    this.events.onSearchClose?.(reason)
     return true
   }
 
@@ -6781,11 +6786,9 @@ export class TuiApp {
   /** Set (or clear) the TEMPORARY search presentation target (plan §6). The
    * target drives effective reveal (Focus Thought, secondary cards, Thinking,
    * long user, PTC ancestors, Workflow run/phase, the Workflow hidden-member
-   * context row) and the rendered occurrence highlight — PRESENTATION ONLY.
-   * It never writes `expandedOverride`, `focusExpandedTurns`,
-   * `subCallExpanded` or Workflow `userOpen`, so clearing it restores the
-   * user's own disclosure state exactly (including any manual operation the
-   * user performed while the search was open). */
+   * context row) and the rendered occurrence highlight. Search navigation stays
+   * presentation-only; an ordinary dismiss may promote the CURRENT effective
+   * reveal through the close transaction into an existing user owner. */
   setTranscriptSearchTarget(target: TranscriptSearchPresentationTarget | undefined): void {
     this.setTranscriptSearchPresentation({ matchMessages: this.searchMatchMessages, target, grantReveal: true })
   }
@@ -6797,6 +6800,93 @@ export class TuiApp {
     if (!this.applySearchPresentation(presentation)) return false
     this.rebuildMessages()
     return true
+  }
+
+  /** Finish one transcript-search close transaction. An ordinary dismiss may
+   * promote only the CURRENT effective search reveal into an existing durable
+   * disclosure owner; the presentation is then cleared in the same rebuild. */
+  finishTranscriptSearchPresentation(
+    matchMessages: ReadonlySet<TranscriptMessage>,
+    options: { preserveCurrentReveal?: boolean; rebuild?: boolean } = {},
+  ): boolean {
+    if (options.preserveCurrentReveal === true) this.promoteCurrentSearchReveal()
+    this.searchSuppressedSubCalls.clear()
+    if (!this.applySearchPresentation({ matchMessages, target: undefined, grantReveal: false })) return false
+    if (options.rebuild !== false) this.rebuildMessages()
+    return true
+  }
+
+  /** Promote the CURRENT effective search reveal into the existing disclosure
+   * owners. Search navigation remains presentation-only until this boundary;
+   * this method never creates a second search-pinned state. */
+  private promoteCurrentSearchReveal(): boolean {
+    const target = this.searchTarget
+    if (!this.searchRevealGranted || target === undefined) return false
+
+    const message = target.message
+    let changed = false
+    const messageReveal = this.searchForcesMessageExpanded(message)
+    // Long-user disclosure has a real Host owner on either surface when the
+    // navigation-time ownership/affordance latch admitted the reveal.
+    if (isUserMessageDisclosureCandidate(message) && messageReveal
+      && this.expandedOverride.get(message) !== true) {
+      this.expandedOverride.set(message, true)
+      changed = true
+    }
+    // Secondary cards have a durable per-card owner only on fullscreen, where
+    // the existing click affordance makes the resulting state user-controllable.
+    if (this.fullscreen !== undefined && isFocusSecondaryDisclosure(message) && messageReveal
+      && this.expandedOverride.get(message) !== true) {
+      this.expandedOverride.set(message, true)
+      changed = true
+    }
+
+    // A real Focus Thought root is represented by the current turn's activity
+    // in the current transcript projection. Do not promote a bare message turn
+    // when Focus has no actual Thought root to own.
+    const turn = this.searchTargetTurn()
+    if (this.focusModeEnabled && turn !== undefined
+      && this.messages.includes(message) && this.turnActivities.has(turn)
+      && !this.focusExpandedTurns.has(turn)) {
+      this.focusExpandedTurns.add(turn)
+      changed = true
+    }
+
+    if (this.fullscreen !== undefined && target.match.source.kind === 'subcall-field') {
+      let subCallChanged = false
+      for (const subCallId of target.match.source.subCallIds) {
+        if (!this.searchForcesSubCallExpanded(subCallId) || this.subCallExpanded.has(subCallId)) continue
+        this.subCallExpanded.add(subCallId)
+        subCallChanged = true
+      }
+      if (subCallChanged) {
+        this.subCallExpandedRevision += 1
+        changed = true
+      }
+    }
+
+    if (message.kind === 'workflow') {
+      const state = this.workflowDisclosure.get(message.runId)
+      let workflowChanged = false
+      if (state !== undefined && this.searchForcesWorkflowRunOpen(message.runId) && state.userOpen !== true) {
+        state.userOpen = true
+        workflowChanged = true
+      }
+      const phaseKey = this.searchTargetPhaseKey()
+      const phase = phaseKey === undefined ? undefined : state?.phases.get(phaseKey)
+      if (state !== undefined && phaseKey !== undefined && phase !== undefined
+        && this.searchForcesWorkflowPhaseOpen(message.runId, phaseKey) && phase.userOpen !== true) {
+        phase.userOpen = true
+        workflowChanged = true
+      }
+      if (workflowChanged) {
+        this.workflowDisclosureRevision += 1
+        changed = true
+      }
+    }
+
+    if (changed) this.clearFocusLiveHeightState()
+    return changed
   }
 
   /** Apply a search presentation to the live state WITHOUT rebuilding. The

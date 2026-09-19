@@ -2,9 +2,9 @@
  * Production-runner transcript-search structural gates (perf plan S5 §8.1):
  * drive the REAL `apply(ctx, config)` wiring through a session, open the search
  * overlay and assert the presentation epoch invariants — one rebuild per
- * interaction, zero re-windows for a same-window query/JNext/Prev, exactly one
- * projection for an off-window jump, and a clean close that restores the origin
- * window and clears the target. This closes the PR #149 tracked follow-up
+ * interaction, zero re-windows for a same-window query/Next/Prev, exactly one
+ * projection for an off-window jump, and a clean dismiss that keeps the current
+ * window while clearing the target. This closes the PR #149 tracked follow-up
  * (production `apply` wiring had no integration harness).
  * @module @xmoon76/dsh-pi-tui/transcript-search-runner.test
  */
@@ -236,7 +236,7 @@ test('runner search: an off-window jump re-windows exactly once and rebuilds onc
   assert.equal(app.searchPresentationDiagnosticsForTest().rebuilds, 1, 'the refinement commits exactly one rebuild')
 })
 
-test('runner search: closing restores the origin window and clears the presentation', async (t) => {
+test('runner search: dismiss preserves the current window and clears the presentation', async (t) => {
   const fixture = await mountSearchRunner(t, 30, [2], 'zzq marker')
   const { app, projections } = fixture
   app.startTranscriptSearch()
@@ -244,14 +244,32 @@ test('runner search: closing restores the origin window and clears the presentat
   typeQuery(fixture, 'zzq')
   await fixture.settleRender()
   assert.equal(app.transcriptSearchPresentationForTest()?.matchTurn, 2, 'precondition: the off-window match is current')
+  const beforeScroll = app.fullscreenScrollForTest()?.scrollTop
 
   projections.reset()
   app.closeTranscriptSearch()
   await fixture.settleRender()
   assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'closing clears the search target')
   assert.equal(app.isSearching(), false, 'the overlay is gone')
-  assert.equal(projections.count(), 1, 'closing repaints the restored origin window exactly once')
+  assert.equal(projections.count(), 0, 'dismiss does not re-window the current transcript')
+  assert.equal(app.fullscreenScrollForTest()?.scrollTop, beforeScroll, 'dismiss preserves the current viewport position')
   assert.equal(app.searchMatchMessagesForTest().size, 0, 'closing clears the weak-match set')
+})
+
+test('runner search: a surface switch clears search without latest or promotion', async (t) => {
+  const fixture = await mountSearchRunner(t, 30, [2], 'zzq marker')
+  const { app } = fixture
+  app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'zzq')
+  await fixture.settleRender()
+  assert.equal(app.transcriptSearchPresentationForTest()?.matchTurn, 2, 'precondition: a historical target is current')
+
+  app.setFullscreen(!app.isFullscreen())
+  await fixture.settleRender()
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'surface change clears the search target')
+  assert.equal(app.searchMatchMessagesForTest().size, 0, 'surface change clears weak representatives')
+  assert.equal(app.isSearching(), false, 'surface change closes search')
 })
 
 test('runner search: a session switch clears the search presentation', async (t) => {
