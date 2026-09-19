@@ -95,7 +95,7 @@ test('navigation: the current strong highlight moves between occurrences in one 
   app.stop()
 })
 
-test('navigation: a reveal still expands an anchor-only card and anchors its top', async () => {
+test('navigation: a reveal expands an anchor-only card and targets its rendered hit', async () => {
   const { vt, app } = startApp(100, 20)
   const longText = Array.from({ length: 24 }, (_, index) => `line ${index}`).join('\n')
     + '\nneedle in the compacted middle\n' + Array.from({ length: 6 }, (_, index) => `tail ${index}`).join('\n')
@@ -114,10 +114,52 @@ test('navigation: a reveal still expands an anchor-only card and anchors its top
   app.scrollToSearchTarget()
   const revealed = (await viewport(vt)).join('\n')
   // A compact-capable long bubble inserts marker/tail chrome rows, so its whole
-  // card is NOT occurrence-preserving: the reveal still EXPANDS it, and the
-  // selection anchors at the owning card top (no guessed strong occurrence).
+  // card is NOT occurrence-preserving: the reveal still EXPANDS it, while the
+  // viewport may use the rendered hit only as approximate navigation.
   assert.ok(!revealed.includes('rows compacted'), `the search reveal must expand the bubble:\n${revealed}`)
-  assert.ok(revealed.includes('line 0'), `the anchor lands on the owning card top:\n${revealed}`)
+  const targetRow = revealed.split('\n').findIndex(line => line.includes('needle in the compacted middle'))
+  assert.ok(targetRow >= 0, `the rendered query hit must be visible:\n${revealed}`)
+  const targetCol = revealed.split('\n')[targetRow]!.indexOf('compacted middle')
+  assert.ok(targetCol >= 0)
+  assert.ok(!isStrongCell(vt, targetRow, targetCol), 'approximate anchor navigation never fabricates a strong occurrence')
+  app.stop()
+})
+
+test('navigation: multiple anchor-only hits use separate approximate viewport targets', async () => {
+  const { vt, app } = startApp(100, 12)
+  const text = [
+    'top filler',
+    'needle first hit',
+    ...Array.from({ length: 18 }, (_, index) => `middle filler ${index}`),
+    'needle second hit',
+    'bottom filler',
+  ].join('\n')
+  const message: TranscriptMessage = { kind: 'user', turn: 0, text }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.scrollToBottom()
+  await viewport(vt)
+
+  const target = (sourceOccurrence: number) => ({
+    query: 'needle',
+    match: { id: sourceOccurrence, turn: 0, occurrence: sourceOccurrence, source: { kind: 'message' as const }, sourceOccurrence },
+    message,
+  })
+
+  app.setTranscriptSearchTarget(target(0))
+  app.scrollToSearchTarget()
+  let lines = await viewport(vt)
+  let row = lines.findIndex(line => line.includes('needle first hit'))
+  assert.ok(row >= 0, `the first approximate hit must be visible:\n${lines.join('\n')}`)
+  assert.ok(!isStrongCell(vt, row, lines[row]!.indexOf('needle')), 'anchor-only hit 0 stays weak')
+
+  app.setTranscriptSearchTarget(target(1))
+  app.scrollToSearchTarget()
+  lines = await viewport(vt)
+  row = lines.findIndex(line => line.includes('needle second hit'))
+  assert.ok(row >= 0, `the second approximate hit must be visible:\n${lines.join('\n')}`)
+  assert.ok(!isStrongCell(vt, row, lines[row]!.indexOf('needle')), 'anchor-only hit 1 stays weak')
+  assert.equal(app.transcriptSearchPresentationForTest()?.sourceOccurrence, 1, 'semantic source occurrence remains independent')
   app.stop()
 })
 
@@ -144,6 +186,91 @@ test('navigation: clearing the target removes the reveal and every decoration', 
   assert.ok(!vt.getCellUnderline(cells.row, cells.first), 'clearing removes the first decoration')
   assert.ok(!vt.getCellUnderline(cells.row, cells.second), 'clearing removes every decoration')
   assert.ok(!isStrongCell(vt, cells.row, cells.first), 'clearing leaves no strong highlight')
+  app.stop()
+})
+
+test('navigation: resize recomputes the approximate range from current wrapped lines', async () => {
+  const { vt, app } = startApp(100, 14)
+  const message: TranscriptMessage = {
+    kind: 'user',
+    turn: 0,
+    text: `${'prefix filler '.repeat(14)}needle wrapped target ${'suffix filler '.repeat(14)}`,
+  }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle wrapped',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  app.scrollToSearchTarget()
+  await viewport(vt)
+  assert.ok(vt.getViewport().some(line => line.includes('needle')), 'the target is visible before resize')
+
+  vt.resize(40, 14)
+  await viewport(vt)
+  app.scrollToSearchTarget()
+  const lines = await viewport(vt)
+  const targetRow = lines.findIndex(line => line.includes('needle'))
+  assert.ok(targetRow >= 0, `the target remains visible after wrapped-line remeasurement:\n${lines.join('\n')}`)
+  assert.ok(!isStrongCell(vt, targetRow, lines[targetRow]!.indexOf('needle')), 'resize never turns anchor-only navigation into strong provenance')
+  app.stop()
+})
+
+test('navigation: an already-visible approximate range does not jitter the viewport', async () => {
+  const { vt, app } = startApp(100, 12)
+  const text = [
+    ...Array.from({ length: 5 }, (_, index) => `prefix ${index}`),
+    'needle visible target',
+    ...Array.from({ length: 18 }, (_, index) => `suffix ${index}`),
+  ].join('\n')
+  const message: TranscriptMessage = { kind: 'user', turn: 0, text }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  app.scrollToSearchTarget()
+  const scroll = app.fullscreenScrollForTest()
+  assert.ok(scroll !== undefined)
+  await viewport(vt)
+  app.scrollToTop({ disableFollow: true })
+  await viewport(vt)
+  const before = app.fullscreenScrollForTest()!.scrollTop
+  assert.ok(vt.getViewport().some(line => line.includes('needle visible target')), 'precondition: target remains visible after a manual scroll')
+  app.scrollToSearchTarget()
+  assert.equal(app.fullscreenScrollForTest()!.scrollTop, before, 'an already-visible range must not be re-centered')
+  app.stop()
+})
+
+test('navigation: a passive transcript repaint does not snap back to the search range', async () => {
+  const { vt, app } = startApp(100, 14)
+  const targetMessage: TranscriptMessage = {
+    kind: 'user',
+    turn: 0,
+    text: [
+      ...Array.from({ length: 20 }, (_, index) => `prefix ${index}`),
+      'needle passive target',
+      ...Array.from({ length: 12 }, (_, index) => `suffix ${index}`),
+    ].join('\n'),
+  }
+  app.setFullscreen(true)
+  app.setTranscript([targetMessage])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: targetMessage,
+  })
+  app.scrollToSearchTarget()
+  await viewport(vt)
+  app.scrollToTop({ disableFollow: true })
+  await viewport(vt)
+  const before = app.fullscreenScrollForTest()!.scrollTop
+  app.setTranscript([targetMessage, { kind: 'user', turn: 1, text: 'new passive content' }])
+  await viewport(vt)
+  assert.equal(app.fullscreenScrollForTest()!.scrollTop, before, 'passive projection preserves the user viewport')
   app.stop()
 })
 

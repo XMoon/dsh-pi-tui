@@ -87,6 +87,15 @@ export interface RenderedSearchSelector {
   readonly weakOnly?: boolean
 }
 
+/** Navigation-only rendered row range. It is best-effort geometry and does
+ * not prove semantic occurrence correspondence. */
+export interface RenderedSearchScrollRange {
+  /** First rendered row of the navigation target, inclusive. */
+  readonly startRow: number
+  /** Last rendered row of the navigation target, inclusive. */
+  readonly endRow: number
+}
+
 /** One block's rendered search selection. `exact` is true ONLY when the
  * semantic occurrence was PROVEN to a rendered occurrence; a false selection is
  * an anchor-only degradation and must NOT strong-highlight anything. */
@@ -95,6 +104,8 @@ export interface RenderedSearchSelection {
   readonly selectedIndex: number
   readonly selectedRow: number | undefined
   readonly exact: boolean
+  /** Best-effort viewport geometry; never semantic occurrence proof. */
+  readonly scrollRange?: RenderedSearchScrollRange
 }
 
 function isImageLine(line: string): boolean {
@@ -197,6 +208,51 @@ export function selectRenderedSearchMatch(
   }
   // No source geometry at all: anchor the card top, never strong-highlight.
   return { matches, selectedIndex: -1, selectedRow: 0, exact: false }
+}
+
+/** Convert one rendered match to its inclusive first/last row range. */
+function renderedSearchMatchRowRange(match: AltScreenSearchMatch | undefined): RenderedSearchScrollRange | undefined {
+  if (match === undefined || match.segments.length === 0) return undefined
+  return {
+    startRow: match.segments[0]!.row,
+    endRow: match.segments[match.segments.length - 1]!.row,
+  }
+}
+
+/** Choose navigation-only geometry without changing provenance selection.
+ * Exact selections use the proven rendered occurrence. Anchor-only selections
+ * prefer matches inside the current source's regions (including
+ * `enumerable:false` position-only regions), then fall back to card-wide
+ * matches only when no region exists at all. The semantic selection remains
+ * untouched by this best-effort range. */
+export function selectRenderedSearchScrollRange(
+  matches: readonly AltScreenSearchMatch[],
+  selection: RenderedSearchSelection,
+  selector: RenderedSearchSelector,
+  regions: readonly SearchSourceRegion[],
+): RenderedSearchScrollRange | undefined {
+  if (selector.weakOnly === true) return undefined
+
+  if (selection.exact && selection.selectedIndex >= 0) {
+    const exactRange = renderedSearchMatchRowRange(matches[selection.selectedIndex])
+    if (exactRange !== undefined) return exactRange
+  }
+
+  const sourceKey = selector.geometry?.sourceKey
+  const sourceRegions = sourceKey === undefined
+    ? undefined
+    : regions.filter(region => region.sourceKey === sourceKey)
+  const candidates = sourceRegions === undefined
+    ? matches
+    : matches.filter(match => sourceRegions.some(region => matchInsideRegion(match, region)))
+  if (candidates.length > 0) {
+    const candidateIndex = Math.min(Math.max(selector.sourceOccurrence, 0), candidates.length - 1)
+    const candidateRange = renderedSearchMatchRowRange(candidates[candidateIndex])
+    if (candidateRange !== undefined) return candidateRange
+  }
+
+  if (selection.selectedRow === undefined) return undefined
+  return { startRow: selection.selectedRow, endRow: selection.selectedRow }
 }
 
 /** Decorate every visible occurrence of `selection.matches` without changing
