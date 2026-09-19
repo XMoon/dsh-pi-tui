@@ -4564,8 +4564,10 @@ export function apply(ctx: Context, config: Config): void {
           grantReveal: false,
         }
         searchProfiler.stage('search.presentation-commit')
-        app.setTranscriptSearchPresentation(presentation)
-        searchProfiler.stage('search.rebuild')
+        // The setter reports whether it actually committed: a repeat no-match
+        // step (same empty set, target already cleared) is a no-op and MUST NOT
+        // be reported as a rebuild.
+        if (app.setTranscriptSearchPresentation(presentation)) searchProfiler.stage('search.rebuild')
         app.setSearchResult(0, 0)
         return
       }
@@ -4584,8 +4586,7 @@ export function apply(ctx: Context, config: Config): void {
       if (sameWindow) {
         const presentation = navigationSearchPresentation(match)
         searchProfiler.stage('search.presentation-commit')
-        app.setTranscriptSearchPresentation(presentation)
-        searchProfiler.stage('search.rebuild')
+        if (app.setTranscriptSearchPresentation(presentation)) searchProfiler.stage('search.rebuild')
         app.scrollToSearchTarget()
         searchProfiler.stage('search.scroll')
         app.setSearchResult(searchCurrent + 1, searchMatches.length)
