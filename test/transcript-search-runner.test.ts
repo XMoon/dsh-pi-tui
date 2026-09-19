@@ -355,3 +355,47 @@ test('runner search: a late session event never strands the current target', asy
   assert.equal(after?.matchId, before?.matchId, 'the current match identity is preserved across the live projection')
   assert.equal(after?.revealGranted, true, 'the reveal grant survives the passive projection')
 })
+
+test('runner search: a no-match query atomically clears the representative set', async (t) => {
+  const fixture = await mountSearchRunner(t, 30, [25, 29])
+  const { app, projections } = fixture
+  app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'transcript')
+  await fixture.settleRender()
+  assert.ok(app.searchMatchMessagesForTest().size > 0, 'precondition: the result cards are published')
+
+  projections.reset()
+  app.resetSearchPresentationDiagnosticsForTest()
+  typeQuery(fixture, 'zzz') // 'transcriptzzz' — no match
+  await fixture.settleRender()
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'the target is cleared')
+  assert.equal(app.searchMatchMessagesForTest().size, 0,
+    'the representative set is cleared ATOMICALLY with the target (never left stale)')
+  assert.ok(app.searchPresentationDiagnosticsForTest().rebuilds <= 1,
+    `the clear costs at most one rebuild (got ${app.searchPresentationDiagnosticsForTest().rebuilds})`)
+  assert.equal(projections.count(), 0, 'a no-match clear never re-windows the transcript')
+})
+
+test('runner search: Ctrl+End while search is open repaints exactly once', async (t) => {
+  const fixture = await mountSearchRunner(t, 30, [2], 'zzq marker')
+  const { app, projections } = fixture
+  app.setFullscreen(true)
+  await fixture.settleRender()
+  app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'zzq') // off-window: the view sits on a history window
+  await fixture.settleRender()
+  assert.equal(app.isSearching(), true, 'precondition: the search box is open')
+
+  projections.reset()
+  app.resetSearchPresentationDiagnosticsForTest()
+  fixture.input('\x1b[1;5F') // Ctrl+End
+  await fixture.settleRender()
+  assert.equal(app.isSearching(), false, 'Ctrl+End closes the search box')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'the search presentation is cleared')
+  assert.equal(projections.count(), 1,
+    `Ctrl+End must project the transcript exactly ONCE (got ${projections.count()})`)
+  assert.ok(app.searchPresentationDiagnosticsForTest().rebuilds <= 1,
+    `Ctrl+End must not double-rebuild (got ${app.searchPresentationDiagnosticsForTest().rebuilds})`)
+})
