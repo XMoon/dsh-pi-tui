@@ -16,6 +16,7 @@ import {
   sliceByColumn,
   visibleWidth,
   type AltScreenSearchMatch,
+  type AltScreenSearchSegment,
   type Component,
 } from '@xmoon76/pi-tui'
 
@@ -30,27 +31,54 @@ const KITTY_IMAGE_PREFIX = '\x1b_G'
 const ITERM2_IMAGE_PREFIX = '\x1b]1337;File='
 
 /**
- * What to select inside one rendered block: the query, the block-relative
- * rendered row range of the semantic source (when known) and the occurrence
- * ordinal inside that source.
+ * One searchable SOURCE REGION in a rendered card: the block-relative rows (and
+ * optional visible columns) a renderer can PROVE belong to one semantic source.
+ * `anchorRow` is the honest fallback row when no occurrence correspondence can
+ * be proven.
+ */
+export interface SearchSourceRegion {
+  readonly sourceKey: string
+  readonly anchorRow: number
+  readonly rowStart: number
+  readonly rowEnd: number
+  readonly columns?: { readonly startCol: number; readonly endCol: number }
+}
+
+/** One PROVEN occurrence mapping: the semantic source-local ordinal and the
+ * rendered match (`matchIndex` indexes the card's matcher result) it maps to. */
+export interface RenderedSourceOccurrence {
+  readonly sourceOccurrence: number
+  readonly matchIndex: number
+  readonly segments: readonly AltScreenSearchSegment[]
+}
+
+/** The proven geometry of ONE semantic source in a rendered card. Only
+ * occurrences whose correspondence the renderer can prove are listed; an empty
+ * `occurrences` means "the source region is visible, but no occurrence can be
+ * proven" — the selection anchors at `anchorRow` and shows NO strong highlight
+ * rather than guessing. */
+export interface RenderedSourceGeometry {
+  readonly sourceKey: string
+  readonly anchorRow: number
+  readonly occurrences: readonly RenderedSourceOccurrence[]
+}
+
+/**
+ * What to select inside one rendered block. The CURRENT target carries the
+ * proven `geometry` of its own source; other visible matching cards are
+ * decorated weak-only and never carry semantic identity.
  */
 export interface RenderedSearchSelector {
   readonly query: string
-  /** Block-relative rendered rows [start, end) of the semantic source. */
-  readonly range?: { readonly start: number; readonly end: number }
-  /** Visible-column span inside the (single-row) range for a FIELD-scoped
-   * selection: a Workflow member row renders `label` and `status` on one row,
-   * so a row-only range cannot tell the two fields apart. */
-  readonly columns?: { readonly startCol: number; readonly endCol: number }
-  /** Decorate every occurrence WEAKLY and select none: used for the other
-   * visible cards while the current card owns the strong occurrence. */
-  readonly weakOnly?: boolean
+  /** The semantic source-local ordinal of the target match. */
   readonly sourceOccurrence: number
+  readonly geometry?: RenderedSourceGeometry
+  readonly weakOnly?: boolean
 }
 
-/** One block's rendered search selection. `exact` is false when the semantic
- * occurrence could not be located inside its source range and the ordinal
- * fallback (or the card top) was used. */
+/** One block's rendered search selection. `exact` is true ONLY when the
+ * semantic occurrence was PROVEN to a rendered occurrence; a false selection is
+ * an anchor-only degradation and must NOT strong-highlight anything. */
 export interface RenderedSearchSelection {
   readonly matches: readonly AltScreenSearchMatch[]
   readonly selectedIndex: number
@@ -91,11 +119,51 @@ function styleVisibleText(text: string, style: (value: string) => string): strin
   return result
 }
 
+/** Whether every segment of a match lies FULLY inside the region (row range,
+ * plus the visible-column span when the region declares one). A start-only
+ * check would accept a match whose tail crosses out of the source. */
+function matchInsideRegion(match: AltScreenSearchMatch, region: SearchSourceRegion): boolean {
+  if (match.segments.length === 0) return false
+  for (const segment of match.segments) {
+    if (segment.row < region.rowStart || segment.row >= region.rowEnd) return false
+    if (region.columns !== undefined) {
+      if (segment.row !== region.rowStart) return false
+      if (segment.startCol < region.columns.startCol || segment.endCol > region.columns.endCol) return false
+    }
+  }
+  return true
+}
+
+/** Build the PROVEN geometry of one source from the card's matcher result and
+ * the renderer-declared regions. Matches are claimed in render order, so the
+ * source ordinal follows the VISIBLE text, never a raw-corpus ordinal. */
+export function buildSourceGeometry(
+  matches: readonly AltScreenSearchMatch[],
+  regions: readonly SearchSourceRegion[],
+  sourceKey: string,
+): RenderedSourceGeometry | undefined {
+  const sourceRegions = regions.filter(region => region.sourceKey === sourceKey)
+  if (sourceRegions.length === 0) return undefined
+  const occurrences: RenderedSourceOccurrence[] = []
+  matches.forEach((match, matchIndex) => {
+    const region = sourceRegions.find(candidate => matchInsideRegion(match, candidate))
+    if (region === undefined) return
+    occurrences.push({ sourceOccurrence: occurrences.length, matchIndex, segments: match.segments })
+  })
+  return { sourceKey, anchorRow: sourceRegions[0]!.anchorRow, occurrences }
+}
+
 /**
- * Select the rendered occurrence that belongs to the semantic source. The
- * range-limited matches win (occurrence `sourceOccurrence` inside the range);
- * otherwise the ordinal is taken across the whole card (exact: false); an
- * empty card falls back to the card top.
+ * Select the rendered occurrence that belongs to the semantic source.
+ * An exact highlight requires a PROVEN occurrence; otherwise the selection
+ * anchors at the source region row (or the card top) and shows NO strong
+ * highlight — a wrong strong highlight would misrepresent the N/M identity.
+ *
+ * NOTE (best-effort boundary): the index query is `trim().toLowerCase()` while
+ * the fork matcher collapses internal whitespace (`/\s+/g` → single space), so
+ * a semantic occurrence and the rendered occurrence set can differ for exotic
+ * whitespace. A mapping is therefore always a best-effort claim, never a
+ * guarantee.
  */
 export function selectRenderedSearchMatch(
   matches: readonly AltScreenSearchMatch[],
@@ -105,41 +173,15 @@ export function selectRenderedSearchMatch(
     // Every visible occurrence is decorated weak; no card is "current".
     return { matches, selectedIndex: -1, selectedRow: undefined, exact: false }
   }
-  const range = selector.range
-  const columns = range === undefined ? undefined : selector.columns
-  const scoped = range === undefined
-    ? matches
-    : matches.filter(match => {
-      const first = match.segments[0]
-      const last = match.segments[match.segments.length - 1]
-      if (first === undefined || last === undefined) return false
-      if (first.row < range.start || last.row >= range.end) return false
-      // A field-scoped selection additionally requires the occurrence to START
-      // inside the field's visible column span (label vs status on one row).
-      if (columns !== undefined && (first.startCol < columns.startCol || first.startCol >= columns.endCol)) return false
-      return true
-    })
-  if (scoped.length > 0 && selector.sourceOccurrence < scoped.length) {
-    // The requested source occurrence exists inside its semantic range: the
-    // exact rendered occurrence.
-    const match = scoped[selector.sourceOccurrence]!
-    return {
-      matches,
-      selectedIndex: matches.indexOf(match),
-      selectedRow: match.segments[0]?.row,
-      exact: true,
+  const geometry = selector.geometry
+  if (geometry !== undefined) {
+    const occurrence = geometry.occurrences.find(candidate => candidate.sourceOccurrence === selector.sourceOccurrence)
+    if (occurrence !== undefined) {
+      return { matches, selectedIndex: occurrence.matchIndex, selectedRow: occurrence.segments[0]?.row, exact: true }
     }
+    return { matches, selectedIndex: -1, selectedRow: geometry.anchorRow, exact: false }
   }
-  if (matches.length > 0) {
-    // No in-range occurrence (or the source ordinal overflows the range):
-    // fall back to the whole-card ordinal and mark the selection inexact.
-    const index = Math.min(Math.max(0, selector.sourceOccurrence), matches.length - 1)
-    const match = matches[index]!
-    return { matches, selectedIndex: index, selectedRow: match.segments[0]?.row, exact: false }
-  }
-  // The rendered text contains no occurrence at all (a presenter transformed
-  // the canonical text): anchor the owning card top instead of dropping the
-  // semantic result.
+  // No source geometry at all: anchor the card top, never strong-highlight.
   return { matches, selectedIndex: -1, selectedRow: 0, exact: false }
 }
 
