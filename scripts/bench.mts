@@ -10,9 +10,8 @@
  *     TranscriptFolder/StatsFolder apply and snapshot timings;
  *   - ingest: TranscriptFolder.apply() time per event count;
  *   - projection: messages() p50/p95/p99 (the incremental read-grouping);
- *   - rebuild: TuiApp.setTranscript cold (full markdown parse) vs warm
- *     (the stage-J per-message render cache) p50/p95/p99, including the
- *     20 Hz streaming case (one message's text replaced per frame);
+ *   - transcript presentation: bounded 20-turn indexed projections, real live
+ *     assistant input flushes, fullscreen commits and theme switches;
  *   - theme switch cost;
  *   - heap: growth per warm rebuild and the settled working set.
  *
@@ -30,32 +29,61 @@ import { TranscriptWindowController } from '../src/transcript-window.ts'
 import { ContextMeasurementCoordinator } from '../src/status/context-measurement.ts'
 import { usageFromStats } from '../src/status/derive-usage.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Terminal } from '@xmoon76/pi-tui'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import type { SessionStats } from '../src/stats.ts'
 
 const XtermTerminal = xterm.Terminal
 
 /** A minimal headless terminal for TuiApp (render target only). */
-class BenchTerminal {
+class BenchTerminal implements Terminal {
   private readonly xterm: InstanceType<typeof XtermTerminal>
+  private inputHandler: ((data: string) => void) | undefined
+  private resizeHandler: (() => void) | undefined
+
   constructor(columns: number, rows: number) {
     this.xterm = new XtermTerminal({ cols: columns, rows, disableStdin: true, allowProposedApi: true })
   }
-  start(): void {}
-  stop(): void {}
-  async drainInput(): Promise<void> {}
+
+  start(onInput: (data: string) => void, onResize: () => void): void {
+    this.inputHandler = onInput
+    this.resizeHandler = onResize
+  }
+
+  stop(): void {
+    this.inputHandler = undefined
+    this.resizeHandler = undefined
+  }
+
+  async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
   write(data: string): void { this.xterm.write(data) }
   get columns(): number { return this.xterm.cols }
   get rows(): number { return this.xterm.rows }
   get kittyProtocolActive(): boolean { return false }
-  moveBy(): void {}
+  moveBy(_lines: number): void {}
   hideCursor(): void {}
   showCursor(): void {}
   clearLine(): void {}
   clearFromCursor(): void {}
   clearScreen(): void {}
-  setTitle(): void {}
-  setProgress(): void {}
+  setTitle(_title: string): void {}
+  setProgress(_active: boolean): void {}
+}
+
+/** Every benchmark surface owns one final dispose, including failed sections. */
+function withBenchApp<T>(
+  width: number,
+  rows: number,
+  run: (app: TuiApp, terminal: BenchTerminal) => T,
+): T {
+  const terminal = new BenchTerminal(width, rows)
+  const app = new TuiApp(terminal, { onSubmit: () => {}, onExit: () => {} })
+  try {
+    app.start()
+    return run(app, terminal)
+  } finally {
+    app.dispose()
+  }
 }
 
 // --- synthetic session content ---------------------------------------------
@@ -92,14 +120,14 @@ function buildEvents(turns: number): SessionEvent[] {
           turn, step: 0, index: chunk,
           chunk: { type: 'text-delta', index: chunk, text: MARKDOWN_BLOCKS[turn % 3]!.slice(chunk * 40, chunk * 40 + 40) },
         },
-      } as SessionEvent)
+      } as unknown as SessionEvent)
     }
     events.push({
       type: 'assistant/message', seq: seq++, time: turn * 1000 + 11, data: {
         turn, step: 0,
         message: { id: `msg-${turn}`, role: 'assistant', content: [{ type: 'text', text: MARKDOWN_BLOCKS[turn % 3]! }], source: { kind: 'assistant' } },
       },
-    } as SessionEvent)
+    } as unknown as SessionEvent)
     events.push({
       type: 'tool/call', seq: seq++, time: turn * 1000 + 12, data: {
         turn, step: 0, callId: `r${turn}`, name: 'read', arguments: JSON.stringify({ file: `src/file-${turn}.ts` }),
@@ -368,13 +396,14 @@ function timeIt(n: number, run: () => void): number[] {
   return samples
 }
 
-/** Iteration counts; BENCH_FAST=1 shrinks them for quick before/after sweeps. */
-const FAST = process.env.BENCH_FAST === '1'
-const PROJ_SAMPLES = FAST ? 50 : 200
-const WARM_SAMPLES = FAST ? 50 : 200
-const STREAM_SAMPLES = FAST ? 50 : 200
-const FULL_SAMPLES = FAST ? 20 : 50
-const HEAP_REBUILDS = FAST ? 300 : 2000
+/** Iteration counts; smoke is a tiny runtime-maintenance workload. */
+const SMOKE = process.env.BENCH_SMOKE === '1'
+const FAST = SMOKE || process.env.BENCH_FAST === '1'
+const PROJ_SAMPLES = SMOKE ? 2 : FAST ? 50 : 200
+const WARM_SAMPLES = SMOKE ? 2 : FAST ? 50 : 200
+const STREAM_SAMPLES = SMOKE ? 2 : FAST ? 50 : 200
+const FULL_SAMPLES = SMOKE ? 2 : FAST ? 20 : 50
+const HEAP_REBUILDS = SMOKE ? 3 : FAST ? 300 : 2000
 
 /** Warm one callback, then report its median measured sample. */
 function warmedP50(n: number, run: () => void): number {
@@ -441,6 +470,78 @@ function fmtBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
 }
 
+interface RenderFixture {
+  folder: TranscriptFolder
+  controller: TranscriptWindowController
+  liveTurn: number
+}
+
+/** Build the bounded production presentation fixture: cold history is hydrated,
+ * while the live tail is opened through the same durable + transient seams as
+ * the runner. */
+function buildRenderFixture(turns: number, withLiveTail = false): RenderFixture {
+  const folder = new TranscriptFolder()
+  const history = buildEvents(turns)
+  folder.hydrate(history)
+  const liveTurn = turns
+  if (withLiveTail) {
+    folder.apply([{
+      type: 'turn/start',
+      seq: history.length,
+      time: turns * 1000,
+      data: { turn: liveTurn },
+    } as SessionEvent])
+    folder.applyLiveInput({
+      kind: 'start',
+      sessionId: 'bench-session',
+      attemptId: 'bench-attempt',
+      turn: liveTurn,
+      step: 0,
+    })
+    folder.applyLiveInput({
+      kind: 'chunk',
+      sessionId: 'bench-session',
+      attemptId: 'bench-attempt',
+      turn: liveTurn,
+      step: 0,
+      time: turns * 1000 + 1,
+      chunk: { type: 'text-delta', index: 0, text: 'live seed' },
+    })
+  }
+  const controller = new TranscriptWindowController({ windowTurns: 20, turns: folder.groupedTurns() })
+  return { folder, controller, liveTurn }
+}
+
+/** Commit one bounded projection exactly as the production runner does. */
+function projectRenderFixture(app: TuiApp, fixture: RenderFixture): void {
+  const { folder, controller } = fixture
+  controller.setTurns(folder.groupedTurns())
+  const endTurn = controller.endTurn()
+  const projection = folder.window({
+    maxTurns: controller.windowTurns,
+    ...(endTurn === undefined ? {} : { endTurn }),
+  })
+  const snapshot = controller.snapshot()
+  app.setTranscript(projection.messages, folder.turnActivities(), {
+    ...controller.state(),
+    firstTurn: snapshot.firstTurn,
+    lastTurn: snapshot.lastTurn,
+    hasNewer: snapshot.hasNewer,
+  }, [])
+}
+
+function applyLiveFrame(fixture: RenderFixture, frame: number): void {
+  fixture.folder.applyLiveInput({
+    kind: 'chunk',
+    sessionId: 'bench-session',
+    attemptId: 'bench-attempt',
+    turn: fixture.liveTurn,
+    step: 0,
+    time: fixture.liveTurn * 1000 + frame + 2,
+    chunk: { type: 'text-delta', index: 0, text: ` frame-${frame % 100}` },
+  })
+}
+
 // --- the benchmark ----------------------------------------------------------
 
 async function main(): Promise<void> {
@@ -450,7 +551,7 @@ async function main(): Promise<void> {
   row('scenario', 'value')
 
   // 1. ingest + projection
-  for (const turns of [111, 1111, 5555]) {
+  for (const turns of (SMOKE ? [3] : [111, 1111, 5555])) {
     const events = buildEvents(turns)
     // Each timing sample gets a fresh folder. Re-applying the same log to a
     // stateful folder would benchmark duplicated history, not ingestion.
@@ -470,7 +571,7 @@ async function main(): Promise<void> {
   // from the renderer benchmark so replay/fold regressions remain visible
   // even when the TUI cache masks them. The hydrate path is the cold-resume
   // contract; live suffixes continue to use apply().
-  for (const turns of [100, 500, 1000]) {
+  for (const turns of (SMOKE ? [3] : [100, 500, 1000])) {
     const events = buildReasoningHeavyEvents(turns)
     const metrics = measureLongSession(events)
     const memory = process.memoryUsage()
@@ -483,14 +584,14 @@ async function main(): Promise<void> {
 
   // 1b. Keep the single-turn tool-loop shape visible: settledPerStep must
   // retain current-turn samples without scanning them on every step event.
-  for (const steps of [100, 500, 1000]) {
+  for (const steps of (SMOKE ? [3] : [100, 500, 1000])) {
     const events = buildManyStepEvents(steps)
     const metrics = measureManyStepStats(events)
     row(`one-turn-many-steps ${events.length} events (${steps} steps)`, `${steps} settled steps`)
     row('  StatsFolder.apply', fmtMs(metrics.statsApply))
     row(`  StatsFolder.snapshot ×${FULL_SAMPLES}`, fmtDuration(metrics.snapshot))
   }
-  for (const reads of [100, 500, 1000]) {
+  for (const reads of (SMOKE ? [3] : [100, 500, 1000])) {
     const events = buildReadHeavyEvents(1, reads)
     const metrics = measureLongSession(events)
     const liveApply = measureTranscriptApply(events)
@@ -503,8 +604,8 @@ async function main(): Promise<void> {
     row('  memory heapUsed/rss', `${fmtBytes(memory.heapUsed)} / ${fmtBytes(memory.rss)}`)
   }
   {
-    const turns = 20
-    const events = buildTextHeavyEvents(turns, 18_000, 17_000)
+    const turns = SMOKE ? 3 : 20
+    const events = buildTextHeavyEvents(turns, SMOKE ? 100 : 18_000, SMOKE ? 100 : 17_000)
     const metrics = measureLongSession(events)
     const memory = process.memoryUsage()
     row(`700k-like ${events.length} events (${turns} turns, ${turns * (18_000 + 17_000)} chars)`, `${metrics.messages} messages`)
@@ -514,82 +615,74 @@ async function main(): Promise<void> {
     row('  memory heapUsed/rss', `${fmtBytes(memory.heapUsed)} / ${fmtBytes(memory.rss)}`)
   }
 
-  // 2. rebuild (cold vs warm) across widths, plus the streaming case
-  const turns = 555
-  const folder = new TranscriptFolder()
-  folder.apply(buildEvents(turns))
-  const messages = folder.messages()
-  for (const width of [40, 80, 160]) {
-    // True cold: a fresh app whose FIRST setTranscript parses every message.
-    const coldApp = new TuiApp(new BenchTerminal(width, 24) as never, { onSubmit: () => {}, onExit: () => {} })
-    coldApp.start()
-    const cold = timeIt(1, () => coldApp.setTranscript(messages))
-    coldApp.stop()
-    const terminal = new BenchTerminal(width, 24)
-    const app = new TuiApp(terminal as never, { onSubmit: () => {}, onExit: () => {} })
-    app.start()
-    app.setTranscript(messages)
-    const warm = timeIt(WARM_SAMPLES, () => app.setTranscript(messages))
-    row(`rebuild ${messages.length} messages @${width} cols (cold, fresh app)`, fmtMs(cold[0]!))
-    row(`  same content (warm cache)`, fmt(stats(warm)))
-    // 20 Hz streaming: one assistant message's text replaced per frame.
-    // Clone only the target card so the baseline fixture remains immutable for
-    // the fullscreen and heap scenarios below; each frame keeps a fixed-size
-    // replacement instead of appending an ever-growing suffix.
-    const target = messages.findIndex(message => message.kind === 'assistant')
-    const streaming = messages.map((message, index) => {
-      if (index !== target || message.kind !== 'assistant') return message
-      return { ...message }
+  // 2. Production-shaped transcript presentation: a bounded 20-turn indexed
+  // window, followed by the real transient live-input path.
+  const renderTurns = SMOKE ? 21 : 30
+  const renderWidths = SMOKE ? [40] : [40, 80, 160]
+  for (const width of renderWidths) {
+    const coldFixture = buildRenderFixture(renderTurns)
+    const cold = withBenchApp(width, 24, app => timeIt(1, () => projectRenderFixture(app, coldFixture)))
+    row(`bounded 20-turn projection @${width} cols (cold, fresh app)`, fmtMs(cold[0]!))
+
+    const warmFixture = buildRenderFixture(renderTurns)
+    const warm = withBenchApp(width, 24, app => {
+      projectRenderFixture(app, warmFixture)
+      return timeIt(WARM_SAMPLES, () => projectRenderFixture(app, warmFixture))
     })
-    const streamEntry = streaming[target]
-    const streamBase = streamEntry?.kind === 'assistant' ? streamEntry.text : ''
-    const streamPrefix = streamBase.slice(0, Math.max(0, streamBase.length - 8))
-    let streamFrame = 0
-    const warmStream = timeIt(STREAM_SAMPLES, () => {
-      if (streamEntry !== undefined && streamEntry.kind === 'assistant') {
-        streamEntry.text = `${streamPrefix}frame-${String(streamFrame++ % 100).padStart(2, '0')}`
-      }
-      app.setTranscript(streaming)
+    row(`  same indexed projection (warm cache)`, fmt(stats(warm)))
+
+    const streamingFixture = buildRenderFixture(renderTurns, true)
+    const streaming = withBenchApp(width, 24, app => {
+      projectRenderFixture(app, streamingFixture)
+      let frame = 1
+      return timeIt(STREAM_SAMPLES, () => {
+        applyLiveFrame(streamingFixture, frame++)
+        projectRenderFixture(app, streamingFixture)
+      })
     })
-    row(`  streaming 1 message/frame @${width}`, fmt(stats(warmStream)))
-    // Theme switch cost: alternate palettes so every sample is a real switch.
-    let themeFrame = 0
-    const theme = timeIt(5, () => {
-      app.applyTheme(themeFrame++ % 2 === 0 ? 'light' : 'dark')
+    row(`  real live stream 1 token/flush @${width}`, fmt(stats(streaming)))
+
+    const themeFixture = buildRenderFixture(renderTurns)
+    const theme = withBenchApp(width, 24, app => {
+      projectRenderFixture(app, themeFixture)
+      let frame = 0
+      return timeIt(SMOKE ? 2 : 5, () => { app.applyTheme(frame++ % 2 === 0 ? 'light' : 'dark') })
     })
     row(`  theme dark↔light @${width}`, fmt(stats(theme)))
-    app.stop()
   }
 
-  // 3. fullscreen rebuild
+  // 3. Fullscreen uses the same bounded projection and live folder fixture.
   {
-    const terminal = new BenchTerminal(120, 24)
-    const app = new TuiApp(terminal as never, { onSubmit: () => {}, onExit: () => {} })
-    app.start()
-    app.setTranscript(messages)
-    app.setFullscreen(true)
-    const full = timeIt(FULL_SAMPLES, () => app.setTranscript(messages))
-    row(`fullscreen rebuild ${messages.length} messages @120`, fmt(stats(full)))
-    app.stop()
+    const fixture = buildRenderFixture(renderTurns, true)
+    const full = withBenchApp(120, 24, app => {
+      projectRenderFixture(app, fixture)
+      app.setFullscreen(true)
+      let frame = 1
+      return timeIt(FULL_SAMPLES, () => {
+        applyLiveFrame(fixture, frame++)
+        projectRenderFixture(app, fixture)
+      })
+    })
+    row(`fullscreen bounded projection @120`, fmt(stats(full)))
   }
 
-  // 4. heap (requires --expose-gc)
+  // 4. Heap (requires --expose-gc).
   if (globalThis.gc !== undefined) {
-    const terminal = new BenchTerminal(120, 24)
-    const app = new TuiApp(terminal as never, { onSubmit: () => {}, onExit: () => {} })
-    app.start()
-    app.setTranscript(messages)
-    const gc = globalThis.gc as () => void
-    gc()
-    const before = process.memoryUsage().heapUsed
-    for (let i = 0; i < HEAP_REBUILDS; i += 1) app.setTranscript(messages)
-    gc()
-    const after = process.memoryUsage().heapUsed
-    row(`heap growth per warm rebuild (${HEAP_REBUILDS}×, gc)`, `${((after - before) / Math.max(1, HEAP_REBUILDS)).toFixed(1)} B/rebuild`)
-    gc()
-    const settled = process.memoryUsage().heapUsed
-    row(`settled heap for ${messages.length} messages @120`, `${(settled / 1024 / 1024).toFixed(1)} MiB`)
-    app.stop()
+    const fixture = buildRenderFixture(renderTurns)
+    const heap = withBenchApp(120, 24, app => {
+      projectRenderFixture(app, fixture)
+      const gc = globalThis.gc as () => void
+      gc()
+      const before = process.memoryUsage().heapUsed
+      for (let i = 0; i < HEAP_REBUILDS; i += 1) projectRenderFixture(app, fixture)
+      gc()
+      const after = process.memoryUsage().heapUsed
+      gc()
+      const settled = process.memoryUsage().heapUsed
+      return { before, after, settled }
+    })
+    row(`heap growth per warm projection (${HEAP_REBUILDS}×, gc)`, `${((heap.after - heap.before) / Math.max(1, HEAP_REBUILDS)).toFixed(1)} B/rebuild`)
+    row(`settled heap for bounded projection @120`, `${(heap.settled / 1024 / 1024).toFixed(1)} MiB`)
   } else {
     row('heap (rerun with --expose-gc)', 'skipped')
   }
@@ -600,7 +693,7 @@ async function main(): Promise<void> {
   const { ExtensionLedger } = await import('../src/extension/internal/ledger.ts')
   const { SurfaceHost } = await import('../src/extension/internal/surface-host.ts')
   const { WidgetOutlet } = await import('../src/extension/internal/widget-outlet.ts')
-  for (const count of [0, 10, 50]) {
+  for (const count of (SMOKE ? [0, 2] : [0, 10, 50])) {
     const ledger = new ExtensionLedger()
     const host = new SurfaceHost(ledger, () => {})
     let renders = 0
@@ -612,19 +705,21 @@ async function main(): Promise<void> {
         maxHeight: 1,
       }, `owner-${index}`)
     }
+    const widgetFrames = SMOKE ? 2 : 200
     const t0 = process.hrtime.bigint()
-    for (let frame = 0; frame < 200; frame += 1) outlet.refresh(0, 120, 4)
-    const elapsed = Number(process.hrtime.bigint() - t0) / 200
-    row(`widget outlet refresh ×${count} contributions (200 frames)`, `${elapsed.toFixed(0)} ns/frame`)
+    for (let frame = 0; frame < widgetFrames; frame += 1) outlet.refresh(0, 120, 4)
+    const elapsed = Number(process.hrtime.bigint() - t0) / widgetFrames
+    row(`widget outlet refresh ×${count} contributions (${widgetFrames} frames)`, `${elapsed.toFixed(0)} ns/frame`)
     void host
   }
   // Invalidation coalescing: 100 replaces in one tick → ONE flush.
   const { InvalidateBatcher } = await import('../src/extension/internal/batcher.ts')
   let flushCount = 0
   const batcher = new InvalidateBatcher({ requestRender: () => { flushCount += 1 } })
-  for (let index = 0; index < 100; index += 1) batcher.invalidate()
+  const invalidations = SMOKE ? 2 : 100
+  for (let index = 0; index < invalidations; index += 1) batcher.invalidate()
   await Promise.resolve()
-  row('invalidation burst coalescing (100 in one tick)', `${flushCount} flush(es)`)
+  row(`invalidation burst coalescing (${invalidations} in one tick)`, `${flushCount} flush(es)`)
 
   // 6. PR D1 — indexed full-history search: cold index build (allowed
   //    O(history)), then query classes over the LIGHTWEIGHT projection
@@ -632,8 +727,8 @@ async function main(): Promise<void> {
   //    typing sequence with refinement. The structural counters prove the
   //    query path does not rebuild projection work.
   {
-    const SEARCH_SAMPLES = FAST ? 100 : 400
-    for (const turns of [100, 1000, 10_000]) {
+    const SEARCH_SAMPLES = SMOKE ? 2 : FAST ? 100 : 400
+    for (const turns of (SMOKE ? [5] : [100, 1000, 10_000])) {
       const folder = new TranscriptFolder()
       folder.hydrate(buildSearchEvents(turns))
       const messages = folder.messages()
@@ -666,7 +761,7 @@ async function main(): Promise<void> {
     // carried the previous sample's final candidates would measure a
     // cheaper, unreal typing sequence — the candidates must always be the
     // previous prefix's).
-    for (const turns of [1000, 10_000]) {
+    for (const turns of (SMOKE ? [5] : [1000, 10_000])) {
       const folder = new TranscriptFolder()
       folder.hydrate(buildSearchEvents(turns))
       const diag = folder.searchDiagnosticsForTest()
@@ -693,17 +788,17 @@ async function main(): Promise<void> {
   //     off-window jump exactly 1 projection.
   {
     const folder = new TranscriptFolder()
-    folder.hydrate(buildSearchEvents(30))
-    const app = new TuiApp(new BenchTerminal(120, 40) as never, { onSubmit: () => {}, onExit: () => {} })
-    app.start()
-    app.setFullscreen(true)
-    const controller = new TranscriptWindowController({ turns: folder.groupedTurns() })
-    let windowCalls = 0
-    const originalWindow = TranscriptFolder.prototype.window
-    TranscriptFolder.prototype.window = function (this: TranscriptFolder, options: Parameters<TranscriptFolder['window']>[0]) {
-      windowCalls += 1
-      return originalWindow.call(this, options)
-    }
+    folder.hydrate(buildSearchEvents(SMOKE ? 21 : 30))
+    withBenchApp(120, 40, app => {
+      app.setFullscreen(true)
+      const controller = new TranscriptWindowController({ windowTurns: 20, turns: folder.groupedTurns() })
+      let windowCalls = 0
+      const originalWindow = TranscriptFolder.prototype.window
+      try {
+        TranscriptFolder.prototype.window = function (this: TranscriptFolder, options: Parameters<TranscriptFolder['window']>[0]) {
+          windowCalls += 1
+          return originalWindow.call(this, options)
+        }
     const project = (): void => {
       controller.setTurns(folder.groupedTurns())
       const endTurn = controller.endTurn()
@@ -716,7 +811,7 @@ async function main(): Promise<void> {
       }, [])
     }
     project()
-    let matches = folder.search('transcript')
+    let matches = folder.search('needle')
     let current = 0
     const representatives = (): ReadonlySet<TranscriptMessage> => {
       const set = new Set<TranscriptMessage>()
@@ -729,7 +824,7 @@ async function main(): Promise<void> {
     const presentationStep = (): { semanticMs: number; commitMs: number } & Record<string, number> => {
       app.resetSearchPresentationDiagnosticsForTest()
       windowCalls = 0
-      const semantic = timeIt(1, () => { matches = folder.search('transcript') })
+      const semantic = timeIt(1, () => { matches = folder.search('needle') })
       const commit = timeIt(1, () => {
         const match = matches[current]
         const message = match === undefined ? undefined : folder.resolveSearchMatch(match)
@@ -737,7 +832,7 @@ async function main(): Promise<void> {
           app.setTranscriptSearchTarget(undefined)
           return
         }
-        const target = { query: 'transcript', match, message }
+        const target = { query: 'needle', match, message }
         const snapshot = controller.snapshot()
         const inWindow = snapshot.firstTurn !== undefined && snapshot.lastTurn !== undefined
           && match.turn >= snapshot.firstTurn && match.turn <= snapshot.lastTurn
@@ -784,16 +879,18 @@ async function main(): Promise<void> {
     const offWindow = matches.findIndex(match => match.turn < first)
     current = offWindow >= 0 ? offWindow : 0
     report('  off-window jump', presentationStep())
-    TranscriptFolder.prototype.window = originalWindow
-    app.stop()
+      } finally {
+        TranscriptFolder.prototype.window = originalWindow
+      }
+    })
   }
 
   // 7. PR C navigation baseline (unchanged by D1/D2 — recorded so a
   //    regression in grouped/window indexes or a D2 measurement leak into
   //    navigation stays visible): moveOlder ×50 + moveNewer ×50.
   {
-    const NAV_SAMPLES = FAST ? 20 : 50
-    for (const turns of [100, 1000, 10_000]) {
+    const NAV_SAMPLES = SMOKE ? 2 : FAST ? 20 : 50
+    for (const turns of (SMOKE ? [5] : [100, 1000, 10_000])) {
       const folder = new TranscriptFolder()
       folder.hydrate(buildEvents(turns))
       const controller = new TranscriptWindowController({ turns: folder.groupedTurns() })
@@ -816,7 +913,7 @@ async function main(): Promise<void> {
   //    explicit measurement cost is exposed separately (it is real work —
   //    the point is that UI-only refreshes no longer pay it).
   {
-    const CHEAP_SAMPLES = FAST ? 200 : 1000
+    const CHEAP_SAMPLES = SMOKE ? 2 : FAST ? 200 : 1000
     const sessionStats: SessionStats = {
       turns: 5000,
       steps: 12_000,
@@ -837,7 +934,7 @@ async function main(): Promise<void> {
     // it as a scan proportional to the historical context (synthetic but
     // non-trivial — the point is the cost is paid ONLY on explicit
     // measures, never on cheap refreshes).
-    const history = new Array<number>(10_000).fill(1)
+    const history = new Array<number>(SMOKE ? 10 : 10_000).fill(1)
     const reader = (_sessionId: string): number => {
       measureCalls += 1
       let scanned = 0
