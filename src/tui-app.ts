@@ -82,6 +82,8 @@ import { ENABLE_FOCUS_REPORTING, isFocusReport } from './notification/terminal-f
 import { TaskBrowserPanel, type TaskBrowserViewState, type TaskPanelItem } from './task-panel.ts'
 import type { TaskBrowserSummary } from './task-browser-runtime.ts'
 import type { StatusStore } from './status/store.ts'
+import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './display-preset.ts'
+import { isDisplayPresetAvailable, isFocusDisplayPreset } from './display-preset.ts'
 import type { AccessStatus, CompositionStatus, RunPhase, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
 import { deriveActivityStatus } from './status/derive-activity.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
@@ -2837,6 +2839,8 @@ export interface TuiAppOptions {
    * the surface works identically without it.
    */
   statusStore?: StatusStore
+  /** The shared canonical display authority. Standalone surfaces default to Full. */
+  displayState?: DisplayState
   /** M5: fired when the terminal WIDTH materially changed (the command
    * surface refreshes on width changes — the runner coalesces to its
    * interval). */
@@ -3886,13 +3890,13 @@ export class TuiApp {
    * transition): the render-cache identity for Workflow cards. */
   private workflowDisclosureRevision = 0
   /**
-   * Focus Mode (plan): the persisted preference is applied through
-   * {@link setFocusMode}; while ON, the transcript projection replaces each
-   * turn's intermediate activity with a live Thought block (see
-   * focus-activity.ts). The WorkingIndicator is NEVER hidden by Focus —
-   * the two surfaces are independent (plan §3).
+   * The shared DisplayState derives Focus when its preset is `focus`; while
+   * active, the transcript projection replaces each turn's intermediate
+   * activity with a live Thought block (see focus-activity.ts). The
+   * WorkingIndicator is NEVER hidden by Focus — the two surfaces are
+   * independent.
    */
-  private focusModeEnabled = false
+  private readonly displayState: DisplayState
   /**
    * The user's per-turn Thought disclosures. LIVE running turns are
    * allowed (plan §2.3) and `turn/end` NEVER clears the choice (plan
@@ -4114,6 +4118,7 @@ export class TuiApp {
     })
     this.terminal = resizeAware
     this.events = events
+    this.displayState = options.displayState ?? { preset: 'full' }
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
@@ -4123,6 +4128,9 @@ export class TuiApp {
     // footer always composes from a snapshot (headless tests drive it
     // through setStatus).
     this.statusStore = options.statusStore ?? new StatusStoreImpl(initialStatusSnapshot('0.0.0'))
+    // The shared display state is the authority even for an externally
+    // supplied store; seed its interaction section before the first frame.
+    this.statusStore.update({ interaction: { displayPreset: this.displayState.preset } })
     // M0/M5: the store notify IS the footer's render path — every
     // ACCEPTED projection (activity, surface, view, host facts) re-renders
     // the composer. The old per-caller `projectActivity(); renderFooter()`
@@ -5801,7 +5809,7 @@ export class TuiApp {
         // a visible long-user override with no expanded root consumes the
         // press as a user collapse, so the Thought roots are untouched. The
         // root storage/expansion rule itself is unchanged.
-        if (this.fullscreen !== undefined && this.focusModeEnabled) {
+        if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
           if (this.hasVisibleExpandedFocusRoots()) {
             // Clear the user overrides BEFORE the single root-collapse
             // rebuild so one pass paints both, and keep the root contract's
@@ -6898,24 +6906,35 @@ export class TuiApp {
 
   /** Whether Focus Mode is currently projecting the transcript. */
   isFocusModeEnabled(): boolean {
-    return this.focusModeEnabled
+    return isFocusDisplayPreset(this.displayState.preset)
   }
 
-  /** Turn Focus Mode on/off (the runner's unified setter — the persisted
-   * preference, the system-prompt section and this surface all read the
-   * SAME runtime state). Off restores the ordinary transcript projection
-   * immediately; the expansion set is kept but not consulted (plan §16.4). */
-  setFocusMode(enabled: boolean): void {
-    if (this.focusModeEnabled === enabled) return
+  /** The canonical display preset for status/command consumers. */
+  displayPreset(): DisplayPreset {
+    return this.displayState.preset
+  }
+
+  /** Apply the canonical display preset through the shared runtime state.
+   * Compact is rejected until its projection exists; changing between the
+   * available presets keeps the existing disclosure owners intact. */
+  setDisplayPreset(preset: DisplayPreset): DisplayPresetApplyResult {
+    if (!isDisplayPresetAvailable(preset)) return { kind: 'unsupported', preset }
+    if (this.displayState.preset === preset) return { kind: 'unchanged', preset }
     this.clearFocusLiveHeightState()
-    this.focusModeEnabled = enabled
+    this.displayState.preset = preset
     // Focus is a transcript PROJECTION, never a Thinking preference
     // owner: switching Focus ON/OFF leaves the shared thinkingExpanded
     // bulk preference untouched (plan §17). The rebuild re-derives the
     // projection for the new mode.
-    this.projectStatus({ interaction: { focusMode: enabled } })
+    this.projectStatus({ interaction: { displayPreset: preset } })
     this.rebuildMessages('focus-disclosure')
     this.requestRender()
+    return { kind: 'applied', preset }
+  }
+
+  /** @deprecated Use setDisplayPreset; retained for existing headless callers. */
+  setFocusMode(enabled: boolean): DisplayPresetApplyResult {
+    return this.setDisplayPreset(enabled ? 'focus' : 'full')
   }
 
   /** Switch the structural icon palette at runtime (the /settings write
@@ -7048,7 +7067,7 @@ export class TuiApp {
     // in the current transcript projection. Do not promote a bare message turn
     // when Focus has no actual Thought root to own.
     const turn = this.searchTargetTurn()
-    if (this.focusModeEnabled && turn !== undefined
+    if (isFocusDisplayPreset(this.displayState.preset) && turn !== undefined
       && this.messages.includes(message) && this.turnActivities.has(turn)
       && !this.focusExpandedTurns.has(turn)) {
       this.focusExpandedTurns.add(turn)
@@ -7864,7 +7883,7 @@ export class TuiApp {
   /** The user-owned Focus expansion projection (no search target): manual
    * disclosures PLUS the regular Ctrl+O derived recent turns. */
   private focusProjectionExpandedTurnsBase(): ReadonlySet<number> {
-    if (!this.focusModeEnabled || this.fullscreen !== undefined || !this.toolOutputExpanded) {
+    if (!isFocusDisplayPreset(this.displayState.preset) || this.fullscreen !== undefined || !this.toolOutputExpanded) {
       return this.focusExpandedTurns
     }
     const boundary = this.expandBoundary()
@@ -7884,7 +7903,7 @@ export class TuiApp {
   }
 
   private projectedBlocks(projectionExpanded: ReadonlySet<number>): FocusProjectedBlock[] {
-    return projectFocus(this.messages, this.turnActivities, projectionExpanded, this.focusModeEnabled)
+    return projectFocus(this.messages, this.turnActivities, projectionExpanded, isFocusDisplayPreset(this.displayState.preset))
   }
 
   /** The live Preparing snapshot for one Focus turn, kept in model order. */
@@ -7938,7 +7957,7 @@ export class TuiApp {
    * standalone block between the durable projection and local cards. */
   private transcriptBlocks(projectionExpanded: ReadonlySet<number>): TranscriptRenderBlock[] {
     const blocks: TranscriptRenderBlock[] = [...this.projectedBlocks(projectionExpanded)]
-    if (!this.focusModeEnabled) {
+    if (!isFocusDisplayPreset(this.displayState.preset)) {
       if (this.streamingToolPreviews.length > 0) {
         blocks.push({ kind: 'streaming-tool-previews', previews: this.streamingToolPreviews })
       }
@@ -8087,7 +8106,7 @@ export class TuiApp {
         block.activity,
         projectionExpanded.has(block.activity.turn),
         this.focusToolDisplayFor(block.activity),
-        this.focusModeEnabled && !projectionExpanded.has(block.activity.turn)
+        isFocusDisplayPreset(this.displayState.preset) && !projectionExpanded.has(block.activity.turn)
           ? focusPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
           : undefined,
       )
@@ -8449,7 +8468,7 @@ export class TuiApp {
    * epoch. Leaving history keeps the existing floor active; explicit lifecycle
    * and structural boundaries release it. */
   private focusLivePaddingEnabled(): boolean {
-    const enabled = this.focusModeEnabled
+    const enabled = isFocusDisplayPreset(this.displayState.preset)
       && this.fullscreen !== undefined
       && this.fullscreenScroll !== undefined
     if (!enabled) this.clearFocusLiveHeightState()
@@ -12191,7 +12210,7 @@ export class TuiApp {
    * not pollute each other). Both count: regular mode full-reveals ANY
    * expanded root. */
   private isInsideExpandedFocus(message: TranscriptMessage, boundary: number): boolean {
-    if (!this.focusModeEnabled || !('turn' in message)) return false
+    if (!isFocusDisplayPreset(this.displayState.preset) || !('turn' in message)) return false
     const turn = message.turn
     return this.focusExpandedTurns.has(turn) || this.isRegularCtrlOExpandedTurn(turn, boundary)
   }
@@ -12201,7 +12220,7 @@ export class TuiApp {
    * projection and isInsideExpandedFocus; never written into
    * focusExpandedTurns). Fullscreen never derives. */
   private isRegularCtrlOExpandedTurn(turn: number, boundary: number): boolean {
-    if (!this.focusModeEnabled || this.fullscreen !== undefined || !this.toolOutputExpanded) return false
+    if (!isFocusDisplayPreset(this.displayState.preset) || this.fullscreen !== undefined || !this.toolOutputExpanded) return false
     return Number.isFinite(boundary) && turn >= boundary
   }
 
@@ -12252,7 +12271,7 @@ export class TuiApp {
       if (this.searchForcesMessageExpanded(message)) return true
       const override = this.expandedOverride.get(message)
       if (override !== undefined) return override
-      if (this.fullscreen !== undefined && this.focusModeEnabled) return false
+      if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) return false
       return message.turn >= userBoundary
     }
     // Delivered files are an assistant turn-tail, but their capped/complete
@@ -12292,7 +12311,7 @@ export class TuiApp {
       // keeps its folded state unless the MOUSE full-revealed it (the
       // per-card override still wins) or the temporary search target
       // reveals it.
-      if (this.fullscreen !== undefined && this.focusModeEnabled) {
+      if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
         return this.expandedOverride.get(message) === true || this.searchForcesMessageExpanded(message)
       }
       return this.toolOutputExpanded
@@ -15597,7 +15616,7 @@ export class TuiApp {
    * (Ctrl+O owns the Thought-root bulk there). Shared by the durable bubble
    * and the ephemeral pending lane so their labels never diverge. */
   private userFoldHint(): ExpandHint {
-    return this.fullscreen === undefined ? 'fold' : this.focusModeEnabled ? 'click' : 'click-fold'
+    return this.fullscreen === undefined ? 'fold' : isFocusDisplayPreset(this.displayState.preset) ? 'click' : 'click-fold'
   }
 
   /** The expanded long-user tail control: presentation chrome naming the
@@ -15633,7 +15652,7 @@ export class TuiApp {
   private pendingUserExpandedState(row: PendingUserRow): boolean {
     const override = this.pendingUserExpanded.get(pendingUserDisclosureKey(row))
     if (override !== undefined) return override
-    if (this.fullscreen !== undefined && this.focusModeEnabled) return false
+    if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) return false
     return this.toolOutputExpanded
   }
 

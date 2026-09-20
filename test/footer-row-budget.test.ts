@@ -353,7 +353,7 @@ test('an instruction that renders NOTHING reserves no line and paints nothing', 
 
 test('a right-zone row keeps its single-line contract while left-only siblings wrap', () => {
   const snap = busySnapshot() as DeepMutable<StatusSnapshot>
-  snap.interaction.focusMode = true
+  snap.interaction.displayPreset = 'focus'
   const layout: FooterLayoutV1 = {
     schemaVersion: 1,
     rows: [

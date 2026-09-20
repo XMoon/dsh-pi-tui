@@ -303,7 +303,7 @@ function defaultRow1Right(snap: StatusSnapshot): RefItem[] {
       order: 0,
     })
   }
-  if (snap.interaction.focusMode) {
+  if (snap.interaction.displayPreset === 'focus') {
     items.push({
       text: toneText('focus', 'textMuted'),
       compact: toneText('focus', 'textMuted'),
@@ -464,7 +464,7 @@ test('permission/plan/task/focus variants stay byte-equivalent', () => {
       ...snap,
       access: { permissionPreset: { id: permission, label: permission, matched: permission !== 'custom' } },
       collaboration: { plan: { effective: true } },
-      interaction: { ...snap.interaction, focusMode: true },
+      interaction: { ...snap.interaction, displayPreset: 'focus' },
       activity: { ...snap.activity, taskCount: 1, childAgentCount: 2 },
     }
     const expected = referenceFooter(defaultReferenceRows(variant, CONTEXT, ''), 100)
@@ -632,7 +632,7 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
   // The status row's right zone (plan state + Focus Mode) renders flush
   // right when active — only the left zone is fitted to the remainder.
   const focusSnap = mainSnapshot() as DeepMutable<StatusSnapshot>
-  focusSnap.interaction = { ...focusSnap.interaction, focusMode: true }
+  focusSnap.interaction = { ...focusSnap.interaction, displayPreset: 'focus' }
   assert.equal(
     composer.render({ snapshot: focusSnap as StatusSnapshot, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),

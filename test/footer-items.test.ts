@@ -158,6 +158,12 @@ test('context renders the legacy bar and the full formatter', () => {
   assert.equal(render('context', emptyStatusSnapshot()), '')
 })
 
+test('focus-mode keeps its legacy id but follows the canonical display preset', () => {
+  assert.equal(render('focus-mode', snapshotWith(snap => { snap.interaction.displayPreset = 'focus' })), 'focus')
+  assert.equal(render('focus-mode', snapshotWith(snap => { snap.interaction.displayPreset = 'full' })), '')
+  assert.equal(render('focus-mode', snapshotWith(snap => { snap.interaction.displayPreset = 'compact' })), '')
+})
+
 test('turns-steps renders tN/sN', () => {
   const text = render('turns-steps', snapshotWith(snap => {
     snap.usage.turns = 3

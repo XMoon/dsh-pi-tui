@@ -481,7 +481,7 @@ const focusModeItem: FooterItemDefinition = {
   formats: ['plain'],
   defaultFormat: 'plain',
   render(snapshot: StatusSnapshot) {
-    if (!snapshot.interaction.focusMode) return null
+    if (snapshot.interaction.displayPreset !== 'focus') return null
     return { spans: [{ text: 'focus', tone: 'textMuted' }] }
   },
 }

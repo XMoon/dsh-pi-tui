@@ -44,10 +44,10 @@ test('update merges sections and keeps untouched sections by identity', () => {
   assert.equal(store.revision(), 1)
   // A second update touching a DIFFERENT section keeps the workspace
   // reference (the footer cache can rely on section identity).
-  store.update({ interaction: { focusMode: true } })
+  store.update({ interaction: { displayPreset: 'focus' } })
   const second = store.snapshot()
   assert.equal(second.workspace, workspace)
-  assert.equal(second.interaction.focusMode, true)
+  assert.equal(second.interaction.displayPreset, 'focus')
   assert.equal(store.revision(), 2)
 })
 
@@ -78,7 +78,7 @@ test('replace swaps the whole snapshot and notifies once', () => {
   const store = new StatusStore()
   let notified = 0
   store.subscribe(() => { notified += 1 })
-  const next = snapshotWith({ interaction: { focusMode: true } })
+  const next = snapshotWith({ interaction: { displayPreset: 'focus' } })
   store.replace(next)
   assert.equal(store.snapshot(), next)
   assert.equal(notified, 1)
@@ -90,18 +90,18 @@ test('subscribe returns a disposer; a throwing listener is isolated', () => {
   const boom = (): void => { throw new Error('listener boom') }
   store.subscribe(boom)
   store.subscribe(() => { seen.push(store.revision()) })
-  store.update({ interaction: { focusMode: true } })
+  store.update({ interaction: { displayPreset: 'focus' } })
   assert.deepEqual(seen, [1])
   const dispose = store.subscribe(() => { seen.push(99) })
   dispose()
-  store.update({ interaction: { focusMode: false } })
+  store.update({ interaction: { displayPreset: 'full' } })
   assert.deepEqual(seen, [1, 2])
 })
 
 test('undefined patch values are skipped', () => {
   const store = new StatusStore()
-  store.update({ workspace: undefined, interaction: { focusMode: true } })
-  assert.equal(store.snapshot().interaction.focusMode, true)
+  store.update({ workspace: undefined, interaction: { displayPreset: 'focus' } })
+  assert.equal(store.snapshot().interaction.displayPreset, 'focus')
   assert.equal(store.revision(), 1)
 })
 
@@ -109,14 +109,14 @@ test('replace with an identical snapshot does not notify (same identity discipli
   const store = new StatusStore()
   let notified = 0
   store.subscribe(() => { notified += 1 })
-  const next = snapshotWith({ interaction: { focusMode: true } })
+  const next = snapshotWith({ interaction: { displayPreset: 'focus' } })
   store.replace(next)
   assert.equal(notified, 1)
   // The SAME snapshot object again: no change.
   store.replace(next)
   assert.equal(notified, 1)
   // A NEW object with a changed section notifies.
-  store.replace(snapshotWith({ interaction: { focusMode: false } }))
+  store.replace(snapshotWith({ interaction: { displayPreset: 'full' } }))
   assert.equal(notified, 2)
 })
 
