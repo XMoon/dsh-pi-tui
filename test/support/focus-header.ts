@@ -2,7 +2,7 @@
  * Focus disclosure-header row matching for the headless UI tests.
  *
  * The Focus header renders the whale disclosure glyph plus a status label
- * (`Working 3s`, `Waiting for approval · 1s`, `Completed 6s`, …). The SAME
+ * (`Working 3s`, `Waiting for approval · 1s`, `Turn complete 6s`, …). The SAME
  * whale glyphs are reused elsewhere in the viewport — the working indicator
  * shows `🐋 Working...` and the assistant bullet leads with `🐋 text` — so a
  * bare glyph needle is ambiguous. These helpers match the header's label
@@ -16,7 +16,7 @@
  * (`${glyph} ${label}`), while the working indicator and the assistant
  * bullet use the two-space `iconPrefix` — so the single space plus the
  * line-start anchor excludes those look-alikes. */
-const HEADER_LABEL = 'Work|Wait|Compl|Fail|Interr|Block|Max'
+const HEADER_LABEL = 'Work|Wait|Turn c|Compl|Fail|Interr|Block|Max'
 
 function headerPattern(expanded: boolean | undefined): RegExp {
   const collapsed = '(?:🐋|▸)'

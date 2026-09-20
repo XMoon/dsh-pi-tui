@@ -1298,8 +1298,8 @@ test('the header label names the live phase and failures; durations only when kn
   assert.equal(focusStatusLabel(running!, 'waiting-question', undefined), 'Waiting for input')
   assert.equal(focusStatusLabel(running!, 'compacting', '3s'), 'Working 3s')
   const done = activityOf(0, completedTurn(0, 0, 1000))
-  assert.equal(focusStatusLabel(done!, 'idle', '34s'), 'Completed 34s')
-  assert.equal(focusStatusLabel(done!, 'working', '34s'), 'Completed 34s', 'a settled turn ignores the run phase')
+  assert.equal(focusStatusLabel(done!, 'idle', '34s'), 'Turn complete 34s')
+  assert.equal(focusStatusLabel(done!, 'working', '34s'), 'Turn complete 34s', 'a settled turn ignores the run phase')
   const failed = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'X', message: 'boom' } } }, 18000, 1),
@@ -1346,11 +1346,11 @@ test('FocusActivityComponent reads the live phase without a rebuild and freezes 
   assert.ok(component.render(80).some(line => line.includes('Working 34s')), 'resume keeps accumulating from the frozen value')
 })
 
-test('a completed Focus turn renders Completed instead of Thought', () => {
+test('a completed Focus turn renders Turn complete instead of Thought', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
   const header = new FocusActivityComponent({ activity: folder.turnActivity(0)!, expanded: false, now: () => 35_000 }).render(80).join('\n')
-  assert.ok(header.includes('Completed 6s'), header)
+  assert.ok(header.includes('Turn complete 6s'), header)
   assert.ok(!header.includes('Thought'), `the live label must not read Thought: ${header}`)
 })
 
@@ -1410,13 +1410,14 @@ test('the header drops the token/tool tail progressively on narrow widths (plan 
   const tools = new Map<string, number>([['read', 7], ['search', 4], ['bash', 3], ['z', 2]])
   const rich = { ...done!, tools, toolCalls: 16, usage: { inputTokens: 62_000, outputTokens: 800, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 62_800 }
   const wide = formatFocusHeaderLine(rich, false, 'idle', '6s', 120)
-  assert.ok(wide.includes('🐋 Completed 6s · 63k tok · 16 tools · read ×7 · search ×4 · bash ×3 · +1'), wide)
+  assert.ok(wide.includes('🐋 Turn complete 6s · 63k tok · 16 tools · read ×7 · search ×4 · bash ×3 · +1'), wide)
   const medium = formatFocusHeaderLine(rich, false, 'idle', '6s', 50)
   assert.ok(medium.includes('· 63k tok · 16 tools') && !medium.includes('read ×7'), `medium drops the types:\n${medium}`)
   const narrow = formatFocusHeaderLine(rich, false, 'idle', '6s', 30)
-  assert.equal(narrow, '🐋 Completed 6s · 63k tok', `narrow keeps token + label:\n${narrow}`)
+  assert.equal(narrow, '🐋 Turn complete 6s · 63k tok', `narrow keeps token + label:\n${narrow}`)
   const tiny = formatFocusHeaderLine(rich, false, 'idle', '6s', 16)
-  assert.equal(tiny, '🐋 Completed 6s', `tiny keeps the bare label:\n${tiny}`)
+  assert.ok(visibleWidth(tiny) <= 16, `tiny remains within width:\n${tiny}`)
+  assert.ok(tiny.includes('Turn complet'), `tiny keeps the start of the outcome label:\n${tiny}`)
   const minuscule = formatFocusHeaderLine(rich, false, 'idle', '6s', 4)
   assert.ok(visibleWidth(minuscule) <= 4, `hard truncate as the last resort:\n${minuscule}`)
 })
@@ -1908,7 +1909,7 @@ test('the component renders an indented muted card and refreshes duration live',
   const activity = folder.turnActivity(0)!
   const component = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
   const lines = component.render(80)
-  assert.ok(lines[0]!.includes('🐋 Completed 6s · 1 tool · read ×1'), lines[0])
+  assert.ok(lines[0]!.includes('🐋 Turn complete 6s · 1 tool · read ×1'), lines[0])
   assert.ok(lines[0]!.startsWith('  '), 'the card is indented')
   // Running turns re-read `now` per render: a later frame shows the new
   // duration (the WorkingIndicator heartbeat drives the repaint).
