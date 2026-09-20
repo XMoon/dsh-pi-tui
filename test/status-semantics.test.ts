@@ -223,14 +223,15 @@ test('usage: cache-write-only data carries its own hit percentage', () => {
   assert.equal(usage.cacheHitPct, 91.9, 'the cache hit percent is the stats fact, independent of the read/write split')
 })
 
-test('activity: nonzero child counts ride the section', () => {
+test('activity: background task and child counts never become a lifecycle phase', () => {
   const status = deriveActivityStatus(
     { working: false, compacting: false, applyingCompaction: false, approvalOpen: false, questionOpen: false },
     false,
-    { queuedCount: 0, taskCount: 0, childAgentCount: 4, todoCount: 0 },
+    { queuedCount: 0, taskCount: 1, childAgentCount: 4, todoCount: 0 },
   )
+  assert.equal(status.phase, 'idle')
   assert.equal(status.childAgentCount, 4)
-  assert.equal(status.taskCount, 0)
+  assert.equal(status.taskCount, 1)
 })
 
 test('access: alpha.4 drops the event-log fold inputs entirely (service-only reads)', () => {
