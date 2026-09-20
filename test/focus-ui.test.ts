@@ -1776,6 +1776,191 @@ test('Question keeps the editor seat while the effective fold key inspects trans
   assert.equal(await approval, 'rejected')
 })
 
+test('Question fixed PageUp wins over a conflicting transcript inspection remap', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': 'pageUp' }))
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Which context should be retained?',
+    detail: Array.from({ length: 64 }, (_, index) => `detail-${index}`).join('\n'),
+    options: [{ label: 'Continue' }],
+  }])
+  await vt.waitForRender()
+  const internals = app as unknown as { activeQuestions?: { flow: { bodyScroll: number } } }
+  const flow = internals.activeQuestions?.flow
+  assert.ok(flow !== undefined, 'Question flow must own the response seat')
+  vt.sendInput('\x1b[6~')
+  await vt.waitForRender()
+  assert.ok(flow.bodyScroll > 0, 'Question PageDown must first move its own scrollport')
+  const rootsBefore = [...app.focusExpandedTurnsForTest()]
+  vt.sendInput('\x1b[5~')
+  await vt.waitForRender()
+  assert.equal(flow.bodyScroll, 0, 'Question PageUp must beat the conflicting global fold remap')
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], rootsBefore, 'PageUp must not disclose transcript roots')
+  vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+  app.setFullscreen(false)
+})
+
+test('Question text editing beats conflicting inspection remaps for every Input control', async () => {
+  const cases = [
+    { key: 'left', moves: ['\x1b[D'], expected: 'abXc' },
+    { key: 'home', moves: ['\x1b[H'], expected: 'Xabc' },
+    { key: 'end', moves: ['\x1b[H', '\x1b[F'], expected: 'abcX' },
+    { key: 'ctrl+a', moves: ['\x01'], expected: 'Xabc' },
+    { key: 'ctrl+b', moves: ['\x02'], expected: 'abXc' },
+    { key: 'ctrl+e', moves: ['\x1b[H', '\x05'], expected: 'abcX' },
+    { key: 'ctrl+f', moves: ['\x1b[H', '\x06'], expected: 'aXbc' },
+    { key: 'ctrl+end', moves: ['\x1b[H', '\x1b[1;5F'], expected: 'abcX' },
+  ] as const
+  const { vt, app } = startApp()
+
+  for (const scenario of cases) {
+    app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': scenario.key }))
+    const promise = app.askQuestions([{ id: 'q1', question: `Type with ${scenario.key}?` }])
+    await vt.waitForRender()
+    vt.sendInput('abc')
+    await vt.waitForRender()
+    for (const move of scenario.moves) {
+      vt.sendInput(move)
+      await vt.waitForRender()
+    }
+    vt.sendInput('X')
+    await vt.waitForRender()
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    vt.sendInput('\r')
+    assert.deepEqual(await promise, [{ id: 'q1', selected: [], custom: scenario.expected }], scenario.key)
+  }
+})
+
+test('Question text edit cancel beats a conflicting Ctrl+C inspection remap', async () => {
+  const { vt, app } = startApp()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': 'ctrl+c' }))
+  const promise = app.askQuestions([{ id: 'q1', question: 'Cancel text editing?' }])
+  await vt.waitForRender()
+  vt.sendInput('draft')
+  await vt.waitForRender()
+  const internals = app as unknown as { activeQuestions?: { flow: { editingOther: boolean } } }
+  assert.equal(internals.activeQuestions?.flow.editingOther, true)
+  vt.sendInput('\x03')
+  await vt.waitForRender()
+  assert.equal(internals.activeQuestions?.flow.editingOther, false, 'Ctrl+C must leave text editing before inspection routing')
+  vt.sendInput('\x03')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('Question navigation preserves Input-owned remaps after Esc', async () => {
+  const cases = [
+    { key: 'home', moves: ['\x1b[H'], expected: 'Xabc' },
+    { key: 'end', moves: ['\x1b[H', '\x1b[F'], expected: 'abcX' },
+    { key: 'ctrl+a', moves: ['\x01'], expected: 'Xabc' },
+    { key: 'ctrl+b', moves: ['\x02'], expected: 'abXc' },
+    { key: 'ctrl+e', moves: ['\x1b[H', '\x05'], expected: 'abcX' },
+    { key: 'ctrl+f', moves: ['\x1b[H', '\x06'], expected: 'aXbc' },
+    { key: 'ctrl+end', moves: ['\x1b[H', '\x1b[1;5F'], expected: 'abcX' },
+  ] as const
+  const { vt, app } = startApp()
+
+  for (const scenario of cases) {
+    app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': scenario.key }))
+    const promise = app.askQuestions([{ id: 'q1', question: `Re-enter with ${scenario.key}?` }])
+    await vt.waitForRender()
+    vt.sendInput('abc')
+    await vt.waitForRender()
+    vt.sendInput('\x1b')
+    await vt.waitForRender()
+    const internals = app as unknown as { activeQuestions?: { flow: { editingOther: boolean } } }
+    assert.equal(internals.activeQuestions?.flow.editingOther, false, scenario.key)
+    for (const move of scenario.moves) {
+      vt.sendInput(move)
+      await vt.waitForRender()
+    }
+    vt.sendInput('X')
+    await vt.waitForRender()
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    vt.sendInput('\r')
+    assert.deepEqual(await promise, [{ id: 'q1', selected: [], custom: scenario.expected }], scenario.key)
+  }
+})
+
+test('Question and Approval allow only explicit read-only inspection actions', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  let jumps = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onTranscriptJumpLatest: () => { jumps += 1; return true },
+  })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setTodoSummary([{ content: 'inspect todo', status: 'pending' }])
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.transcript.toggleExpand': 'ctrl+x',
+    'app.transcript.toggleThinking': 'ctrl+y',
+    'app.transcript.jumpLatest': 'ctrl+g',
+    'app.todo.toggle': 'ctrl+t',
+  }))
+  const question = app.askQuestions([{ id: 'q1', question: 'Inspect safely?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  vt.sendInput('\x19')
+  vt.sendInput('\x07')
+  vt.sendInput('\x14')
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'fold inspection must work under Question')
+  assert.equal(app.isThinkingExpanded(), true, 'Thinking inspection must work under Question')
+  assert.equal(jumps, 1, 'jump-latest inspection must work under Question')
+  assert.equal(app.isTodoPanelVisible(), true, 'Todo presentation must work under Question')
+  assert.ok(vt.getViewport().join('\n').includes('Inspect safely?'), 'Question remains the response owner')
+  vt.sendInput('1')
+  vt.sendInput('\r')
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Continue'] }])
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'inspect safely' })
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  vt.sendInput('\x19')
+  vt.sendInput('\x07')
+  vt.sendInput('\x14')
+  await vt.waitForRender()
+  assert.equal(jumps, 2, 'jump-latest inspection must work under Approval')
+  assert.equal(app.isTodoPanelVisible(), false, 'Todo presentation must remain reversible under Approval')
+  assert.ok(vt.getViewport().join('\n').includes('Approve bash?'), 'Approval remains the response owner')
+  vt.sendInput('n')
+  assert.equal(await approval, 'rejected')
+  app.setFullscreen(false)
+})
+
+test('Question does not fall through to generic Host transcript search', async () => {
+  const { vt, app } = startApp()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.search': 'ctrl+f' }))
+  const promise = app.askQuestions([{ id: 'q1', question: 'Search remains deferred?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  assert.equal(app.isSearching(), false, 'Question must consume deferred Search input')
+  assert.ok(vt.getViewport().join('\n').includes('Search remains deferred?'), 'Question remains mounted')
+  vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
 test('fullscreen Focus Question lets the effective fold key expand roots without moving modal focus', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -1801,7 +1986,7 @@ test('fullscreen Focus Question lets the effective fold key expand roots without
   app.setFullscreen(false)
 })
 
-test('fullscreen Focus Question permits disclosure-only background clicks and keeps modal focus', async () => {
+test('fullscreen Focus Question permits read-only background inspection and keeps modal focus', async () => {
   const vt = new VirtualTerminal(100, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -1823,13 +2008,15 @@ test('fullscreen Focus Question permits disclosure-only background clicks and ke
   click(vt, 3, todoY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(view.join('\n').includes('modal todo'), 'Question must block Todo interaction behind it')
+  assert.equal(app.isTodoPanelVisible(), true, 'Todo presentation remains usable behind Question')
+  assert.ok(view.join('\n').includes('modal todo'), 'Todo presentation remains visible behind Question')
   const ordinaryY = findRow(view, 'prompt 1')
   assert.ok(ordinaryY >= 0, `ordinary user row missing behind Question:\n${view.join('\n')}`)
   click(vt, 3, ordinaryY + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.ok(!hasFocusHeader(view.join('\n'), true), 'Question must block ordinary message actions behind it')
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'an ordinary presentation target must not mutate Focus roots')
+  assert.ok(view.join('\n').includes('Inspect context?'), 'Question remains visible after presentation inspection')
   click(vt, 3, y + 1)
   await vt.waitForRender()
   view = vt.getViewport()
@@ -1978,7 +2165,7 @@ test('fullscreen Focus Approval keeps ownership while the effective fold key ins
   assert.ok(approvalY >= 0, 'the transcript remains painted behind Approval')
   click(vt, 3, approvalY + 1)
   await vt.waitForRender()
-  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'Approval must block fullscreen transcript mouse disclosure')
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'Approval mouse stays inert without authoritative dialog bounds')
   vt.sendInput('\x18')
   await vt.waitForRender()
   assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'Approval must allow only the semantic transcript disclosure action')
@@ -1988,7 +2175,7 @@ test('fullscreen Focus Approval keeps ownership while the effective fold key ins
   app.setFullscreen(false)
 })
 
-test('fullscreen native link activation is blocked while Question or Approval owns the modal', async () => {
+test('fullscreen native link activation keeps ordinary behavior during Question and Approval', async () => {
   const vt = new VirtualTerminal(100, 30)
   const opened: string[] = []
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
@@ -2006,28 +2193,28 @@ test('fullscreen native link activation is blocked while Question or Approval ow
   const question = app.askQuestions([{ id: 'q1', question: 'Inspect this link?', options: [{ label: 'Continue' }] }])
   await vt.waitForRender()
   fullscreen.openUrl?.('https://question.example')
-  assert.deepEqual(opened, [], 'Question ownership must block the fork release-time OSC8 opener')
+  assert.deepEqual(opened, ['https://question.example'], 'Question must not add a modal-specific OSC8 prohibition')
   vt.sendInput('\x1b')
   await assert.rejects(question, /cancelled/)
 
   const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
   await vt.waitForRender()
   fullscreen.openUrl?.('https://approval.example')
-  assert.deepEqual(opened, [], 'Approval ownership must block the fork release-time OSC8 opener')
+  assert.deepEqual(opened, ['https://question.example', 'https://approval.example'], 'Approval must not add a modal-specific OSC8 prohibition')
   vt.sendInput('n')
   assert.equal(await approval, 'rejected')
 
   fullscreen.openUrl?.('https://ordinary.example')
-  assert.deepEqual(opened, ['https://ordinary.example'], 'the opener remains available after modal ownership ends')
+  assert.deepEqual(opened, ['https://question.example', 'https://approval.example', 'https://ordinary.example'], 'the opener remains available after modal ownership ends')
   app.setFullscreen(false)
 })
 
-test('Question disclosure whitelist rejects Todo, action, attachment, workflow, link, and ordinary hits', () => {
+test('Question modal inspection allowlist separates presentation from mutation', () => {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
-  const internals = app as unknown as { isModalTranscriptDisclosureHit(hitId: string): boolean }
+  const internals = app as unknown as { isModalInspectionSafeHit(hitId: string): boolean }
   const allowed = [
     'user:expand:1',
     'pending-user:collapse:key',
@@ -2035,26 +2222,26 @@ test('Question disclosure whitelist rejects Todo, action, attachment, workflow, 
     'focus:collapse:1',
     'ptc:1:call-1',
     'message:disclosure:1',
-  ]
-  for (const hitId of allowed) assert.equal(internals.isModalTranscriptDisclosureHit(hitId), true, hitId)
-  const blocked = [
+    'message:toggle:1',
+    'attachment:1:0',
     'todo:dock',
     'todo:panel',
     'workflow:run:run-1',
     'workflow:phase:run-1:phase-1',
+  ]
+  for (const hitId of allowed) assert.equal(internals.isModalInspectionSafeHit(hitId), true, hitId)
+  const blocked = [
     'workflow:member:run-1:1:child-1',
     'workflow:phase-agents:run-1:phase-1',
     'workflow:run-agents:run-1',
-    'attachment:1:0',
-    'message:toggle:1',
     'plugin:action',
     'link:https://example.test',
     'inert',
   ]
-  for (const hitId of blocked) assert.equal(internals.isModalTranscriptDisclosureHit(hitId), false, hitId)
+  for (const hitId of blocked) assert.equal(internals.isModalInspectionSafeHit(hitId), false, hitId)
 })
 
-test('Question background disclosure rejects a repaint or resize between press and release', async () => {
+test('Question background inspection rejects a repaint or resize between press and release', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()

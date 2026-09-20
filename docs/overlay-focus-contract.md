@@ -116,30 +116,57 @@ what guarantees the newer operation wins.
   `initialFocus`) are additive; the default `setHidden(false)` / `focus()` /
   `showOverlay()` behavior still promotes and takes focus.
 
-## 6. Modal transcript inspection exception
+## 6. Modal response ownership and read-only inspection
 
-Question and Approval retain keyboard ownership while they are visible. They
-have one narrow Host shortcut exception: the effective semantic
-`app.transcript.toggleExpand` action may inspect transcript context without
-moving focus into the transcript or changing the modal's draft, page, cursor,
-selection, or decision state. No other Host shortcut passes through this
-exception.
+Question and Approval own the response plane: editing, selection/decision,
+submit/cancel, and every lifecycle, session, business, or plugin mutation. They
+do not own the entire TUI. An explicit read-only inspection plane remains
+available while a response modal is visible.
 
-Fullscreen Question pointer handling follows the same boundary:
+Keyboard routing follows this priority:
+
+1. an active nested inspection child, when the existing ownership stack can
+   support it;
+2. fixed Question/Approval response keys owned by the component;
+3. the explicit inspection-safe semantic allowlist:
+   `app.transcript.toggleExpand`, `app.transcript.toggleThinking`,
+   `app.transcript.jumpLatest`, and `app.todo.toggle`;
+4. all remaining input is consumed by the response modal.
+
+The normal Host shortcut ladder is never run generically behind a response
+modal. Inspection may change presentation or viewport state, but must not
+mutate the answer, submit/steer editor input, change session/context identity,
+or trigger lifecycle/business/plugin actions. Todo presentation is allowed;
+Todo/business mutation is not.
+
+Transcript Search is intended inspection, not a product-level prohibition. It
+is deferred from this PR because the current `OverlayBroker` mounts a new
+managed overlay under an active Question/Approval suspension as hidden; making
+Search a temporary keyboard owner would require a new nested inspection-child
+ownership primitive. The follow-up is **Milestone A follow-up — nested
+transcript Search under Question/Approval**. Until that ownership proof exists,
+the existing modal routing consumes Search input rather than falling through to
+the generic Host ladder.
+
+Fullscreen Question pointer handling uses the same semantic boundary:
 
 - clicks inside the Question frame remain Question-owned;
-- outside clicks may activate only an existing transcript disclosure target;
-- Todo, links, search navigation, workflow/plugin actions, attachments, editor
-  focus, and ordinary message actions remain blocked;
+- outside clicks may activate only explicit presentation/inspection targets:
+  transcript disclosure, attachment collapse/expand, Todo presentation, and
+  Workflow run/phase disclosure;
+- Workflow member/agent viewer actions, editor focus, session/context changes,
+  lifecycle/business mutation, arbitrary plugin actions, and ambiguous hits stay
+  blocked;
 - press/release uses the last-painted geometry and semantic owner/row/hit
   identity, with a Question-instance fence;
-- a disclosure rebuild must not change modal focus ownership.
+- a presentation rebuild must not change modal focus ownership.
 
-Approval mouse passthrough is intentionally not enabled here. Its managed
-overlay may occupy a broader physical area than the visible dialog content, and
-this contract does not invent a second dialog hit map. Approval context
-inspection is keyboard-only until an authoritative last-painted dialog bound is
-available.
+Approval keyboard inspection uses the same semantic allowlist. Approval mouse
+inspection is not enabled because the current managed overlay does not expose
+authoritative last-painted visible-dialog bounds; this is an implementation
+limitation, not the product interaction contract. The contract does not invent
+a second dialog hit map. Existing fullscreen selection/copy and ordinary OSC8
+link behavior remain available without a modal-specific URL prohibition.
 
 ## 7. Regression checklist for future changes
 
