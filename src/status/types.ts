@@ -11,6 +11,8 @@
  * @module @xmoon76/dsh-pi-tui/status
  */
 
+import type { DisplayPreset } from '../display-preset.ts'
+
 /** What the user is currently looking at (plan §4.6). */
 export interface ViewStatus {
   readonly subject:
@@ -70,9 +72,9 @@ export interface PlanStatus {
   readonly pending?: boolean
 }
 
-/** Focus Mode: the TUI's own presentation + behavioral policy (plan §4.4). */
+/** Canonical transcript display preset and derived Focus behavioral policy. */
 export interface InteractionStatus {
-  readonly focusMode: boolean
+  readonly displayPreset: DisplayPreset
 }
 
 /** The workspace the display subject lives in (plan §4.7). */
@@ -180,7 +182,7 @@ export function emptyStatusSnapshot(): StatusSnapshot {
     composition: {},
     access: {},
     collaboration: { plan: { effective: false } },
-    interaction: { focusMode: false },
+    interaction: { displayPreset: 'full' },
     workspace: { cwd: '' },
     activity: {
       phase: 'idle',
