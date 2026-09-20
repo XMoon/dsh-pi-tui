@@ -881,6 +881,50 @@ test('height-only resize refreshes the extension widget row budget', async () =>
   assert.equal(widgetRows(), 3)
 })
 
+test('history overlay preserves background cells outside its physical frame', async () => {
+  const rows = [
+    { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
+  ]
+  const source: import('../src/history-search.ts').HistorySearchSource = {
+    search: async () => ({ results: rows, exhausted: true }),
+  }
+  const vt = new VirtualTerminal(120, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  const background = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'.repeat(5).slice(0, 116)
+  app.setDraft(Array.from({ length: 12 }, () => background).join('\n'))
+  await vt.waitForRender()
+  const plainViewport = (): string[] => vt.getViewport()
+    .map(line => stripTerminalSequences(line).padEnd(vt.columns, ' '))
+  const before = plainViewport()
+
+  app.openHistorySearch()
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 100))
+  await vt.waitForRender()
+  const after = plainViewport()
+  const frameTop = after.findIndex(line => line.includes('╭'))
+  assert.ok(frameTop >= 0, `history frame must be painted:\n${after.join('\n')}`)
+  const leftBorder = after[frameTop]!.indexOf('╭')
+  const rightBorder = after[frameTop]!.indexOf('╮', leftBorder)
+  assert.ok(leftBorder > 0, 'history frame must have a background area on the left')
+  assert.ok(rightBorder > leftBorder, 'history frame right border must be present')
+  const coveredRow = frameTop + 1
+  assert.ok(before[coveredRow]!.includes(background.slice(0, 20)), 'the selected background row must contain the sentinel pattern')
+  assert.equal(
+    after[coveredRow]!.slice(0, leftBorder),
+    before[coveredRow]!.slice(0, leftBorder),
+    'cells to the left of the history frame must remain owned by the background',
+  )
+  assert.equal(
+    after[coveredRow]!.slice(rightBorder + 1),
+    before[coveredRow]!.slice(rightBorder + 1),
+    'cells to the right of the history frame must remain owned by the background',
+  )
+})
+
 test('history overlay reflows geometry without restarting its search state', async () => {
   const rows = [
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
@@ -921,6 +965,49 @@ test('history overlay reflows geometry without restarting its search state', asy
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('╭') && view.includes('╰'), `history frame must survive shrink:\n${view}`)
   assert.ok(view.includes('type filter') && view.includes('╰'), `history footer must survive shrink:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+})
+
+test('history overlay preserves query and selection across fullscreen rebinds', async () => {
+  const rows = [
+    { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
+    { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
+  ]
+  const source: import('../src/history-search.ts').HistorySearchSource = {
+    search: async () => ({ results: rows, exhausted: true }),
+  }
+  const vt = new VirtualTerminal(120, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  app.start()
+  startedApps.add(app)
+  app.openHistorySearch()
+  await vt.waitForRender()
+  vt.sendInput('x')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  const strip = (line: string): string => stripTerminalSequences(line)
+  const hasSelectedBeta = (viewport: string[]): boolean => viewport.some(line => {
+    const plain = strip(line)
+    return plain.includes('entry beta') && plain.includes('›')
+  })
+  const before = vt.getViewport().map(strip).join('\n')
+  assert.ok(before.includes('Search: > x'), `history query must be visible before fullscreen:\n${before}`)
+  assert.ok(hasSelectedBeta(vt.getViewport()), `history selection must be visible before fullscreen:\n${before}`)
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Search: > x'), `fullscreen rebind must preserve the query:\n${view}`)
+  assert.ok(hasSelectedBeta(vt.getViewport()), `fullscreen rebind must preserve the selection:\n${view}`)
+
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Search: > x'), `regular rebind must preserve the query:\n${view}`)
+  assert.ok(hasSelectedBeta(vt.getViewport()), `regular rebind must preserve the selection:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
 })

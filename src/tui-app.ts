@@ -6717,7 +6717,7 @@ export class TuiApp {
     this.historyResponsiveFrame = frame
     const handle = this.showOverlayOnHost(
       frame,
-      { width: '100%', maxHeight: '100%' },
+      { width: 100, maxHeight: '100%', margin: { left: 3, right: 3 } },
       { remountable: true },
     )
     this.historyOverlay = handle
@@ -6725,7 +6725,7 @@ export class TuiApp {
       if (this.historyPanel !== panel || this.historyOverlay !== handle) return
       const next = this.createHistoryFrame(panel)
       this.historyResponsiveFrame = next
-      this.rebindOverlayRaw(handle, next, { width: '100%', maxHeight: '100%' })
+      this.rebindOverlayRaw(handle, next, { width: 100, maxHeight: '100%', margin: { left: 3, right: 3 } })
     })
   }
 
