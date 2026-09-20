@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp, type ApprovalOutcome } from '../src/tui-app.ts'
+import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
@@ -169,6 +170,21 @@ test('n rejects and escape cancels', async () => {
   await viewport(vt)
   vt.sendInput('\x1b') // escape
   assert.equal(await cancelled, 'cancelled')
+})
+
+test('Focus approval keeps ownership while the remapped fold key precedes every decision', async () => {
+  const { vt, app } = startApp()
+  app.setFocusMode(true)
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': 'ctrl+x' }))
+  for (const [key, expected] of [['y', 'allowed-once'], ['n', 'rejected'], ['\x1b', 'cancelled']] as const) {
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+    await viewport(vt)
+    vt.sendInput('\x18')
+    await vt.waitForRender()
+    assert.ok(vt.getViewport().join('\n').includes('Approve bash?'), 'fold inspection must not dismiss Approval')
+    vt.sendInput(key)
+    assert.equal(await decision, expected)
+  }
 })
 
 test('ctrl+c cancels the prompt like escape', async () => {

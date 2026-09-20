@@ -20,6 +20,7 @@ import { TranscriptFolder, windowMessages, type TranscriptToolMessage } from '..
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth, type StreamingToolPreview } from '../src/tui-app.ts'
 import type { ToolPresenter } from '../src/present.ts'
+import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { countFocusHeaders, findFocusHeaderRow, hasFocusHeader } from './support/focus-header.ts'
 
@@ -1735,6 +1736,364 @@ test('regular Ctrl+O never writes the fullscreen Focus root set (plan §22.5/§2
   assert.equal(app.isToolOutputExpanded(), true, 'Focus OFF keeps the historical Ctrl+O')
   assert.equal(app.focusExpandedTurnsForTest().size, 0)
   app.stop()
+})
+
+test('Question keeps the editor seat while the effective fold key inspects transcript context', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  applyMixed(folder, runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': 'ctrl+x' }))
+  const promise = app.askQuestions([{ id: 'q1', question: 'What should be recorded?' }])
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('What should be recorded?'), `question missing:\n${view}`)
+  vt.sendInput('ab')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  vt.sendInput('\x18') // remapped app.transcript.toggleExpand
+  await vt.waitForRender()
+  assert.equal(app.isToolOutputExpanded(), true, 'the effective fold key must pass through the Question modal')
+  assert.ok(vt.getViewport().join('\n').includes('What should be recorded?'), 'the Question must remain mounted')
+  vt.sendInput('X')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('aXb'), `fold inspection must preserve the Question input/cursor:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  assert.equal(app.isToolOutputExpanded(), false, 'the second effective fold key toggles the regular disclosure back')
+  assert.ok(vt.getViewport().join('\n').includes('Approve bash?'), 'Approval must remain the keyboard owner')
+  vt.sendInput('n')
+  assert.equal(await approval, 'rejected')
+})
+
+test('fullscreen Focus Question lets the effective fold key expand roots without moving modal focus', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': 'ctrl+x' }))
+  const promise = app.askQuestions([{ id: 'q1', question: 'Inspect this context?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'the modal-safe fold key must use the fullscreen Focus root disclosure')
+  assert.ok(vt.getViewport().join('\n').includes('Inspect this context?'), 'the Question must remain mounted after disclosure')
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Continue'] }])
+  app.setFullscreen(false)
+})
+
+test('fullscreen Focus Question permits disclosure-only background clicks and keeps modal focus', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setTodoSummary([{ content: 'modal todo', status: 'pending' }])
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Inspect context?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  let y = findFocusHeaderRow(view, false)
+  assert.ok(y >= 0, `collapsed Thought missing behind Question:\n${view.join('\n')}`)
+  const todoY = findRow(view, 'modal todo')
+  assert.ok(todoY >= 0, `Todo disclosure missing behind Question:\n${view.join('\n')}`)
+  click(vt, 3, todoY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('modal todo'), 'Question must block Todo interaction behind it')
+  const ordinaryY = findRow(view, 'prompt 1')
+  assert.ok(ordinaryY >= 0, `ordinary user row missing behind Question:\n${view.join('\n')}`)
+  click(vt, 3, ordinaryY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(!hasFocusHeader(view.join('\n'), true), 'Question must block ordinary message actions behind it')
+  click(vt, 3, y + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(hasFocusHeader(view.join('\n'), true), `the background Thought disclosure must work:\n${view.join('\n')}`)
+  assert.ok(view.join('\n').includes('Inspect context?'), 'the Question must remain visible after background disclosure')
+
+  const bashY = findRow(view, 'Bash cmd 1')
+  assert.ok(bashY >= 0, `expanded process card missing:\n${view.join('\n')}`)
+  click(vt, 10, bashY + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('out 1 line 6'), `secondary process disclosure must work behind Question:\n${view.join('\n')}`)
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Continue'] }])
+  app.setFullscreen(false)
+})
+
+test('Question transcript gestures cannot leak after the Question settles', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Inspect context?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  const y = findFocusHeaderRow(vt.getViewport(), false)
+  assert.ok(y >= 0, `collapsed Thought missing:\n${vt.getViewport().join('\n')}`)
+  // Press on the background target, settle the Question before release, then
+  // release at the old cell. The Question-owned latch must not become a
+  // normal fullscreen gesture.
+  vt.sendInput(`\x1b[<0;3;${y + 1}M`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+  vt.sendInput(`\x1b[<0;3;${y + 1}m`)
+  await vt.waitForRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a stale Question press must not expand after settle')
+  app.setFullscreen(false)
+})
+
+test('Question presentation and settlement invalidate a pre-modal fullscreen gesture', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const y = findFocusHeaderRow(vt.getViewport(), false)
+  assert.ok(y >= 0, `collapsed Thought missing:\n${vt.getViewport().join('\n')}`)
+
+  // The ordinary fullscreen press happens before the modal owns the seat.
+  vt.sendInput(`\x1b[<0;3;${y + 1}M`)
+  const promise = app.askQuestions([{ id: 'q1', question: 'Inspect context?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+  vt.sendInput(`\x1b[<0;3;${y + 1}m`)
+  await vt.waitForRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a pre-modal press must not resume after Question settles')
+  app.setFullscreen(false)
+})
+
+test('fullscreen surface swaps invalidate a Question-owned transcript gesture', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const y = findFocusHeaderRow(vt.getViewport(), false)
+  assert.ok(y >= 0, `collapsed Thought missing:\n${vt.getViewport().join('\n')}`)
+  const promise = app.askQuestions([{ id: 'q1', question: 'Inspect context?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;3;${y + 1}M`)
+  app.setFullscreen(false)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+
+  // The fork does not synthesize a release click across an alt-screen swap;
+  // exercise the Host release path directly to prove its Question latch was
+  // nevertheless invalidated at the remount boundary.
+  const internals = app as unknown as { handleFullscreenClick(x: number, y: number): void }
+  internals.handleFullscreenClick(3, y)
+  await vt.waitForRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a pre-swap Question gesture must not survive remount')
+  vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+  app.setFullscreen(false)
+})
+
+test('session changes invalidate a Question-owned transcript gesture and paint snapshot', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const y = findFocusHeaderRow(vt.getViewport(), false)
+  assert.ok(y >= 0, `collapsed Thought missing:\n${vt.getViewport().join('\n')}`)
+  const promise = app.askQuestions([{ id: 'q1', question: 'Inspect context?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;3;${y + 1}M`)
+  app.clearSessionOverrides()
+  const internals = app as unknown as { handleFullscreenClick(x: number, y: number): void }
+  internals.handleFullscreenClick(3, y)
+  await vt.waitForRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a session boundary must consume the old Question gesture')
+  vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+  app.setFullscreen(false)
+})
+
+test('fullscreen Focus Approval keeps ownership while the effective fold key inspects context', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': 'ctrl+x' }))
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  const approvalY = findFocusHeaderRow(vt.getViewport(), false)
+  assert.ok(approvalY >= 0, 'the transcript remains painted behind Approval')
+  click(vt, 3, approvalY + 1)
+  await vt.waitForRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'Approval must block fullscreen transcript mouse disclosure')
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'Approval must allow only the semantic transcript disclosure action')
+  assert.ok(vt.getViewport().join('\n').includes('Approve bash?'), 'Approval must remain visible after disclosure')
+  vt.sendInput('n')
+  assert.equal(await approval, 'rejected')
+  app.setFullscreen(false)
+})
+
+test('fullscreen native link activation is blocked while Question or Approval owns the modal', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const opened: string[] = []
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    openExternalUrl: (url) => opened.push(url),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const fullscreen = (app as unknown as {
+    fullscreen?: { openUrl?: (url: string) => void }
+  }).fullscreen
+  assert.ok(fullscreen?.openUrl, 'the fullscreen test seam must expose the configured opener')
+
+  const question = app.askQuestions([{ id: 'q1', question: 'Inspect this link?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  fullscreen.openUrl?.('https://question.example')
+  assert.deepEqual(opened, [], 'Question ownership must block the fork release-time OSC8 opener')
+  vt.sendInput('\x1b')
+  await assert.rejects(question, /cancelled/)
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  fullscreen.openUrl?.('https://approval.example')
+  assert.deepEqual(opened, [], 'Approval ownership must block the fork release-time OSC8 opener')
+  vt.sendInput('n')
+  assert.equal(await approval, 'rejected')
+
+  fullscreen.openUrl?.('https://ordinary.example')
+  assert.deepEqual(opened, ['https://ordinary.example'], 'the opener remains available after modal ownership ends')
+  app.setFullscreen(false)
+})
+
+test('Question disclosure whitelist rejects Todo, action, attachment, workflow, link, and ordinary hits', () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const internals = app as unknown as { isModalTranscriptDisclosureHit(hitId: string): boolean }
+  const allowed = [
+    'user:expand:1',
+    'pending-user:collapse:key',
+    'focus:toggle:1',
+    'focus:collapse:1',
+    'ptc:1:call-1',
+    'message:disclosure:1',
+  ]
+  for (const hitId of allowed) assert.equal(internals.isModalTranscriptDisclosureHit(hitId), true, hitId)
+  const blocked = [
+    'todo:dock',
+    'todo:panel',
+    'workflow:run:run-1',
+    'workflow:phase:run-1:phase-1',
+    'workflow:member:run-1:1:child-1',
+    'workflow:phase-agents:run-1:phase-1',
+    'workflow:run-agents:run-1',
+    'attachment:1:0',
+    'message:toggle:1',
+    'plugin:action',
+    'link:https://example.test',
+    'inert',
+  ]
+  for (const hitId of blocked) assert.equal(internals.isModalTranscriptDisclosureHit(hitId), false, hitId)
+})
+
+test('Question background disclosure rejects a repaint or resize between press and release', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Inspect context?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  let y = findFocusHeaderRow(vt.getViewport(), false)
+  assert.ok(y >= 0, `collapsed Thought missing:\n${vt.getViewport().join('\n')}`)
+
+  // The pressed target disappears before release: the old Question gesture
+  // must not fall through to the normal fullscreen path.
+  vt.sendInput(`\x1b[<0;3;${y + 1}M`)
+  app.setTranscript([], new Map())
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;3;${y + 1}m`)
+  await vt.waitForRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a repainted-away target must stay inert')
+
+  show(app, folder)
+  await vt.waitForRender()
+  y = findFocusHeaderRow(vt.getViewport(), false)
+  assert.ok(y >= 0, `restored Thought missing:\n${vt.getViewport().join('\n')}`)
+  // The snapshot changes dimensions before release; the old press cannot act
+  // on the newly painted frame even if the same target returns at the cell.
+  vt.sendInput(`\x1b[<0;3;${y + 1}M`)
+  vt.resize(80, 24)
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;3;${y + 1}m`)
+  await vt.waitForRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a resized frame must consume the stale gesture')
+  vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+  app.setFullscreen(false)
 })
 
 test('fullscreen + Focus OFF: Ctrl+O keeps the historical tool master — never the root bulk (plan §22.7)', async () => {

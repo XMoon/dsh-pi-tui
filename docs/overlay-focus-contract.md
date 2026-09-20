@@ -116,7 +116,32 @@ what guarantees the newer operation wins.
   `initialFocus`) are additive; the default `setHidden(false)` / `focus()` /
   `showOverlay()` behavior still promotes and takes focus.
 
-## 6. Regression checklist for future changes
+## 6. Modal transcript inspection exception
+
+Question and Approval retain keyboard ownership while they are visible. They
+have one narrow Host shortcut exception: the effective semantic
+`app.transcript.toggleExpand` action may inspect transcript context without
+moving focus into the transcript or changing the modal's draft, page, cursor,
+selection, or decision state. No other Host shortcut passes through this
+exception.
+
+Fullscreen Question pointer handling follows the same boundary:
+
+- clicks inside the Question frame remain Question-owned;
+- outside clicks may activate only an existing transcript disclosure target;
+- Todo, links, search navigation, workflow/plugin actions, attachments, editor
+  focus, and ordinary message actions remain blocked;
+- press/release uses the last-painted geometry and semantic owner/row/hit
+  identity, with a Question-instance fence;
+- a disclosure rebuild must not change modal focus ownership.
+
+Approval mouse passthrough is intentionally not enabled here. Its managed
+overlay may occupy a broader physical area than the visible dialog content, and
+this contract does not invent a second dialog hit map. Approval context
+inspection is keyboard-only until an authoritative last-painted dialog bound is
+available.
+
+## 7. Regression checklist for future changes
 
 When you add or change an overlay path, cover the family it belongs to:
 
@@ -143,7 +168,7 @@ When you add or change an overlay path, cover the family it belongs to:
   `remountOrder` front after a reentrant mount; no shadow state (`wasFocused`,
   `desiredFocus`, ordinals, `previouslyFocused`) may reappear.
 
-## 7. By-design boundaries
+## 8. By-design boundaries
 
 - A non-remountable overlay does **not** survive a fullscreen swap (its raw and
   its callbacks die with the screen); this matches the baseline behavior.
