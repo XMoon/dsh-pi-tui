@@ -17,9 +17,9 @@ import {
   FOCUS_MODE_PROMPT,
   FOCUS_SECTION_NAME,
   FOCUS_SECTION_ORDER,
-  focusModeOf,
   installFocusPrompt,
 } from '../src/focus.ts'
+import { resolveDisplayPreset, type DisplayState } from '../src/display-preset.ts'
 import {
   FOCUS_TOOL_SUMMARY_MAX_TYPES,
   FocusActivityComponent,
@@ -164,13 +164,13 @@ function blockKinds(blocks: readonly FocusProjectedBlock[]): string[] {
 
 // ── settings normalization (plan §6) ─────────────────────────────────────
 
-test('focusModeOf normalizes persisted values defensively', () => {
-  assert.equal(focusModeOf('on'), 'on')
-  assert.equal(focusModeOf('off'), 'off')
-  assert.equal(focusModeOf(undefined), 'off')
-  assert.equal(focusModeOf(''), 'off')
-  assert.equal(focusModeOf('yes'), 'off')
-  assert.equal(focusModeOf('ON'), 'off')
+test('display preset resolution normalizes legacy values defensively', () => {
+  assert.equal(resolveDisplayPreset({ focusMode: 'on' }).preset, 'focus')
+  assert.equal(resolveDisplayPreset({ focusMode: 'off' }).preset, 'full')
+  assert.equal(resolveDisplayPreset({ focusMode: undefined }).preset, 'full')
+  assert.equal(resolveDisplayPreset({ focusMode: '' }).preset, 'full')
+  assert.equal(resolveDisplayPreset({ focusMode: 'yes' }).preset, 'full')
+  assert.equal(resolveDisplayPreset({ focusMode: 'ON' }).preset, 'full')
 })
 
 // ── TurnActivity V2 aggregation ─────────────────────────────────────────
@@ -3702,8 +3702,8 @@ function fakeAgentCtx(sections: Array<{ name: string; order: number; text: strin
 test('installFocusPrompt registers ONE dynamic section with the TUI-private name', () => {
   const sections: Array<{ name: string; order: number; text: string | (() => string); complete?: boolean }> = []
   const agentCtx = fakeAgentCtx(sections)
-  const focusState = { enabled: false }
-  const dispose = installFocusPrompt(agentCtx as never, focusState)
+  const displayState: DisplayState = { preset: 'full' }
+  const dispose = installFocusPrompt(agentCtx as never, displayState)
   assert.ok(dispose !== undefined)
   assert.equal(sections.length, 1)
   assert.equal(sections[0]!.name, FOCUS_SECTION_NAME)
@@ -3711,7 +3711,7 @@ test('installFocusPrompt registers ONE dynamic section with the TUI-private name
   assert.equal(sections[0]!.complete, undefined, 'never a complete section')
   const text = sections[0]!.text
   assert.equal(typeof text === 'function' ? text() : text, '', 'off → empty text')
-  focusState.enabled = true
+  displayState.preset = 'focus'
   assert.equal(typeof text === 'function' ? text() : '', FOCUS_MODE_PROMPT, 'on → the exact instruction')
   const prompt = FOCUS_MODE_PROMPT.toLowerCase()
   assert.match(prompt, /self-contained/, 'questions must be self-contained')
@@ -3726,7 +3726,9 @@ test('installFocusPrompt registers ONE dynamic section with the TUI-private name
     'the prompt must not promise an unconditional wake or resume',
   )
   // The same registered section flips without re-registration.
-  focusState.enabled = false
+  displayState.preset = 'compact'
+  assert.equal(typeof text === 'function' ? text() : '', '', 'reserved Compact must not enable the Focus prompt')
+  displayState.preset = 'full'
   assert.equal(typeof text === 'function' ? text() : '', '', 'off again without re-registering')
   assert.equal(sections.length, 1, 'no re-registration on toggles')
   dispose?.()
@@ -3735,7 +3737,7 @@ test('installFocusPrompt registers ONE dynamic section with the TUI-private name
 
 test('installFocusPrompt degrades gracefully when the service is missing', () => {
   const agentCtx = { get: () => undefined }
-  const dispose = installFocusPrompt(agentCtx as never, { enabled: true })
+  const dispose = installFocusPrompt(agentCtx as never, { preset: 'focus' })
   assert.equal(dispose, undefined, 'no service → no section, no throw')
 })
 
@@ -3745,6 +3747,6 @@ test('installFocusPrompt tolerates a throwing registration', () => {
       ? { section: () => { throw new Error('duplicate name') } }
       : undefined,
   }
-  const dispose = installFocusPrompt(agentCtx as never, { enabled: true })
+  const dispose = installFocusPrompt(agentCtx as never, { preset: 'focus' })
   assert.equal(dispose, undefined)
 })
