@@ -113,11 +113,11 @@ dsh --profile pi-tui --session <session-id>
 
 `Ctrl+O` 控制工具和系统详情，并在普通模式与全屏非 Focus 下展开/收起超长用户 Prompt;全屏 Focus 下它整体展开最近几个 Thought root 或全部收起，超长用户 Prompt 改用点击提示行（或搜索命中）展开、`Ctrl+O` 收回。`Alt+T` 单独控制 Thinking。
 
-### Focus Mode
+### Conversation display
 
-`/focus` 可以把运行中的 Thinking、Tool Call 和中间回复聚合为一个实时更新的 Thought 区块。
+`/display focus` 将运行中的 Thinking、Tool Call 和中间回复聚合为一个实时更新的 Thought 区块；`/display full` 恢复普通 Transcript 展示。`/focus` 仍作为兼容命令保留。Compact 预设尚未开放，`/display compact` 会明确拒绝。
 
-需要查看过程时可以展开，关闭 Focus 后恢复普通 Transcript 展示。全屏 Focus 中可以按 Thought root 批量展开/收起,也可以单独点击卡片;切换或缩放时会保留 viewport。Focus 只影响界面投影，不修改 Session 中保存的事件。
+需要查看过程时可以展开，关闭 Focus 后恢复普通 Transcript 展示。全屏 Focus 中可以按 Thought root 批量展开/收起,也可以单独点击卡片;切换或缩放时会保留 viewport。展示预设只影响界面投影，不修改 Session 中保存的事件。
 
 ### Session
 

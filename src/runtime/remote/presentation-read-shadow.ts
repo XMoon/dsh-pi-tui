@@ -1,11 +1,12 @@
 /**
- * Generation-fenced Direct-vs-Remote parity for transcript and Focus
+ * Generation-fenced Direct-vs-Remote parity for transcript and display-preset
  * presentation. It reuses the existing TUI folds at a fresh observation point;
  * it does not implement Client history, reconnect, or Assistant settlement.
  * @module @xmoon76/dsh-pi-tui/runtime/remote/presentation-read-shadow
  */
 
 import { projectFocus, type FocusProjectedBlock } from '../../focus-activity.ts'
+import type { DisplayPreset } from '../../display-preset.ts'
 import { TranscriptWindowController, type TranscriptWindowSnapshot } from '../../transcript-window.ts'
 import {
   TranscriptFolder,
@@ -93,7 +94,8 @@ export interface PresentationProjectionOptions {
   readonly windowTurns?: number
   readonly endTurn?: number
   readonly expandedTurns?: ReadonlySet<number>
-  readonly focusMode?: boolean
+  /** Client-local canonical preset; omitted preserves the historical Focus projection. */
+  readonly displayPreset?: DisplayPreset
 }
 
 /** Normalized semantic output; renderer details intentionally do not appear. */
@@ -325,6 +327,9 @@ export function projectPresentationSnapshot(
   snapshot: PresentationReadSnapshot,
   options: PresentationProjectionOptions = {},
 ): PresentationSemanticProjection {
+  if (options.displayPreset === 'compact') {
+    throw new Error('Compact display projection is not available in this build')
+  }
   const folder = applyToFreshFolder(snapshot)
   const windowTurns = options.windowTurns ?? 20
   const controller = new TranscriptWindowController({
@@ -343,7 +348,7 @@ export function projectPresentationSnapshot(
     window.messages,
     folder.turnActivities(),
     expandedTurns,
-    options.focusMode ?? true,
+    options.displayPreset === undefined || options.displayPreset === 'focus',
   )
   const activities = [...folder.turnActivities().entries()]
     .sort(([left], [right]) => left - right)

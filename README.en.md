@@ -119,11 +119,11 @@ dsh --profile pi-tui --session <session-id>
 
 `Ctrl+O` controls Tool and System details and expands/collapses long user prompts in regular mode and in fullscreen outside Focus — in fullscreen Focus it bulk-expands the recent Thought roots or collapses them all, while long user prompts are expanded by clicking the marker (or by a search hit) and collapsed with `Ctrl+O`. `Alt+T` controls Thinking separately.
 
-### Focus Mode
+### Conversation display
 
-`/focus` groups the current turn's Thinking, Tool Calls, and intermediate replies into a live Thought block.
+`/display focus` groups the current turn's Thinking, Tool Calls, and intermediate replies into a live Thought block; `/display full` restores the normal Transcript projection. `/focus` remains available as a compatibility command. The Compact preset is reserved and `/display compact` is rejected until its projection ships.
 
-The full process can still be expanded when needed. In fullscreen Focus, Thought roots can be expanded/collapsed in bulk or opened with an individual card click, and the viewport survives switches and resizes. Disabling Focus restores the normal Transcript projection. Focus only changes presentation; it does not modify Session events.
+The full process can still be expanded when needed. In fullscreen Focus, Thought roots can be expanded/collapsed in bulk or opened with an individual card click, and the viewport survives switches and resizes. Display presets only change presentation; they do not modify Session events.
 
 ### Sessions
 
