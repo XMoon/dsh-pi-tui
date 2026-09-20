@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Question / Approval keep response ownership while read-only context inspection remains available.** While a response modal is open, fold, Thinking disclosure, fullscreen jump-latest, Todo presentation, and proven fullscreen presentation hits remain usable; fixed Question / Approval response keys take precedence over conflicting global inspection remaps, while submit, session changes, and lifecycle actions remain protected.
+- **Question / Approval keep response ownership while read-only context inspection remains available.** While a response modal is open, fold, Thinking disclosure, fullscreen jump-latest, Todo presentation, and proven fullscreen presentation hits remain usable through direct or leader-bound inspection triggers; fixed Question / Approval response keys take precedence over conflicting global inspection remaps, while submit, session changes, and lifecycle actions remain protected.
 - **Full-text search in long sessions is much faster.** Typing and stepping
   with `Enter`/`Shift+Enter` now rebuild the transcript tree at most ONCE per
   operation and no longer re-measure or re-render the entire window for every

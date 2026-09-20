@@ -1948,6 +1948,101 @@ test('Question and Approval allow only explicit read-only inspection actions', a
   app.setFullscreen(false)
 })
 
+test('Question and Approval allow safe leader inspection while blocking mutations', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  let steers = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSteer: () => { steers += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.transcript.toggleExpand': '<leader>o',
+      'app.input.steer': '<leader>t',
+    },
+  }))
+
+  const question = app.askQuestions([{ id: 'q1', question: 'Inspect with a leader?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('t')
+  await vt.waitForRender()
+  assert.equal(steers, 0, 'leader-bound mutation must stay blocked by Question')
+  assert.ok(vt.getViewport().join('\n').includes('Inspect with a leader?'), 'Question remains the response owner')
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('o')
+  await vt.waitForRender()
+  assert.equal(app.isToolOutputExpanded(), true, 'leader-bound fold inspection must work under Question')
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Continue'] }])
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'leader inspection' })
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('o')
+  await vt.waitForRender()
+  assert.equal(app.isToolOutputExpanded(), false, 'leader-bound fold inspection must work under Approval')
+  assert.ok(vt.getViewport().join('\n').includes('Approve bash?'), 'Approval remains the response owner')
+  vt.sendInput('n')
+  assert.equal(await approval, 'rejected')
+})
+
+test('Question fixed selection wins over a pending leader completion', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.transcript.toggleExpand': '<leader>1' },
+  }))
+  const question = app.askQuestions([{ id: 'q1', question: 'Fixed selection wins?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('1')
+  await vt.waitForRender()
+  assert.equal(app.isToolOutputExpanded(), false, 'Question selection must beat the leader completion')
+  vt.sendInput('\r')
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Continue'] }])
+})
+
+test('settling Question cancels a pending modal leader', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  applyMixed(folder, settledThoughtTurn(1, 0))
+  app.setFocusMode(true)
+  show(app, folder)
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.transcript.toggleExpand': '<leader>o' },
+  }))
+  const controller = new AbortController()
+  const question = app.askQuestions([{ id: 'q1', question: 'Abort the pending leader?' }], controller.signal)
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  controller.abort()
+  await assert.rejects(question, /aborted|cancelled/)
+  vt.sendInput('o')
+  await vt.waitForRender()
+  assert.equal(app.isToolOutputExpanded(), false, 'a settled Question must cancel its pending leader')
+})
+
 test('Question does not fall through to generic Host transcript search', async () => {
   const { vt, app } = startApp()
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.search': 'ctrl+f' }))

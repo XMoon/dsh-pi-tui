@@ -128,13 +128,16 @@ Keyboard routing follows this priority:
 1. an active nested inspection child, when the existing ownership stack can
    support it;
 2. fixed Question/Approval response keys owned by the component;
-3. the explicit inspection-safe semantic allowlist:
-   `app.transcript.toggleExpand`, `app.transcript.toggleThinking`,
-   `app.transcript.jumpLatest`, and `app.todo.toggle`;
-4. all remaining input is consumed by the response modal.
+3. a direct trigger of the explicit inspection-safe semantic allowlist;
+4. a leader prefix or completion, when the completed semantic action is in the
+   same inspection-safe allowlist;
+5. all remaining input is consumed by the response modal.
 
-The normal Host shortcut ladder is never run generically behind a response
-modal. Inspection may change presentation or viewport state, but must not
+Leader prefixes are modal-aware rather than a generic Host passthrough: fixed
+response keys cancel a pending prefix and continue through Question/Approval,
+while leader-bound lifecycle, session, editor, business, and plugin actions
+remain blocked. The normal Host shortcut ladder is never run generically behind
+a response modal. Inspection may change presentation or viewport state, but must not
 mutate the answer, submit/steer editor input, change session/context identity,
 or trigger lifecycle/business/plugin actions. Todo presentation is allowed;
 Todo/business mutation is not.

@@ -436,6 +436,7 @@ export class QuestionFlow implements Component, Focusable {
     }
     const optionless = this.isOptionless()
     if (optionless && inputOwnsKey(data)) return true
+    if (!optionless && /^[1-9]$/.test(data)) return true
     if (componentKeymap.matches(data, 'question.confirm')
       || componentKeymap.matches(data, 'question.cancel')
       || componentKeymap.matches(data, 'question.previous')
