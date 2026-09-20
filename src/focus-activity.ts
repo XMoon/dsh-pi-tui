@@ -29,6 +29,7 @@ import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import { toolTitle } from './present.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
+import { isSurfacedContext } from './transcript-semantics.ts'
 import { displayFailureText } from './failure-presentation.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
 import { focusTiming, type FocusTimingStore } from './focus-timing.ts'
@@ -436,20 +437,19 @@ export class FocusActivityComponent {
  * §12/§33): a turn with an initial prompt is grouped as
  * `user(s) → FocusActivity`; a turn with only same-turn steers starts with
  * `FocusActivity` and keeps those steers in process order. A turn woken by
- * injected-context keeps that LEADING prefix as its foundation
- * before the Thought (expanded and collapsed). Expanded process/final and
- * compaction rows follow, so the raw TranscriptMessage union is never
- * polluted with a fake `focus-activity` kind and the session data stays
- * lossless.
+ * injected-context keeps that LEADING prefix at its original foundation
+ * position before the Thought. Expanded process/final and compaction rows
+ * follow, so the raw TranscriptMessage union is never polluted with a fake
+ * `focus-activity` kind and the session data stays lossless.
  *
- * Collapsed turns HIDE process rows — thinking, tool, mid-turn system/inject
- * and ordinary intermediate-assistant — so they cannot leak through
+ * Collapsed turns HIDE process rows — thinking, tool, ordinary system/process
+ * rows and ordinary intermediate-assistant — so they cannot leak through
  * Ctrl+O/Alt+T (plan §15.2). A committed pre-steer answer is the explicit
- * persistent-row exception. The LEADING injected-context prefix (the turn
- * foundation) and every human user row stay visible before the Thought. The final
- * assistant only appears after the authoritative `turn/end` (plan §13.1)
- * and never duplicates in the expanded view (it stays at its
- * chronological position).
+ * persistent-row exception. Human user rows and injected context marked
+ * `context:true` are persistent input/context rows and remain visible before
+ * the Thought in their raw relative order. The final assistant only appears
+ * after the authoritative `turn/end` (plan §13.1) and never duplicates in the
+ * expanded view (it stays at its chronological position).
  * @param messages - the windowed transcript.
  * @param activities - the folder's per-turn activities (same fold state).
  * @param expandedTurns - the user's expansion choices (live running turns
@@ -463,15 +463,16 @@ export type FocusProjectedBlock =
     truncated?: boolean
     /**
      * Set ONLY on process rows that exist BECAUSE the owner Thought is
-     * expanded (thinking / tool / system / intermediate-assistant /
-     * compaction rows revealed by the disclosure). The fullscreen click
-     * handler routes by the NEAREST owner: a SECONDARY card (thinking /
-     * tool / system / compaction) toggles itself, and a NON-secondary
-     * process row (intermediate assistant) collapses the owner Thought.
-     * The user's own messages and the FINAL assistant are NOT marked, so
-     * clicking them never collapses the Thought (plan §8.8, review P2:
-     * the click scope is exactly the expanded process content, never the
-     * turn's persistent rows).
+     * expanded (thinking / tool / ordinary system / intermediate-assistant /
+     * compaction rows revealed by the disclosure). Surfaced context rows are
+     * persistent input/context rows, so they are never marked. The fullscreen
+     * click handler routes by the NEAREST owner: a SECONDARY card (thinking /
+     * tool / ordinary system / compaction) toggles itself, and a NON-secondary
+     * process row (intermediate assistant) collapses the owner Thought. User
+     * rows, surfaced context, and the FINAL assistant are NOT marked, so
+     * clicking them never collapses the Thought (plan §8.8, review P2: the
+     * click scope is exactly the expanded process content, never the turn's
+     * persistent rows).
      */
     collapseFocusOwnerOnClick?: number
   }
@@ -521,26 +522,26 @@ export function projectFocus(
       // The THOUGHT-LEAD boundary precedes the Thought: rows before the
       // turn's FIRST non-steer user (injected context) stay in place
       // and that initial user itself stays above the Thought; every later
-      // user/steer returns to its chronological position in the process
-      // (plan: expanded chronology — the projection reorders, never the
-      // session events). With a non-steer user, the first such row is the
+      // user/steer or surfaced-context row returns to its chronological
+      // position (plan: expanded chronology — the projection reorders, never
+      // the session events). With a non-steer user, the first such row is the
       // compatibility boundary; when every user is a steer, the boundary
       // falls back to the end of the LEADING injected-context prefix, so an
       // inject-woken turn keeps its foundation before the Thought (never a
       // scan of mid-process system rows). Consecutive users after the
       // boundary stay in chronological order; they are not a multi-row
       // initial prompt (plan: no adjacency guessing). Every revealed
-      // ordinary process row carries the owner-turn collapse mark;
-       // committed pre-steer answers, the user's rows, the lead foundation
-      // rows and the FINAL assistant stay unmarked
-      // (clicking them must not collapse the Thought — review P2).
+      // ordinary process row carries the owner-turn collapse mark; committed
+      // pre-steer answers, user rows, surfaced context, lead foundation rows,
+      // and the FINAL assistant stay unmarked (clicking them must not collapse
+      // the Thought — review P2).
       const boundary = thoughtLeadBoundary(group)
       for (const member of group.slice(0, boundary)) {
         out.push({ kind: 'message', message: member })
       }
       if (activity !== undefined) out.push({ kind: 'activity', activity })
       for (const member of group.slice(boundary)) {
-        if (member.kind === 'user') {
+        if (isFocusPersistentInputRow(member)) {
           out.push({ kind: 'message', message: member })
         } else {
           if (final !== undefined && member === final.message) continue
@@ -556,20 +557,17 @@ export function projectFocus(
       }
       continue
     }
-    // Collapsed Focus normally summarizes the turn's INPUTS before the
-    // Thought: the leading injected-context prefix (the turn foundation) and
-    // EVERY human user row (same-turn steers included) precede it; process
-    // rows stay hidden inside the Thought. A committed pre-steer answer is
-    // the one exception: from that exact raw boundary onward, preserve the
-    // conversation rows in chronology so the answer cannot be swallowed by
-    // the Thought or move when the disclosure changes.
-    for (const member of group.slice(0, leadingInjectedContextPrefixEnd(group))) {
-      out.push({ kind: 'message', message: member })
-    }
+    // Collapsed Focus summarizes persistent input/context rows before the
+    // Thought in their raw relative order. Both human user/steer rows and
+    // injected context marked `context:true` are persistent; all ordinary
+    // process rows stay hidden inside the Thought. A committed pre-steer answer
+    // is the one exception: from that exact raw boundary onward, preserve the
+    // persistent rows and answer in chronology so the answer cannot be swallowed
+    // by the Thought or move when the disclosure changes.
     const firstCommittedIndex = group.findIndex(isCommittedAnswer)
     if (firstCommittedIndex < 0) {
       for (const member of group) {
-        if (member.kind === 'user') out.push({ kind: 'message', message: member })
+        if (isFocusPersistentInputRow(member)) out.push({ kind: 'message', message: member })
       }
       if (activity !== undefined) out.push({ kind: 'activity', activity })
       // Compaction cards keep their existing lifecycle in the collapsed
@@ -580,7 +578,7 @@ export function projectFocus(
     } else {
       const beforeCommitted = group.slice(0, firstCommittedIndex)
       for (const member of beforeCommitted) {
-        if (member.kind === 'user') out.push({ kind: 'message', message: member })
+        if (isFocusPersistentInputRow(member)) out.push({ kind: 'message', message: member })
       }
       if (activity !== undefined) out.push({ kind: 'activity', activity })
       for (const member of beforeCommitted) {
@@ -588,7 +586,7 @@ export function projectFocus(
       }
       for (const member of group.slice(firstCommittedIndex)) {
         if (final !== undefined && member === final.message) continue
-        if (member.kind === 'user' || member.kind === 'compaction' || isCommittedAnswer(member)) {
+        if (isFocusPersistentInputRow(member) || member.kind === 'compaction' || isCommittedAnswer(member)) {
           out.push({ kind: 'message', message: member })
         }
       }
@@ -615,13 +613,21 @@ function assistantForStep(
   return undefined
 }
 
-/** The end of the turn's LEADING injected-context prefix: only consecutive
- * `kind === 'system'` rows carrying the source-derived `context` marker at
- * the very start of the group count as the opening turn foundation. Other
- * `kind: 'system'` rows (llm/retry, max-tokens) are orchestration, not
- * foundation — they must stay process content, never lifted before the
- * Thought. Mid-process system rows are never included either, so a later
- * inject can never be lifted before the Thought. */
+/** Rows that remain visible outside the collapsed Thought as persistent
+ * input/context boundaries. The semantic class stays Context for injected
+ * rows; this predicate only controls disclosure behavior. */
+function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
+  return message.kind === 'user' || isSurfacedContext(message)
+}
+
+/** The end of the turn's LEADING injected-context prefix used only for
+ * expanded Thought insertion. Consecutive `kind === 'system'` rows carrying
+ * the source-derived `context` marker at the very start of the group count as
+ * the opening turn foundation. Other `kind: 'system'` rows (llm/retry,
+ * max-tokens) are orchestration, not foundation — they must stay process
+ * content, never lifted before the Thought. Mid-process system rows are never
+ * included in this expanded lead boundary; collapsed visibility uses
+ * isFocusPersistentInputRow instead. */
 function leadingInjectedContextPrefixEnd(group: readonly TranscriptMessage[]): number {
   let end = 0
   while (true) {

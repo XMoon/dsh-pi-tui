@@ -50,6 +50,25 @@ Synthetic rows carry source-derived origins (`llm-retry`, `turn-max-tokens`,
 `command`, `subagent-delegation`, `turn-error`, and `turn-interrupted`) so a
 future disclosure projection does not infer meaning from wording.
 
+## Surfaced Context Boundaries
+
+Injected context is still the semantic class `context`; `surfaced-context` is a
+separate disclosure role. A folded system row marked `context: true` is a
+surfaced context boundary regardless of its producer or provenance label.
+
+- Collapsed Focus surfaces user/steer rows and surfaced context in raw relative
+  order before the Thought.
+- Expanded Focus restores surfaced context to its chronological position and
+  leaves it unmarked as owner-only process content.
+- Full keeps the original transcript chronology unchanged.
+- Future Compact treats surfaced context as a Work-span boundary without
+  rendering Compact in PR2.
+
+This intentionally differs from official dsh-web Compact, where injected
+context may be folded into a turn's process group. The TUI keeps surfaced
+context independently visible so Focus does not hide the information explaining
+why a turn woke or changed behavior.
+
 ## Persistence migration
 
 Startup resolves canonical data before the first agent composition or TUI frame:

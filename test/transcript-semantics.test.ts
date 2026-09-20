@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { classifyTranscriptMessage } from '../src/transcript-semantics.ts'
+import { classifyTranscriptMessage, isSurfacedContext } from '../src/transcript-semantics.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 
 const tool = (origin?: 'command' | 'subagent-delegation' | 'turn-error' | 'turn-interrupted'): TranscriptMessage => ({
@@ -16,6 +16,18 @@ test('classifies conversation, process, attention, and context without reading d
   assert.deepEqual(classifyTranscriptMessage(tool()), { class: 'process' })
   assert.deepEqual(classifyTranscriptMessage({ kind: 'system', turn: 1, text: 'context', context: true }), { class: 'context', origin: 'injected-context' })
   assert.deepEqual(classifyTranscriptMessage({ kind: 'summary', text: 'conversation' }), { class: 'context', origin: 'window-summary' })
+})
+
+test('marks injected context as a surfaced boundary without changing its Context class', () => {
+  const injected: TranscriptMessage = { kind: 'system', turn: 1, text: 'unknown producer', context: true }
+  assert.deepEqual(classifyTranscriptMessage(injected), { class: 'context', origin: 'injected-context' })
+  assert.equal(isSurfacedContext(injected), true)
+  assert.equal(isSurfacedContext({ kind: 'system', turn: 1, text: 'ordinary system' }), false)
+  assert.equal(isSurfacedContext({ kind: 'system', turn: 1, text: 'retry', origin: 'llm-retry' }), false)
+  assert.equal(isSurfacedContext({ kind: 'system', turn: 1, text: 'max', origin: 'turn-max-tokens' }), false)
+  assert.equal(isSurfacedContext({ kind: 'workflow' } as TranscriptMessage), false)
+  assert.equal(isSurfacedContext({ kind: 'compaction', turn: 1, text: '', items: 0, tokens: 0 } as TranscriptMessage), false)
+  assert.equal(isSurfacedContext({ kind: 'summary', text: 'summary' }), false)
 })
 
 test('classifies synthetic origins by source semantics', () => {

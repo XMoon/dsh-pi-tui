@@ -3411,6 +3411,54 @@ test('search target: clearing restores the user collapsed Thought (runtime-like 
   app.stop()
 })
 
+test('search target: surfaced context stays visible without opening its Thought', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('search-context'), role: 'user',
+      content: [{ type: 'text', text: 'surfaced context' }],
+      source: { kind: 'plugin', plugin: 'search-context' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', {
+      turn: 1, step: 0,
+      chunk: { type: 'reasoning-delta', index: 0, text: 'hidden search thinking' },
+    }, T0 + 2, 2),
+  ])
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const context = folder.messages().find(message => message.kind === 'system' && message.context === true)
+  assert.ok(context !== undefined, 'fixture: injected context folds to a surfaced system row')
+  const collapsed = vt.getViewport().join('\n')
+  assert.ok(!hasFocusHeader(collapsed, true), 'precondition: the Thought is collapsed')
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [], 'precondition: no durable Thought root is expanded')
+  const collapsedThinkingRows = collapsed.split('\n').filter(line => line.includes('hidden search thinking')).length
+
+  app.setTranscriptSearchTarget({
+    query: 'surfaced context',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: context,
+  })
+  await vt.waitForRender()
+  const searched = vt.getViewport().join('\n')
+  assert.ok(searched.includes('surfaced context'), 'the visible context row remains searchable')
+  assert.ok(!hasFocusHeader(searched, true), 'searching surfaced context must not open its Thought')
+  assert.equal(searched.split('\n').filter(line => line.includes('hidden search thinking')).length, collapsedThinkingRows,
+    'searching context must not add a revealed process row')
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [], 'context search must remain a temporary row reveal')
+
+  app.setTranscriptSearchTarget(undefined)
+  await vt.waitForRender()
+  const dismissed = vt.getViewport().join('\n')
+  assert.ok(!hasFocusHeader(dismissed, true), 'dismissing context search preserves the collapsed Thought')
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [], 'dismissal must not promote a context search root')
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('search target: a nested PTC hit expands the ancestor path to the child body', async () => {
   const child: TranscriptToolMessage = {
     kind: 'tool', turn: 1, name: 'bash', args: '{"cmd":"tests"}', result: 'grandchild-needle output',
