@@ -1337,6 +1337,7 @@ test('turn/end error renders a failure line', () => {
   assert.ok(tool !== undefined && tool.kind === 'tool')
   assert.equal(tool.name, 'error')
   assert.equal(tool.result, 'authentication failed')
+  assert.equal(tool.origin, 'turn-error')
 })
 
 test('command/run + command/done fold into an executed line', () => {
@@ -1348,6 +1349,7 @@ test('command/run + command/done fold into an executed line', () => {
   const tool = messages[0]
   assert.ok(tool !== undefined && tool.kind === 'tool')
   assert.equal(tool.name, '/compact')
+  assert.equal(tool.origin, 'command')
 })
 
 test('command/done success text and error text fold into the card', () => {
@@ -1400,6 +1402,20 @@ test('aborted turn/end folds into an interrupted card', () => {
   assert.equal(tool.name, 'interrupted')
   assert.equal(tool.status, 'error')
   assert.equal(tool.result, 'cancelled by user')
+  assert.equal(tool.origin, 'turn-interrupted')
+})
+
+test('crash-recovery interrupted turn/end folds into an attention card', () => {
+  const messages = foldTranscript([
+    event('turn/end', { turn: 0, reason: { kind: 'interrupted' } }, 0),
+  ])
+  assert.deepEqual(kinds(messages), ['tool'])
+  const tool = messages[0]
+  assert.ok(tool !== undefined && tool.kind === 'tool')
+  assert.equal(tool.name, 'interrupted')
+  assert.equal(tool.status, 'error')
+  assert.equal(tool.result, 'interrupted')
+  assert.equal(tool.origin, 'turn-interrupted')
 })
 
 test('parallel same-name tool calls pair results by callId', () => {
@@ -2145,6 +2161,7 @@ test('subagent/descriptor folds into a delegation card', () => {
   assert.equal(card.name, 'subagent')
   assert.equal(card.args, 'do the thing')
   assert.equal(card.status, 'ok')
+  assert.equal(card.origin, 'subagent-delegation')
   assert.ok(card.result.includes('mode: continuable'))
   assert.ok(card.result.includes('model: deepseek-chat'))
 })
@@ -2429,6 +2446,7 @@ test('llm/retry folds into a system line with the delay', () => {
   assert.ok(entry !== undefined && entry.kind === 'system')
   assert.ok(entry.text.includes('llm retry 1/2 in 3s'), `text:\n${entry.text}`)
   assert.ok(entry.text.includes('RATE_LIMITED'), `text:\n${entry.text}`)
+  assert.equal(entry.origin, 'llm-retry')
 })
 
 test('AUTH failures use generic presentation text without leaking durable messages', () => {
@@ -2470,6 +2488,7 @@ test('max-tokens turn end folds into a notice', () => {
   const entry = messages[0]
   assert.ok(entry !== undefined && entry.kind === 'system')
   assert.ok(entry.text.includes('max tokens'), `text:\n${entry.text}`)
+  assert.equal(entry.origin, 'turn-max-tokens')
 })
 
 test('window anchored at endTurn shows the match turn instead of the newest', () => {
