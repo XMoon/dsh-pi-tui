@@ -13,7 +13,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { isIndeterminateSkillWrite, registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
-import { shouldConsumeAdvertisedMiss } from '../src/index.ts'
+import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../src/index.ts'
 import type { SurfaceCatalogSnapshot } from '../src/surface-catalog.ts'
 import type { WriteOutcome } from '../src/runtime/session-writer-port.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -73,10 +73,12 @@ function stubRunner(
     agent: Agent | undefined
     writerOutcome?: WriteOutcome
     writerCalls?: { kind: 'prompt'; mode?: 'queue' | 'steer'; messages?: readonly unknown[] }[]
+    displayWrites?: ('focus' | 'compact' | 'full')[]
   },
   diag: ReturnType<typeof createDiag> = createDiag({ filePath: undefined, stderrLevel: 'off' }),
-  options: { transitionPending?: boolean; busyEnter?: string; generation?: () => number } = {},
+  options: { transitionPending?: boolean; busyEnter?: string; generation?: () => number; initialDisplayPreset?: 'focus' | 'compact' | 'full' } = {},
 ): TuiCommandRunner {
+  let displayPreset: 'focus' | 'compact' | 'full' = options.initialDisplayPreset ?? 'full'
   return {
     ctx,
     app,
@@ -155,8 +157,16 @@ function stubRunner(
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
-    focusEnabled: () => false,
-    setFocusMode: () => {},
+    displayPreset: () => displayPreset,
+    setDisplayPreset: (preset) => {
+      if (preset === 'compact') return { kind: 'unsupported', preset }
+      if (displayPreset === preset) return { kind: 'unchanged', preset }
+      displayPreset = preset
+      state.displayWrites?.push(preset)
+      return { kind: 'applied', preset }
+    },
+    focusEnabled: () => displayPreset === 'focus',
+    setFocusMode: (enabled) => { displayPreset = enabled ? 'focus' : 'full' },
     setNotificationMode: () => {},
     setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
@@ -221,6 +231,61 @@ function snapshotOf(options: { skills?: { name: string; description: string }[];
     issues: Object.freeze([]),
   })
 }
+
+test('display and focus commands share the canonical preset and reject Compact', async () => {
+  assert.equal(LOCAL_COMMANDS.has('display'), true, '/display must execute locally')
+  assert.equal(SESSIONLESS_COMMANDS.has('display'), true, '/display must work before the first session')
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const displayWrites: ('focus' | 'compact' | 'full')[] = []
+  const runner = stubRunner(ctx, app, { agent: undefined, displayWrites })
+  registerTuiCommands(runner)
+  const invoke = (name: string, rawInput: string): Promise<{ kind: string; text?: string }> | { kind: string; text?: string } => {
+    const definition = services.defs.find(candidate => candidate.name === name)
+    assert.ok(definition?.handler !== undefined, `${name} must be registered`)
+    return (definition.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }> | { kind: string; text?: string })({ rawInput })
+  }
+  assert.deepEqual(await invoke('display', ''), { kind: 'success', text: 'Display: full.' })
+  assert.deepEqual(await invoke('display', 'focus'), { kind: 'success', text: 'Display: focus.' })
+  assert.deepEqual(await invoke('display', 'status'), { kind: 'success', text: 'Display: focus.' })
+  assert.deepEqual(await invoke('focus', 'status'), { kind: 'success', text: 'Focus mode is on.' })
+  assert.deepEqual(await invoke('focus', 'off'), { kind: 'success', text: 'Focus mode off.' })
+  assert.deepEqual(await invoke('display', 'compact'), { kind: 'error', text: 'Compact display is not available in this build.' })
+  assert.deepEqual(displayWrites, ['focus', 'full'], 'only applied presets may persist')
+  assert.equal(runner.displayPreset?.(), 'full', 'Compact must not mutate the canonical state')
+  assert.deepEqual(await invoke('focus', 'toggle'), { kind: 'success', text: 'Focus mode on.' })
+  assert.deepEqual(await invoke('focus', 'status'), { kind: 'success', text: 'Focus mode is on.' })
+  assert.deepEqual(displayWrites, ['focus', 'full', 'focus'])
+  assert.deepEqual(await invoke('display', 'garbage'), { kind: 'error', text: 'unknown /display verb "garbage" (full|focus|compact|status)' })
+  app.stop()
+})
+
+test('/focus off maps a seeded Compact state to Full', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const displayWrites: ('focus' | 'compact' | 'full')[] = []
+  const runner = stubRunner(ctx, app, { agent: undefined, displayWrites }, undefined, { initialDisplayPreset: 'compact' })
+  registerTuiCommands(runner)
+  const definition = services.defs.find(candidate => candidate.name === 'focus')
+  assert.ok(definition?.handler !== undefined)
+  const result = await (definition.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }> | { kind: string; text?: string })({ rawInput: 'off' })
+  assert.deepEqual(result, { kind: 'success', text: 'Focus mode off.' })
+  assert.equal(runner.displayPreset?.(), 'full')
+  assert.deepEqual(displayWrites, ['full'])
+  app.stop()
+})
 
 test('an initial snapshot installs skill wrappers and claims SYNCHRONOUSLY with zero catalog I/O', () => {
   const ctx = new Context()

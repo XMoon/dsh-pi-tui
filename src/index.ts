@@ -97,7 +97,15 @@ import type { SaveLocationResult } from './save-location.ts'
 import { completeDirectory } from './file-completion/directory-completion.ts'
 import { LocalFileSource } from './file-completion/local-file-source.ts'
 import { TranscriptWindowController } from './transcript-window.ts'
-import { focusModeOf, installFocusPrompt, type FocusState } from './focus.ts'
+import { installFocusPrompt } from './focus.ts'
+import {
+  isDisplayPresetAvailable,
+  isFocusDisplayPreset,
+  resolveDisplayPreset,
+  type DisplayPreset,
+  type DisplayPresetApplyResult,
+  type DisplayState,
+} from './display-preset.ts'
 import { CompletionNotificationController } from './notification/controller.ts'
 import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
 import { DISABLE_FOCUS_REPORTING, ENABLE_FOCUS_REPORTING, FOCUS_IN_SEQUENCE, FOCUS_OUT_SEQUENCE, TerminalFocusTracker } from './notification/terminal-focus.ts'
@@ -205,7 +213,7 @@ import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from './runtime/direct/config-direct.ts'
 import { DirectSessionArchive } from './runtime/direct/session-archive-direct.ts'
 import { DirectHostCommandPort } from './runtime/direct/host-command-direct.ts'
-import { serializeTuiSettingsMutation } from './runtime/config-port.ts'
+import { serializeTuiSettingsMutation, type TuiSettingsDoc } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
 import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-direct.ts'
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
@@ -304,7 +312,7 @@ const LOCAL_SHELL_TAIL_FLUSH_MS = 200
  * command silently starts creating sessions again.
  */
 export const SESSIONLESS_COMMANDS = new Set([
-  'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
+  'display', 'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings',
   // `/statusline` is the approved alias of `/footer` (same configurator,
   // other-agent muscle memory) — it rides the same ownership sets, so it
@@ -325,7 +333,7 @@ export const SESSIONLESS_COMMANDS = new Set([
  * body — there is no command-execution wire for skills.
  */
 export const LOCAL_COMMANDS = new Set([
-  'copy', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'attach', 'image', 'keybindings', 'kill', 'login', 'logout',
+  'copy', 'display', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'attach', 'image', 'keybindings', 'kill', 'login', 'logout',
   'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'transcript', 'yolo',
@@ -1430,11 +1438,8 @@ interface LegacyAgentComposition {
  *   standalone composition callers; that branch installs the caller-owned ref
  *   and does not require an Agent.
  * @param presetId - the requested preset, or `undefined` for the default.
- * @param focusState - the shared Focus runtime state (STRUCTURAL on
- *   purpose: the public declaration bundle must not inline src/focus.ts —
- *   the parameter only ever carries the runner's FocusState object, so a
- *   bare `{ enabled: boolean }` keeps the shipped .d.mts clean); when
- *   provided, the setup ALSO installs the dynamic Focus system-prompt
+ * @param displayState - the shared canonical DisplayState. When provided, the
+ *   setup also installs the dynamic Focus system-prompt
  *   section exactly once per composed agent (plan §9 — every composed
  *   root TUI agent gets it; /focus toggles never re-register).
  * @param diag - the diagnostics channel, when the caller has one.
@@ -1445,21 +1450,21 @@ export function composeAgent(
   ctx: Context,
   installSelection: ModelSelectionRef,
   presetId?: string,
-  focusState?: { enabled: boolean },
+  displayState?: DisplayState,
   diag?: Diag,
 ): Promise<LegacyAgentComposition>
 export function composeAgent(
   ctx: Context,
   installSelection: (agentCtx: Context, agent: Agent) => void,
   presetId?: string,
-  focusState?: { enabled: boolean },
+  displayState?: DisplayState,
   diag?: Diag,
 ): Promise<AgentComposition>
 export async function composeAgent(
   ctx: Context,
   installSelection: ModelSelectionRef | ((agentCtx: Context, agent: Agent) => void),
   presetId?: string,
-  focusState?: { enabled: boolean },
+  displayState?: DisplayState,
   diag?: Diag,
 ): Promise<LegacyAgentComposition | AgentComposition> {
   const presets = ctx.get('agentPresets')
@@ -1474,7 +1479,7 @@ export async function composeAgent(
           // Focus is a TUI surface policy: install it only when the runner
           // supplied the shared state (other callers — the headless tests —
           // keep the plain composition).
-          if (focusState !== undefined) installFocusPrompt(agentCtx, focusState, diag)
+          if (displayState !== undefined) installFocusPrompt(agentCtx, displayState, diag)
         },
       }
     }
@@ -1484,7 +1489,7 @@ export async function composeAgent(
         // Focus is a TUI surface policy: install it only when the runner
         // supplied the shared state (other callers — the headless tests —
         // keep the plain composition).
-        if (focusState !== undefined) installFocusPrompt(agentCtx, focusState, diag)
+        if (displayState !== undefined) installFocusPrompt(agentCtx, displayState, diag)
       },
     }
   }
@@ -1504,7 +1509,7 @@ export async function composeAgent(
     // keeps this outer scoped section; a full agent rebuild re-runs this
     // setup, so the section still lands exactly once. Only the runner
     // (which owns the shared state) requests the install.
-    if (focusState !== undefined) installFocusPrompt(agentCtx, focusState, diag)
+    if (displayState !== undefined) installFocusPrompt(agentCtx, displayState, diag)
   }
   if (typeof installSelection === 'function') {
     return {
@@ -2067,8 +2072,8 @@ export function apply(ctx: Context, config: Config): void {
         // makes Home/End move within the input (Ctrl+Home/End scroll);
         // 'viewport' keeps Home/End scrolling the fullscreen conversation.
         homeEndKeys: z.string(),
-        // Focus Mode: 'on' collapses turn-intermediate activity into a
-        // live Thought block (default 'off' — Focus OFF == current UI).
+        // Legacy Focus preference retained as a migration input only. Runtime
+        // writes use displayPreset and never mutate this field.
         focusMode: z.string(),
         // Completion notifications: mode = when the main agent's
         // settlement notifies ('unfocused' default | 'always' | 'off'),
@@ -2089,7 +2094,7 @@ export function apply(ctx: Context, config: Config): void {
         // keybindings parser (src/keybindings/config.ts) owns the
         // validation fail-soft. Adding a schema field here would break
         // the z<T> inference of the whole register call (probed).
-      }),
+      }).set('displayPreset', z.string()),
       // `history` used to live here (a per-cwd map in the settings
       // document). It moved to $DSH_HOME/user-history/*.jsonl (see
       // history.ts); the schema deliberately no longer carries it, so the
@@ -2099,11 +2104,14 @@ export function apply(ctx: Context, config: Config): void {
       // (the runtime validation accepts missing optional fields).
       { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCustomItems: undefined as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' } },
     )
-    // The ONE authoritative Focus runtime state (plan §5): restored from
-    // the persisted document BEFORE the first compose/resume below, mutated
-    // only through the runner's unified setFocusMode. The system-prompt
-    // section and the TUI projection both read THIS object.
-    const focusState: FocusState = { enabled: focusModeOf(tuiSettings?.get().focusMode) === 'on' }
+    // Resolve the canonical display state before the first compose/resume so
+    // the first model prompt and the first transcript frame agree.
+    const persistedTuiSettings = tuiSettings?.get() as unknown as TuiSettingsDoc | undefined
+    const displayResolution = resolveDisplayPreset({
+      displayPreset: persistedTuiSettings?.displayPreset,
+      focusMode: persistedTuiSettings?.focusMode,
+    })
+    const displayState: DisplayState = { preset: displayResolution.preset }
 
     // Completion notifications (plan: Client/TUI presentation capability —
     // settled detection, focus detection, terminal output and settings
@@ -2187,7 +2195,7 @@ export function apply(ctx: Context, config: Config): void {
       assembled: undefined,
     }
     const installSessionModelSelection = (_agentCtx: Context, agent: Agent): void => { modelSelections.installForAgent(agent) }
-    const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, installSessionModelSelection, presetId, focusState, diag)
+    const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, installSessionModelSelection, presetId, displayState, diag)
 
     // The semantic backend (server/client migration): the TUI consumes
     // Host domains through narrow ports, never ctx.* directly. Direct is the
@@ -2251,6 +2259,20 @@ export function apply(ctx: Context, config: Config): void {
       const raw = backend.config.footerCustomItems.rawForPersistence()
       if (raw.kind === 'unavailable') throw new Error('custom footer definitions unavailable; settings write aborted')
       return raw.value
+    }
+
+    // Migrate legacy/invalid display settings without delaying composition or
+    // changing the initial frame. The canonical field always wins at boot;
+    // this best-effort write only makes the chosen runtime value durable.
+    if (displayResolution.canonicalize && tuiSettings !== undefined) {
+      runDetached('display preset migration', () => serializeTuiSettingsMutation(
+        tuiSettings,
+        () => tuiSettings.replace({
+          ...tuiSettings.get(),
+          footerCustomItems: userFooterCustomItemsForSave(),
+          displayPreset: displayState.preset,
+        }),
+      ), { diag })
     }
 
     // Launch-time preset entry: `--preset` wins over $DSH_PI_TUI_PRESET, and
@@ -7874,6 +7896,7 @@ export function apply(ctx: Context, config: Config): void {
       // M0: the unified status projection store (the app projects its own
       // surface state into it; the runner derives the DSH-owned sections).
       statusStore,
+      displayState,
       // M5: a material width change refreshes the command surface (the
       // runner coalesces to its interval).
       onTerminalResize: () => footerCommandRunner?.requestRefresh(),
@@ -8536,7 +8559,8 @@ export function apply(ctx: Context, config: Config): void {
     // before the first frame — otherwise the system prompt would tell the
     // model the user cannot see the process while the UI still shows it in
     // full (review blocker: the two halves of Focus would split).
-    app.setFocusMode(focusState.enabled)
+    // The app already receives the shared displayState at construction, so the
+    // first mounted frame cannot flash a different preset.
     // Terminal focus reporting (CSI ? 1004) for the completion
     // notification policy: enabled at TUI mount, disabled in cleanup so
     // the mode never leaks into the shell after exit. The app already
@@ -9550,29 +9574,31 @@ export function apply(ctx: Context, config: Config): void {
         diag.warn('skills/change subscription unavailable', { error: safeErrorMessage(error) })
       }
     }
-    /** The UNIFIED Focus setter (plan §7): the runtime state and the TUI
+    /** The unified DisplayPreset setter (plan §7): the runtime state and the TUI
      * surface mutate IMMEDIATELY (a persistence failure must never leave
      * the UI on the old state); the settings write is detached and
      * best-effort — a failure notifies and the next boot may restore the
-     * old value. Every mutation path (/focus, /settings) goes through
-     * this — there is exactly one authoritative state (plan §5). */
-    const setFocusMode = (enabled: boolean): void => {
-      focusState.enabled = enabled
-      app.setFocusMode(enabled)
+     * old value. Every mutation path (`/display`, `/focus`, `/settings`)
+     * goes through this — there is exactly one authoritative state (plan §5). */
+    const setDisplayPreset = (preset: DisplayPreset): DisplayPresetApplyResult => {
+      if (!isDisplayPresetAvailable(preset)) return { kind: 'unsupported', preset }
+      const result = app.setDisplayPreset(preset)
+      if (result.kind !== 'applied') return result
       // The footer's focus-mode item reads the store: repaint it right
       // away (no session event is guaranteed to follow an idle toggle).
       refreshStatusCheap()
       const settings = tuiSettings
       if (settings !== undefined) {
-        runDetached('settings focus write', () => serializeTuiSettingsMutation(
+        runDetached('settings display preset write', () => serializeTuiSettingsMutation(
            settings,
-           () => settings.replace({ ...settings.get(), footerCustomItems: userFooterCustomItemsForSave(), focusMode: enabled ? 'on' : 'off' }),
+           () => settings.replace({ ...settings.get(), footerCustomItems: userFooterCustomItemsForSave(), displayPreset: preset }),
          ), {
           diag,
-          notify: (message) => app.notify(`focus mode persistence failed: ${message}`, 'error'),
+          notify: (message) => app.notify(`display preset persistence failed: ${message}`, 'error'),
           recoverable: () => true,
         })
       }
+      return result
     }
     /**
      * The conversation rewind picker (the ONE entry shared by the idle
@@ -9763,10 +9789,13 @@ export function apply(ctx: Context, config: Config): void {
       sessionCwd,
       signal,
       get sessionGeneration() { return sessionGeneration },
-      /** Focus Mode surface (plan §32.1): the /focus and /settings commands
-       * read the runtime state and mutate it through the ONE setter. */
-      focusEnabled: () => focusState.enabled,
-      setFocusMode,
+      /** Canonical display surface: /display and /focus compatibility both
+       * read and mutate the shared DisplayState through one setter. */
+      displayPreset: () => displayState.preset,
+      setDisplayPreset,
+      /** @deprecated Focus compatibility facade. */
+      focusEnabled: () => isFocusDisplayPreset(displayState.preset),
+      setFocusMode: (enabled) => { setDisplayPreset(enabled ? 'focus' : 'full') },
       get pendingPreset() { return pendingPreset },
       set pendingPreset(id: string | undefined) { pendingPreset = id },
       /** The effective preset id for COLD (sessionless) reads: the run-local

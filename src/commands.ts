@@ -34,6 +34,7 @@ import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture } from './tui-app.ts'
 import { mergeDraft, sessionUnchanged } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
+import { isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyResult } from './display-preset.ts'
 import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from './wheel-scroll.ts'
 import { iconStyleOf } from './icons.ts'
@@ -318,7 +319,7 @@ export function presetDisplayText(preset: {
 }
 
 /** The TUI settings document surface (theme/footer/footerLayout/
- * fullscreen/busyEnter/localShellSandbox/homeEndKeys/focusMode). The old
+ * fullscreen/busyEnter/localShellSandbox/homeEndKeys/displayPreset/focusMode). The old
  * `history` field moved to $DSH_HOME/user-history/*.jsonl and is
  * deliberately NOT part of the document anymore. The type now lives on
  * the config port (M1.9); the re-export keeps the public commands-surface
@@ -626,11 +627,13 @@ export interface TuiCommandRunner {
    * Optional: stubs without the coordinator fall back to a direct
    * sessionReader read. */
   forceContextMeasurement?(): number | undefined
-  /** Whether Focus Mode is currently on (the authoritative runtime state). */
+  /** The canonical display preset (the authoritative runtime state). */
+  displayPreset?(): DisplayPreset
+  /** Apply a canonical display preset through the shared setter. */
+  setDisplayPreset?(preset: DisplayPreset): DisplayPresetApplyResult
+  /** @deprecated Compatibility facade for existing command-only callers. */
   focusEnabled(): boolean
-  /** The UNIFIED Focus setter: mutates the runtime state and the TUI
-   * surface immediately, persists best-effort (plan §7 — /settings and
-   * /focus both route through this, never a direct settings write). */
+  /** @deprecated Compatibility facade; production commands use setDisplayPreset. */
   setFocusMode(enabled: boolean): void
   /** Apply the completion-notification MODE ('unfocused' | 'always' |
    * 'off') to the runtime controller (the /settings panel write; the
@@ -1256,6 +1259,20 @@ export type HostCommandClaim =
   // argued line of an execute-kind command): the line is never handed to the
   // command plane, and it is an ordinary submission.
   | { readonly claimed: false }
+
+/** Read the canonical preset, with a narrow adapter for old command-only fakes. */
+function displayPresetOf(runner: TuiCommandRunner): DisplayPreset {
+  return runner.displayPreset?.() ?? (runner.focusEnabled() ? 'focus' : 'full')
+}
+
+/** Apply through the canonical setter, retaining only the old test/extension seam. */
+function applyDisplayPreset(runner: TuiCommandRunner, preset: DisplayPreset): DisplayPresetApplyResult {
+  if (!isDisplayPresetAvailable(preset)) return { kind: 'unsupported', preset }
+  const setter = runner.setDisplayPreset
+  if (setter !== undefined) return setter(preset)
+  runner.setFocusMode(preset === 'focus')
+  return { kind: 'applied', preset }
+}
 
 /**
  * Register the TUI-owned slash commands on the commands service. The
@@ -2154,11 +2171,11 @@ export function registerTuiCommands(
             values: ['input', 'viewport'],
           },
           {
-            id: 'focus-mode',
-            label: 'Focus mode',
-            description: 'Collapse intermediate activity into a live Thought block; click to reveal the full turn',
-            currentValue: runner.focusEnabled() ? 'on' : 'off',
-            values: ['off', 'on'],
+            id: 'display-preset',
+            label: 'Display',
+            description: 'Transcript disclosure preset; Focus collapses intermediate activity into a live Thought block',
+            currentValue: displayPresetOf(runner),
+            values: ['full', 'focus'],
           },
           {
             id: 'notification-mode',
@@ -2537,11 +2554,9 @@ export function registerTuiCommands(
                  ), { notify: true })
               }
             }
-          } else if (id === 'focus-mode') {
-            if (value === 'off' || value === 'on') {
-              // The UNIFIED setter: runtime mutation first, persistence
-              // best-effort (plan §7 — never a direct settings write).
-              runner.setFocusMode(value === 'on')
+          } else if (id === 'display-preset') {
+            if (value === 'full' || value === 'focus') {
+              applyDisplayPreset(runner, value)
             }
           } else if (id === 'notification-mode') {
             if (value === 'unfocused' || value === 'always' || value === 'off') {
@@ -2745,19 +2760,40 @@ export function registerTuiCommands(
     },
   })
 
-  // `/focus` — the Focus Mode control (plan §8): LOCAL + SESSIONLESS (the
-  // runner's ownership sets), so it always executes directly — never
-  // queued/steered while busy, never sent to the model, and usable before
-  // the first session exists (the first real prompt then composes with the
-  // Focus section already installed). Every mutation goes through the
-  // runner's ONE setter.
+  // `/display` is the canonical LOCAL + SESSIONLESS display control. It is
+  // usable before the first session and every mutation goes through the
+  // runner's canonical setter.
+  commands.register({
+    name: 'display',
+    description: 'Set the transcript display preset',
+    input: { hint: '[full|focus|compact|status]' },
+    handler: (invocation) => {
+      const verb = invocation.rawInput.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+      const report = (text: string): { kind: 'success'; text: string } => {
+        app.notify(text, 'info')
+        return { kind: 'success', text }
+      }
+      if (verb === '' || verb === 'status') return report(`Display: ${displayPresetOf(runner)}.`)
+      if (verb === 'compact') {
+        return { kind: 'error', text: 'Compact display is not available in this build.' }
+      }
+      if (verb === 'full' || verb === 'focus') {
+        const result = applyDisplayPreset(runner, verb)
+        if (result.kind === 'unsupported') return { kind: 'error', text: 'Compact display is not available in this build.' }
+        return report(`Display: ${verb}.`)
+      }
+      return { kind: 'error', text: `unknown /display verb "${verb}" (full|focus|compact|status)` }
+    },
+  })
+
+  // `/focus` is the compatibility adapter over the canonical display state.
   commands.register({
     name: 'focus',
-    description: 'Toggle Focus Mode (intermediate activity folds into a live Thought block)',
+    description: 'Toggle Focus display (intermediate activity folds into a live Thought block)',
     input: { hint: '[on|off|toggle|status]' },
     handler: (invocation) => {
       const verb = invocation.rawInput.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
-      const enabled = runner.focusEnabled()
+      const enabled = displayPresetOf(runner) === 'focus'
       // The command feedback is a transient notify (the same pattern as
       // /reload): a sessionless local command writes no command/done card,
       // so the success text must be surfaced HERE or the toggle would be
@@ -2767,17 +2803,17 @@ export function registerTuiCommands(
         return { kind: 'success', text }
       }
       if (verb === '' || verb === 'toggle') {
-        runner.setFocusMode(!enabled)
+        applyDisplayPreset(runner, enabled ? 'full' : 'focus')
         return report(`Focus mode ${enabled ? 'off' : 'on'}.`)
       }
       if (verb === 'on') {
         if (enabled) return report('Focus mode is on.')
-        runner.setFocusMode(true)
+        applyDisplayPreset(runner, 'focus')
         return report('Focus mode on.')
       }
       if (verb === 'off') {
-        if (!enabled) return report('Focus mode is off.')
-        runner.setFocusMode(false)
+        if (displayPresetOf(runner) === 'full') return report('Focus mode is off.')
+        applyDisplayPreset(runner, 'full')
         return report('Focus mode off.')
       }
       if (verb === 'status') {
