@@ -151,7 +151,7 @@ To stay on the older DSH `0.1.5-rc.1`/`0.1.5-rc.2`, keep the stable
   recovery instead of silently no-opping.
 - **The Focus header shows the real run state.** An open turn reads `Working`,
   `Waiting for approval · 12s`, or `Waiting for input · 12s`, and settles on
-  `Completed`; time spent waiting on the user no longer counts toward the run
+  `Turn complete`; time spent waiting on the user no longer counts toward the run
   duration.
 - **The Focus compact Tool row uses the tool identity plus the official
   description.** A foreground Bash call shows `Bash · <description>` and a

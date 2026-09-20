@@ -121,7 +121,7 @@ dsh --profile pi-tui
   inbox 的 steering 行显示 `waiting for next turn…`，并在下一次普通消息唤醒时按官方
   语义消费；此时空的 Ctrl+S 会给出提示而不是静默无操作。
 - **Focus 头部显示真实执行状态。** 未完成 turn 显示 `Working`、
-  `Waiting for approval · 12s` 或 `Waiting for input · 12s`，完成后显示 `Completed`；
+  `Waiting for approval · 12s` 或 `Waiting for input · 12s`，完成后显示 `Turn complete`；
   等待用户的时间不计入运行时长。
 - **Focus compact 工具行改为工具身份 + 官方描述。** 前台 Bash 显示
   `Bash · <description>`，后台卡片显示 `<工具名> · <content 描述>`；未知的自定义工具

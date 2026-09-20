@@ -17,7 +17,7 @@
  * The whale icon encodes ONLY the disclosure state (🐋 collapsed / 🐳
  * expanded); the execution state is carried by the header label — an open
  * turn reads `Working` or, while parked on the user, `Waiting for
- * approval` / `Waiting for input`; a settled turn reads `Completed` /
+ * approval` / `Waiting for input`; a settled turn reads `Turn complete` /
  * `Failed after` / `Interrupted` / `Blocked` / `Max tokens` — two
  * orthogonal dimensions, never merged into one symbol (plan §2.2).
  * @module @xmoon76/dsh-pi-tui/focus-activity
@@ -57,7 +57,7 @@ export function focusDisclosureIcon(expanded: boolean): '🐋' | '🐳' {
 /** The header's base label WITHOUT the stats tail (plan §14.1): an open
  * turn names its REAL phase (`Working` / `Waiting for approval` /
  * `Waiting for input`), so a turn parked on the user never reads as
- * progress; a settled failure names its reason instead of "Completed". The
+ * progress; a settled failure names its reason instead of "Turn complete". The
  * duration is omitted entirely when the turn has no reliable start
  * (plan §10.2 — never a fake `0s`). The phase comes from the authoritative
  * unified status — this formatter never re-derives approval/question state. */
@@ -86,7 +86,7 @@ export function focusStatusLabel(activity: TurnActivity, phase: RunPhase, durati
     case 'max-tokens':
       return `Max tokens${time}`
     default:
-      return `Completed${time}`
+      return `Turn complete${time}`
   }
 }
 

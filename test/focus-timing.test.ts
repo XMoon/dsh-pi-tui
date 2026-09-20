@@ -47,7 +47,7 @@ test('the plan timeline: an approval wait freezes the timer and resume continues
   assert.equal(store.activeMillis(asActivity(activity), 'working', 45_000), 15_000, 't=45 → Working 15s')
   activity.completed = true
   activity.endedAt = 50_000
-  assert.equal(store.activeMillis(asActivity(activity), 'idle', 60_000), 20_000, 'finish → Completed 20s')
+  assert.equal(store.activeMillis(asActivity(activity), 'idle', 60_000), 20_000, 'finish → Turn complete 20s')
 })
 
 test('a question wait freezes the timer exactly like approval', () => {
