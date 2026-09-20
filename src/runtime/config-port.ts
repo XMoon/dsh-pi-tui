@@ -31,7 +31,8 @@ import type { FooterCustomItemsParseResult } from '../footer/custom-items.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
  * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/
- * focusMode/wheelScrollLines). The old
+ * displayPreset/focusMode/wheelScrollLines). `displayPreset` is the canonical
+ * display authority; `focusMode` remains a legacy migration input. The old
  * `history` field moved to $DSH_HOME/user-history/*.jsonl and is
  * deliberately NOT part of the document anymore. `footerLayout` is the
  * M2 versioned custom layout (nested settings object), absent when not
@@ -67,6 +68,8 @@ export interface TuiSettingsDoc {
   busyEnter: string
   localShellSandbox: string
   homeEndKeys: string
+  displayPreset?: string
+  /** @deprecated Legacy migration input; runtime writes use displayPreset. */
   focusMode: string
   /** Completion-notification mode: 'unfocused' (default) | 'always' |
    * 'off' — when the main agent's settlement notifies the terminal. */
