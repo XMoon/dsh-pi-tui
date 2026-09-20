@@ -207,6 +207,14 @@ import type { ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapsh
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
 
+/** Semantic inspection actions that may cross a response modal boundary. */
+const MODAL_INSPECTION_ACTIONS: readonly AppKeybindingId[] = [
+  'app.transcript.toggleExpand',
+  'app.transcript.toggleThinking',
+  'app.transcript.jumpLatest',
+  'app.todo.toggle',
+]
+
 /** Fullscreen Focus anchoring (plan §8.6): the collapsed Thought's header
  * lands one row below the viewport top so the previous context row stays
  * visible above it. Used on the COLLAPSE direction; the EXPAND direction
@@ -3787,6 +3795,9 @@ export class TuiApp {
    * action resolver + leader machine. Built by the constructor when the
    * runner did not inject one. */
   private readonly keybindings: HostKeybindingManager
+  /** True only while the modal router feeds the leader machine; the callback
+   * uses this narrow scope to reject non-inspection completions. */
+  private modalInspectionLeader = false
   /** The semantic action → host method router (plan §9). */
   private readonly actionDispatcher: AppActionDispatcher
   /** M7: the transcript/tool renderer registry (optional). */
@@ -4184,6 +4195,14 @@ export class TuiApp {
       },
       onLeaderStateChange: () => this.renderFooter(),
       onLeaderActivate: (action, key) => {
+        // A response modal may arm the shared leader machine, but only the
+        // explicit inspection plane can complete there. Return consumed=true
+        // for blocked actions so their completion key cannot become answer
+        // text or a Question/Approval response after this callback returns.
+        if (this.modalInspectionLeader
+          && !MODAL_INSPECTION_ACTIONS.includes(action as AppKeybindingId)) {
+          return true
+        }
         // M6: a leader sequence must never bypass the viewer's
         // parent-action guard — a `<leader>X` binding of a parent action
         // (e.g. app.input.steer) is inert inside the continuable viewer,
@@ -17106,26 +17125,53 @@ export class TuiApp {
   }
 
   /**
-   * Allow the explicit modal-safe inspection whitelist through before
-   * Question / Approval consume their ordinary input. Component-owned fixed
-   * response keys win over configurable inspection remaps; no generic Host
-   * shortcut ladder runs behind the modal.
+   * Allow direct and leader-bound triggers from the explicit modal-safe
+   * inspection whitelist before Question / Approval consume their ordinary
+   * input. Component-owned fixed response keys win over configurable
+   * inspection remaps; no generic Host shortcut ladder runs behind the modal.
    */
   private handleModalInspectionAction(data: string): TuiInputListenerResult | undefined {
     if (this.activeQuestions === undefined && this.activeApproval === undefined) return undefined
-    if (this.activeQuestions?.flow.ownsFixedKey(data) === true) return undefined
-    if (this.activeApproval !== undefined && this.approvalOwnsFixedKey(data)) return undefined
-    const inspectionActions: readonly AppKeybindingId[] = [
-      'app.transcript.toggleExpand',
-      'app.transcript.toggleThinking',
-      'app.transcript.jumpLatest',
-      'app.todo.toggle',
-    ]
-    for (const action of inspectionActions) {
+    const leader = this.keybindings.leaderMachine()
+    if (this.activeQuestions?.flow.ownsFixedKey(data) === true
+      || (this.activeApproval !== undefined && this.approvalOwnsFixedKey(data))) {
+      // A modal response key wins over both a leader prefix and a leader
+      // completion, then continues through the component's normal handler.
+      this.keybindings.cancelLeader()
+      return undefined
+    }
+    for (const action of MODAL_INSPECTION_ACTIONS) {
       if (!this.keybindings.matches(data, action)) continue
+      // A direct inspection key is its own gesture; never leave a half-armed
+      // leader sequence behind it.
+      this.keybindings.cancelLeader()
       this.clearExitConfirmation()
       if (!this.dispatchResolvedAction(action, data)) return undefined
       return { consume: true }
+    }
+    if (leader !== undefined) {
+      this.modalInspectionLeader = true
+      let outcome: ReturnType<typeof leader.feed>
+      try {
+        outcome = leader.feed(data)
+      } finally {
+        this.modalInspectionLeader = false
+      }
+      if (outcome.kind === 'consumed' || outcome.kind === 'cancelled-consume') {
+        this.clearExitConfirmation()
+        return { consume: true }
+      }
+      if (outcome.kind === 'activated') {
+        if (outcome.consumed) {
+          this.clearExitConfirmation()
+          return { consume: true }
+        }
+        // A safe inspection dispatch can decline, matching the direct-key
+        // contract; let the current modal handle the completion key.
+        this.clearExitConfirmation()
+      } else if (outcome.kind === 'cancelled-pass') {
+        this.clearExitConfirmation()
+      }
     }
     return undefined
   }
@@ -17160,6 +17206,7 @@ export class TuiApp {
     if (pending.settled === true) return
     pending.settled = true
     if (this.activeApproval === pending) {
+      this.keybindings.cancelLeader()
       this.clearFullscreenPointerGestures()
       this.activeApproval = undefined
       // Fallback: if nothing is restored beneath the approval, input returns
@@ -17323,6 +17370,7 @@ export class TuiApp {
   /** Resolve the question flow with its answers, or reject on cancel/abort. */
   private settleQuestions(state: QuestionState, answers: TuiQuestionAnswer[] | undefined): void {
     if (this.activeQuestions !== state || state.settled === true) return
+    this.keybindings.cancelLeader()
     state.settled = true
     this.clearFullscreenPointerGestures()
     if (state.onAbort !== undefined && state.signal !== undefined) {

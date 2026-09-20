@@ -190,7 +190,12 @@ test('Focus approval keeps ownership while the remapped fold key precedes every 
 test('Approval decision keys beat a conflicting inspection remap', async () => {
   const { vt, app } = startApp()
   app.setFocusMode(true)
-  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': 'y' }))
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.exit.request': false,
+    'app.transcript.toggleExpand': 'ctrl+c',
+  }))
+  assert.deepEqual(app.keybindingsManager().keysFor('app.transcript.toggleExpand'), ['ctrl+c'],
+    'the conflicting inspection remap must be effective')
   const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
   await viewport(vt)
   vt.sendInput('y')
