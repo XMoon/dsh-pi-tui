@@ -3712,6 +3712,18 @@ test('installFocusPrompt registers ONE dynamic section with the TUI-private name
   assert.equal(typeof text === 'function' ? text() : text, '', 'off → empty text')
   focusState.enabled = true
   assert.equal(typeof text === 'function' ? text() : '', FOCUS_MODE_PROMPT, 'on → the exact instruction')
+  const prompt = FOCUS_MODE_PROMPT.toLowerCase()
+  assert.match(prompt, /self-contained/, 'questions must be self-contained')
+  assert.match(prompt, /did not see hidden/, 'questions must account for hidden context')
+  assert.match(prompt, /required background result is unresolved/, 'required background work must block a false completion claim')
+  assert.match(prompt, /checkpoint/, 'an early turn end must be communicated as a checkpoint')
+  assert.match(prompt, /do not .*promise that a later wake is guaranteed/, 'the prompt must state the no-guaranteed-wake policy')
+  const promiseClaims = prompt.split(/[.!?]\s+/).filter(sentence => !/\bdo not\b/.test(sentence)).join(' ')
+  assert.doesNotMatch(
+    promiseClaims,
+    /\b(?:will|shall|guarantees?|guaranteed|definitely)\b[^.!?\n]*(?:wake|resume)\b|\b(?:wake|resume)\b[^.!?\n]*\b(?:automatically|guaranteed?)\b/,
+    'the prompt must not promise an unconditional wake or resume',
+  )
   // The same registered section flips without re-registration.
   focusState.enabled = false
   assert.equal(typeof text === 'function' ? text() : '', '', 'off again without re-registering')

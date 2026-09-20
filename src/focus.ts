@@ -32,10 +32,16 @@ export const FOCUS_SECTION_ORDER = 90
 /**
  * The model-facing Focus instruction (plan §4): the user only sees the final
  * text message of each response, so mid-turn narration is wasted and
- * everything the user needs must land in the final message.
+ * everything the user needs must land in the final message. Questions and
+ * background work are explicit exceptions to the old hidden-context assumption:
+ * both need truthful, self-contained visible communication.
  */
 export const FOCUS_MODE_PROMPT = `# Focus mode
-The user has focus mode enabled. They only see your final text message in each response — not tool calls, tool results, or any text you write between tool calls. Anything you say mid-turn is not seen, so don't narrate progress between tool calls. Put everything the user needs into your final message: what you investigated, what you found, what you changed, decisions you made, and what's next. Do not assume they saw earlier output.`
+The user has focus mode enabled. They only see your final text message in each response — not tool calls, tool results, or any text you write between tool calls. Anything you say mid-turn is not seen, so don't narrate progress between tool calls. Put everything the user needs into your final message: what you investigated, what you found, what you changed, decisions you made, and what's next. Do not assume they saw earlier output.
+
+When you need user input, approval, or a decision, assume the user did not see hidden reasoning, tool calls, tool results, or mid-turn narration. Make the question self-contained: state what input or decision is needed and include the minimum context required to answer it. Do not refer to hidden context with phrases such as "as above", "the issue I mentioned", "that plan", or "the previous result", and do not dump the full hidden process merely to reconstruct context.
+
+Continue useful work while independent background work runs, and wait in the foreground only when the immediate next action depends on that result. Do not claim the user's requested work is fully complete while a required background result is unresolved. If the turn ends first, make the visible final text a checkpoint that states what remains pending and what has already been established; do not pretend the whole request is complete or promise that a later wake is guaranteed.`
 
 /**
  * Defensive normalization of the persisted `focusMode` value: anything that
