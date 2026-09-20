@@ -3195,11 +3195,12 @@ type TranscriptCellGesture = {
   termRows: number
 }
 
-/** One Question-owned transcript gesture. The Question object identity is
+/** One Question-owned inspection gesture. The Question object identity is
  * part of the fence so a press cannot survive a question settle or transfer
  * to the normal fullscreen click path. */
 type QuestionTranscriptGesture = TranscriptCellGesture & {
   question: QuestionState
+  target: 'transcript' | 'todo'
 }
 
 /** One rendered transcript block in the fullscreen row map (mouse
@@ -3377,7 +3378,7 @@ export class TuiApp {
    * validates it before acting — a question advance / repaint between
    * press and release must never transfer the click. */
   private questionPressGesture: import('./question.ts').QuestionMouseGesture | undefined
-  /** The Question-owned transcript press gesture. Kept separate from the
+  /** The Question-owned inspection press gesture. Kept separate from the
    * normal fullscreen gesture so a Question cannot leak a background press
    * into the normal click ladder after it settles. */
   private questionTranscriptGesture: QuestionTranscriptGesture | undefined
@@ -5143,7 +5144,7 @@ export class TuiApp {
       this.clearExitConfirmation()
       return this.handleSaveLocationKey(data)
     }
-    const modalInspection = this.handleModalTranscriptInspectionKey(data)
+    const modalInspection = this.handleModalInspectionAction(data)
     if (modalInspection !== undefined) return modalInspection
     if (this.activeQuestions !== undefined) {
       this.clearExitConfirmation()
@@ -6459,13 +6460,7 @@ export class TuiApp {
         // host owns both: the opener validates http/https and the paste
         // reads the clipboard then feeds a bracketed paste to the focused
         // component.
-        openUrl: openExternalUrl === undefined ? undefined : (url) => {
-          // TuiAltScreen activates OSC 8 links before it synthesizes the
-          // onCellClick callback, so modal ownership must be enforced here as
-          // well as in the Host click ladder.
-          if (this.activeQuestions !== undefined || this.activeApproval !== undefined) return
-          openExternalUrl(url)
-        },
+        openUrl: openExternalUrl,
         onRightClickPaste: this.readClipboardText === undefined ? undefined : () => {
           this.rightClickPasteFromClipboard()
         },
@@ -9496,23 +9491,29 @@ export class TuiApp {
     return { top: bottom - frame.rows, bottom }
   }
 
-  /** A hit identity that is safe to inspect while a modal owns the screen.
-   * This is deliberately narrower than the normal fullscreen click ladder:
-   * disclosure only, never an attachment, workflow, ordinary message, Todo,
-   * link, or plugin action. */
-  private isModalTranscriptDisclosureHit(hitId: string): boolean {
+  /** A hit identity that is safe to inspect while a response modal owns
+   * the screen. This is an explicit positive allowlist: only presentation or
+   * disclosure targets pass, while workflow viewers/actions and unknown hits
+   * remain inert. */
+  private isModalInspectionSafeHit(hitId: string): boolean {
     return hitId.startsWith('user:')
       || hitId.startsWith('pending-user:')
       || hitId.startsWith('focus:toggle:')
       || hitId.startsWith('focus:collapse:')
       || hitId.startsWith('ptc:')
       || hitId.startsWith('message:disclosure:')
+      || hitId.startsWith('message:toggle:')
+      || hitId.startsWith('attachment:')
+      || hitId.startsWith('workflow:run:')
+      || hitId.startsWith('workflow:phase:')
+      || hitId === 'todo:dock'
+      || hitId === 'todo:panel'
   }
 
-  /** Apply one already-fenced modal disclosure hit. The caller has checked
+  /** Apply one already-fenced modal inspection hit. The caller has checked
    * the painted and current semantic identities; this helper intentionally
    * has no fallback to the ordinary fullscreen action ladder. */
-  private applyModalTranscriptDisclosure(entry: FullscreenRowEntry, entryIndex: number, inMessage: number): void {
+  private applyModalInspectionHit(entry: FullscreenRowEntry, entryIndex: number, inMessage: number): void {
     const nextVisible = this.nextVisibleRowEntry(entryIndex)
     if (entry.userDisclosureHit !== undefined) {
       if (inMessage === entry.userDisclosureHit.row) this.applyUserDisclosureHit(entry.userDisclosureHit)
@@ -9536,34 +9537,76 @@ export class TuiApp {
         return
       }
     }
-    // Workflow rows are intentionally inert here, even when their own hit
-    // metadata represents a disclosure header: modal inspection is not a
-    // workflow/action surface.
-    if (entry.workflowHits !== undefined) return
+    if (entry.workflowHits !== undefined) {
+      const hit = entry.workflowHits.find(candidate => inMessage >= candidate.top && inMessage < candidate.top + candidate.height)
+      if (hit !== undefined && (hit.hit.kind === 'run' || hit.hit.kind === 'phase')) {
+        this.handleWorkflowHit(hit.hit)
+      }
+      return
+    }
     for (const attachment of entry.attachments) {
-      if (inMessage >= attachment.start && inMessage < attachment.end) return
+      if (inMessage >= attachment.start && inMessage < attachment.end) {
+        this.toggleAttachmentCollapsed(message, attachment.imageIndex)
+        return
+      }
     }
     if (entry.collapseFocusOwnerOnClick !== undefined) {
       if (isFocusSecondaryDisclosure(message)) this.toggleMessageExpanded(message)
       else this.collapseFocusTurn(entry.collapseFocusOwnerOnClick, { fullscreenViewport: 'anchor-turn' })
       return
     }
-    if (isFocusSecondaryDisclosure(message)) this.toggleMessageExpanded(message)
+    this.toggleMessageExpanded(message)
   }
 
-  /** Record a Question-owned disclosure press against the last painted
-   * transcript snapshot. The Question identity is stored with the gesture so
-   * a settle/replacement cannot hand the release to another owner. */
+  /** Resolve a painted Todo dock/panel row to its presentation target. */
+  private fullscreenTodoHit(
+    snapshot: {
+      termRows: number
+      footerHeight: number
+      editorHeight: number
+      workingHeight: number
+      queueHeight: number
+      goalHeight: number
+      todoHeight: number
+      dockHeight: number
+    },
+    y: number,
+  ): 'todo:dock' | 'todo:panel' | undefined {
+    const todoBottom = Math.max(0, Math.min(snapshot.termRows,
+      snapshot.termRows - snapshot.footerHeight - snapshot.editorHeight - snapshot.workingHeight
+      - snapshot.queueHeight - snapshot.goalHeight))
+    const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
+    if (snapshot.dockHeight > 0 && y >= todoTop - snapshot.dockHeight && y < todoTop) return 'todo:dock'
+    if (todoTop < todoBottom && y >= todoTop && y < todoBottom) return 'todo:panel'
+    return undefined
+  }
+
+  /** Record a Question-owned inspection press against the last painted
+   * snapshot. The Question identity is stored with the gesture so a
+   * settle/replacement cannot hand the release to another owner. */
   private beginQuestionTranscriptInspection(question: QuestionState, y: number): void {
     this.questionTranscriptGesture = undefined
     const snapshot = this.fullscreenPaintSnapshot
     if (snapshot === undefined) return
     if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return
+    const todoHit = this.fullscreenTodoHit(snapshot, y)
+    if (todoHit !== undefined) {
+      this.questionTranscriptGesture = {
+        question,
+        ownerId: todoHit,
+        row: 0,
+        hitId: 'todo',
+        columns: snapshot.columns,
+        termRows: snapshot.termRows,
+        target: 'todo',
+      }
+      return
+    }
     const cell = this.resolveFullscreenTranscriptCell(y, snapshot)
     if (cell === undefined) return
     const painted = snapshot.rows[cell.entryIndex]!
     const hitId = painted.hits[cell.inMessage] ?? 'inert'
-    if (!this.isModalTranscriptDisclosureHit(hitId)) return
+    if (!this.isModalInspectionSafeHit(hitId)) return
     this.questionTranscriptGesture = {
       question,
       ownerId: painted.ownerId,
@@ -9571,10 +9614,11 @@ export class TuiApp {
       hitId,
       columns: snapshot.columns,
       termRows: snapshot.termRows,
+      target: 'transcript',
     }
   }
 
-  /** Complete a Question-owned disclosure click with the same live semantic
+  /** Complete a Question-owned inspection click with the same live semantic
    * re-check as the normal fullscreen path. The snapshot supplies what the
    * user pressed; the refreshed live row map proves that target still means
    * the same disclosure before any action runs. */
@@ -9586,6 +9630,13 @@ export class TuiApp {
     if (snapshot === undefined) return
     if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return
     if (snapshot.columns !== pressed.columns || snapshot.termRows !== pressed.termRows) return
+    if (pressed.target === 'todo') {
+      const todoHit = this.fullscreenTodoHit(snapshot, y)
+      if (todoHit !== pressed.ownerId) return
+      if (todoHit === 'todo:dock') this.toggleTodoPanel()
+      else this.handleTodoPanelClick()
+      return
+    }
     this.refreshMessageRows()
     const cell = this.resolveFullscreenTranscriptCell(y, {
       headerHeight: snapshot.headerHeight,
@@ -9599,11 +9650,11 @@ export class TuiApp {
     if (entry === undefined) return
     const ownerId = this.fullscreenRowOwnerId(entry, cell.entryIndex)
     const hitId = this.fullscreenRowHitIdentity(entry, cell.inMessage, this.nextVisibleRowEntry(cell.entryIndex))
-    if (!this.isModalTranscriptDisclosureHit(hitId)
+    if (!this.isModalInspectionSafeHit(hitId)
       || pressed.ownerId !== ownerId
       || pressed.row !== cell.inMessage
       || pressed.hitId !== hitId) return
-    this.applyModalTranscriptDisclosure(entry, cell.entryIndex, cell.inMessage)
+    this.applyModalInspectionHit(entry, cell.entryIndex, cell.inMessage)
   }
 
   /**
@@ -9622,9 +9673,9 @@ export class TuiApp {
     // the click to a different target).
     const question = this.activeQuestions
     if (question !== undefined) {
-      // The question owns the modal front: normal transcript/todo gestures are
-      // dead, while a separate Question-owned latch may name one disclosure
-      // target outside the frame.
+      // The question owns the response frame: its fixed surface remains local,
+      // while a separate Question-owned latch may name one proven
+      // presentation/inspection target outside the frame.
       const frame = question.frame
       // A question being remounted has no authoritative frame yet; consume
       // the press rather than guessing background geometry.
@@ -9678,14 +9729,10 @@ export class TuiApp {
     // keyboard todo-toggle between press and release repaints the dock
     // into the panel, and the same cell must not run the panel action
     // for a dock press.
-    const height = snapshot.termRows
-    const todoBottom = Math.max(0, Math.min(height, height - snapshot.footerHeight - snapshot.editorHeight - snapshot.workingHeight - snapshot.queueHeight - snapshot.goalHeight))
-    const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
-    const inDock = snapshot.dockHeight > 0 && y >= todoTop - snapshot.dockHeight && y < todoTop
-    const inPanel = todoTop < todoBottom && y >= todoTop && y < todoBottom
-    if (inDock || inPanel) {
+    const todoHit = this.fullscreenTodoHit(snapshot, y)
+    if (todoHit !== undefined) {
       this.fullscreenCellGesture = {
-        ownerId: inDock ? 'todo:dock' : 'todo:panel',
+        ownerId: todoHit,
         row: 0,
         hitId: 'todo',
         columns: snapshot.columns,
@@ -9713,9 +9760,9 @@ export class TuiApp {
   }
 
   /** Whether a visible modal overlay blocks fullscreen transcript pointer
-   * (disclosure) gestures. The transcript-search box is the ONE exception (fork
+   * inspection gestures. The transcript-search box is the ONE exception (fork
    * seam X058): it is a viewport-passthrough overlay, so while it is the ONLY
-   * VISIBLE modal the background disclosure clicks stay live. Any other modal —
+   * VISIBLE modal the background inspection clicks stay live. Any other modal —
    * including one that SUPPRESSES the search box (the box itself is then
    * hidden) — blocks exactly as before. */
   private overlayBlocksTranscriptPointer(): boolean {
@@ -9824,21 +9871,11 @@ export class TuiApp {
       this.fullscreenCellGesture = undefined
       return
     }
-    const height = snapshot.termRows
-    const todoBottom = Math.max(0, Math.min(height, height - snapshot.footerHeight - snapshot.editorHeight - snapshot.workingHeight - snapshot.queueHeight - snapshot.goalHeight))
-    const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
     // The dock strip (the todo summary row) sits directly above the panel:
-    // clicking it opens the panel (mouse parity with the todo-toggle
-    // action). The summary
-    // is hidden while the panel is open, so the dock renders zero rows and
-    // this branch is inert — the two regions never fight.
-    const dockHeight = snapshot.dockHeight
-    const inDock = dockHeight > 0 && y >= todoTop - dockHeight && y < todoTop
-    // A click on the todo panel's own rows runs the state loop (compact →
-    // full list → back to the summary row), so the mouse opens AND closes
-    // the panel without the todo-toggle action.
-    const inPanel = todoTop < todoBottom && y >= todoTop && y < todoBottom
-    if (inDock || inPanel) {
+    // clicking it opens the panel (mouse parity with the todo-toggle action).
+    // A panel click runs the compact → full list → summary presentation loop.
+    const todoHit = this.fullscreenTodoHit(snapshot, y)
+    if (todoHit !== undefined) {
       // The dock and the panel are ONE coalescing family, and the first
       // click MUTATES the layout (the dock vanishes, the panel takes its
       // rows): a rapid second click at the same coordinate would land on
@@ -9857,7 +9894,7 @@ export class TuiApp {
         this.fullscreenCellGesture = undefined
         return
       }
-      if ((pressed.ownerId === 'todo:dock') !== inDock) {
+      if (pressed.ownerId !== todoHit) {
         this.fullscreenCellGesture = undefined
         return
       }
@@ -9865,7 +9902,7 @@ export class TuiApp {
       const now = Date.now()
       if (now < this.todoClickCoalesceUntil) return
       this.todoClickCoalesceUntil = now + TODO_CLICK_COALESCE_MS
-      if (inDock) this.toggleTodoPanel()
+      if (todoHit === 'todo:dock') this.toggleTodoPanel()
       else this.handleTodoPanelClick()
       return
     }
@@ -17069,22 +17106,40 @@ export class TuiApp {
   }
 
   /**
-   * Allow the one modal-safe Host inspection action through before Question /
-   * Approval consume their ordinary input. The modal keeps the keyboard seat;
-   * this dispatch only mutates transcript disclosure through the normal action
-   * path, so Focus fullscreen, regular Focus, and remapped keys keep their
-   * existing semantics. No other Host shortcut passes this gate.
+   * Allow the explicit modal-safe inspection whitelist through before
+   * Question / Approval consume their ordinary input. Component-owned fixed
+   * response keys win over configurable inspection remaps; no generic Host
+   * shortcut ladder runs behind the modal.
    */
-  private handleModalTranscriptInspectionKey(data: string): TuiInputListenerResult | undefined {
+  private handleModalInspectionAction(data: string): TuiInputListenerResult | undefined {
     if (this.activeQuestions === undefined && this.activeApproval === undefined) return undefined
-    if (!this.keybindings.matches(data, 'app.transcript.toggleExpand')) return undefined
-    this.clearExitConfirmation()
-    if (!this.dispatchResolvedAction('app.transcript.toggleExpand', data)) return undefined
-    return { consume: true }
+    if (this.activeQuestions?.flow.ownsFixedKey(data) === true) return undefined
+    if (this.activeApproval !== undefined && this.approvalOwnsFixedKey(data)) return undefined
+    const inspectionActions: readonly AppKeybindingId[] = [
+      'app.transcript.toggleExpand',
+      'app.transcript.toggleThinking',
+      'app.transcript.jumpLatest',
+      'app.todo.toggle',
+    ]
+    for (const action of inspectionActions) {
+      if (!this.keybindings.matches(data, action)) continue
+      this.clearExitConfirmation()
+      if (!this.dispatchResolvedAction(action, data)) return undefined
+      return { consume: true }
+    }
+    return undefined
   }
 
-  /** Route a key while a prompt is showing; every key except the narrow
-   * transcript-disclosure inspection action is consumed. */
+  /** Approval's fixed response keys must beat a conflicting inspection remap. */
+  private approvalOwnsFixedKey(data: string): boolean {
+    return matchesKey(data, 'y')
+      || matchesKey(data, 'n')
+      || matchesKey(data, 'escape')
+      || matchesKey(data, 'ctrl+c')
+  }
+
+  /** Route a key while a prompt is showing; every key except the explicit
+   * inspection-safe whitelist is consumed. */
   private handleApprovalKey(data: string): TuiInputListenerResult {
     const pending = this.activeApproval
     if (pending === undefined) return undefined

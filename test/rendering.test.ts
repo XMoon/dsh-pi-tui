@@ -875,7 +875,7 @@ test('a fullscreen click on an option row selects it', async () => {
   assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
 })
 
-test('clicks outside the active question frame are captured (the modal owns every click)', async () => {
+test('Todo presentation remains clickable outside the active Question frame', async () => {
   const { vt, app } = startApp()
   const todos = Array.from({ length: 3 }, (_, i) => ({
     id: `t-${i}`, content: `todo item ${i}`,
@@ -891,12 +891,13 @@ test('clicks outside the active question frame are captured (the modal owns ever
   const dockIdx = lines.findIndex(line => strip(line).includes('☑'))
   assert.ok(dockIdx >= 0, `todo summary dock row missing:\n${view}`)
   assert.ok(lines.some(line => strip(line).includes('Proceed?')), `question missing:\n${view}`)
-  // A click on the dock row (outside the question frame) must NOT open the
-  // todo panel — the capturing modal consumes every click.
+  // A click on the dock row (outside the question frame) is a read-only
+  // presentation action and may open the Todo panel without disturbing the
+  // response owner.
   clickCell(vt, 10, dockIdx)
   await vt.waitForRender()
   view = await viewport(vt)
-  assert.ok(!app.isTodoPanelVisible(), 'a click outside the frame must not open the todo panel')
+  assert.ok(app.isTodoPanelVisible(), 'a Todo presentation click must open the panel')
   assert.ok(view.includes('Proceed?'), `question must stay mounted:\n${view}`)
   await vt.sendInput('\x1b')
   await assert.rejects(promise, /cancelled/)

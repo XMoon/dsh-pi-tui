@@ -350,6 +350,24 @@ test('collapsed Focus hides the Workflow card; expanded Focus shows one Run disc
   assert.equal(chevrons, 1, `exactly one workflow run row:\n${view}`)
 })
 
+test('Question permits Workflow run disclosure but keeps viewer actions inert', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setFocusMode(true)
+  app.setTranscript([workflow({ members: [member(0, 'a', 'P', 'running')] })])
+  app.expandFocusTurn(0)
+  let view = await viewport(vt)
+  const promise = app.askQuestions([{ id: 'q1', question: 'Inspect the workflow?', options: [{ label: 'Continue' }] }])
+  view = await viewport(vt)
+  const headerRow = rowOf(view, 'Workflow audit [running]')
+  await clickCell(vt, 10, headerRow)
+  view = await viewport(vt)
+  assert.equal(runChevron(view), '▶', 'Workflow run disclosure remains inspectable behind Question')
+  assert.ok(view.includes('Inspect the workflow?'), 'Question remains the response owner')
+  vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
 test('workflow card clicks never collapse the owning Focus turn', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
