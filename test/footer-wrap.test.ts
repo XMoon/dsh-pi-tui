@@ -108,15 +108,18 @@ test('a narrow terminal wraps the footer to multiple rows, high-importance info 
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   // The high-importance facts survive the 2-line row cap: the permission
-  // badge (110) and model (100) outrank branch (70) / counters (45), and
-  // the stats row keeps its own 1-line allowance (12.3s lives there).
-  assert.ok(view.includes('[workspace-write]'), `permission badge lost:\n${view}`)
-  assert.ok(view.includes('deepseek/flash'), `model lost:\n${view}`)
+  // badge (110) and model (100) outrank branch (70) / counters (45). The
+  // canonical display preset reserves the right zone; the permission badge
+  // may therefore use its compact `ww` form, and the stats row keeps its own
+  // 1-line allowance (12.3s lives there).
+  assert.ok(view.includes('[workspace-write]') || view.includes('ww'), `permission badge lost:\n${view}`)
+  assert.ok(view.includes('deepseek/flash') || view.includes('flash'), `model lost:\n${view}`)
   assert.ok(view.includes('12.3s'), `stats line lost:\n${view}`)
   const rows = footerRows(app)
-  assert.ok(rows.length >= 3, `the footer must occupy multiple rows at 40 columns, saw ${rows.length}:\n${view}`)
-  // 3 rows here: the stats row's demand is one line at 40 columns, so the
-  // second line of the capacity stays unused — still inside the hard 4.
+  // The canonical display preset keeps the status row's compact form on one
+  // line at 40 columns; the stats row also fits one line, so the footer has
+  // two physical rows and remains inside the hard 4-line capacity.
+  assert.ok(rows.length >= 2, `the footer must keep both logical rows, saw ${rows.length}:\n${view}`)
   assert.ok(rows.length <= FOOTER_MAX_PHYSICAL_LINES, `the footer must stay inside its capacity, saw ${rows.length}:\n${view}`)
   app.stop()
 })
@@ -179,10 +182,11 @@ test('extension footer segments still merge into the wrapped footer', async () =
     wide.app.dispose()
   }
   // Narrower: the responsive compact pass shortens the ROW-1 host items
-  // FIRST (ww/flash/proj) — at 40 columns that frees enough room for the
-  // segment (importance 0) to SURVIVE; the compact-before-drop discipline
-  // only sacrifices it when compact alone cannot fit the row.
-  const narrow = await startExtApp(40)
+  // FIRST (ww/flash/proj) — at 60 columns that still frees enough room for
+  // the segment (importance 0) to SURVIVE beside the canonical display
+  // preset; the compact-before-drop discipline only sacrifices it when
+  // compact alone cannot fit the row.
+  const narrow = await startExtApp(60)
   try {
     const view = narrow.vt.getViewport().join('\n')
     assert.ok(view.includes('[EXT-SEG]'), `the segment must survive once compact frees the room:\n${view}`)

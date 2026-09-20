@@ -27,6 +27,7 @@ test('the V1 payload serializes the snapshot + geometry', () => {
   assert.deepEqual(input.view, { subject: 'main' })
   assert.equal(input.composition.model?.id, 'flash')
   assert.equal(input.interaction.displayPreset, 'focus')
+  assert.ok(!('focusMode' in input.interaction), 'the canonical V1 projection must not expose the retired boolean')
   // The payload is plain JSON (the command receives a string).
   const json = JSON.stringify(input)
   assert.ok(json.includes('"schemaVersion":1'))

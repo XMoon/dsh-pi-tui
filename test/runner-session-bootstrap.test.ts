@@ -2051,6 +2051,70 @@ test('startup canonicalizes an unsupported display preset, preserves legacy/raw 
   await disposeContext(third.context)
 })
 
+test('display full retries canonical persistence when runtime is already full', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-display-unchanged-retry-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const probe = installProbe()
+  life.defer(probe.restore)
+  const resumed: FakeSession = fakeSession({
+    id: 'display-unchanged-retry-session',
+    header: { id: 'display-unchanged-retry-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('display unchanged retry'),
+  })
+  const doc: Record<string, unknown> = {
+    theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'off',
+    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
+    displayPreset: 'compact', focusMode: 'on', wheelScrollLines: '1',
+    notificationMode: 'unfocused', notificationMethod: 'auto',
+  }
+  const replacements: Record<string, unknown>[] = []
+  let failFirstWrite = true
+  const settings = {
+    register: () => ({
+      get: () => ({ ...doc }),
+      replace: async (next: Record<string, unknown>) => {
+        replacements.push({ ...next })
+        if (failFirstWrite) {
+          failFirstWrite = false
+          throw new Error('display migration write failed')
+        }
+        Object.assign(doc, next)
+      },
+    }),
+    describe: () => [{ ns: 'dsh-pi-tui', user: {} }],
+  }
+  const context = new Context()
+  const harness = makeHarness(home, resumed)
+  context.provide('settings', settings as never)
+  const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app !== undefined, 'the production runner must create a TuiApp')
+  assert.equal(app.displayPreset(), 'full', 'unsupported Compact resolves to Full at runtime')
+  assert.equal(replacements.length, 1, 'boot must attempt the migration write')
+  assert.equal(doc.displayPreset, 'compact', 'the failed migration leaves settings unchanged')
+
+  const displayHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
+  assert.ok(displayHandler !== undefined, 'the production runner must register /display')
+  const result = await (displayHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'full' })
+  assert.deepEqual(result, { kind: 'success', text: 'Display: full.' })
+  await settle()
+  assert.equal(replacements.length, 2, 'an unchanged runtime preset must still retry persistence')
+  assert.equal(doc.displayPreset, 'full', 'the explicit /display full retry must repair the canonical setting')
+  assert.equal(replacements[1]?.displayPreset, 'full')
+  await fiber.dispose()
+  await disposeContext(context)
+})
+
 test('live repaint preserves manual scrolling in the latest window', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-live-follow-')

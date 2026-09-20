@@ -1093,9 +1093,9 @@ for (const cols of [40, 80, 120]) {
       assert.ok(text.includes('Preview'), `the preview must stay visible at ${cols}x${rows}:\n${text}`)
       assert.ok(text.includes('A Add'), `the contextual help must not scroll away at ${cols}x${rows}:\n${text}`)
       // THE key guarantee: the EDITABLE body survives — the cursor's item
-      // (the last one: Focus mode) must be on screen, never eaten by
+      // (the last one: Display) must be on screen, never eaten by
       // the fixed preview.
-      assert.ok(text.includes('Focus mode'), `the active item must stay visible at ${cols}x${rows}:\n${text}`)
+      assert.ok(text.includes('Display'), `the active item must stay visible at ${cols}x${rows}:\n${text}`)
       // A long label must not break the layout (ANSI-safe truncation).
       assert.ok(!text.split('\n').some(line => line.length > cols + 20), `no line may overflow the frame at ${cols}x${rows}`)
       app.stop()
@@ -1123,7 +1123,7 @@ test('a 4-physical-row preview cannot eat the editable body (10-row terminal)', 
   const text = view.join('\n')
   assert.ok(text.includes('A Add'), `the help must stay visible:\n${text}`)
   assert.ok(text.includes('Preview'), `the preview must stay visible:\n${text}`)
-  assert.ok(text.includes('Focus mode'), `the ACTIVE item must stay visible (the body must never be eaten):\n${text}`)
+  assert.ok(text.includes('Display'), `the ACTIVE item must stay visible (the body must never be eaten):\n${text}`)
   app.stop()
 })
 

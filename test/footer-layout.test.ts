@@ -13,6 +13,7 @@ import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from '../src/footer/pres
 test('the builtin default layout parses as valid', () => {
   const parsed = parseFooterLayout(DEFAULT_FOOTER_LAYOUT)
   assert.ok(isFooterLayout(parsed), `default layout must parse: ${JSON.stringify(parsed)}`)
+  assert.deepEqual(DEFAULT_FOOTER_LAYOUT.rows[0]!.right.map(ref => ref.id), ['plan-state', 'display-preset'])
 })
 
 test('the presets never share placement objects (no cross-preset aliasing)', () => {

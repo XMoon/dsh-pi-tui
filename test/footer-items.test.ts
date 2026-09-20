@@ -164,6 +164,12 @@ test('focus-mode keeps its legacy id but follows the canonical display preset', 
   assert.equal(render('focus-mode', snapshotWith(snap => { snap.interaction.displayPreset = 'compact' })), '')
 })
 
+test('display-preset is the canonical always-visible preset indicator', () => {
+  assert.equal(render('display-preset', snapshotWith(snap => { snap.interaction.displayPreset = 'full' })), 'full')
+  assert.equal(render('display-preset', snapshotWith(snap => { snap.interaction.displayPreset = 'focus' })), 'focus')
+  assert.equal(render('display-preset', snapshotWith(snap => { snap.interaction.displayPreset = 'compact' })), 'compact')
+})
+
 test('turns-steps renders tN/sN', () => {
   const text = render('turns-steps', snapshotWith(snap => {
     snap.usage.turns = 3
