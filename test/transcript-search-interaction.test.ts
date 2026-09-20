@@ -255,9 +255,9 @@ test('interaction: background selection copies while an in-box drag never select
 
   // A drag on a transcript row OUTSIDE the box (the box is top-right) selects
   // and copies the underlying text.
-  vt.sendInput('\x1b[<0;1;8M')
-  vt.sendInput('\x1b[<32;20;8M')
-  vt.sendInput('\x1b[<0;20;8m')
+  vt.sendInput('\x1b[<0;1;6M')
+  vt.sendInput('\x1b[<32;20;6M')
+  vt.sendInput('\x1b[<0;20;6m')
   await vt.waitForRender()
   assert.ok(copied.length >= 1, 'a background drag outside the search box must copy the selection')
   assert.ok(copied.some(text => text.includes('turn ')), `the copied text must be transcript content: ${JSON.stringify(copied)}`)

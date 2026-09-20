@@ -9583,10 +9583,13 @@ export function apply(ctx: Context, config: Config): void {
     const setDisplayPreset = (preset: DisplayPreset): DisplayPresetApplyResult => {
       if (!isDisplayPresetAvailable(preset)) return { kind: 'unsupported', preset }
       const result = app.setDisplayPreset(preset)
-      if (result.kind !== 'applied') return result
-      // The footer's focus-mode item reads the store: repaint it right
-      // away (no session event is guaranteed to follow an idle toggle).
-      refreshStatusCheap()
+      if (result.kind === 'unsupported') return result
+      // The footer reads the store: repaint it right away after a live UI
+      // transition (no session event is guaranteed to follow an idle toggle).
+      // `unchanged` still means the canonical preset was accepted; it must
+      // continue through persistence so a failed migration write can be
+      // retried while the runtime is already on that preset.
+      if (result.kind === 'applied') refreshStatusCheap()
       const settings = tuiSettings
       if (settings !== undefined) {
         runDetached('settings display preset write', () => serializeTuiSettingsMutation(

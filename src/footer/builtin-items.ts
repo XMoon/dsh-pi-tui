@@ -6,7 +6,7 @@
  *
  * Default-preset composition: row 1 leads with the view-scope item and
  * composes the main-only identity badges (permission/model/tasks/branch)
- * and the extension bridge on the LEFT, with plan-state and focus-mode on
+ * and the extension bridge on the LEFT, with plan-state and display-preset on
  * the RIGHT; row 2 composes the stats-line facts as real semantic
  * placements (token-usage:pi, cache-hit:pi, performance:latency and
  * performance:speed — the RECENT performance contract) plus the turn/step
@@ -378,6 +378,7 @@ export function registerBuiltinFooterItems(registry: FooterItemRegistry): void {
   registry.register(sandboxModeItem)
   registry.register(approvalPolicyItem)
   registry.register(focusModeItem)
+  registry.register(displayPresetItem)
   registry.register(focusedSeatItem)
   registry.register(projectItem)
   registry.register(runStateItem)
@@ -475,7 +476,7 @@ const approvalPolicyItem: FooterItemDefinition = {
 const focusModeItem: FooterItemDefinition = {
   id: 'focus-mode',
   label: 'Focus mode',
-  description: 'The Focus Mode indicator.',
+  description: 'Legacy Focus Mode indicator.',
   defaultZone: 'right',
   defaultImportance: 120,
   formats: ['plain'],
@@ -483,6 +484,20 @@ const focusModeItem: FooterItemDefinition = {
   render(snapshot: StatusSnapshot) {
     if (snapshot.interaction.displayPreset !== 'focus') return null
     return { spans: [{ text: 'focus', tone: 'textMuted' }] }
+  },
+}
+
+/** The canonical display preset indicator for new Footer layouts. */
+const displayPresetItem: FooterItemDefinition = {
+  id: 'display-preset',
+  label: 'Display',
+  description: 'The active transcript display preset.',
+  defaultZone: 'right',
+  defaultImportance: 120,
+  formats: ['plain'],
+  defaultFormat: 'plain',
+  render(snapshot: StatusSnapshot) {
+    return { spans: [{ text: snapshot.interaction.displayPreset, tone: 'textMuted' }] }
   },
 }
 
@@ -752,6 +767,7 @@ export const INTENTIONALLY_STABLE_DENSITY_ITEMS: readonly string[] = [
   'reasoning',
   'approval-policy',
   'focus-mode',
+  'display-preset',
   'focused-seat',
   'project',
   'version',

@@ -106,8 +106,9 @@ can retry on a later boot.
 ```
 
 The settings row is `display-preset` with only `full` and `focus` values. The
-footer item keeps its historical `focus-mode` id for custom-layout
-compatibility, but it renders only when the canonical preset is Focus.
+canonical Footer item is `display-preset` and always shows the active preset;
+the historical `focus-mode` item remains for custom-layout compatibility and
+renders only when the canonical preset is Focus.
 
 ## Direct and Remote parity
 

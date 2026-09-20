@@ -281,17 +281,23 @@ export interface TranscriptViewportAnchor {
   readonly bottom?: TranscriptViewportAnchorPoint
 }
 
-/** Whether a message is a Focus SECONDARY disclosure: a foldable process
- * card inside an expanded Thought that has its own compact/full two-state
- * renderer (plan §10). Shared by the render rule and the click handler —
- * never two different foldable sets. Workflow is deliberately NOT in the
- * set (PR2 plan §7.1/§12.3): the Workflow card owns its own Run/Phase
- * disclosure and must never be wrapped in a second generic fold. */
-function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
+/** Whether a message has a generic compact/full disclosure of its own.
+ * Workflow is deliberately NOT in the set (PR2 plan §7.1/§12.3): the
+ * Workflow card owns its own Run/Phase disclosure and must never be wrapped
+ * in a second generic fold. Surfaced context remains generic-foldable so its
+ * own click/search disclosure can survive independently of a Thought root. */
+function isFoldableMessageDisclosure(message: TranscriptMessage): boolean {
   return message.kind === 'thinking'
     || message.kind === 'tool'
     || message.kind === 'system'
     || message.kind === 'compaction'
+}
+
+/** Whether a generic foldable message is a Thought-owned Focus secondary.
+ * Surfaced context is persistent input/context, not process revealed by the
+ * Thought, so root auto-reveal and secondary cleanup must exclude it. */
+function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
+  return isFoldableMessageDisclosure(message) && !isSurfacedContext(message)
 }
 
 /** Whether a message is a TEXT-ONLY durable user message — the only kind
@@ -299,7 +305,7 @@ function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
  * (attachment/image/file blocks) keep their existing presentation. The
  * width-dependent "long enough" decision stays in the render layer; this
  * helper only classifies the message. User messages are deliberately NOT
- * folded into {@link isFocusSecondaryDisclosure}: they are turn
+ * folded into {@link isFoldableMessageDisclosure}: they are turn
  * foundations, not process detail. */
 function isUserMessageDisclosureCandidate(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'user' }> {
   return message.kind === 'user'
@@ -7056,9 +7062,10 @@ export class TuiApp {
       this.expandedOverride.set(message, true)
       changed = true
     }
-    // Secondary cards have a durable per-card owner only on fullscreen, where
-    // the existing click affordance makes the resulting state user-controllable.
-    if (this.fullscreen !== undefined && isFocusSecondaryDisclosure(message) && messageReveal
+    // Fullscreen foldable message cards have a durable per-card owner where
+    // the existing click affordance makes the resulting state user-controllable;
+    // surfaced context uses this local owner without becoming Thought-owned.
+    if (this.fullscreen !== undefined && isFoldableMessageDisclosure(message) && messageReveal
       && this.expandedOverride.get(message) !== true) {
       this.expandedOverride.set(message, true)
       changed = true
@@ -9418,10 +9425,10 @@ export class TuiApp {
       if (isFocusSecondaryDisclosure(message)) return `message:disclosure:${token}`
       return `focus:collapse:${entry.collapseFocusOwnerOnClick}`
     }
-    // The card-level toggle. Secondary process cards get a distinct identity
-    // so the modal inspection whitelist can never reinterpret an ordinary
-    // message toggle as a disclosure after a repaint.
-    return isFocusSecondaryDisclosure(message)
+    // The card-level toggle. Generic foldable message cards get a distinct
+    // identity so the modal inspection whitelist can never reinterpret an
+    // ordinary message toggle as a disclosure after a repaint.
+    return isFoldableMessageDisclosure(message)
       ? `message:disclosure:${token}`
       : `message:toggle:${token}`
   }
@@ -10175,7 +10182,7 @@ export class TuiApp {
    * (override true) — the per-card override always expresses the
    * opposite of the effective state (plan §3.5/E4). */
   private toggleMessageExpanded(message: TranscriptMessage): void {
-    if (!isFocusSecondaryDisclosure(message)) return
+    if (!isFoldableMessageDisclosure(message)) return
     // Only collapsing the SEARCH TARGET revokes the reveal: collapsing an
     // unrelated card must not hide the current target.
     const revokesSearchReveal = this.searchTarget?.message === message

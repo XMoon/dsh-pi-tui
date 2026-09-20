@@ -3459,6 +3459,97 @@ test('search target: surfaced context stays visible without opening its Thought'
   app.stop()
 })
 
+test('surfaced context keeps its local expansion when its Thought is toggled', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('local-context'), role: 'user',
+      content: [{ type: 'text', text: 'surfaced context\ncontext detail line' }],
+      source: { kind: 'plugin', plugin: 'local-context' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', {
+      turn: 1, step: 0,
+      chunk: { type: 'reasoning-delta', index: 0, text: 'hidden reasoning' },
+    }, T0 + 2, 2),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('local-context-tool'),
+      name: 'read', arguments: JSON.stringify({ path: 'context.txt' }),
+    }, T0 + 3, 3),
+  ])
+  app.setFocusMode(true)
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+
+  let view = vt.getViewport()
+  const contextRow = findRow(view, 'Context injection local-context')
+  assert.ok(contextRow >= 0, `surfaced context row missing:\n${view.join('\n')}`)
+  assert.ok(!view.join('\n').includes('context detail line'), 'precondition: context starts folded')
+  click(vt, 8, contextRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.join('\n').includes('context detail line'), 'the context row must expand locally')
+
+  app.expandFocusTurn(1)
+  await vt.waitForRender()
+  assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), 'the Thought must open')
+  const expandedHeader = findFocusHeaderRow(vt.getViewport(), true)
+  assert.ok(expandedHeader >= 0)
+  click(vt, 8, expandedHeader + 1)
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.ok(!hasFocusHeader(collapsed, true), 'the Thought must close again')
+  assert.ok(collapsed.includes('context detail line'),
+    'collapsing the Thought must not clear the surfaced context local disclosure')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('search-revealing an old tool does not Thought-expand unrelated surfaced context', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('old-context'), role: 'user',
+      content: [{ type: 'text', text: 'old surfaced context\nold context detail line' }],
+      source: { kind: 'plugin', plugin: 'old-context' },
+    }, T0 + 1, 1),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('old-context-tool'),
+      name: 'read', arguments: JSON.stringify({ path: 'old-context.txt' }),
+    }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('old-context-answer'), role: 'assistant', content: [{ type: 'text', text: 'old answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 4, 4),
+  ])
+  for (let turn = 2; turn <= 4; turn += 1) applyMixed(folder, miniTurn(turn, turn * 100))
+  app.setFocusMode(true)
+  app.setToolOutputExpanded(true)
+  show(app, folder)
+  await vt.waitForRender()
+  const tool = folder.messages().find(message => message.kind === 'tool' && message.turn === 1)
+  assert.ok(tool !== undefined, 'fixture: the old tool exists')
+  const collapsed = vt.getViewport().join('\n')
+  assert.ok(!collapsed.includes('old context detail line'), 'precondition: the old context starts folded')
+
+  app.revealSearchMatch(tool)
+  await vt.waitForRender()
+  const revealed = vt.getViewport().join('\n')
+  assert.ok(hasFocusHeader(revealed, true), 'search must reveal the old Thought')
+  assert.ok(revealed.includes('old-context.txt'), `the searched tool must be visible:\n${revealed}`)
+  assert.ok(!revealed.includes('old context detail line'),
+    'searching the tool must not owner-expand unrelated surfaced context')
+  app.stop()
+})
+
 test('search target: a nested PTC hit expands the ancestor path to the child body', async () => {
   const child: TranscriptToolMessage = {
     kind: 'tool', turn: 1, name: 'bash', args: '{"cmd":"tests"}', result: 'grandchild-needle output',

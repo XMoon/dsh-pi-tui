@@ -107,7 +107,7 @@ test('the flat cursor spans Left then Right; ←/→ move between zones', () => 
   walkTo(m, 'ext:*') // the LAST left item
   m.moveDown()
   const row = m.state().layout.rows[0]!
-  // ↓ continues into the row's RIGHT zone (plan state, focus mode) — there
+  // ↓ continues into the row's RIGHT zone (plan state, display preset) — there
   // is no "available" section after the items.
   assert.equal(m.state().cursor, row.left.length, 'the cursor moves into the right zone')
   for (let i = 0; i < 8; i += 1) m.moveDown()
@@ -249,7 +249,7 @@ test('Move Mode: M enters, ↑↓ reorder within the zone, Enter/Esc exits', () 
   for (let i = 0; i < 12; i += 1) m.moveDown()
   const state = m.state()
   assert.equal(state.layout.rows[0]!.left.at(-1)!.id, 'model', 'the item stops at the zone end')
-  assert.deepEqual(state.layout.rows[0]!.right.map(ref => ref.id), ['plan-state', 'focus-mode'], 'the right zone is untouched')
+  assert.deepEqual(state.layout.rows[0]!.right.map(ref => ref.id), ['plan-state', 'display-preset'], 'the right zone is untouched')
   m.activate()
   assert.equal(m.state().mode, 'row')
   // Esc exits Move Mode back to the row editor (the plan's "Enter/Esc
