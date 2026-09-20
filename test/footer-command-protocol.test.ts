@@ -20,13 +20,13 @@ function mutableSnapshot(): DeepMutable<StatusSnapshot> {
 test('the V1 payload serializes the snapshot + geometry', () => {
   const snap = mutableSnapshot()
   snap.composition.model = { provider: 'deepseek', id: 'flash', displayName: 'flash' }
-  snap.interaction.focusMode = true
+  snap.interaction.displayPreset = 'focus'
   const input = buildCommandInput(snap, 160, 45)
   assert.equal(input.schemaVersion, 1)
   assert.deepEqual(input.surface, { width: 160, height: 45, fullscreen: false, focusedSeat: 'editor' })
   assert.deepEqual(input.view, { subject: 'main' })
   assert.equal(input.composition.model?.id, 'flash')
-  assert.equal(input.interaction.focusMode, true)
+  assert.equal(input.interaction.displayPreset, 'focus')
   // The payload is plain JSON (the command receives a string).
   const json = JSON.stringify(input)
   assert.ok(json.includes('"schemaVersion":1'))

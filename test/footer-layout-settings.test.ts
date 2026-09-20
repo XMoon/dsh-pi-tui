@@ -214,7 +214,7 @@ test('the compact phase re-renders items at the compact density before dropping'
   // A right zone pins 'focus'; the left zone must fit the remaining width.
   // The context item's compact form ('25%') is much shorter than its
   // preferred bar — the compact phase must keep it instead of dropping it.
-  snap.interaction.focusMode = true
+  snap.interaction.displayPreset = 'focus'
   const text = composer.render({
     snapshot: snap,
     layout: {

@@ -19,6 +19,7 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import { TranscriptFolder, windowMessages, type TranscriptToolMessage } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth, type StreamingToolPreview } from '../src/tui-app.ts'
+import type { DisplayState } from '../src/display-preset.ts'
 import type { ToolPresenter } from '../src/present.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -38,9 +39,9 @@ afterEach(() => {
   }
 })
 
-function startApp(): { vt: VirtualTerminal; app: TuiApp } {
+function startApp(displayState: DisplayState = { preset: 'full' }): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { displayState })
   app.start()
   startedApps.add(app)
   return { vt, app }
@@ -623,18 +624,15 @@ test('a session switch with the SAME turn number and revision renders the NEW ac
   app.stop()
 })
 
-test('boot restore: a persisted Focus ON applies to the app BEFORE the first frame (runner contract)', async () => {
-  // The runner restores the persisted focusMode into focusState and then —
-  // at the boot visual-settings stage, BEFORE the first normal display —
-  // calls app.setFocusMode(focusState.enabled) (index.ts). This test locks
-  // THAT ordering contract: an app receiving setFocusMode before its first
-  // transcript snapshot renders a running turn collapsed WITHOUT any
-  // /focus command — the model-side and UI-side halves of Focus cannot
-  // split across restarts (review blocker).
-  const { vt, app } = startApp()
+test('boot restore: the shared Focus preset applies BEFORE the first frame', async () => {
+  // Startup resolves persistence into the shared DisplayState before the app
+  // starts or receives its first transcript snapshot. The prompt and UI must
+  // therefore observe the same canonical preset without a /focus command.
+  const displayState: DisplayState = { preset: 'focus' }
+  const { vt, app } = startApp(displayState)
+  assert.equal(app.displayPreset(), 'focus')
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
-  app.setFocusMode(true) // boot restore — no /focus involved
   show(app, folder)      // the first snapshot lands AFTER the restore
   app.setFullscreen(true)
   await vt.waitForRender()

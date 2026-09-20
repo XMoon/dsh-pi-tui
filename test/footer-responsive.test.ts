@@ -115,7 +115,7 @@ test('all builtin styles stay inside the composer width policy', () => {
 
 test('a right zone is never covered by the left zone at any width', () => {
   const snap = busySnapshot() as DeepMutable<StatusSnapshot>
-  snap.interaction.focusMode = true
+  snap.interaction.displayPreset = 'focus'
   for (const width of WIDTHS) {
     const text = composer.render({ snapshot: snap, layout: RIGHT_ZONE_LAYOUT, width, context: CONTEXT })
     const rows = text.split('\n')
@@ -133,7 +133,7 @@ test('a right zone ALONE stays flush to the RIGHT edge (an empty left zone must 
   // snapshot), the old code joined the right items at the LEFT edge —
   // the right zone lost its alignment semantic.
   const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
-  snap.interaction.focusMode = true
+  snap.interaction.displayPreset = 'focus'
   for (const width of [80, 40, 20]) {
     const text = composer.render({
       snapshot: snap,
@@ -156,7 +156,7 @@ test('the right zone drops LOW-importance items before the rightmost high-import
   // a LOWER-importance neighbor was the better victim — on a narrow row
   // `version(10) focus(120)` must drop version, never the pinned focus.
   const snap = busySnapshot() as DeepMutable<StatusSnapshot>
-  snap.interaction.focusMode = true
+  snap.interaction.displayPreset = 'focus'
   // Width 10: the right zone (13 cells) alone exceeds the room the left
   // leaves (8) — item-level fitting must drop the low-importance version
   // and keep the high-importance focus (the old code truncated the whole
@@ -180,7 +180,7 @@ test('the right zone drops LOW-importance items before the rightmost high-import
 
 test('items drop by importance under pressure (the tail goes first)', () => {
   const snap = busySnapshot() as DeepMutable<StatusSnapshot>
-  snap.interaction.focusMode = true
+  snap.interaction.displayPreset = 'focus'
   // A narrow width with a right zone: the left zone must compact/drop the
   // LOWEST-importance items (version 10, performance 40, token-usage 50,
   // cache-hit 55...) while keeping the highest (permission 110, plan 115).

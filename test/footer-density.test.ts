@@ -78,7 +78,7 @@ function richSnapshot(): StatusSnapshot {
     steps: 191,
   }
   snap.usage.context = { usedTokens: 195_000, windowTokens: 272_000, percent: 72 }
-  snap.interaction.focusMode = true
+  snap.interaction.displayPreset = 'focus'
   snap.host.dshVersion = '0.1.2-alpha.2'
   return snap as StatusSnapshot
 }
