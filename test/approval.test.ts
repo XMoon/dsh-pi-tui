@@ -198,8 +198,8 @@ test('Approval decision keys beat a conflicting inspection remap', async () => {
     'the conflicting inspection remap must be effective')
   const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
   await viewport(vt)
-  vt.sendInput('y')
-  assert.equal(await decision, 'allowed-once', 'the fixed Approval decision must win over transcript inspection')
+  vt.sendInput('\x03') // Ctrl+C
+  assert.equal(await decision, 'cancelled', 'Approval fixed Ctrl+C must win over the conflicting transcript inspection remap')
   assert.equal(app.isToolOutputExpanded(), false, 'the conflicting inspection action must not run')
 })
 
