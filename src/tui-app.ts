@@ -3186,6 +3186,22 @@ interface ExitConfirmationTrigger {
   readonly clearsDraft: boolean
 }
 
+/** The semantic press/release fence for one fullscreen transcript cell. */
+type TranscriptCellGesture = {
+  ownerId: string
+  row: number
+  hitId: string
+  columns: number
+  termRows: number
+}
+
+/** One Question-owned transcript gesture. The Question object identity is
+ * part of the fence so a press cannot survive a question settle or transfer
+ * to the normal fullscreen click path. */
+type QuestionTranscriptGesture = TranscriptCellGesture & {
+  question: QuestionState
+}
+
 /** One rendered transcript block in the fullscreen row map (mouse
  * hit-testing): the message/activity owner, the painted height, the
  * attachment spans, the PTC sub-call header spans, the Workflow card hit
@@ -3361,6 +3377,10 @@ export class TuiApp {
    * validates it before acting — a question advance / repaint between
    * press and release must never transfer the click. */
   private questionPressGesture: import('./question.ts').QuestionMouseGesture | undefined
+  /** The Question-owned transcript press gesture. Kept separate from the
+   * normal fullscreen gesture so a Question cannot leak a background press
+   * into the normal click ladder after it settles. */
+  private questionTranscriptGesture: QuestionTranscriptGesture | undefined
   /** The press-time semantic identity of a fullscreen transcript/todo
    * cell (mouse parity): the release click may only act on the EXACT
    * identity that was pressed — an async transcript projection change
@@ -3373,9 +3393,17 @@ export class TuiApp {
    * sub-call / Workflow run-phase-member / attachment / Focus owner
    * collapse): a repaint that reinterprets the row can never pass the
    * fence even when the card object and the relative row are unchanged. */
-  private fullscreenCellGesture:
-    | { ownerId: string; row: number; hitId: string; columns: number; termRows: number }
-    | undefined
+  private fullscreenCellGesture: TranscriptCellGesture | undefined
+
+  /** Invalidate every fullscreen press/release latch at an ownership or
+   * surface boundary. A gesture captured by one owner must never be
+   * interpreted by a later modal, session, or screen. */
+  private clearFullscreenPointerGestures(): void {
+    this.fullscreenCellGesture = undefined
+    this.questionPressGesture = undefined
+    this.questionTranscriptGesture = undefined
+  }
+
   /** Flows waiting behind the active one (FIFO; shown on settle). */
   private readonly questionQueue: QuestionState[] = []
   /** The active Save Location prompt, if any (one on screen at a time). */
@@ -5115,6 +5143,8 @@ export class TuiApp {
       this.clearExitConfirmation()
       return this.handleSaveLocationKey(data)
     }
+    const modalInspection = this.handleModalTranscriptInspectionKey(data)
+    if (modalInspection !== undefined) return modalInspection
     if (this.activeQuestions !== undefined) {
       this.clearExitConfirmation()
       return this.handleQuestionKey(data)
@@ -6310,6 +6340,8 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     const active = this.fullscreen !== undefined
     if (enabled === active) return
+    this.clearFullscreenPointerGestures()
+    this.fullscreenPaintSnapshot = undefined
     // Entering fullscreen from a regular surface with NO effective expand key:
     // that surface never folded, so it cannot hold long-user disclosure state.
     // The clear is deliberately GLOBAL for the transition (the override map
@@ -6344,6 +6376,7 @@ export class TuiApp {
       this.events.onSearchClose?.('surface-change')
     }
     if (enabled) {
+      const openExternalUrl = this.openExternalUrl
       // The alt screen owns mouse handling (wheel scroll, drag selection,
       // right-click paste — pi's fullscreen behavior); a same-cell primary
       // click reaches us through its onCellClick callback so cards can be
@@ -6426,7 +6459,13 @@ export class TuiApp {
         // host owns both: the opener validates http/https and the paste
         // reads the clipboard then feeds a bracketed paste to the focused
         // component.
-        openUrl: this.openExternalUrl,
+        openUrl: openExternalUrl === undefined ? undefined : (url) => {
+          // TuiAltScreen activates OSC 8 links before it synthesizes the
+          // onCellClick callback, so modal ownership must be enforced here as
+          // well as in the Host click ladder.
+          if (this.activeQuestions !== undefined || this.activeApproval !== undefined) return
+          openExternalUrl(url)
+        },
         onRightClickPaste: this.readClipboardText === undefined ? undefined : () => {
           this.rightClickPasteFromClipboard()
         },
@@ -6481,8 +6520,6 @@ export class TuiApp {
       // PREVIOUS alt instance's last-painted snapshot (and any in-flight
       // gesture) BEFORE start, so a press immediately after re-entry can
       // never resolve against a frame the new surface never drew.
-      this.fullscreenPaintSnapshot = undefined
-      this.fullscreenCellGesture = undefined
       alt.start()
       // The alt screen starts with NO focused component: without this, every
       // key after Ctrl+F is dropped (the app-level listener still sees
@@ -9210,6 +9247,13 @@ export class TuiApp {
    * rebuilds would leave the map stale; the re-measure at this boundary
    * is the painted projection). The snapshot keeps STABLE values only. */
   private commitFullscreenPaintSnapshot(): void {
+    const previousSnapshot = this.fullscreenPaintSnapshot
+    const columns = this.terminal.columns
+    const termRows = this.terminal.rows
+    if (previousSnapshot !== undefined
+      && (previousSnapshot.columns !== columns || previousSnapshot.termRows !== termRows)) {
+      this.clearFullscreenPointerGestures()
+    }
     const scroll = this.fullscreenScroll
     const paintedHeight = (component: Component): number => this.fullscreen?.getPaintedBox(component)?.height ?? 0
     this.refreshMessageRows()
@@ -9334,11 +9378,15 @@ export class TuiApp {
     // card-level identity); a NON-secondary process row collapses the
     // owner turn.
     if (entry.collapseFocusOwnerOnClick !== undefined) {
-      if (isFocusSecondaryDisclosure(message)) return `message:toggle:${token}`
+      if (isFocusSecondaryDisclosure(message)) return `message:disclosure:${token}`
       return `focus:collapse:${entry.collapseFocusOwnerOnClick}`
     }
-    // The card-level toggle.
-    return `message:toggle:${token}`
+    // The card-level toggle. Secondary process cards get a distinct identity
+    // so the modal inspection whitelist can never reinterpret an ordinary
+    // message toggle as a disclosure after a repaint.
+    return isFocusSecondaryDisclosure(message)
+      ? `message:disclosure:${token}`
+      : `message:toggle:${token}`
   }
 
   /** The press/release semantic identity of one long-user disclosure control:
@@ -9438,6 +9486,126 @@ export class TuiApp {
     return undefined
   }
 
+  /** The current Question frame's screen bounds, using the same footer and
+   * frame rows as the existing Question click path. */
+  private questionFrameBounds(question: QuestionState): { top: number; bottom: number } | undefined {
+    const frame = question.frame
+    if (frame === undefined) return undefined
+    const footerHeight = this.footer.render(this.terminal.columns).length
+    const bottom = this.terminal.rows - footerHeight
+    return { top: bottom - frame.rows, bottom }
+  }
+
+  /** A hit identity that is safe to inspect while a modal owns the screen.
+   * This is deliberately narrower than the normal fullscreen click ladder:
+   * disclosure only, never an attachment, workflow, ordinary message, Todo,
+   * link, or plugin action. */
+  private isModalTranscriptDisclosureHit(hitId: string): boolean {
+    return hitId.startsWith('user:')
+      || hitId.startsWith('pending-user:')
+      || hitId.startsWith('focus:toggle:')
+      || hitId.startsWith('focus:collapse:')
+      || hitId.startsWith('ptc:')
+      || hitId.startsWith('message:disclosure:')
+  }
+
+  /** Apply one already-fenced modal disclosure hit. The caller has checked
+   * the painted and current semantic identities; this helper intentionally
+   * has no fallback to the ordinary fullscreen action ladder. */
+  private applyModalTranscriptDisclosure(entry: FullscreenRowEntry, entryIndex: number, inMessage: number): void {
+    const nextVisible = this.nextVisibleRowEntry(entryIndex)
+    if (entry.userDisclosureHit !== undefined) {
+      if (inMessage === entry.userDisclosureHit.row) this.applyUserDisclosureHit(entry.userDisclosureHit)
+      return
+    }
+    if (entry.hasTrailingSpacer && inMessage === entry.height - 1) {
+      const owner = this.blankRowFocusCollapseOwner(entry, nextVisible)
+      if (owner !== undefined) this.collapseFocusTurn(owner, { fullscreenViewport: 'anchor-turn' })
+      return
+    }
+    if (entry.activity !== undefined) {
+      this.toggleFocusTurn(entry.activity.turn)
+      return
+    }
+    const message = entry.message
+    if (message === undefined) return
+    if (entry.subCallHits !== undefined) {
+      const hit = entry.subCallHits.find(candidate => inMessage >= candidate.top && inMessage < candidate.top + candidate.height)
+      if (hit !== undefined) {
+        this.toggleSubCallExpanded(hit.subCallId)
+        return
+      }
+    }
+    // Workflow rows are intentionally inert here, even when their own hit
+    // metadata represents a disclosure header: modal inspection is not a
+    // workflow/action surface.
+    if (entry.workflowHits !== undefined) return
+    for (const attachment of entry.attachments) {
+      if (inMessage >= attachment.start && inMessage < attachment.end) return
+    }
+    if (entry.collapseFocusOwnerOnClick !== undefined) {
+      if (isFocusSecondaryDisclosure(message)) this.toggleMessageExpanded(message)
+      else this.collapseFocusTurn(entry.collapseFocusOwnerOnClick, { fullscreenViewport: 'anchor-turn' })
+      return
+    }
+    if (isFocusSecondaryDisclosure(message)) this.toggleMessageExpanded(message)
+  }
+
+  /** Record a Question-owned disclosure press against the last painted
+   * transcript snapshot. The Question identity is stored with the gesture so
+   * a settle/replacement cannot hand the release to another owner. */
+  private beginQuestionTranscriptInspection(question: QuestionState, y: number): void {
+    this.questionTranscriptGesture = undefined
+    const snapshot = this.fullscreenPaintSnapshot
+    if (snapshot === undefined) return
+    if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return
+    const cell = this.resolveFullscreenTranscriptCell(y, snapshot)
+    if (cell === undefined) return
+    const painted = snapshot.rows[cell.entryIndex]!
+    const hitId = painted.hits[cell.inMessage] ?? 'inert'
+    if (!this.isModalTranscriptDisclosureHit(hitId)) return
+    this.questionTranscriptGesture = {
+      question,
+      ownerId: painted.ownerId,
+      row: cell.inMessage,
+      hitId,
+      columns: snapshot.columns,
+      termRows: snapshot.termRows,
+    }
+  }
+
+  /** Complete a Question-owned disclosure click with the same live semantic
+   * re-check as the normal fullscreen path. The snapshot supplies what the
+   * user pressed; the refreshed live row map proves that target still means
+   * the same disclosure before any action runs. */
+  private completeQuestionTranscriptInspection(question: QuestionState, y: number): void {
+    const pressed = this.questionTranscriptGesture
+    this.questionTranscriptGesture = undefined
+    if (pressed === undefined || pressed.question !== question) return
+    const snapshot = this.fullscreenPaintSnapshot
+    if (snapshot === undefined) return
+    if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return
+    if (snapshot.columns !== pressed.columns || snapshot.termRows !== pressed.termRows) return
+    this.refreshMessageRows()
+    const cell = this.resolveFullscreenTranscriptCell(y, {
+      headerHeight: snapshot.headerHeight,
+      welcomeHeight: snapshot.welcomeHeight,
+      scrollTop: snapshot.scrollTop,
+      viewportHeight: snapshot.viewportHeight,
+      rows: this.messageRows,
+    })
+    if (cell === undefined) return
+    const entry = this.messageRows[cell.entryIndex]
+    if (entry === undefined) return
+    const ownerId = this.fullscreenRowOwnerId(entry, cell.entryIndex)
+    const hitId = this.fullscreenRowHitIdentity(entry, cell.inMessage, this.nextVisibleRowEntry(cell.entryIndex))
+    if (!this.isModalTranscriptDisclosureHit(hitId)
+      || pressed.ownerId !== ownerId
+      || pressed.row !== cell.inMessage
+      || pressed.hitId !== hitId) return
+    this.applyModalTranscriptDisclosure(entry, cell.entryIndex, cell.inMessage)
+  }
+
   /**
    * Map a fullscreen click (0-based screen cell, from the alt screen's
    * onCellClick) onto a transcript message and toggle its individual
@@ -9446,36 +9614,36 @@ export class TuiApp {
    * decides, and the Ctrl+O keyboard fold does not pierce them.
    */
   private handleFullscreenPress(x: number, y: number): void {
+    this.clearFullscreenPointerGestures()
     // The press half of a same-cell click: while a question owns the
     // modal front, record the flow's press-time semantic identity (the
     // release click in handleFullscreenClick validates it — a question
     // advance / repaint between press and release must never transfer
     // the click to a different target).
     const question = this.activeQuestions
-    if (question?.frame !== undefined) {
-      // The question owns the modal front: any pre-question todo/transcript
-      // gesture is dead — a press inside the frame must not leave a stale
-      // background identity that a later release (after the question
-      // closes) could resurrect.
-      this.fullscreenCellGesture = undefined
-      // A stale-geometry press cannot name a valid target: consume any
-      // prior gesture so a later release can never match it.
-      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) {
-        this.questionPressGesture = undefined
+    if (question !== undefined) {
+      // The question owns the modal front: normal transcript/todo gestures are
+      // dead, while a separate Question-owned latch may name one disclosure
+      // target outside the frame.
+      const frame = question.frame
+      // A question being remounted has no authoritative frame yet; consume
+      // the press rather than guessing background geometry.
+      if (frame === undefined) return
+      // A stale-geometry press cannot name a valid target: consume any prior
+      // gesture so a later release can never match it.
+      if (this.terminal.rows !== frame.termRows || this.terminal.columns !== frame.termColumns) return
+      const width = this.terminal.columns
+      const bounds = this.questionFrameBounds(question)
+      if (bounds === undefined) return
+      if (y >= bounds.top && y < bounds.bottom) {
+        if (x >= 2 && x <= width - 3) {
+          this.questionPressGesture = question.flow.beginMousePress(y - bounds.top - 1)
+        }
         return
       }
-      const width = this.terminal.columns
-      const height = this.terminal.rows
-      const footerHeight = this.footer.render(width).length
-      const seatHeight = question.frame.rows
-      const seatBottom = height - footerHeight
-      const seatTop = seatBottom - seatHeight
-      if (y >= seatTop && y < seatBottom && x >= 2 && x <= width - 3) {
-        this.questionPressGesture = question.flow.beginMousePress(y - seatTop - 1)
-      }
+      this.beginQuestionTranscriptInspection(question, y)
       return
     }
-    this.questionPressGesture = undefined
     // Any OTHER CAPTURING overlay owns the press: no transcript / dock /
     // todo identity below is reachable (the click is inert behind it). A
     // nonCapturing notice is non-modal, so background clicks still resolve.
@@ -9562,50 +9730,53 @@ export class TuiApp {
     // range is derived from the bottom: footer height + the frame's last
     // rendered height.
     const question = this.activeQuestions
-    if (question?.frame !== undefined) {
-      // The question owns the modal front: EVERY click while a question is
-      // up is captured here (in-frame clicks route to the flow; out-of-frame
-      // clicks and the stale-geometry window are ignored) — background todo/
-      // transcript interaction must not be reachable behind the modal. Any
-      // pre-question todo/transcript gesture is dead at branch entry (a
-      // cross-mode close before the release must not resurrect it on the
-      // background surface) — cleared BEFORE the stale-geometry guard, so
-      // a release that hits the resize-mismatch early return also drops it.
+    if (question !== undefined) {
+      // The question owns the modal front. Its frame keeps the existing
+      // editor-seat click behavior; outside the frame only the separately
+      // fenced transcript disclosure gesture is eligible.
       this.fullscreenCellGesture = undefined
-      // Stale-geometry guard: between a terminal resize (rows OR columns —
-      // a width change rewraps the body and shifts the flow's hit map) and
-      // the next repaint, the frame's rendered height and hit map still
-      // reflect the OLD terminal. A stale-geometry release cannot act:
-      // consume any prior gesture so it can never match a later click.
-      if (this.terminal.rows !== question.frame.termRows || this.terminal.columns !== question.frame.termColumns) {
+      const frame = question.frame
+      // A question being remounted has no authoritative frame yet; consume
+      // the release rather than guessing background geometry.
+      if (frame === undefined) {
         this.questionPressGesture = undefined
+        this.questionTranscriptGesture = undefined
+        return
+      }
+      // A stale-geometry release cannot act against either the question or
+      // the background frame.
+      if (this.terminal.rows !== frame.termRows || this.terminal.columns !== frame.termColumns) {
+        this.questionPressGesture = undefined
+        this.questionTranscriptGesture = undefined
         return
       }
       const width = this.terminal.columns
-      const height = this.terminal.rows
-      const footerHeight = this.footer.render(width).length
-      const seatHeight = question.frame.rows
-      const seatBottom = height - footerHeight
-      const seatTop = seatBottom - seatHeight
-      if (y >= seatTop && y < seatBottom) {
+      const bounds = this.questionFrameBounds(question)
+      if (bounds === undefined) {
+        this.questionPressGesture = undefined
+        this.questionTranscriptGesture = undefined
+        return
+      }
+      if (y >= bounds.top && y < bounds.bottom) {
         // Inside the frame: its side borders + padding occupy columns 0-1
         // and the last two; content rows start below the top border.
+        const gesture = this.questionPressGesture
+        this.questionPressGesture = undefined
+        this.questionTranscriptGesture = undefined
         if (x >= 2 && x <= width - 3) {
-          // The flow's content starts at seat column 2 (side borders +
-          // padding); pass the flow-local column so the free-text Input
-          // can position its cursor on a click while editing. The click
-          // may only act on the EXACT press-time identity (a question
-          // advance / repaint between press and release must not
-          // transfer it to a different target).
-          const gesture = this.questionPressGesture
-          this.questionPressGesture = undefined
-          question.flow.completeMouseClick(gesture, y - seatTop - 1, x - 2)
+          // The flow's content starts at seat column 2 (borders + padding);
+          // the flow validates the exact press-time question identity.
+          question.flow.completeMouseClick(gesture, y - bounds.top - 1, x - 2)
           this.requestRender()
         }
+        return
       }
+      this.questionPressGesture = undefined
+      this.completeQuestionTranscriptInspection(question, y)
       return
     }
     this.questionPressGesture = undefined
+    this.questionTranscriptGesture = undefined
     // Any OTHER managed overlay (search / settings / approvals / extension
     // overlays) owns the click: with one up, NO transcript / dock / todo
     // interaction below is reachable — concrete rows AND the blank-row
@@ -10232,7 +10403,8 @@ export class TuiApp {
     // click-coalescing window is equally session-scoped: a fresh click in
     // the new session must never be swallowed by the old session's
     // window.
-    this.fullscreenCellGesture = undefined
+    this.clearFullscreenPointerGestures()
+    this.fullscreenPaintSnapshot = undefined
     this.todoClickCoalesceUntil = 0
     // The Focus disclosures are session-scoped transient state too: a
     // switched-in session must never inherit the old session's turn
@@ -16776,6 +16948,7 @@ export class TuiApp {
     if (this.activeSaveLocation !== undefined) {
       this.settleSaveLocation(this.activeSaveLocation, { kind: 'cancelled' })
     }
+    this.clearFullscreenPointerGestures()
     this.renderApprovalDialog(pending)
     this.activeApproval = pending
     // M6: a capturing surface owns the input now — any pending leader
@@ -16895,7 +17068,23 @@ export class TuiApp {
     return dialog
   }
 
-  /** Route a key while a prompt is showing; every key is consumed. */
+  /**
+   * Allow the one modal-safe Host inspection action through before Question /
+   * Approval consume their ordinary input. The modal keeps the keyboard seat;
+   * this dispatch only mutates transcript disclosure through the normal action
+   * path, so Focus fullscreen, regular Focus, and remapped keys keep their
+   * existing semantics. No other Host shortcut passes this gate.
+   */
+  private handleModalTranscriptInspectionKey(data: string): TuiInputListenerResult | undefined {
+    if (this.activeQuestions === undefined && this.activeApproval === undefined) return undefined
+    if (!this.keybindings.matches(data, 'app.transcript.toggleExpand')) return undefined
+    this.clearExitConfirmation()
+    if (!this.dispatchResolvedAction('app.transcript.toggleExpand', data)) return undefined
+    return { consume: true }
+  }
+
+  /** Route a key while a prompt is showing; every key except the narrow
+   * transcript-disclosure inspection action is consumed. */
   private handleApprovalKey(data: string): TuiInputListenerResult {
     const pending = this.activeApproval
     if (pending === undefined) return undefined
@@ -16916,6 +17105,7 @@ export class TuiApp {
     if (pending.settled === true) return
     pending.settled = true
     if (this.activeApproval === pending) {
+      this.clearFullscreenPointerGestures()
       this.activeApproval = undefined
       // Fallback: if nothing is restored beneath the approval, input returns
       // to the editor.
@@ -17009,6 +17199,7 @@ export class TuiApp {
     // M6: a question owns the seat now — any pending leader sequence is
     // cancelled (focus-transition cancellation).
     this.keybindings.cancelLeader()
+    this.clearFullscreenPointerGestures()
     // A Host question is authoritative over a Client-local Save Location
     // prompt: presenting a question settles the prompt as cancelled (the
     // caller's owned workflow classifies it and notifies nothing).
@@ -17064,7 +17255,8 @@ export class TuiApp {
     }
   }
 
-  /** Route a key while a question flow is showing; every key is consumed. */
+  /** Route a key while a question flow is showing; the Host inspection
+   * exception is handled immediately before this all-key modal owner. */
   private handleQuestionKey(data: string): TuiInputListenerResult {
     const state = this.activeQuestions
     if (state === undefined) return undefined
@@ -17077,6 +17269,7 @@ export class TuiApp {
   private settleQuestions(state: QuestionState, answers: TuiQuestionAnswer[] | undefined): void {
     if (this.activeQuestions !== state || state.settled === true) return
     state.settled = true
+    this.clearFullscreenPointerGestures()
     if (state.onAbort !== undefined && state.signal !== undefined) {
       state.signal.removeEventListener('abort', state.onAbort)
     }
