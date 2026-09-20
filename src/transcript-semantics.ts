@@ -48,7 +48,7 @@ export function classifyTranscriptMessage(message: TranscriptMessage): Transcrip
         ? { class: 'process' }
         : { class: 'process', origin: message.origin }
     case 'system':
-      if (message.context === true) return { class: 'context', origin: 'injected-context' }
+      if (isSurfacedContext(message)) return { class: 'context', origin: 'injected-context' }
       if (message.origin === 'turn-max-tokens') return { class: 'attention', origin: message.origin }
       if (message.origin === 'llm-retry') return { class: 'process', origin: message.origin }
       return { class: 'context' }
@@ -63,3 +63,12 @@ export function classifyTranscriptMessage(message: TranscriptMessage): Transcrip
 
 /** Short alias for callers that phrase the operation as a semantic read. */
 export const transcriptSemanticOf = classifyTranscriptMessage
+
+/**
+ * Whether a system row is an injected context boundary that Focus keeps
+ * visible when its Thought is collapsed. The fold's authoritative `context`
+ * marker intentionally covers unknown/future injection producers too.
+ */
+export function isSurfacedContext(message: TranscriptMessage): boolean {
+  return message.kind === 'system' && message.context === true
+}

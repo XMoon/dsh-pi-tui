@@ -3499,7 +3499,7 @@ test('a steer claimed before reasoning is still identified durably', () => {
     'durable next-step identity must not depend on a prior visible process row')
 })
 
-test('expanded: a mid-turn injected/system row stays in its process position (never lifted to the lead)', () => {
+test('injected context stays chronological when expanded and surfaces when collapsed', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
@@ -3523,22 +3523,193 @@ test('expanded: a mid-turn injected/system row stays in its process position (ne
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1008, 8),
   ])
   const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
-  // Only the LEADING system prefix is the turn foundation; a mid-turn
-  // inject stays at its real chronological position inside the process.
+  // The mid-turn inject stays at its real chronological position when the
+  // Thought is expanded, but is a persistent context row rather than process.
   assert.deepEqual(blockKinds(expanded), ['user', 'activity', 'thinking', 'system', 'user', 'assistant'],
-    `a mid-turn inject must stay in its process position when expanded: ${blockKinds(expanded).join(',')}`)
+    `a mid-turn inject must stay chronological when expanded: ${blockKinds(expanded).join(',')}`)
   const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
-  // Collapsed Focus summarizes inputs only: the mid-turn inject is process
-  // content and stays hidden under the Thought — never lifted to the lead.
-  assert.deepEqual(blockKinds(collapsed), ['user', 'user', 'activity', 'assistant'],
-    `a mid-turn inject must not surface before the collapsed Thought: ${blockKinds(collapsed).join(',')}`)
+  // Collapsed Focus surfaces injected context alongside user/steer rows in raw
+  // relative order, while thinking/tool rows remain inside the Thought.
+  assert.deepEqual(blockKinds(collapsed), ['user', 'system', 'user', 'activity', 'assistant'],
+    `a mid-turn inject must surface before the collapsed Thought: ${blockKinds(collapsed).join(',')}`)
   const expandedSystem = expanded.find(block => block.kind === 'message' && block.message.kind === 'system')
   assert.ok(expandedSystem !== undefined && expandedSystem.kind === 'message' && expandedSystem.message.kind === 'system')
   assert.equal(expandedSystem.message.text, 'mid-turn reminder')
-  assert.equal(expandedSystem.collapseFocusOwnerOnClick, 0,
-    'a mid-turn inject is process content: it keeps the owner-turn collapse mark')
-  assert.ok(!collapsed.some(block => block.kind === 'message' && block.message.kind === 'system'),
-    'collapsed Focus must not surface a mid-turn inject')
+  assert.equal(expandedSystem.collapseFocusOwnerOnClick, undefined,
+    'a surfaced context row is persistent, not owner-only process content')
+  assert.equal(collapsed.filter(block => block.kind === 'message' && block.message.kind === 'system').length, 1,
+    'the mid-turn context row must surface exactly once')
+})
+
+test('collapsed Focus preserves interleaved user, steer, and injected-context order', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('ctx-a'), role: 'user',
+      content: [{ type: 'text', text: 'context A' }],
+      source: { kind: 'plugin', plugin: 'unknown-producer' },
+    }, 1001, 1),
+    eventAt('user/message', {
+      id: MessageId('interleaved-init'), role: 'user',
+      content: [{ type: 'text', text: 'initial prompt' }],
+      source: { kind: 'user' },
+    }, 1002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking A' } }, 1003, 3),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('interleaved-a'), name: 'read', arguments: '{}' }, 1004, 4),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('interleaved-r-a'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('interleaved-a'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('interleaved-a') },
+      },
+    }, 1005, 5),
+    eventAt('user/message', {
+      id: MessageId('ctx-b'), role: 'user',
+      content: [{ type: 'text', text: 'context B' }],
+      source: { kind: 'plugin', plugin: 'future-injector' },
+    }, 1006, 6),
+    ...claimedSteer('interleaved-steer', 'steer', 1007, 7),
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('interleaved-b'), name: 'read', arguments: '{}' }, 1010, 10),
+    eventAt('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('interleaved-r-b'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('interleaved-b'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('interleaved-b') },
+      },
+    }, 1011, 11),
+    eventAt('user/message', {
+      id: MessageId('ctx-c'), role: 'user',
+      content: [{ type: 'text', text: 'context C' }],
+      source: { kind: 'plugin', plugin: 'late-injector' },
+    }, 1012, 12),
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('interleaved-final'), role: 'assistant', content: [{ type: 'text', text: 'final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1013, 13),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1014, 14),
+  ])
+  const messages = folder.messages()
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.deepEqual(blockKinds(expanded), ['system', 'user', 'activity', 'thinking', 'tool', 'system', 'user', 'tool', 'system', 'assistant'])
+  const expandedContexts = expanded.flatMap(block => block.kind === 'message' && block.message.kind === 'system' ? [block] : [])
+  assert.equal(expandedContexts.length, 3)
+  assert.deepEqual(
+    expanded.flatMap(block => block.kind === 'message' && block.message.kind === 'system' ? [block.message.text] : []),
+    ['context A', 'context B', 'context C'],
+    'expanded context rows retain their raw A/B/C order',
+  )
+  const expandedContextIndexes = expanded.flatMap((block, index) =>
+    block.kind === 'message' && block.message.kind === 'system' ? [index] : [])
+  const expandedSteerIndex = expanded.findIndex(block =>
+    block.kind === 'message' && block.message.kind === 'user' && block.message.text === 'steer')
+  assert.ok(expandedContextIndexes[1] !== undefined && expandedContextIndexes[1] < expandedSteerIndex
+    && expandedContextIndexes[2] !== undefined && expandedSteerIndex < expandedContextIndexes[2],
+    'expanded context remains on the correct side of the steer')
+  for (const block of expandedContexts) assert.equal(block.collapseFocusOwnerOnClick, undefined)
+
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['system', 'user', 'system', 'user', 'system', 'activity', 'assistant'])
+  assert.deepEqual(
+    collapsed.flatMap(block => block.kind === 'message' && (block.message.kind === 'system' || block.message.kind === 'user')
+      ? [block.message.kind === 'system' ? block.message.text : block.message.text] : []),
+    ['context A', 'initial prompt', 'context B', 'steer', 'context C'],
+  )
+  assert.equal(folder.turnActivity(0)?.toolCalls, 2, 'surfaced context must not change tool counts')
+  const expandedMessages = expanded.flatMap((block): TranscriptMessage[] =>
+    block.kind === 'message' ? [block.message] : [])
+  const refolded = projectTools(expandedMessages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(refolded), blockKinds(collapsed),
+    'expanded → collapsed preserves the surfaced-context summary')
+  assert.deepEqual(
+    refolded.flatMap(block => block.kind === 'message' && block.message.kind === 'system' ? [block.message.text] : []),
+    ['context A', 'context B', 'context C'],
+    'refolded surfaced context remains in raw relative order',
+  )
+  const reexpanded = projectTools(expandedMessages, folder.turnActivities(), new Set([0]))
+  assert.deepEqual(blockKinds(reexpanded), blockKinds(expanded),
+    'expanded → collapsed → expanded keeps the same chronology')
+  assert.deepEqual(
+    reexpanded.flatMap(block => block.kind === 'message' && block.message.kind === 'system' ? [block.message.text] : []),
+    ['context A', 'context B', 'context C'],
+    're-expanded context rows retain their raw A/B/C order',
+  )
+  const full = projectFocus(messages, folder.turnActivities(), new Set(), false)
+  assert.deepEqual(full.map(block => block.kind === 'message' ? block.message : undefined), messages,
+    'Full keeps the raw chronology and does not hoist context')
+})
+
+test('inject-woken turns surface context before and during the collapsed Thought', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 2000, 0),
+    eventAt('user/message', {
+      id: MessageId('wake-a'), role: 'user',
+      content: [{ type: 'text', text: 'wake A' }],
+      source: { kind: 'plugin', plugin: 'subagent-settled' },
+    }, 2001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'wake thinking' } }, 2002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('wake-call'), name: 'read', arguments: '{}' }, 2003, 3),
+    eventAt('user/message', {
+      id: MessageId('wake-b'), role: 'user',
+      content: [{ type: 'text', text: 'wake B' }],
+      source: { kind: 'plugin', plugin: 'session-reference' },
+    }, 2004, 4),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('wake-final'), role: 'assistant', content: [{ type: 'text', text: 'awake' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 2005, 5),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2006, 6),
+  ])
+  const messages = folder.messages()
+  assert.deepEqual(blockKinds(projectTools(messages, folder.turnActivities(), new Set())), ['system', 'system', 'activity', 'assistant'])
+  assert.deepEqual(blockKinds(projectTools(messages, folder.turnActivities(), new Set([0]))), ['system', 'activity', 'thinking', 'tool', 'system', 'assistant'])
+})
+
+test('collapsed context never crosses a committed pre-steer assistant boundary', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 3000, 0),
+    eventAt('step/start', { turn: 0, step: 1 }, 3001, 1),
+    eventAt('user/message', steerMessage('committed-initial', 'initial'), 3002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: 'answer A' } }, 3003, 3),
+    queueSteer(steerMessage('committed-steer', 'steer'), 3004, 4),
+    assistantSettlement(0, 1, 'committed-a', 'answer A', 3005, 5, [{ type: 'text', text: 'answer A' }], 3003),
+    eventAt('step/end', { turn: 0, step: 1 }, 3006, 6),
+    claimSteer(3007, 7),
+    eventAt('step/start', { turn: 0, step: 2 }, 3008, 8),
+    eventAt('user/message', {
+      id: MessageId('committed-context-a'), role: 'user',
+      content: [{ type: 'text', text: 'context A' }],
+      source: { kind: 'plugin', plugin: 'agent-instructions' },
+    }, 3009, 9),
+    eventAt('user/message', steerMessage('committed-steer', 'steer'), 3010, 10),
+    eventAt('assistant/chunk', { turn: 0, step: 2, chunk: { type: 'reasoning-delta', index: 0, text: 'answer B thinking' } }, 3011, 11),
+    eventAt('user/message', {
+      id: MessageId('committed-context-b'), role: 'user',
+      content: [{ type: 'text', text: 'context B' }],
+      source: { kind: 'plugin', plugin: 'subagent-settled' },
+    }, 3012, 12),
+    assistantSettlement(0, 2, 'committed-b', 'answer B', 3013, 13),
+    eventAt('step/end', { turn: 0, step: 2 }, 3014, 14),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3015, 15),
+  ])
+  const messages = folder.messages()
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant', 'system', 'user', 'system', 'assistant'])
+  const collapsedTexts = collapsed.flatMap(block => {
+    if (block.kind !== 'message') return []
+    const message = block.message
+    return message.kind === 'user' || message.kind === 'assistant' || message.kind === 'system' ? [message.text] : []
+  })
+  assert.deepEqual(collapsedTexts, ['initial', 'answer A', 'context A', 'steer', 'context B', 'answer B'])
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  const expandedContextRows = expanded.filter((block): block is Extract<FocusProjectedBlock, { kind: 'message' }> =>
+    block.kind === 'message' && block.message.kind === 'system')
+  assert.equal(expandedContextRows.length, 2)
+  for (const block of expandedContextRows) assert.equal(block.collapseFocusOwnerOnClick, undefined)
 })
 
 test('expanded and collapsed: multiple opening injected rows keep their order and never duplicate', () => {

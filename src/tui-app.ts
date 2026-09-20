@@ -144,6 +144,7 @@ import { QuestionFlow } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
+import { isSurfacedContext } from './transcript-semantics.ts'
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
@@ -7295,11 +7296,14 @@ export class TuiApp {
 
   /** The current search target's owner turn (Focus temporary reveal). Gated on
    * the grant: after an explicit collapse the target must not force the Focus
-   * root open either. */
+   * root open either. Surfaced context is already visible in collapsed Focus,
+   * so searching it reveals only that row and never opens its Thought root. */
   private searchTargetTurn(): number | undefined {
     if (!this.searchRevealGranted) return undefined
     const message = this.searchTarget?.message
-    return message !== undefined && 'turn' in message ? message.turn : undefined
+    return message !== undefined && !isSurfacedContext(message) && 'turn' in message
+      ? message.turn
+      : undefined
   }
 
   /** Whether the CURRENT search target owns this message (effective reveal).

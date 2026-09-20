@@ -497,13 +497,14 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   visibility pair is deleted.
 - **Focus separates turn foundation from process chronology
   (projection-only)**: a LEADING injected-context prefix that wakes a
-  turn is persistent input context and renders before the Thought —
-  expanded and collapsed. Only the leading prefix counts; mid-turn
-  injected context stays process content at its real position. Collapsed
-  Focus summarizes inputs: opening injected context + ALL human user rows
-  precede the Thought, even when a user row was a same-turn steer.
+  turn is the expanded Thought foundation and renders before the Thought.
+  Every injected-context row marked `context: true` is also a persistent
+  surfaced context boundary in collapsed Focus, where it remains visible
+  alongside human user/steer rows in raw relative order.
   Expanded Focus preserves process chronology after the foundation: later
-  steers and mid-turn injected context return to their real positions.
+  steers and surfaced context return to their real positions and remain
+  unmarked as owner-only process content. Searching surfaced context reveals
+  the visible row without opening its Thought root.
   The durable `steer`/source facts are never rewritten, and injected
   context still does not occupy Think/Tool/Message slots and never counts
   as a tool.
