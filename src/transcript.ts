@@ -61,6 +61,12 @@ export interface PresentedFilePresentation {
   readonly description?: string
 }
 
+/** Source-derived origins for synthetic system presentation rows. */
+export type TranscriptSystemOrigin = 'llm-retry' | 'turn-max-tokens'
+
+/** Source-derived origins for synthetic tool presentation rows. */
+export type TranscriptToolOrigin = 'command' | 'subagent-delegation' | 'turn-error' | 'turn-interrupted'
+
 /** One renderable message in the TUI transcript. */
 export type TranscriptMessage =
   /**
@@ -107,7 +113,7 @@ export type TranscriptMessage =
    * other `kind: 'system'` presentation rows (llm/retry, max-tokens), which
    * are orchestration and must never be treated as turn foundation.
    */
-  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; icon?: IconSemantic; context?: true }
+  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; icon?: IconSemantic; context?: true; origin?: TranscriptSystemOrigin }
   | TranscriptToolMessage
   | TranscriptWorkflowMessage
   /** Older-than-window turns collapsed into one line (windowing). */
@@ -442,6 +448,8 @@ export interface TranscriptToolMessage {
   args: string
   result: string
   status: 'ok' | 'error' | 'running'
+  /** Source-derived provenance for synthetic non-model tool rows. */
+  origin?: TranscriptToolOrigin
   /** The completed result's content blocks, for tool-owned presentation. */
   resultBlocks?: readonly ContentBlock[]
   /** The tool-private presentation payload from the tool/result event. */
@@ -4326,11 +4334,13 @@ export class TranscriptFolder {
           // degrades to the bare marker instead of crashing the fold
           // (plan §10.2 — Focus aggregates the same events).
           const error = event.data.reason.error
-          this.appendItem({ kind: 'tool', turn: endTurn, name: 'error', args: '', result: displayFailureText(error), status: 'error' })
+          this.appendItem({ kind: 'tool', turn: endTurn, name: 'error', args: '', result: displayFailureText(error), status: 'error', origin: 'turn-error' })
         } else if (event.data.reason.kind === 'aborted') {
-          this.appendItem({ kind: 'tool', turn: endTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error' })
+          this.appendItem({ kind: 'tool', turn: endTurn, name: 'interrupted', args: '', result: 'cancelled by user', status: 'error', origin: 'turn-interrupted' })
+        } else if (event.data.reason.kind === 'interrupted') {
+          this.appendItem({ kind: 'tool', turn: endTurn, name: 'interrupted', args: '', result: 'interrupted', status: 'error', origin: 'turn-interrupted' })
         } else if (event.data.reason.kind === 'max-tokens') {
-          this.appendItem({ kind: 'system', turn: endTurn, text: 'max tokens reached — output truncated' })
+          this.appendItem({ kind: 'system', turn: endTurn, text: 'max tokens reached — output truncated', origin: 'turn-max-tokens' })
         }
         // Focus aggregation: turn/end is the authoritative finalization —
         // it settles timing, the end reason, and makes the final assistant
@@ -4421,7 +4431,7 @@ export class TranscriptFolder {
         const label = maxRetries === undefined
           ? `llm retry ${retry} in ${Math.round(delayMs / 1000)}s`
           : `llm retry ${retry}/${maxRetries} in ${Math.round(delayMs / 1000)}s`
-        this.appendItem({ kind: 'system', turn, text: `${label} — ${displayFailureText(failure)}` })
+        this.appendItem({ kind: 'system', turn, text: `${label} — ${displayFailureText(failure)}`, origin: 'llm-retry' })
         // Focus aggregation: retries are orchestration, not a Tool — they
         // stay in the expanded process and never touch the Tool slot
         // (plan §16.2).
@@ -4441,7 +4451,7 @@ export class TranscriptFolder {
           : event.data.text === undefined || event.data.text === ''
             ? ''
             : ` — ${event.data.text}`
-        this.appendItem({ kind: 'tool', turn: this.currentTurn, name: `/${name}`, args: '', result: `executed${outcome}`, status: event.data.kind === 'error' ? 'error' : 'ok' })
+        this.appendItem({ kind: 'tool', turn: this.currentTurn, name: `/${name}`, args: '', result: `executed${outcome}`, status: event.data.kind === 'error' ? 'error' : 'ok', origin: 'command' })
         break
       }
       case 'subagent/descriptor': {
@@ -4458,6 +4468,7 @@ export class TranscriptFolder {
           turn: this.currentTurn,
           name: 'subagent',
           args: label ?? 'subagent',
+           origin: 'subagent-delegation',
           result,
           status: 'ok',
         })
