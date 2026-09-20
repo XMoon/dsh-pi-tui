@@ -156,10 +156,81 @@ test('compares an official eventSource cut through Transcript, Window, and Focus
   )
   const shadow = new RemotePresentationReadShadow(direct, remote, generations.source)
 
-  const report = reportOf(await shadow.compare({ sessionId: 'session', projection: { focusMode: true } }))
+  const report = reportOf(await shadow.compare({ sessionId: 'session', projection: { displayPreset: 'focus' } }))
   assert.equal(report.comparable, true)
   assert.deepEqual(report.mismatches, [])
   assert.deepEqual(report.skipped, [])
+  shadow.dispose()
+})
+
+test('Compact projection is rejected before it can alias Full', () => {
+  assert.throws(
+    () => projectPresentationSnapshot(directSnapshot(settledEvents()), { displayPreset: 'compact' }),
+    /Compact display projection is not available/,
+  )
+})
+
+test('canonical Full projection keeps Direct/Remote parity', async () => {
+  const generations = generationHarness()
+  const events = [
+    event('turn/start', 0, { turn: 0 }),
+    event('user/message', 1, {
+      turn: 0,
+      id: 'user-activity',
+      role: 'user',
+      content: [{ type: 'text', text: 'run it' }],
+      source: { kind: 'user' },
+    }),
+    event('step/start', 2, { turn: 0, step: 0 }),
+    event('tool/call', 3, {
+      turn: 0,
+      step: 0,
+      callId: 'activity-call',
+      name: 'bash',
+      arguments: '{"command":"echo activity"}',
+    }),
+    event('assistant/message', 4, {
+      turn: 0,
+      step: 0,
+      message: {
+        id: 'assistant-activity',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+      },
+    }),
+    event('turn/end', 5, { turn: 0, reason: { kind: 'completed' } }),
+  ]
+  const directReader = new DirectPresentationReader({
+    agentFor: id => id === 'session' ? { session: { snapshotEvents: () => events } } : undefined,
+    assistantStreamBaselineFor: () => [],
+  })
+  const entries: RemotePresentationEventEntry[] = events.map(eventValue => ({ type: 'event' as const, event: eventValue }))
+  const remote = new RemotePresentationReader(
+    retainableSource<RemotePresentationBinding>({ 'session': officialBinding(entries) }).source,
+    generations.source,
+  )
+  const shadow = new RemotePresentationReadShadow(directReader, remote, generations.source)
+  const report = reportOf(await shadow.compare({ sessionId: 'session', projection: { displayPreset: 'full' } }))
+  assert.equal(report.comparable, true)
+  assert.deepEqual(report.mismatches, [])
+  assert.deepEqual(report.skipped, [])
+  const fullProjection = projectPresentationSnapshot(directSnapshot(events), { displayPreset: 'full' })
+  const focusProjection = projectPresentationSnapshot(directSnapshot(events), { displayPreset: 'focus' })
+  assert.equal(
+    fullProjection.focus.some(block => (block as { kind?: string }).kind === 'activity'),
+    false,
+    'Full must not project a Focus activity block',
+  )
+  assert.equal(
+    focusProjection.focus.some(block => (block as { kind?: string }).kind === 'activity'),
+    true,
+    'Focus must fold intermediate activity into a Focus block',
+  )
+  assert.ok(
+    fullProjection.messages.some(message => (message as { kind?: string }).kind === 'tool'),
+    'Full must retain the intermediate tool message in the transcript',
+  )
   shadow.dispose()
 })
 
@@ -219,12 +290,12 @@ test('Delivered Files survive Direct/Remote Transcript, Window, and Focus parity
 
   const report = reportOf(await shadow.compare({
     sessionId: 'session',
-    projection: { focusMode: true, windowTurns: 20 },
+    projection: { displayPreset: 'focus', windowTurns: 20 },
   }))
   assert.equal(report.comparable, true)
   assert.deepEqual(report.mismatches, [])
 
-  const projection = projectPresentationSnapshot(directSnapshot(events), { focusMode: true, windowTurns: 20 })
+  const projection = projectPresentationSnapshot(directSnapshot(events), { displayPreset: 'focus', windowTurns: 20 })
   const closing = projection.messages.find(message => (
     (message as { kind?: string; text?: string }).kind === 'assistant'
     && (message as { text?: string }).text === 'final'
@@ -301,11 +372,11 @@ test('fresh same-turn steer parity hydrates durable history before replaying the
   const remote = { ...directSnapshot(events, liveInputs), coverage: 'bounded' as const }
   const shadow = new RemotePresentationReadShadow(reader(direct), reader(remote), generations.source)
 
-  const report = reportOf(await shadow.compare({ sessionId: 'session', projection: { focusMode: true } }))
+  const report = reportOf(await shadow.compare({ sessionId: 'session', projection: { displayPreset: 'focus' } }))
   assert.equal(report.comparable, true)
   assert.deepEqual(report.mismatches, [])
 
-  const projection = projectPresentationSnapshot(direct, { focusMode: true, windowTurns: 20 })
+  const projection = projectPresentationSnapshot(direct, { displayPreset: 'focus', windowTurns: 20 })
   assert.deepEqual(
     projection.messages.map(message => `${(message as { kind: string }).kind}:${(message as { text?: string }).text ?? ''}`),
     ['user:initial prompt', 'assistant:assistant A', 'user:human steer', 'assistant:assistant B'],
@@ -364,7 +435,7 @@ test('preserves Focus context/final ownership and history no-op semantics', () =
     }),
     event('turn/end', 6, { turn: 0, reason: { kind: 'completed' } }),
   ]
-  const projection = projectPresentationSnapshot(directSnapshot(events), { focusMode: true, windowTurns: 20 })
+  const projection = projectPresentationSnapshot(directSnapshot(events), { displayPreset: 'focus', windowTurns: 20 })
   assert.equal(projection.messages.some(message => (message as { context?: true }).context === true), true)
   const focus = projection.focus as readonly { kind: string; message?: { text?: string } }[]
   assert.equal(focus.filter(block => block.kind === 'message' && block.message?.text === 'final').length, 1)

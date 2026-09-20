@@ -1948,6 +1948,109 @@ test('startup applies the persisted wheel step BEFORE the first fullscreen mount
 })
 
 
+test('startup canonicalizes an unsupported display preset, preserves legacy/raw settings, and retries after a failed write', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-display-migration-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const probe = installProbe()
+  life.defer(probe.restore)
+  const resumed: FakeSession = fakeSession({
+    id: 'display-migration-session',
+    header: { id: 'display-migration-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('display migration'),
+  })
+  const userFooterItems = [{ id: 'user-item', kind: 'text', text: 'keep me' }]
+  const doc: Record<string, unknown> = {
+    theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'off',
+    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
+    displayPreset: 'compact', focusMode: 'on', wheelScrollLines: '1',
+    notificationMode: 'unfocused', notificationMethod: 'auto',
+    footerCustomItems: [{ id: 'project-item' }], keybindings: { tab: 'custom' },
+  }
+  const replacements: Record<string, unknown>[] = []
+  let failFirstWrite = true
+  const settings = {
+    register: () => ({
+      get: () => ({ ...doc }),
+      replace: async (next: Record<string, unknown>) => {
+        replacements.push({ ...next })
+        if (failFirstWrite) {
+          failFirstWrite = false
+          throw new Error('display migration write failed')
+        }
+        Object.assign(doc, next)
+      },
+    }),
+    describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: userFooterItems } }],
+  }
+  const mount = async (): Promise<{ context: Context; fiber: { dispose: () => Promise<unknown> }; app: TuiApp; harness: RunnerHarness }> => {
+    const context = new Context()
+    const harness = makeHarness(home, resumed)
+    context.provide('settings', settings as never)
+    const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+    await settle()
+    const app = probe.apps.at(-1)
+    assert.ok(app !== undefined, 'the production runner must create a TuiApp')
+    return { context, fiber, app, harness }
+  }
+
+  const first = await mount()
+  assert.equal(first.app.displayPreset(), 'full', 'unsupported Compact must resolve to Full before the first frame')
+  const beforeCompactFrame = vt.getViewport().join('\n')
+  const compactHandler = (first.harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
+  assert.ok(compactHandler !== undefined, 'the production runner must register /display')
+  const compactResult = await (compactHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'compact' })
+  assert.deepEqual(compactResult, { kind: 'error', text: 'Compact display is not available in this build.' })
+  await settle()
+  assert.equal(replacements.length, 1, 'Compact must not trigger a second persistence write')
+  assert.equal(doc.displayPreset, 'compact', 'Compact must not mutate the settings document')
+  assert.equal(first.app.displayPreset(), 'full', 'Compact must not mutate the live display state')
+  assert.equal(vt.getViewport().join('\n'), beforeCompactFrame, 'Compact must not repaint the production surface')
+  assert.equal(replacements.length, 1, 'boot must attempt one canonical migration write')
+  assert.equal(doc.displayPreset, 'compact', 'a failed migration must not change the live settings document')
+  await first.fiber.dispose()
+  await disposeContext(first.context)
+
+  const second = await mount()
+  assert.equal(second.app.displayPreset(), 'full')
+  assert.equal(replacements.length, 2, 'a later boot must retry the failed canonicalization')
+  assert.equal(doc.displayPreset, 'full')
+  assert.equal(doc.focusMode, 'on', 'legacy focusMode remains migration-only and preserved')
+  assert.deepEqual(doc.footerCustomItems, userFooterItems, 'whole-document migration preserves the USER footer definitions')
+  assert.deepEqual(doc.keybindings, { tab: 'custom' }, 'unknown settings pass-through survives migration')
+  assert.equal(replacements[1]?.displayPreset, 'full')
+  await second.fiber.dispose()
+  await disposeContext(second.context)
+
+  // Remove the canonical field to exercise the real legacy Focus fallback
+  // through apply/compose, not only the pure resolver.
+  doc.displayPreset = undefined
+  const third = await mount()
+  assert.equal(third.app.displayPreset(), 'focus', 'legacy focusMode must apply before the first production frame')
+  assert.equal(replacements.length, 3)
+  assert.equal(replacements[2]?.displayPreset, 'focus', 'legacy boot must canonicalize to Focus')
+  assert.equal(doc.focusMode, 'on', 'legacy focusMode remains preserved after canonicalization')
+
+  const displayHandler = (third.harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
+  assert.ok(displayHandler !== undefined, 'the production runner must register /display')
+  const displayResult = await (displayHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'full' })
+  assert.deepEqual(displayResult, { kind: 'success', text: 'Display: full.' })
+  await settle()
+  assert.equal(doc.displayPreset, 'full', 'the production canonical setter must persist displayPreset')
+  assert.equal(doc.focusMode, 'on', 'the production display write must not mutate legacy focusMode')
+  assert.equal(replacements.at(-1)?.displayPreset, 'full')
+  await third.fiber.dispose()
+  await disposeContext(third.context)
+})
+
 test('live repaint preserves manual scrolling in the latest window', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-live-follow-')
