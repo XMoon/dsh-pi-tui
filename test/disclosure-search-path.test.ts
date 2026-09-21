@@ -421,6 +421,25 @@ test('a parked cluster-member override behind a collapsed cluster does not consu
   assert.equal(overrides.get(second), true, 'the parked override is preserved (manual state survives)')
 })
 
+test('a visible local shell card override is collapsed by the first regular Ctrl+O', async () => {
+  const { vt, app } = startApp('compact')
+  const long = Array.from({ length: 30 }, (_, index) => `shell line ${index}`).join('\n')
+  const card = app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell', args: 'ls -la', result: long, status: 'ok',
+  })
+  await viewport(vt)
+  // Simulate a fullscreen click-expand that survives the return to regular.
+  ;(app as unknown as { toggleMessageExpanded(message: TranscriptMessage): void }).toggleMessageExpanded(card)
+  const expanded = await viewport(vt)
+  assert.ok(expanded.includes('shell line 0'), 'precondition: the local shell card is expanded')
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'precondition: the master is off')
+
+  vt.sendInput('\x0f')
+  const collapsed = await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the visible local card must be collapsed by the first press')
+  assert.ok(!collapsed.includes('shell line 0'), `the local card folds:\n${collapsed}`)
+})
+
 test('a cluster reveal promotes the cluster owner on an ordinary dismiss', async () => {
   const { vt, app } = startApp('compact')
   const first: TranscriptMessage = {
