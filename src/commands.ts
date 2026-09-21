@@ -1270,6 +1270,10 @@ function applyDisplayPreset(runner: TuiCommandRunner, preset: DisplayPreset): Di
   if (!isDisplayPresetAvailable(preset)) return { kind: 'unsupported', preset }
   const setter = runner.setDisplayPreset
   if (setter !== undefined) return setter(preset)
+  // The legacy seam can only express Focus vs non-Focus. Compact has no
+  // representation there, so it must FAIL rather than silently activate Full
+  // (Compact must never be a Full alias).
+  if (preset !== 'focus' && preset !== 'full') return { kind: 'unsupported', preset }
   runner.setFocusMode(preset === 'focus')
   return { kind: 'applied', preset }
 }
@@ -2173,9 +2177,9 @@ export function registerTuiCommands(
           {
             id: 'display-preset',
             label: 'Display',
-            description: 'Transcript disclosure preset; Focus collapses intermediate activity into a live Thought block',
+            description: 'Transcript disclosure preset; Focus collapses intermediate activity into a live Thought block, Compact folds contiguous process into Work spans',
             currentValue: displayPresetOf(runner),
-            values: ['full', 'focus'],
+            values: ['full', 'compact', 'focus'],
           },
           {
             id: 'notification-mode',
@@ -2555,7 +2559,7 @@ export function registerTuiCommands(
               }
             }
           } else if (id === 'display-preset') {
-            if (value === 'full' || value === 'focus') {
+            if (value === 'full' || value === 'compact' || value === 'focus') {
               applyDisplayPreset(runner, value)
             }
           } else if (id === 'notification-mode') {
@@ -2774,12 +2778,9 @@ export function registerTuiCommands(
         return { kind: 'success', text }
       }
       if (verb === '' || verb === 'status') return report(`Display: ${displayPresetOf(runner)}.`)
-      if (verb === 'compact') {
-        return { kind: 'error', text: 'Compact display is not available in this build.' }
-      }
-      if (verb === 'full' || verb === 'focus') {
+      if (verb === 'full' || verb === 'focus' || verb === 'compact') {
         const result = applyDisplayPreset(runner, verb)
-        if (result.kind === 'unsupported') return { kind: 'error', text: 'Compact display is not available in this build.' }
+        if (result.kind === 'unsupported') return { kind: 'error', text: `Display preset "${verb}" is not available in this build.` }
         return report(`Display: ${verb}.`)
       }
       return { kind: 'error', text: `unknown /display verb "${verb}" (full|focus|compact|status)` }

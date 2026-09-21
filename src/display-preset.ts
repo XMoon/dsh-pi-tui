@@ -1,10 +1,10 @@
 /**
- * Canonical transcript display presets and their PR2 foundation policy.
+ * Canonical transcript display presets and their layered disclosure policy.
  *
- * DisplayPreset is the one runtime vocabulary for presentation state. Compact
- * is intentionally part of the type and policy table before its renderer is
- * available; the availability gate keeps PR2 from claiming a Full renderer is
- * Compact.
+ * DisplayPreset is the one runtime vocabulary for presentation state. Every
+ * preset whose projection exists in this build is available; the availability
+ * gate exists so a future preset can never be claimed by another preset's
+ * renderer before its own projection ships.
  * @module @xmoon76/dsh-pi-tui/display-preset
  */
 
@@ -40,7 +40,6 @@ export type DisplayPresetResolutionSource =
   | 'legacy-focus'
   | 'legacy-full'
   | 'invalid-canonical'
-  | 'unsupported-canonical'
 
 /** The resolved runtime preset and whether the canonical field needs writing. */
 export interface DisplayPresetResolution {
@@ -54,9 +53,9 @@ export function isDisplayPreset(value: unknown): value is DisplayPreset {
   return value === 'focus' || value === 'compact' || value === 'full'
 }
 
-/** PR2 exposes only presets whose projections already exist. */
+/** Every preset whose projection exists in this build ships as available. */
 export function isDisplayPresetAvailable(preset: DisplayPreset): boolean {
-  return preset === 'focus' || preset === 'full'
+  return preset === 'focus' || preset === 'compact' || preset === 'full'
 }
 
 /** Whether a preset enables the model-facing Focus behavioral policy. */
@@ -64,7 +63,7 @@ export function isFocusDisplayPreset(preset: DisplayPreset): boolean {
   return preset === 'focus'
 }
 
-/** The layered disclosure contract future projections will consume. */
+/** The layered disclosure contract every preset projection consumes. */
 export function displayPolicyFor(preset: DisplayPreset): DisplayDisclosurePolicy {
   switch (preset) {
     case 'focus':
@@ -77,21 +76,16 @@ export function displayPolicyFor(preset: DisplayPreset): DisplayDisclosurePolicy
 }
 
 /**
- * Resolve the canonical field before the legacy Focus field. A recognized but
- * unavailable Compact value is intentionally pinned to Full rather than kept
- * as a hidden request that could activate after a later upgrade.
+ * Resolve the canonical field before the legacy Focus field. Every recognized
+ * preset (Compact included) is canonical as of PR3 and is never rewritten; an
+ * unrecognized value falls back to Full.
  */
 export function resolveDisplayPreset(input: PersistedDisplayInput): DisplayPresetResolution {
   if (input.displayPreset !== undefined) {
-    switch (input.displayPreset) {
-      case 'focus':
-      case 'full':
-        return { preset: input.displayPreset, canonicalize: false, source: 'canonical' }
-      case 'compact':
-        return { preset: 'full', canonicalize: true, source: 'unsupported-canonical' }
-      default:
-        return { preset: 'full', canonicalize: true, source: 'invalid-canonical' }
+    if (isDisplayPreset(input.displayPreset)) {
+      return { preset: input.displayPreset, canonicalize: false, source: 'canonical' }
     }
+    return { preset: 'full', canonicalize: true, source: 'invalid-canonical' }
   }
   if (input.focusMode === 'on') {
     return { preset: 'focus', canonicalize: true, source: 'legacy-focus' }

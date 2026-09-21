@@ -15,20 +15,20 @@ import {
   type DisplayState,
 } from '../src/display-preset.ts'
 
-test('recognizes the complete display vocabulary but exposes only Full/Focus', () => {
+test('recognizes the complete display vocabulary and exposes every preset', () => {
   assert.equal(isDisplayPreset('focus'), true)
   assert.equal(isDisplayPreset('compact'), true)
   assert.equal(isDisplayPreset('full'), true)
   assert.equal(isDisplayPreset('other'), false)
   assert.equal(isDisplayPresetAvailable('focus'), true)
   assert.equal(isDisplayPresetAvailable('full'), true)
-  assert.equal(isDisplayPresetAvailable('compact'), false)
+  assert.equal(isDisplayPresetAvailable('compact'), true)
   assert.equal(isFocusDisplayPreset('focus'), true)
   assert.equal(isFocusDisplayPreset('full'), false)
   assert.equal(isFocusDisplayPreset('compact'), false)
 })
 
-test('returns preset disclosure policy without activating Compact', () => {
+test('returns each preset disclosure policy', () => {
   assert.deepEqual(displayPolicyFor('focus'), {
     turnLayer: 'collapsed',
     processLayer: 'collapsed',
@@ -46,7 +46,7 @@ test('returns preset disclosure policy without activating Compact', () => {
   })
 })
 
-test('canonical persistence wins over legacy Focus and invalidates Compact in PR2', () => {
+test('canonical persistence wins over legacy Focus for every recognized preset', () => {
   assert.deepEqual(resolveDisplayPreset({ displayPreset: 'focus', focusMode: 'off' }), {
     preset: 'focus', canonicalize: false, source: 'canonical',
   })
@@ -54,7 +54,7 @@ test('canonical persistence wins over legacy Focus and invalidates Compact in PR
     preset: 'full', canonicalize: false, source: 'canonical',
   })
   assert.deepEqual(resolveDisplayPreset({ displayPreset: 'compact', focusMode: 'on' }), {
-    preset: 'full', canonicalize: true, source: 'unsupported-canonical',
+    preset: 'compact', canonicalize: false, source: 'canonical',
   })
   assert.deepEqual(resolveDisplayPreset({ displayPreset: 'garbage', focusMode: 'on' }), {
     preset: 'full', canonicalize: true, source: 'invalid-canonical',
@@ -103,7 +103,7 @@ test('one shared DisplayState drives the Focus prompt, TuiApp, and status projec
   app.dispose()
 })
 
-test('TuiApp shares the canonical state and rejects Compact without mutation', async () => {
+test('TuiApp shares the canonical state and applies Compact without Focus behavior', async () => {
   const displayState: DisplayState = { preset: 'full' }
   const statusStore = new StatusStore()
   let notifications = 0
@@ -124,15 +124,17 @@ test('TuiApp shares the canonical state and rejects Compact without mutation', a
   assert.equal(app.isFocusModeEnabled(), true)
   assert.equal(statusStore.snapshot().interaction.displayPreset, 'focus')
   await vt.waitForRender()
-  const beforeCompactFrame = vt.getViewport().join('\n')
   const beforeCompactRevision = statusStore.revision()
   const beforeCompactNotifications = notifications
-  assert.deepEqual(app.setDisplayPreset('compact'), { kind: 'unsupported', preset: 'compact' })
-  assert.equal(displayState.preset, 'focus')
-  assert.equal(statusStore.snapshot().interaction.displayPreset, 'focus')
-  assert.equal(statusStore.revision(), beforeCompactRevision, 'Compact must not update status')
-  assert.equal(notifications, beforeCompactNotifications, 'Compact must not notify the footer')
-  assert.equal(vt.getViewport().join('\n'), beforeCompactFrame, 'Compact must not repaint the surface')
+  assert.deepEqual(app.setDisplayPreset('compact'), { kind: 'applied', preset: 'compact' })
+  assert.equal(displayState.preset, 'compact')
+  assert.equal(app.isFocusModeEnabled(), false, 'Compact must not enable the Focus behavioral policy')
+  assert.equal(statusStore.snapshot().interaction.displayPreset, 'compact')
+  assert.ok(statusStore.revision() > beforeCompactRevision, 'Compact must update the status projection')
+  assert.ok(notifications > beforeCompactNotifications, 'Compact must notify the footer')
+  await vt.waitForRender()
+  assert.deepEqual(app.setDisplayPreset('compact'), { kind: 'unchanged', preset: 'compact' })
+  assert.equal(displayState.preset, 'compact', 're-applying the live preset is unchanged, not a reset')
   unsubscribe()
   app.dispose()
 })

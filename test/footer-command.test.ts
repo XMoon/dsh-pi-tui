@@ -397,15 +397,14 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     return () => {}
   }) as TuiApp['openSettings']
   const applied: Array<{ footerLayout?: unknown; footerCustomItems?: unknown }> = []
-  const displayWrites: ('full' | 'focus')[] = []
+  const displayWrites: ('full' | 'focus' | 'compact')[] = []
   const persistedDisplayDocs: Record<string, unknown>[] = []
-  let displayPreset: 'full' | 'focus' = 'full'
+  let displayPreset: 'full' | 'focus' | 'compact' = 'full'
   const runner: TuiCommandRunner = {
     ctx,
     app,
     displayPreset: () => displayPreset,
     setDisplayPreset: (preset) => {
-      if (preset === 'compact') return { kind: 'unsupported', preset }
       if (displayPreset === preset) return { kind: 'unchanged', preset }
       displayPreset = preset
       displayWrites.push(preset)
@@ -487,12 +486,13 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   assert.ok(settingsChange !== undefined)
   const displayRow = settingsItems?.find(item => item.id === 'display-preset')
   assert.ok(displayRow !== undefined, 'settings must expose the canonical display row')
-  assert.deepEqual(displayRow?.values, ['full', 'focus'])
+  assert.deepEqual(displayRow?.values, ['full', 'compact', 'focus'])
   assert.equal(settingsItems?.some(item => item.id === 'focus-mode'), false)
   settingsChange!('display-preset', 'focus', () => {})
+  settingsChange!('display-preset', 'compact', () => {})
   settingsChange!('display-preset', 'full', () => {})
-  assert.deepEqual(displayWrites, ['focus', 'full'], 'settings choices must use the canonical setter')
-  assert.deepEqual(persistedDisplayDocs.map(doc => doc.displayPreset), ['focus', 'full'])
+  assert.deepEqual(displayWrites, ['focus', 'compact', 'full'], 'settings choices must use the canonical setter')
+  assert.deepEqual(persistedDisplayDocs.map(doc => doc.displayPreset), ['focus', 'compact', 'full'])
   assert.equal(persistedDisplayDocs[0]?.focusMode, 'off', 'canonical settings writes preserve legacy focusMode')
 
   const layoutOne: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'model' }], right: [] }] }
