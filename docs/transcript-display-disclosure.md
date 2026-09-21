@@ -180,11 +180,13 @@ class:
 - Focus expanded: the card returns to its exact raw position.
 - Full: unchanged chronology.
 - The card's OWN disclosure is independent of the Focus root: a root
-  collapse/expand neither collapses nor expands it (it stays a normal
-  tool-card secondary for render/click semantics but is exempt from the
-  root-collapse secondary reset), and it reuses the existing tool-card
-  disclosure owner (fullscreen click; regular fail-open/full when no operable
-  owner exists — no F6 work).
+  collapse/expand never changes it. Fullscreen Focus keeps the mouse-owned
+  per-card disclosure (collapsed by default; a click toggles only the card) and
+  the card is exempt from the root-collapse secondary reset. Regular Focus has
+  no per-card owner independent of the root — Ctrl+O drives BOTH the root and
+  the tool-detail master — so the card fails open/full there and advertises no
+  fold hint (never a Ctrl+O affordance that would actually drive the root); no
+  F6 work.
 - A RUNNING interaction is untouched: the QuestionFlow / plan-mode approval
   panel owns it and no duplicate settled-style card is surfaced.
 - The turn's tool count, tool-type stats and Tool slot exclude these tools, so

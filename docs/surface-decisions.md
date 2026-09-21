@@ -629,13 +629,15 @@ F4 behavior and documents the guarantees in
   Focus hoists them out of the Thought (raw relative order, never across the
   committed-answer fence and never reordered against user/steer rows); expanded
   Focus restores their raw position; Full is unchanged. Their own disclosure is
-  independent of the Focus root (a root collapse does not reset it — they stay
-  normal tool-card secondaries for render and click semantics but are EXEMPT
-  from the root-collapse secondary reset), they reuse the existing tool-card
-  owner (fullscreen click; regular fails open), and a RUNNING interaction
-  remains owned by its panel (QuestionFlow / plan-mode approval) with no
-  duplicate surfaced card. The turn's tool count / tool-type stats / Tool slot
-  exclude them, running or settled. Every other tool (todo/goal/subagent/
+  independent of the Focus root: fullscreen Focus keeps the mouse-owned
+  per-card disclosure (collapsed by default; a click toggles only the card) and
+  the card is EXEMPT from the root-collapse secondary reset, while regular Focus
+  has no per-card owner independent of the root (Ctrl+O drives both the root and
+  the tool-detail master) and therefore fails open/full with no fold hint. A
+  RUNNING interaction remains owned by its panel (QuestionFlow / plan-mode
+  approval) with no duplicate surfaced card. The turn's tool count / tool-type
+  stats / Tool slot exclude them, running or settled. Every other tool
+  (todo/goal/subagent/
   workflow/schedule/cordis/bash/edit/…) stays ordinary Process.
 
 ## The composer submission policy is the WEB policy
