@@ -20,7 +20,7 @@ import { parseExitStatus } from '@deepseek-ai/dsh-shell'
 import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expandAssistantStream, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
-import { contextIconSemantic, contextProvenance, contextSummary } from './context.ts'
+import { contextIconSemantic, contextPresentation, contextProvenance, contextSummary, type TranscriptContextPresentation } from './context.ts'
 import { finalizedBlockFallbackText, fileAttachmentSummary, textWithAttachmentMarkers, userBlocksVisibleNow } from './content-block-presentation.ts'
 import { displayFailure, displayFailureText } from './failure-presentation.ts'
 import type { IconSemantic } from './icons.ts'
@@ -113,7 +113,23 @@ export type TranscriptMessage =
    * other `kind: 'system'` presentation rows (llm/retry, max-tokens), which
    * are orchestration and must never be treated as turn foundation.
    */
-  | { kind: 'system'; turn: number; text: string; label?: string; summary?: string; icon?: IconSemantic; context?: true; origin?: TranscriptSystemOrigin }
+  | {
+    kind: 'system'
+    turn: number
+    text: string
+    label?: string
+    summary?: string
+    icon?: IconSemantic
+    context?: true
+    origin?: TranscriptSystemOrigin
+    /**
+     * Presentation-only provenance for an injected Context row: the
+     * producer-declared form, the raw source kind and a relay/notice
+     * sender. Never part of the semantic class — `context` stays the
+     * surfaced authority.
+     */
+    contextPresentation?: TranscriptContextPresentation
+  }
   | TranscriptToolMessage
   | TranscriptWorkflowMessage
   /** Older-than-window turns collapsed into one line (windowing). */
@@ -3956,6 +3972,10 @@ export class TranscriptFolder {
             // context (never orchestration like llm/retry or max-tokens),
             // so Focus may treat it as turn foundation.
             context: true as const,
+            // Presentation-only provenance (form/kind/sender) for the
+            // form-aware Context roles Compact and Focus present. The
+            // semantic marker above stays the surfaced authority.
+            contextPresentation: contextPresentation(event.data.source),
           })
           // Focus aggregation: injected context (skill-invocation,
           // skill-catalog, system reminders) is orchestration, NOT one of

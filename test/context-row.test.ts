@@ -1,0 +1,158 @@
+/**
+ * Pure tests for the form-aware standalone Context rows (notice / relay /
+ * recall): brightness, natural wrapping, producer-authored summaries, and
+ * the reused long-message disclosure geometry.
+ * @module @xmoon76/dsh-pi-tui/context-row.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
+import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../src/context-row.ts'
+import { color } from '../src/theme.ts'
+import type { TranscriptMessage } from '../src/transcript.ts'
+
+type SystemRow = Extract<TranscriptMessage, { kind: 'system' }>
+
+function noticeRow(summary: string | undefined, text = 'full payload body'): SystemRow {
+  return {
+    kind: 'system', turn: 0, text, label: 'Background job', icon: 'context-notice', context: true,
+    ...summary === undefined ? {} : { summary },
+    contextPresentation: { form: 'notice', sourceKind: 'subagent-settled', role: 'inject' },
+  }
+}
+
+function relayRow(text: string): SystemRow {
+  return {
+    kind: 'system', turn: 0, text, label: 'agent-message', icon: 'context-generic', context: true,
+    contextPresentation: { form: 'relay', sourceKind: 'agent-message', senderSessionId: 'child-2', role: 'inject' },
+  }
+}
+
+function recallRow(text: string): SystemRow {
+  return {
+    kind: 'system', turn: 0, text, label: 'prior work', icon: 'context-recall', context: true,
+    contextPresentation: { form: 'recall', sourceKind: 'session-reference', role: 'recall' },
+  }
+}
+
+test('a collapsed notice shows the producer summary at normal brightness, never a payload preview', () => {
+  const summary = 'the background test suite finished with 3 failures'
+  const rows = new NoticeContextRow({ message: noticeRow(summary), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(80)
+  assert.equal(rows.length, 2, 'header + summary only')
+  assert.match(rows[0]!, /Background job/)
+  assert.match(rows[0]!, /ctrl\+o to expand/)
+  assert.equal(rows[1], color.text(summary), 'the summary is normal brightness, never dim')
+  assert.ok(!rows.some(row => row.includes('full payload body')), 'the payload stays hidden')
+  assert.ok(!rows.some(row => row.includes('Context injection')), 'a notice is never a generic Context injection')
+})
+
+test('a notice summary wraps naturally at narrow widths instead of being truncated to one row', () => {
+  const summary = 'the background job completed with a long account that cannot fit on a single physical terminal row'
+  const rows = new NoticeContextRow({ message: noticeRow(summary), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(24)
+  for (const row of rows) assert.ok(visibleWidth(row) <= 24, `row exceeds the width: ${JSON.stringify(row)}`)
+  const summaryRows = rows.slice(1)
+  assert.ok(summaryRows.length > 1, `the summary must wrap, got ${summaryRows.length} row(s)`)
+  assert.ok(!summaryRows.some(row => row.includes('…')), 'the summary is never ellipsized to a single line')
+  assert.ok(summaryRows.join(' ').includes('background'), 'the summary text is present')
+})
+
+test('an expanded notice adds the complete payload and keeps the summary', () => {
+  const summary = 'job finished'
+  const rows = new NoticeContextRow({ message: noticeRow(summary, 'line one\nline two'), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(80)
+  assert.ok(rows.includes(color.text(summary)))
+  assert.ok(rows.includes(color.textDim('line one')), 'the payload renders through the existing Context body rules')
+  assert.ok(rows.includes(color.textDim('line two')))
+  assert.ok(!rows.some(row => row.includes('to expand')), 'an open row carries no expand affordance')
+})
+
+test('a legacy notice without a summary fabricates no body preview', () => {
+  const rows = new NoticeContextRow({ message: noticeRow(undefined, 'the only payload'), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(80)
+  assert.equal(rows.length, 1, 'header only — no invented summary, no head preview')
+  assert.ok(!rows[0]!.includes('the only payload'))
+})
+
+test('a relay names its sender, shows the body at normal brightness, and is not a generic Context injection', () => {
+  const body = 'There are two need-fix issues in the search restoration path.'
+  const rows = new RelayContextRow({
+    message: relayRow(body), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+    geometry: { thresholdRows: 10, headRows: 4 },
+  }).render(100)
+  assert.equal(rows.length, 2)
+  assert.match(rows[0]!, /Agent message · child-2/)
+  assert.equal(rows[1], color.text(body))
+  assert.ok(!rows.some(row => row.includes('Context injection')))
+})
+
+test('a long relay reuses the long-message disclosure: head rows plus a marker, hidden tail', () => {
+  const body = Array.from({ length: 30 }, (_, index) => `line ${index}`).join(' ')
+  const geometry = { thresholdRows: 3, headRows: 2 }
+  const rows = new RelayContextRow({
+    message: relayRow(body), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji', geometry,
+  }).render(60)
+  assert.match(rows[0]!, /to expand/)
+  assert.equal(rows.length, 4, 'header + 2 head rows + the overflow marker')
+  assert.ok(rows[3]!.includes('…'))
+  assert.ok(rows[1]!.includes('line 0'))
+  assert.ok(!rows.some(row => row.includes('line 29')), 'the tail stays hidden until expanded')
+
+  const expanded = new RelayContextRow({
+    message: relayRow(body), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji', geometry,
+  }).render(60)
+  assert.ok(expanded.length > 4, 'an expanded relay renders the whole body')
+  assert.ok(expanded.join(' ').includes('line 29'))
+})
+
+test('a long relay never exceeds a narrow width (header, head rows and overflow marker)', () => {
+  const body = Array.from({ length: 30 }, (_, index) => `line ${index}`).join(' ')
+  const geometry = { thresholdRows: 3, headRows: 2 }
+  const message = relayRow(body)
+  for (const width of [1, 2, 3]) {
+    const rows = new RelayContextRow({ message, expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji', geometry }).render(width)
+    assert.ok(rows.length > 0, `width ${width} must still render rows`)
+    for (const row of rows) {
+      assert.ok(visibleWidth(row) <= width, `width ${width} overflowed: ${JSON.stringify(row)}`)
+    }
+  }
+})
+
+test('wide glyphs (CJK / emoji) never break the narrow-width row contract', () => {
+  const cjkSummary = '后台任务已完成并发现三个问题'
+  const cjkBody = '另一个 agent 发来的消息内容包含中文与表情 🐋🐳 以及更多文字'
+  for (const width of [1, 2, 3]) {
+    const noticeRows = new NoticeContextRow({ message: noticeRow(cjkSummary), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(width)
+    for (const row of noticeRows) {
+      assert.ok(visibleWidth(row) <= width, `notice width ${width} overflowed: ${JSON.stringify(row)}`)
+    }
+    const noticeExpanded = new NoticeContextRow({ message: noticeRow(cjkSummary, '展开后的中文载荷内容'), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(width)
+    for (const row of noticeExpanded) {
+      assert.ok(visibleWidth(row) <= width, `expanded notice width ${width} overflowed: ${JSON.stringify(row)}`)
+    }
+    const relayRows = new RelayContextRow({
+      message: relayRow(cjkBody), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+      geometry: { thresholdRows: 1, headRows: 1 },
+    }).render(width)
+    for (const row of relayRows) {
+      assert.ok(visibleWidth(row) <= width, `relay width ${width} overflowed: ${JSON.stringify(row)}`)
+    }
+    const recallRows = new RecallContextRow({ message: recallRow('回忆载荷 🐋 中文'), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(width)
+    for (const row of recallRows) {
+      assert.ok(visibleWidth(row) <= width, `recall width ${width} overflowed: ${JSON.stringify(row)}`)
+    }
+  }
+})
+
+test('a recall names its labels and keeps the payload behind the ordinary disclosure', () => {
+  const collapsed = new RecallContextRow({ message: recallRow('recalled body'), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(80)
+  assert.equal(collapsed.length, 1)
+  assert.match(collapsed[0]!, /Session recall · prior work/)
+  assert.ok(!collapsed[0]!.includes('recalled body'))
+  const expanded = new RecallContextRow({ message: recallRow('recalled body'), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(80)
+  assert.ok(expanded.includes(color.textDim('recalled body')))
+  // No metadata -> no invented summary.
+  const bare = new RecallContextRow({
+    message: { kind: 'system', turn: 0, text: 'x', context: true, contextPresentation: { form: 'recall', role: 'recall' } },
+    expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+  }).render(80)
+  assert.equal(bare[0]!.includes('Session recall'), true)
+})

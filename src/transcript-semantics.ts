@@ -69,6 +69,6 @@ export const transcriptSemanticOf = classifyTranscriptMessage
  * visible when its Thought is collapsed. The fold's authoritative `context`
  * marker intentionally covers unknown/future injection producers too.
  */
-export function isSurfacedContext(message: TranscriptMessage): boolean {
+export function isSurfacedContext(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
   return message.kind === 'system' && message.context === true
 }
