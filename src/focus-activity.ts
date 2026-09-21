@@ -645,9 +645,10 @@ export function projectFocus(
  * The canonical structural blocks the expanded Focus TAIL consumes: one turn
  * group from its Thought-lead boundary onward. The held-back final is included,
  * so cluster membership is computed from exactly the raw adjacency the window
- * would give. `projectFocus` materializes these blocks flat; this exported seam
- * lets the convergence oracle compare Work/cluster boundary IDENTITY (owner and
- * member objects) instead of display strings (plan §25).
+ * would give. `projectFocus` emits a canonical Work span as a nested `work`
+ * block (F6); this exported seam lets the convergence oracle compare
+ * Work/cluster boundary IDENTITY (owner and member objects) instead of display
+ * strings (plan §25).
  * @param group - one turn's consecutive raw messages.
  * @param boundary - the group's Thought-lead boundary ({@link focusThoughtLeadBoundary}).
  *   Passed in so one expanded group computes the boundary once.

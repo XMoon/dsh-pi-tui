@@ -4088,6 +4088,14 @@ export class TuiApp {
     readonly messages: readonly TranscriptMessage[]
     readonly ancestry: SearchRevealAncestry
   } | undefined
+  /** `focusRootHidesSearchTarget()` memo: the collapsed Focus visibility of one
+   * search target for the current window/activity epoch. */
+  private collapsedFocusHiddenMemo: {
+    readonly messages: readonly TranscriptMessage[]
+    readonly activities: ReadonlyMap<number, TurnActivity>
+    readonly target: TranscriptMessage
+    readonly hidden: boolean
+  } | undefined
   /** The CompactWorkComponent cache, keyed by the span owner. */
   private readonly workComponents = new Map<TranscriptMessage, {
     component: CompactWorkComponent
@@ -7656,26 +7664,48 @@ export class TuiApp {
     return message.kind === 'workflow' || (message.kind === 'tool' && (message.subCalls?.length ?? 0) > 0)
   }
 
-  /** The current search target's owner turn (Focus temporary reveal). Gated on
-   * the grant: after an explicit collapse the target must not force the Focus
-   * root open either. A surfaced-context target NEVER opens its Thought root —
-   * an already-visible Context row needs no reveal, and a mid-turn
-   * `form:'notice'` (the one surfaced row collapsed Focus hides) is surfaced by
-   * the presentation-only `collapsedFocusForcedVisible()` reveal instead.
+  /** The current search target's owner turn, but ONLY when collapsed Focus
+   * actually HIDES that row (Focus temporary reveal). Gated on the grant: after
+   * an explicit collapse the target must not force the Focus root open either.
    *
-   * This is the reveal-NECESSITY authority: a target that is already fully
-   * visible on this surface needs no deeper Focus-root reveal, and opening the
-   * root here would also let an Esc dismiss PROMOTE it into `focusExpandedTurns`.
-   * A regular-Focus fail-open surfaced-interaction card is exactly that case —
-   * its answers are already visible, so searching it must not open or promote
-   * the Thought. Fullscreen keeps the deeper reveal (its card is collapsed
-   * behind the mouse owner). */
+   * This is the reveal-NECESSITY authority: it resolves the collapsed Focus
+   * projection itself (the same visibility rules the renderer uses), so a user
+   * prompt, the final assistant, a committed answer, a compaction card, a
+   * surfaced interaction, a forced-visible notice or a fail-open delivered tail
+   * that is already on screen never opens — or promotes — a Thought root. */
   private searchTargetTurn(): number | undefined {
     if (!this.searchRevealGranted) return undefined
+    if (!isFocusDisplayPreset(this.displayState.preset)) return undefined
     const message = this.searchTarget?.message
-    if (message === undefined || isSurfacedContext(message) || !('turn' in message)) return undefined
-    if (this.surfacedInteractionFailsOpen(message)) return undefined
+    if (message === undefined || !('turn' in message)) return undefined
+    if (!this.focusRootHidesSearchTarget(message)) return undefined
     return message.turn
+  }
+
+  /** Whether the COLLAPSED Focus projection hides one row (so the search target
+   * needs the Focus-root reveal). Computed from the real `projectFocus`
+   * collapsed output — never from "the row has a turn" — and memoized per
+   * window/activity/target. `collapsedFocusForcedVisible()` is included, so a
+   * hidden mid-turn notice is already surfaced and needs no root reveal. */
+  private focusRootHidesSearchTarget(message: TranscriptMessage): boolean {
+    const memo = this.collapsedFocusHiddenMemo
+    if (memo !== undefined && memo.messages === this.messages && memo.activities === this.turnActivities
+      && memo.target === message) return memo.hidden
+    const blocks = projectFocus(
+      this.messages,
+      this.turnActivities,
+      new Set(),
+      true,
+      this.collapsedFocusForcedVisible(),
+    )
+    const visible = blocks.some(block => block.kind === 'message' && block.message === message)
+    this.collapsedFocusHiddenMemo = {
+      messages: this.messages,
+      activities: this.turnActivities,
+      target: message,
+      hidden: !visible,
+    }
+    return !visible
   }
 
   /** Whether the CURRENT search target owns this message (effective reveal).
@@ -7719,6 +7749,10 @@ export class TuiApp {
       // promoting it on dismiss would mint a redundant durable override.
       return !this.messageExpandedIgnoringSearch(message)
     }
+    // Thinking is Alt+T-owned, never the Ctrl+O master: its reveal necessity
+    // must not depend on `messageFoldDisclosureAvailable()` (a surface disabling
+    // Ctrl+O must still reveal a matched Thinking body).
+    if (message.kind === 'thinking') return !this.messageExpandedIgnoringSearch(message)
     if (!isFoldableMessageDisclosure(message)) return false
     if (!this.messageFoldDisclosureAvailable()) return false
     return !this.messageExpandedIgnoringSearch(message)
