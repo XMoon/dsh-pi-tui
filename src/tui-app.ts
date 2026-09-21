@@ -7961,6 +7961,10 @@ export class TuiApp {
     if (target === undefined) return false
     const index = this.canonicalStructureIndex()
     if (index.workByMember.has(target) || index.clusterByMember.has(target)) return true
+    // A delivered-files tail is expanded by the message-local search reveal
+    // itself, independent of any Focus root state: revoke it even when the root
+    // is manual, or the collapse branch can never turn the master back on.
+    if (isDeliveredFilesDisclosureCandidate(target) && this.deliveredFilesMasterOwned()) return true
     const turn = this.searchTargetTurn()
     return turn !== undefined && !this.focusExpandedTurns.has(turn)
   }
