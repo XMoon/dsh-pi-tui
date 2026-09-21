@@ -199,9 +199,14 @@ test('Q2 Focus collapsed hoists the settled question outside the Thought', () =>
 test('Q3 Focus expanded restores the question to its exact raw chronology', () => {
   const { folder, questionRow } = questionTurn()
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([TURN]), true)
-  const questionIndex = blocks.findIndex(block => block.kind === 'message' && block.message === questionRow)
-  const readIndex = blocks.findIndex(block => block.kind === 'message' && block.message.kind === 'tool' && block.message.name === 'read')
-  const bashIndex = blocks.findIndex(block => block.kind === 'message' && block.message.kind === 'tool' && block.message.name === 'bash')
+  // F6 keeps Process runs inside nested Work containers; flatten them for the
+  // raw chronology assertion.
+  const rows = blocks.flatMap(block => block.kind === 'work'
+    ? [...block.span.members]
+    : block.kind === 'message' ? [block.message] : [])
+  const questionIndex = rows.indexOf(questionRow)
+  const readIndex = rows.findIndex(message => message.kind === 'tool' && message.name === 'read')
+  const bashIndex = rows.findIndex(message => message.kind === 'tool' && message.name === 'bash')
   assert.ok(readIndex >= 0 && questionIndex > readIndex && bashIndex > questionIndex,
     'expanded keeps Process -> Question -> Process raw order')
 })
@@ -315,16 +320,22 @@ test('Q10 search reaches a hidden answer and dismiss restores the collapsed card
   assert.ok(view.includes('1/1 answered'), `the settled summary remains visible:\n${view}`)
 })
 
-test('Q12 regular Compact fails open (no dead hidden question) while fullscreen is click-operable', async () => {
+test('Q12 regular Compact folds the settled question card under the shared owner', async () => {
   const { vt, app } = startApp('compact')
   const { folder } = questionTurn()
   show(app, folder)
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('Question'), `the question card renders on regular Compact:\n${view}`)
-  // Regular reserves Ctrl+O for Work spans: the question card has no operable
-  // fold owner, so it must render its answers instead of a dead hidden state.
-  assert.ok(view.includes('● q0 → B'), `regular Compact fails open:\n${view}`)
+  // After F6 regular Compact has an operable fold owner (the shared Ctrl+O
+  // master), so the settled card folds instead of a dead hidden state.
+  assert.ok(!view.includes('● q0 → B'), `regular Compact folds the settled card:\n${view}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('● q0 → B'), 'the master opens the card')
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('● q0 → B'), 'the master collapses it again')
 
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -426,9 +437,12 @@ test('E1/E2 exit_plan_mode is a Compact Work boundary and hoists out of collapse
   assert.deepEqual(order, ['user', 'plan-review', 'activity', 'assistant'], 'User | Plan review | Working | Assistant')
 
   const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([TURN]), true)
-  const reviewIndex = expanded.findIndex(block => block.kind === 'message' && block.message === planReviewRow)
-  const readIndex = expanded.findIndex(block => block.kind === 'message' && block.message.kind === 'tool' && block.message.name === 'read')
-  const bashIndex = expanded.findIndex(block => block.kind === 'message' && block.message.kind === 'tool' && block.message.name === 'bash')
+  const rows = expanded.flatMap(block => block.kind === 'work'
+    ? [...block.span.members]
+    : block.kind === 'message' ? [block.message] : [])
+  const reviewIndex = rows.indexOf(planReviewRow)
+  const readIndex = rows.findIndex(message => message.kind === 'tool' && message.name === 'read')
+  const bashIndex = rows.findIndex(message => message.kind === 'tool' && message.name === 'bash')
   assert.ok(readIndex >= 0 && reviewIndex > readIndex && bashIndex > reviewIndex, 'expanded restores raw chronology')
 })
 

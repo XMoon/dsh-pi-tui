@@ -51,14 +51,21 @@ const ambient = (label: string): TranscriptMessage => ({
 })
 const summary = (text: string): TranscriptMessage => ({ kind: 'summary', text })
 
+/** Flatten the F6 nested Work containers back into member rows: these tests
+ * assert the raw Focus chronology, and the canonical span keeps its members
+ * inside the container. */
+function flatRows(blocks: ReturnType<typeof projectFocus>): TranscriptMessage[] {
+  return blocks.flatMap(block => block.kind === 'work'
+    ? [...block.span.members]
+    : block.kind === 'message' ? [block.message] : [])
+}
+
 function collapsed(messages: readonly TranscriptMessage[]): TranscriptMessage[] {
-  return projectFocus(messages, noActivities, new Set(), true)
-    .flatMap(block => block.kind === 'message' ? [block.message] : [])
+  return flatRows(projectFocus(messages, noActivities, new Set(), true))
 }
 
 function expanded(messages: readonly TranscriptMessage[]): TranscriptMessage[] {
-  return projectFocus(messages, noActivities, new Set([TURN]), true)
-    .flatMap(block => block.kind === 'message' ? [block.message] : [])
+  return flatRows(projectFocus(messages, noActivities, new Set([TURN]), true))
 }
 
 // --- 1/2: busy-turn notice is absorbed by the collapsed Thought -------------

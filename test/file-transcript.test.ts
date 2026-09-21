@@ -363,7 +363,7 @@ test('generic tool-result content presents file and unknown blocks in order', as
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool',
     turn: 0,

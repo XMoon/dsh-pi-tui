@@ -325,7 +325,7 @@ test('runner search: a Compact dismiss promotes the revealed Work span and keeps
   await fixture.settleRender()
   assert.equal(app.transcriptSearchPresentationForTest()?.matchTurn, 0,
     'precondition: the query resolved to the hidden tool row')
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0,
+  assert.equal(app.expandedWorkOwnersForTest().size, 0,
     'the search reveal stays presentation-only while searching')
   assert.ok(vt.getViewport().join('\n').includes('[ok]'),
     `the reveal opens the owning Work span so the match is reachable:\n${vt.getViewport().join('\n')}`)
@@ -335,7 +335,7 @@ test('runner search: a Compact dismiss promotes the revealed Work span and keeps
   app.closeTranscriptSearch()
   await fixture.settleRender()
   assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'the search target is cleared')
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 1,
+  assert.equal(app.expandedWorkOwnersForTest().size, 1,
     'the dismissal promotes the revealed Work span to a manual owner')
   const after = vt.getViewport().join('\n')
   assert.ok(after.includes('[ok]'),

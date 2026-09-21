@@ -159,7 +159,11 @@ function intermediateTurn(turn: number, baseSeq: number, startTime: number): Ses
 
 /** The kinds of the projected blocks, in order ('activity' for Thought). */
 function blockKinds(blocks: readonly FocusProjectedBlock[]): string[] {
-  return blocks.map(block => block.kind === 'activity' ? 'activity' : block.message.kind)
+  return blocks.map(block => block.kind === 'activity'
+    ? 'activity'
+    : block.kind === 'work'
+      ? 'work'
+      : block.message.kind)
 }
 
 // ── settings normalization (plan §6) ─────────────────────────────────────
@@ -416,7 +420,7 @@ test('an empty assistant/message without a prior chunk still owns the final slot
     'the earlier text row remains visible while the empty authority stays hidden')
   assert.equal(folder.turnActivity(0)?.lastAssistantVisible, false,
     'the hidden exact-last marker prevents earlier final fallback')
-  const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(messages, folder.turnActivities(), new Set(), true)
   assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
     'an empty last step must suppress the final — never fall back to the earlier text assistant')
 })
@@ -673,7 +677,7 @@ test('a late message for an older step updates its confirmed preview without reg
   ])
   assert.equal(activity.message?.text, '第一步权威')
   assert.equal((activity as { lastAssistantStep?: number }).lastAssistantStep, 1)
-  const projected = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const projected = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
   const final = projected.find(block => block.kind === 'message' && block.message.kind === 'assistant')
   assert.ok(final !== undefined && final.kind === 'message' && final.message.kind === 'assistant')
   if (final !== undefined && final.kind === 'message' && final.message.kind === 'assistant') {
@@ -697,7 +701,7 @@ test('a late assistant event after turn/end never changes the exact final answer
       message: { id: MessageId('a2'), role: 'assistant', content: [{ type: 'text', text: '迟到的最终' }], source: { kind: 'model', provider: 'p', model: 'm' } },
     }, 1004, 4),
   ])
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
   const finals = blocks.filter(b => b.kind === 'message' && b.message.kind === 'assistant')
   assert.equal(finals.length, 1, 'exactly one final')
   if (finals[0]?.kind === 'message' && finals[0].message.kind === 'assistant') {
@@ -1078,13 +1082,13 @@ test('workflow rows stay out of the collapsed Focus and visible when expanded (p
     eventAt('tool-workflow/run-start', { runId: 'r1', name: 'audit' }, 1002, 2),
     eventAt('tool-workflow/agent-start', { runId: 'r1', seq: 0, label: 'checker', childId: 'session-x' }, 1003, 3),
   ])
-  const collapsed = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const collapsed = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
   assert.equal(
     collapsed.filter(block => block.kind === 'message' && block.message.kind === 'workflow').length,
     0,
     'a collapsed Focus must not show the workflow process row',
   )
-  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const expanded = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   const workflowBlocks = expanded.filter(block => block.kind === 'message' && block.message.kind === 'workflow')
   assert.equal(workflowBlocks.length, 1, 'an expanded Focus must keep the workflow row')
   const block = workflowBlocks[0]
@@ -2178,7 +2182,7 @@ test('Focus OFF returns the current normal ordering (identity projection)', () =
     { kind: 'thinking', turn: 0, text: 'hmm' },
     { kind: 'assistant', turn: 0, text: 'answer' },
   ] as TranscriptMessage[]
-  const blocks = projectFocus(messages, new Map(), new Set(), false)
+  const blocks = projectFocusFlat(messages, new Map(), new Set(), false)
   assert.deepEqual(blockKinds(blocks), ['user', 'thinking', 'assistant'])
   assert.deepEqual(blocks, messages.map(m => ({ kind: 'message', message: m })))
 })
@@ -2186,7 +2190,7 @@ test('Focus OFF returns the current normal ordering (identity projection)', () =
 test('Focus ON collapsed: user → FocusActivity → final, process hidden', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
   assert.deepEqual(blockKinds(blocks), ['user', 'activity', 'assistant'])
   const final = blocks[2]
   assert.ok(final !== undefined && final.kind === 'message')
@@ -2211,7 +2215,7 @@ test('intermediate assistant messages are hidden when collapsed', () => {
     }, 1000 + 8, 9),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1000 + 9000, 10),
   ])
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
   const kinds = blockKinds(blocks)
   assert.equal(kinds.filter(k => k === 'assistant').length, 1, 'only the LAST assistant survives collapsed')
   const final = blocks.find(b => b.kind === 'message' && b.message.kind === 'assistant')
@@ -2226,14 +2230,14 @@ test('intermediate assistant messages are hidden when collapsed', () => {
 test('no final assistant before turn/end (running collapsed)', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000).slice(0, -1)) // drop turn/end
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
   assert.deepEqual(blockKinds(blocks), ['user', 'activity'])
 })
 
 test('FocusActivity always precedes the final assistant', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
   const activityIndex = blocks.findIndex(b => b.kind === 'activity')
   const finalIndex = blocks.findIndex(b => b.kind === 'message' && b.message.kind === 'assistant')
   assert.ok(activityIndex >= 0 && activityIndex < finalIndex)
@@ -2242,7 +2246,7 @@ test('FocusActivity always precedes the final assistant', () => {
 test('expanded turns show the full process in order and never duplicate the final', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   const kinds = blockKinds(blocks)
   assert.deepEqual(kinds, ['user', 'activity', 'thinking', 'tool', 'assistant'])
   const assistants = blocks.filter(b => b.kind === 'message' && b.message.kind === 'assistant')
@@ -2258,7 +2262,7 @@ test('aborted/interrupted/error turns show no final assistant collapsed', () => 
         ? { kind: 'error', error: { code: 'X', message: 'boom' } }
         : { kind: reason } }, 7000, 99),
     ])
-    const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+    const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
     assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
       `${reason}: an interrupted prefix must never be promoted to a final answer`)
     assert.ok(blocks.some(b => b.kind === 'activity'), `${reason}: the Thought card stays`)
@@ -2271,7 +2275,7 @@ test('max-tokens keeps the useful settled assistant with the truncated marker', 
     ...completedTurn(0, 0, 1000).slice(0, -1),
     eventAt('turn/end', { turn: 0, reason: { kind: 'max-tokens' } }, 7000, 99),
   ])
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
   const final = blocks.find(b => b.kind === 'message' && b.message.kind === 'assistant')
   assert.ok(final !== undefined && final.kind === 'message')
   if (final.kind === 'message') {
@@ -2287,7 +2291,7 @@ test('an EXPANDED max-tokens turn keeps the truncated marker on its last assista
     ...completedTurn(0, 0, 1000).slice(0, -1),
     eventAt('turn/end', { turn: 0, reason: { kind: 'max-tokens' } }, 7000, 99),
   ])
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   const assistants = blocks.filter((b): b is Extract<FocusProjectedBlock, { kind: 'message' }> =>
     b.kind === 'message' && b.message.kind === 'assistant')
   assert.equal(assistants.length, 1, 'one final assistant in the expanded process')
@@ -2295,7 +2299,7 @@ test('an EXPANDED max-tokens turn keeps the truncated marker on its last assista
   // A COMPLETED expanded turn has no marker.
   const done = new TranscriptFolder()
   done.apply(completedTurn(0, 0, 1000))
-  const doneBlocks = projectFocus(done.messages(), done.turnActivities(), new Set([0]), true)
+  const doneBlocks = projectFocusFlat(done.messages(), done.turnActivities(), new Set([0]), true)
   const doneAssistant = doneBlocks.find((b): b is Extract<FocusProjectedBlock, { kind: 'message' }> =>
     b.kind === 'message' && b.message.kind === 'assistant')
   assert.equal(doneAssistant?.truncated, undefined, 'a completed final never carries the marker')
@@ -2331,7 +2335,7 @@ test('the final is the EXACT last assistant: an empty last step yields NO final 
   assert.equal(messages.findLast(m => m.kind === 'assistant')?.text, 'final answer 0',
     'the earlier text row remains visible while the empty exact-last row stays hidden')
   assert.equal(folder.turnActivity(0)?.lastAssistantVisible, false)
-  const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(messages, folder.turnActivities(), new Set(), true)
   assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
     'an empty last step must suppress the final — never fall back to the earlier text assistant')
 })
@@ -2386,7 +2390,7 @@ test('a reasoning-only exact last assistant is NOT renderable — no final', () 
   assert.equal(messages.findLast(m => m.kind === 'assistant')?.text, 'final answer 0',
     'the earlier text row remains visible while the reasoning-only exact-last row stays hidden')
   assert.equal(folder.turnActivity(0)?.lastAssistantVisible, false)
-  const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(messages, folder.turnActivities(), new Set(), true)
   assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
     'a reasoning-only last step must not be promoted to the final')
 })
@@ -2421,7 +2425,7 @@ test('max-tokens also never falls back to an earlier assistant', () => {
     }, 1000 + 12, 22),
     eventAt('turn/end', { turn: 0, reason: { kind: 'max-tokens' } }, 1000 + 13, 23),
   ])
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
   assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'assistant'),
     'max-tokens must not promote an earlier text assistant when the last step is empty')
 })
@@ -2436,7 +2440,7 @@ test('the EXPANDED final is always the LAST block (a max-tokens system row canno
   // the expanded projection must hold the final back and emit it last.
   const messages = folder.messages()
   assert.equal(messages.at(-1)?.kind, 'system', 'precondition: the raw fold ends with the max-tokens system row')
-  const blocks = projectFocus(messages, folder.turnActivities(), new Set([0]), true)
+  const blocks = projectFocusFlat(messages, folder.turnActivities(), new Set([0]), true)
   const last = blocks.at(-1)
   assert.ok(last !== undefined && last.kind === 'message' && last.message.kind === 'assistant',
     `the final assistant must be the LAST expanded block, got: ${blocks.map(b => b.kind === 'message' ? b.message.kind : 'activity').join(',')}`)
@@ -2469,13 +2473,41 @@ test('the Thought component never renders a line wider than the terminal', () =>
   }
 })
 
+/** Flatten the F6 nested Work containers back into member rows so the legacy
+ * chronology/ownership assertions keep addressing raw rows. Each member keeps
+ * the full projected ancestry; production keeps the span as a nested
+ * container. */
+function projectFocusFlat(
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, import('../src/transcript.ts').TurnActivity>,
+  expanded: ReadonlySet<number>,
+  focusMode: boolean,
+): FocusProjectedBlock[] {
+  return projectFocus(messages, activities, expanded, focusMode).flatMap(block => {
+    if (block.kind !== 'work') return [block]
+    const containerPath = [
+      { kind: 'focus-root' as const, turn: block.focusOwnerTurn },
+      { kind: 'work' as const, owner: block.span.owner },
+    ]
+    return block.span.members.map(message => ({ kind: 'message' as const, message, containerPath }))
+  })
+}
+
+/** The Focus-root turn of one projected row's container ancestry (the F6
+ * replacement for the retired collapseFocusOwnerOnClick marker). */
+function focusOwnerMark(block: FocusProjectedBlock): number | undefined {
+  const path = 'containerPath' in block ? block.containerPath : undefined
+  const owner = path?.[0]
+  return owner?.kind === 'focus-root' ? owner.turn : undefined
+}
+
 /** projectFocus helper with the focus-mode flag preset. */
 function projectTools(
   messages: readonly TranscriptMessage[],
   activities: ReadonlyMap<number, import('../src/transcript.ts').TurnActivity>,
   expanded: ReadonlySet<number>,
 ): FocusProjectedBlock[] {
-  return projectFocus(messages, activities, expanded, true)
+  return projectFocusFlat(messages, activities, expanded, true)
 }
 
 test('collapsed turns never render process rows at all (no Ctrl+O leak)', () => {
@@ -2487,7 +2519,7 @@ test('collapsed turns never render process rows at all (no Ctrl+O leak)', () => 
   const messages = folder.messages()
   // Ctrl+O = expand recent turns; the projection must ignore that boundary
   // for a COLLAPSED Focus turn (the rows simply are not there).
-  const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(messages, folder.turnActivities(), new Set(), true)
   assert.ok(!blocks.some(b => b.kind === 'message' && (b.message.kind === 'tool' || b.message.kind === 'thinking')),
     'a collapsed Focus turn must hide its process regardless of Ctrl+O')
 })
@@ -2500,7 +2532,7 @@ test('compaction cards keep their existing lifecycle under Focus', () => {
     eventAt('compaction/end', { compactionId: 'c1' }, 8000, 100),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9000, 101),
   ])
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
   assert.ok(blockKinds(blocks).includes('compaction'), 'compaction cards stay visible')
 })
 
@@ -2508,7 +2540,7 @@ test('window summaries (turn-less entries) pass through the projection', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
   const windowed = [{ kind: 'summary', text: '… 3 earlier turns' }, ...folder.messages()] as TranscriptMessage[]
-  const blocks = projectFocus(windowed, folder.turnActivities(), new Set(), true)
+  const blocks = projectFocusFlat(windowed, folder.turnActivities(), new Set(), true)
   assert.equal(blocks[0]?.kind === 'message' ? blocks[0].message.kind : '', 'summary')
 })
 
@@ -2651,7 +2683,7 @@ test('a settled text-only answer crossed by a human steer stays persistent befor
   assert.ok(expandedAssistant?.kind === 'message' && expandedAssistant.message.kind === 'assistant')
   if (expandedAssistant?.kind === 'message' && expandedAssistant.message.kind === 'assistant') {
     assert.equal(expandedAssistant.message.text, 'assistant A')
-    assert.equal(expandedAssistant.collapseFocusOwnerOnClick, undefined,
+    assert.equal(focusOwnerMark(expandedAssistant), undefined,
       'a committed pre-steer answer is persistent in expanded Focus')
   }
 
@@ -2678,7 +2710,7 @@ test('a settled text-only answer crossed by a human steer stays persistent befor
   assert.equal(activity.message, undefined, 'the final B remains outside the Thought Message slot')
 
   const raw = folder.messages()
-  const off = projectFocus(raw, folder.turnActivities(), new Set(), false)
+  const off = projectFocusFlat(raw, folder.turnActivities(), new Set(), false)
   assert.deepEqual(off.map(block => block.kind === 'message' ? block.message : undefined), raw,
     'Focus off leaves the raw transcript chronology unchanged')
 })
@@ -3012,7 +3044,7 @@ test('multiple text-only answers crossed by steers preserve conversation chronol
   assert.equal(committedRows.length, 3)
   for (const block of committedRows) {
     assert.equal(block.kind, 'message')
-    assert.equal(block.collapseFocusOwnerOnClick, undefined)
+    assert.equal(focusOwnerMark(block), undefined)
   }
 })
 
@@ -3087,7 +3119,7 @@ test('committed pre-steer answers do not alter the raw Focus-off projection', ()
     eventAt('user/message', steer, 6008, 98),
   ])
   const raw = folder.messages()
-  const projected = projectFocus(raw, folder.turnActivities(), new Set(), false)
+  const projected = projectFocusFlat(raw, folder.turnActivities(), new Set(), false)
   assert.equal(projected.length, raw.length)
   projected.forEach((block, index) => {
     assert.equal(block.kind, 'message')
@@ -3225,7 +3257,7 @@ test('open opaque process rows preserve same-turn steer ordering in collapsed an
 test('expanded: the initial user stays before the Thought; a mid-turn steer returns to its chronological position', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, steeredTurn(0, 0, 1000))
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   const kinds = blockKinds(blocks)
   // user(initial) → activity → thinking → tool → user(steer) → assistant(final)
   assert.deepEqual(kinds, ['user', 'activity', 'thinking', 'tool', 'user', 'assistant'],
@@ -3268,7 +3300,7 @@ test('expanded: injected/system context before the initial user stays above the 
   ])
   const messages = folder.messages()
   assert.equal(messages[0]?.kind, 'system', 'precondition: the raw fold starts with the injected system row')
-  const blocks = projectFocus(messages, folder.turnActivities(), new Set([0]), true)
+  const blocks = projectFocusFlat(messages, folder.turnActivities(), new Set([0]), true)
   // system → user(initial) → activity → thinking → tool → assistant(final):
   // the initial user must NOT land below the Thought (the countLeadingUsers
   // regression — a non-user lead used to zero the prefix).
@@ -3298,7 +3330,7 @@ test('expanded: a second CONSECUTIVE user is a steer, never part of the initial 
     }, 1003, 3),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
   ])
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   // Only the FIRST direct user is the initial prompt; the second
   // consecutive user returns to its chronological position (plan: no
   // adjacency guessing — consecutive users are queue/steer input).
@@ -3319,7 +3351,7 @@ test('expanded: a turn with NO user row keeps the Thought and never crashes (no 
     }, 1002, 2),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1003, 3),
   ])
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   assert.deepEqual(blockKinds(blocks), ['activity', 'thinking', 'assistant'],
     'no user → the Thought leads, chronology intact, no synthetic user')
   assert.ok(!blocks.some(b => b.kind === 'message' && b.message.kind === 'user'), 'never a synthetic user row')
@@ -3340,7 +3372,7 @@ test('expanded: multiple steers keep their relative chronology', () => {
     }, 2001, 51),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2002, 52),
   ])
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   const userTexts = blocks.flatMap(b => b.kind === 'message' && b.message.kind === 'user' ? [b.message.text] : [])
   assert.deepEqual(userTexts, ['initial prompt 0', 'steer 0', 'second steer'], 'steers keep their order')
   const kinds = blockKinds(blocks)
@@ -3355,16 +3387,16 @@ test('expanded: multiple steers keep their relative chronology', () => {
 test('expanded: user rows never carry the owner collapse mark; process rows always do', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, steeredTurn(0, 0, 1000))
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   for (const block of blocks) {
     if (block.kind !== 'message') continue
     if (block.message.kind === 'user') {
-      assert.equal(block.collapseFocusOwnerOnClick, undefined,
+      assert.equal(focusOwnerMark(block), undefined,
         `a user row must never collapse the owner Thought: ${block.message.text}`)
     } else if (block.message.kind === 'assistant') {
-      assert.equal(block.collapseFocusOwnerOnClick, undefined, 'the final assistant never carries the owner mark')
+      assert.equal(focusOwnerMark(block), undefined, 'the final assistant never carries the owner mark')
     } else {
-      assert.equal(block.collapseFocusOwnerOnClick, 0,
+      assert.equal(focusOwnerMark(block), 0,
         `a process row must carry the owner-turn collapse mark: ${block.message.kind}`)
     }
   }
@@ -3382,7 +3414,7 @@ test('expanded: a claimed steer in a non-user turn stays after the Thought', () 
     }, 1005, 5),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 6),
   ])
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   // This user is a durable next-step claim, not an opening prompt. The
   // Thought owns the turn root and the steer stays in its process position.
   assert.deepEqual(blockKinds(blocks), ['activity', 'thinking', 'user', 'assistant'],
@@ -3412,7 +3444,7 @@ test('an idle steer that opens a turn remains before the Thought', () => {
   const user = folder.messages().find(message => message.kind === 'user')
   assert.ok(user !== undefined && user.kind === 'user')
   assert.equal(user.steer, undefined)
-  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const expanded = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   assert.deepEqual(blockKinds(expanded), ['user', 'activity', 'thinking', 'assistant'])
   const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
   assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant'])
@@ -3435,7 +3467,7 @@ test('metadata-free logs keep the first user as the initial-prompt fallback', ()
     }, 1003, 3),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
   ])
-  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const expanded = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   assert.deepEqual(blockKinds(expanded), ['thinking', 'user', 'activity', 'assistant'])
   const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
   assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant'])
@@ -3492,7 +3524,7 @@ test('Focus surfaces an opening injected trigger before Thought while keeping th
   ]
   const folder = new TranscriptFolder()
   applyMixed(folder, events)
-  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const expanded = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   // The opening injected trigger is the turn foundation: it stays BEFORE
   // the Thought; the claimed steer returns to its chronological process
   // position (expanded chronology preserved).
@@ -3518,16 +3550,16 @@ test('Focus surfaces an opening injected trigger before Thought while keeping th
   // process — it must never collapse the owner Thought; the expanded
   // thinking row is process content and keeps the owner mark; user and
   // final stay unmarked.
-  assert.equal(expandedSystem.collapseFocusOwnerOnClick, undefined,
+  assert.equal(focusOwnerMark(expandedSystem), undefined,
     'an opening injected row must not carry the Thought collapse mark')
   const expandedThinking = expanded.find(block => block.kind === 'message' && block.message.kind === 'thinking')
   assert.ok(expandedThinking !== undefined && expandedThinking.kind === 'message')
-  assert.equal(expandedThinking.collapseFocusOwnerOnClick, 0,
+  assert.equal(focusOwnerMark(expandedThinking), 0,
     'expanded process rows keep the owner-turn collapse mark')
   for (const block of expanded) {
     if (block.kind !== 'message') continue
     if (block.message.kind === 'user' || block.message.kind === 'assistant') {
-      assert.equal(block.collapseFocusOwnerOnClick, undefined,
+      assert.equal(focusOwnerMark(block), undefined,
         `user/final rows never carry the owner mark: ${block.message.kind}`)
     }
   }
@@ -3545,7 +3577,7 @@ test('a steer claimed before reasoning is still identified durably', () => {
     }, 1006, 6),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1007, 7),
   ])
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   assert.deepEqual(blockKinds(blocks), ['activity', 'user', 'thinking', 'assistant'],
     'durable next-step identity must not depend on a prior visible process row')
 })
@@ -3573,7 +3605,7 @@ test('injected context stays chronological when expanded and surfaces when colla
     }, 1007, 7),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1008, 8),
   ])
-  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const expanded = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   // The mid-turn inject stays at its real chronological position when the
   // Thought is expanded, but is a persistent context row rather than process.
   assert.deepEqual(blockKinds(expanded), ['user', 'activity', 'thinking', 'system', 'user', 'assistant'],
@@ -3586,7 +3618,7 @@ test('injected context stays chronological when expanded and surfaces when colla
   const expandedSystem = expanded.find(block => block.kind === 'message' && block.message.kind === 'system')
   assert.ok(expandedSystem !== undefined && expandedSystem.kind === 'message' && expandedSystem.message.kind === 'system')
   assert.equal(expandedSystem.message.text, 'mid-turn reminder')
-  assert.equal(expandedSystem.collapseFocusOwnerOnClick, undefined,
+  assert.equal(focusOwnerMark(expandedSystem), undefined,
     'a surfaced context row is persistent, not owner-only process content')
   assert.equal(collapsed.filter(block => block.kind === 'message' && block.message.kind === 'system').length, 1,
     'the mid-turn context row must surface exactly once')
@@ -3659,7 +3691,7 @@ test('collapsed Focus preserves interleaved user, steer, and injected-context or
   assert.ok(expandedContextIndexes[1] !== undefined && expandedContextIndexes[1] < expandedSteerIndex
     && expandedContextIndexes[2] !== undefined && expandedSteerIndex < expandedContextIndexes[2],
     'expanded context remains on the correct side of the steer')
-  for (const block of expandedContexts) assert.equal(block.collapseFocusOwnerOnClick, undefined)
+  for (const block of expandedContexts) assert.equal(focusOwnerMark(block), undefined)
 
   const collapsed = projectTools(messages, folder.turnActivities(), new Set())
   assert.deepEqual(blockKinds(collapsed), ['system', 'user', 'system', 'user', 'system', 'activity', 'assistant'])
@@ -3687,7 +3719,7 @@ test('collapsed Focus preserves interleaved user, steer, and injected-context or
     ['context A', 'context B', 'context C'],
     're-expanded context rows retain their raw A/B/C order',
   )
-  const full = projectFocus(messages, folder.turnActivities(), new Set(), false)
+  const full = projectFocusFlat(messages, folder.turnActivities(), new Set(), false)
   assert.deepEqual(full.map(block => block.kind === 'message' ? block.message : undefined), messages,
     'Full keeps the raw chronology and does not hoist context')
 })
@@ -3760,7 +3792,7 @@ test('collapsed context never crosses a committed pre-steer assistant boundary',
   const expandedContextRows = expanded.filter((block): block is Extract<FocusProjectedBlock, { kind: 'message' }> =>
     block.kind === 'message' && block.message.kind === 'system')
   assert.equal(expandedContextRows.length, 2)
-  for (const block of expandedContextRows) assert.equal(block.collapseFocusOwnerOnClick, undefined)
+  for (const block of expandedContextRows) assert.equal(focusOwnerMark(block), undefined)
 })
 
 test('expanded and collapsed: multiple opening injected rows keep their order and never duplicate', () => {
@@ -3784,7 +3816,7 @@ test('expanded and collapsed: multiple opening injected rows keep their order an
     }, 1004, 4),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
   ])
-  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const expanded = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   assert.deepEqual(blockKinds(expanded), ['system', 'system', 'activity', 'thinking', 'assistant'],
     `every opening inject precedes the Thought when expanded: ${blockKinds(expanded).join(',')}`)
   const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
@@ -3798,7 +3830,7 @@ test('expanded and collapsed: multiple opening injected rows keep their order an
     'opening injects keep their original order when collapsed')
   for (const block of [...expanded, ...collapsed]) {
     if (block.kind !== 'message' || block.message.kind !== 'system') continue
-    assert.equal(block.collapseFocusOwnerOnClick, undefined,
+    assert.equal(focusOwnerMark(block), undefined,
       'an opening injected row never carries the Thought collapse mark')
   }
 })
@@ -3824,7 +3856,7 @@ test('expanded and collapsed: an llm/retry after the opening inject stays proces
     }, 1004, 4),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
   ])
-  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const expanded = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
   // Only the injected context is the foundation; the retry stays in its
   // chronological process position.
   assert.deepEqual(blockKinds(expanded), ['system', 'activity', 'system', 'thinking', 'assistant'],
@@ -3838,10 +3870,10 @@ test('expanded and collapsed: an llm/retry after the opening inject stays proces
   // inject stays unmarked foundation.
   const expandedRetry = expanded.find(block => block.kind === 'message' && block.message.kind === 'system' && block.message.text.includes('llm retry'))
   assert.ok(expandedRetry !== undefined && expandedRetry.kind === 'message')
-  assert.equal(expandedRetry.collapseFocusOwnerOnClick, 0, 'the retry is process content: owner-marked')
+  assert.equal(focusOwnerMark(expandedRetry), 0, 'the retry is process content: owner-marked')
   const expandedInject = expanded.find(block => block.kind === 'message' && block.message.kind === 'system' && block.message.text === 'system reminder')
   assert.ok(expandedInject !== undefined && expandedInject.kind === 'message')
-  assert.equal(expandedInject.collapseFocusOwnerOnClick, undefined, 'the opening inject is foundation: unmarked')
+  assert.equal(focusOwnerMark(expandedInject), undefined, 'the opening inject is foundation: unmarked')
 })
 
 test('a system row with an icon but no context marker is never turn foundation (independent contracts)', () => {
@@ -3865,7 +3897,7 @@ test('a system row with an icon but no context marker is never turn foundation (
   // never make a row part of the turn foundation.
   const iconOnly: TranscriptMessage = { kind: 'system', turn: 0, text: 'icon without context', icon: 'context-generic' }
   const messages = [folder.messages()[0]!, iconOnly, ...folder.messages().slice(1)]
-  const expanded = projectFocus(messages, folder.turnActivities(), new Set([0]), true)
+  const expanded = projectFocusFlat(messages, folder.turnActivities(), new Set([0]), true)
   // The real injected context is the foundation; the icon-only row stays
   // in the process, after the Thought.
   assert.deepEqual(blockKinds(expanded), ['system', 'activity', 'system', 'thinking', 'assistant'],
@@ -3875,15 +3907,15 @@ test('a system row with an icon but no context marker is never turn foundation (
     'the icon-only row is hidden under the collapsed Thought')
   const iconRow = expanded.find(block => block.kind === 'message' && block.message.kind === 'system' && block.message.text === 'icon without context')
   assert.ok(iconRow !== undefined && iconRow.kind === 'message')
-  assert.equal(iconRow.collapseFocusOwnerOnClick, 0, 'the icon-only row is process content: owner-marked')
+  assert.equal(focusOwnerMark(iconRow), 0, 'the icon-only row is process content: owner-marked')
 })
 
 test('fold → expand → fold projection is reversible (same collapsed output)', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, steeredTurn(0, 0, 1000))
-  const collapsed = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
-  const expanded = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
-  const refolded = projectFocus(
+  const collapsed = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
+  const expanded = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const refolded = projectFocusFlat(
     expanded.map(block => block.kind === 'message' ? block.message : null).filter((m): m is TranscriptMessage => m !== null),
     folder.turnActivities(),
     new Set(),

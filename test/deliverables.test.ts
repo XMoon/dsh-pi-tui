@@ -350,7 +350,7 @@ test('Focus keeps the delivery tail on the final assistant message', async () =>
   assert.ok(folded.includes('four.txt'), folded)
   assert.ok(!folded.includes('five.txt'), folded)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const expanded = await viewport(vt)
   assert.ok(expanded.includes('five.txt'), expanded)
   assert.ok(!expanded.includes('… +1'), expanded)
@@ -379,7 +379,7 @@ test('delivery tails reflow without visual overflow at supported widths', async 
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workspaceRoot: '/workspace' })
   app.start()
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'assistant',
     turn: 1,

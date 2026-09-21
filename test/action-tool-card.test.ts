@@ -292,14 +292,14 @@ test('assistant delivery tails cap folded files and expand with transcript detai
   assert.ok(!folded.includes('Presented /workspace'), folded)
   for (const line of folded.split('\n')) assert.ok(visibleWidth(stripTerminalSequences(line)) <= 90, JSON.stringify(line))
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const expanded = await viewport(vt)
   assert.ok(expanded.includes('dist/five.js'), expanded)
   assert.ok(expanded.includes('fifth file'), expanded)
   assert.ok(!expanded.includes('… +1'), expanded)
   for (const line of expanded.split('\n')) assert.ok(visibleWidth(stripTerminalSequences(line)) <= 90, JSON.stringify(line))
 
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   const collapsedAgain = await viewport(vt)
   assert.ok(!collapsedAgain.includes('dist/five.js'), collapsedAgain)
   assert.ok(collapsedAgain.includes('… +1'), collapsedAgain)
@@ -383,7 +383,7 @@ test('expanded action cards keep payloads, historical snapshots, and terminal ou
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([
     actionMessage('send_message', { agent_id: 'child-1', message: 'First instruction.\n\nSecond instruction.' }, 'message delivered to agent child-1'),
     actionMessage('terminal_send', { sessionId: 'pty-3', text: 'export FOO=1\nmake test' }, 'viewport output\n[wait: stdin_read]'),
@@ -421,7 +421,7 @@ test('terminal_send payload is added above a dedicated terminal result view', as
   })
   app.start()
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([actionMessage(
     'terminal_send',
     { sessionId: 'pty-3', text: 'make test' },
@@ -555,6 +555,7 @@ test('fullscreen Focus: the secondary send_message card stays compact with its p
   app.setFullscreen(true)
   app.setTranscript(folder.messages(), folder.turnActivities())
   app.expandFocusTurn(1)
+  app.expandAllWorkSpansForTest()
   const view = await viewport(vt)
   // The collapsed-slot one-liner (`Send message <target> · <first line>`) is
   // covered by the pure focusToolDisplay assertion; here the expanded root

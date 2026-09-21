@@ -172,7 +172,7 @@ test('S9: a session switch drops the stale pending Work and its owner state', as
   ], new Map(), undefined, [preview('p-session-a')])
   await vt.waitForRender()
   assert.equal(preparingRows(vt.getViewport().join('\n')).length, 1, 'precondition: session A pending Work is visible')
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0)
 
   // A different session's transcript arrives with no live preview.
   app.setTranscript([{ kind: 'user', turn: 1, text: 'session B prompt' }], new Map(), undefined, [])
@@ -181,8 +181,8 @@ test('S9: a session switch drops the stale pending Work and its owner state', as
   assert.ok(!view.includes('session A'), 'no stale session A row survives')
   assert.equal(preparingRows(view).length, 0, 'no stale pending Work survives the session switch')
   assert.equal(workHeaders(view).length, 0, 'no stale Work owner survives')
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0)
-  assert.equal(app.compactExpandedClustersForTest().size, 0)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0)
+  assert.equal(app.expandedContextClusterOwnersForTest().size, 0)
 })
 
 // --- S10: preset / surface switch -----------------------------------------
@@ -206,7 +206,7 @@ test('S10: preset and surface switches during Preparing keep one source of truth
   let view = vt.getViewport().join('\n')
   assert.equal(preparingRows(view).length, 1, `returning to Compact reconstructs exactly one call:\n${view}`)
   assert.equal(workHeaders(view).length, 1, `one Work span:\n${view}`)
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0, 'no stale Work owner from the preset switching')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'no stale Work owner from the preset switching')
 
   app.setFullscreen(true)
   await vt.waitForRender()

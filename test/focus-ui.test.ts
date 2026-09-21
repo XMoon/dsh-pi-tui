@@ -265,17 +265,18 @@ test('Focus expanded places Preparing rows after the process tail and before the
   assert.ok(headerRow >= 0, `collapsed Thought missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 3, headerRow + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   const view = vt.getViewport()
   const joined = view.join('\n')
   const processRow = findRow(view, 'Read src/transcript.ts')
-  const editRow = findRow(view, 'Preparing Edit...')
-  const bashRow = findRow(view, 'Preparing Bash...')
+  const preparingRow = findRow(view, 'Preparing Edit +1')
   const finalRow = findRow(view, 'The transcript folds events incrementally.')
   assert.ok(hasFocusHeader(joined, true), `expanded Thought missing:\n${joined}`)
-  assert.ok(processRow >= 0 && editRow >= 0 && bashRow >= 0 && finalRow >= 0, `expanded ordering rows missing:\n${joined}`)
-  assert.ok(processRow < editRow && editRow < bashRow && bashRow < finalRow, `Preparing rows must be index ordered at the process tail:\n${joined}`)
-  assert.equal((joined.match(/Preparing (?:Edit|Bash)\.\.\./g) ?? []).length, 2, `each preview should render once:\n${joined}`)
-  assert.ok(!joined.includes('Tool:    Preparing'), `expanded Focus must not use the compact Preparing Tool slot:\n${joined}`)
+  assert.ok(processRow >= 0 && preparingRow >= 0 && finalRow >= 0, `expanded ordering rows missing:\n${joined}`)
+  assert.ok(processRow < preparingRow && preparingRow < finalRow,
+    `the pending Work card must sit at the process tail before the final:\n${joined}`)
+  assert.equal((joined.match(/Preparing Edit \+1/g) ?? []).length, 1, `the pending Work summary must render once:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -293,6 +294,8 @@ test('clicking the Thought header expands a RUNNING turn: process visible, Think
   const y = findFocusHeaderRow(view, false)
   assert.ok(y >= 0, `Thought header row missing:\n${view.join('\n')}`)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
@@ -468,7 +471,7 @@ test('Ctrl+O cannot leak a collapsed Focus turn (outer gate)', async () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
-  app.setToolOutputExpanded(true) // Ctrl+O master switch ON
+  app.setTranscriptDetailExpanded(true) // Ctrl+O master switch ON
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -656,6 +659,8 @@ test('Alt+T is the ONE Thinking detail toggle, shared by Focus ON/OFF (unified d
   let y = findFocusHeaderRow(vt.getViewport(), false)
   click(vt, 3, y + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   let joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('locating the transcript path'), 'Focus expanded must show Thinking (compact) by default')
   assert.ok(joined.includes('(click to expand)'), 'the compact Thinking card must carry the click hint')
@@ -756,6 +761,8 @@ test('a RUNNING turn supports live secondary disclosures (plan §41)', async () 
   let y = findFocusHeaderRow(view, false)
   click(vt, 3, y + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   view = vt.getViewport()
   // Thinking is compact by default: click the compact card full.
   assert.ok(view.join('\n').includes('locating the transcript path'), 'the compact Thinking preview must be visible by default')
@@ -823,7 +830,7 @@ test('Ctrl+O cannot force the secondaries full inside an expanded Thought (plan 
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
-  app.setToolOutputExpanded(true) // Ctrl+O master switch ON
+  app.setTranscriptDetailExpanded(true) // Ctrl+O master switch ON
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
@@ -835,6 +842,8 @@ test('Ctrl+O cannot force the secondaries full inside an expanded Thought (plan 
   // card, and Ctrl+O (the process detail master) never expands it.
   const y = findFocusHeaderRow(vt.getViewport(), false)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(hasFocusHeader(joined, true), 'the root must expand')
@@ -864,6 +873,8 @@ test('fullscreen Thinking: compact default, click-full, Alt+T toggles the bulk l
   let view = vt.getViewport()
   let y = findFocusHeaderRow(view, false)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   view = vt.getViewport()
   let joined = view.join('\n')
@@ -907,6 +918,8 @@ test('a session switch clears the secondary expansions with the other overrides 
   let y = findFocusHeaderRow(view, false)
   click(vt, 3, y + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   view = vt.getViewport()
   const ty = findRow(view, 'locating the transcript path')
   click(vt, 10, ty + 1)
@@ -924,6 +937,8 @@ test('a session switch clears the secondary expansions with the other overrides 
   // override was cleared; the category is still visible).
   y = findFocusHeaderRow(view, false)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   view = vt.getViewport()
   const reopened = view.join('\n')
@@ -980,6 +995,8 @@ test('a plugin tool renderer sees the EFFECTIVE expansion inside an expanded Tho
   const y = findFocusHeaderRow(vt.getViewport(), false)
   click(vt, 3, y + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('probe false'), `the plugin renderer must see the compact state:\n${view}`)
   // The per-card override full-reveals it: expanded=true.
@@ -1007,7 +1024,7 @@ test('regular mode: Ctrl+O is the Focus detail master (review contract)', async 
   // Ctrl+O ON: the recent Focus Thought full-reveals (the keyboard
   // master); Thinking appears COMPACT (never hidden — Alt+T owns its
   // detail).
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   view = vt.getViewport()
   joined = view.join('\n')
@@ -1022,14 +1039,14 @@ test('regular mode: Ctrl+O is the Focus detail master (review contract)', async 
   assert.ok(joined.includes('locating the transcript path'), 'Alt+T must expand Thinking in regular detail mode')
   assert.ok(!joined.includes('(alt+t to expand)'), 'the full card must not carry the compact hint')
   // Ctrl+O OFF: back to compact.
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(hasFocusHeader(joined, false), 'Ctrl+O must collapse the recent Focus Thoughts')
   assert.ok(!joined.includes('Read src/transcript.ts [running]'), 'the process must hide again')
   // The bulk Thinking preference is untouched by Ctrl+O: reopening the
   // root (Alt+T-independent) still renders Thinking full.
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(!joined.includes('(alt+t to expand)'), 'Thinking stays full — Ctrl+O never touches its detail')
@@ -1041,7 +1058,7 @@ test('switching to fullscreen drops the Ctrl+O-derived reveal; back to regular i
   const folder = new TranscriptFolder()
   applyMixed(folder, runningTurn(0))
   app.setFocusMode(true)
-  app.setToolOutputExpanded(true) // regular Ctrl+O master ON
+  app.setTranscriptDetailExpanded(true) // regular Ctrl+O master ON
   show(app, folder)
   await vt.waitForRender()
   // Regular: the derived reveal is active.
@@ -1106,7 +1123,7 @@ test('regular Ctrl+O derives ONLY the recent Focus turns; older roots stay colla
   assert.ok(!joined.includes('🖥️  Bash cmd 2'), 'no process rows while compact')
   // Ctrl+O ON: the RECENT 3 turns derive-expand (their tool cards appear);
   // the OLDEST turn stays collapsed (its process stays hidden).
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   const expandedHeaders = countFocusHeaders(joined, true)
@@ -1118,14 +1135,14 @@ test('regular Ctrl+O derives ONLY the recent Focus turns; older roots stay colla
 })
 
 test('regular search reveal of a NON-recent root full-reveals its process (no dead compact cards)', async () => {
-  const vt = new VirtualTerminal(100, 40)
+  const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
   const folder = new TranscriptFolder()
   for (let turn = 1; turn <= 4; turn += 1) applyMixed(folder, miniTurn(turn, turn * 100))
   app.setFocusMode(true)
-  app.setToolOutputExpanded(true) // Ctrl+O ON: turns 2-4 derive
+  app.setTranscriptDetailExpanded(true) // Ctrl+O ON: turns 2-4 derive
   show(app, folder)
   await vt.waitForRender()
   // The search reveals the OLDEST turn — NOT inside the recent boundary:
@@ -1136,7 +1153,7 @@ test('regular search reveal of a NON-recent root full-reveals its process (no de
   app.revealSearchMatch(oldestTool)
   await vt.waitForRender()
   const joined = vt.getViewport().join('\n')
-  assert.ok(joined.includes('🖥️  Bash cmd 1'), 'the non-recent root full-reveals its tool card in regular mode')
+  assert.ok(joined.includes('🖥️  Bash cmd 1'), `the non-recent root full-reveals its tool card in regular mode:\n${joined}`)
   assert.ok(!joined.includes('(ctrl+o to expand)'), 'no dead compact secondary affordance')
   app.stop()
 })
@@ -1176,7 +1193,7 @@ test('regular Focus expanded roots render large diffs in FULL (no mouse, no cap)
   assert.ok(!joined.includes('new 15'), 'no process rows while compact')
   // Ctrl+O ON: the derived root full-reveals — the large diff renders in
   // FULL (regular has no mouse affordance to open a capped body).
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(hasFocusHeader(joined, true), 'the derived root must expand')
@@ -1209,7 +1226,7 @@ test('cache identity: Ctrl+O ON caps a large diff, then /focus on FULL-REVEALS t
     eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2, 2),
   ])
   // Focus OFF + Ctrl+O ON: the ordinary fold expands the card, the diff CAPS.
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   show(app, folder)
   await vt.waitForRender()
   let joined = vt.getViewport().join('\n')
@@ -1249,7 +1266,7 @@ test('cache identity: /focus off restores the ordinary CAPPED diff presentation 
   ])
   // Focus ON + Ctrl+O ON: the derived root full-reveals the diff.
   app.setFocusMode(true)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   show(app, folder)
   await vt.waitForRender()
   let joined = vt.getViewport().join('\n')
@@ -1429,6 +1446,8 @@ test('fullscreen Focus expand/collapse: the expanded Bash card keeps the multili
   assert.ok(y >= 0, `Thought header missing:\n${joined}`)
   click(vt, 3, y + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   // The folded card caps the command; clicking the cap marker (fullscreen
   // mouse-owned disclosure) full-reveals it.
   let capY = findRow(vt.getViewport(), 'more command lines')
@@ -1554,6 +1573,8 @@ test('fullscreen Focus Ctrl+O expands ONLY the recent roots; secondaries stay co
   // Ctrl+O with NOTHING expanded → Expand Recent.
   vt.sendInput('\x0f')
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   const expanded = [...app.focusExpandedTurnsForTest()].sort((a, b) => a - b)
   assert.deepEqual(expanded, [3, 4, 5],
     `Ctrl+O must expand exactly the ${EXPAND_RECENT_TURNS} most recent eligible roots (got ${JSON.stringify(expanded)})`)
@@ -1567,11 +1588,8 @@ test('fullscreen Focus Ctrl+O expands ONLY the recent roots; secondaries stay co
   }
   // Thinking still follows the global preference (compact by default):
   // the expanded roots' Thinking cards carry the click hint.
-  app.scrollToTop()
-  await vt.waitForRender()
-  const top = vt.getViewport().join('\n')
-  assert.ok(hasFocusHeader(top, true), `an expanded header must be visible at the top:\n${top}`)
-  assert.ok(top.includes('(click to expand)'), `Thinking stays compact under Ctrl+O (click hint):\n${top}`)
+  assert.ok(hasFocusHeader(joined, true), `an expanded header must be visible:\n${joined}`)
+  assert.ok(joined.includes('(click to expand)'), `Thinking stays compact under Ctrl+O (click hint):\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -1664,6 +1682,8 @@ test('fullscreen Ctrl+O Collapse All clears every secondary override; the global
   assert.ok(y >= 0, `Thought header missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 3, y + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   let joined = vt.getViewport().join('\n')
   assert.ok(hasFocusHeader(joined, true), 'precondition: root expanded')
   // Local overrides: bulk Thinking ON (Alt+T), then collapse ONLY the
@@ -1691,11 +1711,11 @@ test('fullscreen Ctrl+O Collapse All clears every secondary override; the global
   assert.ok(joined.includes('out 1 line 39'), 'precondition: the Bash card is locally full (tail visible)')
   // Ctrl+O = Collapse All: every override is dropped, the bulk Thinking
   // preference survives, and the tool master normalizes OFF (plan §8).
-  app.setToolOutputExpanded(true) // pre-arm the master: the bulk fold must reset it
+  app.setTranscriptDetailExpanded(true) // pre-arm the master: the bulk fold must reset it
   vt.sendInput('\x0f')
   await vt.waitForRender()
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'all roots collapsed')
-  assert.equal(app.isToolOutputExpanded(), false, 'Collapse All normalizes the Ctrl+O master OFF (fullscreen Focus path only)')
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'Collapse All normalizes the Ctrl+O master OFF (fullscreen Focus path only)')
   assert.equal(app.isThinkingExpanded(), true, 'Collapse All never touches the global Thinking preference')
   // Re-expand: the old local overrides must NOT resurrect.
   y = findFocusHeaderRow(vt.getViewport(), false)
@@ -1720,18 +1740,18 @@ test('regular Ctrl+O never writes the fullscreen Focus root set (plan §22.5/§2
   // root set must stay empty.
   vt.sendInput('\x0f')
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), true, 'regular Ctrl+O still owns the detail master')
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'regular Ctrl+O still owns the detail master')
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'regular Ctrl+O must never write focusExpandedTurns')
   assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), 'regular Focus Ctrl+O must keep deriving the reveal')
   vt.sendInput('\x0f')
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), false, 'second Ctrl+O folds the derived reveal back')
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'second Ctrl+O folds the derived reveal back')
   assert.ok(hasFocusHeader(vt.getViewport().join('\n'), false), 'the derived reveal must fold back')
   // Regular + Focus OFF: the historical master switch only.
   app.setFocusMode(false)
   vt.sendInput('\x0f')
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), true, 'Focus OFF keeps the historical Ctrl+O')
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'Focus OFF keeps the historical Ctrl+O')
   assert.equal(app.focusExpandedTurnsForTest().size, 0)
   app.stop()
 })
@@ -1753,7 +1773,7 @@ test('Question keeps the editor seat while the effective fold key inspects trans
   await vt.waitForRender()
   vt.sendInput('\x18') // remapped app.transcript.toggleExpand
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), true, 'the effective fold key must pass through the Question modal')
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the effective fold key must pass through the Question modal')
   assert.ok(vt.getViewport().join('\n').includes('What should be recorded?'), 'the Question must remain mounted')
   vt.sendInput('X')
   await vt.waitForRender()
@@ -1768,7 +1788,7 @@ test('Question keeps the editor seat while the effective fold key inspects trans
   await vt.waitForRender()
   vt.sendInput('\x18')
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), false, 'the second effective fold key toggles the regular disclosure back')
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the second effective fold key toggles the regular disclosure back')
   assert.ok(vt.getViewport().join('\n').includes('Approve bash?'), 'Approval must remain the keyboard owner')
   vt.sendInput('n')
   assert.equal(await approval, 'rejected')
@@ -1980,7 +2000,7 @@ test('Question and Approval allow safe leader inspection while blocking mutation
   await vt.waitForRender()
   vt.sendInput('o')
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), true, 'leader-bound fold inspection must work under Question')
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'leader-bound fold inspection must work under Question')
   vt.sendInput('1')
   await vt.waitForRender()
   vt.sendInput('\r')
@@ -1992,7 +2012,7 @@ test('Question and Approval allow safe leader inspection while blocking mutation
   await vt.waitForRender()
   vt.sendInput('o')
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), false, 'leader-bound fold inspection must work under Approval')
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'leader-bound fold inspection must work under Approval')
   assert.ok(vt.getViewport().join('\n').includes('Approve bash?'), 'Approval remains the response owner')
   vt.sendInput('n')
   assert.equal(await approval, 'rejected')
@@ -2014,7 +2034,7 @@ test('Question fixed selection wins over a pending leader completion', async () 
   await vt.waitForRender()
   vt.sendInput('1')
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), false, 'Question selection must beat the leader completion')
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'Question selection must beat the leader completion')
   vt.sendInput('\r')
   assert.deepEqual(await question, [{ id: 'q1', selected: ['Continue'] }])
 })
@@ -2038,7 +2058,7 @@ test('settling Question cancels a pending modal leader', async () => {
   await assert.rejects(question, /aborted|cancelled/)
   vt.sendInput('o')
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), false, 'a settled Question must cancel its pending leader')
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'a settled Question must cancel its pending leader')
 })
 
 test('Question does not fall through to generic Host transcript search', async () => {
@@ -2111,6 +2131,8 @@ test('fullscreen Focus Question permits read-only background inspection and keep
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'an ordinary presentation target must not mutate Focus roots')
   assert.ok(view.join('\n').includes('Inspect context?'), 'Question remains visible after presentation inspection')
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   view = vt.getViewport()
   assert.ok(hasFocusHeader(view.join('\n'), true), `the background Thought disclosure must work:\n${view.join('\n')}`)
@@ -2386,7 +2408,7 @@ test('fullscreen + Focus OFF: Ctrl+O keeps the historical tool master — never 
   vt.sendInput('\x0f')
   await vt.waitForRender()
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'Focus OFF must not enter the root-bulk branch')
-  assert.equal(app.isToolOutputExpanded(), true, 'the historical tool master keeps toggling')
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the historical tool master keeps toggling')
   app.setFullscreen(false)
   app.stop()
 })
@@ -2409,6 +2431,8 @@ test('blank-row collapse works when the Thought header scrolled OUT of view (pla
   let y = findFocusHeaderRow(vt.getViewport(), false)
   assert.ok(y >= 0, `Thought header missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   const bashY = findRow(vt.getViewport(), 'Bash seq 1 120')
   assert.ok(bashY >= 0, `Bash card missing:\n${vt.getViewport().join('\n')}`)
@@ -2434,9 +2458,11 @@ test('blank-row collapse works when the Thought header scrolled OUT of view (pla
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
-  assert.ok(hasFocusHeader(joined, false), `the blank-row click must collapse the Thought:\n${joined}`)
-  const headerY = findFocusHeaderRow(view, false)
-  assert.ok(headerY >= 0 && headerY <= 3, `the collapse anchor must bring the header near the top:\n${joined}`)
+  // F6 nearest-container rule: the spacer is INSIDE the nested Work, so it
+  // collapses that Work container (its header anchors near the top) while the
+  // outer Thought stays expanded.
+  assert.ok(hasFocusHeader(joined, true), `the Thought root must stay expanded:\n${joined}`)
+  assert.ok(joined.includes('▸ Work'), `the internal blank-row click must collapse the owning Work:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -2455,6 +2481,8 @@ test('a secondary content row toggles only the secondary; the adjacent blank row
   let y = findFocusHeaderRow(vt.getViewport(), false)
   assert.ok(y >= 0, `Thought header missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   // The Bash card's CONTENT row toggles only the secondary: the last
   // result line proves the full-reveal, and the ROOT stays open. The
@@ -2481,7 +2509,8 @@ test('a secondary content row toggles only the secondary; the adjacent blank row
   click(vt, 3, topBashY)
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
-  assert.ok(hasFocusHeader(joined, false), `the blank row must collapse the Thought:\n${joined}`)
+  assert.ok(hasFocusHeader(joined, true), `the Thought root must stay expanded:\n${joined}`)
+  assert.ok(joined.includes('▸ Work'), `the internal blank row must collapse the owning Work:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -2500,6 +2529,8 @@ test('clicking the Thinking row toggles the secondary, never the root (plan §23
   let y = findFocusHeaderRow(vt.getViewport(), false)
   click(vt, 3, y + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   let joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('(click to expand)'), 'precondition: Thinking compact with the hint')
   const thinkY = findRow(vt.getViewport(), '🌊 Thinking')
@@ -2513,7 +2544,7 @@ test('clicking the Thinking row toggles the secondary, never the root (plan §23
   app.stop()
 })
 
-test('a blank-row click collapses ONLY the owning Thought (plan §23.4)', async () => {
+test('a blank-row click inside turn 2 collapses ONLY that turn\'s nested Work (F6 nearest container)', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -2536,21 +2567,26 @@ test('a blank-row click collapses ONLY the owning Thought (plan §23.4)', async 
   assert.ok(y >= 0, `second Thought header missing:\n${view.join('\n')}`)
   click(vt, 3, y + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   view = vt.getViewport()
   assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1, 2], 'precondition: both roots expanded')
   const joined = view.join('\n')
   assert.equal(countFocusHeaders(joined, true), 2, `precondition: two expanded headers visible:\n${joined}`)
   // The blank row INSIDE turn 2 (between its Thinking and Bash cards):
   // only turn 2 collapses.
+  app.scrollToBottom()
+  await vt.waitForRender()
+  view = vt.getViewport()
   const bash2Y = findRow(view, 'Bash cmd 2')
   assert.ok(bash2Y >= 0, `turn-2 Bash card missing:\n${joined}`)
   assert.ok(isBlankRow(view[bash2Y - 1]), `the clicked row must be a blank spacer row:\n${joined}`)
   click(vt, 3, bash2Y)
   await vt.waitForRender()
-  assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1], 'only the OWNING Thought collapses')
+  assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1, 2], 'the Thought roots stay expanded')
   const after = vt.getViewport().join('\n')
-  assert.equal(countFocusHeaders(after, true), 1, `the other Thought must stay expanded:\n${after}`)
-  assert.ok(hasFocusHeader(after, false), 'the collapsed Thought header must anchor into view')
+  assert.equal(countFocusHeaders(after, true), 2, `both Thoughts stay expanded:\n${after}`)
+  assert.ok(after.includes('▸ Work'), `the OWNING Work container collapses:\n${after}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -2626,6 +2662,8 @@ test('the blank-row fallback never pierces an open modal overlay (plan §23.7)',
   await vt.waitForRender()
   let y = findFocusHeaderRow(vt.getViewport(), false)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   assert.ok(hasFocusHeader(vt.getViewport().join('\n'), true), 'precondition: root expanded')
   // An open MODAL overlay owns the click: the blank row between Thinking and
@@ -2734,6 +2772,8 @@ test('resize keeps the blank-row click map aligned (plan §23.8)', async () => {
   let y = findFocusHeaderRow(vt.getViewport(), false)
   click(vt, 3, y + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   let view = vt.getViewport()
   const bashY = findRow(view, 'Bash seq 1 120')
   assert.ok(bashY >= 0, `Bash card missing:\n${view.join('\n')}`)
@@ -2758,7 +2798,9 @@ test('resize keeps the blank-row click map aligned (plan §23.8)', async () => {
   click(vt, 3, echoY)
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
-  assert.ok(hasFocusHeader(after, false), `the blank-row collapse must work after resize:\n${after}`)
+  // F6: the spacer inside the nested Work collapses that Work, not the Thought.
+  assert.ok(hasFocusHeader(after, true), `the Thought must stay expanded:\n${after}`)
+  assert.ok(after.includes('▸ Work'), `the blank-row collapse must work after resize:\n${after}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -2778,6 +2820,8 @@ test('a blank-row click BEFORE the first paint after a resize is dropped — reb
   let y = findFocusHeaderRow(vt.getViewport(), false)
   assert.ok(y >= 0, `Thought header missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   let view = vt.getViewport()
   const bashY = findRow(view, 'Bash seq 1 120')
@@ -2808,7 +2852,8 @@ test('a blank-row click BEFORE the first paint after a resize is dropped — reb
   click(vt, 3, echoY)
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
-  assert.ok(hasFocusHeader(after, false), `the post-paint blank click must collapse:\n${after}`)
+  assert.ok(hasFocusHeader(after, true), `the Thought must stay expanded:\n${after}`)
+  assert.ok(after.includes('▸ Work'), `the post-paint blank click must collapse the Work:\n${after}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -2830,6 +2875,8 @@ test('Collapse All clears a secondary override parked on a WINDOWED-AWAY message
   let y = findFocusHeaderRow(vt.getViewport(), false)
   assert.ok(y >= 0, `Thought header missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   let view = vt.getViewport()
   const bashY = findRow(view, 'Bash cmd 1')
@@ -2867,6 +2914,8 @@ test('Collapse All clears a secondary override parked on a WINDOWED-AWAY message
   y = findFocusHeaderRow(vt.getViewport(), false)
   assert.ok(y >= 0, `collapsed header missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   const joined = vt.getViewport().join('\n')
   assert.ok(!joined.includes('out 1 line 39'), `the parked override must not resurrect the full-reveal:\n${joined}`)
@@ -3085,7 +3134,7 @@ test('local shell cards stay folded in fullscreen Focus even with the Ctrl+O mas
   // Regular: Ctrl+O turns the shell master ON and the card expands.
   vt.sendInput('\x0f')
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), true, 'precondition: master ON')
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'precondition: master ON')
   assert.ok(vt.getViewport().join('\n').includes('shell line 0'), 'precondition: the card is expanded in regular')
   // Switch to fullscreen Focus: Ctrl+O owns the Thought roots there, so
   // the shell card keeps its folded state (the documented contract).
@@ -3153,6 +3202,8 @@ test('gutter blocker: the fullscreen Focus hit-map stays aligned across the disc
   let y = findFocusHeaderRow(lines, false)
   assert.ok(y >= 0, `Thought header missing:\n${lines.join('\n')}`)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('🌊 Thinking'), `the process timeline must appear under the expanded Thought:\n${view}`)
@@ -3295,6 +3346,8 @@ test('editor/footer clicks are clipped OUT of the transcript hit-test when scrol
   let y = findFocusHeaderRow(vt.getViewport(), false)
   assert.ok(y >= 0, `Thought header missing:\n${vt.getViewport().join('\n')}`)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   let view = vt.getViewport()
   const bashY = findRow(view, 'Bash seq 1 120')
@@ -3508,7 +3561,7 @@ test('surfaced context keeps its local expansion when its Thought is toggled', a
 })
 
 test('search-revealing an old tool does not Thought-expand unrelated surfaced context', async () => {
-  const vt = new VirtualTerminal(100, 40)
+  const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
@@ -3532,7 +3585,7 @@ test('search-revealing an old tool does not Thought-expand unrelated surfaced co
   ])
   for (let turn = 2; turn <= 4; turn += 1) applyMixed(folder, miniTurn(turn, turn * 100))
   app.setFocusMode(true)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   show(app, folder)
   await vt.waitForRender()
   const tool = folder.messages().find(message => message.kind === 'tool' && message.turn === 1)

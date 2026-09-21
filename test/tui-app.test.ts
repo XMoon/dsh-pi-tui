@@ -347,7 +347,7 @@ test('tool cards present through the real registry: read shows the relativized p
 
     startedApps.add(app)
     life.defer(() => app.stop())
-    app.setToolOutputExpanded(true)
+    app.setTranscriptDetailExpanded(true)
     const folder = new TranscriptFolder()
     folder.apply([callEvent, resultEvent])
     app.setTranscript(folder.messages())
@@ -1772,7 +1772,7 @@ test('fullscreen todo: a session switch resets the click-coalescing window (mous
 test('fullscreen transcript click: a press cannot transfer to a repainted message (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
@@ -1847,7 +1847,7 @@ test('fullscreen transcript click: a press on a local card cannot transfer to a 
 test('fullscreen transcript click: a resize between press and release cannot act against the stale frame (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
@@ -1874,7 +1874,7 @@ test('fullscreen transcript click: a resize between press and release cannot act
 test('fullscreen transcript click: a resize + repaint between press and release cannot transfer the gesture (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
@@ -1903,7 +1903,7 @@ test('fullscreen transcript click: a resize + repaint between press and release 
 test('fullscreen transcript click: a question-frame press clears the stale background gesture (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"AAA"}',
@@ -2852,7 +2852,7 @@ test('a running edit card renders its call-time diff', async () => {
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-1')])
   app.setTranscript(folder.messages())
@@ -2872,7 +2872,7 @@ test('subagent-family tool cards show the model/provider line when the call carr
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   // A running subagent_route dispatch with an explicit model/provider.
   const args = JSON.stringify({ description: 'research', prompt: 'look it up', provider: 'ollama', model: 'deepseek-v4' })
   const folder = new TranscriptFolder()
@@ -2897,7 +2897,7 @@ test('subagent-family cards without an explicit model render unchanged (compatib
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   // The official subagent tool never carries model/provider in the args
   // (deployment config owns the route): no model line, no extra row.
   const args = JSON.stringify({ description: 'research', prompt: 'deep dive', run_in_background: false })
@@ -2927,7 +2927,7 @@ test('a completed diff card renders the applied result diffs', async () => {
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-2'), diffResultEvent(1, 'call-diff-2', 'The file src/foo.ts has been updated successfully.')])
   app.setTranscript(folder.messages())
@@ -2966,7 +2966,7 @@ test('a settled Edit keeps folded and expanded views on the applied result diff'
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-applied'), diffResultEvent(1, 'call-diff-applied', 'The file src/foo.ts has been updated successfully.')])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
@@ -2977,7 +2977,7 @@ test('a settled Edit keeps folded and expanded views on the applied result diff'
   assert.equal(folded.split('src/foo.ts').length - 1, 1, `Edit path must belong only to the card header:\n${folded}`)
   assert.ok(folded.includes('more diff lines hidden'), `folded cap must explain hidden context:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('Edit src/foo.ts [ok]  +1 -1'), `expanded result stats missing:\n${expanded}`)
@@ -3011,7 +3011,7 @@ test('a folded settled Edit caps the result diff across all hunks', async () => 
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-folded-hunks'), diffResultEvent(1, 'call-diff-folded-hunks', 'updated')])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
@@ -3045,7 +3045,7 @@ test('a multi-hunk Edit keeps path ownership in the card header', async () => {
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-multi'), diffResultEvent(1, 'call-diff-multi', 'The file src/foo.ts has been updated successfully.')])
   app.setTranscript(folder.messages())
@@ -3075,7 +3075,7 @@ test('expanded Edit headers reflow with terminal width changes', async () => {
   })
   app.start()
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-resize', args), diffResultEvent(1, 'call-diff-resize', 'done')])
   app.setTranscript(folder.messages())
@@ -3120,7 +3120,7 @@ test('narrow Edit headers preserve status across running, success, and error sta
   })
   app.start()
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const assertHeaderStatus = async (expected: string, events: SessionEvent[]): Promise<void> => {
     const folder = new TranscriptFolder()
@@ -3146,7 +3146,7 @@ test('expanded non-Edit headers retain full wrapped descriptions', async () => {
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   app.setTranscript([{
     kind: 'tool', turn: 0, name: 'grep',
     args: JSON.stringify({ pattern, path: 'src' }),
@@ -3182,14 +3182,14 @@ test('a successful Edit with a non-diff result view falls back consistently', as
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-generic', args), diffResultEvent(1, 'call-diff-generic', 'raw result')])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `folded fallback diff missing:\n${folded}`)
   assert.ok(!folded.includes('GENERIC_RESULT'), `folded card must not use a non-diff result view:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded fallback diff missing:\n${expanded}`)
@@ -3222,14 +3222,14 @@ test('metadata-only successful Edit results render in folded and expanded views'
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-empty-success', args), emptyResultEvent(1, 'call-diff-empty-success')])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(folded.includes('RESULT_OLD') && folded.includes('RESULT_NEW'), `folded metadata diff missing:\n${folded}`)
   assert.ok(!folded.includes('CALL_OLD') && !folded.includes('CALL_NEW'), `folded view used call data over structured result:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('RESULT_OLD') && expanded.includes('RESULT_NEW'), `expanded metadata diff missing:\n${expanded}`)
@@ -3267,7 +3267,7 @@ test('metadata-only error Edit results stay error and use the attempted call dif
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-empty-error', args), emptyResultEvent(1, 'call-diff-empty-error', true)])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
@@ -3276,7 +3276,7 @@ test('metadata-only error Edit results stay error and use the attempted call dif
   assert.ok(!folded.includes('RESULT_OLD') && !folded.includes('RESULT_NEW'), `folded error used applied data:\n${folded}`)
   assert.ok(!folded.includes('+1 -1'), `folded error fabricated success stats:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('Edit src/foo.ts [error]'), `expanded error identity missing:\n${expanded}`)
@@ -3309,13 +3309,13 @@ test('malformed Edit args never substitute presenter call diffs', async () => {
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-malformed-edit', '{not-json'), diffResultEvent(1, 'call-malformed-edit', 'unstructured result')])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(!folded.includes('PRESENTER_OLD') && !folded.includes('PRESENTER_NEW'), `folded malformed Edit used presenter call data:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(!expanded.includes('PRESENTER_OLD') && !expanded.includes('PRESENTER_NEW'), `expanded malformed Edit used presenter call data:\n${expanded}`)
@@ -3339,7 +3339,7 @@ test('a completed diff card without a result view falls back to the call-time di
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-3'), diffResultEvent(1, 'call-diff-3', 'The file src/foo.ts has been updated successfully.')])
   app.setTranscript(folder.messages())
@@ -3380,7 +3380,7 @@ test('an error Edit stays an error and never renders an applied result diff', as
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-error', args), diffResultEvent(1, 'call-diff-error', 'edit failed', true)])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
@@ -3389,7 +3389,7 @@ test('an error Edit stays an error and never renders an applied result diff', as
   assert.ok(!folded.includes('RESULT_OLD') && !folded.includes('RESULT_NEW'), `error card must not show an applied result diff:\n${folded}`)
   assert.ok(!folded.includes('+1 -1'), `error card must not fabricate success stats:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('Edit src/foo.ts [error]'), `expanded error identity missing:\n${expanded}`)
@@ -3423,14 +3423,14 @@ test('an error Edit ignores non-diff result views and keeps the call diff', asyn
   const folder = new TranscriptFolder()
   folder.apply([diffCallEvent(0, 'call-diff-error-generic', args), diffResultEvent(1, 'call-diff-error-generic', 'edit failed', true)])
   app.setTranscript(folder.messages())
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   await vt.waitForRender()
   const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
   const folded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(folded.includes('CALL_OLD') && folded.includes('CALL_NEW'), `folded attempted diff missing:\n${folded}`)
   assert.ok(!folded.includes('RESULT_GENERIC'), `folded error should not show result content:\n${folded}`)
 
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   await vt.waitForRender()
   const expanded = stripAnsi(vt.getViewport().join('\n'))
   assert.ok(expanded.includes('CALL_OLD') && expanded.includes('CALL_NEW'), `expanded attempted diff missing:\n${expanded}`)
@@ -3456,7 +3456,7 @@ test('a big diff card caps in the default view with an expand hint', async () =>
   app.start()
 
   startedApps.add(app)
-  app.setToolOutputExpanded(true)
+  app.setTranscriptDetailExpanded(true)
   const folder = new TranscriptFolder()
   folder.apply([{
     type: 'tool/call',
@@ -3534,10 +3534,10 @@ test('ctrl+o still folds the viewed transcript while the viewer is up', async ()
   startedApps.add(app)
   app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'child-1', label: 'research', mode: 'one-shot', activity: 'running' })
   await vt.waitForRender()
-  app.setToolOutputExpanded(false)
+  app.setTranscriptDetailExpanded(false)
   vt.sendInput('\x0f') // ctrl+o
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), true, `ctrl+o must still toggle the fold while viewing`)
+  assert.equal(app.isTranscriptDetailExpanded(), true, `ctrl+o must still toggle the fold while viewing`)
   app.setViewerMode(undefined)
   app.stop()
 })

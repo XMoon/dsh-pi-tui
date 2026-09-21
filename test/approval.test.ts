@@ -200,7 +200,7 @@ test('Approval decision keys beat a conflicting inspection remap', async () => {
   await viewport(vt)
   vt.sendInput('\x03') // Ctrl+C
   assert.equal(await decision, 'cancelled', 'Approval fixed Ctrl+C must win over the conflicting transcript inspection remap')
-  assert.equal(app.isToolOutputExpanded(), false, 'the conflicting inspection action must not run')
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the conflicting inspection action must not run')
 })
 
 test('ctrl+c cancels the prompt like escape', async () => {
