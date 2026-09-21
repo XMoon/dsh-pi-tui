@@ -221,3 +221,81 @@ agentPreset from live projections or zero-I/O cache hints, and leaves cold
 misses unknown. It drops the TUI-private title cache (DSH's
 projection cache owns the durability) and never activates a cold Session for
 picker labels.
+
+## Fullscreen scroll frame: geometry-epoch snapshot reuse (2026-09-21)
+
+> Measured 2026-09-21 · `next @ 976574e9` (before) vs
+> `investigate/scroll-perf-post` @ `49c2f159` (after) · Node v24.20.0 ·
+> headless xterm 120x40, forced synchronous frames (`renderNow()`), 4
+> interleaved rounds, medians. Full methodology and raw data:
+> `temp/perf/fullscreen-scroll-performance-report-20260921.md` (untracked
+> investigation artifact; the tables below are the durable record).
+
+Two facts define fullscreen scroll cost (both refs identical, fork untouched
+by the F6 range):
+
+1. **A scroll frame costs the same as a no-op repaint.** `renderLayoutFrame`
+   re-renders and recomposes the whole frame every paint (~7.5 ms at 120x40,
+   proportional to viewport area, flat from 61 to 1501 mounted blocks thanks
+   to the per-message render caches). The scroll's marginal diff cost is
+   0.1-0.35 ms headless.
+2. **Every scroll frame rewrites the FULL viewport** (per-row erase + redraw,
+   2.6-9.8 KB by terminal size, independent of scroll distance) — the fork
+   has no scroll-region optimization. This is the real-terminal cost.
+
+The per-frame `commitFullscreenPaintSnapshot` remeasure
+(`refreshMessageRows` → `remeasureTranscriptBlocks` → per-row hit
+identities) was the stage that scaled with mounted transcript blocks. The
+geometry-epoch optimization removes it from frames that did not change
+transcript geometry.
+
+### The geometry-epoch contract
+
+`TuiApp.fullscreenRowsDirty` gates the snapshot rebuild. It is raised ONLY by:
+
+- `updateTranscriptGeometry()` — every content/structural/search/disclosure
+  commit flows through here (or through `rebuildMessages`, which calls it);
+- `refreshMessageRows()` — the paint-time remeasure and the click-time live
+  re-checks;
+- the async image-settle seam (`ImageThumbnail` requestRender wiring) — a
+  settle invalidates the component without either writer above;
+- a terminal resize (detected at the snapshot commit).
+
+Hard rule for future changes: **any path that changes the rendered transcript
+geometry must reach one of the two row-map writers or raise the flag
+itself.** A path that mutates disclosure/collapse state and only calls
+`requestRender()` will paint with a STALE row map and stale press/release
+fence identities. The regression tests in
+`test/fullscreen-scroll-geometry-epoch.test.ts` pin the contract: pure
+scroll frames never remeasure; an async image settle remeasures exactly on
+the next painted frame; press/release fence semantics survive scrolled
+repaints.
+
+### Measured effect (p50 forced-frame wall time, median of 4)
+
+| case (120x40) | before | after | snapshot stage |
+|---|---:|---:|---|
+| full preset, 61 blocks | 7.63 ms | 7.88 ms (noise) | 0.29 → 0.02 ms |
+| compact collapsed | 8.81 ms | 7.44 ms (−16%) | 1.31 → 0.02 ms |
+| focus collapsed | 12.57 ms | 9.43 ms (−25%) | 3.09 → 0.02 ms |
+| focus turn-expanded | 12.51 ms | 9.10 ms (−27%) | 3.00 → 0.02 ms |
+| 500-turn session (1501 blocks) | 13.08 ms | 8.20 ms (−37%) | 4.87 → 0.02 ms |
+| focus, scrolling while streaming | 11.79 ms | 8.18 ms (−31%) | 3.03 → 0.02 ms |
+
+Coalesced stream ticks (frames whose projection actually changed) keep the
+full remeasure by design — those frames raised the flag themselves.
+
+### Scroll-frame profiler
+
+`DSH_TUI_SCROLL_PROFILE=1` emits one stderr line per coalesced scroll frame
+(a frame whose render request was opened by a fullscreen `scrollBy`):
+
+```text
+scroll frame=6.30ms write=0.05ms snapshot=0.02ms refresh=0.00ms remeasure=0.00ms hits=0.00ms bytes=6204 rowsRW=34 blocks=61 rows=237 viewport=34 scrollTop=98 preset=full search=off
+```
+
+`latency` covers scroll input → painted frame; `refresh`/`remeasure`/`hits`
+are the snapshot-commit internals; `bytes`/`rowsRW` are the per-frame
+terminal rewrite volume. It is a diagnostic switch, disabled by default, and
+deliberately separate from `DSH_TUI_RENDER_PROFILE` (transcript presentation
+commits). The probe/benchmark lives in the perf report referenced above.

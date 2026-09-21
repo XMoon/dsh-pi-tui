@@ -10358,6 +10358,16 @@ export class TuiApp {
     scroll.scrollTo(desiredTop, { disableFollow: true })
   }
 
+  /** An async image settle invalidates ONLY the thumbnail component: the
+   * resolved bytes can change the attachment's rendered rows, so the next
+   * paint-snapshot commit must remeasure instead of reusing the committed
+   * row geometry (geometry epoch — docs/perf-baseline.md). Every
+   * `ImageThumbnail` render-request wiring MUST go through here. */
+  private settleThumbnailRender(): void {
+    this.fullscreenRowsDirty = true
+    this.requestRender()
+  }
+
   /** The live collapse flag for ONE image-block occurrence (message object
    * + image index within its content). Read at render time — a fullscreen
    * click only repaints. */
@@ -14427,14 +14437,7 @@ export class TuiApp {
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
             this.imageLoader!,
             this.imageTheme!,
-            // An async settle invalidates ONLY the thumbnail component: the
-            // resolved bytes can change the attachment's rendered height, so
-            // the next paint-snapshot commit must remeasure instead of
-            // reusing the committed row geometry (geometry epoch).
-            () => {
-              this.fullscreenRowsDirty = true
-              this.requestRender()
-            },
+            () => this.settleThumbnailRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
           )
           this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -14505,7 +14508,7 @@ export class TuiApp {
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
               this.imageLoader,
               this.imageTheme,
-              () => this.requestRender(),
+              () => this.settleThumbnailRender(),
               this.occurrenceCollapsedRef(message, imageIndex),
             )
             this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -14536,7 +14539,7 @@ export class TuiApp {
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
             this.imageLoader,
             this.imageTheme,
-            () => this.requestRender(),
+            () => this.settleThumbnailRender(),
             this.occurrenceCollapsedRef(message, imageIndex),
           )
           this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -15744,7 +15747,7 @@ export class TuiApp {
                     block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
                     this.imageLoader,
                     this.imageTheme,
-                    () => this.requestRender(),
+                    () => this.settleThumbnailRender(),
                   ))
                 } else {
                   // Known process blocks keep their legacy JSON form;
@@ -15897,7 +15900,7 @@ export class TuiApp {
               block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
               this.imageLoader,
               this.imageTheme,
-              () => this.requestRender(),
+              () => this.settleThumbnailRender(),
             ))
           } else {
             // Known process blocks keep their legacy JSON form; file and
@@ -15943,7 +15946,7 @@ export class TuiApp {
           block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
           this.imageLoader,
           this.imageTheme,
-          () => this.requestRender(),
+          () => this.settleThumbnailRender(),
         ))
       }
     }
