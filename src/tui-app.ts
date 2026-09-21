@@ -7711,7 +7711,10 @@ export class TuiApp {
       // Only the hidden tail (index beyond the folded limit) needs a reveal; a
       // hit in the already-visible files or the assistant body does not.
       if (source?.kind !== 'assistant-deliverable') return false
-      return source.index >= DELIVERED_FILES_FOLDED_LIMIT
+      if (source.index < DELIVERED_FILES_FOLDED_LIMIT) return false
+      // A tail the master already expanded needs no temporary reveal, and
+      // promoting it on dismiss would mint a redundant durable override.
+      return !this.messageExpandedIgnoringSearch(message)
     }
     if (!isFoldableMessageDisclosure(message)) return false
     if (!this.messageFoldDisclosureAvailable()) return false
