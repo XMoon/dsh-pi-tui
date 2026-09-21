@@ -610,8 +610,14 @@ F4 behavior and documents the guarantees in
   distinct-label dedup uses a Set. A projection resolves the reveal owner a
   small constant number of times regardless of history size.
 - **Streaming/Preparing ownership and search/surface transitions hold** under the
-  deterministic race matrices; a page change refreshes the container owner
-  without applying stale state, and a window never invents an off-window member.
+  deterministic race matrices. The live Preparing ownership consumes the SAME
+  Work-member boundary authority as the projection, so a settled
+  surfaced-interaction card (question / Plan review) closes the trailing run and
+  a following live call starts a new pending Work instead of jumping back before
+  it (Compact collapsed/expanded and expanded Focus alike). A page/window change
+  prunes the Compact Work/cluster owners the new window no longer projects (so an
+  A→B→A round-trip cannot resurrect a dropped expansion), and a window never
+  invents an off-window member.
 - **Width/grapheme robustness** holds for every F4 row family across ASCII, CJK,
   emoji, combining marks, ZWJ emoji and ANSI text.
 - **Settled surfaced-interaction cards (question / Plan review) are surfaced

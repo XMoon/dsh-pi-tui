@@ -87,6 +87,47 @@ test('9.1 a page change refreshes the container owner and drops the old disclosu
     `the new window's cluster keeps its default collapsed presentation:\n${view}`)
   assert.ok(!app.compactExpandedClustersForTest().has(c),
     'the new owner is not pre-expanded by the stale window-1 state')
+  assert.equal(app.compactExpandedClustersForTest().has(a), false,
+    'leaving window 1 must DROP its cluster owner, not merely ignore it')
+  assert.equal(app.compactExpandedClustersForTest().size, 0)
+})
+
+test('9.1 an A -> B -> A page round-trip on the SAME message objects never resurrects a dropped owner', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const workOwner = thinking(1, 'page A run')
+  const clusterOwner = ambient(1, 'page-a-ctx')
+  const clusterSecond = ambient(1, 'page-a-ctx-2')
+  // The folder returns the SAME object references when a page is revisited.
+  const pageA: TranscriptMessage[] = [workOwner, tool(1, 'ok'), clusterOwner, clusterSecond]
+  const pageB: TranscriptMessage[] = [ambient(9, 'page-b-ctx'), ambient(9, 'page-b-ctx-2')]
+  const windowA = { mode: 'history' as const, endTurn: 1, firstTurn: 1, lastTurn: 1 }
+  const windowB = { mode: 'history' as const, endTurn: 9, firstTurn: 9, lastTurn: 9 }
+
+  app.setTranscript(pageA, new Map(), windowA)
+  await vt.waitForRender()
+  app.toggleWorkSpan(workOwner)
+  app.toggleContextCluster(clusterOwner)
+  await vt.waitForRender()
+  assert.equal(app.compactExpandedWorkOwnersForTest().has(workOwner), true, 'precondition: the Work span is open')
+  assert.equal(app.compactExpandedClustersForTest().has(clusterOwner), true, 'precondition: the cluster is open')
+
+  app.setTranscript(pageB, new Map(), windowB)
+  await vt.waitForRender()
+  assert.equal(app.compactExpandedWorkOwnersForTest().has(workOwner), false, 'leaving page A drops its Work owner')
+  assert.equal(app.compactExpandedClustersForTest().has(clusterOwner), false, 'leaving page A drops its cluster owner')
+
+  app.setTranscript(pageA, new Map(), windowA)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(app.compactExpandedWorkOwnersForTest().has(workOwner), false,
+    'the A -> B -> A round-trip must not resurrect the Work owner')
+  assert.equal(app.compactExpandedClustersForTest().has(clusterOwner), false,
+    'the round-trip must not resurrect the cluster owner')
+  assert.ok(!view.split('\n').some(line => /^\s*▾ Work(?: ·|$)/.test(line)),
+    `the Work span stays collapsed after the round-trip:\n${view}`)
+  assert.ok(!view.split('\n').some(line => /^\s*▾ .*Context ·/.test(line)),
+    `the cluster stays collapsed after the round-trip:\n${view}`)
 })
 
 // --- 9.2 Work at the window edge ------------------------------------------

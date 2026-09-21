@@ -334,5 +334,9 @@ under bad input, long sessions and rapid live updates:
   width for ASCII, CJK, emoji, combining marks, ZWJ emoji and ANSI-colored text;
   the notice summary keeps its natural wrap.
 - **Windowing.** A window clusters and folds only the rows it contains: no
-  off-window member is invented, the window-summary marker ends a run, and a page
-  change refreshes the container owner without re-applying stale state.
+  off-window member is invented, the window-summary marker ends a run, and a
+  page/window change is a new disclosure epoch that prunes every Compact
+  Work/cluster owner the new window no longer projects. Object identity alone
+  cannot expire such an owner — the folder returns the SAME message objects when
+  a page is revisited — so an A→B→A round-trip never resurrects a dropped
+  expansion (a search jump keeps the same window and its owners).
