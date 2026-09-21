@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Conversation display now has one canonical Full/Focus/Compact preset state.** `/display` is the primary control and `/focus` remains compatible.
 - **The Compact display preset is now available.** `/display compact`, the `display-preset` setting, and a persisted `displayPreset: compact` all activate Compact for real: the conversation and Assistant intermediate output stay visible in chronology, contiguous reasoning/tool process folds into `Work` spans with Header / Think / Tool previews (click or `Ctrl+O` to expand the raw process rows, with `Ctrl+O` as the bulk owner), injected `notice` / `relay` / `recall` context becomes standalone presentation (producer summary, Agent message, Session recall), and adjacent ambient injections (instructions/catalog/snapshot) collapse into an expandable Context cluster. Compact remains opt-in; the default is unchanged.
+- **The Context cluster header now shows both the disclosure state and the Context identity.** The collapse/expand marker (`▸`/`▾`) is followed by the Context identity icon: `▸ 📎 Context · N injections` under emoji, `▸ ⋅ Context · N injections` under symbols, and `▸ Context · N injections` under minimal (the decorative icon disappears with no dangling space). The `Work` header is unchanged.
+- **Collapsed Focus absorbs mid-turn process notices into the Thought.** A `notice` that arrives while the Agent is already working (a background job finishing, a subagent settling) no longer occupies its own row: it is folded into the collapsed Thought and fully restored in raw chronology when Focus is expanded. A notice in the turn's opening foundation stays visible (it explains why the Agent resumed) and a mid-turn `relay` stays independently visible. A hidden mid-turn notice remains reachable through full-text search, which reveals it temporarily and restores the collapsed view on dismiss without creating new manual expansion state.
+- **Rebuilding the presentation when search opens no longer scales quadratically with history size.** In a large session, the search-reveal re-projection now resolves the reveal owner once per projection epoch, with a benefit that grows with the history length.
 - **Question / Approval keep response ownership while read-only context inspection remains available.** While a response modal is open, fold, Thinking disclosure, fullscreen jump-latest, Todo presentation, and proven fullscreen presentation hits remain usable through direct or leader-bound inspection triggers; fixed Question / Approval response keys take precedence over conflicting global inspection remaps, while submit, session changes, and lifecycle actions remain protected.
 - **Full-text search in long sessions is much faster.** Typing and stepping
   with `Enter`/`Shift+Enter` now rebuild the transcript tree at most ONCE per
@@ -42,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Restoring an old session no longer crashes when an injected-context source is missing or malformed.** A log row whose context source is empty or not an object degrades safely to a standalone generic Context row; unknown or future context forms are never mistaken for ambient injections and never fabricate a summary or sender.
 - **Ctrl+F full-text search now works per occurrence, not per card.** The `N/M`
   counter and `↑`/`↓` step through every occurrence inside one card. Every
   visible match is marked weakly; the current occurrence uses the strongest

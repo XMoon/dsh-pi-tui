@@ -498,13 +498,19 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
 - **Focus separates turn foundation from process chronology
   (projection-only)**: a LEADING injected-context prefix that wakes a
   turn is the expanded Thought foundation and renders before the Thought.
-  Every injected-context row marked `context: true` is also a persistent
-  surfaced context boundary in collapsed Focus, where it remains visible
-  alongside human user/steer rows in raw relative order.
+  Human user/steer rows and CAUSAL surfaced context are persistent
+  boundaries in collapsed Focus, where they remain visible in raw relative
+  order. A MID-TURN `form:'notice'` (a background job or subagent settling
+  while the Agent already works) is process feedback, not causal input: it is
+  hidden inside the collapsed Thought and restored at its exact raw position
+  when the Thought opens (2026-09-21 addendum; the decision reads the
+  semantic `form` and raw position, never a source kind). A notice inside the
+  opening foundation and a mid-turn relay stay visible.
   Expanded Focus preserves process chronology after the foundation: later
   steers and surfaced context return to their real positions and remain
-  unmarked as owner-only process content. Searching surfaced context reveals
-  the visible row without opening its Thought root.
+  unmarked as owner-only process content. Searching a hidden mid-turn notice
+  surfaces it through a presentation-only temporary reveal (`projectFocus`
+  `forcedVisible`) without opening the Thought or writing a manual owner.
   The durable `steer`/source facts are never rewritten, and injected
   context still does not occupy Think/Tool/Message slots and never counts
   as a tool.
@@ -537,9 +543,15 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   row). Counts describe the span, not the turn; no fact renders a placeholder
   row; span-local duration is omitted rather than faked from whole-turn timing.
   Expanding the span re-uses the ordinary message renderers for its members.
-- **The Work/cluster disclosure glyph is the plain triangle** (`▸`/`▾`, new
+- **The Work header keeps the plain triangle** (`▸`/`▾`, the
   `section-collapsed`/`section-expanded` semantics in every icon style) — the
-  Focus root keeps its whale identity. Both are click-owned in fullscreen.
+  Focus root keeps its whale identity. The Context CLUSTER header composes the
+  same disclosure marker with the Context identity icon (`context-generic`:
+  `📎` emoji / `⋅` symbols / hidden minimal), so it reads
+  `▸ 📎 Context · N injections` under emoji and `▸ Context · N injections` under
+  minimal with no dangling separator (`iconLead` supplies each separator only
+  when its glyph exists). Work deliberately has no separate identity icon. Both
+  disclosures are click-owned in fullscreen.
 - **`Ctrl+O` under Compact owns the Work spans only, and a disclosure
   CAPABILITY decides what may be collapsed.** Regular Compact has no operable
   owner for any other message-level fold, so those rows render in full and
@@ -553,7 +565,7 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
 - **Ambient clustering is semantic on every preset and surface; only its
   presentation default is surface-dependent.** Regular presents the members
   flat (no manual cluster owner yet); fullscreen defaults collapsed with a
-  click-expandable `▸ Context · N injections` header. The cluster owner, search
+  click-expandable `▸ 📎 Context · N injections` header. The cluster owner, search
   owner, viewport identity and raw-adjacency rule stay cluster-based either way.
   TODO(F6): give the regular surface a manual cluster owner.
 - **Surfaced Context is form-aware.** The fold retains the producer-declared
@@ -578,6 +590,30 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   search index, or viewport owner.
 - **Scope**: Focus expanded is NOT globally Compact yet (F5), Full is not yet
   Compact + expanded Process, and Compact is not the default (F7).
+
+## F4 hardening (2026-09-21 PR4)
+
+PR4 adds no preset, semantic class or disclosure owner; it hardens the shipped
+F4 behavior and documents the guarantees in
+`docs/transcript-display-disclosure.md`:
+
+- **Malformed / legacy Context never crashes or invents identity.** The fold
+  reads the source kind through the single Context parser, so a restored log with
+  a `null`/missing/non-object `source` folds as standalone generic Context
+  instead of throwing; unknown/future `form` stays generic (never ambient);
+  invalid `summary`/`sender`/label values are never fabricated; malformed
+  `changes`/`references` arrays degrade to the kind fallback; a legacy
+  `session-reference` stays recall.
+- **Large-history grouping stays linear.** The active search reveal owner is
+  memoized per projection (keyed on target, preset, surface and window
+  identities) instead of being re-resolved per row/span, and the parser's
+  distinct-label dedup uses a Set. A projection resolves the reveal owner a
+  small constant number of times regardless of history size.
+- **Streaming/Preparing ownership and search/surface transitions hold** under the
+  deterministic race matrices; a page change refreshes the container owner
+  without applying stale state, and a window never invents an off-window member.
+- **Width/grapheme robustness** holds for every F4 row family across ASCII, CJK,
+  emoji, combining marks, ZWJ emoji and ANSI text.
 
 ## The composer submission policy is the WEB policy
 

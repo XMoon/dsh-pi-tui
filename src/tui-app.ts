@@ -168,7 +168,7 @@ import {
 import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
-import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
+import { FocusActivityComponent, focusPreparingSummary, isCollapsedFocusHiddenRow, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
 import { projectCompact, type CompactWorkSpan } from './compact-projection.ts'
 import { CompactPendingWorkComponent, CompactWorkComponent, summarizeWorkSpan } from './compact-work.ts'
 import { ContextClusterComponent } from './context-cluster.ts'
@@ -451,6 +451,10 @@ export interface TranscriptPresentationDiagnostics {
   mountReplacements: number
   rowMapRefreshes: number
   structuralFallbacks: number
+  /** Uncached `searchRevealOwnerFor()` resolutions. A single projection must
+   * resolve the active reveal owner at most once, no matter how many rows or
+   * Work spans it projects (a per-row resolution is the accidental O(n^2)). */
+  searchOwnerResolutions: number
 }
 
 /** Internal labels for the structural rebuild sites. */
@@ -3703,6 +3707,7 @@ export class TuiApp {
     mountReplacements: 0,
     rowMapRefreshes: 0,
     structuralFallbacks: 0,
+    searchOwnerResolutions: 0,
   }
   private readonly transcriptRenderProfiler = createTranscriptRenderProfiler()
   /** The Ctrl+R input-history panel, while one is open. */
@@ -4003,6 +4008,22 @@ export class TuiApp {
    * actually collapses the Work span.
    */
   private compactOpenRunMembers: ReadonlySet<TranscriptMessage> = new Set()
+  /**
+   * The reveal owner memoized for the CURRENT (target, preset, surface,
+   * window) identity. `revealedSearchOwner()` is consulted once per projected
+   * row and once per Work span / cluster component, so resolving it freshly
+   * each time would re-project the whole transcript per row — an accidental
+   * O(n^2) while a search is active. The memo key holds every input the
+   * resolution reads, so it needs no separate invalidation across session,
+   * window, preset, surface or search changes.
+   */
+  private revealedOwnerMemo: {
+    readonly target: TranscriptMessage
+    readonly preset: DisplayPreset
+    readonly fullscreen: boolean
+    readonly messages: readonly TranscriptMessage[]
+    readonly owner: SearchRevealOwner | undefined
+  } | undefined
   /** The CompactWorkComponent cache, keyed by the span owner. */
   private readonly compactWorkComponents = new Map<TranscriptMessage, {
     component: CompactWorkComponent
@@ -7512,8 +7533,10 @@ export class TuiApp {
 
   /** The current search target's owner turn (Focus temporary reveal). Gated on
    * the grant: after an explicit collapse the target must not force the Focus
-   * root open either. Surfaced context is already visible in collapsed Focus,
-   * so searching it reveals only that row and never opens its Thought root. */
+   * root open either. A surfaced-context target NEVER opens its Thought root —
+   * an already-visible Context row needs no reveal, and a mid-turn
+   * `form:'notice'` (the one surfaced row collapsed Focus hides) is surfaced by
+   * the presentation-only `collapsedFocusForcedVisible()` reveal instead. */
   private searchTargetTurn(): number | undefined {
     if (!this.searchRevealGranted) return undefined
     const message = this.searchTarget?.message
@@ -8178,7 +8201,7 @@ export class TuiApp {
     }
     this.compactOpenRunMembers = new Set()
     const blocks: TranscriptRenderBlock[] = isFocusDisplayPreset(preset)
-      ? projectFocus(this.messages, this.turnActivities, projectionExpanded, true)
+      ? projectFocus(this.messages, this.turnActivities, projectionExpanded, true, this.collapsedFocusForcedVisible())
       : this.messages.map(message => ({ kind: 'message', message }) as TranscriptRenderBlock)
     return this.applyContextClusters(blocks)
   }
@@ -8192,11 +8215,26 @@ export class TuiApp {
   }
 
   /**
+   * The temporary search reveal for collapsed Focus: the ONE hidden mid-turn
+   * `form:'notice'` the current grant must surface. Presentation-only — it
+   * never opens the Thought and never writes a manual disclosure owner, so an
+   * ordinary dismiss restores the collapsed view with no residue. Rows that
+   * collapsed Focus already shows, and hidden Process rows (which the turn
+   * expansion owns), are not forced here.
+   */
+  private collapsedFocusForcedVisible(): ReadonlySet<TranscriptMessage> {
+    const target = this.searchRevealedMessage()
+    if (target === undefined || !isCollapsedFocusHiddenRow(this.messages, target)) return new Set()
+    return new Set([target])
+  }
+
+  /**
    * The user-controllable disclosure container that currently HIDES one
    * transcript row. The search reveal and the dismissal promotion both read
    * THIS single resolution, so they can never disagree about who owns the row.
    */
   private searchRevealOwnerFor(message: TranscriptMessage): SearchRevealOwner | undefined {
+    this.transcriptPresentationDiagnostics.searchOwnerResolutions += 1
     if (this.displayState.preset === 'compact') {
       for (const span of this.eligibleWorkSpans()) {
         if (span.members.includes(message)) return { kind: 'compact-work', owner: span.owner }
@@ -8213,10 +8251,27 @@ export class TuiApp {
     return undefined
   }
 
-  /** The GRANTED reveal's container owner (undefined when no reveal is active). */
+  /** The GRANTED reveal's container owner (undefined when no reveal is active).
+   * Memoized on the full resolution identity (see {@link revealedOwnerMemo}):
+   * the per-row/per-span disclosure decision must not re-project the whole
+   * transcript for every row. */
   private revealedSearchOwner(): SearchRevealOwner | undefined {
     const target = this.searchRevealedMessage()
-    return target === undefined ? undefined : this.searchRevealOwnerFor(target)
+    if (target === undefined) return undefined
+    const memo = this.revealedOwnerMemo
+    if (memo !== undefined && memo.target === target && memo.preset === this.displayState.preset
+      && memo.fullscreen === (this.fullscreen !== undefined) && memo.messages === this.messages) {
+      return memo.owner
+    }
+    const owner = this.searchRevealOwnerFor(target)
+    this.revealedOwnerMemo = {
+      target,
+      preset: this.displayState.preset,
+      fullscreen: this.fullscreen !== undefined,
+      messages: this.messages,
+      owner,
+    }
+    return owner
   }
 
   /** Whether one Work span is opened ONLY by the granted search reveal. */

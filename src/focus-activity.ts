@@ -30,6 +30,7 @@ import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import { toolTitle } from './present.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
 import { isSurfacedContext } from './transcript-semantics.ts'
+import { isNoticeContext } from './context-presentation.ts'
 import { displayFailureText } from './failure-presentation.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
 import { focusTiming, type FocusTimingStore } from './focus-timing.ts'
@@ -478,11 +479,19 @@ export type FocusProjectedBlock =
   }
   | { kind: 'activity'; activity: TurnActivity }
 
+/**
+ * Project one transcript window into Focus presentation blocks. Collapsed
+ * Focus summarizes causal input and opening foundation around the Thought;
+ * `forcedVisible` carries the temporary search reveal for a row the collapsed
+ * view would otherwise hide (a mid-turn notice) — it surfaces that exact row
+ * without opening the Thought and without becoming a disclosure owner.
+ */
 export function projectFocus(
   messages: readonly TranscriptMessage[],
   activities: ReadonlyMap<number, TurnActivity>,
   expandedTurns: ReadonlySet<number>,
   focusMode: boolean,
+  forcedVisible?: ReadonlySet<TranscriptMessage>,
 ): FocusProjectedBlock[] {
   if (!focusMode) return messages.map(message => ({ kind: 'message', message }))
   const out: FocusProjectedBlock[] = []
@@ -497,14 +506,8 @@ export function projectFocus(
       continue
     }
     // One turn's consecutive message run.
-    const group: TranscriptMessage[] = [message]
-    while (index + 1 < messages.length) {
-      const next = messages[index + 1]!
-      if (!('turn' in next) || next.turn !== turn) break
-      group.push(next)
-      index += 1
-    }
-    index += 1
+    const group = consecutiveTurnGroup(messages, index, turn)
+    index += group.length
     const activity = activities.get(turn)
     const expanded = expandedTurns.has(turn)
     // The final assistant is decided ONCE from the exact last assistant
@@ -563,11 +566,18 @@ export function projectFocus(
     // process rows stay hidden inside the Thought. A committed pre-steer answer
     // is the one exception: from that exact raw boundary onward, preserve the
     // persistent rows and answer in chronology so the answer cannot be swallowed
-    // by the Thought or move when the disclosure changes.
+    // by the Thought or move when the disclosure changes. A MID-TURN
+    // `form:'notice'` is the other exception (see
+    // {@link isCollapsedFocusVisibleRow}): it is process feedback and hides
+    // inside the Thought, while an opening-foundation notice stays visible.
+    const leadBoundary = thoughtLeadBoundary(group)
     const firstCommittedIndex = group.findIndex(isCommittedAnswer)
     if (firstCommittedIndex < 0) {
-      for (const member of group) {
-        if (isFocusPersistentInputRow(member)) out.push({ kind: 'message', message: member })
+      for (let index = 0; index < group.length; index += 1) {
+        const member = group[index]!
+        if (isCollapsedFocusVisibleRow(member, index, leadBoundary) || forcedVisible?.has(member) === true) {
+          out.push({ kind: 'message', message: member })
+        }
       }
       if (activity !== undefined) out.push({ kind: 'activity', activity })
       // Compaction cards keep their existing lifecycle in the collapsed
@@ -577,16 +587,22 @@ export function projectFocus(
       }
     } else {
       const beforeCommitted = group.slice(0, firstCommittedIndex)
-      for (const member of beforeCommitted) {
-        if (isFocusPersistentInputRow(member)) out.push({ kind: 'message', message: member })
+      for (let index = 0; index < beforeCommitted.length; index += 1) {
+        const member = beforeCommitted[index]!
+        if (isCollapsedFocusVisibleRow(member, index, leadBoundary) || forcedVisible?.has(member) === true) {
+          out.push({ kind: 'message', message: member })
+        }
       }
       if (activity !== undefined) out.push({ kind: 'activity', activity })
       for (const member of beforeCommitted) {
         if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
       }
-      for (const member of group.slice(firstCommittedIndex)) {
+      for (let index = firstCommittedIndex; index < group.length; index += 1) {
+        const member = group[index]!
         if (final !== undefined && member === final.message) continue
-        if (isFocusPersistentInputRow(member) || member.kind === 'compaction' || isCommittedAnswer(member)) {
+        if (isCollapsedFocusVisibleRow(member, index, leadBoundary)
+          || forcedVisible?.has(member) === true
+          || member.kind === 'compaction' || isCommittedAnswer(member)) {
           out.push({ kind: 'message', message: member })
         }
       }
@@ -618,6 +634,73 @@ function assistantForStep(
  * rows; this predicate only controls disclosure behavior. */
 function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
   return message.kind === 'user' || isSurfacedContext(message)
+}
+
+/**
+ * Whether one row stays visible OUTSIDE the collapsed Thought. Position-aware:
+ * a MID-TURN `form:'notice'` is process feedback (a background job settling
+ * while the Agent already works), not causal input, so it is hidden inside the
+ * collapsed Thought and restored in raw chronology when the Thought opens. A
+ * notice inside the turn's OPENING foundation (`index < leadBoundary`) explains
+ * why the turn started and stays visible, exactly like users/steers, opening
+ * ambient Context and mid-turn relays. The decision is positional (raw
+ * chronology) plus semantic (`form`), never a source-name heuristic; `Compact`
+ * and `Full` do not route through here.
+ * @param message - the raw transcript row.
+ * @param index - its index in the raw turn group.
+ * @param leadBoundary - the turn's Thought-lead boundary (see {@link thoughtLeadBoundary}).
+ */
+function isCollapsedFocusVisibleRow(message: TranscriptMessage, index: number, leadBoundary: number): boolean {
+  if (!isFocusPersistentInputRow(message)) return false
+  return !(index >= leadBoundary && isNoticeContext(message))
+}
+
+/**
+ * One turn's maximal run of CONSECUTIVE same-turn rows starting at `start`.
+ * A turn-less entry (window summary) may SPLIT a turn into separate runs, and
+ * the projection folds each run independently — this helper is shared by the
+ * projection and the collapsed visibility predicate so their index and
+ * `thoughtLeadBoundary` math can never diverge on a non-monotonic window.
+ * @param messages - the transcript window.
+ * @param start - the run's first index.
+ * @param turn - the run's turn number.
+ */
+function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: number, turn: number): TranscriptMessage[] {
+  const group: TranscriptMessage[] = [messages[start]!]
+  let index = start + 1
+  while (index < messages.length) {
+    const next = messages[index]!
+    if (!('turn' in next) || next.turn !== turn) break
+    group.push(next)
+    index += 1
+  }
+  return group
+}
+
+/**
+ * Whether collapsed Focus hides one row inside the Thought (a mid-turn
+ * `form:'notice'`). The temporary search reveal reads this to force EXACTLY
+ * that row visible without opening the Thought and without minting a manual
+ * disclosure owner; the positional decision uses the SAME consecutive-run
+ * grouping as the projection ({@link consecutiveTurnGroup} +
+ * {@link thoughtLeadBoundary}), never a source-name check.
+ * @param messages - the current transcript window.
+ * @param message - the row to test.
+ */
+export function isCollapsedFocusHiddenRow(messages: readonly TranscriptMessage[], message: TranscriptMessage): boolean {
+  if (!isSurfacedContext(message) || !isNoticeContext(message) || !('turn' in message)) return false
+  const position = messages.indexOf(message)
+  if (position < 0) return false
+  // Walk back to the start of the CONSECUTIVE run the projection would group.
+  let start = position
+  while (start > 0) {
+    const previous = messages[start - 1]!
+    if (!('turn' in previous) || previous.turn !== message.turn) break
+    start -= 1
+  }
+  const group = consecutiveTurnGroup(messages, start, message.turn)
+  const index = position - start
+  return !isCollapsedFocusVisibleRow(message, index, thoughtLeadBoundary(group))
 }
 
 /** The end of the turn's LEADING injected-context prefix used only for

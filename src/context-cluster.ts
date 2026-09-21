@@ -59,14 +59,24 @@ export function contextClusterSummaryParts(cluster: ContextCluster): string[] {
   return parts
 }
 
-/** The cluster header line: `▸ Context · 6 injections`. */
+/** The cluster header: `▸ 📎 Context · 6 injections`.
+ *
+ * Two independent semantics compose here: the section disclosure state marker
+ * (`sectionDisclosureSemantic`, which survives every icon style) and the
+ * Context identity icon (`context-generic`, which `minimal` hides). Each part
+ * carries its trailing separator only when its glyph exists (`iconLead`), so
+ * `minimal` never leaves a dangling space and the emoji/symbols layouts read
+ * `▸ 📎 Context · …` / `▸ ⋅ Context · …`. The marker is chrome whose glyphs
+ * resolve through the icon registry, never a hard-coded string. */
 export function formatContextClusterHeader(
   cluster: ContextCluster,
   expanded: boolean,
   iconStyle: IconStyle = 'emoji',
 ): string {
   const count = cluster.members.length
-  return `${iconLead(sectionDisclosureSemantic(expanded), iconStyle)}Context · ${count} injection${count === 1 ? '' : 's'}`
+  const disclosure = iconLead(sectionDisclosureSemantic(expanded), iconStyle)
+  const identity = iconLead('context-generic', iconStyle)
+  return `${disclosure}${identity}Context · ${count} injection${count === 1 ? '' : 's'}`
 }
 
 /**
