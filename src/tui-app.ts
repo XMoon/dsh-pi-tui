@@ -7887,8 +7887,10 @@ export class TuiApp {
   }
 
   /** Whether one per-card override row is MATERIALIZED on the current
-   * projection: a current-window top-level row, an OPEN Work member, or a Focus
-   * secondary inside an expanded root. */
+   * projection: a current-window top-level row, an OPEN Work member, or a row
+   * the Focus projection actually emits (compaction always; a Focus secondary
+   * only inside an expanded root; surfaced context unless collapsed Focus hides
+   * the mid-turn notice). */
   private messageRowMaterialized(message: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
     if (!this.messages.includes(message)) return false
     const span = this.canonicalStructureIndex().workByMember.get(message)
@@ -7896,8 +7898,18 @@ export class TuiApp {
       return this.workOwnerMaterialized(span.owner, projectionExpanded) && this.workSpanExpanded(span)
     }
     const policy = displayPolicyFor(this.displayState.preset)
-    if (policy.focusBehavior && 'turn' in message && isFocusSecondaryDisclosure(message)) {
-      return projectionExpanded.has(message.turn)
+    if (policy.focusBehavior && 'turn' in message) {
+      // Compaction cards are emitted by BOTH Focus branches (collapsed and
+      // expanded), so they are always materialized in the current window.
+      if (message.kind === 'compaction') return true
+      if (isFocusSecondaryDisclosure(message)) return projectionExpanded.has(message.turn)
+      // Surfaced context is emitted unless collapsed Focus hides it (the
+      // mid-turn notice); a granted forced-visible reveal materializes it too.
+      if (isSurfacedContext(message)) {
+        if (projectionExpanded.has(message.turn)) return true
+        return !isCollapsedFocusHiddenRow(this.messages, message)
+          || this.collapsedFocusForcedVisible().has(message)
+      }
     }
     return true
   }
