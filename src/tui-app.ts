@@ -8027,29 +8027,54 @@ export class TuiApp {
 
   /** The granted search target when it is a message-local foldable the REGULAR
    * transcript-detail master owns (not Thinking/Alt+T, not a delivered tail,
-   * not a fail-open surfaced interaction) and that is materially projected. A
-   * reveal-only opener must both arm the collapse branch and be revoked by it. */
+   * not a fail-open surfaced interaction), is materially projected, AND the
+   * reveal is ACTUALLY what opens it. A target already expanded without the
+   * search (root full reveal, master boundary, explicit override, open Work run)
+   * is not a closable disclosure: counting it would make the first Ctrl+O a
+   * visual no-op. */
   private revealedRegularMasterFold(projectionExpanded: ReadonlySet<number>): TranscriptMessage | undefined {
     const target = this.searchRevealedMessage()
     if (target === undefined) return undefined
     if (!isFoldableMessageDisclosure(target) || target.kind === 'thinking') return undefined
     if (this.surfacedInteractionFailsOpen(target)) return undefined
+    if (!this.searchForcesMessageExpanded(target)) return undefined
     return this.messageRowMaterialized(target, projectionExpanded) ? target : undefined
   }
 
-  /** Whether collapsing the regular master would be immediately undone by the
-   * still-granted search reveal: the target is a message-local foldable this
-   * master owns, lives in a Work/cluster this master collapses, or its Focus
-   * root is search/derived-only. Computed from target ANCESTRY / the current
-   * materialization, before any owner state changes. */
-  private regularMasterCollapseRevokesReveal(projectionExpanded: ReadonlySet<number>): boolean {
+  /** Whether the regular-master collapse transaction would leave the CURRENT
+   * granted search target HIDDEN, so the still-granted reveal would immediately
+   * reopen the owner the collapse just closed. Resolved from owner ancestry and
+   * the collapse's own consequences — never from "a search target exists".
+   * Evaluated before any owner state changes. */
+  private regularMasterCollapseRevokesReveal(): boolean {
     const target = this.searchRevealedMessage()
     if (target === undefined) return false
     const index = this.canonicalStructureIndex()
-    if (index.workByMember.has(target) || index.clusterByMember.has(target)) return true
-    if (this.revealedRegularMasterFold(projectionExpanded) !== undefined) return true
+    const span = index.workByMember.get(target)
+    if (span !== undefined) {
+      // A regular Focus root full reveal keeps the Work (and its members) open
+      // across the master collapse; every other Work opener is cleared here.
+      const rootKeepsOpen = this.fullscreen === undefined && isFocusDisplayPreset(this.displayState.preset)
+        && this.focusProjectionExpandedTurnsBase().has(span.turn)
+      return !rootKeepsOpen
+    }
+    if (index.clusterByMember.has(target)) return true
+    if (isDeliveredFilesDisclosureCandidate(target)) return this.deliveredFilesMasterCollapseHidesSearchTarget()
+    // Thinking is Alt+T-owned: the master collapse does not change its state.
+    if (target.kind === 'thinking') return false
+    if (isFoldableMessageDisclosure(target)) return this.messageFoldDisclosureAvailable()
     const turn = this.searchTargetTurn()
     return turn !== undefined && !this.focusExpandedTurns.has(turn)
+  }
+
+  /** Whether the delivered-files master collapse hides a matched hidden file
+   * (index beyond the folded limit) on a surface that owns the tail. */
+  private deliveredFilesMasterCollapseHidesSearchTarget(): boolean {
+    if (!this.deliveredFilesMasterOwned()) return false
+    const target = this.searchRevealedMessage()
+    if (target === undefined || !isDeliveredFilesDisclosureCandidate(target)) return false
+    const source = this.searchTarget?.match.source
+    return source?.kind === 'assistant-deliverable' && source.index >= DELIVERED_FILES_FOLDED_LIMIT
   }
 
   /**
@@ -8140,12 +8165,13 @@ export class TuiApp {
     }
     const target = this.searchRevealedMessage()
     return target !== undefined && isDeliveredFilesDisclosureCandidate(target)
+      && this.searchForcesMessageExpanded(target)
       && this.messageRowMaterialized(target, projectionExpanded)
   }
 
   /** Clear the delivered-files overrides the current surface's Ctrl+O master
-   * owns (materialized only) and revoke a reveal that would immediately
-   * re-expand the tail. */
+   * owns (materialized only) and revoke a reveal that the collapse would turn
+   * into the re-opener (a hidden file beyond the folded limit). */
   private clearDeliveredFilesMasterDisclosure(): void {
     if (!this.deliveredFilesMasterOwned()) return
     const projectionExpanded = this.focusProjectionExpandedTurns()
@@ -8154,8 +8180,7 @@ export class TuiApp {
       if (!this.messageRowMaterialized(message, projectionExpanded)) continue
       this.expandedOverride.delete(message)
     }
-    const target = this.searchRevealedMessage()
-    if (target !== undefined && isDeliveredFilesDisclosureCandidate(target)) this.suppressSearchReveal()
+    if (this.deliveredFilesMasterCollapseHidesSearchTarget()) this.suppressSearchReveal()
   }
 
   /**
@@ -8171,7 +8196,7 @@ export class TuiApp {
   private clearRegularMasterOwnedDisclosures(): void {
     if (this.fullscreen !== undefined) return
     const projectionExpanded = this.focusProjectionExpandedTurns()
-    const revokesReveal = this.regularMasterCollapseRevokesReveal(projectionExpanded)
+    const revokesReveal = this.regularMasterCollapseRevokesReveal()
     for (const owner of [...this.expandedWorkOwners]) {
       if (!this.workOwnerMaterialized(owner, projectionExpanded)) continue
       const span = this.canonicalStructureIndex().workByMember.get(owner)
