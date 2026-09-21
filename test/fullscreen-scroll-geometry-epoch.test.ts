@@ -257,3 +257,41 @@ test('the press/release fence keeps its semantics across scrolled repaints', asy
   app.setFullscreen(false)
   app.stop()
 })
+
+test('the scroll profiler never latches a frame window on a no-op boundary scroll', async () => {
+  // The profiler reads the env at app construction: scope it to this test.
+  process.env.DSH_TUI_SCROLL_PROFILE = '1'
+  const emitted: string[] = []
+  const originalConsoleError = console.error
+  console.error = (message: unknown): void => { emitted.push(String(message)) }
+  try {
+    const { vt, app } = startApp()
+    app.setFullscreen(true)
+    app.setTranscript(scrollFixture().messages())
+    await viewport(vt)
+    await viewport(vt)
+    // Jump to the top WITHOUT scrollBy: no profiler window may open.
+    ;(app as unknown as { fullscreenScroll: { scrollTo(top: number): void } }).fullscreenScroll.scrollTo(0)
+    await viewport(vt)
+
+    // A wheel-up AT the top moves nothing and requests no repaint: it must
+    // NOT latch a profiling window.
+    vt.sendInput('\x1b[<64;10;5M')
+    await viewport(vt)
+    // An unrelated repaint must not inherit the latched window either.
+    app.requestRender()
+    await viewport(vt)
+    const frames = (): number => emitted.filter(line => line.startsWith('scroll frame=')).length
+    assert.equal(frames(), 0, `a no-op boundary scroll must not latch a profiler window (emitted ${frames()})`)
+
+    // A real scroll emits exactly ONE frame, timed from THIS wheel.
+    await wheel(vt, 'down')
+    assert.equal(frames(), 1, `the moving wheel must emit exactly one scroll frame (got ${frames()})`)
+    const latency = Number(/frame=([\d.]+)ms/.exec(emitted.find(line => line.startsWith('scroll frame='))!)?.[1])    assert.ok(Number.isFinite(latency) && latency >= 0 && latency < 200, `scroll latency must be timed from the moving wheel (got ${latency}ms)`)
+    app.setFullscreen(false)
+    app.stop()
+  } finally {
+    console.error = originalConsoleError
+    delete process.env.DSH_TUI_SCROLL_PROFILE
+  }
+})

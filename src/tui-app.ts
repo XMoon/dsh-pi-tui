@@ -6790,19 +6790,29 @@ export class TuiApp {
       // Scroll profiler (diagnostic): a scroll request opens a frame window
       // that closes at the next paint-snapshot commit, so coalesced frames
       // emit exactly one line describing the frame the user actually saw.
+      // Only a scrollBy that actually requests a repaint (the offset moved
+      // or the follow-end state flipped) may open the window: a no-op
+      // scrollBy at a boundary never paints, and latching here would hang
+      // the window until an UNRELATED frame inherited the stale start.
       if (this.scrollProfiler.enabled) {
         const scrollView = this.fullscreenScroll
         const originalScrollBy = scrollView.scrollBy.bind(scrollView)
         scrollView.scrollBy = (lines: number): number => {
+          const scrollTopBefore = scrollView.scrollTop
+          const followingEndBefore = scrollView.isFollowingEnd
+          const started = performance.now()
+          const remainder = originalScrollBy(lines)
+          const requestedRepaint = scrollView.scrollTop !== scrollTopBefore || scrollView.isFollowingEnd !== followingEndBefore
+          if (!requestedRepaint) return remainder
           if (!this.scrollFramePending) {
             this.scrollFramePending = true
-            this.scrollFrameStart = performance.now()
+            this.scrollFrameStart = started
             this.scrollFrameWriteMs = 0
             this.scrollFrameBytes = 0
             this.scrollFrameRowsRewritten = 0
             this.scrollFrameRemeasureMs = 0
           }
-          return originalScrollBy(lines)
+          return remainder
         }
       }
       const root = new VStack([
@@ -6851,6 +6861,8 @@ export class TuiApp {
       this.fullscreen?.stop()
       this.fullscreen = undefined
       this.fullscreenScroll = undefined
+      // A latched profiler window must not leak across a fullscreen swap.
+      this.scrollFramePending = false
       this.tui.start()
       // The alt screen's stop disables focus reporting (?1004l rides the
       // mouse-disable sequence). The main screen keeps needing focus
