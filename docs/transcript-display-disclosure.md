@@ -124,12 +124,15 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
 - Expanding a `Work` span reveals its raw member rows through the existing
   message renderers; Thinking and tool-local detail keep their own orthogonal
   disclosure.
-- Under Compact, Ctrl+O owns the **Work spans only**. Every other message-level
-  fold is decided by a disclosure CAPABILITY, not by a key that happens to
-  exist: on the regular surface (no mouse, Ctrl+O reserved for Work) a fold with
-  no operable owner is not presented collapsed at all — the row renders in full
-  and advertises no hint. On fullscreen the mouse owns those folds
-  (`(click to expand)`). Alt+T still owns Thinking detail, independently of both.
+- Disclosure ownership is converged in F6 (see the F6 section below): on the
+  regular surface the shared `Ctrl+O` transcript-detail master owns Compact
+  Work, Context clusters, ordinary folds and long/pending-user folds whenever
+  the effective `app.transcript.toggleExpand` key exists. Fullscreen Compact
+  keeps the Work-span bulk and fullscreen Focus keeps the Thought-root bulk,
+  with the mouse owning the local folds there. Every collapsed representation is
+  capability-gated: a fold with no operable owner is not presented collapsed at
+  all — the row renders in full and advertises no hint. Alt+T still owns
+  Thinking detail, independently of all of them.
 - Members of an OPEN Work run follow the same surface contract: regular
   full-reveals them, fullscreen keeps the per-card click (`(click to expand)`),
   and a hidden member revealed by search is promoted to a manual Work owner when
