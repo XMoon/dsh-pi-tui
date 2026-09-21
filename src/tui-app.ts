@@ -7892,6 +7892,11 @@ export class TuiApp {
    * only inside an expanded root; surfaced context unless collapsed Focus hides
    * the mid-turn notice). */
   private messageRowMaterialized(message: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
+    // A local (non-session) card — e.g. a `!`/`!!` shell card — is always
+    // appended to the rendered transcript and participates in NO canonical
+    // Work/cluster/Focus ancestry, so it is always materialized. It is NOT in
+    // `this.messages` (it lives in `localMessages`).
+    if (this.localMessages.includes(message)) return true
     if (!this.messages.includes(message)) return false
     const index = this.canonicalStructureIndex()
     const span = index.workByMember.get(message)
