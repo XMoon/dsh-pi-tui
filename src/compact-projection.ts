@@ -17,7 +17,7 @@
  * @module @xmoon76/dsh-pi-tui/compact-projection
  */
 
-import { classifyTranscriptMessage } from './transcript-semantics.ts'
+import { classifyTranscriptMessage, isSurfacedInteractionTool } from './transcript-semantics.ts'
 import { clusterAdjacentAmbientContext, type ContextCluster } from './context-presentation.ts'
 import type { TranscriptMessage } from './transcript.ts'
 
@@ -71,9 +71,14 @@ function clusterExpanded(cluster: ContextCluster, options: CompactProjectionOpti
 
 /** Whether one row continues the current Work run. Process rows with a turn
  * number extend the run only while the turn is unchanged; turn-less rows
- * (window summaries) never enter Work. */
+ * (window summaries) never enter Work. A settled surfaced-interaction card
+ * (question / Plan review) is human-decision evidence, not Process work — it
+ * never joins a span (and so never counts toward its tool count/preview); the
+ * caller flushes the run and renders it standalone. */
 function isWorkMember(message: TranscriptMessage): message is TranscriptMessage & { turn: number } {
-  return 'turn' in message && classifyTranscriptMessage(message).class === 'process'
+  return 'turn' in message
+    && classifyTranscriptMessage(message).class === 'process'
+    && !isSurfacedInteractionTool(message)
 }
 
 /**
@@ -123,6 +128,14 @@ export function projectCompact(
         out.push({ kind: 'context-cluster', cluster, expanded })
         if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member })
       }
+      continue
+    }
+    if (isSurfacedInteractionTool(message)) {
+      // A settled surfaced-interaction card is a Work BOUNDARY: it ends the
+      // current run, renders standalone in raw chronology, and belongs to
+      // neither side.
+      flush()
+      out.push({ kind: 'message', message })
       continue
     }
     if (isWorkMember(message)) {

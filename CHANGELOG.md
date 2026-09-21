@@ -14,6 +14,7 @@
 - **Context 簇头部现在同时显示展开状态与 Context 身份。** 折叠/展开标记（`▸`/`▾`）后新增 Context 身份图标：emoji 下为 `▸ 📎 Context · N injections`，symbols 下为 `▸ ⋅ Context · N injections`，minimal 下只保留 `▸ Context · N injections`（装饰图标自动隐藏，无多余空格）。`Work` 头部保持不变。
 - **折叠的 Focus 会把回合中途的过程通知收进 Thought。** Agent 已在工作期间到达的 `notice`（后台任务完成、子代理结算等过程反馈）不再独立占据一行，而是收进折叠的 Thought，展开 Focus 时按原始时间顺序完整恢复；唤醒本回合的开头通知仍然可见（用来说明 Agent 为何被唤醒），中途的 `relay` 也仍然独立可见。中途通知在折叠状态下仍可通过全文搜索临时定位，关闭搜索后恢复折叠，不产生新的手动展开状态。
 - **长会话下打开搜索的展示重建不再随历史规模平方增长。** 大历史会话中搜索定位的重新投影改为每个投影周期只解析一次揭示归属，历史越长改善越明显。
+- **已结束的 `ask_user_question` 与 `exit_plan_mode`（Plan review）卡片现在作为“人工交互证据”独立展示，不再被过程折叠吞掉。** 两者只按工具身份识别（恰好是这两个工具，不新增语义类别，也不因为卡片丰富或曾需要批准就扩大范围）：Compact 下成为 `Work` 的边界并原地单独展示（不计入 `Work` 的工具数或 Tool 预览）；折叠的 Focus 会把它们提到 Thought 之外（与 user/steer、surfaced Context 同类，保持原始相对顺序，不跨越已提交回答/steer 的顺序边界）；展开 Focus 时回到原始时间位置；Full 不变。卡片自身的展开/折叠与 Focus root 相互独立（折叠 Focus root 不会重置它），并复用已有 Tool 卡片交互（全屏可点击；常规面无可操作 owner 时按现有能力完整展示）。仍在等待回答/批准的问题不受影响——交互仍由其面板独占，不会重复出现一张已结束样式的卡片；部分作答、跳过、取消或出错的问题卡片同样保持独立可读。其余工具（todo/goal/subagent/workflow/schedule/cordis/bash/edit 等）仍属于普通 Process。
 - **Question / Approval 保留响应所有权，同时允许只读上下文检查。** 模态打开时仍可通过直接或 leader 检查快捷键使用折叠、Thinking 展开、全屏回到最新位置、Todo 展示切换，以及已证明的全屏展示性鼠标目标；固定的 Question / Approval 响应键优先于冲突的全局检查快捷键，提交、会话切换和生命周期操作仍由模态保护。
 - **长会话全文搜索显著更快。** 连续输入、`Enter`/`Shift+Enter` 跳转现在**每个操作最多
   重建一次**会话内容，不再重复重建、重复测量或整窗重绘；同一窗口内的跳转近似即时，

@@ -72,3 +72,36 @@ export const transcriptSemanticOf = classifyTranscriptMessage
 export function isSurfacedContext(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
   return message.kind === 'system' && message.context === true
 }
+
+/**
+ * The tool names whose SETTLED card is surfaced human-interaction evidence —
+ * durable human decisions, not ordinary work. PR4's authoritative set is
+ * exactly these two: `ask_user_question` (the user's answers) and
+ * `exit_plan_mode` (the user's Plan review / approval result). Every other
+ * tool stays Process regardless of how rich its card looks or whether its
+ * execution happened to require an approval.
+ */
+export const SURFACED_INTERACTION_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'ask_user_question',
+  'exit_plan_mode',
+])
+
+/** Whether one tool NAME belongs to the surfaced-interaction set, regardless of
+ * settled state. The fold uses this to keep such calls out of the turn's work
+ * accounting even while they are running. */
+export function isSurfacedInteractionToolName(name: string): boolean {
+  return SURFACED_INTERACTION_TOOL_NAMES.has(name)
+}
+
+/**
+ * Whether one tool row is SETTLED human-interaction evidence rather than
+ * ordinary work-process evidence. The decision is source/tool identity only
+ * (kind + a name in {@link SURFACED_INTERACTION_TOOL_NAMES} + settled status) —
+ * never the display title or the result wording. A RUNNING question / plan
+ * review is owned by its active interaction panel and must NOT become a
+ * duplicate surfaced card. This orthogonal projection role deliberately does
+ * NOT add a fifth semantic class, and unknown tools stay Process.
+ */
+export function isSurfacedInteractionTool(message: TranscriptMessage): boolean {
+  return message.kind === 'tool' && isSurfacedInteractionToolName(message.name) && message.status !== 'running'
+}

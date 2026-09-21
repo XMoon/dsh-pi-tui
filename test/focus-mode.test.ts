@@ -2683,6 +2683,57 @@ test('a settled text-only answer crossed by a human steer stays persistent befor
     'Focus off leaves the raw transcript chronology unchanged')
 })
 
+test('Q11 a settled question after a committed pre-steer answer never crosses the ordering fence', () => {
+  const folder = new TranscriptFolder()
+  const initial = steerMessage('q-fence-initial', 'initial prompt')
+  const steer = steerMessage('q-fence-steer', 'human steer')
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 1 }, 1001, 1),
+    eventAt('user/message', initial, 1002, 2),
+    eventAt('assistant/chunk', {
+      turn: 0,
+      step: 1,
+      chunk: { type: 'text-delta', index: 0, text: 'assistant A' },
+    }, 1003, 3),
+    queueSteer(steer, 1004, 4),
+    assistantSettlement(0, 1, 'q-fence-a', 'assistant A', 1005, 5, [{ type: 'text', text: 'assistant A' }], 1003),
+    eventAt('step/end', { turn: 0, step: 1 }, 1006, 6),
+    claimSteer(1007, 7),
+    eventAt('step/start', { turn: 0, step: 2 }, 1008, 8),
+    eventAt('user/message', steer, 1009, 9),
+    eventAt('tool/call', {
+      turn: 0, step: 2, callId: ToolCallId('q-fence-call'), name: 'ask_user_question',
+      arguments: JSON.stringify({ questions: [{ id: 'q', question: 'Continue?' }] }),
+    }, 1010, 10),
+    eventAt('tool/result', {
+      turn: 0, step: 2,
+      message: {
+        id: MessageId('q-fence-r'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('q-fence-call'), content: [{ type: 'text', text: JSON.stringify({ answers: [{ id: 'q', selected: ['yes'] }] }) }] }],
+        source: { kind: 'tool', callId: ToolCallId('q-fence-call') },
+      },
+    }, 1011, 11),
+  ])
+
+  const messages = folder.messages()
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  const order = blockKinds(collapsed)
+  const committedIndex = collapsed.findIndex(block => block.kind === 'message' && block.message.kind === 'assistant' && block.message.text === 'assistant A')
+  const questionIndex = collapsed.findIndex(block => block.kind === 'message' && block.message.kind === 'tool' && block.message.name === 'ask_user_question')
+  assert.ok(committedIndex >= 0, `the committed pre-steer answer stays persistent: ${order.join(' | ')}`)
+  assert.ok(questionIndex >= 0, `the settled question is surfaced: ${order.join(' | ')}`)
+  assert.ok(questionIndex > committedIndex,
+    `the question must not hoist above the committed-answer/user fence: ${order.join(' | ')}`)
+
+  // Expanded Focus keeps the same relative order (raw chronology).
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  const expandedQuestion = expanded.findIndex(block => block.kind === 'message' && block.message.kind === 'tool' && block.message.name === 'ask_user_question')
+  const expandedCommitted = expanded.findIndex(block => block.kind === 'message' && block.message.kind === 'assistant' && block.message.text === 'assistant A')
+  assert.ok(expandedCommitted >= 0 && expandedQuestion > expandedCommitted,
+    `expanded keeps the question after the committed answer: ${blockKinds(expanded).join(' | ')}`)
+})
+
 test('same-millisecond steer and assistant output stays process evidence', () => {
   const initial = steerMessage('equal-initial', 'initial prompt')
   const steer = steerMessage('equal-steer', 'human steer')

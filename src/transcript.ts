@@ -31,6 +31,7 @@ import {
   usageFromAssistantSettlement,
   type TokenUsageTotals,
 } from './token-usage.ts'
+import { isSurfacedInteractionToolName } from './transcript-semantics.ts'
 import type {
   AssistantLiveChunk,
   AssistantLiveContentBlock,
@@ -4173,16 +4174,24 @@ export class TranscriptFolder {
         // (replay artifact) must not mutate the Focus counts or the Tool
         // slot (review finding). The transcript card still folds.
         if (!activity.completed) {
-          activity.toolCalls += 1
-          activity.tools.set(event.data.name, (activity.tools.get(event.data.name) ?? 0) + 1)
+          // A surfaced-interaction tool call (question / Plan review) is
+          // human-decision evidence, not ordinary work: it never increments
+          // the turn's tool count, never appears in the tool-type stats, and
+          // never owns the latest-meaningful-Tool slot. It still confirms the
+          // message candidate below (a real step boundary), so final answer
+          // selection is unchanged.
+          if (!isSurfacedInteractionToolName(event.data.name)) {
+            activity.toolCalls += 1
+            activity.tools.set(event.data.name, (activity.tools.get(event.data.name) ?? 0) + 1)
+            activity.tool = {
+              callId: event.data.callId,
+              name: event.data.name,
+              args: event.data.arguments,
+              status: 'running',
+            }
+          }
           this.confirmMessageCandidate(activity)
           this.syncMessage(activity)
-          activity.tool = {
-            callId: event.data.callId,
-            name: event.data.name,
-            args: event.data.arguments,
-            status: 'running',
-          }
           activity.revision += 1
         }
         break
