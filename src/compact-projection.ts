@@ -1,38 +1,26 @@
 /**
- * Compact projection: contiguous Process runs become `Work` spans.
+ * Compact materialization over the canonical transcript structure.
  *
- * Compact collapses CONTIGUOUS Process runs, never whole turns. Starting
- * from the raw transcript order, a maximal run of Process-classified rows
- * becomes one presentation-only {@link CompactWorkSpan}; every other
- * semantic boundary (Conversation, Attention, surfaced Context, workflow,
- * compaction, window summary, turn boundary) ends the run. Assistant
- * intermediate narration and the final answer stay outside Work at their
- * chronological positions, so the session data is never reordered or
- * duplicated.
- *
- * Surfaced Context rows are grouped by raw adjacency FIRST (see
- * `context-presentation.ts`); a cluster is a Work boundary exactly like a
- * standalone Context row, and hidden Process rows can never create a false
- * cluster.
+ * The semantic segmentation is owned by `transcript-projection.ts`; this module
+ * only decides how Compact PRESENTS it: a collapsed Work span emits its header
+ * block, an expanded span emits the header followed by its raw member rows, and
+ * an ambient Context cluster emits a header (or flat members on a surface with
+ * no operable cluster owner) with its members revealed on expansion. Search
+ * forces exactly the owning span/cluster open while content refresh keeps the
+ * collapsed header in place.
  * @module @xmoon76/dsh-pi-tui/compact-projection
  */
 
-import { classifyTranscriptMessage, isSurfacedInteractionTool } from './transcript-semantics.ts'
-import { clusterAdjacentAmbientContext, type ContextCluster } from './context-presentation.ts'
+import type { ContextCluster } from './context-presentation.ts'
+import { projectTranscriptStructure, type TranscriptWorkSpan } from './transcript-projection.ts'
 import type { TranscriptMessage } from './transcript.ts'
 
 /**
- * One presentation-only contiguous Process run. `members` preserve raw
- * order, `owner` (the first member TranscriptMessage) is the stable
- * presentation identity, and no original message is mutated. The span
- * carries no durable state — its aggregate facts are derived at render time.
+ * The Compact Work span is the canonical {@link TranscriptWorkSpan}. The alias
+ * keeps the Compact presentation vocabulary while the shared semantic type
+ * stays preset-neutral.
  */
-export interface CompactWorkSpan {
-  readonly kind: 'work'
-  readonly turn: number
-  readonly members: readonly TranscriptMessage[]
-  readonly owner: TranscriptMessage
-}
+export type CompactWorkSpan = TranscriptWorkSpan
 
 /** One Compact projection block, in visual order. */
 export type CompactProjectedBlock =
@@ -40,7 +28,9 @@ export type CompactProjectedBlock =
   | { readonly kind: 'work'; readonly span: CompactWorkSpan }
   | { readonly kind: 'context-cluster'; readonly cluster: ContextCluster; readonly expanded: boolean }
 
-/** Projection inputs shared by every preset's cluster substitution. */
+/** Compact projection inputs: the manual Work/cluster disclosures and the
+ * temporary search reveal. Full and Focus materialize their own presentation
+ * from TuiApp state, so this options bag is Compact-only. */
 export interface CompactProjectionOptions {
   /** Work spans the user (or a search reveal) opened. */
   readonly expandedWorkOwners: ReadonlySet<TranscriptMessage>
@@ -69,22 +59,8 @@ function clusterExpanded(cluster: ContextCluster, options: CompactProjectionOpti
   return cluster.members.some(member => options.forcedExpanded.has(member))
 }
 
-/** Whether one row continues the current Work run. Process rows with a turn
- * number extend the run only while the turn is unchanged; turn-less rows
- * (window summaries) never enter Work. A settled surfaced-interaction card
- * (question / Plan review) is human-decision evidence, not Process work — it
- * never joins a span (and so never counts toward its tool count/preview); the
- * caller flushes the run and renders it standalone. Exported so the live
- * Preparing ownership consumes the SAME boundary authority as the projection:
- * a settled interaction closes the trailing run. */
-export function isCompactWorkMember(message: TranscriptMessage): message is TranscriptMessage & { turn: number } {
-  return 'turn' in message
-    && classifyTranscriptMessage(message).class === 'process'
-    && !isSurfacedInteractionTool(message)
-}
-
 /**
- * Project one transcript window into Compact presentation blocks.
+ * Materialize the canonical structure for Compact.
  *
  * A collapsed Work span emits only its header block; an expanded span emits
  * the header followed by its raw member rows (the existing message
@@ -98,57 +74,30 @@ export function projectCompact(
   messages: readonly TranscriptMessage[],
   options: CompactProjectionOptions,
 ): CompactProjectedBlock[] {
-  const clustering = clusterAdjacentAmbientContext(messages)
   const out: CompactProjectedBlock[] = []
-  let run: TranscriptMessage[] = []
-  let runTurn: number | undefined
-  const flush = (): void => {
-    const owner = run[0]
-    if (owner !== undefined && runTurn !== undefined) {
-      const span: CompactWorkSpan = { kind: 'work', turn: runTurn, members: run, owner }
+  for (const block of projectTranscriptStructure(messages)) {
+    if (block.kind === 'message') {
+      out.push({ kind: 'message', message: block.message })
+      continue
+    }
+    if (block.kind === 'work') {
+      const span = block.span
       out.push({ kind: 'work', span })
       if (workExpanded(span, options)) {
-        for (const member of run) out.push({ kind: 'message', message: member })
-      }
-    }
-    run = []
-    runTurn = undefined
-  }
-  for (const message of messages) {
-    const cluster = clustering.byMember.get(message)
-    if (cluster !== undefined) {
-      flush()
-      // The first member is the cluster header; expanding re-emits EVERY
-      // member (owner included) as an ordinary Context row. Other members
-      // contribute nothing on their own.
-      if (message === cluster.owner) {
-        if (options.clusterHeader === false) {
-          for (const member of cluster.members) out.push({ kind: 'message', message: member })
-          continue
-        }
-        const expanded = clusterExpanded(cluster, options)
-        out.push({ kind: 'context-cluster', cluster, expanded })
-        if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member })
+        for (const member of span.members) out.push({ kind: 'message', message: member })
       }
       continue
     }
-    if (isSurfacedInteractionTool(message)) {
-      // A settled surfaced-interaction card is a Work BOUNDARY: it ends the
-      // current run, renders standalone in raw chronology, and belongs to
-      // neither side.
-      flush()
-      out.push({ kind: 'message', message })
+    // The first member is the cluster header; expanding re-emits EVERY
+    // member (owner included) as an ordinary Context row.
+    const cluster = block.cluster
+    if (options.clusterHeader === false) {
+      for (const member of cluster.members) out.push({ kind: 'message', message: member })
       continue
     }
-    if (isCompactWorkMember(message)) {
-      if (run.length > 0 && runTurn !== message.turn) flush()
-      run.push(message)
-      runTurn = message.turn
-      continue
-    }
-    flush()
-    out.push({ kind: 'message', message })
+    const expanded = clusterExpanded(cluster, options)
+    out.push({ kind: 'context-cluster', cluster, expanded })
+    if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member })
   }
-  flush()
   return out
 }

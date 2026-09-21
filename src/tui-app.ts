@@ -169,7 +169,8 @@ import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallb
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
 import { FocusActivityComponent, focusPreparingSummary, isCollapsedFocusHiddenRow, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
-import { isCompactWorkMember, projectCompact, type CompactWorkSpan } from './compact-projection.ts'
+import { projectCompact } from './compact-projection.ts'
+import { clusterByMemberOf, isTranscriptWorkMember, projectTranscriptStructure, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
 import { CompactPendingWorkComponent, CompactWorkComponent, summarizeWorkSpan } from './compact-work.ts'
 import { ContextClusterComponent } from './context-cluster.ts'
 import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './context-presentation.ts'
@@ -3047,7 +3048,7 @@ type SearchRevealOwner =
 /** The Work a live Preparing call belongs to: the turn's still-open trailing
  * Process run, or a NEW (ephemeral) pending run when that run was closed. */
 type CompactPreparingOwner =
-  | { readonly kind: 'trailing-run'; readonly span: CompactWorkSpan }
+  | { readonly kind: 'trailing-run'; readonly span: TranscriptWorkSpan }
   | { readonly kind: 'pending-run' }
 
 /** One live-only transcript block containing preparing tool rows. It is
@@ -3058,7 +3059,7 @@ type CompactPreparingOwner =
  * owners are the stable first-member TranscriptMessages. */
 type TranscriptWorkBlock = {
   kind: 'work'
-  span: CompactWorkSpan
+  span: TranscriptWorkSpan
   /** The live Preparing summary of the NEWEST Work span of its turn (the
    * only span whose Tool slot may claim the streaming call). */
   preparingSummary?: string
@@ -3087,7 +3088,7 @@ function sameCollapseOwner(left: TranscriptRenderBlock, right: TranscriptRenderB
  * plus the raw member identity order. Content changes (thinking text, tool
  * status) keep both, so the collapsed header can refresh in place; a boundary
  * change or a member add/remove is structural. */
-function sameWorkSpanShape(left: CompactWorkSpan, right: CompactWorkSpan): boolean {
+function sameWorkSpanShape(left: TranscriptWorkSpan, right: TranscriptWorkSpan): boolean {
   if (left.owner !== right.owner || left.members.length !== right.members.length) return false
   for (let index = 0; index < left.members.length; index += 1) {
     if (left.members[index] !== right.members[index]) return false
@@ -4027,7 +4028,7 @@ export class TuiApp {
   /** The CompactWorkComponent cache, keyed by the span owner. */
   private readonly compactWorkComponents = new Map<TranscriptMessage, {
     component: CompactWorkComponent
-    span: CompactWorkSpan
+    span: TranscriptWorkSpan
     expanded: boolean
     themeRev: number
     iconStyle: IconStyle
@@ -5943,7 +5944,7 @@ export class TuiApp {
         // Process disclosure master for both surfaces. Compact has no mouse
         // in regular mode, so this is its only bulk affordance.
         if (this.displayState.preset === 'compact') {
-          this.toggleCompactWorkSpans()
+          this.toggleTranscriptWorkSpans()
           return true
         }
         // Fullscreen + Focus: Ctrl+O owns the Thought-root bulk (plan §3) —
@@ -7197,7 +7198,7 @@ export class TuiApp {
   /** The Compact Work spans currently projected, in visual order. Derived
    * through the SAME pure projection the render path uses, so the Ctrl+O bulk
    * can never disagree with what is on screen. */
-  private eligibleWorkSpans(): CompactWorkSpan[] {
+  private eligibleWorkSpans(): TranscriptWorkSpan[] {
     const blocks = projectCompact(this.messages, {
       expandedWorkOwners: new Set(),
       expandedClusters: new Set(),
@@ -7210,7 +7211,7 @@ export class TuiApp {
    * (revoking any temporary search reveal that opened one), otherwise expand
    * the recent spans. One mutation, one rebuild, one viewport pass — the
    * existing fold-disclosure master semantics. */
-  private toggleCompactWorkSpans(): void {
+  private toggleTranscriptWorkSpans(): void {
     const spans = this.eligibleWorkSpans()
     const open = spans.filter(span => this.workSpanExpanded(span))
     // Under Compact, Ctrl+O owns the Work spans ONLY, in ONE
@@ -8333,7 +8334,7 @@ export class TuiApp {
   }
 
   /** Whether one Work span is opened ONLY by the granted search reveal. */
-  private workSpanRevealedBySearch(span: CompactWorkSpan): boolean {
+  private workSpanRevealedBySearch(span: TranscriptWorkSpan): boolean {
     const revealed = this.revealedSearchOwner()
     return revealed?.kind === 'compact-work' && revealed.owner === span.owner
   }
@@ -8503,19 +8504,19 @@ export class TuiApp {
 
   /** Whether one Work span is effectively open: a manual disclosure or a
    * granted search reveal whose target is one of its members. */
-  private workSpanExpanded(span: CompactWorkSpan): boolean {
+  private workSpanExpanded(span: TranscriptWorkSpan): boolean {
     return this.compactExpandedWorkOwners.has(span.owner) || this.workSpanRevealedBySearch(span)
   }
 
   /** Whether one turn's contiguous Process run is still OPEN at the transcript
    * tail: the LAST turn-bearing message of the window belongs to that turn and
    * is a Work MEMBER under the projection's own boundary authority
-   * ({@link isCompactWorkMember}). ONLY an open run may absorb a live Preparing
-   * call. A live Preparing call is a Process row that has not landed durably
-   * yet, so once an Assistant / Context / Attention boundary — OR a settled
-   * surfaced-interaction card — has been recorded, the call starts a NEW run:
-   * drawing it back into the previous Work span would cross a chronology
-   * boundary the Compact projection forbids. */
+   * ({@link isTranscriptWorkMember}). ONLY an open run may absorb a live
+   * Preparing call. A live Preparing call is a Process row that has not landed
+   * durably yet, so once an Assistant / Context / Attention boundary — OR a
+   * settled surfaced-interaction card — has been recorded, the call starts a
+   * NEW run: drawing it back into the previous Work span would cross a
+   * chronology boundary the canonical projection forbids. */
   private workRunOpenForTurn(turn: number): boolean {
     for (let index = this.messages.length - 1; index >= 0; index -= 1) {
       const message = this.messages[index]!
@@ -8524,7 +8525,7 @@ export class TuiApp {
       // MEMBER under the SAME boundary authority the projection uses: a
       // settled surfaced-interaction card (question / Plan review) closes the
       // run even though its base semantic class stays `process`.
-      return message.turn === turn && isCompactWorkMember(message)
+      return message.turn === turn && isTranscriptWorkMember(message)
     }
     return false
   }
@@ -8537,7 +8538,7 @@ export class TuiApp {
    */
   private applyCompactPreparing(blocks: TranscriptRenderBlock[]): void {
     if (this.streamingToolPreviews.length === 0) return
-    const spans: CompactWorkSpan[] = []
+    const spans: TranscriptWorkSpan[] = []
     for (const block of blocks) {
       if (block.kind === 'work') spans.push(block.span)
     }
@@ -8584,8 +8585,8 @@ export class TuiApp {
    * Otherwise the call starts a NEW run (`pending-run`) and must never be drawn
    * back across the closed boundary.
    */
-  private compactPreparingOwner(turn: number, spans: readonly CompactWorkSpan[]): CompactPreparingOwner {
-    let trailing: CompactWorkSpan | undefined
+  private compactPreparingOwner(turn: number, spans: readonly TranscriptWorkSpan[]): CompactPreparingOwner {
+    let trailing: TranscriptWorkSpan | undefined
     for (const span of spans) {
       if (span.turn === turn) trailing = span
     }
@@ -8701,7 +8702,7 @@ export class TuiApp {
    * and previews render from. Member topology is compared separately (a
    * boundary change is structural); this only decides content refresh. */
   private compactWorkSignature(
-    span: CompactWorkSpan,
+    span: TranscriptWorkSpan,
     toolDisplay: string | undefined,
     preparingSummary: string | undefined,
   ): string {
@@ -8722,7 +8723,7 @@ export class TuiApp {
    * signature covers the span-local facts the card renders. The live
    * Preparing summary arrives from the BLOCK (only the newest span of a turn
    * carries it) and is consumed by a collapsed span's Tool slot. */
-  private compactWorkComponentFor(span: CompactWorkSpan, blockPreparingSummary: string | undefined): CompactWorkComponent {
+  private compactWorkComponentFor(span: TranscriptWorkSpan, blockPreparingSummary: string | undefined): CompactWorkComponent {
     const expanded = this.workSpanExpanded(span)
     const summary = summarizeWorkSpan(span)
     const toolDisplay = summary.tool === undefined
