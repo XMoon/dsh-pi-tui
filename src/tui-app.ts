@@ -8045,7 +8045,8 @@ export class TuiApp {
    * granted search target HIDDEN, so the still-granted reveal would immediately
    * reopen the owner the collapse just closed. Resolved from owner ancestry and
    * the collapse's own consequences — never from "a search target exists".
-   * Evaluated before any owner state changes. */
+   * Evaluated after the master flag is already collapsed but BEFORE the owner
+   * sets are cleaned up. */
   private regularMasterCollapseRevokesReveal(): boolean {
     const target = this.searchRevealedMessage()
     if (target === undefined) return false
