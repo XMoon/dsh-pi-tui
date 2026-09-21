@@ -158,6 +158,33 @@ test('9.2 a window-summary before Process never joins the Work span', () => {
   assert.deepEqual(span?.members, [messages[1], messages[2]], 'the summary never becomes a Work member')
 })
 
+test('9.2 the window prune keeps owners that are still projected when paging from another preset', async () => {
+  const { vt, app } = startApp()
+  const owner = thinking(1, 'page run')
+  const page = [owner, tool(1, 'ok')]
+  const windowA = { mode: 'history' as const, endTurn: 1, firstTurn: 1, lastTurn: 1 }
+  app.setTranscript(page, new Map(), windowA)
+  await vt.waitForRender()
+  app.toggleWorkSpan(owner)
+  await vt.waitForRender()
+  assert.equal(app.compactExpandedWorkOwnersForTest().has(owner), true, 'precondition: the span is open in Compact')
+
+  // A window change made while FOCUS is active, with the SAME projected
+  // messages: the Compact liveness must not depend on the active preset.
+  app.setDisplayPreset('focus')
+  await vt.waitForRender()
+  app.setTranscript(page, new Map(), { ...windowA, hasNewer: false })
+  await vt.waitForRender()
+  assert.equal(app.compactExpandedWorkOwnersForTest().has(owner), true,
+    'a still-projected Work owner survives a window change made from another preset')
+
+  app.setDisplayPreset('compact')
+  await vt.waitForRender()
+  assert.equal(app.compactExpandedWorkOwnersForTest().has(owner), true)
+  assert.ok(vt.getViewport().join('\n').split('\n').some(line => /^\s*▾ Work(?: ·|$)/.test(line)),
+    `the span stays expanded in Compact:\n${vt.getViewport().join('\n')}`)
+})
+
 test('9.2 a Work disclosure from an older window is not re-applied to a new page owner', async () => {
   const { vt, app } = startApp()
   const oldOwner = thinking(1, 'old run')

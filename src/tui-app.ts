@@ -6982,7 +6982,7 @@ export class TuiApp {
     // identity alone can never expire it — `TranscriptFolder` returns the SAME
     // TranscriptMessage object when a page is revisited, so A → B → A would
     // otherwise resurrect the old expansion.
-    if (windowChanged) this.pruneCompactDisclosuresToWindow(blocks)
+    if (windowChanged) this.pruneCompactDisclosuresToWindow()
     const classifiedAt = this.transcriptRenderProfiler.mark(profileStart)
     const structural = !this.transcriptPresentationCommitted
       || activitiesChanged
@@ -8086,14 +8086,24 @@ export class TuiApp {
    * longer projects (the window-epoch reset). `TranscriptFolder` returns the
    * same message objects when a page is revisited, so object identity can
    * never expire a stale owner; the window change itself must. A search jump
-   * keeps the same window and therefore keeps its owners. */
-  private pruneCompactDisclosuresToWindow(blocks: readonly TranscriptRenderBlock[]): void {
+   * keeps the same window and therefore keeps its owners.
+   *
+   * Liveness is derived from an INDEPENDENT Compact projection of the new
+   * window, never the active preset's blocks: Focus/Full have no Work blocks
+   * and the regular surface has no cluster block, so using the current
+   * projection would drop owners that are still projected and resurrect the
+   * stale-state bug the moment the user pages from another preset. */
+  private pruneCompactDisclosuresToWindow(): void {
     const liveWork = new Set<TranscriptMessage>()
-    const liveClusters = new Set<TranscriptMessage>()
-    for (const block of blocks) {
+    for (const block of projectCompact(this.messages, {
+      expandedWorkOwners: new Set(),
+      expandedClusters: new Set(),
+      forcedExpanded: new Set(),
+    })) {
       if (block.kind === 'work') liveWork.add(block.span.owner)
-      if (block.kind === 'context-cluster') liveClusters.add(block.cluster.owner)
     }
+    const liveClusters = new Set<TranscriptMessage>()
+    for (const cluster of clusterAdjacentAmbientContext(this.messages).clusters) liveClusters.add(cluster.owner)
     for (const owner of [...this.compactExpandedWorkOwners]) {
       if (!liveWork.has(owner)) this.compactExpandedWorkOwners.delete(owner)
     }
@@ -8417,7 +8427,18 @@ export class TuiApp {
       }
       if (block.kind === 'streaming-tool-previews') continue
       if (block.kind === 'pending-user') continue
-      if (block.kind === 'work' || block.kind === 'context-cluster') continue
+      if (block.kind === 'work') continue
+      if (block.kind === 'context-cluster') {
+        // A fullscreen mid-turn ambient cluster is a durable persistent fence:
+        // the live call belongs AFTER it, exactly like a settled interaction
+        // card. (On the regular surface the same rows are flat messages and
+        // are counted below.)
+        if (block.cluster.turn === turn) {
+          lastTurnIndex = index
+          lastTurnIsHeldBackFinal = false
+        }
+        continue
+      }
       if (!('turn' in block.message) || block.message.turn !== turn) continue
       lastTurnIndex = index
       lastTurnIsHeldBackFinal = block.message.kind === 'assistant' && block.collapseFocusOwnerOnClick === undefined
