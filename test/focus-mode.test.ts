@@ -12,6 +12,7 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
+import { projectCompact } from '../src/compact-projection.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import {
   FOCUS_MODE_PROMPT,
@@ -2238,7 +2239,7 @@ test('a reasoning-first durable step renders Activity before the final Assistant
   assert.deepEqual(
     blockKinds(collapsed),
     ['user', 'activity', 'assistant'],
-    'Compact folds the reasoning-first step into Activity BEFORE the final Assistant',
+    'collapsed Focus folds the reasoning-first step into Activity BEFORE the final Assistant',
   )
   const expanded = projectTools(folder.messages(), folder.turnActivities(), new Set([0]))
   assert.deepEqual(
@@ -2246,6 +2247,52 @@ test('a reasoning-first durable step renders Activity before the final Assistant
     ['user', 'activity', 'thinking', 'assistant'],
     'expanded Focus shows the same canonical lane order (the leading activity block is the expanded span header)',
   )
+})
+
+test('a reasoning-first durable step keeps its Activity before the final Assistant in the COMPACT projection', () => {
+  // The REAL Compact materialization (projectCompact over the canonical
+  // structure) — not the Focus projector — must order the reasoning-first
+  // Work span before the final Assistant.
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', { id: MessageId('m-u'), role: 'user', content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('m-a'),
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'checking the plan first' },
+          { type: 'text', text: 'final answer' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [
+        { type: 'chunk', time: 1002, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { type: 'chunk', time: 1003, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the plan first' } },
+        { type: 'chunk', time: 1004, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'checking the plan first' } } },
+        { type: 'chunk', time: 1005, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+        { type: 'chunk', time: 1006, chunk: { type: 'text-delta', index: 1, text: 'final answer' } },
+        { type: 'chunk', time: 1007, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'final answer' } } },
+      ],
+    }, 1008, 2),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 3),
+  ])
+  const blocks = projectCompact(folder.messages(), {
+    expandedWorkOwners: new Set(),
+    expandedClusters: new Set(),
+    forcedExpanded: new Set(),
+  })
+  assert.deepEqual(
+    blocks.map(block => block.kind === 'message' ? block.message.kind : block.kind),
+    ['user', 'work', 'assistant'],
+    'Compact materializes the reasoning-first span BEFORE the final Assistant',
+  )
+  const work = blocks[1]
+  assert.ok(work !== undefined && work.kind === 'work')
+  assert.deepEqual(work.span.members.map(member => member.kind), ['thinking'])
 })
 
 test('intermediate assistant messages are hidden when collapsed', () => {

@@ -1546,8 +1546,16 @@ test('late reasoning keeps an assistant-settled thinking entry closed', () => {
     }, 1),
   ])
   // The transcript preserves the late replay fragment, but it must not
-  // re-enter the open lifecycle set or become running again.
+  // re-enter the open lifecycle set or become running again. The live
+  // chronology (Thinking BEFORE the Assistant row — §4.5) stays anchored:
+  // an in-place refresh on an EXISTING row never re-judges its position
+  // against the stored authority.
   folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: ' after' }, 1_700_000_000_002))
+  assert.deepEqual(
+    folder.messages().map(message => message.kind),
+    ['thinking', 'assistant'],
+    'the §4.5-anchored lane order survives the late in-place refresh',
+  )
   const thinking = folder.messages().find((message): message is Extract<TranscriptMessage, { kind: 'thinking' }> => message.kind === 'thinking')
   assert.ok(thinking)
   assert.equal(thinking.running, false)
@@ -4010,6 +4018,18 @@ function messageSettlement(seq: number, step: { stream: AssistantStreamRecord[];
   }, seq)
 }
 
+/** One durable text-only `assistant/message` settlement (empty stream — no
+ * STREAM lane evidence; the text-only content itself proves an
+ * assistant-first step). */
+function textOnlySettlement(seq: number, text = 'final answer'): SessionEvent {
+  return event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: { id: MessageId(`text-only-${seq}`), role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    stream: [],
+  }, seq)
+}
+
 test('cold assistant/message settlements preserve the durable lane order in both directions', () => {
   for (const first of ['thinking', 'assistant'] as const) {
     const folder = new TranscriptFolder()
@@ -4127,7 +4147,78 @@ test('live streaming plus message settlement matches cold hydration for both lan
   }
 })
 
-test('first late reasoning after settlement appends no trailing Thinking row', () => {
+test('first late reasoning after a text-only settlement is preserved as settled diagnostic evidence', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['assistant'])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 3, text: 'late diagnostic thought' }, 4))
+  // The evidence is KEPT (plan §4.6): an assistant-first step owns its
+  // Thinking lane after the Assistant row — valid topology, never running.
+  assert.deepEqual(kinds(folder.messages()), ['assistant', 'thinking'])
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'late diagnostic thought')
+  assert.equal(thinking.running, false, 'late reasoning is never made running again')
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.deepEqual([...((activity as { settledSteps?: Set<number> }).settledSteps ?? [])], [0], 'the step remains settled')
+  assert.ok(activity.think !== undefined, 'the Think slot keeps the preserved evidence')
+  assert.equal(activity.think.running, false, 'the Think slot stays settled')
+})
+
+test('late reasoning created for a thinking-first step relocates before the Assistant row', () => {
+  // Matrix-E counterpart under a THINKING-first authority: after a retry
+  // reset tombstones the settled Thinking row (the Assistant row survives —
+  // it is no longer transient), a late diagnostic delta CREATES the row via
+  // the settled path. The created row is placed by the stored thinking-first
+  // authority — relocated BEFORE the Assistant row, never appended as a
+  // trailing Activity.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    messageSettlement(2, laneOrderedStep('thinking')),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  folder.apply([
+    event('llm/retry', {
+      retryId: 'retry-late' as RetryId,
+      turn: 0,
+      step: 0,
+      provider: 'p',
+      mode: 'normal',
+      policyKey: 'test',
+      retry: 1,
+      maxRetries: 2,
+      delayMs: 0,
+      failure: { message: 'failed', code: 'TEST' },
+    }, 3),
+  ])
+  assert.deepEqual(
+    kinds(folder.messages()),
+    ['assistant', 'system'],
+    'the retry reset tombstones the settled Thinking row; the settled Assistant row survives',
+  )
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: 'recreated diagnostic thought' }, 4))
+  assert.deepEqual(
+    kinds(folder.messages()),
+    ['thinking', 'assistant', 'system'],
+    'the created Thinking row is placed by the stored thinking-first authority — no trailing Activity',
+  )
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'recreated diagnostic thought')
+  assert.equal(thinking.running, false, 'late reasoning is never made running again')
+})
+
+test('cold reasoning from the embedded stream survives a text-only assembled content', () => {
+  // Scenario A: stream = Reasoning -> Text, assembled content = Text only.
+  // The Thinking lane restores from the SAME projection that owns lane
+  // order/usage — durable reasoning is never lost to a lossy content list.
   const folder = new TranscriptFolder()
   folder.hydrate([
     event('turn/start', { turn: 0 }, 0),
@@ -4135,21 +4226,117 @@ test('first late reasoning after settlement appends no trailing Thinking row', (
     event('assistant/message', {
       turn: 0,
       step: 0,
-      message: { id: MessageId('no-reasoning'), role: 'assistant', content: [{ type: 'text', text: 'final answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
-      stream: [],
+      message: { id: MessageId('stream-reasoning'), role: 'assistant', content: [{ type: 'text', text: 'ordered answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: laneOrderedStep('thinking').stream,
     }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'ordered thought', 'the reasoning comes from the embedded stream, not the text-only content')
+  assert.equal(thinking.running, false)
+})
+
+test('a same-step replacement moves the Thinking lane to its own authority', () => {
+  // Scenario B: first settlement text-only, replacement Reasoning -> Text.
+  // Row existence is not chronology ownership — the replacement's durable
+  // evidence relocates the Thinking row BEFORE the Assistant row, so the
+  // invalid trailing Activity from #161's row-existence gate cannot return.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
   ])
   assert.deepEqual(kinds(folder.messages()), ['assistant'])
-  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 3, text: 'late diagnostic thought' }, 4))
+  folder.apply([messageSettlement(3, laneOrderedStep('thinking'))])
   assert.deepEqual(
     kinds(folder.messages()),
-    ['assistant'],
-    'late reasoning must not append a Thinking row after the settled Assistant',
+    ['thinking', 'assistant'],
+    'the replacement settles Thinking -> Assistant with no trailing Activity',
   )
-  const activity = folder.turnActivity(0)
-  assert.ok(activity !== undefined)
-  assert.deepEqual([...((activity as { settledSteps?: Set<number> }).settledSteps ?? [])], [0], 'the step remains settled')
-  assert.equal(activity.think, undefined, 'the Think slot stays settled — late reasoning is diagnostic only')
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'ordered thought')
+  assert.equal(thinking.running, false)
+})
+
+test('a same-step replacement converges a reasoning-first step to assistant-first', () => {
+  // Scenario C: first settlement Reasoning -> Text, replacement Text ->
+  // Reasoning. The newer authoritative evidence owns the topology in BOTH
+  // directions.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    messageSettlement(2, laneOrderedStep('thinking')),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  folder.apply([messageSettlement(3, laneOrderedStep('assistant'))])
+  assert.deepEqual(
+    kinds(folder.messages()),
+    ['assistant', 'thinking'],
+    'the replacement converges the rows to the assistant-first topology',
+  )
+})
+
+test('remove and re-add reasoning keeps the lane chronology drift-free', () => {
+  // Scenario D: Reasoning -> Text, then a text-only replacement, then a
+  // Reasoning -> Text replacement again. The final topology is Thinking ->
+  // Assistant with no trailing drift.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    messageSettlement(2, laneOrderedStep('thinking')),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  folder.apply([textOnlySettlement(3, 'replacement answer')])
+  assert.deepEqual(kinds(folder.messages()), ['assistant'], 'the text-only replacement removes the Thinking row')
+  folder.apply([messageSettlement(4, laneOrderedStep('thinking'))])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistant.text, 'ordered answer', 'the final replacement owns the Assistant text')
+})
+
+test('lane relocation keeps search/window/group contracts intact', () => {
+  // Scenario H: a Thinking row relocated across read rows must keep every
+  // index-keyed contract — search identities, window order, read grouping,
+  // turn facts.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file_path":"r1.ts"}' }, 3),
+    toolResult(4, 'r1', 'r1 ok', 'read'),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 9, text: 'late diagnostic thought' }, 5))
+  folder.apply([
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file_path":"r2.ts"}' }, 6),
+    toolResult(7, 'r2', 'r2 ok', 'read'),
+  ])
+  // [Assistant, read r1, Thinking, read r2] — the two reads are separated
+  // by the Thinking row and stay individual cards.
+  assert.deepEqual(kinds(folder.messages()), ['assistant', 'tool', 'thinking', 'tool'])
+  folder.apply([messageSettlement(8, laneOrderedStep('thinking'))])
+  // The replacement relocates the Thinking row BEFORE the Assistant row;
+  // the vacated gap merges the two reads into one grouped card.
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant', 'tool'])
+  const merged = folder.messages()[2]
+  assert.ok(merged !== undefined && merged.kind === 'tool')
+  assert.ok(merged.result.includes('r1 ok') && merged.result.includes('r2 ok'), 'the merged read card carries both results')
+  // Search still finds both lanes and both read results (index remap).
+  assert.equal(folder.search('ordered thought').length, 1)
+  assert.equal(folder.search('ordered answer').length, 1)
+  assert.equal(folder.search('r1 ok').length, 1)
+  assert.equal(folder.search('r2 ok').length, 1)
+  // Window and grouped-turn projections stay consistent.
+  const windowed = folder.window({ maxTurns: 1 })
+  assert.deepEqual(windowed.messages.map(message => message.kind), ['thinking', 'assistant', 'tool'])
+  assert.deepEqual([...folder.groupedTurns()], [0])
 })
 
 test('late reasoning after settlement refreshes an existing Thinking row in place', () => {
