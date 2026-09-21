@@ -837,6 +837,62 @@ test('a disabled Alt+T mints no Thinking override on search dismiss', async () =
   assert.notEqual(overrides.get(thinking), true, 'a fail-open Thinking must not mint an override on dismiss')
 })
 
+test('an already-visible delivered file does not consume the first regular Ctrl+O', async () => {
+  const { vt, app } = startApp('compact')
+  const { messages, assistant } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  await viewport(vt)
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-1', 0))
+  await viewport(vt)
+  assert.ok(!(await viewport(vt)).includes('src/file-5.ts'), 'precondition: the tail stays folded')
+  vt.sendInput('\x0f')
+  const after = await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the first press must turn the master on')
+  assert.ok(after.includes('src/file-5.ts'), `the tail expands with the master:\n${after}`)
+})
+
+test('a collapapsing regular Ctrl+O revokes a hidden delivered-file reveal', async () => {
+  const { vt, app } = startApp('compact')
+  const { messages, assistant } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  app.setTranscriptDetailExpanded(true)
+  await viewport(vt)
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-5', 4))
+  await viewport(vt)
+  vt.sendInput('\x0f')
+  const after = await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the master collapses')
+  assert.ok(!after.includes('src/file-5.ts'), `the reveal is revoked so the tail stays folded:\n${after}`)
+})
+
+test('a search target already full-revealed by a manual root does not consume Ctrl+O', async () => {
+  const { vt, app } = startApp('focus')
+  const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'work reasoning' }
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 1, name: 'bash', args: JSON.stringify({ command: 'x' }),
+    result: 'TOOL_RESULT_MARKER', status: 'ok',
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 1, text: 'go' },
+    owner,
+    tool,
+    { kind: 'assistant', turn: 1, text: 'final' },
+  ]
+  app.setTranscript(messages, new Map([[1, activity(1)]]))
+  await viewport(vt)
+  app.toggleFocusTurn(1)
+  await viewport(vt)
+  assert.ok((await viewport(vt)).includes('TOOL_RESULT_MARKER'),
+    'precondition: the manual root full-reveals the Work member')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'precondition: no manual Work owner')
+  app.setTranscriptSearchTarget(targetFor(tool, 'TOOL_RESULT_MARKER'))
+  await viewport(vt)
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), true,
+    'an already-visible reveal target must not consume the first Ctrl+O')
+})
+
 test('collapsed Focus + a hidden process row search still opens the Thought', async () => {
   const { vt, app } = startApp('focus')
   const { messages, activities } = settledTurnFixture()
