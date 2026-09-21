@@ -275,7 +275,7 @@ test('Q4 the question card disclosure is independent of the Focus root', async (
   assert.equal(isSurfacedInteractionTool(questionRow), true)
 })
 
-test('Q6 the settled question card renders the N/M summary collapsed and the answer rows expanded', async () => {
+test('Q6 the settled question card renders the N/M summary and structured answers, never raw JSON', async () => {
   const { vt, app } = startApp('focus')
   const { folder } = questionTurn()
   show(app, folder)
@@ -451,6 +451,46 @@ test('E4 exit_plan_mode never counts or previews, and its plan body stays expand
   assert.equal(summarizeWorkSpan(span.span).toolCount, 1, 'the Plan review never joins a span count')
   assert.equal(planReviewRow.kind === 'tool' ? planReviewRow.name : undefined, 'exit_plan_mode')
 })
+
+// --- R3: regular Focus has no independent card owner -> fail open --------
+
+for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
+  test(`R3 regular Focus: a settled ${toolName} card fails open and never follows the Focus root`, async () => {
+    const { vt, app } = startApp('focus')
+    const { folder } = toolName === 'ask_user_question' ? questionTurn() : planReviewTurn()
+    show(app, folder)
+    await vt.waitForRender()
+    const cardFull = (): boolean => {
+      const view = vt.getViewport().join('\n')
+      return toolName === 'ask_user_question' ? view.includes('● q0 → B') : view.includes('Plan approved')
+    }
+    assert.ok(cardFull(), `regular Focus fails open (card full, no coupled fold):\n${vt.getViewport().join('\n')}`)
+    assert.ok(!vt.getViewport().join('\n').includes('ctrl+o to expand'),
+      `no Ctrl+O affordance is advertised for the fail-open card:\n${vt.getViewport().join('\n')}`)
+
+    // Expanding/collapsing the root must never change the card's own state.
+    app.expandFocusTurn(TURN)
+    await vt.waitForRender()
+    assert.ok(cardFull(), `expanding the root leaves the card full:\n${vt.getViewport().join('\n')}`)
+
+    app.toggleFocusTurn(TURN)
+    await vt.waitForRender()
+    assert.ok(cardFull(), `collapsing the root leaves the card full:\n${vt.getViewport().join('\n')}`)
+
+    // Ctrl+O drives ONLY the Thought root; the card stays full throughout.
+    vt.sendInput('\x0f')
+    await vt.waitForRender()
+    const expandedView = vt.getViewport().join('\n')
+    assert.ok(expandedView.includes('🐳'), `Ctrl+O expands the Thought root:\n${expandedView}`)
+    assert.ok(cardFull(), `the card stays full while the root is open:\n${expandedView}`)
+
+    vt.sendInput('\x0f')
+    await vt.waitForRender()
+    const collapsedView = vt.getViewport().join('\n')
+    assert.ok(collapsedView.includes('🐋'), `Ctrl+O collapses the Thought root:\n${collapsedView}`)
+    assert.ok(cardFull(), `the card stays full after the root collapses:\n${collapsedView}`)
+  })
+}
 
 // --- R2#1: Collapse All still closes the root under an interaction reveal ---
 

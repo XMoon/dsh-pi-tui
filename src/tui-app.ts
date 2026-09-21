@@ -13009,6 +13009,19 @@ export class TuiApp {
     return this.thinkingExpanded
   }
 
+  /** Whether a settled surfaced-interaction card (question / Plan review) must
+   * fail open/full on THIS surface. Fullscreen Focus owns the card through the
+   * mouse, so its disclosure is independent of the root; regular Focus has NO
+   * per-card owner independent of the Focus root (Ctrl+O drives BOTH the root
+   * and the tool-detail master), so the card always renders full rather than a
+   * disclosure state the root would drive indirectly. Compact/Full are
+   * unchanged — their own capability already applies. */
+  private surfacedInteractionFailsOpen(message: TranscriptMessage): boolean {
+    return this.fullscreen === undefined
+      && isFocusDisplayPreset(this.displayState.preset)
+      && isSurfacedInteractionTool(message)
+  }
+
   /** The effective expansion of one foldable message (plan §9/§33),
    * SURFACE-ADAPTIVE: Thinking is its OWN disclosure — a compact/full
    * detail level controlled by Alt+T (bulk) plus per-card overrides
@@ -13028,6 +13041,11 @@ export class TuiApp {
     // count, marker or search geometry is ever produced for a key that cannot
     // operate it.
     if (!this.messageFoldDisclosureAvailable()) return true
+    // A settled surfaced-interaction card is NOT a Thought-owned secondary:
+    // regular Focus has no card owner independent of the Focus root, so it
+    // fails open/full instead of following the root (fullscreen keeps its
+    // mouse-owned per-card disclosure below).
+    if (this.surfacedInteractionFailsOpen(message)) return true
     if (isUserMessageDisclosureCandidate(message)) {
       // Long user disclosure follows its OWN recent-USER-turn boundary where
       // Ctrl+O owns the expand master (regular AND fullscreen without Focus),
@@ -13159,9 +13177,13 @@ export class TuiApp {
         // Ctrl+O owns the Thought-root bulk, so the label is click-only —
         // never a dead key hint.
         ? this.userFoldHint()
-        : insideFocusSecondary || insideCompactRun
-          ? (this.fullscreen !== undefined ? 'click' : undefined)
-          : this.ordinaryFoldHint()
+        : this.surfacedInteractionFailsOpen(message)
+          // Fail-open surface: the card is always full, so it advertises no
+          // fold hint (never a Ctrl+O hint that would actually drive the root).
+          ? undefined
+          : insideFocusSecondary || insideCompactRun
+            ? (this.fullscreen !== undefined ? 'click' : undefined)
+            : this.ordinaryFoldHint()
     // The FULL-REVEAL flag for tool bodies (large diffs): true for the
     // per-card override AND for any REGULAR expanded root (the surface
     // contract — no mouse, so a capped diff would be unreadable); fullscreen
@@ -13169,6 +13191,7 @@ export class TuiApp {
     const fullReveal = this.expandedOverride.get(message) === true
       || this.searchForcesMessageExpanded(message)
       || !this.messageFoldDisclosureAvailable()
+      || this.surfacedInteractionFailsOpen(message)
       || (this.fullscreen === undefined && (insideFocusSecondary || insideCompactRun))
     return { expanded, fullReveal, expandHint }
   }
