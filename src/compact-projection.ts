@@ -48,6 +48,13 @@ export interface CompactProjectionOptions {
   readonly expandedClusters: ReadonlySet<TranscriptMessage>
   /** Messages a temporary search reveal must surface (the target row). */
   readonly forcedExpanded: ReadonlySet<TranscriptMessage>
+  /**
+   * Whether a cluster emits its header block. `false` is the FLAT presentation
+   * a surface without any manual cluster disclosure owner uses: the semantic
+   * cluster still groups the rows (ownership/search), but the members render
+   * directly instead of a header whose affordance nobody can operate.
+   */
+  readonly clusterHeader?: boolean
 }
 
 /** Whether one Work span is effectively expanded. */
@@ -108,6 +115,10 @@ export function projectCompact(
       // member (owner included) as an ordinary Context row. Other members
       // contribute nothing on their own.
       if (message === cluster.owner) {
+        if (options.clusterHeader === false) {
+          for (const member of cluster.members) out.push({ kind: 'message', message: member })
+          continue
+        }
         const expanded = clusterExpanded(cluster, options)
         out.push({ kind: 'context-cluster', cluster, expanded })
         if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member })

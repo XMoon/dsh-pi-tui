@@ -138,13 +138,14 @@ import {
 } from './present.ts'
 import { TranscriptSearchComponent } from './search.ts'
 import { CompactTextPreview } from './compact-text-preview.ts'
+import { longMessageDisclosureWindow } from './long-message-disclosure.ts'
 import { HistoryPanel, historyOverlayGeometry } from './history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
-import { isSurfacedContext } from './transcript-semantics.ts'
+import { classifyTranscriptMessage, isSurfacedContext } from './transcript-semantics.ts'
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
@@ -169,7 +170,7 @@ import type { TranscriptWindowState } from './transcript-window.ts'
 import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
 import { FocusActivityComponent, focusPreparingSummary, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
 import { projectCompact, type CompactWorkSpan } from './compact-projection.ts'
-import { CompactWorkComponent, summarizeWorkSpan } from './compact-work.ts'
+import { CompactPendingWorkComponent, CompactWorkComponent, summarizeWorkSpan } from './compact-work.ts'
 import { ContextClusterComponent } from './context-cluster.ts'
 import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './context-presentation.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from './context-row.ts'
@@ -1646,22 +1647,25 @@ export class UserBubbleComponent implements Component {
     this.lastCompactMarkerRow = undefined
     this.lastCollapseEligible = false
     const options = this.compactOptions
-    if (options === undefined || child.length <= options.thresholdRows) return child
+    if (options === undefined) return child
+    // The SAME shared window the relay Context row uses: decide and slice on
+    // the visual rows the current width produced.
+    const window = longMessageDisclosureWindow(child, options, {
+      expanded: options.expanded,
+      marker: (hidden) => {
+        const raw = options.compactMarker(hidden, inner)
+        // Final single-row guard: a narrow bubble never lets the marker wrap or
+        // overflow — it truncates instead (the builder may already have
+        // dropped its verb, but an extreme width still needs clipping).
+        return visibleWidth(raw) <= inner ? raw : truncateToWidth(raw, inner, '…')
+      },
+    })
     if (options.expanded) {
-      this.lastCollapseEligible = true
+      this.lastCollapseEligible = window.long
       return child
     }
-    const head = Math.min(options.headRows, child.length)
-    const tail = Math.min(options.tailRows, Math.max(0, child.length - head))
-    if (head + tail >= child.length) return child
-    const hidden = child.length - head - tail
-    const raw = options.compactMarker(hidden, inner)
-    // Final single-row guard: a narrow bubble never lets the marker wrap or
-    // overflow — it truncates instead (the builder may already have dropped
-    // its verb, but an extreme width still needs clipping).
-    const markerText = visibleWidth(raw) <= inner ? raw : truncateToWidth(raw, inner, '…')
-    this.lastCompactMarkerRow = head
-    return [...child.slice(0, head), markerText, ...child.slice(child.length - tail)]
+    this.lastCompactMarkerRow = window.markerRow
+    return [...window.rows]
   }
 }
 
@@ -3030,6 +3034,18 @@ function deepFreeze(value: unknown): unknown {
  * one bulk owner: Ctrl+O never touches Thinking. */
 type ExpandHint = 'click' | 'click-fold' | 'fold' | 'thinking' | undefined
 
+/** The disclosure container that hides one transcript row from the current
+ * presentation (the search reveal/promotion owner resolution). */
+type SearchRevealOwner =
+  | { readonly kind: 'compact-work'; readonly owner: TranscriptMessage }
+  | { readonly kind: 'context-cluster'; readonly owner: TranscriptMessage }
+
+/** The Work a live Preparing call belongs to: the turn's still-open trailing
+ * Process run, or a NEW (ephemeral) pending run when that run was closed. */
+type CompactPreparingOwner =
+  | { readonly kind: 'trailing-run'; readonly span: CompactWorkSpan }
+  | { readonly kind: 'pending-run' }
+
 /** One live-only transcript block containing preparing tool rows. It is
  * kept outside FocusProjectedBlock so no ephemeral row can enter the Focus
  * activity projection or durable transcript model. Focus-expanded blocks carry
@@ -3048,6 +3064,9 @@ type TranscriptRenderBlock = FocusProjectedBlock | TranscriptWorkBlock | Transcr
   kind: 'streaming-tool-previews'
   previews: readonly StreamingToolPreview[]
   turn?: number
+  /** Compact only: render the live call as an EPHEMERAL pending Work card
+   * (it belongs to a new Process run, not to any durable Work span). */
+  pendingWork?: true
   collapseFocusOwnerOnClick?: number
 } | {
   kind: 'pending-user'
@@ -3098,7 +3117,9 @@ function sameTranscriptBlockShape(left: TranscriptRenderBlock, right: Transcript
     return left.expanded === right.expanded && sameContextClusterShape(left.cluster, right.cluster)
   }
   if (left.kind === 'streaming-tool-previews' && right.kind === 'streaming-tool-previews') {
-    return left.turn === right.turn && sameStreamingToolPreviewShape(left.previews, right.previews)
+    return left.turn === right.turn
+      && (left.pendingWork === true) === (right.pendingWork === true)
+      && sameStreamingToolPreviewShape(left.previews, right.previews)
   }
   if (left.kind === 'pending-user' && right.kind === 'pending-user') {
     return pendingUserDisclosureKey(left.row) === pendingUserDisclosureKey(right.row)
@@ -3974,6 +3995,14 @@ export class TuiApp {
    * disclosure or a temporary search reveal opens one.
    */
   private readonly compactExpandedClusters = new Set<TranscriptMessage>()
+  /**
+   * Members of every Work span currently OPEN in the Compact projection.
+   * Recomputed once per projection; empty for every other preset. The regular
+   * surface full-reveals these rows (no mouse ⇒ no per-card fold affordance),
+   * so `Ctrl+O` can never be advertised as a card's expand key while it
+   * actually collapses the Work span.
+   */
+  private compactOpenRunMembers: ReadonlySet<TranscriptMessage> = new Set()
   /** The CompactWorkComponent cache, keyed by the span owner. */
   private readonly compactWorkComponents = new Map<TranscriptMessage, {
     component: CompactWorkComponent
@@ -7157,6 +7186,11 @@ export class TuiApp {
   private toggleCompactWorkSpans(): void {
     const spans = this.eligibleWorkSpans()
     const open = spans.filter(span => this.workSpanExpanded(span))
+    // ONE action owns the whole "recent detail" family under Compact: the Work
+    // spans AND the generic fold master that the rendered Context rows advertise
+    // through their `(ctrl+o to expand)` hint. Toggling only the spans would
+    // leave that hint dead (the key would collapse the Work span instead), so
+    // both move together in ONE mutation/rebuild/viewport pass.
     if (open.length > 0) {
       this.mutateTranscriptDisclosure(() => {
         for (const span of open) this.compactExpandedWorkOwners.delete(span.owner)
@@ -7230,6 +7264,20 @@ export class TuiApp {
     if (this.fullscreen !== undefined && isFoldableMessageDisclosure(message) && messageReveal
       && this.expandedOverride.get(message) !== true) {
       this.expandedOverride.set(message, true)
+      changed = true
+    }
+
+    // A revealed Work span / ambient cluster becomes the SAME kind of
+    // user-controllable owner the Focus root and the foldable cards get: an
+    // ordinary dismiss keeps the container open instead of collapsing it under
+    // the still-current match. Resolved through the ONE owner the reveal used.
+    const revealOwner = this.searchRevealOwnerFor(message)
+    if (revealOwner?.kind === 'compact-work' && !this.compactExpandedWorkOwners.has(revealOwner.owner)) {
+      this.compactExpandedWorkOwners.add(revealOwner.owner)
+      changed = true
+    }
+    if (revealOwner?.kind === 'context-cluster' && !this.compactExpandedClusters.has(revealOwner.owner)) {
+      this.compactExpandedClusters.add(revealOwner.owner)
       changed = true
     }
 
@@ -8105,29 +8153,33 @@ export class TuiApp {
   private projectedBlocks(projectionExpanded: ReadonlySet<number>): TranscriptRenderBlock[] {
     const preset = this.displayState.preset
     if (preset === 'compact') {
+      const expandedWorkOwners = new Set(this.compactExpandedWorkOwners)
+      const expandedClusters = new Set(this.effectiveExpandedClusterOwners())
+      // The temporary search reveal opens exactly the container that HIDES the
+      // target row, resolved through the same owner the dismissal promotes.
+      const revealed = this.revealedSearchOwner()
+      if (revealed?.kind === 'compact-work') expandedWorkOwners.add(revealed.owner)
+      if (revealed?.kind === 'context-cluster') expandedClusters.add(revealed.owner)
       const blocks: TranscriptRenderBlock[] = [
         ...projectCompact(this.messages, {
-          expandedWorkOwners: this.compactExpandedWorkOwners,
-          expandedClusters: this.compactExpandedClusters,
-          forcedExpanded: this.compactForcedExpandedMessages(),
+          expandedWorkOwners,
+          expandedClusters,
+          forcedExpanded: new Set(),
+          clusterHeader: !this.contextClusterDefaultExpanded(),
         }),
       ]
-      // The live Preparing state belongs to the NEWEST Work span of its turn:
-      // an older span of the same turn must not repeat the same preview row
-      // (plan §36 — no duplicate Tool row).
-      const newestWork = new Map<number, number>()
-      blocks.forEach((block, index) => {
-        if (block.kind === 'work') newestWork.set(block.span.turn, index)
-      })
-      for (const [turn, index] of newestWork) {
-        const preparingSummary = focusPreparingSummary(this.streamingToolPreviewsForTurn(turn))
-        if (preparingSummary === undefined) continue
-        const block = blocks[index]
-        if (block?.kind !== 'work') continue
-        blocks[index] = { kind: 'work', span: block.span, preparingSummary }
+      // Publish the scope the regular surface full-reveals: every member of
+      // every OPEN Work span. Computed ONCE per projection (never per message)
+      // so the render-cache path stays O(1) per card.
+      const openRunMembers = new Set<TranscriptMessage>()
+      for (const block of blocks) {
+        if (block.kind !== 'work' || !this.workSpanExpanded(block.span)) continue
+        for (const member of block.span.members) openRunMembers.add(member)
       }
+      this.compactOpenRunMembers = openRunMembers
       return blocks
     }
+    this.compactOpenRunMembers = new Set()
     const blocks: TranscriptRenderBlock[] = isFocusDisplayPreset(preset)
       ? projectFocus(this.messages, this.turnActivities, projectionExpanded, true)
       : this.messages.map(message => ({ kind: 'message', message }) as TranscriptRenderBlock)
@@ -8142,30 +8194,65 @@ export class TuiApp {
     return this.searchRevealGranted ? this.searchTarget?.message : undefined
   }
 
+  /**
+   * The user-controllable disclosure container that currently HIDES one
+   * transcript row. The search reveal and the dismissal promotion both read
+   * THIS single resolution, so they can never disagree about who owns the row.
+   */
+  private searchRevealOwnerFor(message: TranscriptMessage): SearchRevealOwner | undefined {
+    if (this.displayState.preset === 'compact') {
+      for (const span of this.eligibleWorkSpans()) {
+        if (span.members.includes(message)) return { kind: 'compact-work', owner: span.owner }
+      }
+    }
+    // A FLAT cluster (the regular-surface presentation) has no header hiding its
+    // members, so it is not a disclosure owner: resolving or promoting it would
+    // strand a manual owner that would unexpectedly reopen the cluster when the
+    // surface later changes. The SEMANTIC clustering is untouched — only the
+    // header-backed presentation owns a disclosure.
+    if (this.contextClusterDefaultExpanded()) return undefined
+    const cluster = clusterAdjacentAmbientContext(this.messages).byMember.get(message)
+    if (cluster !== undefined) return { kind: 'context-cluster', owner: cluster.owner }
+    return undefined
+  }
+
+  /** The GRANTED reveal's container owner (undefined when no reveal is active). */
+  private revealedSearchOwner(): SearchRevealOwner | undefined {
+    const target = this.searchRevealedMessage()
+    return target === undefined ? undefined : this.searchRevealOwnerFor(target)
+  }
+
   /** Whether one Work span is opened ONLY by the granted search reveal. */
   private workSpanRevealedBySearch(span: CompactWorkSpan): boolean {
-    const target = this.searchRevealedMessage()
-    return target !== undefined && span.members.includes(target)
+    const revealed = this.revealedSearchOwner()
+    return revealed?.kind === 'compact-work' && revealed.owner === span.owner
   }
 
   /** Whether one ambient cluster is opened ONLY by the granted search reveal. */
   private clusterRevealedBySearch(cluster: ContextCluster): boolean {
-    const target = this.searchRevealedMessage()
-    return target !== undefined && cluster.members.includes(target)
+    const revealed = this.revealedSearchOwner()
+    return revealed?.kind === 'context-cluster' && revealed.owner === cluster.owner
   }
 
-  /** The messages a temporary search reveal must surface: exactly the current
-   * GRANTED search target row. A hidden Work child or cluster member therefore
-   * opens only its OWN owning span/cluster (plan §29). */
-  private compactForcedExpandedMessages(): ReadonlySet<TranscriptMessage> {
-    const target = this.searchRevealedMessage()
-    return target === undefined ? new Set() : new Set([target])
-  }
-
-  /** Whether one ambient cluster is open: a manual disclosure or a granted
-   * search reveal whose target is one of its members. */
+  /** Whether one ambient cluster is open: a manual disclosure, a granted
+   * search reveal whose target is one of its members, or the recent-detail
+   * fold master (Ctrl+O). */
   private contextClusterExpanded(cluster: ContextCluster): boolean {
-    return this.compactExpandedClusters.has(cluster.owner) || this.clusterRevealedBySearch(cluster)
+    // The semantic cluster exists on every preset/surface; only its PRESENTATION
+    // default is surface-dependent (regular has no manual cluster disclosure
+    // owner in F4, so its members are shown expanded rather than stranded).
+    return this.compactExpandedClusters.has(cluster.owner)
+      || this.clusterRevealedBySearch(cluster)
+      || this.contextClusterDefaultExpanded()
+  }
+
+  /** The manual + surface-default cluster expansion set the Compact projection
+   * consumes (the search reveal is applied separately). */
+  private effectiveExpandedClusterOwners(): ReadonlySet<TranscriptMessage> {
+    const owners = new Set(this.compactExpandedClusters)
+    if (!this.contextClusterDefaultExpanded()) return owners
+    for (const cluster of clusterAdjacentAmbientContext(this.messages).clusters) owners.add(cluster.owner)
+    return owners
   }
 
   /**
@@ -8189,6 +8276,13 @@ export class TuiApp {
         continue
       }
       if (message !== cluster.owner) continue
+      // Regular: the cluster still groups the rows semantically, but the surface
+      // has no manual cluster disclosure owner yet, so it presents the members
+      // directly instead of a header with no operable affordance.
+      if (this.contextClusterDefaultExpanded()) {
+        for (const member of cluster.members) out.push({ kind: 'message', message: member })
+        continue
+      }
       const expanded = this.contextClusterExpanded(cluster)
       out.push({ kind: 'context-cluster', cluster, expanded })
       if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member })
@@ -8252,7 +8346,7 @@ export class TuiApp {
     const blocks: TranscriptRenderBlock[] = [...this.projectedBlocks(projectionExpanded)]
     const preset = this.displayState.preset
     if (preset === 'compact') {
-      this.insertCompactPreparingPreviews(blocks)
+      this.applyCompactPreparing(blocks)
     } else if (!isFocusDisplayPreset(preset)) {
       if (this.streamingToolPreviews.length > 0) {
         blocks.push({ kind: 'streaming-tool-previews', previews: this.streamingToolPreviews })
@@ -8291,36 +8385,84 @@ export class TuiApp {
     return this.compactExpandedWorkOwners.has(span.owner) || this.workSpanRevealedBySearch(span)
   }
 
-  /** Fold the live Preparing rows into the Compact projection: an EXPANDED
-   * Work span renders them after its members (the durable row is not there
-   * yet), a COLLAPSED span consumes them through its Work Tool slot, and a
-   * Preparing call with no projected span yet (the very first call of a
-   * turn) keeps the standalone tail block. No row is ever emitted twice. */
-  private insertCompactPreparingPreviews(blocks: TranscriptRenderBlock[]): void {
+  /** Whether one turn's contiguous Process run is still OPEN at the transcript
+   * tail: the LAST turn-bearing message of the window belongs to that turn and
+   * is Process-classified. ONLY an open run may absorb a live Preparing call.
+   * A live Preparing call is a Process row that has not landed durably yet, so
+   * once an Assistant / Context / Attention boundary has been recorded, the
+   * call starts a NEW run: drawing it back into the previous Work span would
+   * cross a chronology boundary the Compact projection forbids. */
+  private workRunOpenForTurn(turn: number): boolean {
+    for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+      const message = this.messages[index]!
+      if (!('turn' in message)) continue
+      return message.turn === turn && classifyTranscriptMessage(message).class === 'process'
+    }
+    return false
+  }
+
+  /**
+   * The single Compact live-Preparing pass. The ownership decision is read from
+   * THIS projection's already-projected spans plus the raw transcript tail, so
+   * the collapsed (Tool slot) and expanded (member insertion) representations
+   * can never drift onto different chronology snapshots.
+   */
+  private applyCompactPreparing(blocks: TranscriptRenderBlock[]): void {
     if (this.streamingToolPreviews.length === 0) return
+    const spans: CompactWorkSpan[] = []
+    for (const block of blocks) {
+      if (block.kind === 'work') spans.push(block.span)
+    }
     const turns = [...new Set(this.streamingToolPreviews.map(preview => preview.turn))].sort((a, b) => a - b)
-    const unplaced: StreamingToolPreview[] = []
+    const pending: StreamingToolPreview[] = []
     for (const turn of turns) {
       const previews = this.streamingToolPreviewsForTurn(turn)
       if (previews.length === 0) continue
-      let workIndex = -1
-      let span: CompactWorkSpan | undefined
-      for (let index = blocks.length - 1; index >= 0; index -= 1) {
-        const block = blocks[index]!
-        if (block.kind === 'work' && block.span.turn === turn) {
-          workIndex = index
-          span = block.span
-          break
-        }
-      }
-      if (span === undefined) {
-        unplaced.push(...previews)
+      const owner = this.compactPreparingOwner(turn, spans)
+      if (owner.kind === 'pending-run') {
+        // The previous run was closed by a Conversation / Context / Attention
+        // boundary (or none exists yet): the call is a NEW Process run, shown
+        // as an ephemeral pending Work at the transcript tail.
+        pending.push(...previews)
         continue
       }
-      if (!this.workSpanExpanded(span)) continue
-      blocks.splice(workIndex + 1 + span.members.length, 0, { kind: 'streaming-tool-previews', turn, previews })
+      const span = owner.span
+      const workIndex = blocks.findIndex(block => block.kind === 'work' && block.span.owner === span.owner)
+      if (workIndex < 0) {
+        pending.push(...previews)
+        continue
+      }
+      if (this.workSpanExpanded(span)) {
+        // The open run renders the live call after its durable members.
+        blocks.splice(workIndex + 1 + span.members.length, 0, { kind: 'streaming-tool-previews', turn, previews })
+        continue
+      }
+      // The collapsed run's Tool slot owns the live call (plan §36).
+      const preparingSummary = focusPreparingSummary(previews)
+      const block = blocks[workIndex]
+      if (block?.kind === 'work' && preparingSummary !== undefined) {
+        blocks[workIndex] = { kind: 'work', span: block.span, preparingSummary }
+      }
     }
-    if (unplaced.length > 0) blocks.push({ kind: 'streaming-tool-previews', previews: unplaced })
+    if (pending.length > 0) blocks.push({ kind: 'streaming-tool-previews', previews: pending, pendingWork: true })
+  }
+
+  /**
+   * The Work owner of one live Preparing call, decided from the CURRENT
+   * projection snapshot:
+   * - the turn's trailing Process run must still be OPEN (the last turn-bearing
+   *   raw message belongs to that turn and is Process-classified), and
+   * - that run's projected span must be the last span of the turn.
+   * Otherwise the call starts a NEW run (`pending-run`) and must never be drawn
+   * back across the closed boundary.
+   */
+  private compactPreparingOwner(turn: number, spans: readonly CompactWorkSpan[]): CompactPreparingOwner {
+    let trailing: CompactWorkSpan | undefined
+    for (const span of spans) {
+      if (span.turn === turn) trailing = span
+    }
+    if (trailing === undefined || !this.workRunOpenForTurn(turn)) return { kind: 'pending-run' }
+    return { kind: 'trailing-run', span: trailing }
   }
 
   /** The expanded Focus owner used only for the spacer immediately before a
@@ -8538,7 +8680,15 @@ export class TuiApp {
     }
     if (block.kind === 'work') return this.compactWorkComponentFor(block.span, block.preparingSummary)
     if (block.kind === 'context-cluster') return this.contextClusterComponentFor(block.cluster, block.expanded)
-    if (block.kind === 'streaming-tool-previews') return this.streamingToolPreviewComponent(block.previews, width)
+    if (block.kind === 'streaming-tool-previews') {
+      if (block.pendingWork === true) {
+        return new CompactPendingWorkComponent({
+          preparingSummary: focusPreparingSummary(block.previews) ?? '',
+          iconStyle: this.iconStyle,
+        })
+      }
+      return this.streamingToolPreviewComponent(block.previews, width)
+    }
     if (block.kind === 'pending-user') return this.pendingUserComponentFor(block.row)
     return this.componentForMessage(block.message, boundary, width, userBoundary)
   }
@@ -10985,6 +11135,7 @@ export class TuiApp {
     // session's span owners (they hold the OLD message objects).
     this.compactExpandedWorkOwners.clear()
     this.compactExpandedClusters.clear()
+    this.compactOpenRunMembers = new Set()
     this.compactWorkComponents.clear()
     this.compactClusterComponents.clear()
     // The live Focus timer's shared phase/pause timeline is session-scoped
@@ -12752,6 +12903,11 @@ export class TuiApp {
     if (message.kind === 'thinking') {
       return this.effectiveThinkingExpanded(message)
     }
+    // The capability decides BEFORE any renderer builds a folded view: on
+    // regular Compact every non-Work fold is presented in full, so no hidden
+    // count, marker or search geometry is ever produced for a key that cannot
+    // operate it.
+    if (!this.messageFoldDisclosureAvailable()) return true
     if (isUserMessageDisclosureCandidate(message)) {
       // Long user disclosure follows its OWN recent-USER-turn boundary where
       // Ctrl+O owns the expand master (regular AND fullscreen without Focus),
@@ -12777,6 +12933,17 @@ export class TuiApp {
       return message.turn >= boundary
         || this.expandedOverride.get(message) === true
         || this.searchForcesMessageExpanded(message)
+    }
+    // A member of an OPEN Compact Work run. Regular has no mouse, so the open
+    // run full-reveals its own process detail — there is never a dead
+    // `(ctrl+o to expand)` card whose key actually collapses the Work span.
+    // Fullscreen keeps the mouse-owned per-card disclosure (plus the temporary
+    // search reveal, which never writes the user override).
+    if (this.displayState.preset === 'compact' && 'turn' in message && this.compactOpenRunMembers.has(message)) {
+      if (this.fullscreen !== undefined) {
+        return this.expandedOverride.get(message) === true || this.searchForcesMessageExpanded(message)
+      }
+      return true
     }
     if ('turn' in message && this.isInsideExpandedFocus(message, boundary) && isFocusSecondaryDisclosure(message)) {
       if (this.fullscreen !== undefined) {
@@ -12848,10 +13015,17 @@ export class TuiApp {
     const insideFocusSecondary = 'turn' in message
       && this.isInsideExpandedFocus(message, boundary)
       && isFocusSecondaryDisclosure(message)
+    // A member of an OPEN Compact Work run: regular full-reveals it (no
+    // affordance at all), fullscreen offers the mouse click.
+    const insideCompactRun = this.displayState.preset === 'compact'
+      && message.kind !== 'thinking'
+      && 'turn' in message
+      && this.compactOpenRunMembers.has(message)
     // The fold-hint OWNER (plan §12): Thinking is thinking-owned in
     // regular and click-owned in fullscreen; fullscreen Focus SECONDARY
-    // cards are click-owned; every other fold is fold-owned. A regular
-    // Focus non-Thinking secondary is ALWAYS full — no hint. The owner is
+    // cards and fullscreen Compact Work members are click-owned; every other
+    // fold is fold-owned. A regular Focus non-Thinking secondary and a
+    // regular Compact Work member are ALWAYS full — no hint. The owner is
     // SEMANTIC (never a physical key — the rendered copy resolves the
     // EFFECTIVE key through the keymap).
     const expandHint: ExpandHint = message.kind === 'thinking'
@@ -12865,16 +13039,17 @@ export class TuiApp {
         // Ctrl+O owns the Thought-root bulk, so the label is click-only —
         // never a dead key hint.
         ? this.userFoldHint()
-        : insideFocusSecondary
+        : insideFocusSecondary || insideCompactRun
           ? (this.fullscreen !== undefined ? 'click' : undefined)
-          : 'fold'
+          : this.ordinaryFoldHint()
     // The FULL-REVEAL flag for tool bodies (large diffs): true for the
-    // per-card override AND for any REGULAR Focus expanded root (the
-    // surface contract — no mouse, so a capped diff would be unreadable);
-    // fullscreen keeps the per-card override semantics.
+    // per-card override AND for any REGULAR expanded root (the surface
+    // contract — no mouse, so a capped diff would be unreadable); fullscreen
+    // keeps the per-card override semantics.
     const fullReveal = this.expandedOverride.get(message) === true
       || this.searchForcesMessageExpanded(message)
-      || (this.fullscreen === undefined && insideFocusSecondary)
+      || !this.messageFoldDisclosureAvailable()
+      || (this.fullscreen === undefined && (insideFocusSecondary || insideCompactRun))
     return { expanded, fullReveal, expandHint }
   }
 
@@ -13377,7 +13552,7 @@ export class TuiApp {
       // that it is collapse-eligible). A regular surface with NO effective
       // expand key has no affordance at all (fullscreen keeps the marker
       // click), so it must render the full prompt rather than strand it.
-      if (this.userDisclosureAffordanceAvailable()) {
+      if (this.userDisclosureAffordanceAvailable() && this.messageFoldDisclosureAvailable()) {
         const hint = expandHint
         return new UserBubbleComponent(
           new Text(message.text, 0, 0),
@@ -13453,7 +13628,11 @@ export class TuiApp {
         if (kind === 'relay') {
           return new RelayContextRow({
             ...rowOptions,
-            geometry: { thresholdRows: USER_MESSAGE_COMPACT_THRESHOLD_ROWS, headRows: USER_MESSAGE_HEAD_ROWS },
+            geometry: {
+              thresholdRows: USER_MESSAGE_COMPACT_THRESHOLD_ROWS,
+              headRows: USER_MESSAGE_HEAD_ROWS,
+              tailRows: USER_MESSAGE_TAIL_ROWS,
+            },
           })
         }
         if (kind === 'recall') return new RecallContextRow(rowOptions)
@@ -16136,7 +16315,53 @@ export class TuiApp {
    * (Ctrl+O owns the Thought-root bulk there). Shared by the durable bubble
    * and the ephemeral pending lane so their labels never diverge. */
   private userFoldHint(): ExpandHint {
-    return this.fullscreen === undefined ? 'fold' : isFocusDisplayPreset(this.displayState.preset) ? 'click' : 'click-fold'
+    if (this.fullscreen === undefined) return 'fold'
+    if (isFocusDisplayPreset(this.displayState.preset)) return 'click'
+    // Fullscreen Compact: Ctrl+O owns the Work spans, so the long-user fold is
+    // a pure mouse-click affordance there.
+    if (this.displayState.preset === 'compact') return 'click'
+    return 'click-fold'
+  }
+
+  /**
+   * Regular Compact reserves `Ctrl+O` for the Work spans, so no OTHER
+   * message-level fold has an operable keyboard owner on that surface. F4 must
+   * never RENDER a collapsed representation whose only advertised key cannot
+   * operate it (the real keyboard convergence is F6); it presents those rows in
+   * full instead.
+   */
+  private compactRegularReservesFoldKey(): boolean {
+    return this.displayState.preset === 'compact' && this.fullscreen === undefined
+  }
+
+  /**
+   * Whether an ordinary (non-Thinking) message fold can be presented COLLAPSED
+   * at all on this surface. Thinking is deliberately excluded: its owner is
+   * `Alt+T` and is decided by its own disclosure path.
+   */
+  private messageFoldDisclosureAvailable(): boolean {
+    return !this.compactRegularReservesFoldKey()
+  }
+
+  /**
+   * Whether ambient Context clusters are disclosed COLLAPSED by default. The
+   * clustering itself is semantic and happens on every preset/surface; only the
+   * presentation default is surface-dependent, because the regular surface has
+   * no manual cluster disclosure owner yet.
+   */
+  private contextClusterDefaultExpanded(): boolean {
+    return this.fullscreen === undefined
+  }
+
+  /**
+   * The fold-hint OWNER of an ordinary (non-Thinking, non-Work-member) foldable
+   * row. Compact reserves `Ctrl+O` for the Work spans, so on that preset the
+   * ordinary fold is either mouse-click owned (fullscreen) or not offered at all
+   * (regular — the capability renders it in full).
+   */
+  private ordinaryFoldHint(): ExpandHint {
+    if (this.displayState.preset !== 'compact') return 'fold'
+    return this.fullscreen === undefined ? undefined : 'click'
   }
 
   /** The expanded long-user tail control: presentation chrome naming the
@@ -16181,7 +16406,7 @@ export class TuiApp {
    * user bubble when this surface has a disclosure affordance; otherwise it
    * renders in full (never a dead marker). */
   private pendingUserComponentFor(row: PendingUserRow): PendingUserComponent {
-    if (row.foldableText !== true || !this.userDisclosureAffordanceAvailable()) {
+    if (row.foldableText !== true || !this.userDisclosureAffordanceAvailable() || !this.messageFoldDisclosureAvailable()) {
       return new PendingUserComponent(row, this.queueRunning)
     }
     const hint = this.userFoldHint()

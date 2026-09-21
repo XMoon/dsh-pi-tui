@@ -76,7 +76,7 @@ test('a relay names its sender, shows the body at normal brightness, and is not 
   const body = 'There are two need-fix issues in the search restoration path.'
   const rows = new RelayContextRow({
     message: relayRow(body), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
-    geometry: { thresholdRows: 10, headRows: 4 },
+    geometry: { thresholdRows: 10, headRows: 4, tailRows: 3 },
   }).render(100)
   assert.equal(rows.length, 2)
   assert.match(rows[0]!, /Agent message · child-2/)
@@ -84,28 +84,40 @@ test('a relay names its sender, shows the body at normal brightness, and is not 
   assert.ok(!rows.some(row => row.includes('Context injection')))
 })
 
-test('a long relay reuses the long-message disclosure: head rows plus a marker, hidden tail', () => {
-  const body = Array.from({ length: 30 }, (_, index) => `line ${index}`).join(' ')
-  const geometry = { thresholdRows: 3, headRows: 2 }
+test('a long relay reuses the FULL long-message disclosure geometry: head, marker and tail', () => {
+  const body = Array.from({ length: 40 }, (_, index) => `line ${index}`).join(' ')
+  const geometry = { thresholdRows: 3, headRows: 2, tailRows: 2 }
   const rows = new RelayContextRow({
     message: relayRow(body), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji', geometry,
   }).render(60)
   assert.match(rows[0]!, /to expand/)
-  assert.equal(rows.length, 4, 'header + 2 head rows + the overflow marker')
-  assert.ok(rows[3]!.includes('…'))
-  assert.ok(rows[1]!.includes('line 0'))
-  assert.ok(!rows.some(row => row.includes('line 29')), 'the tail stays hidden until expanded')
+  assert.equal(rows.length, 6, 'header + 2 head rows + the overflow marker + 2 tail rows')
+  assert.ok(rows[3]!.includes('…'), 'the marker sits between the head and the tail')
+  assert.ok(rows[1]!.includes('line 0'), 'the head is kept')
+  assert.ok(rows[5]!.includes('line 39'), 'the TAIL is kept, exactly like the long-user geometry')
+  assert.ok(!rows.some(row => row.includes('line 20')), 'the middle is what the affordance reveals')
 
   const expanded = new RelayContextRow({
     message: relayRow(body), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji', geometry,
   }).render(60)
-  assert.ok(expanded.length > 4, 'an expanded relay renders the whole body')
-  assert.ok(expanded.join(' ').includes('line 29'))
+  assert.ok(expanded.length > 5, 'an expanded relay renders the whole body')
+  assert.ok(expanded.join(' ').includes('line 20'))
+  assert.ok(expanded.join(' ').includes('line 39'))
+})
+
+test('a relay short enough to keep head AND tail shows no marker and hides nothing', () => {
+  const body = Array.from({ length: 4 }, (_, index) => `line ${index}`).join(' ')
+  const geometry = { thresholdRows: 3, headRows: 4, tailRows: 3 }
+  const rows = new RelayContextRow({
+    message: relayRow(body), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji', geometry,
+  }).render(60)
+  assert.ok(!rows.join('\n').includes('…'), 'no marker when nothing is hidden')
+  assert.ok(rows.join(' ').includes('line 3'), 'the full body is shown')
 })
 
 test('a long relay never exceeds a narrow width (header, head rows and overflow marker)', () => {
   const body = Array.from({ length: 30 }, (_, index) => `line ${index}`).join(' ')
-  const geometry = { thresholdRows: 3, headRows: 2 }
+  const geometry = { thresholdRows: 3, headRows: 2, tailRows: 2 }
   const message = relayRow(body)
   for (const width of [1, 2, 3]) {
     const rows = new RelayContextRow({ message, expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji', geometry }).render(width)
@@ -130,7 +142,7 @@ test('wide glyphs (CJK / emoji) never break the narrow-width row contract', () =
     }
     const relayRows = new RelayContextRow({
       message: relayRow(cjkBody), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
-      geometry: { thresholdRows: 1, headRows: 1 },
+      geometry: { thresholdRows: 1, headRows: 1, tailRows: 1 },
     }).render(width)
     for (const row of relayRows) {
       assert.ok(visibleWidth(row) <= width, `relay width ${width} overflowed: ${JSON.stringify(row)}`)

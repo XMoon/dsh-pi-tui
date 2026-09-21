@@ -539,8 +539,23 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   Expanding the span re-uses the ordinary message renderers for its members.
 - **The Work/cluster disclosure glyph is the plain triangle** (`▸`/`▾`, new
   `section-collapsed`/`section-expanded` semantics in every icon style) — the
-  Focus root keeps its whale identity. Both are click-owned in fullscreen;
-  `Ctrl+O` is the Compact Work-span bulk owner in both surfaces.
+  Focus root keeps its whale identity. Both are click-owned in fullscreen.
+- **`Ctrl+O` under Compact owns the Work spans only, and a disclosure
+  CAPABILITY decides what may be collapsed.** Regular Compact has no operable
+  owner for any other message-level fold, so those rows render in full and
+  advertise no hint (the capability is applied where the renderer builds the
+  disclosure, so no hidden count/marker is produced); fullscreen keeps the
+  mouse-owned per-card click. Members of an open Work run follow the same
+  surface rule, and a hidden Work/cluster member revealed by search is promoted
+  through the ONE reveal-owner resolution (`searchRevealOwnerFor`) when the
+  search closes. TODO(F6): assign the regular-surface owners and restore a
+  collapsed presentation.
+- **Ambient clustering is semantic on every preset and surface; only its
+  presentation default is surface-dependent.** Regular presents the members
+  flat (no manual cluster owner yet); fullscreen defaults collapsed with a
+  click-expandable `▸ Context · N injections` header. The cluster owner, search
+  owner, viewport identity and raw-adjacency rule stay cluster-based either way.
+  TODO(F6): give the regular surface a manual cluster owner.
 - **Surfaced Context is form-aware.** The fold retains the producer-declared
   `MessageSource.form` as presentation-only provenance; `notice`, `relay` and
   `recall` become standalone rows (producer summary at normal brightness /

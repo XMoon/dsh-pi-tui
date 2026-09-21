@@ -261,6 +261,146 @@ test('the live Preparing state belongs only to the newest Work span of a turn', 
     `the preparing call must render exactly once (no duplicate Tool row):\n${view}`)
 })
 
+test('a live Preparing call follows the trailing Process run ownership matrix', async () => {
+  const preview = { callId: 'preparing-matrix', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' }
+  const preparingRows = (view: string): number[] =>
+    view.split('\n').flatMap((line, index) => line.includes('Preparing') ? [index] : [])
+
+  // (a) Tool -> Preparing: the trailing run is OPEN, so the call joins its Tool slot.
+  {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([
+      { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+    ], new Map(), undefined, [preview])
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.equal(workHeaders(view).length, 1, `one trailing Work span:\n${view}`)
+    assert.equal(preparingRows(view).length, 1, `the call joins the run's Tool slot:\n${view}`)
+    assert.ok(!view.includes('Tool:    Preparing') === false)
+    app.dispose()
+    startedApps.delete(app)
+  }
+
+  // (b) Work A -> Assistant -> Preparing: the narration closes the run, so the
+  // call becomes a NEW pending Work after the boundary.
+  {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([
+      { kind: 'thinking', turn: 1, text: 'first' },
+      { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+      { kind: 'assistant', turn: 1, text: 'narration' },
+    ], new Map(), undefined, [preview])
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    assert.equal(workHeaders(view).length, 2, `the narration mints a new Work run:\n${view}`)
+    const narrationRow = lines.findIndex(line => line.includes('narration'))
+    assert.ok(narrationRow >= 0, `the boundary row renders:\n${view}`)
+    assert.ok(preparingRows(view).every(row => row > narrationRow),
+      `the pending Work must follow the closed boundary:\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+
+  // (c) Work A -> Assistant -> Work B preparing: the call belongs to the TRAILING run B.
+  {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([
+      { kind: 'thinking', turn: 1, text: 'A' },
+      { kind: 'assistant', turn: 1, text: 'narration' },
+      { kind: 'thinking', turn: 1, text: 'B' },
+    ], new Map(), undefined, [preview])
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    assert.equal(workHeaders(view).length, 2, `two durable spans:\n${view}`)
+    const narrationRow = lines.findIndex(line => line.includes('narration'))
+    const preparing = preparingRows(view)
+    assert.equal(preparing.length, 1, `the call renders exactly once:\n${view}`)
+    assert.ok(preparing[0]! > narrationRow, `the call belongs to B, after the narration:\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('an ephemeral pending Work renders Header + Tool slot with no lifecycle suffix', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    { kind: 'assistant', turn: 1, text: 'narration' },
+  ], new Map(), undefined, [
+    { callId: 'pending-shape', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  assert.equal(workHeaders(view).length, 1, `a pending Work header renders:\n${view}`)
+  assert.ok(lines.some(line => /^\s*▸ Work\s*$/.test(line)),
+    `the pending header carries NO lifecycle suffix (no visual jump when the durable span lands):\n${view}`)
+  assert.match(view, /Tool:\s+Preparing Bash/)
+  assert.ok(!view.includes('preparing') || !lines.some(line => /▸ Work ·/.test(line)))
+})
+
+test('a live Preparing call never crosses a closed Work boundary', async () => {
+  const previews = [{ callId: 'preparing-after-boundary', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' }]
+  const processRows = (): TranscriptMessage[] => [
+    { kind: 'thinking', turn: 1, text: 'first reasoning' },
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+  ]
+  const boundaries: ReadonlyArray<{ name: string; row: TranscriptMessage; needle: string }> = [
+    { name: 'assistant', row: { kind: 'assistant', turn: 1, text: 'between the spans' }, needle: 'between the spans' },
+    {
+      name: 'notice',
+      row: {
+        kind: 'system', turn: 1, text: 'notice body', label: 'Background job', summary: 'child settled',
+        icon: 'context-notice', context: true,
+        contextPresentation: { form: 'notice', sourceKind: 'subagent-settled', role: 'inject' },
+      },
+      needle: 'child settled',
+    },
+    { name: 'attention', row: { kind: 'system', turn: 1, text: 'ATTENTION_MARKER', origin: 'turn-max-tokens' }, needle: 'ATTENTION_MARKER' },
+  ]
+  for (const boundary of boundaries) {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([...processRows(), boundary.row], new Map(), undefined, previews)
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    const preparingRows = lines.flatMap((line, index) => line.includes('Preparing') ? [index] : [])
+    assert.equal(preparingRows.length, 1, `exactly one Preparing row (${boundary.name}):\n${view}`)
+    const boundaryRow = lines.findIndex(line => line.includes(boundary.needle))
+    assert.ok(boundaryRow >= 0, `boundary row missing (${boundary.name}):\n${view}`)
+    assert.ok(preparingRows[0]! > boundaryRow,
+      `the live call must follow the closed ${boundary.name} boundary, never move back inside the previous Work span:\n${view}`)
+    assert.equal(lines.filter(line => /Tool:\s/.test(line) && !line.includes('Preparing')).length, 1,
+      `the closed Work span keeps its own durable Tool row (${boundary.name}):\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('an expanded closed Work span never absorbs a later live Preparing call', async () => {
+  const { vt, app } = startApp('compact')
+  const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'first reasoning' }
+  app.setTranscript([
+    owner,
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+    { kind: 'assistant', turn: 1, text: 'between the spans' },
+  ], new Map(), undefined, [
+    { callId: 'preparing-expanded-boundary', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  app.toggleWorkSpan(owner)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  assert.equal(workHeaders(view, true).length, 1, `precondition: the Work span is expanded:\n${view}`)
+  const preparingRows = lines.flatMap((line, index) => line.includes('Preparing') ? [index] : [])
+  const assistantRow = lines.findIndex(line => line.includes('between the spans'))
+  assert.equal(preparingRows.length, 1, `exactly one Preparing row:\n${view}`)
+  assert.ok(assistantRow >= 0, `the boundary row must render:\n${view}`)
+  assert.ok(preparingRows[0]! > assistantRow,
+    `the live call must be inserted AFTER the closed boundary, not inside the expanded span:\n${view}`)
+})
+
 test('a Work header stays inspectable while a Question owns the modal', async () => {
   const { vt, app } = startApp('compact')
   const folder = new TranscriptFolder()
@@ -283,6 +423,257 @@ test('a Work header stays inspectable while a Question owns the modal', async ()
   await vt.waitForRender()
   vt.sendInput('\r')
   assert.deepEqual(await promise, [{ id: 'q1', selected: ['Continue'] }])
+})
+
+test('regular Compact Ctrl+O opens the Work run without a dead ctrl+o card hint', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    { kind: 'thinking', turn: 1, text: 'reasoning one' },
+    // A foldable process card that advertises its fold key when collapsed —
+    // the exact card class that produced the dead `(ctrl+o to expand)` hint.
+    { kind: 'system', turn: 1, text: 'RETRY_BODY_MARKER', origin: 'llm-retry' },
+  ], new Map())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.equal(workHeaders(view).length, 1, `precondition: one collapsed Work span:\n${view}`)
+  assert.ok(!view.includes('RETRY_BODY_MARKER'), 'the collapsed preview hides the member card')
+  assert.ok(!view.includes('ctrl+o'), 'no foldable row advertises ctrl+o before the bulk reveal')
+
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(workHeaders(view, true).length, 1, `the run opens:\n${view}`)
+  assert.ok(view.includes('🌊 Thinking'), `the open run renders its member rows:\n${view}`)
+  assert.ok(view.includes('RETRY_BODY_MARKER'), `the open run renders the member card:\n${view}`)
+  assert.ok(!view.includes('(ctrl+o to expand)'),
+    `no member card may advertise ctrl+o while the key collapses the Work span:\n${view}`)
+})
+
+test('regular Compact presents a long user prompt in full instead of an inoperable marker', async () => {
+  const { vt, app } = startApp('compact')
+  const longPrompt = Array.from({ length: 40 }, (_, index) => `prompt line ${index}`).join('\n')
+  app.setTranscript([{ kind: 'user', turn: 1, text: longPrompt }], new Map())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  // Ctrl+O owns the Work spans on this surface, so the prompt must never claim
+  // a `ctrl+o to expand` affordance the key cannot operate — it renders in full.
+  assert.ok(!view.includes('rows compacted'),
+    `no collapsed representation may be generated for an inoperable fold:\n${view}`)
+  assert.ok(!view.includes('ctrl+o'), `no inoperable key hint:\n${view}`)
+  // A folded bubble would show only head + marker + tail; the MIDDLE row being
+  // present proves no collapsed representation was built at all.
+  assert.ok(view.includes('prompt line 20'), `the middle of the prompt is visible:\n${view}`)
+})
+
+test('regular Compact presents a foldable pending-user row in full', async () => {
+  const { vt, app } = startApp('compact')
+  const longText = Array.from({ length: 40 }, (_, index) => `pending line ${index}`).join('\n')
+  app.setPendingInputPresentation({
+    queued: [],
+    steering: [{ id: 'pending-1', text: longText, rpcId: 'rpc-1', status: 'steering', foldableText: true }],
+    running: true,
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('rows compacted'), `no inoperable fold:\n${view}`)
+  assert.ok(!view.includes('ctrl+o'), `no inoperable key hint:\n${view}`)
+  assert.ok(view.includes('pending line 20'), `the whole pending row is visible:\n${view}`)
+})
+
+test('regular Compact presents a standalone Context row in full instead of a dead key hint', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    {
+      kind: 'system', turn: 1, text: 'CONTEXT_BODY_MARKER', label: 'legacy-injector', context: true,
+      contextPresentation: { sourceKind: 'plugin', role: 'inject' },
+    },
+  ], new Map())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('CONTEXT_BODY_MARKER'), `the payload is visible without a fold:\n${view}`)
+  assert.ok(!view.includes('ctrl+o'), `no inoperable key hint:\n${view}`)
+})
+
+test('fullscreen Compact keeps the ordinary folds click-owned (mouse exists)', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    {
+      kind: 'system', turn: 1, text: 'CONTEXT_BODY_MARKER', label: 'legacy-injector', context: true,
+      contextPresentation: { sourceKind: 'plugin', role: 'inject' },
+    },
+  ], new Map())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.match(view, /\(click to expand\)/, `a fullscreen row advertises the mouse disclosure:\n${view}`)
+  assert.ok(!view.includes('CONTEXT_BODY_MARKER'), 'the collapsed fullscreen row hides its payload')
+  click(vt, 5, rowOf(vt.getViewport(), /Context injection legacy-injector/) + 1)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('CONTEXT_BODY_MARKER'), `the mouse click opens the row:\n${view}`)
+})
+
+test('the regular surface shows ambient cluster members directly (semantic cluster, expanded presentation)', async () => {
+  for (const preset of ['compact', 'focus', 'full'] as const) {
+    const { vt, app } = startApp(preset)
+    app.setTranscript([
+      {
+        kind: 'system', turn: 1, text: 'instructions body', label: 'AGENTS.md', context: true,
+        contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+      },
+      {
+        kind: 'system', turn: 1, text: 'catalog body', label: 'skill-catalog', context: true,
+        contextPresentation: { form: 'catalog', sourceKind: 'plugin', role: 'inject' },
+      },
+    ], new Map())
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    // The raw-adjacent pair is STILL one semantic cluster; the regular surface
+    // simply has no manual cluster disclosure owner in F4, so it presents the
+    // member rows expanded instead of stranding them behind a dead header.
+    assert.equal(clusterHeaders(view).length, 0, `${preset}: no collapsed cluster header on regular:\n${view}`)
+    assert.ok(view.includes('Context injection AGENTS.md'), `${preset}: member rows render:\n${view}`)
+    assert.ok(view.includes('Context injection skill-catalog'), `${preset}: every member renders:\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('fullscreen keeps ambient clusters collapsed by default and click-expandable', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    {
+      kind: 'system', turn: 1, text: 'instructions body', label: 'AGENTS.md', context: true,
+      contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+    },
+    {
+      kind: 'system', turn: 1, text: 'catalog body', label: 'skill-catalog', context: true,
+      contextPresentation: { form: 'catalog', sourceKind: 'plugin', role: 'inject' },
+    },
+  ], new Map())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.equal(clusterHeaders(view.join('\n')).length, 1, `the collapsed cluster header renders:\n${view.join('\n')}`)
+  assert.ok(!view.join('\n').includes('Context injection'), 'the member rows stay behind the header')
+  click(vt, 5, rowOf(view, /▸ Context · 2 injections/) + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.equal(clusterHeaders(view.join('\n'), true).length, 1, `the click opens the cluster:\n${view.join('\n')}`)
+  assert.ok(view.join('\n').includes('Context injection AGENTS.md'), `every member row renders:\n${view.join('\n')}`)
+})
+
+test('fullscreen Compact keeps Work members click-owned inside an open run', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    { kind: 'thinking', turn: 1, text: 'reasoning one' },
+    { kind: 'system', turn: 1, text: 'RETRY_BODY_MARKER', origin: 'llm-retry' },
+  ], new Map())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(workHeaders(view, true).length, 1, `the run opens:\n${view}`)
+  assert.ok(view.includes('(click to expand)'), `mouse-owned member cards must advertise click:\n${view}`)
+  assert.ok(!view.includes('ctrl+o'), `fullscreen members must not advertise the Work-bulk key:\n${view}`)
+})
+
+test('dismissing a search that revealed a hidden Work member promotes the span owner', async () => {
+  const { vt, app } = startApp('compact')
+  const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'hidden reasoning' }
+  const hidden: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'HIDDEN_RESULT', status: 'ok' }
+  app.setTranscript([owner, hidden], new Map())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget({
+    query: 'HIDDEN_RESULT',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: hidden,
+  })
+  await vt.waitForRender()
+  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0, 'the reveal stays presentation-only while searching')
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 1, 'the reveal opens the owning span')
+
+  // The dismissal transaction captures the viewport anchor from the revealed
+  // member row; promotion must keep that row resolvable.
+  const anchor = app.captureTranscriptViewportAnchor()
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await vt.waitForRender()
+  const owners = app.compactExpandedWorkOwnersForTest()
+  assert.equal(owners.size, 1, 'the revealed span becomes a manual owner on dismiss')
+  assert.equal(owners.has(owner), true, 'the promoted owner is the span owner')
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 1,
+    `the promoted span stays open after dismissal:\n${vt.getViewport().join('\n')}`)
+  assert.equal(app.restoreTranscriptViewportAnchor(anchor!, 'top'), true,
+    'a Work-member anchor captured before dismissal must still resolve')
+})
+
+test('search-dismiss does not promote a cluster the regular surface presents flat', async () => {
+  const { vt, app } = startApp('compact')
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'instructions body', label: 'AGENTS.md', context: true,
+    contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+  }
+  const second: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'CLUSTER_MEMBER_MARKER', label: 'skill-catalog', context: true,
+    contextPresentation: { form: 'catalog', sourceKind: 'plugin', role: 'inject' },
+  }
+  app.setTranscript([first, second], new Map())
+  await vt.waitForRender()
+  assert.equal(clusterHeaders(vt.getViewport().join('\n')).length, 0,
+    'precondition: the regular surface presents the members flat (no header)')
+
+  app.setTranscriptSearchTarget({
+    query: 'CLUSTER_MEMBER_MARKER',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: second,
+  })
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('CLUSTER_MEMBER_MARKER'), 'the member is already visible (flat)')
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await vt.waitForRender()
+  assert.equal(app.compactExpandedClustersForTest().size, 0,
+    'a flat cluster hides nothing, so dismissal must not promote a disclosure owner')
+  // The stale owner would otherwise reopen the cluster on the next surface.
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.equal(clusterHeaders(vt.getViewport().join('\n'), true).length, 0,
+    `the fullscreen cluster stays collapsed (no stale promoted owner):\n${vt.getViewport().join('\n')}`)
+})
+
+test('search-dismiss presentation: a revealed cluster member promotes the cluster owner', async () => {
+  const { vt, app } = startApp('compact')
+  // Fullscreen is where the cluster is disclosed COLLAPSED; the reveal and its
+  // dismissal promotion are what make the member reachable there.
+  app.setFullscreen(true)
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'instructions body', label: 'AGENTS.md', context: true,
+    contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+  }
+  const second: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'CLUSTER_MEMBER_MARKER', label: 'skill-catalog', context: true,
+    contextPresentation: { form: 'catalog', sourceKind: 'plugin', role: 'inject' },
+  }
+  app.setTranscript([first, second], new Map())
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget({
+    query: 'CLUSTER_MEMBER_MARKER',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: second,
+  })
+  await vt.waitForRender()
+  assert.equal(clusterHeaders(vt.getViewport().join('\n'), true).length, 1, 'the reveal opens the owning cluster')
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await vt.waitForRender()
+  const owners = app.compactExpandedClustersForTest()
+  assert.equal(owners.size, 1, 'the revealed cluster becomes a manual owner on dismiss')
+  assert.equal(owners.has(first), true, 'the promoted owner is the cluster owner')
+  const view = vt.getViewport().join('\n')
+  assert.equal(clusterHeaders(view, true).length, 1, `the promoted cluster stays open after dismissal:\n${view}`)
+  assert.ok(view.includes('Context injection AGENTS.md'), `its member rows stay visible:\n${view}`)
 })
 
 test('a Work row is a semantic viewport anchor and survives its own toggle', async () => {
@@ -339,6 +730,7 @@ test('raw-adjacent ambient Context clusters in Compact, Focus, and Full', async 
       eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 4, 4),
       eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, T0 + 5, 5),
     ])
+    app.setFullscreen(true)
     show(app, folder)
     await vt.waitForRender()
     const view = vt.getViewport().join('\n')
@@ -406,11 +798,11 @@ test('expanded Focus restores the opening ambient burst above the Thought and th
     eventAt('assistant/message', { turn: 1, step: 1, message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } } }, T0 + 8, 8),
     eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9, 9),
   ])
+  app.setFullscreen(true)
   show(app, folder)
   await vt.waitForRender()
   assert.equal(clusterHeaders(vt.getViewport().join('\n')).length, 2, 'collapsed Focus surfaces both clusters')
 
-  app.setFullscreen(true)
   app.toggleFocusTurn(1)
   await vt.waitForRender()
   const view = vt.getViewport()
@@ -425,6 +817,36 @@ test('expanded Focus restores the opening ambient burst above the Thought and th
   assert.equal(clusterRows.length, 2)
   assert.ok(clusterRows[0]! < thoughtRow, 'the opening ambient burst stays above the Thought')
   assert.ok(clusterRows[1]! > (toolRow >= 0 ? toolRow : thoughtRow), 'the mid-turn burst keeps its chronological position')
+})
+
+test('the regular surface keeps the flat cluster chronology of both ambient bursts', async () => {
+  const { vt, app } = startApp('focus')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }, T0 + 1, 1),
+    contextEvent('ctx-a', { kind: 'plugin', form: 'instructions', plugin: 'agent-instructions' }, 'A', T0 + 2, 2),
+    contextEvent('ctx-b', { kind: 'plugin', form: 'catalog', plugin: 'skill-catalog' }, 'B', T0 + 3, 3),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 4, 4),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, T0 + 5, 5),
+    contextEvent('ctx-c', { kind: 'plugin', form: 'instructions', plugin: 'agent-instructions' }, 'C', T0 + 6, 6),
+    contextEvent('ctx-d', { kind: 'plugin', form: 'snapshot', plugin: 'runtime-context' }, 'D', T0 + 7, 7),
+    eventAt('assistant/message', { turn: 1, step: 1, message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } } }, T0 + 8, 8),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9, 9),
+  ])
+  show(app, folder)
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const joined = vt.getViewport().join('\n')
+  assert.equal(clusterHeaders(joined).length, 0, `the regular surface presents cluster members directly:\n${joined}`)
+  const order = ['instructions body', 'catalog body', 'instructions body', 'snapshot body']
+  // The two ambient bursts keep their raw chronology around the Thought.
+  const a = joined.indexOf('Context injection agent-instructions')
+  const c = joined.lastIndexOf('Context injection agent-instructions')
+  assert.ok(a >= 0 && c > a, `both bursts render separately:\n${joined}`)
+  assert.ok(joined.includes('Context injection skill-catalog') && joined.includes('Context injection runtime-context'),
+    `every member row renders:\n${joined}`)
+  assert.ok(order.length === 4)
 })
 
 test('notice, relay, and recall are standalone Context rows and never enter Work or a cluster', async () => {
@@ -473,6 +895,37 @@ test('Context rows never occupy the Focus slots or counts', async () => {
   assert.match(view, /Think:\s+the real reasoning/)
   assert.ok(view.includes('child settled summary'))
   assert.ok(view.includes('Agent message · child-2'))
+})
+
+test('fullscreen: a long relay keeps its head and tail collapsed and reveals the hidden middle on search', async () => {
+  const { vt, app } = startApp('compact')
+  app.setFullscreen(true)
+  const lines = Array.from({ length: 40 }, (_, index) => `relay line ${index}`)
+  const relay: TranscriptMessage = {
+    kind: 'system', turn: 1, text: lines.join('\n'), label: 'agent-message', context: true,
+    contextPresentation: { form: 'relay', sourceKind: 'agent-message', senderSessionId: 'child-2', role: 'inject' },
+  }
+  app.setTranscript([relay], new Map())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Agent message · child-2'), `the sender is named:\n${view}`)
+  assert.ok(view.includes('relay line 0'), 'the head is visible while collapsed')
+  assert.ok(view.includes('relay line 39'), 'the TAIL is visible while collapsed (long-user geometry)')
+  assert.ok(!view.includes('relay line 20'), 'the middle is hidden while collapsed')
+
+  app.setTranscriptSearchTarget({
+    query: 'relay line 20',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: relay,
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('relay line 20'), `the hidden relay content must be reachable by search:\n${view}`)
+
+  app.setTranscriptSearchTarget(undefined)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('relay line 20'), `disabling the reveal restores the collapsed relay:\n${view}`)
 })
 
 test('form-aware Context rows are render-time width-aware, not width-baked', async () => {

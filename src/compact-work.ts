@@ -159,3 +159,38 @@ export class CompactWorkComponent implements Component {
     return lines
   }
 }
+
+/**
+ * The EPHEMERAL pending Work card: a live Preparing call that does not belong
+ * to any durable Process run yet (the previous run was closed by a
+ * Conversation / Context / Attention boundary, or the turn has no projected
+ * Work span at all).
+ *
+ * It renders the same Header + Tool-slot geometry as a collapsed Work span so
+ * the durable rows can replace it seamlessly — the header deliberately carries
+ * no `preparing`/`pending` suffix (that is an internal lifecycle fact, and
+ * naming it would add a visual jump when the durable Work span lands). The live
+ * state is expressed by the Tool slot alone.
+ */
+export class CompactPendingWorkComponent implements Component {
+  private readonly preparingSummary: string
+  private readonly iconStyle: IconStyle
+
+  constructor(options: { preparingSummary: string; iconStyle?: IconStyle }) {
+    this.preparingSummary = options.preparingSummary
+    this.iconStyle = options.iconStyle ?? 'emoji'
+  }
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    const indent = width >= 4 ? '  ' : ''
+    const contentWidth = Math.max(1, width - visibleWidth(indent))
+    const summary: CompactWorkSummary = { toolCount: 0, subagentCount: 0 }
+    const lines = [`${indent}${color.textDim(formatWorkHeaderLine(summary, false, contentWidth, this.iconStyle))}`]
+    if (this.preparingSummary !== '') {
+      lines.push(`${indent}${color.textDim(compactSlotLine('Tool:', this.preparingSummary, contentWidth))}`)
+    }
+    return lines
+  }
+}
