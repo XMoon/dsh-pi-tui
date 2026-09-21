@@ -152,12 +152,12 @@ test('a Work header click expands its member rows and collapses again', async ()
   let view = vt.getViewport()
   const headerRow = rowOf(view, /▸ Work · 1 tool · thinking/)
   assert.ok(headerRow >= 0, 'precondition: the first Work header is visible')
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0)
 
   click(vt, 3, headerRow + 1)
   await vt.waitForRender()
   view = vt.getViewport()
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 1, 'the header click opens exactly its own span')
+  assert.equal(app.expandedWorkOwnersForTest().size, 1, 'the header click opens exactly its own span')
   assert.equal(workHeaders(view.join('\n'), true).length, 1, 'the opened span renders the expanded glyph')
   assert.equal(workHeaders(view.join('\n'), false).length, 1, 'the other span stays collapsed')
 
@@ -165,23 +165,26 @@ test('a Work header click expands its member rows and collapses again', async ()
   // A different column avoids the fork's double-click word-selection gesture.
   click(vt, 5, expandedRow + 1)
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0, `a second click collapses the span:\n${vt.getViewport().join('\n')}`)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, `a second click collapses the span:\n${vt.getViewport().join('\n')}`)
 })
 
-test('Ctrl+O owns the Compact Work-span bulk in both directions', async () => {
+test('regular Compact Ctrl+O owns Work disclosure through the shared master', async () => {
   const { vt, app } = startApp('compact')
   const folder = new TranscriptFolder()
   applyMixed(folder, workFixture())
   show(app, folder)
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0)
   vt.sendInput('\x0f')
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 2, 'Ctrl+O expands the recent Work spans')
-  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 2)
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 2,
+    'the derived recent-turn master expands the recent Work spans')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0,
+    'the bulk preference never writes a manual per-span owner (plan §44)')
   vt.sendInput('\x0f')
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0, 'Ctrl+O collapses every open Work span')
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 0, 'Ctrl+O collapses every open Work span')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0)
 })
 
 test('a search reveal temporarily opens the owning Work span and restores it on dismiss', async () => {
@@ -202,7 +205,7 @@ test('a search reveal temporarily opens the owning Work span and restores it on 
     message: hiddenThinking,
   })
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0, 'the temporary reveal never writes the manual state')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the temporary reveal never writes the manual state')
   assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 1, 'exactly the owning span opens')
   assert.ok(vt.getViewport().join('\n').includes('Thinking'), 'the revealed member renders its own card')
 
@@ -228,13 +231,13 @@ test('a Work span opened only by the search reveal collapses by revoking the rev
   await vt.waitForRender()
   const revealedRow = rowOf(vt.getViewport(), /▾ Work · 1 tool · thinking/)
   assert.ok(revealedRow >= 0, 'precondition: the granted reveal opened the owning span')
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0)
 
   // An explicit click on a reveal-only span must COLLAPSE it (revoke the
   // temporary reveal), never write a manual owner that outlives the search.
   click(vt, 5, revealedRow + 1)
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0,
+  assert.equal(app.expandedWorkOwnersForTest().size, 0,
     'collapsing a reveal-only span must not promote it to a manual disclosure')
   assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 0, 'the reveal is revoked')
 
@@ -415,7 +418,7 @@ test('a Work header stays inspectable while a Question owns the modal', async ()
 
   click(vt, 5, row + 1)
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 1, 'the read-only Work disclosure must work behind a Question')
+  assert.equal(app.expandedWorkOwnersForTest().size, 1, 'the read-only Work disclosure must work behind a Question')
   assert.ok(workHeaders(vt.getViewport().join('\n'), true).length === 1)
   assert.ok(vt.getViewport().join('\n').includes('Inspect context?'), 'the Question must remain mounted after the disclosure')
 
@@ -449,51 +452,50 @@ test('regular Compact Ctrl+O opens the Work run without a dead ctrl+o card hint'
     `no member card may advertise ctrl+o while the key collapses the Work span:\n${view}`)
 })
 
-test('regular Compact presents a long user prompt in full instead of an inoperable marker', async () => {
+test('regular Compact long user folds under the shared Ctrl+O disclosure', async () => {
   const { vt, app } = startApp('compact')
   const longPrompt = Array.from({ length: 40 }, (_, index) => `prompt line ${index}`).join('\n')
   app.setTranscript([{ kind: 'user', turn: 1, text: longPrompt }], new Map())
   await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  // Ctrl+O owns the Work spans on this surface, so the prompt must never claim
-  // a `ctrl+o to expand` affordance the key cannot operate — it renders in full.
-  assert.ok(!view.includes('rows compacted'),
-    `no collapsed representation may be generated for an inoperable fold:\n${view}`)
-  assert.ok(!view.includes('ctrl+o'), `no inoperable key hint:\n${view}`)
-  // A folded bubble would show only head + marker + tail; the MIDDLE row being
-  // present proves no collapsed representation was built at all.
-  assert.ok(view.includes('prompt line 20'), `the middle of the prompt is visible:\n${view}`)
+  let view = vt.getViewport().join('\n')
+  // After F6 regular Compact has a real disclosure owner (the shared Ctrl+O
+  // master), so the prompt folds and advertises the EFFECTIVE key.
+  assert.ok(view.includes('rows compacted'), `the fold renders:\n${view}`)
+  assert.ok(view.includes('ctrl+o'), `the operable key is advertised:\n${view}`)
+  assert.ok(!view.includes('prompt line 20'), `the compacted middle stays hidden:\n${view}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('prompt line 20'), `the master reveals the middle:\n${view}`)
 })
 
-test('a regular Compact long-user search dismiss mints no disclosure owner', async () => {
+test('a regular Compact long-user search dismiss promotes the disclosure owner', async () => {
   const { vt, app } = startApp('compact')
   const prompt = Array.from({ length: 40 }, (_, index) => `long line ${index}`).join('\n')
   const message: TranscriptMessage = { kind: 'user', turn: 1, text: prompt }
   app.setTranscript([message], new Map())
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().join('\n').includes('rows compacted'),
-    `precondition: regular Compact presents the prompt in full:\n${vt.getViewport().join('\n')}`)
+  assert.ok(vt.getViewport().join('\n').includes('rows compacted'),
+    `precondition: regular Compact folds the prompt:\n${vt.getViewport().join('\n')}`)
 
-  // Ctrl+O belongs to the Work spans here, so the search grant must NOT admit a
-  // long-user reveal — the surface has no long-user disclosure to reveal.
   app.setTranscriptSearchTarget({
     query: 'long line 20',
     match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
     message,
   })
   await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('long line 20'), 'the reveal opens the hidden middle')
+
   app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
   await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('long line 20'),
+    'the promoted owner keeps the revealed prompt expanded')
 
-  // Switching to a surface that DOES own the fold must show the default
-  // collapsed/click-owned presentation, not a stale promoted owner.
-  app.setFullscreen(true)
+  // The promoted owner belongs to the same Ctrl+O master: one press collapses it.
+  vt.sendInput('\x0f')
   await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  assert.match(view, /rows compacted · click to expand/,
-    `the fullscreen surface defaults to the click-owned fold:\n${view}`)
-  assert.ok(!view.includes('long line 20'),
-    `no regular-minted expansion may survive the surface switch:\n${view}`)
+  assert.ok(!vt.getViewport().join('\n').includes('long line 20'),
+    `the master collapses the promoted owner:\n${vt.getViewport().join('\n')}`)
 })
 
 test('a fullscreen Compact long-user search dismiss still promotes the disclosure', async () => {
@@ -524,7 +526,7 @@ test('a fullscreen Compact long-user search dismiss still promotes the disclosur
   assert.ok(!view.includes('rows compacted'), `the promoted disclosure stays expanded:\n${view}`)
 })
 
-test('regular Compact presents a foldable pending-user row in full', async () => {
+test('regular Compact pending-user rows fold under the shared Ctrl+O disclosure', async () => {
   const { vt, app } = startApp('compact')
   const longText = Array.from({ length: 40 }, (_, index) => `pending line ${index}`).join('\n')
   app.setPendingInputPresentation({
@@ -533,13 +535,17 @@ test('regular Compact presents a foldable pending-user row in full', async () =>
     running: true,
   })
   await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('rows compacted'), `no inoperable fold:\n${view}`)
-  assert.ok(!view.includes('ctrl+o'), `no inoperable key hint:\n${view}`)
-  assert.ok(view.includes('pending line 20'), `the whole pending row is visible:\n${view}`)
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('rows compacted'), `the fold renders:\n${view}`)
+  assert.ok(view.includes('ctrl+o'), `the operable key is advertised:\n${view}`)
+  assert.ok(!view.includes('pending line 20'), `the compacted middle stays hidden:\n${view}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('pending line 20'), `the master reveals the middle:\n${view}`)
 })
 
-test('regular Compact presents a standalone Context row in full instead of a dead key hint', async () => {
+test('regular Compact folds a standalone Context row under the shared master', async () => {
   const { vt, app } = startApp('compact')
   app.setTranscript([
     {
@@ -548,9 +554,13 @@ test('regular Compact presents a standalone Context row in full instead of a dea
     },
   ], new Map())
   await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('CONTEXT_BODY_MARKER'), `the payload is visible without a fold:\n${view}`)
-  assert.ok(!view.includes('ctrl+o'), `no inoperable key hint:\n${view}`)
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('CONTEXT_BODY_MARKER'), `the collapsed row hides its payload:\n${view}`)
+  assert.ok(view.includes('ctrl+o'), `the operable key is advertised:\n${view}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('CONTEXT_BODY_MARKER'), `the master reveals the payload:\n${view}`)
 })
 
 test('fullscreen Compact keeps the ordinary folds click-owned (mouse exists)', async () => {
@@ -572,7 +582,7 @@ test('fullscreen Compact keeps the ordinary folds click-owned (mouse exists)', a
   assert.ok(view.includes('CONTEXT_BODY_MARKER'), `the mouse click opens the row:\n${view}`)
 })
 
-test('the regular surface shows ambient cluster members directly (semantic cluster, expanded presentation)', async () => {
+test('the regular surface collapses ambient clusters behind an operable header', async () => {
   for (const preset of ['compact', 'focus', 'full'] as const) {
     const { vt, app } = startApp(preset)
     app.setTranscript([
@@ -587,12 +597,16 @@ test('the regular surface shows ambient cluster members directly (semantic clust
     ], new Map())
     await vt.waitForRender()
     const view = vt.getViewport().join('\n')
-    // The raw-adjacent pair is STILL one semantic cluster; the regular surface
-    // simply has no manual cluster disclosure owner in F4, so it presents the
-    // member rows expanded instead of stranding them behind a dead header.
-    assert.equal(clusterHeaders(view).length, 0, `${preset}: no collapsed cluster header on regular:\n${view}`)
-    assert.ok(view.includes('Context injection AGENTS.md'), `${preset}: member rows render:\n${view}`)
-    assert.ok(view.includes('Context injection skill-catalog'), `${preset}: every member renders:\n${view}`)
+    // The raw-adjacent pair is one semantic cluster and, after F6, the regular
+    // surface has a real keyboard owner (the shared Ctrl+O master), so it
+    // presents the collapsed header instead of stranding the members.
+    assert.equal(clusterHeaders(view).length, 1, `${preset}: the collapsed cluster header renders:\n${view}`)
+    assert.ok(!view.includes('Context injection AGENTS.md'), `${preset}: members stay behind the header:\n${view}`)
+    vt.sendInput('\x0f')
+    await vt.waitForRender()
+    const expanded = vt.getViewport().join('\n')
+    assert.equal(clusterHeaders(expanded, true).length, 1, `${preset}: the master opens the cluster:\n${expanded}`)
+    assert.ok(expanded.includes('Context injection AGENTS.md'), `${preset}: every member renders when open:\n${expanded}`)
     app.dispose()
     startedApps.delete(app)
   }
@@ -651,7 +665,7 @@ test('dismissing a search that revealed a hidden Work member promotes the span o
     message: hidden,
   })
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0, 'the reveal stays presentation-only while searching')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the reveal stays presentation-only while searching')
   assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 1, 'the reveal opens the owning span')
 
   // The dismissal transaction captures the viewport anchor from the revealed
@@ -659,7 +673,7 @@ test('dismissing a search that revealed a hidden Work member promotes the span o
   const anchor = app.captureTranscriptViewportAnchor()
   app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
   await vt.waitForRender()
-  const owners = app.compactExpandedWorkOwnersForTest()
+  const owners = app.expandedWorkOwnersForTest()
   assert.equal(owners.size, 1, 'the revealed span becomes a manual owner on dismiss')
   assert.equal(owners.has(owner), true, 'the promoted owner is the span owner')
   assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 1,
@@ -668,7 +682,7 @@ test('dismissing a search that revealed a hidden Work member promotes the span o
     'a Work-member anchor captured before dismissal must still resolve')
 })
 
-test('search-dismiss does not promote a cluster the regular surface presents flat', async () => {
+test('search-dismiss promotes a regular cluster owner', async () => {
   const { vt, app } = startApp('compact')
   const first: TranscriptMessage = {
     kind: 'system', turn: 1, text: 'instructions body', label: 'AGENTS.md', context: true,
@@ -680,8 +694,8 @@ test('search-dismiss does not promote a cluster the regular surface presents fla
   }
   app.setTranscript([first, second], new Map())
   await vt.waitForRender()
-  assert.equal(clusterHeaders(vt.getViewport().join('\n')).length, 0,
-    'precondition: the regular surface presents the members flat (no header)')
+  assert.equal(clusterHeaders(vt.getViewport().join('\n')).length, 1,
+    'precondition: the regular surface collapses the cluster header')
 
   app.setTranscriptSearchTarget({
     query: 'CLUSTER_MEMBER_MARKER',
@@ -689,17 +703,16 @@ test('search-dismiss does not promote a cluster the regular surface presents fla
     message: second,
   })
   await vt.waitForRender()
-  assert.ok(vt.getViewport().join('\n').includes('CLUSTER_MEMBER_MARKER'), 'the member is already visible (flat)')
+  assert.ok(vt.getViewport().join('\n').includes('CLUSTER_MEMBER_MARKER'), 'the reveal opens the hidden member')
 
   app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
   await vt.waitForRender()
-  assert.equal(app.compactExpandedClustersForTest().size, 0,
-    'a flat cluster hides nothing, so dismissal must not promote a disclosure owner')
-  // The stale owner would otherwise reopen the cluster on the next surface.
-  app.setFullscreen(true)
-  await vt.waitForRender()
-  assert.equal(clusterHeaders(vt.getViewport().join('\n'), true).length, 0,
-    `the fullscreen cluster stays collapsed (no stale promoted owner):\n${vt.getViewport().join('\n')}`)
+  const owners = app.expandedContextClusterOwnersForTest()
+  assert.equal(owners.size, 1, 'the revealed cluster becomes a manual owner on dismiss')
+  assert.equal(owners.has(first), true, 'the promoted owner is the cluster owner')
+  const view = vt.getViewport().join('\n')
+  assert.equal(clusterHeaders(view, true).length, 1, `the promoted cluster stays open:\n${view}`)
+  assert.ok(view.includes('Context injection AGENTS.md'), `its member rows stay visible:\n${view}`)
 })
 
 test('search-dismiss presentation: a revealed cluster member promotes the cluster owner', async () => {
@@ -727,7 +740,7 @@ test('search-dismiss presentation: a revealed cluster member promotes the cluste
 
   app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
   await vt.waitForRender()
-  const owners = app.compactExpandedClustersForTest()
+  const owners = app.expandedContextClusterOwnersForTest()
   assert.equal(owners.size, 1, 'the revealed cluster becomes a manual owner on dismiss')
   assert.equal(owners.has(first), true, 'the promoted owner is the cluster owner')
   const view = vt.getViewport().join('\n')
@@ -836,7 +849,7 @@ test('an ambient cluster expands into every member row and collapses again', asy
   click(vt, 3, headerRow + 1)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.equal(app.compactExpandedClustersForTest().size, 1)
+  assert.equal(app.expandedContextClusterOwnersForTest().size, 1)
   assert.equal(clusterHeaders(view, true).length, 1)
   assert.ok(view.includes('Context injection agent-instructions'), 'every member row renders when open')
   assert.ok(view.includes('Context injection skill-catalog'))
@@ -878,7 +891,7 @@ test('expanded Focus restores the opening ambient burst above the Thought and th
   assert.ok(clusterRows[1]! > (toolRow >= 0 ? toolRow : thoughtRow), 'the mid-turn burst keeps its chronological position')
 })
 
-test('the regular surface keeps the flat cluster chronology of both ambient bursts', async () => {
+test('the regular surface keeps both ambient cluster bursts in raw chronology', async () => {
   const { vt, app } = startApp('focus')
   const folder = new TranscriptFolder()
   applyMixed(folder, [
@@ -896,16 +909,17 @@ test('the regular surface keeps the flat cluster chronology of both ambient burs
   show(app, folder)
   app.toggleFocusTurn(1)
   await vt.waitForRender()
-  const joined = vt.getViewport().join('\n')
-  assert.equal(clusterHeaders(joined).length, 0, `the regular surface presents cluster members directly:\n${joined}`)
-  const order = ['instructions body', 'catalog body', 'instructions body', 'snapshot body']
+  const view = vt.getViewport()
+  const joined = view.join('\n')
+  assert.equal(clusterHeaders(joined).length, 2, `both clusters render as collapsed headers:\n${joined}`)
+  const thoughtRow = rowOf(view, /Working|Turn complete|▾ 🐳|🐳/)
+  const toolRow = rowOf(view, /Tool\|Read|Read\b/)
+  const clusterRows = view.flatMap((line, index) => /Context · 2 injections/.test(line) ? [index] : [])
+  assert.equal(clusterRows.length, 2)
+  assert.ok(thoughtRow >= 0, `expected a Thought:\n${joined}`)
   // The two ambient bursts keep their raw chronology around the Thought.
-  const a = joined.indexOf('Context injection agent-instructions')
-  const c = joined.lastIndexOf('Context injection agent-instructions')
-  assert.ok(a >= 0 && c > a, `both bursts render separately:\n${joined}`)
-  assert.ok(joined.includes('Context injection skill-catalog') && joined.includes('Context injection runtime-context'),
-    `every member row renders:\n${joined}`)
-  assert.ok(order.length === 4)
+  assert.ok(clusterRows[0]! < thoughtRow, 'the opening ambient burst stays above the Thought')
+  assert.ok(clusterRows[1]! > (toolRow >= 0 ? toolRow : thoughtRow), 'the mid-turn burst keeps its chronological position')
 })
 
 test('notice, relay, and recall are standalone Context rows and never enter Work or a cluster', async () => {

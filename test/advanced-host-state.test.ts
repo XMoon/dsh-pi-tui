@@ -75,11 +75,11 @@ test('host state: setWorkingMessage overrides the working label', async () => {
 test('host state: setToolsExpanded toggles the expansion master switch', async () => {
   const { app } = await appWithHostState()
   const host = app.advancedHostStateForTest()
-  assert.equal(app.isToolOutputExpanded(), false)
+  assert.equal(app.isTranscriptDetailExpanded(), false)
   host.setToolsExpanded(true)
-  assert.equal(app.isToolOutputExpanded(), true)
+  assert.equal(app.isTranscriptDetailExpanded(), true)
   host.setToolsExpanded(false)
-  assert.equal(app.isToolOutputExpanded(), false)
+  assert.equal(app.isTranscriptDetailExpanded(), false)
   app.stop()
 })
 

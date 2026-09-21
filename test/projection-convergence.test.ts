@@ -285,26 +285,24 @@ test('Full materialization is the canonical flat chronology: Work expands, no Wo
 
 // --- Expanded Focus consumes the canonical structure -----------------------
 
-test('expanded Focus materializes the canonical tail structure flat (boundary identity, not strings)', () => {
+test('expanded Focus materializes the canonical tail structure as nested Work (boundary identity, not strings)', () => {
   const { messages } = convergenceFixture()
   // The tail slice segments IDENTICALLY to the full window: same Work owners,
   // same members, same boundary sequence (plan §25). This pins the segmentation
   // contract the Focus tail consumes; display strings are deliberately not
-  // compared. (Flat materialization is order-preserving, so this test cannot by
-  // itself prove `projectFocus` calls the seam — that coupling is the code's,
-  // and the emitted-chronology assertion below ties the output to the seam.)
+  // compared. F6 emits each canonical span as a nested Work container, so the
+  // emitted row chronology is recovered by flattening those spans.
   const boundary = focusThoughtLeadBoundary(messages)
   const tailStructure = focusExpandedTailStructure(messages, boundary)
   assertSameSpans(workSpansOf(tailStructure), workSpansOf(projectTranscriptStructure(messages)))
 
-  // The emitted chronology is the lead prefix followed by the canonical tail
-  // flatten — the Focus-specific hoist policy plus the shared segmentation. The
-  // lead prefix identity and total length pin the lead/tail seam.
   const tailRows = flattenStructure(tailStructure)
   const prefix = messages.slice(0, messages.length - tailRows.length)
   const expected = [...prefix, ...tailRows]
   const blocks = projectFocus(messages, new Map(), new Set([TURN]), true)
-  const emitted = blocks.flatMap(block => block.kind === 'message' ? [block.message] : [])
+  const emitted = blocks.flatMap(block => block.kind === 'work'
+    ? [...block.span.members]
+    : block.kind === 'message' ? [block.message] : [])
   assert.equal(emitted.length, messages.length, 'every row is emitted exactly once')
   for (let index = 0; index < prefix.length; index += 1) {
     assert.equal(emitted[index], prefix[index], `the lead prefix is emitted verbatim at row ${index}`)
@@ -312,21 +310,31 @@ test('expanded Focus materializes the canonical tail structure flat (boundary id
   for (let index = prefix.length; index < messages.length; index += 1) {
     assert.equal(emitted[index], expected[index], `expanded Focus keeps the canonical chronology at row ${index}`)
   }
-  assert.ok(!(blocks as readonly { kind: string }[]).some(block => block.kind === 'work'), 'no nested Work disclosure before F6')
+  assert.ok(blocks.some(block => block.kind === 'work'), 'expanded Focus materializes nested canonical Work')
 })
 
-test('expanded Focus keeps process marks and leaves persistent rows unmarked', () => {
+test('expanded Focus emits nested Work containers and leaves persistent rows outside them', () => {
   const { messages, rows } = convergenceFixture()
   const blocks = projectFocus(messages, new Map(), new Set([TURN]), true)
-  const markOf = (message: TranscriptMessage): number | undefined => {
-    const block = blocks.find(candidate => candidate.kind === 'message' && candidate.message === message)
-    return block?.kind === 'message' ? block.collapseFocusOwnerOnClick : undefined
+  // F6 materializes every canonical Process run as a nested Work container
+  // owned by the expanded Thought; its members no longer appear as flat rows.
+  const workBlocks = blocks.filter(block => block.kind === 'work')
+  assert.ok(workBlocks.length > 0, 'expanded Focus materializes canonical Work')
+  const workMembers = new Set<TranscriptMessage>()
+  for (const block of workBlocks) {
+    if (block.kind !== 'work') continue
+    assert.equal(block.focusOwnerTurn, TURN, 'nested Work belongs to the expanded Thought')
+    for (const member of block.span.members) workMembers.add(member)
   }
   for (const process of [rows.thinkA, rows.toolA, rows.thinkB, rows.toolB, rows.thinkC, rows.thinkD, rows.toolD, rows.thinkE, rows.thinkF, rows.toolF]) {
-    assert.equal(markOf(process), TURN, 'a Process row collapses the Focus owner on click')
+    assert.equal(workMembers.has(process), true, 'each Process row is a member of a nested Work span')
+  }
+  const containerOf = (message: TranscriptMessage): readonly { kind: string }[] | undefined => {
+    const block = blocks.find(candidate => candidate.kind === 'message' && candidate.message === message)
+    return block?.kind === 'message' ? block.containerPath : undefined
   }
   for (const persistent of [rows.user, rows.ambient1, rows.ambient2, rows.notice, rows.question, rows.relay, rows.plan]) {
-    assert.equal(markOf(persistent), undefined, 'a persistent row never collapses the Focus owner')
+    assert.equal(containerOf(persistent), undefined, 'a persistent row is never owned by the Thought container')
   }
 })
 
@@ -392,14 +400,16 @@ function surfaceFixture(): { messages: TranscriptMessage[]; process: TranscriptM
   return { messages, process }
 }
 
-test('regular Full renders no Work chrome and flattens ambient clusters', async () => {
+test('regular Full renders no Work chrome and collapses ambient clusters behind an operable header', async () => {
   const { vt, app } = startApp('full')
   const { messages } = surfaceFixture()
   show(app, messages)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(!workHeader(view), `Full never adds a Work header:\n${view}`)
-  assert.ok(!view.includes('Context · 2 injections'), `regular Full presents the cluster flat:\n${view}`)
+  // Context is not Process: after F6 the regular surface has a keyboard cluster
+  // owner, so Full collapses the cluster without changing its Process default.
+  assert.ok(view.includes('Context · 2 injections'), `regular Full collapses the cluster behind its header:\n${view}`)
   assert.ok(view.includes('Read {}'), 'Process rows render in full detail')
   assert.ok(view.includes('surface reasoning'), 'Thinking renders in full detail')
 })
@@ -415,7 +425,7 @@ test('fullscreen Full keeps the existing collapsed cluster header and still no W
   assert.ok(view.includes('Context · 2 injections'), `fullscreen Full collapses the cluster behind its header:\n${view}`)
 })
 
-test('a Full search never mints a compact-work disclosure owner', async () => {
+test('a Full search never mints a Work disclosure owner (Work is flat)', async () => {
   const { vt, app } = startApp('full')
   const { messages, process } = surfaceFixture()
   show(app, messages)
@@ -427,11 +437,11 @@ test('a Full search never mints a compact-work disclosure owner', async () => {
     message: process,
   })
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0, 'Full has no Work disclosure owner')
-  assert.equal(app.compactExpandedClustersForTest().size, 0, 'a Process target is never promoted as a cluster owner')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'Full has no Work disclosure owner')
+  assert.equal(app.expandedContextClusterOwnersForTest().size, 0, 'a Process target is never promoted as a cluster owner')
 })
 
-test('an expanded-Focus search never mints a compact-work disclosure owner (Work is flat)', async () => {
+test('an expanded-Focus search reveals the nested Work without minting a manual owner', async () => {
   const { vt, app } = startApp('focus')
   const { messages, process } = surfaceFixture()
   show(app, messages)
@@ -444,8 +454,10 @@ test('an expanded-Focus search never mints a compact-work disclosure owner (Work
     message: process,
   })
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0, 'expanded Focus Work is flat, so the target is not hidden behind a Work owner')
-  assert.equal(app.compactExpandedClustersForTest().size, 0, 'a Process target is never promoted as a cluster owner')
+  const revealed = vt.getViewport().join('\n')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the nested Work reveal is presentation-only')
+  assert.ok(revealed.includes('▾ Work'), `expanded Focus must reveal the nested Work that hides the matched row:\n${revealed}`)
+  assert.equal(app.expandedContextClusterOwnersForTest().size, 0, 'a Process target is never promoted as a cluster owner')
 })
 
 // --- Window boundary -------------------------------------------------------

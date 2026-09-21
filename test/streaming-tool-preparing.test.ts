@@ -420,13 +420,13 @@ test('preparing rows are inert in the fullscreen hit map', async () => {
   await vt.waitForRender()
 
   const before = vt.getViewport().join('\n')
-  const previewRow = vt.getViewport().findIndex(line => line.includes('Preparing Edit...'))
+  const previewRow = vt.getViewport().findIndex(line => line.includes('Preparing Edit'))
   assert.ok(previewRow >= 0, `preview row missing:\n${before}`)
   assert.deepEqual(app.focusExpandedTurnsForTest(), new Set([1]))
   click(vt, 10, previewRow + 1)
   await vt.waitForRender()
   assert.deepEqual(app.focusExpandedTurnsForTest(), new Set([1]), 'preview click must not toggle a Thought')
-  assert.ok(vt.getViewport().join('\n').includes('Preparing Edit...'), 'preview click must be inert')
+  assert.ok(vt.getViewport().join('\n').includes('Preparing Edit'), 'preview click must be inert')
 })
 
 test('renders preparing rows with the selected icon style and no spinner state', async () => {

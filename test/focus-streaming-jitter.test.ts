@@ -113,7 +113,7 @@ test('expanded live Markdown preserves wheel intent across historical growth and
       [22, 21, 1, true],
       [22, 21, 1, true],
     ])
-    app.setToolOutputExpanded(app.isToolOutputExpanded())
+    app.setTranscriptDetailExpanded(app.isTranscriptDetailExpanded())
     await vt.waitForRender()
     assert.deepEqual(frame(app), [22, 21, 1, true])
 
@@ -126,39 +126,43 @@ test('expanded live Markdown preserves wheel intent across historical growth and
     show(app, folder)
     await vt.waitForRender()
     assert.deepEqual(frame(app), [22, 21, 0, false])
-    const growthPreviews = [0, 1, 2, 3, 4].map(index => ({
-      callId: `growth-${index}`, turn: 1, step: 1, index, name: 'edit', argumentBytes: 900,
-    }))
-    show(app, folder, growthPreviews)
+    // Growth in the LIVE Markdown body: after F6 a run of live tool previews
+    // collapses into one pending Work card, so the viewport-growth probe must
+    // grow the live text itself.
+    for (let i = 0; i < 4; i += 1) folder.applyLiveInput(liveText('\n'))
+    folder.applyLiveInput(liveText(`\n\n${'W'.repeat(88)}`))
+    show(app, folder)
     await vt.waitForRender()
-    assert.deepEqual(frame(app), [26, 21, 0, false])
+    assert.deepEqual(frame(app), [27, 21, 0, false])
     for (let i = 0; i < 4; i += 1) {
       vt.sendInput('\x1b[<65;50;10M')
       await vt.waitForRender()
     }
-    assert.deepEqual(frame(app), [26, 21, 4, false])
+    assert.deepEqual(frame(app), [27, 21, 4, false])
     // A historical structural reset must rebaseline the running epoch before
     // the next passive shrink; it must not leave the turn unprotected.
-    app.setToolOutputExpanded(!app.isToolOutputExpanded())
+    app.setTranscriptDetailExpanded(!app.isTranscriptDetailExpanded())
     await vt.waitForRender()
-    assert.deepEqual(frame(app), [26, 21, 4, false])
+    assert.deepEqual(frame(app), [27, 21, 4, false])
     show(app, folder)
     await vt.waitForRender()
-    assert.deepEqual(frame(app), [26, 21, 4, false])
+    assert.deepEqual(frame(app), [27, 21, 4, false])
     folder.applyLiveInput(liveText(' '))
     show(app, folder)
     await vt.waitForRender()
-    assert.deepEqual(frame(app), [26, 21, 4, false])
+    assert.deepEqual(frame(app), [27, 21, 4, false])
     app.scrollToBottom()
     await vt.waitForRender()
 
+    const grownHeight = height(app)
     // Root disclosure is structural: it may release the previous expanded
-    // floor rather than treating the collapse as passive live input.
+    // floor rather than treating the collapse as passive live input. The
+    // structural toggle must never GROW the content.
     app.toggleFocusTurn(1)
     await vt.waitForRender()
     app.toggleFocusTurn(1)
     await vt.waitForRender()
-    assert.ok(height(app) < 22)
+    assert.ok(height(app) <= grownHeight, `height=${height(app)} grown=${grownHeight}`)
 
     // Historical navigation keeps the current presentation geometry while
     // disabling follow; explicit structural changes above already reset it.
@@ -166,7 +170,7 @@ test('expanded live Markdown preserves wheel intent across historical growth and
     await vt.waitForRender()
     show(app, folder)
     await vt.waitForRender()
-    assert.deepEqual(frame(app), [20, 21, 0, false])
+    assert.deepEqual(frame(app), [27, 21, 0, false])
   } finally {
     app.dispose()
     startedApps.delete(app)
@@ -237,7 +241,7 @@ test('Preparing create/progress/clear holds the live high-water and settlement r
   const collapsed = await runPreparingLifecycle(false)
   const expanded = await runPreparingLifecycle(true)
   assert.deepEqual(collapsed, { initial: 6, created: 7, progressed: 7, cleared: 7, settled: 6 })
-  assert.deepEqual(expanded, { initial: 6, created: 8, progressed: 8, cleared: 8, settled: 6 })
+  assert.deepEqual(expanded, { initial: 6, created: 9, progressed: 9, cleared: 9, settled: 6 })
 })
 
 test('formal Preparing handoff does not add a second blank row', async () => {

@@ -18,6 +18,12 @@
  * line-start anchor excludes those look-alikes. */
 const HEADER_LABEL = 'Work|Wait|Turn c|Compl|Fail|Interr|Block|Max'
 
+/** The plain Work container header (`▸ Work`, `▸ Work · 3 tools · thinking`)
+ * reuses the same section triangle as a Focus disclosure header, so the label
+ * stem alone would misclassify it. Exclude the Work header SHAPE explicitly
+ * instead of relying on a brittle lookahead on the label stem. */
+const WORK_CONTAINER_HEADER = /^\s*[▸▾] Work(?:\s*(?:·.*|…+|\.\.\.))?\s*$/u
+
 function headerPattern(expanded: boolean | undefined): RegExp {
   const collapsed = '(?:🐋|▸)'
   const expandedGlyph = '(?:🐳|▾)'
@@ -26,8 +32,10 @@ function headerPattern(expanded: boolean | undefined): RegExp {
 }
 
 /** Whether one line is a Focus disclosure header (optionally requiring the
- * expanded or collapsed glyph). */
+ * expanded or collapsed glyph). A Work container header is never a Focus
+ * header. */
 export function isFocusHeader(line: string, expanded?: boolean): boolean {
+  if (WORK_CONTAINER_HEADER.test(line)) return false
   return headerPattern(expanded).test(line)
 }
 
@@ -44,9 +52,11 @@ export function findLastFocusHeaderRow(lines: readonly string[], expanded?: bool
   return -1
 }
 
-/** Whether a (possibly joined) viewport text contains a Focus header. */
+/** Whether a (possibly joined) viewport text contains a Focus header. A Work
+ * container header is never a Focus header (delegates to `isFocusHeader` so the
+ * two helpers can never disagree). */
 export function hasFocusHeader(text: string, expanded?: boolean): boolean {
-  return headerPattern(expanded).test(text)
+  return text.split('\n').some(line => isFocusHeader(line, expanded))
 }
 
 /** The number of Focus headers in a (joined) viewport text. */

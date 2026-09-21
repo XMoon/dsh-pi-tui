@@ -358,7 +358,7 @@ test('dismiss promotion: Workflow Run and Phase owners become durable after dism
   app.stop()
 })
 
-test('dismiss promotion: regular secondary reveal has no per-card owner to promote', async () => {
+test('dismiss promotion: regular secondary reveal promotes its per-card owner', async () => {
   const { vt, app } = startApp()
   const message: TranscriptMessage = { kind: 'thinking', turn: 0, text: 'needle reasoning' }
   app.setTranscript([message])
@@ -370,7 +370,8 @@ test('dismiss promotion: regular secondary reveal has no per-card owner to promo
   assert.ok((await viewport(vt)).some(line => line.includes('needle reasoning')), 'the regular search reveal is visible')
   app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
   const overrides = (app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride
-  assert.notEqual(overrides.get(message), true, 'regular Thinking has no per-card owner to promote')
+  assert.equal(overrides.get(message), true,
+    'after F6 the regular surface has a per-card owner for the revealed Thinking and promotes it')
   assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears search presentation')
   app.stop()
 })

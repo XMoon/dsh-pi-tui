@@ -75,7 +75,7 @@ test('9.1 a page change refreshes the container owner and drops the old disclosu
   await vt.waitForRender()
   app.toggleContextCluster(a)
   await vt.waitForRender()
-  assert.equal(app.compactExpandedClustersForTest().has(a), true, 'precondition: the window-1 cluster is manually open')
+  assert.equal(app.expandedContextClusterOwnersForTest().has(a), true, 'precondition: the window-1 cluster is manually open')
 
   // A different page: the ambient run now starts at a fresh owner.
   const c = ambient(9, 'ctx-c')
@@ -85,11 +85,11 @@ test('9.1 a page change refreshes the container owner and drops the old disclosu
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('▸ ') && view.includes('Context · 2 injections'),
     `the new window's cluster keeps its default collapsed presentation:\n${view}`)
-  assert.ok(!app.compactExpandedClustersForTest().has(c),
+  assert.ok(!app.expandedContextClusterOwnersForTest().has(c),
     'the new owner is not pre-expanded by the stale window-1 state')
-  assert.equal(app.compactExpandedClustersForTest().has(a), false,
+  assert.equal(app.expandedContextClusterOwnersForTest().has(a), false,
     'leaving window 1 must DROP its cluster owner, not merely ignore it')
-  assert.equal(app.compactExpandedClustersForTest().size, 0)
+  assert.equal(app.expandedContextClusterOwnersForTest().size, 0)
 })
 
 test('9.1 an A -> B -> A page round-trip on the SAME message objects never resurrects a dropped owner', async () => {
@@ -109,20 +109,20 @@ test('9.1 an A -> B -> A page round-trip on the SAME message objects never resur
   app.toggleWorkSpan(workOwner)
   app.toggleContextCluster(clusterOwner)
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().has(workOwner), true, 'precondition: the Work span is open')
-  assert.equal(app.compactExpandedClustersForTest().has(clusterOwner), true, 'precondition: the cluster is open')
+  assert.equal(app.expandedWorkOwnersForTest().has(workOwner), true, 'precondition: the Work span is open')
+  assert.equal(app.expandedContextClusterOwnersForTest().has(clusterOwner), true, 'precondition: the cluster is open')
 
   app.setTranscript(pageB, new Map(), windowB)
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().has(workOwner), false, 'leaving page A drops its Work owner')
-  assert.equal(app.compactExpandedClustersForTest().has(clusterOwner), false, 'leaving page A drops its cluster owner')
+  assert.equal(app.expandedWorkOwnersForTest().has(workOwner), false, 'leaving page A drops its Work owner')
+  assert.equal(app.expandedContextClusterOwnersForTest().has(clusterOwner), false, 'leaving page A drops its cluster owner')
 
   app.setTranscript(pageA, new Map(), windowA)
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.equal(app.compactExpandedWorkOwnersForTest().has(workOwner), false,
+  assert.equal(app.expandedWorkOwnersForTest().has(workOwner), false,
     'the A -> B -> A round-trip must not resurrect the Work owner')
-  assert.equal(app.compactExpandedClustersForTest().has(clusterOwner), false,
+  assert.equal(app.expandedContextClusterOwnersForTest().has(clusterOwner), false,
     'the round-trip must not resurrect the cluster owner')
   assert.ok(!view.split('\n').some(line => /^\s*▾ Work(?: ·|$)/.test(line)),
     `the Work span stays collapsed after the round-trip:\n${view}`)
@@ -167,7 +167,7 @@ test('9.2 the window prune keeps owners that are still projected when paging fro
   await vt.waitForRender()
   app.toggleWorkSpan(owner)
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().has(owner), true, 'precondition: the span is open in Compact')
+  assert.equal(app.expandedWorkOwnersForTest().has(owner), true, 'precondition: the span is open in Compact')
 
   // A window change made while FOCUS is active, with the SAME projected
   // messages: the Compact liveness must not depend on the active preset.
@@ -175,12 +175,12 @@ test('9.2 the window prune keeps owners that are still projected when paging fro
   await vt.waitForRender()
   app.setTranscript(page, new Map(), { ...windowA, hasNewer: false })
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().has(owner), true,
+  assert.equal(app.expandedWorkOwnersForTest().has(owner), true,
     'a still-projected Work owner survives a window change made from another preset')
 
   app.setDisplayPreset('compact')
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().has(owner), true)
+  assert.equal(app.expandedWorkOwnersForTest().has(owner), true)
   assert.ok(vt.getViewport().join('\n').split('\n').some(line => /^\s*▾ Work(?: ·|$)/.test(line)),
     `the span stays expanded in Compact:\n${vt.getViewport().join('\n')}`)
 })
@@ -192,12 +192,12 @@ test('9.2 a Work disclosure from an older window is not re-applied to a new page
   await vt.waitForRender()
   app.toggleWorkSpan(oldOwner)
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().has(oldOwner), true)
+  assert.equal(app.expandedWorkOwnersForTest().has(oldOwner), true)
 
   const newOwner = thinking(9, 'new run')
   app.setTranscript([newOwner, tool(9, 'new result')], new Map(), { mode: 'history', endTurn: 9, firstTurn: 9, lastTurn: 9 })
   await vt.waitForRender()
-  assert.equal(app.compactExpandedWorkOwnersForTest().has(newOwner), false, 'the new page owner starts collapsed')
+  assert.equal(app.expandedWorkOwnersForTest().has(newOwner), false, 'the new page owner starts collapsed')
   assert.match(vt.getViewport().join('\n'), /▸ Work · 1 tool/)
 })
 

@@ -421,7 +421,7 @@ test('the read-only viewer lets a REMAPPED fold key reach the host fold (effecti
   // fold key, so the remapped chord reaches the host fold path and the
   // OLD key is consumed as inert instead.
   const { vt, app } = startApp({}, managerWith({ 'app.transcript.toggleExpand': 'ctrl+x' }))
-  const before = app.isToolOutputExpanded()
+  const before = app.isTranscriptDetailExpanded()
   app.setViewerMode({
     parentSessionId: 'session-main',
     childSessionId: 'session-child',
@@ -434,11 +434,11 @@ test('the read-only viewer lets a REMAPPED fold key reach the host fold (effecti
   // reaches the host ladder: the fold master flips.
   vt.sendInput('\x18') // ctrl+x
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), !before, 'the remapped fold key must reach the host fold path')
+  assert.equal(app.isTranscriptDetailExpanded(), !before, 'the remapped fold key must reach the host fold path')
   // ctrl+o is no longer the fold key: consumed as inert (no second flip).
   vt.sendInput('\x0f') // ctrl+o
   await vt.waitForRender()
-  assert.equal(app.isToolOutputExpanded(), !before, 'the old ctrl+o must stay inert inside the viewer')
+  assert.equal(app.isTranscriptDetailExpanded(), !before, 'the old ctrl+o must stay inert inside the viewer')
   app.stop()
 })
 

@@ -154,6 +154,8 @@ test('expanding a collapsed SETTLED Thought preserves the viewport (plan 2026-08
   // 2026-08-25 §4.2) instead of jumping to the end.
   click(vt, 3, headerY + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
   assert.ok(hasFocusHeader(joined, true), `expanded symbol missing:\n${joined}`)
@@ -195,6 +197,8 @@ test('clicking an expanded SECONDARY body collapses only the secondary (plan §3
   let y = findFocusHeaderRow(view, false)
   assert.ok(y >= 0, `Thought header missing:\n${view.join('\n')}`)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   view = vt.getViewport()
   // The process timeline is COMPACT: the 120-line result is NOT visible.
@@ -275,6 +279,8 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   let y = findFocusHeaderRow(view, false)
   click(vt, 3, y + 1)
   await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
   // The Thinking card is compact by default: expand BOTH secondaries
   // (Thinking + Bash) via their per-card clicks.
   view = vt.getViewport()
@@ -311,6 +317,8 @@ test('root Collapse All clears the secondary expansions (plan §6/§37)', async 
   // would be timing-sensitive.
   y = findFocusHeaderRow(view, false)
   click(vt, 20, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   view = vt.getViewport()
   const joined = view.join('\n')
@@ -527,6 +535,8 @@ test('resize keeps the click map aligned: secondary closes first, then the root 
   let view = vt.getViewport()
   let y = findFocusHeaderRow(view, false)
   click(vt, 3, y + 1)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
   await vt.waitForRender()
   view = vt.getViewport()
   const bashY = findRow(view, 'Bash seq 1 120')
