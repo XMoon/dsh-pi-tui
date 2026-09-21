@@ -4264,6 +4264,19 @@ export class TuiApp {
         copyBlankRows: ReadonlySet<number>
       }
     | undefined
+
+  /** Whether transcript geometry may have changed since the last fullscreen
+   * paint-snapshot commit (perf plan §19 candidate 1). Raised by the only two
+   * writers of the row map (`updateTranscriptGeometry` / `refreshMessageRows`),
+   * by the async image-settle seam (a thumbnail invalidates without either),
+   * and by a terminal resize (detected at the commit). A frame that only
+   * scrolls or repaints chrome keeps the flag clear and reuses the committed
+   * `rows` + `copyBlankRows` verbatim; chrome heights and scroll state are
+   * re-read fresh every commit. The click-time live re-checks
+   * (`handleFullscreenClick` / `completeQuestionTranscriptInspection`) still
+   * call `refreshMessageRows` themselves, so the stale-frame release fence
+   * keeps measuring live state exactly as before. */
+  private fullscreenRowsDirty = true
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
   private externalEditorInFlight = false
@@ -10061,6 +10074,7 @@ export class TuiApp {
     if (mount) this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
     this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + chromeHeight
     this.messageRows = rows
+    this.fullscreenRowsDirty = true
   }
 
   /** Refresh aligned transcript blocks without clearing the mounted tree.
@@ -10317,6 +10331,7 @@ export class TuiApp {
     this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
     this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + this.transcriptChromeHeight
     this.messageRows = rows
+    this.fullscreenRowsDirty = true
   }
 
   /** Reveal the fullscreen transcript viewport on the current search range
@@ -10739,39 +10754,63 @@ export class TuiApp {
     const previousSnapshot = this.fullscreenPaintSnapshot
     const columns = this.terminal.columns
     const termRows = this.terminal.rows
-    if (previousSnapshot !== undefined
-      && (previousSnapshot.columns !== columns || previousSnapshot.termRows !== termRows)) {
+    const resized = previousSnapshot !== undefined
+      && (previousSnapshot.columns !== columns || previousSnapshot.termRows !== termRows)
+    if (resized) {
       this.clearFullscreenPointerGestures()
+      // A resize re-wraps every block at the new width: the committed row
+      // geometry cannot survive it even when no rebuild ran yet.
+      this.fullscreenRowsDirty = true
     }
     const scroll = this.fullscreenScroll
     const paintedHeight = (component: Component): number => this.fullscreen?.getPaintedBox(component)?.height ?? 0
+    // Geometry epoch (perf plan §19 candidate 1): the expensive row snapshot
+    // (remeasure + per-row hit identities) is only recomputed when transcript
+    // geometry may actually have changed. A pure repaint — a scroll, an
+    // editor keystroke, a footer/activity tick — reuses the committed `rows`
+    // and `copyBlankRows` verbatim; chrome heights and scroll state below are
+    // still re-read fresh from the painted frame. The click-time re-checks
+    // keep their own `refreshMessageRows` calls, so press/release validation
+    // measures live state exactly as before.
+    const rowsDirty = this.fullscreenRowsDirty
+    let rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
+    let copyBlankRows: ReadonlySet<number>
     const refreshStart = this.scrollProfiler.enabled ? performance.now() : 0
-    this.refreshMessageRows()
-    const refreshEnd = this.scrollProfiler.enabled ? performance.now() : 0
-    const welcomeHeight = this.welcomeCard.lastRenderedHeight
-    // The painted rows whose copy source is presentation chrome, derived from
-    // the SAME projection/height base as `rows` below (the last-painted
-    // frame), so the copy filter can never reinterpret a row against a newer,
-    // not-yet-painted rebuild.
-    const copyBlankRows = new Set<number>()
-    let rowTop = welcomeHeight
-    for (const entry of this.messageRows) {
-      const hit = entry.userDisclosureHit
-      if (hit !== undefined && hit.action === 'collapse') copyBlankRows.add(rowTop + hit.row)
-      rowTop += entry.height
+    let refreshEnd = refreshStart
+    let hitsEnd = refreshStart
+    if (previousSnapshot === undefined || rowsDirty) {
+      this.refreshMessageRows()
+      this.fullscreenRowsDirty = false
+      refreshEnd = this.scrollProfiler.enabled ? performance.now() : 0
+      const welcomeHeight = this.welcomeCard.lastRenderedHeight
+      // The painted rows whose copy source is presentation chrome, derived from
+      // the SAME projection/height base as `rows` below (the last-painted
+      // frame), so the copy filter can never reinterpret a row against a newer,
+      // not-yet-painted rebuild.
+      const freshCopyBlankRows = new Set<number>()
+      let rowTop = welcomeHeight
+      for (const entry of this.messageRows) {
+        const hit = entry.userDisclosureHit
+        if (hit !== undefined && hit.action === 'collapse') freshCopyBlankRows.add(rowTop + hit.row)
+        rowTop += entry.height
+      }
+      const hitsStart = this.scrollProfiler.enabled ? performance.now() : 0
+      rows = this.messageRows.map((entry, index) => ({
+        ownerId: this.fullscreenRowOwnerId(entry, index),
+        height: entry.height,
+        hits: this.fullscreenRowHits(entry, index),
+      }))
+      hitsEnd = this.scrollProfiler.enabled ? performance.now() : 0
+      copyBlankRows = freshCopyBlankRows
+    } else {
+      rows = previousSnapshot.rows
+      copyBlankRows = previousSnapshot.copyBlankRows
     }
-    const hitsStart = this.scrollProfiler.enabled ? performance.now() : 0
-    const rows = this.messageRows.map((entry, index) => ({
-      ownerId: this.fullscreenRowOwnerId(entry, index),
-      height: entry.height,
-      hits: this.fullscreenRowHits(entry, index),
-    }))
-    const hitsEnd = this.scrollProfiler.enabled ? performance.now() : 0
     this.fullscreenPaintSnapshot = {
       columns: this.terminal.columns,
       termRows: this.terminal.rows,
       headerHeight: paintedHeight(this.header),
-      welcomeHeight,
+      welcomeHeight: this.welcomeCard.lastRenderedHeight,
       footerHeight: paintedHeight(this.footer),
       editorHeight: paintedHeight(this.editorSeat),
       workingHeight: paintedHeight(this.working),
@@ -10792,7 +10831,7 @@ export class TuiApp {
         snapshot: now - snapshotStart,
         refresh: refreshEnd - refreshStart,
         remeasure: this.scrollFrameRemeasureMs,
-        hits: hitsEnd - hitsStart,
+        hits: hitsEnd - refreshEnd,
         bytes: this.scrollFrameBytes,
         rowsRewritten: this.scrollFrameRowsRewritten,
         blocks: this.mountedTranscriptBlocks.length,
@@ -14388,7 +14427,14 @@ export class TuiApp {
             block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
             this.imageLoader!,
             this.imageTheme!,
-            () => this.requestRender(),
+            // An async settle invalidates ONLY the thumbnail component: the
+            // resolved bytes can change the attachment's rendered height, so
+            // the next paint-snapshot commit must remeasure instead of
+            // reusing the committed row geometry (geometry epoch).
+            () => {
+              this.fullscreenRowsDirty = true
+              this.requestRender()
+            },
             this.occurrenceCollapsedRef(message, imageIndex),
           )
           this.thumbnailOccurrence.set(thumbnail, imageIndex)
