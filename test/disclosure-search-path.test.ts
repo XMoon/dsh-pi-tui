@@ -74,6 +74,22 @@ function targetFor(message: TranscriptMessage, query: string) {
   }
 }
 
+/** A search target whose semantic source is one delivered file (so the reveal
+ * necessity can be judged against the folded limit). */
+function deliverableTarget(message: TranscriptMessage, query: string, index: number) {
+  return {
+    query,
+    match: {
+      id: 0,
+      turn: 'turn' in message ? message.turn : 0,
+      occurrence: 0,
+      source: { kind: 'assistant-deliverable' as const, index, field: 'path' as const },
+      sourceOccurrence: 0,
+    },
+    message,
+  }
+}
+
 function click(vt: VirtualTerminal, x: number, y: number): void {
   vt.sendInput(`\x1b[<0;${x};${y}M`)
   vt.sendInput(`\x1b[<0;${x};${y}m`)
@@ -438,8 +454,7 @@ test('a visible local shell card override is collapsed by the first regular Ctrl
   assert.ok(!collapsed.includes('shell line 0'), `the local card folds:\n${collapsed}`)
 })
 
-function deliveredFilesTurn(): { messages: TranscriptMessage[]; assistant: TranscriptMessage } {
-  const deliverables = Array.from({ length: 5 }, (_, index) => ({
+function deliveredFilesTurn(): { messages: TranscriptMessage[]; assistant: TranscriptMessage } {  const deliverables = Array.from({ length: 5 }, (_, index) => ({
     path: `src/file-${index + 1}.ts`,
     description: `file ${index + 1}`,
   }))
@@ -452,7 +467,7 @@ test('a search-revealed delivered-files tail is collapsed by the first regular C
   const { messages, assistant } = deliveredFilesTurn()
   app.setTranscript(messages, new Map())
   await viewport(vt)
-  app.setTranscriptSearchTarget(targetFor(assistant, 'file-5'))
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-5', 4))
   assert.ok((await viewport(vt)).includes('src/file-5.ts'), 'precondition: the reveal expands the capped tail')
   vt.sendInput('\x0f')
   await viewport(vt)
@@ -465,14 +480,14 @@ test('an ordinary dismiss promotes the delivered-files disclosure on a master-ow
   const { messages, assistant } = deliveredFilesTurn()
   app.setTranscript(messages, new Map())
   await viewport(vt)
-  app.setTranscriptSearchTarget(targetFor(assistant, 'file-5'))
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-5', 4))
   await viewport(vt)
   app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
   const promoted = await viewport(vt)
   assert.ok(promoted.includes('src/file-5.ts'), `the promoted tail stays expanded:\n${promoted}`)
 })
 
-test('a regular Ctrl+O master never leaks into fullscreen Focus for delivered files', async () => {
+test('fullscreen Focus fails delivered files open instead of inheriting the regular master', async () => {
   const { vt, app } = startApp('focus')
   const { messages } = deliveredFilesTurn()
   app.setTranscript(messages, new Map([[1, activity(1)]]))
@@ -481,9 +496,10 @@ test('a regular Ctrl+O master never leaks into fullscreen Focus for delivered fi
 
   app.setFocusMode(true)
   app.setFullscreen(true)
+  app.expandFocusTurn(1)
   const fullscreen = await viewport(vt)
-  assert.ok(!fullscreen.includes('src/file-5.ts'),
-    `fullscreen Focus must not inherit the regular master expansion:\n${fullscreen}`)
+  assert.ok(fullscreen.includes('src/file-5.ts'),
+    `fullscreen Focus has no delivered-files owner, so the tail must fail open:\n${fullscreen}`)
 })
 
 test('a regular Focus manual root does not wedge Ctrl+O on a delivered-files reveal', async () => {
@@ -493,7 +509,7 @@ test('a regular Focus manual root does not wedge Ctrl+O on a delivered-files rev
   await viewport(vt)
   app.toggleFocusTurn(1)
   await viewport(vt)
-  app.setTranscriptSearchTarget(targetFor(assistant, 'file-5'))
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-5', 4))
   assert.ok((await viewport(vt)).includes('src/file-5.ts'), 'precondition: the reveal expands the capped tail')
 
   vt.sendInput('\x0f')
@@ -511,7 +527,7 @@ test('a search-revealed delivered-files tail is collapsed by the first fullscree
   app.setTranscript(messages, new Map())
   app.setFullscreen(true)
   await viewport(vt)
-  app.setTranscriptSearchTarget(targetFor(assistant, 'file-5'))
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-5', 4))
   assert.ok((await viewport(vt)).includes('src/file-5.ts'), 'precondition: the reveal expands the capped tail')
   vt.sendInput('\x0f')
   await viewport(vt)
@@ -525,7 +541,7 @@ test('a promoted delivered-files override is cleared by fullscreen Full Ctrl+O',
   app.setTranscript(messages, new Map())
   app.setFullscreen(true)
   await viewport(vt)
-  app.setTranscriptSearchTarget(targetFor(assistant, 'file-5'))
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-5', 4))
   await viewport(vt)
   app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
   await viewport(vt)
@@ -536,6 +552,64 @@ test('a promoted delivered-files override is cleared by fullscreen Full Ctrl+O',
   assert.equal(app.isTranscriptDetailExpanded(), false)
   assert.notEqual(overrides.get(assistant), true, 'the promoted override is cleared')
   assert.ok(!collapsed.includes('src/file-5.ts'), `the tail collapses:\n${collapsed}`)
+})
+
+test('fullscreen Compact fails delivered files open (no operable owner)', async () => {
+  const { vt, app } = startApp('compact')
+  const { messages } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  app.setFullscreen(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('src/file-5.ts'), `delivered files have no fullscreen owner, so they must fail open:\n${view}`)
+})
+
+test('fullscreen Focus fails delivered files open (no operable owner)', async () => {
+  const { vt, app } = startApp('focus')
+  const { messages } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map([[1, activity(1)]]))
+  app.setFullscreen(true)
+  app.expandFocusTurn(1)
+  const view = await viewport(vt)
+  assert.ok(view.includes('src/file-5.ts'), `delivered files have no fullscreen owner, so they must fail open:\n${view}`)
+})
+
+test('fullscreen Full fails delivered files open when the expand key is disabled', async () => {
+  const { vt, app } = startApp('full')
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': false }))
+  const { messages } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  app.setFullscreen(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('src/file-5.ts'), `a disabled key leaves no owner, so the tail must fail open:\n${view}`)
+})
+
+test('a search dismiss on a fail-open card mints no override', async () => {
+  const { vt, app } = startApp('compact')
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': false }))
+  const tool: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'RESULT_MARKER', status: 'ok' }
+  app.setTranscript([{ kind: 'user', turn: 1, text: 'go' }, tool], new Map())
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(tool, 'RESULT_MARKER'))
+  await viewport(vt)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  assert.notEqual(overrides.get(tool), true, 'a fail-open card hides nothing, so search must not mint an override')
+})
+
+test('searching an already-visible delivered file does not expand the tail', async () => {
+  const { vt, app } = startApp('compact')
+  const { messages, assistant } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  await viewport(vt)
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-1', 0))
+  const view = await viewport(vt)
+  assert.ok(view.includes('src/file-1.ts'), 'the matched visible file is present')
+  assert.ok(!view.includes('src/file-5.ts'), `a visible match must not expand the hidden tail:\n${view}`)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  assert.notEqual(overrides.get(assistant), true, 'dismiss must not mint an override for an already-visible file')
 })
 
 test('a cluster reveal promotes the cluster owner on an ordinary dismiss', async () => {
