@@ -7317,10 +7317,11 @@ export class TuiApp {
   private toggleTranscriptWorkSpans(): void {
     const spans = this.eligibleWorkSpans()
     const open = spans.filter(span => this.workSpanExpanded(span))
-    // Under Compact, Ctrl+O owns the Work spans ONLY, in ONE
-    // mutation/rebuild/viewport pass. No other fold advertises this key: a
-    // non-Work row that has no operable owner is presented in full by the
-    // disclosure capability, so nothing here can leave a dead hint behind.
+    // Fullscreen Compact: Ctrl+O owns the Work spans ONLY, in ONE
+    // mutation/rebuild/viewport pass. Regular Compact flows through the common
+    // transcript-detail master instead. No other fullscreen-Compact fold
+    // advertises this key: a row that has no operable owner is presented in
+    // full by the disclosure capability, so nothing here leaves a dead hint.
     if (open.length > 0) {
       this.mutateTranscriptDisclosure(() => {
         for (const span of open) this.expandedWorkOwners.delete(span.owner)
@@ -7983,12 +7984,12 @@ export class TuiApp {
     const projectionExpanded = this.focusProjectionExpandedTurns()
     for (const span of this.canonicalStructureIndex().workSpans) {
       if (!this.workOwnerMaterialized(span.owner, projectionExpanded)) continue
-      // Count only Works the master can actually CLOSE: a manual owner or a
-      // search-only reveal. A Work opened solely because its Focus root is
-      // manually expanded is part of the root's full reveal (plan §21) and the
-      // master must not treat it as its own closable disclosure — otherwise the
-      // collapse branch stays armed forever and Ctrl+O can never turn ON.
-      if (this.expandedWorkOwners.has(span.owner) || this.workSpanRevealedBySearch(span)) return true
+      // Count only owners that CONTRIBUTE to the current effective disclosure:
+      // a search-only reveal is always closable, and a manual owner only while
+      // it is not already covered by an ancestor full reveal (regular Focus
+      // root, plan §21). A latent manual owner changes nothing on screen, so it
+      // must not arm the collapse branch.
+      if (this.workSpanRevealedBySearch(span) || this.workManualOwnerContributes(span)) return true
     }
     if (!this.contextClusterDefaultExpanded()) {
       for (const cluster of new Set(this.canonicalStructureIndex().clusterByMember.values())) {
@@ -8005,9 +8006,35 @@ export class TuiApp {
       if (this.surfacedInteractionFailsOpen(message)) continue
       if (!isFoldableMessageDisclosure(message)) continue
       if (!this.messageRowMaterialized(message, projectionExpanded)) continue
+      if (!this.messageOverrideContributes(message)) continue
       return true
     }
     return false
+  }
+
+  /** Whether one Work's MANUAL owner still contributes to the current effective
+   * presentation. A manual owner whose Work is already open through an ancestor
+   * full reveal (regular Focus root, plan §21) is latent: removing it changes
+   * nothing, so it must not consume a Ctrl+O press. */
+  private workManualOwnerContributes(span: TranscriptWorkSpan): boolean {
+    if (!this.expandedWorkOwners.has(span.owner)) return false
+    if (this.fullscreen === undefined && isFocusDisplayPreset(this.displayState.preset)
+      && this.focusProjectionExpandedTurnsBase().has(span.turn)) return false
+    return true
+  }
+
+  /** Whether one per-card override still contributes to the current effective
+   * disclosure. On the regular surface an OPEN Work run and an expanded Focus
+   * root already full-reveal their non-Thinking process, so a descendant
+   * override is latent; fullscreen keeps the per-card override as the real
+   * owner. */
+  private messageOverrideContributes(message: TranscriptMessage): boolean {
+    if (this.fullscreen !== undefined) return true
+    if (this.openWorkRunMembers.has(message)) return false
+    if (isFocusDisplayPreset(this.displayState.preset) && 'turn' in message
+      && isFocusSecondaryDisclosure(message)
+      && this.focusProjectionExpandedTurnsBase().has(message.turn)) return false
+    return true
   }
 
   /**
@@ -8060,7 +8087,12 @@ export class TuiApp {
     const projectionExpanded = this.focusProjectionExpandedTurns()
     const revokesReveal = this.regularMasterCollapseRevokesReveal()
     for (const owner of [...this.expandedWorkOwners]) {
-      if (this.workOwnerMaterialized(owner, projectionExpanded)) this.expandedWorkOwners.delete(owner)
+      if (!this.workOwnerMaterialized(owner, projectionExpanded)) continue
+      const span = this.canonicalStructureIndex().workByMember.get(owner)
+      // Keep a latent manual owner parked: an ancestor full reveal already owns
+      // the Work, so clearing it would change nothing on screen.
+      if (span !== undefined && !this.workManualOwnerContributes(span)) continue
+      this.expandedWorkOwners.delete(owner)
     }
     for (const owner of [...this.expandedContextClusterOwners]) {
       if (this.clusterOwnerMaterialized(owner)) this.expandedContextClusterOwners.delete(owner)
@@ -8074,6 +8106,7 @@ export class TuiApp {
       if (this.surfacedInteractionFailsOpen(message)) continue
       if (!isFoldableMessageDisclosure(message)) continue
       if (!this.messageRowMaterialized(message, projectionExpanded)) continue
+      if (!this.messageOverrideContributes(message)) continue
       this.expandedOverride.delete(message)
     }
     if (revokesReveal) this.suppressSearchReveal()
@@ -8834,7 +8867,7 @@ export class TuiApp {
 
   /**
    * Present one canonical ambient cluster by surface capability: a FLAT
-   * member sequence where no manual cluster owner exists (regular), otherwise
+   * member sequence where the surface has no operable cluster owner, otherwise
    * the header block plus its members when open. Both Full and Focus consume
    * this, so cluster presentation is never re-derived per preset.
    */
@@ -13640,10 +13673,10 @@ export class TuiApp {
     if (message.kind === 'thinking') {
       return this.effectiveThinkingExpanded(message)
     }
-    // The capability decides BEFORE any renderer builds a folded view: on
-    // regular Compact every non-Work fold is presented in full, so no hidden
-    // count, marker or search geometry is ever produced for a key that cannot
-    // operate it.
+    // The capability decides BEFORE any renderer builds a folded view: a
+    // surface with no operable disclosure action (regular without an effective
+    // expand key) presents every fold in full, so no hidden count, marker or
+    // search geometry is ever produced for a key that cannot operate it.
     if (!this.messageFoldDisclosureAvailable()) return true
     // A settled surfaced-interaction card is NOT a Thought-owned secondary:
     // regular Focus has no card owner independent of the Focus root, so it
@@ -17231,11 +17264,11 @@ export class TuiApp {
    * message-fold capability is checked FIRST, so a surface that presents the
    * fold in full (regular Compact) has no long-user affordance at all. */
   private userDisclosureAffordanceAvailable(): boolean {
-    // The message-fold capability is the ONE authority. Regular Compact presents
-    // every non-Work fold in full, so no long-user disclosure exists there —
-    // however many physical keys happen to be bound (Ctrl+O belongs to the Work
-    // spans). Without this the search grant would mint a disclosure owner that
-    // the surface never had.
+    // The message-fold capability is the ONE authority: a surface without an
+    // operable expand action presents every fold in full, so no long-user
+    // disclosure exists there however many physical keys happen to be bound.
+    // Without this the search grant would mint a disclosure owner that the
+    // surface never had.
     if (!this.messageFoldDisclosureAvailable()) return false
     return this.fullscreen !== undefined || this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
   }
