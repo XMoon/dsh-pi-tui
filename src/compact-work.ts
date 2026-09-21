@@ -18,7 +18,7 @@
  */
 
 import { truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
-import type { CompactWorkSpan } from './compact-projection.ts'
+import type { TranscriptWorkSpan } from './transcript-projection.ts'
 import { compactSlotLine, compactThinkSlotLine } from './focus-activity.ts'
 import { iconLead, sectionDisclosureSemantic, type IconStyle } from './icons.ts'
 import { color } from './theme.ts'
@@ -43,7 +43,7 @@ export interface CompactWorkSummary {
  * the Tool slot. `llm-retry` process rows contribute neither count.
  * @param span - the presentation-only Work span.
  */
-export function summarizeWorkSpan(span: CompactWorkSpan): CompactWorkSummary {
+export function summarizeWorkSpan(span: TranscriptWorkSpan): CompactWorkSummary {
   let toolCount = 0
   let subagentCount = 0
   let think: CompactWorkSummary['think']
@@ -138,7 +138,7 @@ export class CompactWorkComponent implements Component {
   private readonly iconStyle: IconStyle
 
   constructor(options: {
-    span: CompactWorkSpan
+    span: TranscriptWorkSpan
     expanded: boolean
     summary?: CompactWorkSummary
     toolDisplay?: string

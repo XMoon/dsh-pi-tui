@@ -60,7 +60,7 @@ export function isDisplayPresetAvailable(preset: DisplayPreset): boolean {
 
 /** Whether a preset enables the model-facing Focus behavioral policy. */
 export function isFocusDisplayPreset(preset: DisplayPreset): boolean {
-  return preset === 'focus'
+  return displayPolicyFor(preset).focusBehavior
 }
 
 /** The layered disclosure contract every preset projection consumes. */
