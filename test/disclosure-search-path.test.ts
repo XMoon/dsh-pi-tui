@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import type { TurnActivity, TranscriptMessage } from '../src/transcript.ts'
+import { windowMessages } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import type { DisplayState } from '../src/display-preset.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
@@ -141,6 +142,99 @@ test('an explicit Work collapse under search revokes the temporary reveal', asyn
   const collapsed = await viewport(vt)
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'a reveal-only Work collapse writes no manual owner')
   assert.ok(!collapsed.includes('▾ Work'), `the collapsed Work stays collapsed (no instant reopen):\n${collapsed}`)
+})
+
+test('a manual-open Work collapses under an active search without reopening', async () => {
+  const { vt, app } = startApp('focus')
+  const { messages, activities, owner, tool } = fixture()
+  app.setTranscript(messages, activities)
+  app.setFullscreen(true)
+  await viewport(vt)
+  app.toggleFocusTurn(1)
+  await viewport(vt)
+  app.toggleWorkSpan(owner)
+  assert.ok((await viewport(vt)).includes('▾ Work'), 'precondition: the Work is manually open')
+  // The target lives INSIDE the Work, but the reveal path omits an already-open
+  // Work — the explicit collapse must still revoke the grant by ancestry.
+  app.setTranscriptSearchTarget(targetFor(tool, 'READ_RESULT_MARKER'))
+  await viewport(vt)
+  app.toggleWorkSpan(owner)
+  const collapsed = await viewport(vt)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0)
+  assert.ok(!collapsed.includes('▾ Work'), `the manual-open Work must stay collapsed under search:\n${collapsed}`)
+})
+
+test('a manual-open cluster collapses under an active search without reopening', async () => {
+  const { vt, app } = startApp('compact')
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'instructions body', label: 'AGENTS.md', context: true,
+    contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+  }
+  const second: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'CLUSTER_MEMBER_MARKER', label: 'skill-catalog', context: true,
+    contextPresentation: { form: 'catalog', sourceKind: 'plugin', role: 'inject' },
+  }
+  app.setTranscript([first, second], new Map())
+  await viewport(vt)
+  app.toggleContextCluster(first)
+  assert.ok((await viewport(vt)).includes('▾'), 'precondition: the cluster is manually open')
+  app.setTranscriptSearchTarget(targetFor(second, 'CLUSTER_MEMBER_MARKER'))
+  await viewport(vt)
+  app.toggleContextCluster(first)
+  const collapsed = await viewport(vt)
+  assert.equal(app.expandedContextClusterOwnersForTest().size, 0)
+  assert.ok(!collapsed.includes('▾'), `the manual-open cluster must stay collapsed under search:\n${collapsed}`)
+})
+
+test('regular Ctrl+O collapses a search-only-open Work instead of turning the master on', async () => {
+  const { vt, app } = startApp('compact')
+  const { messages, activities, tool } = fixture()
+  app.setTranscript(messages, activities)
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(tool, 'READ_RESULT_MARKER'))
+  assert.ok((await viewport(vt)).includes('▾ Work'), 'precondition: search temporarily opened the collapsed Work')
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'Ctrl+O must collapse/revoke, not turn the master on')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the reveal-only Work writes no manual owner')
+  assert.ok(!(await viewport(vt)).includes('▾ Work'), 'the search-only Work collapses and its reveal is revoked')
+})
+
+test('a Work owner parked behind a collapsed Focus root does not consume the first Ctrl+O', async () => {
+  const { vt, app } = startApp('compact')
+  const { messages, activities, owner } = fixture()
+  app.setTranscript(messages, activities)
+  await viewport(vt)
+  app.toggleWorkSpan(owner)
+  await viewport(vt)
+  assert.equal(app.expandedWorkOwnersForTest().has(owner), true, 'precondition: the Compact Work is manually open')
+  app.setDisplayPreset('focus')
+  await viewport(vt)
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), true,
+    'the first Ctrl+O must expand the recent Thought, not clear an invisible owner')
+})
+
+test('a windowed-away per-card override does not consume the current Ctrl+O', async () => {
+  const { vt, app } = startApp('focus')
+  const tool1: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'r1', status: 'ok' }
+  const tool2: TranscriptMessage = { kind: 'tool', turn: 2, name: 'read', args: '{}', result: 'r2', status: 'ok' }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 1, text: 'go1' }, tool1, { kind: 'assistant', turn: 1, text: 'f1' },
+    { kind: 'user', turn: 2, text: 'go2' }, tool2, { kind: 'assistant', turn: 2, text: 'f2' },
+  ]
+  const activities = new Map([[1, activity(1)], [2, activity(2)]])
+  app.setTranscript(messages, activities)
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  overrides.set(tool1, true)
+  app.setTranscript(windowMessages(messages, 1), activities)
+  await viewport(vt)
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the windowed-away override must not consume the press')
+  assert.equal(overrides.get(tool1), true, 'the parked override is preserved (manual state may survive a window)')
 })
 
 test('an explicit Focus root collapse returns its nested Work to the compact default', async () => {
