@@ -7186,11 +7186,10 @@ export class TuiApp {
   private toggleCompactWorkSpans(): void {
     const spans = this.eligibleWorkSpans()
     const open = spans.filter(span => this.workSpanExpanded(span))
-    // ONE action owns the whole "recent detail" family under Compact: the Work
-    // spans AND the generic fold master that the rendered Context rows advertise
-    // through their `(ctrl+o to expand)` hint. Toggling only the spans would
-    // leave that hint dead (the key would collapse the Work span instead), so
-    // both move together in ONE mutation/rebuild/viewport pass.
+    // Under Compact, Ctrl+O owns the Work spans ONLY, in ONE
+    // mutation/rebuild/viewport pass. No other fold advertises this key: a
+    // non-Work row that has no operable owner is presented in full by the
+    // disclosure capability, so nothing here can leave a dead hint behind.
     if (open.length > 0) {
       this.mutateTranscriptDisclosure(() => {
         for (const span of open) this.compactExpandedWorkOwners.delete(span.owner)
@@ -7369,9 +7368,9 @@ export class TuiApp {
         }
         this.searchRevealHostOwned = !isUserMessageDisclosureCandidate(next.message)
           || this.isHostUserDisclosure(next.message)
-        this.searchRevealAffordance = this.fullscreen !== undefined
-          ? 'fullscreen'
-          : this.keybindings.keyHint('app.transcript.toggleExpand') !== '' ? 'key' : 'none'
+        this.searchRevealAffordance = !this.userDisclosureAffordanceAvailable()
+          ? 'none'
+          : this.fullscreen !== undefined ? 'fullscreen' : 'key'
         // A new navigation re-opens every PTC sub-call the previous target's
         // reveal had covered.
         this.searchSuppressedSubCalls.clear()
@@ -7532,14 +7531,12 @@ export class TuiApp {
     if (!this.searchRevealGranted || this.searchTarget?.message !== message) return false
     if (!isUserMessageDisclosureCandidate(message)) return true
     if (!this.searchRevealHostOwned) return false
-    // The affordance latched at grant time must still be available: a
-    // key-based grant stops applying once the key is disabled, and a regular
-    // no-affordance grant never becomes a fullscreen click reveal later.
-    const affordanceAvailable = this.searchRevealAffordance === 'fullscreen'
-      ? this.fullscreen !== undefined || this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
-      : this.searchRevealAffordance === 'key'
-        ? this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
-        : false
+    // The affordance latched at grant time must still be available. The
+    // capability gates every kind (a surface that presents the fold in full has
+    // no long-user disclosure at all), and the LATCHED KIND still decides the
+    // rest: a key-based grant stops applying once the key is disabled and never
+    // becomes a fullscreen click reveal later.
+    const affordanceAvailable = this.userRevealAffordanceAvailable()
     return affordanceAvailable && this.userMessageCompactsAtCurrentWidth(message)
   }
 
@@ -8239,8 +8236,9 @@ export class TuiApp {
    * fold master (Ctrl+O). */
   private contextClusterExpanded(cluster: ContextCluster): boolean {
     // The semantic cluster exists on every preset/surface; only its PRESENTATION
-    // default is surface-dependent (regular has no manual cluster disclosure
-    // owner in F4, so its members are shown expanded rather than stranded).
+    // default is surface-dependent (the regular surface has no manual cluster
+    // disclosure owner in F4, so its members are shown flat rather than
+    // stranded behind a header nobody can open in regular Compact).
     return this.compactExpandedClusters.has(cluster.owner)
       || this.clusterRevealedBySearch(cluster)
       || this.contextClusterDefaultExpanded()
@@ -16423,7 +16421,30 @@ export class TuiApp {
    * surface. Fullscreen always does (the compact-marker click); regular needs
    * the effective `app.transcript.toggleExpand` key — compacting without one
    * would strand a full prompt collapsed with no way to open it. */
+  /**
+   * Whether the CURRENT search reveal's latched affordance is still usable.
+   * Separate from {@link userDisclosureAffordanceAvailable} because the grant
+   * kind matters: a `key` grant must not silently become a fullscreen click
+   * reveal after the key is disabled.
+   */
+  private userRevealAffordanceAvailable(): boolean {
+    if (!this.messageFoldDisclosureAvailable()) return false
+    if (this.searchRevealAffordance === 'fullscreen') {
+      return this.fullscreen !== undefined || this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
+    }
+    if (this.searchRevealAffordance === 'key') {
+      return this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
+    }
+    return false
+  }
+
   private userDisclosureAffordanceAvailable(): boolean {
+    // The message-fold capability is the ONE authority. Regular Compact presents
+    // every non-Work fold in full, so no long-user disclosure exists there —
+    // however many physical keys happen to be bound (Ctrl+O belongs to the Work
+    // spans). Without this the search grant would mint a disclosure owner that
+    // the surface never had.
+    if (!this.messageFoldDisclosureAvailable()) return false
     return this.fullscreen !== undefined || this.keybindings.keyHint('app.transcript.toggleExpand') !== ''
   }
 
