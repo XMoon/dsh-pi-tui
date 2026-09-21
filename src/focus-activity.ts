@@ -225,7 +225,7 @@ function compactSingleLine(text: string): string {
  * never wrap (the fullscreen row hit-map depends on that). The returned
  * string is one PHYSICAL terminal row: CR/LF are normalized before width
  * truncation; no caller-provided multiline text may escape. */
-function previewLine(label: string, text: string, width: number): string {
+export function compactSlotLine(label: string, text: string, width: number): string {
   const singleLine = compactSingleLine(text)
   const lead = `${label}${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth(label)))}`
   const bodyBudget = width - visibleWidth(lead)
@@ -234,10 +234,10 @@ function previewLine(label: string, text: string, width: number): string {
 }
 
 /** The RUNNING Think slot line: the same one-row geometry as
- * {@link previewLine}, but the reasoning body is windowed at its RIGHT edge
+ * {@link compactSlotLine}, but the reasoning body is windowed at its RIGHT edge
  * so the latest token stays visible (dsh-web running collapsed-reasoning
  * parity). The fixed `Think:` lead is never part of the scrollable body. */
-function previewThinkLine(text: string, width: number): string {
+export function compactThinkSlotLine(text: string, width: number): string {
   const singleLine = compactSingleLine(text)
   const lead = `Think:${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth('Think:')))}`
   const bodyBudget = width - visibleWidth(lead)
@@ -293,18 +293,18 @@ export function focusCollapsedBody(
     // later output — the preview reads from the start of its line. The gate
     // is the reasoning lifecycle fact, never `activity.completed`.
     lines.push(activity.think.running
-      ? previewThinkLine(activity.think.text, width)
-      : previewLine('Think:', activity.think.text, width))
+      ? compactThinkSlotLine(activity.think.text, width)
+      : compactSlotLine('Think:', activity.think.text, width))
   }
   if (preparingDisplay !== undefined) {
-    lines.push(previewLine('Tool:', preparingDisplay, width))
+    lines.push(compactSlotLine('Tool:', preparingDisplay, width))
   } else if (activity.tool !== undefined && toolDisplay !== undefined) {
     const prefix = activity.tool.status === 'ok' ? '✓ ' : activity.tool.status === 'error' ? '✗ ' : ''
     const active = activity.tool.activeSubCalls
     if (active !== undefined && active.length > 0) {
       lines.push(toolLineWithActive(prefix, toolDisplay, activity.tool.name, active, width))
     } else {
-      lines.push(previewLine('Tool:', `${prefix}${toolDisplay}`, width))
+      lines.push(compactSlotLine('Tool:', `${prefix}${toolDisplay}`, width))
     }
   }
   if (activity.message !== undefined) {
@@ -312,7 +312,7 @@ export function focusCollapsedBody(
   }
   const reason = activity.reason
   if (reason?.kind === 'error' && reason.error !== undefined) {
-    lines.push(previewLine('Error:', displayFailureText(reason.error), width))
+    lines.push(compactSlotLine('Error:', displayFailureText(reason.error), width))
   }
   return lines
 }
@@ -348,10 +348,10 @@ function toolLineWithActive(
   const lead = `Tool:${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth('Tool:')))}`
   const bodyBudget = width - visibleWidth(lead)
   const full = `${prefix}${toolDisplay} · ${suffix}`
-  if (bodyBudget > 0 && visibleWidth(full) <= bodyBudget) return previewLine('Tool:', full, width)
+  if (bodyBudget > 0 && visibleWidth(full) <= bodyBudget) return compactSlotLine('Tool:', full, width)
   const degraded = `${prefix}${toolTitle(rootName)} · ${suffix}`
-  if (bodyBudget > 0 && visibleWidth(degraded) <= bodyBudget) return previewLine('Tool:', degraded, width)
-  return previewLine('Tool:', `${prefix}${toolTitle(rootName)}`, width)
+  if (bodyBudget > 0 && visibleWidth(degraded) <= bodyBudget) return compactSlotLine('Tool:', degraded, width)
+  return compactSlotLine('Tool:', `${prefix}${toolTitle(rootName)}`, width)
 }
 
 
@@ -639,22 +639,34 @@ function leadingInjectedContextPrefixEnd(group: readonly TranscriptMessage[]): n
 }
 
 /** The Thought-lead boundary of one turn group: the index AFTER the
- * turn's FIRST unmarked user row. Rows before it (injected context)
- * and the initial user itself stay above the Thought; every later row
- * (same-turn steers included) returns to its chronological position. A turn
- * whose user rows are all marked same-turn steers has no opening human
- * prompt: the boundary falls back to the end of the LEADING injected-context
- * prefix, so an inject-woken turn keeps its foundation before the Thought
- * (never a scan of mid-process system rows, and never orchestration rows
- * like llm/retry). Without steer metadata, the first user remains the
- * initial-prompt fallback; consecutive users are queue/steer input, not a
- * multi-row initial prompt. */
+ * turn's FIRST unmarked user row AND the surfaced Context rows that
+ * immediately follow it. Rows before it (injected context) and the opening
+ * foundation (initial user plus its adjacent injected context) stay above the
+ * Thought; every later row (same-turn steers included) returns to its
+ * chronological position. A turn whose user rows are all marked same-turn
+ * steers has no opening human prompt: the boundary falls back to the end of
+ * the LEADING injected-context prefix, so an inject-woken turn keeps its
+ * foundation before the Thought (never a scan of mid-process system rows, and
+ * never orchestration rows like llm/retry). Without steer metadata, the first
+ * user remains the initial-prompt fallback; consecutive users are queue/steer
+ * input, not a multi-row initial prompt. */
 function thoughtLeadBoundary(group: readonly TranscriptMessage[]): number {
   const firstInitialUserIndex = group.findIndex(
     member => member.kind === 'user' && member.steer !== true,
   )
-  if (firstInitialUserIndex >= 0) return firstInitialUserIndex + 1
-  return leadingInjectedContextPrefixEnd(group)
+  let end = firstInitialUserIndex >= 0
+    ? firstInitialUserIndex + 1
+    : leadingInjectedContextPrefixEnd(group)
+  // The opening foundation continues through immediately-following surfaced
+  // Context rows (the provider's opening snapshot/catalog burst), so it never
+  // lands below the Thought. A later Context row separated by Process rows is
+  // mid-turn and keeps its chronological position.
+  while (true) {
+    const member = group[end]
+    if (member === undefined || !isSurfacedContext(member)) break
+    end += 1
+  }
+  return end
 }
 
 /** Whether one Assistant entry has semantic/finalized content or an explicit
