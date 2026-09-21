@@ -507,6 +507,39 @@ test('a regular Focus manual root does not wedge Ctrl+O on a delivered-files rev
   assert.equal(app.isTranscriptDetailExpanded(), true, 'press 2 must turn the master on (no wedge)')
 })
 
+test('a search-revealed delivered-files tail is collapsed by the first fullscreen Full Ctrl+O', async () => {
+  const { vt, app } = startApp('full')
+  const { messages, assistant } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  app.setFullscreen(true)
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(assistant, 'file-5'))
+  assert.ok((await viewport(vt)).includes('src/file-5.ts'), 'precondition: the reveal expands the capped tail')
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the reveal-only tail must be collapsed, not turn the master on')
+  assert.ok(!(await viewport(vt)).includes('src/file-5.ts'), 'the reveal is revoked')
+})
+
+test('a promoted delivered-files override is cleared by fullscreen Full Ctrl+O', async () => {
+  const { vt, app } = startApp('full')
+  const { messages, assistant } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  app.setFullscreen(true)
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(assistant, 'file-5'))
+  await viewport(vt)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  assert.equal(overrides.get(assistant), true, 'precondition: the dismiss promoted the override')
+  vt.sendInput('\x0f')
+  const collapsed = await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), false)
+  assert.notEqual(overrides.get(assistant), true, 'the promoted override is cleared')
+  assert.ok(!collapsed.includes('src/file-5.ts'), `the tail collapses:\n${collapsed}`)
+})
+
 test('a cluster reveal promotes the cluster owner on an ordinary dismiss', async () => {
   const { vt, app } = startApp('compact')
   const first: TranscriptMessage = {
