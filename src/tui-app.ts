@@ -7893,9 +7893,17 @@ export class TuiApp {
    * the mid-turn notice). */
   private messageRowMaterialized(message: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
     if (!this.messages.includes(message)) return false
-    const span = this.canonicalStructureIndex().workByMember.get(message)
+    const index = this.canonicalStructureIndex()
+    const span = index.workByMember.get(message)
     if (span !== undefined) {
       return this.workOwnerMaterialized(span.owner, projectionExpanded) && this.workSpanExpanded(span)
+    }
+    // A cluster member's own per-card disclosure is materialized only while its
+    // parent cluster is materialized AND effectively open: a parked override
+    // behind a collapsed cluster must not consume the master's first press.
+    const cluster = index.clusterByMember.get(message)
+    if (cluster !== undefined) {
+      return this.clusterOwnerMaterialized(cluster.owner) && this.contextClusterExpanded(cluster)
     }
     const policy = displayPolicyFor(this.displayState.preset)
     if (policy.focusBehavior && 'turn' in message) {
