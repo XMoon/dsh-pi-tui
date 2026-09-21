@@ -169,7 +169,7 @@ import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallb
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
 import { FocusActivityComponent, focusPreparingSummary, isCollapsedFocusHiddenRow, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
-import { projectCompact, type CompactWorkSpan } from './compact-projection.ts'
+import { isCompactWorkMember, projectCompact, type CompactWorkSpan } from './compact-projection.ts'
 import { CompactPendingWorkComponent, CompactWorkComponent, summarizeWorkSpan } from './compact-work.ts'
 import { ContextClusterComponent } from './context-cluster.ts'
 import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './context-presentation.ts'
@@ -6977,6 +6977,12 @@ export class TuiApp {
       : false
     const projectionExpanded = this.focusProjectionExpandedTurns()
     const blocks = this.transcriptBlocks(projectionExpanded)
+    // A page/window change is a new disclosure epoch: a Compact Work/cluster
+    // owner that the new window no longer projects must be dropped. Object
+    // identity alone can never expire it — `TranscriptFolder` returns the SAME
+    // TranscriptMessage object when a page is revisited, so A → B → A would
+    // otherwise resurrect the old expansion.
+    if (windowChanged) this.pruneCompactDisclosuresToWindow(blocks)
     const classifiedAt = this.transcriptRenderProfiler.mark(profileStart)
     const structural = !this.transcriptPresentationCommitted
       || activitiesChanged
@@ -8076,6 +8082,26 @@ export class TuiApp {
    * START of every rebuild, so local-card push/replace/clear paths prune
    * too (a replaced running card must not linger in the cache).
    */
+  /** Drop the Compact Work/cluster disclosure owners the CURRENT window no
+   * longer projects (the window-epoch reset). `TranscriptFolder` returns the
+   * same message objects when a page is revisited, so object identity can
+   * never expire a stale owner; the window change itself must. A search jump
+   * keeps the same window and therefore keeps its owners. */
+  private pruneCompactDisclosuresToWindow(blocks: readonly TranscriptRenderBlock[]): void {
+    const liveWork = new Set<TranscriptMessage>()
+    const liveClusters = new Set<TranscriptMessage>()
+    for (const block of blocks) {
+      if (block.kind === 'work') liveWork.add(block.span.owner)
+      if (block.kind === 'context-cluster') liveClusters.add(block.cluster.owner)
+    }
+    for (const owner of [...this.compactExpandedWorkOwners]) {
+      if (!liveWork.has(owner)) this.compactExpandedWorkOwners.delete(owner)
+    }
+    for (const owner of [...this.compactExpandedClusters]) {
+      if (!liveClusters.has(owner)) this.compactExpandedClusters.delete(owner)
+    }
+  }
+
   private pruneMessageComponents(
     projectionExpanded: ReadonlySet<number>,
     blocks: readonly TranscriptRenderBlock[] = this.projectedBlocks(projectionExpanded),
@@ -8097,9 +8123,11 @@ export class TuiApp {
     // The Compact Work / Context-cluster component caches follow the same
     // live-projection contract as the Focus activity cache: a span or cluster
     // that left the window (or a preset switch) must not retain a stale
-    // component. The disclosure SETS stay user-owned and may hold an owner
-    // that is currently windowed away (re-expanding after a search jump must
-    // restore the choice) — only the component caches are pruned.
+    // component. The Compact disclosure SETS are user-owned within one window
+    // epoch (a search jump keeps them), but a page/window change prunes every
+    // owner the new window no longer projects — see
+    // pruneCompactDisclosuresToWindow. Only the component caches are pruned
+    // here.
     if (this.compactWorkComponents.size > 0 || this.compactClusterComponents.size > 0) {
       const liveWork = new Set<TranscriptMessage>()
       const liveClusters = new Set<TranscriptMessage>()
@@ -8363,24 +8391,27 @@ export class TuiApp {
   }
 
   /** Find the presentation insertion point for one expanded Thought. The
-   * process rows carry the existing owner marker; the final assistant is held
-   * back by projectFocus, so a preview block lands after process content and
-   * before that final answer. A turn without a projected activity is ignored
-   * rather than attaching a preview to an unrelated Thought. */
+   * live preview is the NEWEST turn event, so it lands after every durable row
+   * of the turn — including a trailing persistent fence such as a settled
+   * surfaced-interaction card (the same boundary the Compact projection uses,
+   * so a live call never jumps back before it). projectFocus appends the
+   * held-back final assistant LAST, so the preview goes immediately before it.
+   * A turn without a projected activity is ignored rather than attaching a
+   * preview to an unrelated Thought. */
   private focusPreparingInsertionIndex(
     blocks: readonly TranscriptRenderBlock[],
     turn: number,
   ): number | undefined {
     let activityIndex = -1
     let lastTurnIndex = -1
-    let lastProcessIndex = -1
-    let finalAssistantIndex = -1
+    let lastTurnIsHeldBackFinal = false
     for (let index = 0; index < blocks.length; index += 1) {
       const block = blocks[index]!
       if (block.kind === 'activity') {
         if (block.activity.turn === turn) {
           activityIndex = index
           lastTurnIndex = index
+          lastTurnIsHeldBackFinal = false
         }
         continue
       }
@@ -8389,15 +8420,12 @@ export class TuiApp {
       if (block.kind === 'work' || block.kind === 'context-cluster') continue
       if (!('turn' in block.message) || block.message.turn !== turn) continue
       lastTurnIndex = index
-      if (block.collapseFocusOwnerOnClick === turn) lastProcessIndex = index
-      if (block.message.kind === 'assistant' && block.collapseFocusOwnerOnClick === undefined) {
-        finalAssistantIndex = index
-      }
+      lastTurnIsHeldBackFinal = block.message.kind === 'assistant' && block.collapseFocusOwnerOnClick === undefined
     }
     if (activityIndex === -1) return undefined
-    if (lastProcessIndex !== -1) return lastProcessIndex + 1
-    if (finalAssistantIndex !== -1) return finalAssistantIndex
-    return lastTurnIndex + 1
+    // The held-back final assistant is the LAST row projectFocus emits for the
+    // turn; insert before it. Otherwise insert after every durable row.
+    return lastTurnIsHeldBackFinal ? lastTurnIndex : lastTurnIndex + 1
   }
 
   /** Build the rendered transcript blocks in visual order. Focus keeps the
@@ -8452,16 +8480,22 @@ export class TuiApp {
 
   /** Whether one turn's contiguous Process run is still OPEN at the transcript
    * tail: the LAST turn-bearing message of the window belongs to that turn and
-   * is Process-classified. ONLY an open run may absorb a live Preparing call.
-   * A live Preparing call is a Process row that has not landed durably yet, so
-   * once an Assistant / Context / Attention boundary has been recorded, the
-   * call starts a NEW run: drawing it back into the previous Work span would
-   * cross a chronology boundary the Compact projection forbids. */
+   * is a Work MEMBER under the projection's own boundary authority
+   * ({@link isCompactWorkMember}). ONLY an open run may absorb a live Preparing
+   * call. A live Preparing call is a Process row that has not landed durably
+   * yet, so once an Assistant / Context / Attention boundary — OR a settled
+   * surfaced-interaction card — has been recorded, the call starts a NEW run:
+   * drawing it back into the previous Work span would cross a chronology
+   * boundary the Compact projection forbids. */
   private workRunOpenForTurn(turn: number): boolean {
     for (let index = this.messages.length - 1; index >= 0; index -= 1) {
       const message = this.messages[index]!
       if (!('turn' in message)) continue
-      return message.turn === turn && classifyTranscriptMessage(message).class === 'process'
+      // The run is open only while the trailing turn-bearing row is a Work
+      // MEMBER under the SAME boundary authority the projection uses: a
+      // settled surfaced-interaction card (question / Plan review) closes the
+      // run even though its base semantic class stays `process`.
+      return message.turn === turn && isCompactWorkMember(message)
     }
     return false
   }

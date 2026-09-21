@@ -74,8 +74,10 @@ function clusterExpanded(cluster: ContextCluster, options: CompactProjectionOpti
  * (window summaries) never enter Work. A settled surfaced-interaction card
  * (question / Plan review) is human-decision evidence, not Process work — it
  * never joins a span (and so never counts toward its tool count/preview); the
- * caller flushes the run and renders it standalone. */
-function isWorkMember(message: TranscriptMessage): message is TranscriptMessage & { turn: number } {
+ * caller flushes the run and renders it standalone. Exported so the live
+ * Preparing ownership consumes the SAME boundary authority as the projection:
+ * a settled interaction closes the trailing run. */
+export function isCompactWorkMember(message: TranscriptMessage): message is TranscriptMessage & { turn: number } {
   return 'turn' in message
     && classifyTranscriptMessage(message).class === 'process'
     && !isSurfacedInteractionTool(message)
@@ -138,7 +140,7 @@ export function projectCompact(
       out.push({ kind: 'message', message })
       continue
     }
-    if (isWorkMember(message)) {
+    if (isCompactWorkMember(message)) {
       if (run.length > 0 && runTurn !== message.turn) flush()
       run.push(message)
       runTurn = message.turn

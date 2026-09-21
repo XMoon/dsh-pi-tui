@@ -246,3 +246,88 @@ test('durableToolTurn fixture folds a tool row for the expanded-run path', () =>
   const messages = durableToolTurn(1, 'c1')
   assert.ok(messages.some(message => message.kind === 'tool'), 'the fixture yields a durable tool row')
 })
+
+// --- Surfaced-interaction boundary closes the trailing run ----------------
+
+/** A live turn: user, read tool, then a SETTLED surfaced-interaction card.
+ * The durable projection is `Work(read) | interaction`, so the interaction is
+ * a Work boundary and a following Preparing call must start a NEW run. */
+function interactionTurn(name: 'ask_user_question' | 'exit_plan_mode'): {
+  folder: TranscriptFolder
+  interactionMarker: string
+} {
+  const folder = new TranscriptFolder()
+  const args = name === 'ask_user_question'
+    ? JSON.stringify({ questions: [{ id: 'q', question: 'Go?' }] })
+    : JSON.stringify({ plan: '# Plan' })
+  const result = name === 'ask_user_question'
+    ? JSON.stringify({ answers: [{ id: 'q', selected: ['y'] }] })
+    : 'PLAN_APPROVED_MARKER'
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }, 1001, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1002, 2),
+    eventAt('tool/result', { turn: 1, step: 0, message: { id: MessageId('r1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId('c1') } } }, 1003, 3),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('q1'), name, arguments: args }, 1004, 4),
+    eventAt('tool/result', { turn: 1, step: 1, message: { id: MessageId('qr1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('q1'), content: [{ type: 'text', text: result }] }], source: { kind: 'tool', callId: ToolCallId('q1') } } }, 1005, 5),
+  ] as SessionEvent[])
+  return { folder, interactionMarker: name === 'ask_user_question' ? '1/1 answered' : 'PLAN_APPROVED_MARKER' }
+}
+
+for (const name of ['ask_user_question', 'exit_plan_mode'] as const) {
+  test(`a settled ${name} closes the trailing run: Preparing starts a NEW pending Work, never the prior span`, async () => {
+    const { folder, interactionMarker } = interactionTurn(name)
+    const previews = [preview('pB', { step: 2, summary: 'bash B' })]
+
+    // Compact collapsed: the durable projection is Work(read) | interaction, so
+    // the live call is a NEW pending Work AFTER the interaction — never the
+    // previous span's Tool slot.
+    {
+      const { vt, app } = startApp('compact')
+      app.setTranscript(folder.messages(), folder.turnActivities(), undefined, previews)
+      await vt.waitForRender()
+      const view = vt.getViewport().join('\n')
+      assert.equal(workHeaders(view).length, 2, `Work(read) + pending Work: the interaction closed the run:\n${view}`)
+      const interactionRow = view.split('\n').findIndex(line => line.includes(interactionMarker))
+      assert.ok(interactionRow >= 0, `the settled interaction renders:\n${view}`)
+      assert.ok(preparingRows(view).every(row => row > interactionRow),
+        `the live call follows the interaction, never the prior span:\n${view}`)
+      app.dispose()
+      startedApps.delete(app)
+    }
+
+    // Compact expanded: the preview must also follow the interaction, not be
+    // spliced back into the previous span's members.
+    {
+      const { vt, app } = startApp('compact')
+      app.setTranscript(folder.messages(), folder.turnActivities(), undefined, previews)
+      const owner = folder.messages().find(message => message.kind === 'thinking' || (message.kind === 'tool' && message.name === 'read'))
+      assert.ok(owner !== undefined)
+      app.toggleWorkSpan(owner)
+      await vt.waitForRender()
+      const view = vt.getViewport().join('\n')
+      const interactionRow = view.split('\n').findIndex(line => line.includes(interactionMarker))
+      assert.ok(interactionRow >= 0, `the settled interaction renders:\n${view}`)
+      assert.ok(preparingRows(view).every(row => row > interactionRow),
+        `the expanded prior span never absorbs the call past the interaction:\n${view}`)
+      app.dispose()
+      startedApps.delete(app)
+    }
+
+    // Focus expanded: the temporary preview lands at the process tail, after
+    // the persistent interaction fence.
+    {
+      const { vt, app } = startApp('focus')
+      app.setTranscript(folder.messages(), folder.turnActivities(), undefined, previews)
+      app.expandFocusTurn(1)
+      await vt.waitForRender()
+      const view = vt.getViewport().join('\n')
+      const interactionRow = view.split('\n').findIndex(line => line.includes(interactionMarker))
+      assert.ok(interactionRow >= 0, `the settled interaction renders in expanded Focus:\n${view}`)
+      assert.ok(preparingRows(view).every(row => row > interactionRow),
+        `expanded Focus keeps raw chronology: the call follows the interaction:\n${view}`)
+      app.dispose()
+      startedApps.delete(app)
+    }
+  })
+}
