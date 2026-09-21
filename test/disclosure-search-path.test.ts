@@ -631,6 +631,26 @@ test('a dismiss does not promote an already-expanded delivered tail', async () =
   assert.ok(!folded.includes('src/file-5.ts'), `the tail folds with the master (no ghost owner):\n${folded}`)
 })
 
+test('a dismiss does not promote an already-expanded long user prompt', async () => {
+  const { vt, app } = startApp('compact')
+  const prompt = Array.from({ length: 40 }, (_, index) => `long line ${index}`).join('\n')
+  const message: TranscriptMessage = { kind: 'user', turn: 1, text: prompt }
+  app.setTranscript([message], new Map())
+  app.setTranscriptDetailExpanded(true)
+  await viewport(vt)
+  assert.ok((await viewport(vt)).includes('long line 20'), 'precondition: the master already expanded the prompt')
+  app.setTranscriptSearchTarget(targetFor(message, 'long line 20'))
+  await viewport(vt)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  assert.notEqual(overrides.get(message), true,
+    'an already-expanded user prompt must not mint a durable override on dismiss')
+  app.setTranscriptDetailExpanded(false)
+  const folded = await viewport(vt)
+  assert.ok(!folded.includes('long line 20'), `the prompt folds with the master (no ghost owner):\n${folded}`)
+})
+
 test('a cluster reveal promotes the cluster owner on an ordinary dismiss', async () => {
   const { vt, app } = startApp('compact')
   const first: TranscriptMessage = {

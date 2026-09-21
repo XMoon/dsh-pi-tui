@@ -7693,7 +7693,10 @@ export class TuiApp {
       // rest: a key-based grant stops applying once the key is disabled and never
       // becomes a fullscreen click reveal later.
       const affordanceAvailable = this.userRevealAffordanceAvailable()
-      return affordanceAvailable && this.userMessageCompactsAtCurrentWidth(message)
+      if (!affordanceAvailable || !this.userMessageCompactsAtCurrentWidth(message)) return false
+      // A prompt the master already expanded is visible; revealing it again
+      // would only mint a redundant durable override on dismiss (plan §35).
+      return !this.messageExpandedIgnoringSearch(message)
     }
     return this.searchNeedsMessageDisclosureReveal(message)
   }
