@@ -369,6 +369,29 @@ test('a hidden mid-turn notice override does not consume the first Ctrl+O', asyn
   assert.equal(overrides.get(notice), true, 'the parked notice override is preserved')
 })
 
+test('regular Focus Ctrl+O keeps toggling after a search dismiss promotes a manual root and Work', async () => {
+  const { vt, app } = startApp('focus')
+  const { messages, activities, owner, tool } = fixture()
+  app.setTranscript(messages, activities)
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(tool, 'READ_RESULT_MARKER'))
+  await viewport(vt)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  assert.equal(app.focusExpandedTurnsForTest().has(1), true, 'precondition: the dismiss promoted the root')
+  assert.equal(app.expandedWorkOwnersForTest().has(owner), true, 'precondition: the dismiss promoted the Work')
+
+  // Press 1 collapses the master-owned Work (the manual root keeps its own full
+  // reveal); press 2 must turn the master ON instead of wedging on the
+  // root-derived Work that the master cannot close.
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), true,
+    'Ctrl+O must not wedge when a manual Focus root keeps its Work open')
+})
+
 test('a cluster reveal promotes the cluster owner on an ordinary dismiss', async () => {
   const { vt, app } = startApp('compact')
   const first: TranscriptMessage = {
