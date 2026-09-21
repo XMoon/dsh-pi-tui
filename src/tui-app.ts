@@ -8052,10 +8052,12 @@ export class TuiApp {
     const index = this.canonicalStructureIndex()
     const span = index.workByMember.get(target)
     if (span !== undefined) {
-      // A regular Focus root full reveal keeps the Work (and its members) open
-      // across the master collapse; every other Work opener is cleared here.
-      const rootKeepsOpen = this.fullscreen === undefined && isFocusDisplayPreset(this.displayState.preset)
-        && this.focusProjectionExpandedTurnsBase().has(span.turn)
+      // Only a MANUAL Focus root survives this collapse. A Ctrl+O-derived
+      // recent root is removed by the very transaction we are about to run, so
+      // treating it as a surviving owner would leave the reveal active and let
+      // search immediately reopen the Thought/Work the user just collapsed.
+      const rootKeepsOpen = isFocusDisplayPreset(this.displayState.preset)
+        && this.focusExpandedTurns.has(span.turn)
       return !rootKeepsOpen
     }
     if (index.clusterByMember.has(target)) return true
