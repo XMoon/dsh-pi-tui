@@ -7,6 +7,7 @@
 
 import { projectFocus, type FocusProjectedBlock } from '../../focus-activity.ts'
 import { projectCompact } from '../../compact-projection.ts'
+import type { TranscriptContainerPath } from '../../transcript-disclosure.ts'
 import type { DisplayPreset } from '../../display-preset.ts'
 import { TranscriptWindowController, type TranscriptWindowSnapshot } from '../../transcript-window.ts'
 import {
@@ -303,24 +304,60 @@ function normalizeActivity(activity: TurnActivity): unknown {
   }
 }
 
+/** Normalize one projected container ancestry for the Direct/Remote oracle.
+ * Owner identity is normalized through the SAME `normalizeValue` path on both
+ * sides, so a Work/cluster owner is compared structurally (never by object
+ * identity across the two independent readers). */
+function normalizeContainerPath(path: TranscriptContainerPath | undefined): unknown {
+  if (path === undefined) return undefined
+  return path.map(owner => owner.kind === 'focus-root'
+    ? { kind: 'focus-root', turn: owner.turn }
+    : { kind: owner.kind, owner: normalizeValue(owner.owner) })
+}
+
 function normalizeFocusBlock(block: FocusProjectedBlock): unknown {
   if (block.kind === 'activity') {
     return { kind: 'activity', activity: normalizeActivity(block.activity) }
+  }
+  if (block.kind === 'work') {
+    return {
+      kind: 'work',
+      turn: block.span.turn,
+      owner: normalizeValue(block.span.owner),
+      members: block.span.members.map(member => normalizeValue(member)),
+      focusOwnerTurn: block.focusOwnerTurn,
+      ...(block.containerPath === undefined ? {} : { containerPath: normalizeContainerPath(block.containerPath) }),
+    }
   }
   return {
     kind: 'message',
     message: normalizeValue(block.message),
     ...(block.truncated === undefined ? {} : { truncated: block.truncated }),
-    ...(block.collapseFocusOwnerOnClick === undefined ? {} : { collapseFocusOwnerOnClick: block.collapseFocusOwnerOnClick }),
+    ...(block.containerPath === undefined ? {} : { containerPath: normalizeContainerPath(block.containerPath) }),
   }
 }
 
 function normalizeCompactBlock(block: ReturnType<typeof projectCompact>[number]): unknown {
-  if (block.kind === 'message') return { kind: 'message', message: normalizeValue(block.message) }
-  if (block.kind === 'work') {
-    return { kind: 'work', turn: block.span.turn, members: block.span.members.map(member => normalizeValue(member)) }
+  if (block.kind === 'message') {
+    return {
+      kind: 'message',
+      message: normalizeValue(block.message),
+      ...(block.containerPath === undefined ? {} : { containerPath: normalizeContainerPath(block.containerPath) }),
+    }
   }
-  return { kind: 'context-cluster', members: block.cluster.members.map(member => normalizeValue(member)) }
+  if (block.kind === 'work') {
+    return {
+      kind: 'work',
+      turn: block.span.turn,
+      members: block.span.members.map(member => normalizeValue(member)),
+      ...(block.containerPath === undefined ? {} : { containerPath: normalizeContainerPath(block.containerPath) }),
+    }
+  }
+  return {
+    kind: 'context-cluster',
+    members: block.cluster.members.map(member => normalizeValue(member)),
+    ...(block.containerPath === undefined ? {} : { containerPath: normalizeContainerPath(block.containerPath) }),
+  }
 }
 
 function applyToFreshFolder(snapshot: PresentationReadSnapshot): TranscriptFolder {
