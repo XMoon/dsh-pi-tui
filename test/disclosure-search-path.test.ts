@@ -392,6 +392,35 @@ test('regular Focus Ctrl+O keeps toggling after a search dismiss promotes a manu
     'Ctrl+O must not wedge when a manual Focus root keeps its Work open')
 })
 
+test('a parked cluster-member override behind a collapsed cluster does not consume Ctrl+O', async () => {
+  const { vt, app } = startApp('compact')
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'instructions body', label: 'AGENTS.md', context: true,
+    contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+  }
+  const second: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'CLUSTER_MEMBER_MARKER', label: 'skill-catalog', context: true,
+    contextPresentation: { form: 'catalog', sourceKind: 'plugin', role: 'inject' },
+  }
+  app.setTranscript([first, second], new Map())
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(second, 'CLUSTER_MEMBER_MARKER'))
+  await viewport(vt)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  assert.equal(app.expandedContextClusterOwnersForTest().has(first), true, 'precondition: the dismiss promoted the cluster')
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  assert.equal(overrides.get(second), true, 'precondition: the dismiss promoted the member override')
+
+  app.toggleContextCluster(first)
+  await viewport(vt)
+  assert.equal(app.expandedContextClusterOwnersForTest().size, 0, 'precondition: the cluster is explicitly collapsed')
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the parked member override must not consume the first press')
+  assert.equal(overrides.get(second), true, 'the parked override is preserved (manual state survives)')
+})
+
 test('a cluster reveal promotes the cluster owner on an ordinary dismiss', async () => {
   const { vt, app } = startApp('compact')
   const first: TranscriptMessage = {
