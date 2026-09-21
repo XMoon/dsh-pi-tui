@@ -168,6 +168,7 @@ import {
 import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
+import { createScrollRenderProfiler } from './scroll-render-profile.ts'
 import { FocusActivityComponent, focusPreparingSummary, isCollapsedFocusHiddenRow, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
 import { projectCompact } from './compact-projection.ts'
 import { clusterByMemberOf, isTranscriptWorkMember, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
@@ -3755,6 +3756,17 @@ export class TuiApp {
     searchOwnerResolutions: 0,
   }
   private readonly transcriptRenderProfiler = createTranscriptRenderProfiler()
+  /** Opt-in scroll-frame profiler (`DSH_TUI_SCROLL_PROFILE=1`, diagnosis
+   * only). The mutable fields below accumulate one coalesced scroll frame;
+   * every write is gated by `enabled`, so the disabled path is one boolean
+   * check per stage. */
+  private readonly scrollProfiler = createScrollRenderProfiler()
+  private scrollFramePending = false
+  private scrollFrameStart = 0
+  private scrollFrameWriteMs = 0
+  private scrollFrameBytes = 0
+  private scrollFrameRowsRewritten = 0
+  private scrollFrameRemeasureMs = 0
   /** The Ctrl+R input-history panel, while one is open. */
   private historyPanel: HistoryPanel | undefined
   /** The overlay handle of the history panel (hide() closes it). */
@@ -4326,6 +4338,24 @@ export class TuiApp {
       },
     })
     this.terminal = resizeAware
+    // Scroll profiler (diagnostic, DSH_TUI_SCROLL_PROFILE=1): time write
+    // calls and count the per-frame rewrite volume on the SAME terminal
+    // instance both screens write through. Disabled builds never wrap.
+    if (this.scrollProfiler.enabled) {
+      const profiled = this.terminal as Terminal & { write: (data: string) => void }
+      const originalWrite = profiled.write.bind(profiled)
+      profiled.write = (data: string): void => {
+        const start = performance.now()
+        originalWrite(data)
+        this.scrollFrameWriteMs += performance.now() - start
+        this.scrollFrameBytes += data.length
+        let erases = 0
+        for (let index = 0; index < data.length; index += 1) {
+          if (data.charCodeAt(index) === 0x1b && data.startsWith('\x1b[2K', index)) erases += 1
+        }
+        this.scrollFrameRowsRewritten += erases
+      }
+    }
     this.events = events
     this.displayState = options.displayState ?? { preset: 'full' }
     this.iconStyle = options.iconStyle ?? 'emoji'
@@ -6734,6 +6764,24 @@ export class TuiApp {
         primary: true,
         scrollbar: 'auto',
       })
+      // Scroll profiler (diagnostic): a scroll request opens a frame window
+      // that closes at the next paint-snapshot commit, so coalesced frames
+      // emit exactly one line describing the frame the user actually saw.
+      if (this.scrollProfiler.enabled) {
+        const scrollView = this.fullscreenScroll
+        const originalScrollBy = scrollView.scrollBy.bind(scrollView)
+        scrollView.scrollBy = (lines: number): number => {
+          if (!this.scrollFramePending) {
+            this.scrollFramePending = true
+            this.scrollFrameStart = performance.now()
+            this.scrollFrameWriteMs = 0
+            this.scrollFrameBytes = 0
+            this.scrollFrameRowsRewritten = 0
+            this.scrollFrameRemeasureMs = 0
+          }
+          return originalScrollBy(lines)
+        }
+      }
       const root = new VStack([
         // The zero-row paint probe rides the layout root: every frame
         // re-stamps the geometry the screen is actually drawn at (the
@@ -10227,7 +10275,9 @@ export class TuiApp {
     // dispose the mounted live-assistant component and a paint rendered it as
     // zero rows (fullscreen Focus transient collapse).
     const projectionExpanded = this.focusProjectionExpandedTurns()
+    const remeasureStart = this.scrollProfiler.enabled ? performance.now() : 0
     const renderedBlocks = this.remeasureTranscriptBlocks(this.mountedTranscriptBlocks, width)
+    if (this.scrollProfiler.enabled) this.scrollFrameRemeasureMs += performance.now() - remeasureStart
     // Keep the MOUNTED highlight wrapper on the SAME geometry epoch as this
     // row map / scroll anchor: a stale selector would paint a strong occurrence
     // for geometry the viewport no longer uses.
@@ -10685,6 +10735,7 @@ export class TuiApp {
    * rebuilds would leave the map stale; the re-measure at this boundary
    * is the painted projection). The snapshot keeps STABLE values only. */
   private commitFullscreenPaintSnapshot(): void {
+    const snapshotStart = this.scrollProfiler.enabled ? performance.now() : 0
     const previousSnapshot = this.fullscreenPaintSnapshot
     const columns = this.terminal.columns
     const termRows = this.terminal.rows
@@ -10694,7 +10745,9 @@ export class TuiApp {
     }
     const scroll = this.fullscreenScroll
     const paintedHeight = (component: Component): number => this.fullscreen?.getPaintedBox(component)?.height ?? 0
+    const refreshStart = this.scrollProfiler.enabled ? performance.now() : 0
     this.refreshMessageRows()
+    const refreshEnd = this.scrollProfiler.enabled ? performance.now() : 0
     const welcomeHeight = this.welcomeCard.lastRenderedHeight
     // The painted rows whose copy source is presentation chrome, derived from
     // the SAME projection/height base as `rows` below (the last-painted
@@ -10707,6 +10760,13 @@ export class TuiApp {
       if (hit !== undefined && hit.action === 'collapse') copyBlankRows.add(rowTop + hit.row)
       rowTop += entry.height
     }
+    const hitsStart = this.scrollProfiler.enabled ? performance.now() : 0
+    const rows = this.messageRows.map((entry, index) => ({
+      ownerId: this.fullscreenRowOwnerId(entry, index),
+      height: entry.height,
+      hits: this.fullscreenRowHits(entry, index),
+    }))
+    const hitsEnd = this.scrollProfiler.enabled ? performance.now() : 0
     this.fullscreenPaintSnapshot = {
       columns: this.terminal.columns,
       termRows: this.terminal.rows,
@@ -10721,12 +10781,28 @@ export class TuiApp {
       dockHeight: paintedHeight(this.dock),
       scrollTop: scroll?.scrollTop ?? 0,
       viewportHeight: scroll?.viewportHeight ?? 0,
-      rows: this.messageRows.map((entry, index) => ({
-        ownerId: this.fullscreenRowOwnerId(entry, index),
-        height: entry.height,
-        hits: this.fullscreenRowHits(entry, index),
-      })),
+      rows,
       copyBlankRows,
+    }
+    if (this.scrollProfiler.enabled && this.scrollFramePending) {
+      const now = performance.now()
+      this.scrollProfiler.emit({
+        latency: now - this.scrollFrameStart,
+        write: this.scrollFrameWriteMs,
+        snapshot: now - snapshotStart,
+        refresh: refreshEnd - refreshStart,
+        remeasure: this.scrollFrameRemeasureMs,
+        hits: hitsEnd - hitsStart,
+        bytes: this.scrollFrameBytes,
+        rowsRewritten: this.scrollFrameRowsRewritten,
+        blocks: this.mountedTranscriptBlocks.length,
+        rows: this.messageRows.reduce((total, entry) => total + entry.height, 0),
+        viewport: scroll?.viewportHeight ?? 0,
+        scrollTop: scroll?.scrollTop ?? 0,
+        preset: this.displayPreset(),
+        searchActive: this.searchOverlay !== undefined,
+      })
+      this.scrollFramePending = false
     }
   }
 
