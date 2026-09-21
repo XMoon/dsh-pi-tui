@@ -23,17 +23,23 @@ function readString(record: Record<string, unknown>, key: string): string | null
   return typeof value === 'string' && value.length > 0 ? value : null
 }
 
-/** Distinct non-empty `field` values of an array-valued source member, in first-seen order. */
+/** Distinct non-empty `field` values of an array-valued source member, in first-seen order.
+ * The `seen` Set keeps a foreign/legacy log with a very large member array
+ * linear; an `includes()` scan here is an accidental O(n^2). */
 function collect(source: Record<string, unknown>, member: string, field: string): string[] {
   const list = source[member]
   if (!Array.isArray(list)) return []
-  const seen: string[] = []
+  const seen = new Set<string>()
+  const names: string[] = []
   for (const entry of list) {
     const record = asRecord(entry)
     const value = record === null ? null : readString(record, field)
-    if (value !== null && !seen.includes(value)) seen.push(value)
+    if (value !== null && !seen.has(value)) {
+      seen.add(value)
+      names.push(value)
+    }
   }
-  return seen
+  return names
 }
 
 /** A collected name list rendered as one label; null when the list is empty. */
