@@ -519,7 +519,7 @@ for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
 }
 
 // --- R2#1: Collapse All still closes the root under an interaction reveal ---
-test('R2#1 Ctrl+O Collapse All closes the root even while a settled interaction search reveal is active', async () => {
+test('R2#1 a visible settled interaction search does not open the root; Collapse All still revokes a process reveal', async () => {
   const { vt, app } = startApp('focus')
   const { folder, questionRow } = questionTurn()
   show(app, folder)
@@ -527,20 +527,36 @@ test('R2#1 Ctrl+O Collapse All closes the root even while a settled interaction 
   await vt.waitForRender()
   assert.ok(!vt.getViewport().join('\n').includes('🐳'), 'precondition: the root is collapsed')
 
+  // A settled interaction is surfaced OUTSIDE the Thought, so searching it needs
+  // no root reveal and must not promote one on dismiss.
   app.setTranscriptSearchTarget({
     query: 'q0',
     match: { id: 0, turn: TURN, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
     message: questionRow,
   })
   await vt.waitForRender()
-  assert.ok(vt.getViewport().join('\n').includes('🐳'),
-    `the reveal opens the owning root:\n${vt.getViewport().join('\n')}`)
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🐋') && !view.includes('🐳'),
+    `a visible settled card must not open the root:\n${view}`)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await vt.waitForRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a visible card promotes no root')
 
-  // The reveal is a TEMPORARY grant: the bulk Collapse All must revoke it and
-  // actually collapse the root (the card's own disclosure survives separately).
+  // A genuinely hidden process row DOES open the root, and the bulk Collapse All
+  // revokes that temporary reveal.
+  const tool = folder.messages().find(message => message.kind === 'tool')
+  assert.ok(tool !== undefined, 'fixture: the process tool exists')
+  app.setTranscriptSearchTarget({
+    query: 'ok',
+    match: { id: 0, turn: TURN, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: tool,
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🐳'), `a hidden process row must open the owning root:\n${view}`)
   vt.sendInput('\x0f')
   await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
+  view = vt.getViewport().join('\n')
   assert.ok(view.includes('🐋'), `Collapse All must collapse the root:\n${view}`)
   assert.ok(!view.includes('🐳'), `no expanded root may survive the bulk collapse:\n${view}`)
   assert.ok(view.includes('Question'), `the settled card stays surfaced:\n${view}`)

@@ -9,8 +9,10 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TurnActivity, TranscriptMessage } from '../src/transcript.ts'
-import { windowMessages } from '../src/transcript.ts'
+import { TranscriptFolder, windowMessages } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import type { DisplayState } from '../src/display-preset.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
@@ -454,12 +456,66 @@ test('a visible local shell card override is collapsed by the first regular Ctrl
   assert.ok(!collapsed.includes('shell line 0'), `the local card folds:\n${collapsed}`)
 })
 
-function deliveredFilesTurn(): { messages: TranscriptMessage[]; assistant: TranscriptMessage } {  const deliverables = Array.from({ length: 5 }, (_, index) => ({
+function deliveredFilesTurn(): { messages: TranscriptMessage[]; assistant: TranscriptMessage } {
+  const deliverables = Array.from({ length: 5 }, (_, index) => ({
     path: `src/file-${index + 1}.ts`,
     description: `file ${index + 1}`,
   }))
   const assistant: TranscriptMessage = { kind: 'assistant', turn: 1, text: 'done', deliverables }
   return { messages: [{ kind: 'user', turn: 1, text: 'go' }, assistant], assistant }
+}
+
+function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
+  return { type, seq, time, data } as SessionEvent
+}
+
+/** A real folded settled turn (so the final assistant is selected and emitted
+ * by the collapsed Focus projection) carrying five delivered files. */
+function settledTurnFixture(): {
+  messages: TranscriptMessage[]
+  activities: ReadonlyMap<number, TurnActivity>
+  user: TranscriptMessage
+  assistant: TranscriptMessage
+} {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'USER_PROMPT_MARKER' }],
+      source: { kind: 'user' },
+    }, 1001, 1),
+    eventAt('assistant/chunk', {
+      turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' },
+    }, 1002, 2),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'x' }),
+    }, 1003, 3),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'PROCESS_RESULT_MARKER' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, 1004, 4),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'FINAL_ANSWER_MARKER' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, 1005, 5),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, 1006, 6),
+  ])
+  const messages = folder.messages()
+  const user = messages.find(message => message.kind === 'user')
+  const assistant = messages.find(message => message.kind === 'assistant')
+  assert.ok(user !== undefined && assistant !== undefined && assistant.kind === 'assistant', 'fixture: folded turn')
+  ;(assistant as Extract<TranscriptMessage, { kind: 'assistant' }>).deliverables = Array.from({ length: 5 }, (_, index) => ({
+    path: `src/file-${index + 1}.ts`,
+    description: `file ${index + 1}`,
+  }))
+  return { messages, activities: folder.turnActivities(), user, assistant }
 }
 
 test('a search-revealed delivered-files tail is collapsed by the first regular Ctrl+O', async () => {
@@ -671,4 +727,80 @@ test('a cluster reveal promotes the cluster owner on an ordinary dismiss', async
   const promoted = await viewport(vt)
   assert.equal(app.expandedContextClusterOwnersForTest().has(first), true, 'the cluster owner is promoted')
   assert.ok(promoted.includes('CLUSTER_MEMBER_MARKER'), `the promoted cluster stays open:\n${promoted}`)
+})
+
+test('a disabled Ctrl+O still reveals a matched Thinking body (Alt+T owns it)', async () => {
+  const { vt, app } = startApp('compact')
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': false }))
+  const lines = [
+    'head',
+    'r1', 'r2', 'r3', 'r4',
+    'MID_REASONING_MARKER',
+    't1', 't2', 't3', 'tail',
+  ]
+  const thinking: TranscriptMessage = { kind: 'thinking', turn: 1, text: lines.join('\n') }
+  app.setTranscript([{ kind: 'user', turn: 1, text: 'go' }, thinking], new Map())
+  await viewport(vt)
+  assert.ok(!(await viewport(vt)).includes('MID_REASONING_MARKER'), 'precondition: compact Thinking hides the middle')
+  app.setTranscriptSearchTarget(targetFor(thinking, 'MID_REASONING_MARKER'))
+  const revealed = await viewport(vt)
+  assert.ok(revealed.includes('MID_REASONING_MARKER'),
+    `a disabled Ctrl+O must not block the Alt+T-owned Thinking reveal:\n${revealed}`)
+  assert.equal(app.isThinkingExpanded(), false, 'the reveal is temporary, never the bulk preference')
+})
+
+test('collapsed Focus + a visible user prompt search does not open or promote the Thought', async () => {
+  const { vt, app } = startApp('focus')
+  const { messages, activities, user } = settledTurnFixture()
+  app.setTranscript(messages, activities)
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(user, 'USER_PROMPT_MARKER'))
+  await viewport(vt)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a visible user prompt must not open the Thought')
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'dismiss must not promote the root')
+})
+
+test('collapsed Focus + a visible final answer search does not open or promote the Thought', async () => {
+  const { vt, app } = startApp('focus')
+  const { messages, activities, assistant } = settledTurnFixture()
+  app.setTranscript(messages, activities)
+  await viewport(vt)
+  assert.ok((await viewport(vt)).includes('FINAL_ANSWER_MARKER'), 'precondition: the final answer is visible')
+  app.setTranscriptSearchTarget(targetFor(assistant, 'FINAL_ANSWER_MARKER'))
+  await viewport(vt)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a visible final answer must not open the Thought')
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'dismiss must not promote the root')
+})
+
+test('fullscreen Focus + a fail-open delivered file search does not open or promote the Thought', async () => {
+  const { vt, app } = startApp('focus')
+  const { messages, activities, assistant } = settledTurnFixture()
+  app.setTranscript(messages, activities)
+  app.setFullscreen(true)
+  await viewport(vt)
+  assert.ok((await viewport(vt)).includes('src/file-5.ts'), 'precondition: the tail fails open and is visible')
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-5', 4))
+  await viewport(vt)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'an already-visible delivered file must not open the Thought')
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'dismiss must not promote the root')
+})
+
+test('collapsed Focus + a hidden process row search still opens the Thought', async () => {
+  const { vt, app } = startApp('focus')
+  const { messages, activities } = settledTurnFixture()
+  const tool = messages.find(message => message.kind === 'tool')
+  assert.ok(tool !== undefined, 'fixture: the process tool exists')
+  app.setTranscript(messages, activities)
+  await viewport(vt)
+  assert.ok(!(await viewport(vt)).includes('PROCESS_RESULT_MARKER'), 'precondition: collapsed Focus hides the process result')
+  app.setTranscriptSearchTarget(targetFor(tool, 'PROCESS_RESULT_MARKER'))
+  const revealed = await viewport(vt)
+  assert.ok(revealed.includes('PROCESS_RESULT_MARKER'),
+    `a genuinely hidden process row must still open its Thought:\n${revealed}`)
 })
