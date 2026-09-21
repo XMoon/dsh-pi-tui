@@ -488,6 +488,25 @@ test('a regular Ctrl+O master never leaks into fullscreen Focus for delivered fi
     `fullscreen Focus must not inherit the regular master expansion:\n${fullscreen}`)
 })
 
+test('a regular Focus manual root does not wedge Ctrl+O on a delivered-files reveal', async () => {
+  const { vt, app } = startApp('focus')
+  const { messages, assistant } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map([[1, activity(1)]]))
+  await viewport(vt)
+  app.toggleFocusTurn(1)
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(assistant, 'file-5'))
+  assert.ok((await viewport(vt)).includes('src/file-5.ts'), 'precondition: the reveal expands the capped tail')
+
+  vt.sendInput('\x0f')
+  const afterFirst = await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'press 1 collapses the reveal-owned tail')
+  assert.ok(!afterFirst.includes('src/file-5.ts'), `the reveal is revoked even with a manual root:\n${afterFirst}`)
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'press 2 must turn the master on (no wedge)')
+})
+
 test('a cluster reveal promotes the cluster owner on an ordinary dismiss', async () => {
   const { vt, app } = startApp('compact')
   const first: TranscriptMessage = {
