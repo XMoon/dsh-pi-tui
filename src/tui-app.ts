@@ -7213,16 +7213,19 @@ export class TuiApp {
   /** Toggle one Compact Work span's disclosure (header click / Ctrl+O bulk).
    * The transition reuses the viewport-safe disclosure transaction: a user
    * following the live tail keeps following it, a historical reader stays on
-   * the same semantic row. A span open ONLY because of the temporary search
-   * reveal collapses by REVOKING that reveal (never by writing a manual
-   * owner), exactly like the Focus root toggle. */
+   * the same semantic row. An explicit collapse REVOKES the temporary search
+   * reveal whenever the granted target lives INSIDE this owner — asking "is the
+   * target inside the collapsing container?", never "is the search what opened
+   * it?" (a manual-open container that the target also sits in would otherwise
+   * silently reopen on the next rebuild). */
   toggleWorkSpan(owner: TranscriptMessage): void {
     const span = this.eligibleWorkSpans().find(candidate => candidate.owner === owner)
     const revealed = span !== undefined && this.workSpanRevealedBySearch(span)
+    const revokesReveal = this.searchTargetInsideWork(owner)
     if (this.expandedWorkOwners.has(owner) || revealed) {
       this.mutateTranscriptDisclosure(() => {
         this.expandedWorkOwners.delete(owner)
-        if (revealed) this.suppressSearchReveal()
+        if (revealed || revokesReveal) this.suppressSearchReveal()
       })
       return
     }
@@ -7231,22 +7234,36 @@ export class TuiApp {
     })
   }
 
-  /** Toggle one ambient Context cluster's disclosure (header click). A
-   * cluster open only because of the temporary search reveal collapses by
-   * revoking that reveal. */
+  /** Toggle one ambient Context cluster's disclosure (header click). An
+   * explicit collapse revokes the temporary search reveal whenever the target
+   * lives inside this cluster (same ownership rule as Work). */
   toggleContextCluster(owner: TranscriptMessage): void {
     const cluster = this.canonicalStructureIndex().clusterByMember.get(owner)
     const revealed = cluster !== undefined && this.clusterRevealedBySearch(cluster)
+    const revokesReveal = this.searchTargetInsideCluster(owner)
     if (this.expandedContextClusterOwners.has(owner) || revealed) {
       this.mutateTranscriptDisclosure(() => {
         this.expandedContextClusterOwners.delete(owner)
-        if (revealed) this.suppressSearchReveal()
+        if (revealed || revokesReveal) this.suppressSearchReveal()
       })
       return
     }
     this.mutateTranscriptDisclosure(() => {
       this.expandedContextClusterOwners.add(owner)
     })
+  }
+
+  /** Whether the GRANTED search target is a member of this Work span (the
+   * explicit-collapse ownership question). */
+  private searchTargetInsideWork(owner: TranscriptMessage): boolean {
+    const target = this.searchRevealedMessage()
+    return target !== undefined && this.canonicalStructureIndex().workByMember.get(target)?.owner === owner
+  }
+
+  /** Whether the GRANTED search target is a member of this Context cluster. */
+  private searchTargetInsideCluster(owner: TranscriptMessage): boolean {
+    const target = this.searchRevealedMessage()
+    return target !== undefined && this.canonicalStructureIndex().clusterByMember.get(target)?.owner === owner
   }
 
   /** Canonical Work/cluster membership for the CURRENT window, memoized on
@@ -7845,17 +7862,81 @@ export class TuiApp {
     this.pendingUserExpanded.clear()
   }
 
+  /** Whether one Work owner is MATERIALIZED as a container on the current
+   * preset/window: Full keeps Work flat, and Focus only materializes it inside
+   * an expanded Thought. A long-term manual owner parked behind a collapsed
+   * root or a flat preset must never decide the current regular Ctrl+O press. */
+  private workOwnerMaterialized(owner: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
+    const policy = displayPolicyFor(this.displayState.preset)
+    if (policy.turnLayer === 'open' && policy.processLayer === 'collapsed') {
+      return this.canonicalStructureIndex().workByMember.get(owner)?.owner === owner
+    }
+    if (policy.focusBehavior) {
+      const span = this.canonicalStructureIndex().workByMember.get(owner)
+      return span !== undefined && projectionExpanded.has(span.turn)
+    }
+    return false
+  }
+
+  /** Whether one Context-cluster owner is MATERIALIZED (header-backed) on the
+   * current surface. A flat/fail-open surface hides nothing, so its clusters
+   * are never visible master-owned disclosures. */
+  private clusterOwnerMaterialized(owner: TranscriptMessage): boolean {
+    if (this.contextClusterDefaultExpanded()) return false
+    return this.canonicalStructureIndex().clusterByMember.has(owner)
+  }
+
+  /** Whether one per-card override row is MATERIALIZED on the current
+   * projection: a current-window top-level row, an OPEN Work member, or a Focus
+   * secondary inside an expanded root. */
+  private messageRowMaterialized(message: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
+    if (!this.messages.includes(message)) return false
+    const span = this.canonicalStructureIndex().workByMember.get(message)
+    if (span !== undefined) {
+      return this.workOwnerMaterialized(span.owner, projectionExpanded) && this.workSpanExpanded(span)
+    }
+    const policy = displayPolicyFor(this.displayState.preset)
+    if (policy.focusBehavior && 'turn' in message && isFocusSecondaryDisclosure(message)) {
+      return projectionExpanded.has(message.turn)
+    }
+    return true
+  }
+
+  /** Whether collapsing the regular master would be immediately undone by the
+   * still-granted search reveal: the target lives in a Work/cluster this master
+   * collapses, or its Focus root is search/derived-only. Computed from target
+   * ANCESTRY, before any owner state changes. */
+  private regularMasterCollapseRevokesReveal(): boolean {
+    const target = this.searchRevealedMessage()
+    if (target === undefined) return false
+    const index = this.canonicalStructureIndex()
+    if (index.workByMember.has(target) || index.clusterByMember.has(target)) return true
+    const turn = this.searchTargetTurn()
+    return turn !== undefined && !this.focusExpandedTurns.has(turn)
+  }
+
   /**
-   * Whether a visible disclosure owned by the REGULAR transcript-detail master
-   * is currently open: a Work span, a Context cluster, or a per-card ordinary
-   * (non-Thinking) fold override. Only the regular surface's master controls
-   * those owners — fullscreen Compact owns Work through its own bulk, fullscreen
-   * Full leaves clusters mouse-owned and per-card folds click-owned — so a
-   * Ctrl+O press there must not clear them.
+   * Whether a VISIBLE disclosure owned by the REGULAR transcript-detail master
+   * is currently open: a materially projected Work span / Context cluster, or a
+   * materially projected per-card ordinary (non-Thinking) fold override. Only
+   * the regular surface's master controls those owners — fullscreen Compact
+   * owns Work through its own bulk, fullscreen Full leaves clusters mouse-owned
+   * and per-card folds click-owned — so a Ctrl+O press there must not clear
+   * them. Long-term state that is NOT materialized in the current projection
+   * (Full Work, a Work parked behind a collapsed Focus root, a windowed-away
+   * override) must never consume a press.
    */
   private hasVisibleRegularMasterOwnedDisclosure(): boolean {
     if (this.fullscreen !== undefined) return false
-    if (this.openWorkOwners.size > 0 || this.effectiveExpandedClusterOwners().size > 0) return true
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    for (const span of this.canonicalStructureIndex().workSpans) {
+      if (this.workOwnerMaterialized(span.owner, projectionExpanded) && this.workSpanExpanded(span)) return true
+    }
+    if (!this.contextClusterDefaultExpanded()) {
+      for (const cluster of new Set(this.canonicalStructureIndex().clusterByMember.values())) {
+        if (this.clusterOwnerMaterialized(cluster.owner) && this.contextClusterExpanded(cluster)) return true
+      }
+    }
     for (const [message, expanded] of this.expandedOverride) {
       if (expanded !== true || message.kind === 'thinking') continue
       if (isUserMessageDisclosureCandidate(message)) continue
@@ -7864,23 +7945,33 @@ export class TuiApp {
       // effect) — counting it would make Ctrl+O take the collapse branch for a
       // state it must not touch.
       if (this.surfacedInteractionFailsOpen(message)) continue
-      if (isFoldableMessageDisclosure(message)) return true
+      if (!isFoldableMessageDisclosure(message)) continue
+      if (!this.messageRowMaterialized(message, projectionExpanded)) continue
+      return true
     }
     return false
   }
 
   /**
    * Normalize the owners the regular transcript-detail master controls (plan
-   * §43): the manual Work/cluster sets, the per-card ordinary (non-Thinking)
-   * fold overrides, and the long-user overrides cleared by the caller. A
-   * granted search reveal that opened one of those containers is revoked in the
-   * SAME transaction so the collapsed owner cannot instantly reopen. Thinking
-   * (Alt+T) and unrelated fullscreen state stay untouched.
+   * §43): the MATERIALIZED Work/cluster owners, the materialized per-card
+   * ordinary (non-Thinking) fold overrides, and the long-user overrides cleared
+   * by the caller. Owners that are not visible in the current projection stay
+   * parked (F6 allows manual state to survive preset/surface switches). A
+   * granted search reveal that would immediately reopen a collapsed owner is
+   * revoked in the SAME transaction, resolved from the target's ancestry.
+   * Thinking (Alt+T) and unrelated fullscreen state stay untouched.
    */
   private clearRegularMasterOwnedDisclosures(): void {
     if (this.fullscreen !== undefined) return
-    this.expandedWorkOwners.clear()
-    this.expandedContextClusterOwners.clear()
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    const revokesReveal = this.regularMasterCollapseRevokesReveal()
+    for (const owner of [...this.expandedWorkOwners]) {
+      if (this.workOwnerMaterialized(owner, projectionExpanded)) this.expandedWorkOwners.delete(owner)
+    }
+    for (const owner of [...this.expandedContextClusterOwners]) {
+      if (this.clusterOwnerMaterialized(owner)) this.expandedContextClusterOwners.delete(owner)
+    }
     for (const message of [...this.expandedOverride.keys()]) {
       if (message.kind === 'thinking') continue
       if (isUserMessageDisclosureCandidate(message)) continue
@@ -7889,9 +7980,10 @@ export class TuiApp {
       // bulk reset, plan §16): keep its fullscreen-owned override.
       if (this.surfacedInteractionFailsOpen(message)) continue
       if (!isFoldableMessageDisclosure(message)) continue
+      if (!this.messageRowMaterialized(message, projectionExpanded)) continue
       this.expandedOverride.delete(message)
     }
-    if (this.revealedSearchOwner() !== undefined) this.suppressSearchReveal()
+    if (revokesReveal) this.suppressSearchReveal()
   }
 
   /** The eligible Focus roots for Ctrl+O bulk expansion: turns with a
