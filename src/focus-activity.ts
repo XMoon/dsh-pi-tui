@@ -29,7 +29,7 @@ import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import { toolTitle } from './present.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
-import { isSurfacedContext } from './transcript-semantics.ts'
+import { isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
 import { isNoticeContext } from './context-presentation.ts'
 import { displayFailureText } from './failure-presentation.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
@@ -631,9 +631,12 @@ function assistantForStep(
 
 /** Rows that remain visible outside the collapsed Thought as persistent
  * input/context boundaries. The semantic class stays Context for injected
- * rows; this predicate only controls disclosure behavior. */
+ * rows; this predicate only controls disclosure behavior. A SETTLED
+ * surfaced-interaction card (question / Plan review) is human-decision
+ * evidence, so it is hoisted out of the collapsed Working exactly like a
+ * user/steer row; expanded Focus restores it at its raw chronology. */
 function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
-  return message.kind === 'user' || isSurfacedContext(message)
+  return message.kind === 'user' || isSurfacedContext(message) || isSurfacedInteractionTool(message)
 }
 
 /**

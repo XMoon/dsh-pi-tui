@@ -614,6 +614,23 @@ F4 behavior and documents the guarantees in
   without applying stale state, and a window never invents an off-window member.
 - **Width/grapheme robustness** holds for every F4 row family across ASCII, CJK,
   emoji, combining marks, ZWJ emoji and ANSI text.
+- **Settled surfaced-interaction cards (question / Plan review) are surfaced
+  evidence, not Process.** The authoritative set is exactly
+  `ask_user_question` + `exit_plan_mode`; source/tool identity only
+  (`kind:'tool'`, a name in the set, not running) — never the title, the result
+  wording, a rich card, or a past approval; no fifth semantic class. Compact
+  makes them Work boundaries (standalone, never counted/previewed); collapsed
+  Focus hoists them out of the Thought (raw relative order, never across the
+  committed-answer fence and never reordered against user/steer rows); expanded
+  Focus restores their raw position; Full is unchanged. Their own disclosure is
+  independent of the Focus root (a root collapse does not reset it — they stay
+  normal tool-card secondaries for render and click semantics but are EXEMPT
+  from the root-collapse secondary reset), they reuse the existing tool-card
+  owner (fullscreen click; regular fails open), and a RUNNING interaction
+  remains owned by its panel (QuestionFlow / plan-mode approval) with no
+  duplicate surfaced card. The turn's tool count / tool-type stats / Tool slot
+  exclude them, running or settled. Every other tool (todo/goal/subagent/
+  workflow/schedule/cordis/bash/edit/…) stays ordinary Process.
 
 ## The composer submission policy is the WEB policy
 

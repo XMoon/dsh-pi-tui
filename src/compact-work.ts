@@ -23,6 +23,7 @@ import { compactSlotLine, compactThinkSlotLine } from './focus-activity.ts'
 import { iconLead, sectionDisclosureSemantic, type IconStyle } from './icons.ts'
 import { color } from './theme.ts'
 import type { TranscriptToolMessage } from './transcript.ts'
+import { isSurfacedInteractionToolName } from './transcript-semantics.ts'
 
 /** The span-local aggregate facts the collapsed Work card renders. */
 export interface CompactWorkSummary {
@@ -51,6 +52,12 @@ export function summarizeWorkSpan(span: CompactWorkSpan): CompactWorkSummary {
     if (member.kind === 'thinking') {
       think = { text: member.text, running: member.running === true }
     } else if (member.kind === 'tool') {
+      // A surfaced-interaction tool (question / Plan review) is human-decision
+      // evidence, never ordinary work: it contributes no tool count and never
+      // owns the Tool preview. While RUNNING it is still a member (its active
+      // panel owns the interaction), but it must not skew the span either —
+      // this keeps Compact and the Focus turn accounting in agreement.
+      if (isSurfacedInteractionToolName(member.name)) continue
       toolCount += 1
       if (member.origin === 'subagent-delegation') subagentCount += 1
       tool = member

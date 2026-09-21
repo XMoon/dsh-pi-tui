@@ -158,6 +158,49 @@ The cluster summary is built from structured labels/forms only (duplicate labels
 compress to `label ×N` for display; the transcript is never deduplicated or
 reordered).
 
+### Surfaced interaction evidence (settled question / Plan review)
+
+A SETTLED surfaced-interaction tool card is not ordinary Process work: it is
+human-interaction evidence (the user's own decision), so it is surfaced
+independently of the Work/Thought. The authoritative PR4 set is exactly
+`ask_user_question` (the user's answers) and `exit_plan_mode` (the Plan review
+/ approval result). The decision is source/tool identity only
+(`kind === 'tool'`, a name in that set, `status !== 'running'`) — never the
+display title, the result wording, whether a modal opened, whether the tool
+required an approval, or how rich the card looks; and never a fifth semantic
+class:
+
+- Compact: the card is a Work BOUNDARY and renders standalone in raw
+  chronology (`Work A · Interaction · Work B`); it is never a span member, so
+  it contributes no tool count or latest-meaningful-Tool preview — running or
+  settled.
+- Focus collapsed: the card is hoisted out of the Thought like a user/steer or
+  surfaced-context row, in raw relative order and without crossing the
+  committed-answer/user ordering fence.
+- Focus expanded: the card returns to its exact raw position.
+- Full: unchanged chronology.
+- The card's OWN disclosure is independent of the Focus root: a root
+  collapse/expand neither collapses nor expands it (it stays a normal
+  tool-card secondary for render/click semantics but is exempt from the
+  root-collapse secondary reset), and it reuses the existing tool-card
+  disclosure owner (fullscreen click; regular fail-open/full when no operable
+  owner exists — no F6 work).
+- A RUNNING interaction is untouched: the QuestionFlow / plan-mode approval
+  panel owns it and no duplicate settled-style card is surfaced.
+- The turn's tool count, tool-type stats and Tool slot exclude these tools, so
+  a `Tool A · Interaction · Tool B` turn still previews a real tool.
+- Partial/skipped/cancelled/errored question cards stay surfaced; the collapsed
+  card shows the `N/M answered` summary derived from the producer's answers
+  JSON, and the expanded card the structured `● id → answer` /
+  `○ id — skipped` rows, never raw JSON. The Plan review card keeps its
+  existing plan-body presentation.
+- Everything else stays ordinary Process — including `todo_write`, the goal
+  tools, `send_message` / `interrupt_agent` / subagent controls, workflow /
+  schedule / cordis tools, and `bash` / `edit` / `write` / `read` / search /
+  `run_code`. A tool having a rich card, or having required a permission
+  approval, does NOT make it interaction evidence; approval is an execution
+  gate, not a durable transcript interaction identity.
+
 ### Disclosure chronology
 
 - Collapsed Focus surfaces user/steer rows and causal Context in raw relative

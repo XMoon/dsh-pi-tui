@@ -145,7 +145,7 @@ import { QuestionFlow } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
-import { classifyTranscriptMessage, isSurfacedContext } from './transcript-semantics.ts'
+import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
@@ -7625,6 +7625,11 @@ export class TuiApp {
       if (!('turn' in message)) continue
       if (message.turn !== turn) continue
       if (!isFocusSecondaryDisclosure(message)) continue
+      // A SETTLED surfaced-interaction card (question / Plan review) is
+      // human-decision evidence, not a Thought-owned process detail: its own
+      // disclosure is independent of the Focus root, so a root collapse never
+      // resets it.
+      if (isSurfacedInteractionTool(message)) continue
       this.expandedOverride.delete(message)
     }
     // The search-reveal revocation is left to `setFocusTurnExpanded` (called
@@ -7811,6 +7816,11 @@ export class TuiApp {
     if (searchTurn !== undefined) expandedTurns.add(searchTurn)
     this.focusExpandedTurns.clear()
     this.clearFocusSecondaryExpansionsForTurns(expandedTurns)
+    // Collapse All always revokes a granted search reveal: the reveal is a
+    // TEMPORARY grant and may be what opened the root (`searchTargetTurn()`).
+    // A settled surfaced-interaction card's OWN disclosure is unaffected — it
+    // survives via the secondary-reset carve-out above, not by keeping the
+    // root open.
     if (searchTurn !== undefined) this.suppressSearchReveal()
     this.toolOutputExpanded = false
     this.rebuildMessages('focus-disclosure')
@@ -7855,11 +7865,13 @@ export class TuiApp {
       if (!('turn' in message)) continue
       if (!turns.has(message.turn)) continue
       if (!isFocusSecondaryDisclosure(message)) continue
+      // The settled surfaced-interaction card (question / Plan review) keeps
+      // its own disclosure override across a root collapse, so it is EXEMPT
+      // from this secondary reset. (The caller still revokes any temporary
+      // search-reveal grant unconditionally: independence lives in the
+      // override, never in keeping the Thought root open.)
+      if (isSurfacedInteractionTool(message)) continue
       this.expandedOverride.delete(message)
-    }
-    const target = this.searchTarget?.message
-    if (target !== undefined && 'turn' in target && turns.has(target.turn) && isFocusSecondaryDisclosure(target)) {
-      this.suppressSearchReveal()
     }
   }
 
