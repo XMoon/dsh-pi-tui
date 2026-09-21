@@ -2133,7 +2133,7 @@ export function registerTuiCommands(
             id: 'expand',
             label: 'Tool output',
             description: 'Whether recent tool/system entries start expanded',
-            currentValue: app.isToolOutputExpanded() ? 'expanded' : 'collapsed',
+            currentValue: app.isTranscriptDetailExpanded() ? 'expanded' : 'collapsed',
             values: ['collapsed', 'expanded'],
           },
           {
@@ -2463,7 +2463,7 @@ export function registerTuiCommands(
               }))
             }
           } else if (id === 'expand') {
-            app.setToolOutputExpanded(value === 'expanded')
+            app.setTranscriptDetailExpanded(value === 'expanded')
           } else if (id === 'thinking') {
             // The declarative surface sets the SHARED bulk preference —
             // `/settings` and Alt+T are the same state (plan §10.4).

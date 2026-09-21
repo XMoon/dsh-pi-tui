@@ -13,6 +13,7 @@
 
 import type { ContextCluster } from './context-presentation.ts'
 import { projectTranscriptStructure, type TranscriptWorkSpan } from './transcript-projection.ts'
+import type { TranscriptContainerPath } from './transcript-disclosure.ts'
 import type { TranscriptMessage } from './transcript.ts'
 
 /**
@@ -22,11 +23,13 @@ import type { TranscriptMessage } from './transcript.ts'
  */
 export type CompactWorkSpan = TranscriptWorkSpan
 
-/** One Compact projection block, in visual order. */
+/** One Compact projection block, in visual order. Message rows carry their
+ * outer-to-inner semantic container ancestry so the renderer never infers
+ * ownership from screen geometry. */
 export type CompactProjectedBlock =
-  | { readonly kind: 'message'; readonly message: TranscriptMessage }
-  | { readonly kind: 'work'; readonly span: CompactWorkSpan }
-  | { readonly kind: 'context-cluster'; readonly cluster: ContextCluster; readonly expanded: boolean }
+  | { readonly kind: 'message'; readonly message: TranscriptMessage; readonly containerPath?: TranscriptContainerPath }
+  | { readonly kind: 'work'; readonly span: CompactWorkSpan; readonly containerPath?: TranscriptContainerPath }
+  | { readonly kind: 'context-cluster'; readonly cluster: ContextCluster; readonly expanded: boolean; readonly containerPath?: TranscriptContainerPath }
 
 /** Compact projection inputs: the manual Work/cluster disclosures and the
  * temporary search reveal. Full and Focus materialize their own presentation
@@ -45,6 +48,13 @@ export interface CompactProjectionOptions {
    * directly instead of a header whose affordance nobody can operate.
    */
   readonly clusterHeader?: boolean
+  /**
+   * Whether a Work span emits its header block. `false` is the FLAT
+   * fail-open presentation a surface without an operable Work disclosure action
+   * uses: the canonical span still groups the rows (ownership/search), but its
+   * members render directly instead of a header nobody can open.
+   */
+  readonly workHeader?: boolean
 }
 
 /** Whether one Work span is effectively expanded. */
@@ -82,22 +92,28 @@ export function projectCompact(
     }
     if (block.kind === 'work') {
       const span = block.span
-      out.push({ kind: 'work', span })
+      const containerPath: TranscriptContainerPath = [{ kind: 'work', owner: span.owner }]
+      if (options.workHeader === false) {
+        for (const member of span.members) out.push({ kind: 'message', message: member, containerPath })
+        continue
+      }
+      out.push({ kind: 'work', span, containerPath })
       if (workExpanded(span, options)) {
-        for (const member of span.members) out.push({ kind: 'message', message: member })
+        for (const member of span.members) out.push({ kind: 'message', message: member, containerPath })
       }
       continue
     }
     // The first member is the cluster header; expanding re-emits EVERY
     // member (owner included) as an ordinary Context row.
     const cluster = block.cluster
+    const containerPath: TranscriptContainerPath = [{ kind: 'context-cluster', owner: cluster.owner }]
     if (options.clusterHeader === false) {
-      for (const member of cluster.members) out.push({ kind: 'message', message: member })
+      for (const member of cluster.members) out.push({ kind: 'message', message: member, containerPath })
       continue
     }
     const expanded = clusterExpanded(cluster, options)
-    out.push({ kind: 'context-cluster', cluster, expanded })
-    if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member })
+    out.push({ kind: 'context-cluster', cluster, expanded, containerPath })
+    if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member, containerPath })
   }
   return out
 }
