@@ -7750,9 +7750,11 @@ export class TuiApp {
       return !this.messageExpandedIgnoringSearch(message)
     }
     // Thinking is Alt+T-owned, never the Ctrl+O master: its reveal necessity
-    // must not depend on `messageFoldDisclosureAvailable()` (a surface disabling
-    // Ctrl+O must still reveal a matched Thinking body).
-    if (message.kind === 'thinking') return !this.messageExpandedIgnoringSearch(message)
+    // must not depend on `messageFoldDisclosureAvailable()`. A surface without
+    // an operable Thinking owner fails open, so nothing is hidden to reveal.
+    if (message.kind === 'thinking') {
+      return this.thinkingDisclosureAvailable() && !this.messageExpandedIgnoringSearch(message)
+    }
     if (!isFoldableMessageDisclosure(message)) return false
     if (!this.messageFoldDisclosureAvailable()) return false
     return !this.messageExpandedIgnoringSearch(message)
@@ -8023,15 +8025,29 @@ export class TuiApp {
     return true
   }
 
+  /** The granted search target when it is a message-local foldable the REGULAR
+   * transcript-detail master owns (not Thinking/Alt+T, not a delivered tail,
+   * not a fail-open surfaced interaction) and that is materially projected. A
+   * reveal-only opener must both arm the collapse branch and be revoked by it. */
+  private revealedRegularMasterFold(projectionExpanded: ReadonlySet<number>): TranscriptMessage | undefined {
+    const target = this.searchRevealedMessage()
+    if (target === undefined) return undefined
+    if (!isFoldableMessageDisclosure(target) || target.kind === 'thinking') return undefined
+    if (this.surfacedInteractionFailsOpen(target)) return undefined
+    return this.messageRowMaterialized(target, projectionExpanded) ? target : undefined
+  }
+
   /** Whether collapsing the regular master would be immediately undone by the
-   * still-granted search reveal: the target lives in a Work/cluster this master
-   * collapses, or its Focus root is search/derived-only. Computed from target
-   * ANCESTRY, before any owner state changes. */
-  private regularMasterCollapseRevokesReveal(): boolean {
+   * still-granted search reveal: the target is a message-local foldable this
+   * master owns, lives in a Work/cluster this master collapses, or its Focus
+   * root is search/derived-only. Computed from target ANCESTRY / the current
+   * materialization, before any owner state changes. */
+  private regularMasterCollapseRevokesReveal(projectionExpanded: ReadonlySet<number>): boolean {
     const target = this.searchRevealedMessage()
     if (target === undefined) return false
     const index = this.canonicalStructureIndex()
     if (index.workByMember.has(target) || index.clusterByMember.has(target)) return true
+    if (this.revealedRegularMasterFold(projectionExpanded) !== undefined) return true
     const turn = this.searchTargetTurn()
     return turn !== undefined && !this.focusExpandedTurns.has(turn)
   }
@@ -8077,6 +8093,9 @@ export class TuiApp {
       if (!this.messageOverrideContributes(message)) continue
       return true
     }
+    // A granted reveal can be the ONLY opener of a master-owned foldable
+    // (compaction, local shell card, …): it is a visible disclosure too.
+    if (this.revealedRegularMasterFold(projectionExpanded) !== undefined) return true
     return false
   }
 
@@ -8152,7 +8171,7 @@ export class TuiApp {
   private clearRegularMasterOwnedDisclosures(): void {
     if (this.fullscreen !== undefined) return
     const projectionExpanded = this.focusProjectionExpandedTurns()
-    const revokesReveal = this.regularMasterCollapseRevokesReveal()
+    const revokesReveal = this.regularMasterCollapseRevokesReveal(projectionExpanded)
     for (const owner of [...this.expandedWorkOwners]) {
       if (!this.workOwnerMaterialized(owner, projectionExpanded)) continue
       const span = this.canonicalStructureIndex().workByMember.get(owner)
@@ -13695,6 +13714,15 @@ export class TuiApp {
     return Number.isFinite(boundary) && turn >= boundary
   }
 
+  /** Whether Thinking has an OPERABLE disclosure owner on THIS surface. Alt+T
+   * owns Thinking on the regular surface; fullscreen also has the mouse
+   * per-card click. Without an owner the block FAILS OPEN (full body) instead of
+   * rendering a compact representation nobody can expand. */
+  private thinkingDisclosureAvailable(): boolean {
+    if (this.fullscreen !== undefined) return true
+    return this.keybindings.keyHint('app.transcript.toggleThinking') !== ''
+  }
+
   /** The effective expansion of one Thinking block (the unified disclosure
    * model, plan §6/§7): the per-message override wins when present — in
    * FULLSCREEN that is a click or a search reveal; in REGULAR it is only
@@ -13702,11 +13730,13 @@ export class TuiApp {
    * fullscreen click override (see setFullscreen), so a stale per-card
    * state can never surface there. Otherwise the shared bulk preference.
    * Focus ON/OFF is irrelevant: there is exactly one Thinking detail
-   * state for the whole app. */
+   * state for the whole app. A surface without an operable owner fails
+   * open. */
   private effectiveThinkingExpanded(
     message: Extract<TranscriptMessage, { kind: 'thinking' }>,
     ignoreSearch = false,
   ): boolean {
+    if (!this.thinkingDisclosureAvailable()) return true
     // The temporary search reveal wins over a stale explicit override while it
     // is GRANTED (a new navigation re-opens the card); an explicit collapse
     // revokes the grant instead of writing user state.
@@ -13888,7 +13918,7 @@ export class TuiApp {
     // SEMANTIC (never a physical key — the rendered copy resolves the
     // EFFECTIVE key through the keymap).
     const expandHint: ExpandHint = message.kind === 'thinking'
-      ? (this.fullscreen !== undefined ? 'click' : 'thinking')
+      ? (this.fullscreen !== undefined ? 'click' : (this.thinkingDisclosureAvailable() ? 'thinking' : undefined))
       : isUserMessageDisclosureCandidate(message)
         // Long user disclosure is a turn-foundation fold. The owner is part
         // of the cache identity so the marker label follows the surface:
