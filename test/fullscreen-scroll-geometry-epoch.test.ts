@@ -287,7 +287,9 @@ test('the scroll profiler never latches a frame window on a no-op boundary scrol
     // A real scroll emits exactly ONE frame, timed from THIS wheel.
     await wheel(vt, 'down')
     assert.equal(frames(), 1, `the moving wheel must emit exactly one scroll frame (got ${frames()})`)
-    const latency = Number(/frame=([\d.]+)ms/.exec(emitted.find(line => line.startsWith('scroll frame='))!)?.[1])    assert.ok(Number.isFinite(latency) && latency >= 0 && latency < 200, `scroll latency must be timed from the moving wheel (got ${latency}ms)`)
+    const latencyLine = emitted.find(line => line.startsWith('scroll frame='))!
+    const latency = Number(/frame=([\d.]+)ms/.exec(latencyLine)?.[1])
+    assert.ok(Number.isFinite(latency) && latency >= 0 && latency < 200, `scroll latency must be timed from the moving wheel (got ${latency}ms)`)
     app.setFullscreen(false)
     app.stop()
   } finally {
