@@ -225,7 +225,7 @@ picker labels.
 ## Fullscreen scroll frame: geometry-epoch snapshot reuse (2026-09-21)
 
 > Measured 2026-09-21 · `next @ 976574e9` (before) vs
-> `investigate/scroll-perf-post` @ `49c2f159` (after) · Node v24.20.0 ·
+> `investigate/scroll-perf-post` @ `2004ef5f` (after) · Node v24.20.0 ·
 > headless xterm 120x40, forced synchronous frames (`renderNow()`), 4
 > interleaved rounds, medians. Full methodology and raw data:
 > `temp/perf/fullscreen-scroll-performance-report-20260921.md` (untracked
