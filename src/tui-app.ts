@@ -6050,11 +6050,13 @@ export class TuiApp {
         // following it, and a historical position stays on the same semantic
         // row.
         if (this.transcriptDetailExpanded || this.hasVisibleExpandedUserDisclosure()
-          || this.hasVisibleRegularMasterOwnedDisclosure()) {
+          || this.hasVisibleRegularMasterOwnedDisclosure()
+          || this.hasVisibleDeliveredFilesMasterDisclosure()) {
           this.mutateTranscriptDisclosure(() => {
             this.transcriptDetailExpanded = false
             this.clearUserDisclosureOverrides()
             this.clearRegularMasterOwnedDisclosures()
+            this.clearDeliveredFilesMasterDisclosure()
             if (this.searchTarget !== undefined && isUserMessageDisclosureCandidate(this.searchTarget.message)) {
               this.suppressSearchReveal()
             }
@@ -7961,10 +7963,6 @@ export class TuiApp {
     if (target === undefined) return false
     const index = this.canonicalStructureIndex()
     if (index.workByMember.has(target) || index.clusterByMember.has(target)) return true
-    // A delivered-files tail is expanded by the message-local search reveal
-    // itself, independent of any Focus root state: revoke it even when the root
-    // is manual, or the collapse branch can never turn the master back on.
-    if (isDeliveredFilesDisclosureCandidate(target) && this.deliveredFilesMasterOwned()) return true
     const turn = this.searchTargetTurn()
     return turn !== undefined && !this.focusExpandedTurns.has(turn)
   }
@@ -8005,17 +8003,46 @@ export class TuiApp {
       // effect) — counting it would make Ctrl+O take the collapse branch for a
       // state it must not touch.
       if (this.surfacedInteractionFailsOpen(message)) continue
-      if (!isFoldableMessageDisclosure(message) && !isDeliveredFilesDisclosureCandidate(message)) continue
+      if (!isFoldableMessageDisclosure(message)) continue
       if (!this.messageRowMaterialized(message, projectionExpanded)) continue
       return true
     }
-    // A granted search reveal can be the ONLY opener (no manual override):
-    // a delivered-files tail is a master-owned disclosure too.
-    const revealedTarget = this.searchRevealedMessage()
-    if (revealedTarget !== undefined && isDeliveredFilesDisclosureCandidate(revealedTarget)
-      && this.deliveredFilesMasterOwned()
-      && this.messageRowMaterialized(revealedTarget, projectionExpanded)) return true
     return false
+  }
+
+  /**
+   * Whether a MATERIALIZED delivered-files disclosure is currently open under
+   * the CURRENT surface's Ctrl+O master. The delivered-files tail is owned by
+   * the regular transcript-detail master AND by fullscreen Full's generic
+   * master, so this is checked independently of the regular-only Work/cluster
+   * helper (fullscreen Compact/Focus own Ctrl+O for something else entirely).
+   */
+  private hasVisibleDeliveredFilesMasterDisclosure(): boolean {
+    if (!this.deliveredFilesMasterOwned()) return false
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    for (const [message, expanded] of this.expandedOverride) {
+      if (expanded !== true || !isDeliveredFilesDisclosureCandidate(message)) continue
+      if (!this.messageRowMaterialized(message, projectionExpanded)) continue
+      return true
+    }
+    const target = this.searchRevealedMessage()
+    return target !== undefined && isDeliveredFilesDisclosureCandidate(target)
+      && this.messageRowMaterialized(target, projectionExpanded)
+  }
+
+  /** Clear the delivered-files overrides the current surface's Ctrl+O master
+   * owns (materialized only) and revoke a reveal that would immediately
+   * re-expand the tail. */
+  private clearDeliveredFilesMasterDisclosure(): void {
+    if (!this.deliveredFilesMasterOwned()) return
+    const projectionExpanded = this.focusProjectionExpandedTurns()
+    for (const message of [...this.expandedOverride.keys()]) {
+      if (!isDeliveredFilesDisclosureCandidate(message)) continue
+      if (!this.messageRowMaterialized(message, projectionExpanded)) continue
+      this.expandedOverride.delete(message)
+    }
+    const target = this.searchRevealedMessage()
+    if (target !== undefined && isDeliveredFilesDisclosureCandidate(target)) this.suppressSearchReveal()
   }
 
   /**
@@ -8045,7 +8072,7 @@ export class TuiApp {
       // is independent of the master (its own disclosure survives a root/root
       // bulk reset, plan §16): keep its fullscreen-owned override.
       if (this.surfacedInteractionFailsOpen(message)) continue
-      if (!isFoldableMessageDisclosure(message) && !isDeliveredFilesDisclosureCandidate(message)) continue
+      if (!isFoldableMessageDisclosure(message)) continue
       if (!this.messageRowMaterialized(message, projectionExpanded)) continue
       this.expandedOverride.delete(message)
     }
