@@ -287,15 +287,23 @@ full remeasure by design — those frames raised the flag themselves.
 
 ### Scroll-frame profiler
 
-`DSH_TUI_SCROLL_PROFILE=1` emits one stderr line per coalesced scroll frame
-(a frame whose render request was opened by a fullscreen `scrollBy`):
+`DSH_TUI_SCROLL_PROFILE=1` emits one stderr line per coalesced scroll frame —
+a frame whose render request was opened by a fullscreen `scrollBy` that
+actually changed scroll state (the offset moved or the follow-end state
+flipped). A boundary wheel that scrolls nothing still repaints, but it is not
+a scroll frame and emits no line:
 
 ```text
-scroll frame=6.30ms write=0.05ms snapshot=0.02ms refresh=0.00ms remeasure=0.00ms hits=0.00ms bytes=6204 rowsRW=34 blocks=61 rows=237 viewport=34 scrollTop=98 preset=full search=off
+scroll frame=6.30ms write=0.05ms snapshot=0.02ms refresh=0.00ms remeasure=0.00ms hits=0.00ms bytes=6204 rowsRW=34 blocks=59 rows=227 viewport=34 scrollTop=96 preset=full search=off
 ```
 
 `latency` covers scroll input → painted frame; `refresh`/`remeasure`/`hits`
-are the snapshot-commit internals; `bytes`/`rowsRW` are the per-frame
-terminal rewrite volume. It is a diagnostic switch, disabled by default, and
-deliberately separate from `DSH_TUI_RENDER_PROFILE` (transcript presentation
-commits). The probe/benchmark lives in the perf report referenced above.
+are the snapshot-commit internals; `bytes` is the per-frame terminal write
+volume in UTF-8 bytes (the wire cost SSH/xterm.js pays — not
+`string.length`); `rowsRW` is the erased/redrawn row count. The window is
+discarded without emitting by every seam that pauses the paint loop
+(`resetScrollProfileFrame()` at the fullscreen swap/exit, external-editor
+suspend, `stop()`, `dispose()`). It is a diagnostic switch, disabled by
+default, and deliberately separate from `DSH_TUI_RENDER_PROFILE` (transcript
+presentation commits). The probe/benchmark lives in the perf report
+referenced above.
