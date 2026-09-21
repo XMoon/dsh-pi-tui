@@ -3767,6 +3767,9 @@ export class TuiApp {
   private scrollFrameBytes = 0
   private scrollFrameRowsRewritten = 0
   private scrollFrameRemeasureMs = 0
+  /** The pre-wrap `terminal.write` (diagnostic builds only): restored in
+   * dispose() so the opt-in instrumentation never outlives the app. */
+  private scrollProfileOriginalWrite: ((data: string) => void) | undefined
   /** The Ctrl+R input-history panel, while one is open. */
   private historyPanel: HistoryPanel | undefined
   /** The overlay handle of the history panel (hide() closes it). */
@@ -4357,6 +4360,7 @@ export class TuiApp {
     if (this.scrollProfiler.enabled) {
       const profiled = this.terminal as Terminal & { write: (data: string) => void }
       const originalWrite = profiled.write.bind(profiled)
+      this.scrollProfileOriginalWrite = originalWrite
       profiled.write = (data: string): void => {
         const start = performance.now()
         originalWrite(data)
@@ -5002,6 +5006,12 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    // Unwrap the diagnostic scroll-profiler write instrumentation FIRST, so
+    // the opt-in wrap never outlives the app instance that installed it.
+    if (this.scrollProfileOriginalWrite !== undefined) {
+      (this.terminal as Terminal & { write: (data: string) => void }).write = this.scrollProfileOriginalWrite
+      this.scrollProfileOriginalWrite = undefined
+    }
     // The process live-TUI slot stays CLAIMED through the whole final
     // teardown (review-loop round 2): every step below still owns the
     // process-global keybinding namespace (the host keybinding manager
@@ -10754,11 +10764,18 @@ export class TuiApp {
    * from its last-painted render (it lives inside the scroll content, so
    * it has no layout box of its own), the scroll state from the
    * ScrollView (final after the layout pass), and the transcript
-   * projection from a FRESH re-measure (the layout engine re-measures
-   * every component every frame, but the messageRows map is only rebuilt
-   * on transcript changes — an async image load that repainted between
-   * rebuilds would leave the map stale; the re-measure at this boundary
-   * is the painted projection). The snapshot keeps STABLE values only. */
+   * projection from the GEOMETRY EPOCH: the row map is re-measured here
+   * only when `fullscreenRowsDirty` says transcript geometry may have
+   * changed (a row-map writer ran, an async image settled, the terminal
+   * resized) or no snapshot exists yet; a pure repaint — a scroll, an
+   * editor keystroke, a chrome tick — reuses the committed rows and
+   * copyBlankRows verbatim. Async image staleness is owned by the settle
+   * seam (`settleThumbnailRender`), NOT by this boundary. The
+   * click-time live re-checks keep their own `refreshMessageRows` calls,
+   * so the press/release fence still measures live state. Chrome heights
+   * and scroll state are re-read fresh on EVERY commit. Contract:
+   * docs/perf-baseline.md ("geometry-epoch snapshot reuse"). The snapshot
+   * keeps STABLE values only. */
   private commitFullscreenPaintSnapshot(): void {
     const snapshotStart = this.scrollProfiler.enabled ? performance.now() : 0
     const previousSnapshot = this.fullscreenPaintSnapshot
