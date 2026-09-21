@@ -369,7 +369,7 @@ test('a hidden mid-turn notice override does not consume the first Ctrl+O', asyn
   assert.equal(overrides.get(notice), true, 'the parked notice override is preserved')
 })
 
-test('regular Focus Ctrl+O keeps toggling after a search dismiss promotes a manual root and Work', async () => {
+test('regular Focus Ctrl+O ignores a redundant Work owner covered by a manual root', async () => {
   const { vt, app } = startApp('focus')
   const { messages, activities, owner, tool } = fixture()
   app.setTranscript(messages, activities)
@@ -381,15 +381,13 @@ test('regular Focus Ctrl+O keeps toggling after a search dismiss promotes a manu
   assert.equal(app.focusExpandedTurnsForTest().has(1), true, 'precondition: the dismiss promoted the root')
   assert.equal(app.expandedWorkOwnersForTest().has(owner), true, 'precondition: the dismiss promoted the Work')
 
-  // Press 1 collapses the master-owned Work (the manual root keeps its own full
-  // reveal); press 2 must turn the master ON instead of wedging on the
-  // root-derived Work that the master cannot close.
-  vt.sendInput('\x0f')
-  await viewport(vt)
+  // The manual root already full-reveals the Work, so the manual Work owner is
+  // redundant: the FIRST press must turn the master ON (removing the latent
+  // owner changes nothing on screen), never a two-step no-op cleanup.
   vt.sendInput('\x0f')
   await viewport(vt)
   assert.equal(app.isTranscriptDetailExpanded(), true,
-    'Ctrl+O must not wedge when a manual Focus root keeps its Work open')
+    'a redundant descendant owner must not consume the first Ctrl+O')
 })
 
 test('a parked cluster-member override behind a collapsed cluster does not consume Ctrl+O', async () => {
