@@ -550,24 +550,37 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   `📎` emoji / `⋅` symbols / hidden minimal), so it reads
   `▸ 📎 Context · N injections` under emoji and `▸ Context · N injections` under
   minimal with no dangling separator (`iconLead` supplies each separator only
-  when its glyph exists). Work deliberately has no separate identity icon. Both
-  disclosures are click-owned in fullscreen.
-- **`Ctrl+O` under Compact owns the Work spans only, and a disclosure
-  CAPABILITY decides what may be collapsed.** Regular Compact has no operable
-  owner for any other message-level fold, so those rows render in full and
-  advertise no hint (the capability is applied where the renderer builds the
-  disclosure, so no hidden count/marker is produced); fullscreen keeps the
-  mouse-owned per-card click. Members of an open Work run follow the same
-  surface rule, and a hidden Work/cluster member revealed by search is promoted
-  through the ONE reveal-owner resolution (`searchRevealOwnerFor`) when the
-  search closes. TODO(F6): assign the regular-surface owners and restore a
-  collapsed presentation.
+  when its glyph exists). Work remains plain `▸`/`▾` through F6; the post-F6
+  Compact UX/identity review decides whether a registry-backed `IconSemantic`
+  `'work'` is added before F7. Both disclosures are click-owned in fullscreen.
+- **`Ctrl+O` is the ONE regular transcript-detail owner; a disclosure
+  CAPABILITY decides what may be collapsed.** On the regular surface the shared
+  master (and, when it exists, the effective `app.transcript.toggleExpand` key)
+  owns regular Compact Work, Context clusters, ordinary folds and long/pending
+  user folds; fullscreen Compact keeps the Work-span bulk and the mouse-owned
+  per-card click. When the key is unavailable every one of those folds fails
+  open and advertises no hint (the capability is applied where the renderer
+  builds the disclosure, so no hidden count/marker is produced). A hidden
+  Work/cluster member revealed by search is opened through the ONE container
+  reveal path (`searchRevealOwnerFor`) and promoted on an ordinary dismiss.
+  The master's DERIVED bulk expansion follows the same `EXPAND_RECENT_TURNS`
+  boundary as every ordinary fold (it never computes a separate recent-Work
+  window); a non-recent container therefore stays collapsed until the user
+  reaches it through search reveal, exactly like a non-recent ordinary fold.
 - **Ambient clustering is semantic on every preset and surface; only its
-  presentation default is surface-dependent.** Regular presents the members
-  flat (no manual cluster owner yet); fullscreen defaults collapsed with a
-  click-expandable `▸ 📎 Context · N injections` header. The cluster owner, search
-  owner, viewport identity and raw-adjacency rule stay cluster-based either way.
-  TODO(F6): give the regular surface a manual cluster owner.
+  presentation default is capability-dependent.** With an operable disclosure
+  action the regular surface collapses the cluster behind the same
+  `▸ 📎 Context · N injections` header as fullscreen (a keyboard master on
+  regular, a click on fullscreen); with no operable action it presents the
+  members flat. The cluster owner, search path, viewport identity and
+  raw-adjacency rule stay cluster-based either way.
+- **Nested Focus Work is a real container.** Expanded Focus emits each canonical
+  Work span as `[focus-root, work]`: fullscreen defaults it collapsed with a
+  mouse-owned header, regular Focus opens it whenever the owning Thought is
+  expanded, and search may reveal it temporarily. The generic blank-row rule
+  collapses the NEAREST shared container (nested Work beats the outer Thought);
+  an explicit root collapse returns that turn's Work owners to the Compact
+  default, while a temporary hiding never clears manual Work state.
 - **Surfaced Context is form-aware.** The fold retains the producer-declared
   `MessageSource.form` as presentation-only provenance; `notice`, `relay` and
   `recall` become standalone rows (producer summary at normal brightness /
@@ -588,9 +601,11 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   legitimate structural reprojection; notice/relay rows are render-time
   width-aware (no baked one-line truncation); there is no second renderer,
   search index, or viewport owner.
-- **Scope**: PR5/F5 converges Focus-expanded and Full onto the canonical
-  structure; disclosure ownership convergence (regular-surface owners, nested
-  Work disclosure) is F6, and Compact is not the default (F7).
+- **Scope**: PR5/F5 converged Focus-expanded and Full onto the canonical
+  structure; PR6/F6 converged disclosure ownership (regular-surface owners,
+  nested Work disclosure, search reveal path). Compact is not the default (F7);
+  the post-F6 Compact UX/identity review decides whether Work gains an identity
+  icon or Compact gains checkpoint narration guidance.
 
 ## F4 hardening (2026-09-21 PR4)
 
@@ -664,19 +679,24 @@ Full and expanded Focus materialize it instead of each re-deriving boundaries:
   independent `applyContextClusters(raw messages)` semantic path.
 - **Expanded Focus consumes the structure for its process tail.** It computes
   the canonical segmentation over the UNFILTERED tail (the held-back final never
-  changes raw adjacency), materializes Work flat (no nested Work disclosure
-  before F6), and keeps the Focus-specific lead foundation, committed-answer
-  fence, click marks and final holdback. Its cluster presentation obeys the
-  surface capability exactly like Full. Collapsed Focus keeps its hoist policy
-  and substitutes the canonical cluster identity in Focus-projected order.
+  changes raw adjacency), materializes each Work span as a nested
+  `[focus-root, work]` container (F6), and keeps the Focus-specific lead
+  foundation, committed-answer fence, projected ancestry and final holdback. Its
+  cluster presentation obeys the surface capability exactly like Full. Collapsed
+  Focus keeps its hoist policy and substitutes the canonical cluster identity in
+  Focus-projected order.
 - **`displayPolicyFor()` is the runtime authority** for materialization:
   `isFocusDisplayPreset()` delegates to `focusBehavior`, and `projectedBlocks()`
   selects the Compact / Focus / Full materializer from `turnLayer`,
   `processLayer` and `focusBehavior`, so the policy table and the runtime cannot
   drift.
-- **Search/viewport are untouched.** Full and flat expanded Focus never mint a
-  `compact-work` search owner; only Compact does that for a span that actually
-  hides the target. No new viewport map, disclosure owner or wire field is added.
+- **Search reveals a canonical container PATH.** Every preset resolves the
+  hiding containers through the same neutral ancestry (Focus root via
+  `searchTargetTurn()`, nested Work, Context cluster); a flat/fail-open
+  container mints no node, a temporary navigation never writes manual state, and
+  an ordinary dismiss promotes the necessary nodes atomically. The stable
+  ancestry is memoized; the mutable open/hidden state is evaluated per call. No
+  new viewport map or wire field is added.
 
 ## The composer submission policy is the WEB policy
 
@@ -922,7 +942,7 @@ mode (only `TuiAltScreen` wires `onCellClick`):
   - Ctrl+O is the Focus detail master: it toggles a DERIVED reveal of the
     recent `EXPAND_RECENT_TURNS` Focus Thoughts. The derived state is
     NEVER written into `focusExpandedTurns`, so switching to fullscreen
-    drops it (deterministic: `toolOutputExpanded` and `focusExpandedTurns`
+    drops it (deterministic: `transcriptDetailExpanded` and `focusExpandedTurns`
     stay orthogonal).
   - ANY expanded Focus root — Ctrl+O-derived OR manually revealed
     (search / viewer restore) — full-reveals its non-Thinking process:
@@ -1090,7 +1110,7 @@ the component cache identity:
   (`click / <key> to expand`);
 - fullscreen inside a Focus: the compact-marker click and a search reveal —
   the recent-turn boundary is deliberately NOT consulted there, because a
-  persisted `toolOutputExpanded` from an earlier surface must not leak an
+  persisted `transcriptDetailExpanded` from an earlier surface must not leak an
   expansion into a surface whose marker says `click to expand`. Ctrl+O there
   belongs to the Thought-root bulk, so the marker never advertises a dead key.
 
