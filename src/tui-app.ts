@@ -7942,7 +7942,13 @@ export class TuiApp {
     if (this.fullscreen !== undefined) return false
     const projectionExpanded = this.focusProjectionExpandedTurns()
     for (const span of this.canonicalStructureIndex().workSpans) {
-      if (this.workOwnerMaterialized(span.owner, projectionExpanded) && this.workSpanExpanded(span)) return true
+      if (!this.workOwnerMaterialized(span.owner, projectionExpanded)) continue
+      // Count only Works the master can actually CLOSE: a manual owner or a
+      // search-only reveal. A Work opened solely because its Focus root is
+      // manually expanded is part of the root's full reveal (plan §21) and the
+      // master must not treat it as its own closable disclosure — otherwise the
+      // collapse branch stays armed forever and Ctrl+O can never turn ON.
+      if (this.expandedWorkOwners.has(span.owner) || this.workSpanRevealedBySearch(span)) return true
     }
     if (!this.contextClusterDefaultExpanded()) {
       for (const cluster of new Set(this.canonicalStructureIndex().clusterByMember.values())) {
