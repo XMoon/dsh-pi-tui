@@ -1948,7 +1948,71 @@ test('startup applies the persisted wheel step BEFORE the first fullscreen mount
 })
 
 
-test('startup canonicalizes an unsupported display preset, preserves legacy/raw settings, and retries after a failed write', async (t) => {
+test('startup restores a persisted Compact preset unchanged and /display compact applies it', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-display-compact-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const probe = installProbe()
+  life.defer(probe.restore)
+  const resumed: FakeSession = fakeSession({
+    id: 'display-compact-session',
+    header: { id: 'display-compact-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('display compact'),
+  })
+  const userFooterItems = [{ id: 'user-item', kind: 'text', text: 'keep me' }]
+  const doc: Record<string, unknown> = {
+    theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'off',
+    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
+    displayPreset: 'compact', focusMode: 'on', wheelScrollLines: '1',
+    notificationMode: 'unfocused', notificationMethod: 'auto',
+    footerCustomItems: [{ id: 'project-item' }], keybindings: { tab: 'custom' },
+  }
+  const replacements: Record<string, unknown>[] = []
+  const settings = {
+    register: () => ({
+      get: () => ({ ...doc }),
+      replace: async (next: Record<string, unknown>) => {
+        replacements.push({ ...next })
+        Object.assign(doc, next)
+      },
+    }),
+    describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: userFooterItems } }],
+  }
+  const context = new Context()
+  const harness = makeHarness(home, resumed)
+  context.provide('settings', settings as never)
+  const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app !== undefined, 'the production runner must create a TuiApp')
+  assert.equal(app.displayPreset(), 'compact', 'a persisted Compact must restore as Compact, never fall back to Full')
+  assert.equal(replacements.length, 0, 'a canonical preset must not trigger a migration write')
+  assert.equal(doc.displayPreset, 'compact', 'the canonical field is left untouched')
+  assert.equal(doc.focusMode, 'on', 'legacy focusMode remains migration-only and preserved')
+  assert.deepEqual(doc.footerCustomItems, [{ id: 'project-item' }], 'a canonical boot must not rewrite the settings document')
+  assert.deepEqual(doc.keybindings, { tab: 'custom' }, 'unknown settings pass-through survives an untouched document')
+
+  const displayHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
+  assert.ok(displayHandler !== undefined, 'the production runner must register /display')
+  const compactResult = await (displayHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'compact' })
+  assert.deepEqual(compactResult, { kind: 'success', text: 'Display: compact.' })
+  await settle()
+  assert.equal(app.displayPreset(), 'compact', 'Compact stays the live preset')
+  assert.equal(replacements.length, 1, 'the explicit /display write persists the canonical field even when unchanged')
+  assert.equal(replacements[0]?.displayPreset, 'compact')
+  await fiber.dispose()
+  await disposeContext(context)
+})
+
+test('startup canonicalizes an invalid display preset, preserves legacy/raw settings, and retries after a failed write', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-display-migration-')
   const previousHome = process.env.DSH_HOME
@@ -1971,7 +2035,7 @@ test('startup canonicalizes an unsupported display preset, preserves legacy/raw 
   const doc: Record<string, unknown> = {
     theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'off',
     busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
-    displayPreset: 'compact', focusMode: 'on', wheelScrollLines: '1',
+    displayPreset: 'garbage', focusMode: 'on', wheelScrollLines: '1',
     notificationMode: 'unfocused', notificationMethod: 'auto',
     footerCustomItems: [{ id: 'project-item' }], keybindings: { tab: 'custom' },
   }
@@ -2003,19 +2067,9 @@ test('startup canonicalizes an unsupported display preset, preserves legacy/raw 
   }
 
   const first = await mount()
-  assert.equal(first.app.displayPreset(), 'full', 'unsupported Compact must resolve to Full before the first frame')
-  const beforeCompactFrame = vt.getViewport().join('\n')
-  const compactHandler = (first.harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
-  assert.ok(compactHandler !== undefined, 'the production runner must register /display')
-  const compactResult = await (compactHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'compact' })
-  assert.deepEqual(compactResult, { kind: 'error', text: 'Compact display is not available in this build.' })
-  await settle()
-  assert.equal(replacements.length, 1, 'Compact must not trigger a second persistence write')
-  assert.equal(doc.displayPreset, 'compact', 'Compact must not mutate the settings document')
-  assert.equal(first.app.displayPreset(), 'full', 'Compact must not mutate the live display state')
-  assert.equal(vt.getViewport().join('\n'), beforeCompactFrame, 'Compact must not repaint the production surface')
+  assert.equal(first.app.displayPreset(), 'full', 'an invalid canonical value resolves to Full before the first frame')
   assert.equal(replacements.length, 1, 'boot must attempt one canonical migration write')
-  assert.equal(doc.displayPreset, 'compact', 'a failed migration must not change the live settings document')
+  assert.equal(doc.displayPreset, 'garbage', 'a failed migration must not change the live settings document')
   await first.fiber.dispose()
   await disposeContext(first.context)
 
@@ -2032,7 +2086,7 @@ test('startup canonicalizes an unsupported display preset, preserves legacy/raw 
 
   // Remove the canonical field to exercise the real legacy Focus fallback
   // through apply/compose, not only the pure resolver.
-  doc.displayPreset = undefined
+  delete doc.displayPreset
   const third = await mount()
   assert.equal(third.app.displayPreset(), 'focus', 'legacy focusMode must apply before the first production frame')
   assert.equal(replacements.length, 3)
@@ -2051,7 +2105,7 @@ test('startup canonicalizes an unsupported display preset, preserves legacy/raw 
   await disposeContext(third.context)
 })
 
-test('display full retries canonical persistence when runtime is already full', async (t) => {
+test('display full retries canonical persistence after a failed migration write', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-display-unchanged-retry-')
   const previousHome = process.env.DSH_HOME
@@ -2073,7 +2127,7 @@ test('display full retries canonical persistence when runtime is already full', 
   const doc: Record<string, unknown> = {
     theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'off',
     busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
-    displayPreset: 'compact', focusMode: 'on', wheelScrollLines: '1',
+    focusMode: 'on', wheelScrollLines: '1',
     notificationMode: 'unfocused', notificationMethod: 'auto',
   }
   const replacements: Record<string, unknown>[] = []
@@ -2099,9 +2153,9 @@ test('display full retries canonical persistence when runtime is already full', 
   await settle()
   const app = probe.apps.at(-1)
   assert.ok(app !== undefined, 'the production runner must create a TuiApp')
-  assert.equal(app.displayPreset(), 'full', 'unsupported Compact resolves to Full at runtime')
+  assert.equal(app.displayPreset(), 'focus', 'legacy focusMode migrates to Focus at runtime')
   assert.equal(replacements.length, 1, 'boot must attempt the migration write')
-  assert.equal(doc.displayPreset, 'compact', 'the failed migration leaves settings unchanged')
+  assert.equal(doc.displayPreset, undefined, 'the failed migration leaves settings unchanged')
 
   const displayHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
   assert.ok(displayHandler !== undefined, 'the production runner must register /display')

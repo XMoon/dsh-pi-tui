@@ -159,7 +159,6 @@ function stubRunner(
     refreshStatus: () => {},
     displayPreset: () => displayPreset,
     setDisplayPreset: (preset) => {
-      if (preset === 'compact') return { kind: 'unsupported', preset }
       if (displayPreset === preset) return { kind: 'unchanged', preset }
       displayPreset = preset
       state.displayWrites?.push(preset)
@@ -232,7 +231,7 @@ function snapshotOf(options: { skills?: { name: string; description: string }[];
   })
 }
 
-test('display and focus commands share the canonical preset and reject Compact', async () => {
+test('display and focus commands share the canonical preset and apply Compact', async () => {
   assert.equal(LOCAL_COMMANDS.has('display'), true, '/display must execute locally')
   assert.equal(SESSIONLESS_COMMANDS.has('display'), true, '/display must work before the first session')
   const ctx = new Context()
@@ -256,12 +255,12 @@ test('display and focus commands share the canonical preset and reject Compact',
   assert.deepEqual(await invoke('display', 'status'), { kind: 'success', text: 'Display: focus.' })
   assert.deepEqual(await invoke('focus', 'status'), { kind: 'success', text: 'Focus mode is on.' })
   assert.deepEqual(await invoke('focus', 'off'), { kind: 'success', text: 'Focus mode off.' })
-  assert.deepEqual(await invoke('display', 'compact'), { kind: 'error', text: 'Compact display is not available in this build.' })
-  assert.deepEqual(displayWrites, ['focus', 'full'], 'only applied presets may persist')
-  assert.equal(runner.displayPreset?.(), 'full', 'Compact must not mutate the canonical state')
+  assert.deepEqual(await invoke('display', 'compact'), { kind: 'success', text: 'Display: compact.' })
+  assert.deepEqual(displayWrites, ['focus', 'full', 'compact'], 'every applied preset persists')
+  assert.equal(runner.displayPreset?.(), 'compact', 'Compact is the canonical live preset')
   assert.deepEqual(await invoke('focus', 'toggle'), { kind: 'success', text: 'Focus mode on.' })
   assert.deepEqual(await invoke('focus', 'status'), { kind: 'success', text: 'Focus mode is on.' })
-  assert.deepEqual(displayWrites, ['focus', 'full', 'focus'])
+  assert.deepEqual(displayWrites, ['focus', 'full', 'compact', 'focus'])
   assert.deepEqual(await invoke('display', 'garbage'), { kind: 'error', text: 'unknown /display verb "garbage" (full|focus|compact|status)' })
   app.stop()
 })
@@ -284,6 +283,28 @@ test('/focus off maps a seeded Compact state to Full', async () => {
   assert.deepEqual(result, { kind: 'success', text: 'Focus mode off.' })
   assert.equal(runner.displayPreset?.(), 'full')
   assert.deepEqual(displayWrites, ['full'])
+  app.stop()
+})
+
+test('/display compact fails closed on a legacy runner without the canonical setter', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const focusModes: boolean[] = []
+  const stub = stubRunner(ctx, app, { agent: undefined })
+  const legacy: TuiCommandRunner = { ...stub, setFocusMode: (enabled) => { focusModes.push(enabled) } }
+  delete (legacy as { setDisplayPreset?: unknown }).setDisplayPreset
+  registerTuiCommands(legacy)
+  const definition = services.defs.find(candidate => candidate.name === 'display')
+  assert.ok(definition?.handler !== undefined, '/display must be registered')
+  const result = await (definition.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }> | { kind: string; text?: string })({ rawInput: 'compact' })
+  assert.deepEqual(result, { kind: 'error', text: 'Display preset "compact" is not available in this build.' })
+  assert.deepEqual(focusModes, [], 'Compact must never fall back to setFocusMode(false), which would activate Full')
   app.stop()
 })
 

@@ -163,11 +163,16 @@ test('compares an official eventSource cut through Transcript, Window, and Focus
   shadow.dispose()
 })
 
-test('Compact projection is rejected before it can alias Full', () => {
-  assert.throws(
-    () => projectPresentationSnapshot(directSnapshot(settledEvents()), { displayPreset: 'compact' }),
-    /Compact display projection is not available/,
+test('Compact projection is produced beside the Focus projection', () => {
+  const projection = projectPresentationSnapshot(directSnapshot(settledEvents()), { displayPreset: 'compact' })
+  // The settled fixture has no process rows, so every Compact block is a
+  // message and the raw chronology is preserved.
+  assert.deepEqual(
+    projection.compact.map(block => (block as { kind: string }).kind),
+    ['message', 'message'],
   )
+  assert.deepEqual(projection.compact, projectPresentationSnapshot(directSnapshot(settledEvents()), { displayPreset: 'compact' }).compact,
+    'the Compact projection is deterministic at one observation point')
 })
 
 test('canonical Full projection keeps Direct/Remote parity', async () => {

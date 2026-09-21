@@ -6,6 +6,7 @@
  */
 
 import { projectFocus, type FocusProjectedBlock } from '../../focus-activity.ts'
+import { projectCompact } from '../../compact-projection.ts'
 import type { DisplayPreset } from '../../display-preset.ts'
 import { TranscriptWindowController, type TranscriptWindowSnapshot } from '../../transcript-window.ts'
 import {
@@ -38,6 +39,7 @@ export type PresentationReadMismatchField =
   | 'projection.messages'
   | 'projection.activities'
   | 'projection.focus'
+  | 'projection.compact'
   | 'projection.window'
 
 /** One bounded presentation mismatch. */
@@ -104,6 +106,9 @@ export interface PresentationSemanticProjection {
   readonly messages: readonly unknown[]
   readonly activities: readonly unknown[]
   readonly focus: readonly unknown[]
+  /** The Compact projection at this observation point (empty disclosure
+   * sets — the same deterministic defaults on both readers). */
+  readonly compact: readonly unknown[]
   readonly window: {
     readonly controller: TranscriptWindowSnapshot
     readonly firstTurn?: number
@@ -310,6 +315,14 @@ function normalizeFocusBlock(block: FocusProjectedBlock): unknown {
   }
 }
 
+function normalizeCompactBlock(block: ReturnType<typeof projectCompact>[number]): unknown {
+  if (block.kind === 'message') return { kind: 'message', message: normalizeValue(block.message) }
+  if (block.kind === 'work') {
+    return { kind: 'work', turn: block.span.turn, members: block.span.members.map(member => normalizeValue(member)) }
+  }
+  return { kind: 'context-cluster', members: block.cluster.members.map(member => normalizeValue(member)) }
+}
+
 function applyToFreshFolder(snapshot: PresentationReadSnapshot): TranscriptFolder {
   const folder = new TranscriptFolder()
   type FolderEvent = Parameters<TranscriptFolder['apply']>[0][number]
@@ -327,9 +340,6 @@ export function projectPresentationSnapshot(
   snapshot: PresentationReadSnapshot,
   options: PresentationProjectionOptions = {},
 ): PresentationSemanticProjection {
-  if (options.displayPreset === 'compact') {
-    throw new Error('Compact display projection is not available in this build')
-  }
   const folder = applyToFreshFolder(snapshot)
   const windowTurns = options.windowTurns ?? 20
   const controller = new TranscriptWindowController({
@@ -350,6 +360,11 @@ export function projectPresentationSnapshot(
     expandedTurns,
     options.displayPreset === undefined || options.displayPreset === 'focus',
   )
+  const compact = projectCompact(window.messages, {
+    expandedWorkOwners: new Set(),
+    expandedClusters: new Set(),
+    forcedExpanded: new Set(),
+  })
   const activities = [...folder.turnActivities().entries()]
     .sort(([left], [right]) => left - right)
     .map(([, activity]) => normalizeActivity(activity))
@@ -358,6 +373,7 @@ export function projectPresentationSnapshot(
     messages: Object.freeze(window.messages.map(message => normalizeValue(message))),
     activities: Object.freeze(activities),
     focus: Object.freeze(focus.map(block => normalizeFocusBlock(block))),
+    compact: Object.freeze(compact.map(block => normalizeCompactBlock(block))),
     window: Object.freeze({
       controller: controllerSnapshot,
       firstTurn: window.firstTurn,
@@ -383,6 +399,7 @@ function compareProjection(
   pushFieldMismatch(mismatches, 'projection.messages', undefined, directProjection.messages, remoteProjection.messages)
   pushFieldMismatch(mismatches, 'projection.activities', undefined, directProjection.activities, remoteProjection.activities)
   pushFieldMismatch(mismatches, 'projection.focus', undefined, directProjection.focus, remoteProjection.focus)
+  pushFieldMismatch(mismatches, 'projection.compact', undefined, directProjection.compact, remoteProjection.compact)
   pushFieldMismatch(mismatches, 'projection.window', undefined, directProjection.window, remoteProjection.window)
   return true
 }
