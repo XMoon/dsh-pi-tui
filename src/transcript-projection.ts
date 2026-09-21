@@ -114,6 +114,24 @@ export function projectTranscriptStructure(messages: readonly TranscriptMessage[
 }
 
 /**
+ * Map every Work member to its canonical span in one linear pass. Disclosure,
+ * search and pruning read Work ownership through THIS index instead of
+ * scanning a preset materialization (or re-projecting Compact) merely to ask
+ * "which Work span owns this row?".
+ * @param structure - the canonical structural blocks for one window.
+ */
+export function workByMemberOf(
+  structure: readonly TranscriptStructureBlock[],
+): ReadonlyMap<TranscriptMessage, TranscriptWorkSpan> {
+  const byMember = new Map<TranscriptMessage, TranscriptWorkSpan>()
+  for (const block of structure) {
+    if (block.kind !== 'work') continue
+    for (const member of block.span.members) byMember.set(member, block.span)
+  }
+  return byMember
+}
+
+/**
  * Map every Context-cluster member to its canonical cluster. Presentation
  * layers that reorder or hoist rows (collapsed/expanded Focus) consume THIS
  * identity instead of re-clustering the reordered sequence, so canonical
