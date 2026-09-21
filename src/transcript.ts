@@ -1010,6 +1010,26 @@ function firstVisibleAssistantTimeFromStream(stream: readonly unknown[] | undefi
   return undefined
 }
 
+/** The lane order the durable `message.content` block order proves for one
+ * settled assistant step: the FIRST lane-visible block decides the result —
+ * a single-lane content still proves the order (the step's other lane row is
+ * hidden or absent, so no visible misorder is possible); `undefined` only
+ * when no block carries lane-visible evidence. Visibility matches the stream
+ * projection's rule (`assistantBlockProjection` — empty reasoning text is not
+ * Thinking evidence), so this stays ordered durable evidence, never a text
+ * heuristic. Used only when the step's embedded stream yields no lane
+ * evidence. */
+function contentLaneOrder(blocks: readonly ContentBlock[]): 'thinking' | 'assistant' | undefined {
+  for (const block of blocks) {
+    if (block.type === 'reasoning') {
+      if (block.text !== '') return 'thinking'
+      continue
+    }
+    if (assistantBlocksVisibleNow([block])) return 'assistant'
+  }
+  return undefined
+}
+
 /** Whether Assistant content is visible before an interruption override. */
 export function assistantBlocksVisibleNow(blocks: readonly ContentBlock[]): boolean {
   for (const block of blocks) {
@@ -2775,15 +2795,19 @@ export class TranscriptFolder {
     // A late reasoning replay remains diagnostic transcript evidence, but a
     // late text/block surface frame must never overwrite the durable message.
     if (activity.settledSteps.has(step)) {
-      if (chunk.type === 'reasoning-delta') {
-        const thinking = this.thinkingEntry(turn, step)
+      // Late reasoning refreshes an EXISTING Thinking row in place; it must
+      // never APPEND a new row after the settled Assistant merely because no
+      // row object existed earlier (post-F6 plan §4.6) — that would create an
+      // invalid trailing Activity after the final answer. The step remains
+      // settled either way.
+      const thinking = this.thinkingEntries.get(key)
+      if (chunk.type === 'reasoning-delta' && thinking !== undefined) {
         thinking.text += chunk.text
         thinking.running = false
         this.closeThinking(thinking)
         this.markStreamingEntryDirty(`thinking:${key}`)
         this.foldThinking(activity, step, chunk.text)
-      } else if (chunk.type === 'block-end' && chunk.block.type === 'reasoning' && 'text' in chunk.block && typeof chunk.block.text === 'string') {
-        const thinking = this.thinkingEntry(turn, step)
+      } else if (chunk.type === 'block-end' && chunk.block.type === 'reasoning' && 'text' in chunk.block && typeof chunk.block.text === 'string' && thinking !== undefined) {
         thinking.text = chunk.block.text
         thinking.running = false
         this.closeThinking(thinking)
@@ -3035,6 +3059,29 @@ export class TranscriptFolder {
       displayBlocks: assistantDisplayBlocksFromStates(states),
       firstLane: rowOrder[0],
     }
+  }
+
+  /** The durable lane-order authority for one settled `assistant/message`
+   * step: the embedded stream's first visible lane — the same authority
+   * `assistant/attempt` already consumes (`assistantStreamProjection`) —
+   * and the durable `message.content` block order only when the stream
+   * yields NO lane evidence (missing, empty, or lane-evidence-free such as
+   * usage-only frames). Never a text heuristic; `undefined` means no order
+   * evidence at all.
+   *
+   * The fold-time stream decode here is a third settlement pass alongside
+   * the usage and first-visible folds; it short-circuits to zero when the
+   * entry already exists (live settlement). Consolidating all settlement
+   * decodes into one projection pass is planned with the PR B timing
+   * projection (post-F6 plan §12.5 — "Decode once"). */
+  private assistantLaneOrderForMessage(
+    stream: readonly unknown[] | undefined,
+    blocks: readonly ContentBlock[],
+  ): 'thinking' | 'assistant' | undefined {
+    const streamLane = stream !== undefined && stream.length > 0
+      ? this.assistantStreamProjection(stream).firstLane
+      : undefined
+    return streamLane ?? contentLaneOrder(blocks)
   }
 
   private restoreThinkingFromProjection(turn: number, step: number, projection: AssistantStreamProjection): void {
@@ -4010,6 +4057,19 @@ export class TranscriptFolder {
         const firstVisible = firstVisibleAssistantTimeFromStream(event.data.stream)
         if (firstVisible === undefined) activity.firstVisibleAssistantTimes.delete(event.data.step)
         else activity.firstVisibleAssistantTimes.set(event.data.step, firstVisible)
+        // The durable embedded stream owns the Thinking/Assistant lane order
+        // for this step — the same rule `assistant/attempt` already follows.
+        // Live rows already established their chronology and are only settled
+        // in place; a MISSING lane row on a fresh materialization (cold replay
+        // / replayed settlement) is created in the authoritative order, never
+        // by reordering existing rows (post-F6 plan §4.4–§4.7).
+        const thinkingRowFirst = entry === undefined
+          && this.assistantLaneOrderForMessage(event.data.stream, messageBlocks) === 'thinking'
+        if (thinkingRowFirst) {
+          // Materialize the missing Thinking row BEFORE the Assistant row so
+          // cold hydration preserves the live Thinking → Assistant order.
+          this.restoreThinkingFromMessage(event.data.turn, event.data.step, messageBlocks)
+        }
         const wasVisible = entry !== undefined && this.isVisible(entry)
         if (entry !== undefined) {
           rememberAssistantStep(entry, event.data.step)
@@ -4053,8 +4113,10 @@ export class TranscriptFolder {
         // the open-lifecycle index, so a later turn/end never revisits it.
         // On a COLD replay no live reasoning deltas ever arrived — the
         // assembled `reasoning` blocks in the durable message restore the
-        // settled thinking entry (Session v2 embedded-stream parity).
-        this.restoreThinkingFromMessage(event.data.turn, event.data.step, messageBlocks)
+        // settled thinking entry (Session v2 embedded-stream parity). When the
+        // missing Thinking row was already materialized first above, this
+        // settlement already owns the lane and must not restore twice.
+        if (!thinkingRowFirst) this.restoreThinkingFromMessage(event.data.turn, event.data.step, messageBlocks)
         // Focus aggregation: the settled assistant text OVERWRITES the
         // candidate's text (authoritative — plan §5.4) but does NOT decide
         // whether it is the final answer; the candidate keeps its step
