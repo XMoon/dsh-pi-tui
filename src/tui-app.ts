@@ -325,6 +325,22 @@ function isUserMessageDisclosureCandidate(message: TranscriptMessage): message i
     && !(message.content !== undefined && message.content.some(block => block.type !== 'text'))
 }
 
+/** The assistant delivered-files tail folds after this many files. */
+const DELIVERED_FILES_FOLDED_LIMIT = 4
+
+/** Whether one assistant message owns a delivered-files disclosure with a
+ * VISIBLE effect (more files than the folded limit). Deliberately narrow:
+ * assistant messages are not generic foldable cards, so they are never folded
+ * into {@link isFoldableMessageDisclosure}; only the capped tail gets a master
+ * owner, and a short tail mints no override that would have no visual effect. */
+function isDeliveredFilesDisclosureCandidate(
+  message: TranscriptMessage,
+): message is Extract<TranscriptMessage, { kind: 'assistant' }> {
+  return message.kind === 'assistant'
+    && message.deliverables !== undefined
+    && message.deliverables.length > DELIVERED_FILES_FOLDED_LIMIT
+}
+
 /** The Workflow run header pill: the REAL status (plan §7.1 — the run's
  * state must be perceivable in the header). The old three-state
  * ok/error/running chrome is a generic-tool presentation; the Workflow card
@@ -1741,7 +1757,6 @@ function pendingUserStatusText(row: PendingUserRow, running: boolean): string {
  * are always shown first; the folded view caps entries while an expanded
  * transcript view re-renders the complete declaration list. */
 class DeliveredFilesComponent implements Component {
-  private static readonly FOLDED_LIMIT = 4
   private readonly files: readonly PresentedFilePresentation[]
   private readonly workspaceRoot: string | undefined
   private readonly expanded: boolean
@@ -1776,7 +1791,7 @@ class DeliveredFilesComponent implements Component {
     const previous = this.cached.get(safeWidth)
     if (previous !== undefined) return previous
 
-    const shown = this.expanded ? this.files : this.files.slice(0, DeliveredFilesComponent.FOLDED_LIMIT)
+    const shown = this.expanded ? this.files : this.files.slice(0, DELIVERED_FILES_FOLDED_LIMIT)
     const rows = [truncateToWidth(color.textDim(`Delivered files · ${this.files.length}`), safeWidth, '…')]
     const spans: Array<{
       index: number
@@ -7380,6 +7395,16 @@ export class TuiApp {
       this.expandedOverride.set(message, true)
       changed = true
     }
+    // A delivered-files tail has the same durable owner ONLY where the current
+    // surface's Ctrl+O actually owns it (regular / fullscreen Full); on
+    // fullscreen Focus/Compact Ctrl+O owns something else, so persisting an
+    // override there would be a dead expansion with no affordance to undo it.
+    if (isDeliveredFilesDisclosureCandidate(message) && messageReveal
+      && this.deliveredFilesMasterOwned()
+      && this.expandedOverride.get(message) !== true) {
+      this.expandedOverride.set(message, true)
+      changed = true
+    }
 
     // A revealed Work span / ambient cluster becomes the SAME kind of
     // user-controllable owner the Focus root and the foldable cards get: an
@@ -7976,10 +8001,16 @@ export class TuiApp {
       // effect) — counting it would make Ctrl+O take the collapse branch for a
       // state it must not touch.
       if (this.surfacedInteractionFailsOpen(message)) continue
-      if (!isFoldableMessageDisclosure(message)) continue
+      if (!isFoldableMessageDisclosure(message) && !isDeliveredFilesDisclosureCandidate(message)) continue
       if (!this.messageRowMaterialized(message, projectionExpanded)) continue
       return true
     }
+    // A granted search reveal can be the ONLY opener (no manual override):
+    // a delivered-files tail is a master-owned disclosure too.
+    const revealedTarget = this.searchRevealedMessage()
+    if (revealedTarget !== undefined && isDeliveredFilesDisclosureCandidate(revealedTarget)
+      && this.deliveredFilesMasterOwned()
+      && this.messageRowMaterialized(revealedTarget, projectionExpanded)) return true
     return false
   }
 
@@ -8010,7 +8041,7 @@ export class TuiApp {
       // is independent of the master (its own disclosure survives a root/root
       // bulk reset, plan §16): keep its fullscreen-owned override.
       if (this.surfacedInteractionFailsOpen(message)) continue
-      if (!isFoldableMessageDisclosure(message)) continue
+      if (!isFoldableMessageDisclosure(message) && !isDeliveredFilesDisclosureCandidate(message)) continue
       if (!this.messageRowMaterialized(message, projectionExpanded)) continue
       this.expandedOverride.delete(message)
     }
@@ -13606,13 +13637,18 @@ export class TuiApp {
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) return false
       return message.turn >= userBoundary
     }
-    // Delivered files are an assistant turn-tail, but their capped/complete
-    // disclosure follows the existing recent-turn Ctrl+O boundary rather than
-    // introducing a second expansion state.
-    if (message.kind === 'assistant' && message.deliverables !== undefined) {
+    // Delivered files are an assistant turn-tail with their own narrow
+    // disclosure: the regular / fullscreen-Full `Ctrl+O` transcript-detail
+    // master owns its capped/complete state, while a surface whose Ctrl+O owns
+    // something else (fullscreen Focus root bulk, fullscreen Compact Work bulk)
+    // must NOT read the leaked master state — only an explicit per-card
+    // override or the temporary search reveal expands it there.
+    if (isDeliveredFilesDisclosureCandidate(message)) {
+      if (this.searchForcesMessageExpanded(message)) return true
+      const override = this.expandedOverride.get(message)
+      if (override !== undefined) return override
+      if (!this.deliveredFilesMasterOwned()) return false
       return message.turn >= boundary
-        || this.expandedOverride.get(message) === true
-        || this.searchForcesMessageExpanded(message)
     }
     // A member of an OPEN Work run (Compact, or nested Work inside an expanded
     // Focus Thought). Regular has no mouse, so the open run full-reveals its own
@@ -17073,6 +17109,16 @@ export class TuiApp {
   private regularBulkOwnsTurn(turn: number): boolean {
     if (this.fullscreen !== undefined || !this.transcriptDetailExpanded) return false
     return turn >= this.expandBoundary()
+  }
+
+  /** Whether the delivered-files tail's Ctrl+O master is owned on THIS surface:
+   * the regular transcript-detail master, or fullscreen Full's generic master.
+   * Fullscreen Focus (Thought-root bulk) and fullscreen Compact (Work bulk)
+   * own Ctrl+O for something else, so they must never read the regular
+   * master's derived expansion. */
+  private deliveredFilesMasterOwned(): boolean {
+    if (this.fullscreen === undefined) return true
+    return !isFocusDisplayPreset(this.displayState.preset) && this.displayState.preset !== 'compact'
   }
 
   /** The expanded long-user tail control: presentation chrome naming the
