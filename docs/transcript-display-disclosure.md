@@ -189,6 +189,11 @@ class:
   F6 work.
 - A RUNNING interaction is untouched: the QuestionFlow / plan-mode approval
   panel owns it and no duplicate settled-style card is surfaced.
+- Search never opens or promotes the Thought root for a card that is already
+  fully visible: on regular Focus (fail-open) the target needs no deeper reveal,
+  so `searchTargetTurn()` reports none and an Esc dismiss cannot promote the
+  root into manual expansion. Fullscreen Focus keeps the deeper reveal for its
+  collapsed, mouse-owned card.
 - The turn's tool count, tool-type stats and Tool slot exclude these tools, so
   a `Tool A · Interaction · Tool B` turn still previews a real tool.
 - Partial/skipped/cancelled/errored question cards stay surfaced; the collapsed

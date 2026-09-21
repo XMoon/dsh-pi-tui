@@ -7542,13 +7542,21 @@ export class TuiApp {
    * root open either. A surfaced-context target NEVER opens its Thought root —
    * an already-visible Context row needs no reveal, and a mid-turn
    * `form:'notice'` (the one surfaced row collapsed Focus hides) is surfaced by
-   * the presentation-only `collapsedFocusForcedVisible()` reveal instead. */
+   * the presentation-only `collapsedFocusForcedVisible()` reveal instead.
+   *
+   * This is the reveal-NECESSITY authority: a target that is already fully
+   * visible on this surface needs no deeper Focus-root reveal, and opening the
+   * root here would also let an Esc dismiss PROMOTE it into `focusExpandedTurns`.
+   * A regular-Focus fail-open surfaced-interaction card is exactly that case —
+   * its answers are already visible, so searching it must not open or promote
+   * the Thought. Fullscreen keeps the deeper reveal (its card is collapsed
+   * behind the mouse owner). */
   private searchTargetTurn(): number | undefined {
     if (!this.searchRevealGranted) return undefined
     const message = this.searchTarget?.message
-    return message !== undefined && !isSurfacedContext(message) && 'turn' in message
-      ? message.turn
-      : undefined
+    if (message === undefined || isSurfacedContext(message) || !('turn' in message)) return undefined
+    if (this.surfacedInteractionFailsOpen(message)) return undefined
+    return message.turn
   }
 
   /** Whether the CURRENT search target owns this message (effective reveal).

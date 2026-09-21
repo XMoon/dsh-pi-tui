@@ -454,6 +454,18 @@ test('E4 exit_plan_mode never counts or previews, and its plan body stays expand
 
 // --- R3: regular Focus has no independent card owner -> fail open --------
 
+function interactionFolder(toolName: 'ask_user_question' | 'exit_plan_mode'): {
+  folder: TranscriptFolder
+  interactionRow: TranscriptMessage
+} {
+  if (toolName === 'ask_user_question') {
+    const { folder, questionRow } = questionTurn()
+    return { folder, interactionRow: questionRow }
+  }
+  const { folder, planReviewRow } = planReviewTurn()
+  return { folder, interactionRow: planReviewRow }
+}
+
 for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
   test(`R3 regular Focus: a settled ${toolName} card fails open and never follows the Focus root`, async () => {
     const { vt, app } = startApp('focus')
@@ -493,7 +505,6 @@ for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
 }
 
 // --- R2#1: Collapse All still closes the root under an interaction reveal ---
-
 test('R2#1 Ctrl+O Collapse All closes the root even while a settled interaction search reveal is active', async () => {
   const { vt, app } = startApp('focus')
   const { folder, questionRow } = questionTurn()
@@ -520,3 +531,36 @@ test('R2#1 Ctrl+O Collapse All closes the root even while a settled interaction 
   assert.ok(!view.includes('🐳'), `no expanded root may survive the bulk collapse:\n${view}`)
   assert.ok(view.includes('Question'), `the settled card stays surfaced:\n${view}`)
 })
+
+// --- R4: searching a fail-open interaction must not open/promote the root ----
+
+for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
+  test(`R4 regular Focus: searching a fail-open ${toolName} card never opens or promotes the Thought root`, async () => {
+    const { vt, app } = startApp('focus')
+    const { folder, interactionRow } = interactionFolder(toolName)
+    show(app, folder)
+    await vt.waitForRender()
+    assert.ok(!vt.getViewport().join('\n').includes('🐳'), 'precondition: the Thought root is collapsed')
+    assert.equal(app.focusExpandedTurnsForTest().size, 0)
+
+    // The card's answer/body is already visible (fail-open); the search target
+    // therefore needs NO deeper Focus-root reveal.
+    app.setTranscriptSearchTarget({
+      query: 'answer',
+      match: { id: 0, turn: TURN, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+      message: interactionRow,
+    })
+    await vt.waitForRender()
+    let view = vt.getViewport().join('\n')
+    assert.ok(view.includes('🐋') && !view.includes('🐳'), `searching a visible card must not open the root:\n${view}`)
+    assert.equal(app.focusExpandedTurnsForTest().size, 0, 'the reveal is temporary, never manual root state')
+
+    // An Esc dismiss may promote the CURRENT reveal — it must NOT promote the
+    // Thought root for an already-visible fail-open card.
+    app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+    assert.ok(view.includes('🐋') && !view.includes('🐳'), `dismiss keeps the root collapsed:\n${view}`)
+    assert.equal(app.focusExpandedTurnsForTest().size, 0, 'no Thought-root promotion for an already-visible card')
+  })
+}
