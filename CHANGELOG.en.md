@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Conversation display now has one canonical Full/Focus preset state.** `/display` is the primary control, `/focus` remains compatible, and Compact is reserved for the next implementation stage and is not selectable yet.
+- **Conversation display now has one canonical Full/Focus/Compact preset state.** `/display` is the primary control and `/focus` remains compatible.
+- **The Compact display preset is now available.** `/display compact`, the `display-preset` setting, and a persisted `displayPreset: compact` all activate Compact for real: the conversation and Assistant intermediate output stay visible in chronology, contiguous reasoning/tool process folds into `Work` spans with Header / Think / Tool previews (click or `Ctrl+O` to expand the raw process rows, with `Ctrl+O` as the bulk owner), injected `notice` / `relay` / `recall` context becomes standalone presentation (producer summary, Agent message, Session recall), and adjacent ambient injections (instructions/catalog/snapshot) collapse into an expandable Context cluster. Compact remains opt-in; the default is unchanged.
 - **Question / Approval keep response ownership while read-only context inspection remains available.** While a response modal is open, fold, Thinking disclosure, fullscreen jump-latest, Todo presentation, and proven fullscreen presentation hits remain usable through direct or leader-bound inspection triggers; fixed Question / Approval response keys take precedence over conflicting global inspection remaps, while submit, session changes, and lifecycle actions remain protected.
 - **Full-text search in long sessions is much faster.** Typing and stepping
   with `Enter`/`Shift+Enter` now rebuild the transcript tree at most ONCE per
