@@ -31,6 +31,7 @@ import { toolTitle } from './present.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
 import { isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
 import { isNoticeContext } from './context-presentation.ts'
+import { projectTranscriptStructure, type TranscriptStructureBlock } from './transcript-projection.ts'
 import { displayFailureText } from './failure-presentation.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
 import { focusTiming, type FocusTimingStore } from './focus-timing.ts'
@@ -538,21 +539,36 @@ export function projectFocus(
       // pre-steer answers, user rows, surfaced context, lead foundation rows,
       // and the FINAL assistant stay unmarked (clicking them must not collapse
       // the Thought — review P2).
-      const boundary = thoughtLeadBoundary(group)
+      const boundary = focusThoughtLeadBoundary(group)
       for (const member of group.slice(0, boundary)) {
         out.push({ kind: 'message', message: member })
       }
       if (activity !== undefined) out.push({ kind: 'activity', activity })
-      for (const member of group.slice(boundary)) {
+      const emitTailRow = (member: TranscriptMessage): void => {
         if (isFocusPersistentInputRow(member)) {
           out.push({ kind: 'message', message: member })
+          return
+        }
+        if (final !== undefined && member === final.message) return
+        if (isCommittedAnswer(member)) {
+          out.push({ kind: 'message', message: member })
+          return
+        }
+        out.push({ kind: 'message', message: member, collapseFocusOwnerOnClick: turn })
+      }
+      // The tail consumes the SAME canonical segmentation as Compact/Full
+      // (`transcript-projection.ts`), computed over the UNFILTERED tail so the
+      // held-back final never changes raw adjacency. Focus-expanded materializes
+      // the Work/cluster members flat — no nested Work disclosure before F6 —
+      // and the TuiApp cluster substitution consumes the same canonical cluster
+      // identity at its Focus-projected position.
+      for (const block of focusExpandedTailStructure(group, boundary)) {
+        if (block.kind === 'work') {
+          for (const member of block.span.members) emitTailRow(member)
+        } else if (block.kind === 'context-cluster') {
+          for (const member of block.cluster.members) emitTailRow(member)
         } else {
-          if (final !== undefined && member === final.message) continue
-          if (isCommittedAnswer(member)) {
-            out.push({ kind: 'message', message: member })
-          } else {
-            out.push({ kind: 'message', message: member, collapseFocusOwnerOnClick: turn })
-          }
+          emitTailRow(block.message)
         }
       }
       if (final !== undefined) {
@@ -570,7 +586,7 @@ export function projectFocus(
     // `form:'notice'` is the other exception (see
     // {@link isCollapsedFocusVisibleRow}): it is process feedback and hides
     // inside the Thought, while an opening-foundation notice stays visible.
-    const leadBoundary = thoughtLeadBoundary(group)
+    const leadBoundary = focusThoughtLeadBoundary(group)
     const firstCommittedIndex = group.findIndex(isCommittedAnswer)
     if (firstCommittedIndex < 0) {
       for (let index = 0; index < group.length; index += 1) {
@@ -615,6 +631,21 @@ export function projectFocus(
   return out
 }
 
+/**
+ * The canonical structural blocks the expanded Focus TAIL consumes: one turn
+ * group from its Thought-lead boundary onward. The held-back final is included,
+ * so cluster membership is computed from exactly the raw adjacency the window
+ * would give. `projectFocus` materializes these blocks flat; this exported seam
+ * lets the convergence oracle compare Work/cluster boundary IDENTITY (owner and
+ * member objects) instead of display strings (plan §25).
+ * @param group - one turn's consecutive raw messages.
+ * @param boundary - the group's Thought-lead boundary ({@link focusThoughtLeadBoundary}).
+ *   Passed in so one expanded group computes the boundary once.
+ */
+export function focusExpandedTailStructure(group: readonly TranscriptMessage[], boundary: number): TranscriptStructureBlock[] {
+  return projectTranscriptStructure(group.slice(boundary))
+}
+
 /** Find the Assistant entry that owns the structural latest step. A late
  * durable message can append after newer process evidence, so physical array
  * order is not a reliable final-answer identity. */
@@ -651,7 +682,7 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
  * and `Full` do not route through here.
  * @param message - the raw transcript row.
  * @param index - its index in the raw turn group.
- * @param leadBoundary - the turn's Thought-lead boundary (see {@link thoughtLeadBoundary}).
+ * @param leadBoundary - the turn's Thought-lead boundary (see {@link focusThoughtLeadBoundary}).
  */
 function isCollapsedFocusVisibleRow(message: TranscriptMessage, index: number, leadBoundary: number): boolean {
   if (!isFocusPersistentInputRow(message)) return false
@@ -663,7 +694,7 @@ function isCollapsedFocusVisibleRow(message: TranscriptMessage, index: number, l
  * A turn-less entry (window summary) may SPLIT a turn into separate runs, and
  * the projection folds each run independently — this helper is shared by the
  * projection and the collapsed visibility predicate so their index and
- * `thoughtLeadBoundary` math can never diverge on a non-monotonic window.
+ * `focusThoughtLeadBoundary` math can never diverge on a non-monotonic window.
  * @param messages - the transcript window.
  * @param start - the run's first index.
  * @param turn - the run's turn number.
@@ -686,7 +717,7 @@ function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: num
  * that row visible without opening the Thought and without minting a manual
  * disclosure owner; the positional decision uses the SAME consecutive-run
  * grouping as the projection ({@link consecutiveTurnGroup} +
- * {@link thoughtLeadBoundary}), never a source-name check.
+ * {@link focusThoughtLeadBoundary}), never a source-name check.
  * @param messages - the current transcript window.
  * @param message - the row to test.
  */
@@ -703,7 +734,7 @@ export function isCollapsedFocusHiddenRow(messages: readonly TranscriptMessage[]
   }
   const group = consecutiveTurnGroup(messages, start, message.turn)
   const index = position - start
-  return !isCollapsedFocusVisibleRow(message, index, thoughtLeadBoundary(group))
+  return !isCollapsedFocusVisibleRow(message, index, focusThoughtLeadBoundary(group))
 }
 
 /** The end of the turn's LEADING injected-context prefix used only for
@@ -736,7 +767,7 @@ function leadingInjectedContextPrefixEnd(group: readonly TranscriptMessage[]): n
  * never orchestration rows like llm/retry). Without steer metadata, the first
  * user remains the initial-prompt fallback; consecutive users are queue/steer
  * input, not a multi-row initial prompt. */
-function thoughtLeadBoundary(group: readonly TranscriptMessage[]): number {
+export function focusThoughtLeadBoundary(group: readonly TranscriptMessage[]): number {
   const firstInitialUserIndex = group.findIndex(
     member => member.kind === 'user' && member.steer !== true,
   )
