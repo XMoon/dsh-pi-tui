@@ -791,6 +791,52 @@ test('fullscreen Focus + a fail-open delivered file search does not open or prom
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'dismiss must not promote the root')
 })
 
+test('a reveal-only compaction is collapsed and revoked by the first regular Ctrl+O', async () => {
+  const { vt, app } = startApp('compact')
+  const compaction: TranscriptMessage = { kind: 'compaction', turn: 1, text: 'COMPACTION_MARKER', items: 3, tokens: 10 }
+  app.setTranscript([{ kind: 'user', turn: 1, text: 'go' }, compaction], new Map())
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(compaction, 'COMPACTION_MARKER'))
+  assert.ok((await viewport(vt)).includes('COMPACTION_MARKER'), 'precondition: the reveal expands the compaction')
+  vt.sendInput('\x0f')
+  const collapsed = await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'press 1 collapses/revokes instead of turning the master on')
+  assert.ok(!collapsed.includes('COMPACTION_MARKER'), `the reveal is revoked:\n${collapsed}`)
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'press 2 turns the master on')
+})
+
+test('a regular surface without Alt+T fails Thinking open (no dead compact card)', async () => {
+  const { vt, app } = startApp('full')
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleThinking': false }))
+  const thinking: TranscriptMessage = {
+    kind: 'thinking', turn: 1,
+    text: ['head', 'r1', 'r2', 'r3', 'MID_THINKING_MARKER', 't1', 't2', 't3', 'tail'].join('\n'),
+  }
+  app.setTranscript([{ kind: 'user', turn: 1, text: 'go' }, thinking], new Map())
+  const view = await viewport(vt)
+  assert.ok(view.includes('MID_THINKING_MARKER'), `Thinking must fail open without an operable owner:\n${view}`)
+  assert.ok(!view.includes('alt+t'), `no dead Alt+T hint may render:\n${view}`)
+})
+
+test('a disabled Alt+T mints no Thinking override on search dismiss', async () => {
+  const { vt, app } = startApp('compact')
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleThinking': false }))
+  const thinking: TranscriptMessage = {
+    kind: 'thinking', turn: 1,
+    text: ['head', 'r1', 'r2', 'r3', 'MID_THINKING_MARKER', 't1', 't2', 't3', 'tail'].join('\n'),
+  }
+  app.setTranscript([{ kind: 'user', turn: 1, text: 'go' }, thinking], new Map())
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(thinking, 'MID_THINKING_MARKER'))
+  await viewport(vt)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  assert.notEqual(overrides.get(thinking), true, 'a fail-open Thinking must not mint an override on dismiss')
+})
+
 test('collapsed Focus + a hidden process row search still opens the Thought', async () => {
   const { vt, app } = startApp('focus')
   const { messages, activities } = settledTurnFixture()
