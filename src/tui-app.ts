@@ -8232,8 +8232,8 @@ export class TuiApp {
   }
 
   /** Whether one ambient cluster is open: a manual disclosure, a granted
-   * search reveal whose target is one of its members, or the recent-detail
-   * fold master (Ctrl+O). */
+   * search reveal whose target is one of its members, or the surface-default
+   * expanded presentation used on regular surfaces. */
   private contextClusterExpanded(cluster: ContextCluster): boolean {
     // The semantic cluster exists on every preset/surface; only its PRESENTATION
     // default is surface-dependent (the regular surface has no manual cluster
@@ -16417,10 +16417,6 @@ export class TuiApp {
     })
   }
 
-  /** Whether the long-user fold has a usable expand affordance on THIS
-   * surface. Fullscreen always does (the compact-marker click); regular needs
-   * the effective `app.transcript.toggleExpand` key — compacting without one
-   * would strand a full prompt collapsed with no way to open it. */
   /**
    * Whether the CURRENT search reveal's latched affordance is still usable.
    * Separate from {@link userDisclosureAffordanceAvailable} because the grant
@@ -16438,6 +16434,12 @@ export class TuiApp {
     return false
   }
 
+  /** Whether the long-user fold has a usable expand affordance on THIS
+   * surface. Fullscreen always does (the compact-marker click); regular needs
+   * the effective `app.transcript.toggleExpand` key — compacting without one
+   * would strand a full prompt collapsed with no way to open it. The
+   * message-fold capability is checked FIRST, so a surface that presents the
+   * fold in full (regular Compact) has no long-user affordance at all. */
   private userDisclosureAffordanceAvailable(): boolean {
     // The message-fold capability is the ONE authority. Regular Compact presents
     // every non-Work fold in full, so no long-user disclosure exists there —
