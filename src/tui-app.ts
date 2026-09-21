@@ -4365,7 +4365,7 @@ export class TuiApp {
         const start = performance.now()
         originalWrite(data)
         this.scrollFrameWriteMs += performance.now() - start
-        this.scrollFrameBytes += data.length
+        this.scrollFrameBytes += Buffer.byteLength(data, 'utf8')
         let erases = 0
         for (let index = 0; index < data.length; index += 1) {
           if (data.charCodeAt(index) === 0x1b && data.startsWith('\x1b[2K', index)) erases += 1
@@ -4936,6 +4936,9 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     this.clearExitConfirmation()
     this.lastEscapeAt = undefined
+    // The stopped screen cannot paint: a latched profiler window would
+    // otherwise bill the $EDITOR dwell time to the next post-resume frame.
+    this.resetScrollProfileFrame()
     if (this.fullscreen !== undefined) {
       this.fullscreen.stop({ preserveScreen: true })
     } else {
@@ -4989,6 +4992,7 @@ export class TuiApp {
     for (const dispose of this.schemeDisposers) dispose()
     this.schemeDisposers = []
     this.clearFocusLiveHeightState()
+    this.resetScrollProfileFrame()
     this.tui.stop()
     this.fullscreen?.stop()
     this.fullscreen = undefined
@@ -5006,8 +5010,9 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    // Unwrap the diagnostic scroll-profiler write instrumentation FIRST, so
-    // the opt-in wrap never outlives the app instance that installed it.
+    // The diagnostic scroll-profiler instrumentation dies with the app: the
+    // write-wrap is unwrapped first and any latched frame window discarded.
+    this.resetScrollProfileFrame()
     if (this.scrollProfileOriginalWrite !== undefined) {
       (this.terminal as Terminal & { write: (data: string) => void }).write = this.scrollProfileOriginalWrite
       this.scrollProfileOriginalWrite = undefined
@@ -6790,10 +6795,11 @@ export class TuiApp {
       // Scroll profiler (diagnostic): a scroll request opens a frame window
       // that closes at the next paint-snapshot commit, so coalesced frames
       // emit exactly one line describing the frame the user actually saw.
-      // Only a scrollBy that actually requests a repaint (the offset moved
-      // or the follow-end state flipped) may open the window: a no-op
-      // scrollBy at a boundary never paints, and latching here would hang
-      // the window until an UNRELATED frame inherited the stale start.
+      // Semantic choice: only a scrollBy that CHANGES scroll state (the
+      // offset moves or the follow-end state flips) counts as a scroll
+      // frame. The alt-screen wheel/PageUp path repaints unconditionally,
+      // so a boundary no-op wheel still paints — it is simply not a scroll
+      // frame and emits no line.
       if (this.scrollProfiler.enabled) {
         const scrollView = this.fullscreenScroll
         const originalScrollBy = scrollView.scrollBy.bind(scrollView)
@@ -6805,12 +6811,9 @@ export class TuiApp {
           const requestedRepaint = scrollView.scrollTop !== scrollTopBefore || scrollView.isFollowingEnd !== followingEndBefore
           if (!requestedRepaint) return remainder
           if (!this.scrollFramePending) {
+            this.resetScrollProfileFrame()
             this.scrollFramePending = true
             this.scrollFrameStart = started
-            this.scrollFrameWriteMs = 0
-            this.scrollFrameBytes = 0
-            this.scrollFrameRowsRewritten = 0
-            this.scrollFrameRemeasureMs = 0
           }
           return remainder
         }
@@ -6862,7 +6865,7 @@ export class TuiApp {
       this.fullscreen = undefined
       this.fullscreenScroll = undefined
       // A latched profiler window must not leak across a fullscreen swap.
-      this.scrollFramePending = false
+      this.resetScrollProfileFrame()
       this.tui.start()
       // The alt screen's stop disables focus reporting (?1004l rides the
       // mouse-disable sequence). The main screen keeps needing focus
@@ -10378,6 +10381,19 @@ export class TuiApp {
 
     const desiredTop = Math.max(0, targetStart - Math.floor(viewportHeight / 3))
     scroll.scrollTo(desiredTop, { disableFollow: true })
+  }
+
+  /** Discard any open scroll-profiler frame window WITHOUT emitting. Called
+   * by every seam that terminates or pauses the paint loop (fullscreen
+   * swap/exit, external-editor suspend, stop, dispose): the suspended
+   * lifecycle cannot paint, so a window latched across it would attribute
+   * the pause to whatever frame repaints after the resume. */
+  private resetScrollProfileFrame(): void {
+    this.scrollFramePending = false
+    this.scrollFrameWriteMs = 0
+    this.scrollFrameBytes = 0
+    this.scrollFrameRowsRewritten = 0
+    this.scrollFrameRemeasureMs = 0
   }
 
   /** An async image settle invalidates ONLY the thumbnail component: the

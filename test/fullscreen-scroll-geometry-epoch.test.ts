@@ -258,8 +258,11 @@ test('the press/release fence keeps its semantics across scrolled repaints', asy
   app.stop()
 })
 
-test('the scroll profiler never latches a frame window on a no-op boundary scroll', async () => {
+test('the scroll profiler counts only scroll-state-changing wheels, not no-op boundary wheels', async () => {
   // The profiler reads the env at app construction: scope it to this test.
+  // Semantic note: the alt-screen wheel path repaints UNCONDITIONALLY, so a
+  // wheel-up at the top still paints a frame — but it changed no scroll
+  // state, so the profiler must NOT count it as a scroll frame.
   process.env.DSH_TUI_SCROLL_PROFILE = '1'
   const emitted: string[] = []
   const originalConsoleError = console.error
@@ -274,22 +277,76 @@ test('the scroll profiler never latches a frame window on a no-op boundary scrol
     ;(app as unknown as { fullscreenScroll: { scrollTo(top: number): void } }).fullscreenScroll.scrollTo(0)
     await viewport(vt)
 
-    // A wheel-up AT the top moves nothing and requests no repaint: it must
-    // NOT latch a profiling window.
+    // A wheel-up AT the top changes no scroll state: the frame it repaints
+    // is not a scroll frame.
     vt.sendInput('\x1b[<64;10;5M')
     await viewport(vt)
-    // An unrelated repaint must not inherit the latched window either.
+    // A subsequent unrelated repaint must not emit a scroll frame either.
     app.requestRender()
     await viewport(vt)
     const frames = (): number => emitted.filter(line => line.startsWith('scroll frame=')).length
-    assert.equal(frames(), 0, `a no-op boundary scroll must not latch a profiler window (emitted ${frames()})`)
+    assert.equal(frames(), 0, `a no-scroll-state-change wheel must not emit a scroll frame (emitted ${frames()})`)
 
-    // A real scroll emits exactly ONE frame, timed from THIS wheel.
+    // A wheel that actually moves the offset emits exactly ONE frame, timed
+    // from THIS wheel.
     await wheel(vt, 'down')
     assert.equal(frames(), 1, `the moving wheel must emit exactly one scroll frame (got ${frames()})`)
     const latencyLine = emitted.find(line => line.startsWith('scroll frame='))!
     const latency = Number(/frame=([\d.]+)ms/.exec(latencyLine)?.[1])
     assert.ok(Number.isFinite(latency) && latency >= 0 && latency < 200, `scroll latency must be timed from the moving wheel (got ${latency}ms)`)
+    app.setFullscreen(false)
+    app.stop()
+  } finally {
+    console.error = originalConsoleError
+    delete process.env.DSH_TUI_SCROLL_PROFILE
+  }
+})
+
+test('the scroll profiler counts UTF-8 bytes, not UTF-16 code units', async () => {
+  // Transport cost (SSH / xterm.js) scales with UTF-8 bytes: CJK costs 3
+  // bytes per character and emoji 4 per glyph, while `string.length` counts
+  // UTF-16 code units. The profiler must report the wire volume.
+  process.env.DSH_TUI_SCROLL_PROFILE = '1'
+  const emitted: string[] = []
+  const originalConsoleError = console.error
+  console.error = (message: unknown): void => { emitted.push(String(message)) }
+  const written: string[] = []
+  try {
+    const vt = new VirtualTerminal(100, 24)
+    const innerWrite = vt.write.bind(vt)
+    vt.write = (data: string): void => {
+      written.push(data)
+      innerWrite(data)
+    }
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    startedApps.add(app)
+    app.setFullscreen(true)
+    const folder = new TranscriptFolder()
+    const events: unknown[] = []
+    let seq = 0
+    for (let turn = 0; turn < 12; turn += 1) {
+      events.push({ type: 'turn/start', seq: seq++, time: turn * 10, data: { turn } })
+      events.push({
+        type: 'user/message', seq: seq++, time: turn * 10 + 1, data: {
+          content: [{ type: 'text', text: `鲸鱼 🐋 你好 scroll-smoke ${turn}` }], source: { kind: 'user' },
+        },
+      })
+      events.push({ type: 'turn/end', seq: seq++, time: turn * 10 + 2, data: { turn, reason: { kind: 'completed' } } })
+    }
+    folder.apply(events as never[])
+    app.setTranscript(folder.messages())
+    await viewport(vt)
+    await viewport(vt)
+
+    written.length = 0
+    await wheel(vt, 'up')
+    const frames = emitted.filter(line => line.startsWith('scroll frame='))
+    assert.equal(frames.length, 1, `exactly one scroll frame expected (got ${frames.length})`)
+    const reported = Number(/bytes=(\d+)/.exec(frames[0]!)?.[1])
+    const utf8Sum = written.reduce((total, data) => total + Buffer.byteLength(data, 'utf8'), 0)
+    const utf16Sum = written.reduce((total, data) => total + data.length, 0)
+    assert.ok(utf16Sum < utf8Sum, `the fixture must contain multibyte content for this test to be meaningful (utf16 ${utf16Sum} < utf8 ${utf8Sum})`)
+    assert.equal(reported, utf8Sum, `bytes= must be the UTF-8 wire volume (${reported} != ${utf8Sum})`)
     app.setFullscreen(false)
     app.stop()
   } finally {
