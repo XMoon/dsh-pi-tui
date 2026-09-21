@@ -83,7 +83,7 @@ import { TaskBrowserPanel, type TaskBrowserViewState, type TaskPanelItem } from 
 import type { TaskBrowserSummary } from './task-browser-runtime.ts'
 import type { StatusStore } from './status/store.ts'
 import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './display-preset.ts'
-import { isDisplayPresetAvailable, isFocusDisplayPreset } from './display-preset.ts'
+import { displayPolicyFor, isDisplayPresetAvailable, isFocusDisplayPreset } from './display-preset.ts'
 import type { AccessStatus, CompositionStatus, RunPhase, StatusPatch, UsageStatus, WorkspaceStatus } from './status/types.ts'
 import { deriveActivityStatus } from './status/derive-activity.ts'
 import { resolveDisplaySubject } from './status/resolve-subject.ts'
@@ -8223,15 +8223,19 @@ export class TuiApp {
   }
 
   /**
-   * The presentation projection over the current transcript window, by
-   * preset: Compact groups contiguous Process runs into Work spans and
-   * clusters raw-adjacent ambient Context; Focus uses the existing turn
-   * projection; Full keeps plain chronology. Ambient Context clustering is
-   * orthogonal density control and is applied to EVERY preset.
+   * The presentation projection over the current transcript window. The
+   * semantic segmentation is owned once by
+   * {@link projectTranscriptStructure} (`transcript-projection.ts`); this entry
+   * selects the materialization from the {@link displayPolicyFor} layers:
+   * Compact (turnLayer open + Process collapsed) renders Work cards, Focus
+   * (focusBehavior) runs the Focus turn projection and substitutes the canonical
+   * cluster identity, and Full (turnLayer open + Process expanded) emits the
+   * structure with Work flat. Ambient Context clustering applies to EVERY preset.
    */
   private projectedBlocks(projectionExpanded: ReadonlySet<number>): TranscriptRenderBlock[] {
     const preset = this.displayState.preset
-    if (preset === 'compact') {
+    const policy = displayPolicyFor(preset)
+    if (policy.turnLayer === 'open' && policy.processLayer === 'collapsed') {
       const expandedWorkOwners = new Set(this.compactExpandedWorkOwners)
       const expandedClusters = new Set(this.effectiveExpandedClusterOwners())
       // The temporary search reveal opens exactly the container that HIDES the
@@ -8259,10 +8263,16 @@ export class TuiApp {
       return blocks
     }
     this.compactOpenRunMembers = new Set()
-    const blocks: TranscriptRenderBlock[] = isFocusDisplayPreset(preset)
-      ? projectFocus(this.messages, this.turnActivities, projectionExpanded, true, this.collapsedFocusForcedVisible())
-      : this.messages.map(message => ({ kind: 'message', message }) as TranscriptRenderBlock)
-    return this.applyContextClusters(blocks)
+    // One canonical segmentation per projection. Full materializes it directly
+    // (Work flat, the shared cluster presentation); Focus reorders/hoists rows,
+    // so it consumes the same canonical cluster identity in Focus-projected
+    // order through the projection-aware substitution helper.
+    const structure = projectTranscriptStructure(this.messages)
+    if (policy.focusBehavior) {
+      const blocks = projectFocus(this.messages, this.turnActivities, projectionExpanded, true, this.collapsedFocusForcedVisible())
+      return this.applyContextClusters(blocks, clusterByMemberOf(structure))
+    }
+    return this.materializeTranscriptStructure(structure)
   }
 
   /** The currently GRANTED search target message: undefined once an explicit
@@ -8368,36 +8378,66 @@ export class TuiApp {
   }
 
   /**
-   * Substitute raw-adjacent ambient Context clusters into an already
-   * projected block list (Focus / Full). The cluster header replaces its
-   * owner's row; an open cluster re-emits EVERY member as an ordinary
-   * Context row (the existing message renderer owns each), and a closed
-   * cluster drops its non-owner members. Grouping is computed from the RAW
-   * window, so a hidden Process row can never merge two Context rows
-   * (plan §19.1/§26.2).
+   * Materialize the canonical structure with Work FLAT and the shared cluster
+   * presentation. Full uses this directly: the canonical segmentation exists
+   * (Work boundaries are known), but Full's default Process disclosure is
+   * expanded, so a span emits its raw members with no Work chrome.
    */
-  private applyContextClusters(blocks: readonly TranscriptRenderBlock[]): TranscriptRenderBlock[] {
-    const clustering = clusterAdjacentAmbientContext(this.messages)
-    if (clustering.clusters.length === 0) return [...blocks]
+  private materializeTranscriptStructure(structure: readonly TranscriptStructureBlock[]): TranscriptRenderBlock[] {
+    const out: TranscriptRenderBlock[] = []
+    for (const block of structure) {
+      if (block.kind === 'message') {
+        out.push({ kind: 'message', message: block.message })
+      } else if (block.kind === 'work') {
+        for (const member of block.span.members) out.push({ kind: 'message', message: member })
+      } else {
+        out.push(...this.materializeContextCluster(block.cluster))
+      }
+    }
+    return out
+  }
+
+  /**
+   * Present one canonical ambient cluster by surface capability: a FLAT
+   * member sequence where no manual cluster owner exists (regular), otherwise
+   * the header block plus its members when open. Both Full and Focus consume
+   * this, so cluster presentation is never re-derived per preset.
+   */
+  private materializeContextCluster(cluster: ContextCluster): TranscriptRenderBlock[] {
+    if (this.contextClusterDefaultExpanded()) {
+      return cluster.members.map(member => ({ kind: 'message', message: member }) as TranscriptRenderBlock)
+    }
+    const expanded = this.contextClusterExpanded(cluster)
+    const out: TranscriptRenderBlock[] = [{ kind: 'context-cluster', cluster, expanded }]
+    if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member })
+    return out
+  }
+
+  /**
+   * Substitute canonical ambient Context clusters into an already projected
+   * block list (Focus). The cluster header replaces its owner's row; an open
+   * cluster re-emits EVERY member as an ordinary Context row (the existing
+   * message renderer owns each), and a closed cluster drops its non-owner
+   * members. Membership comes from the canonical structure's
+   * `byMember` identity — never a re-clustering of the Focus-reordered
+   * sequence — so a hidden Process row can never merge two Context rows
+   * (plan §11/§19.1/§26.2).
+   */
+  private applyContextClusters(
+    blocks: readonly TranscriptRenderBlock[],
+    canonicalByMember: ReadonlyMap<TranscriptMessage, ContextCluster>,
+  ): TranscriptRenderBlock[] {
+    if (canonicalByMember.size === 0) return [...blocks]
     const out: TranscriptRenderBlock[] = []
     for (const block of blocks) {
       const message = block.kind === 'message' ? block.message : undefined
-      const cluster = message === undefined ? undefined : clustering.byMember.get(message)
+      const cluster = message === undefined ? undefined : canonicalByMember.get(message)
       if (cluster === undefined) {
         out.push(block)
         continue
       }
       if (message !== cluster.owner) continue
-      // Regular: the cluster still groups the rows semantically, but the surface
-      // has no manual cluster disclosure owner yet, so it presents the members
-      // directly instead of a header with no operable affordance.
-      if (this.contextClusterDefaultExpanded()) {
-        for (const member of cluster.members) out.push({ kind: 'message', message: member })
-        continue
-      }
-      const expanded = this.contextClusterExpanded(cluster)
-      out.push({ kind: 'context-cluster', cluster, expanded })
-      if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member })
+      out.push(...this.materializeContextCluster(cluster))
     }
     return out
   }
