@@ -322,6 +322,53 @@ test('a fail-open regular surface renders a live call without Work chrome', asyn
   assert.ok(view.includes('Preparing Edit'), `the live call renders as an ordinary preview:\n${view}`)
 })
 
+test('a visible collapsed-Focus compaction override is collapsed by the first Ctrl+O', async () => {
+  const { vt, app } = startApp('focus')
+  const compaction: TranscriptMessage = { kind: 'compaction', turn: 1, text: 'COMPACTION_BODY_MARKER', items: 3, tokens: 10 }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 1, text: 'go' }, compaction, { kind: 'assistant', turn: 1, text: 'final' },
+  ]
+  const activities = new Map([[1, activity(1)]])
+  app.setTranscript(messages, activities)
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  overrides.set(compaction, true)
+  app.setTranscript(messages, activities)
+  assert.ok((await viewport(vt)).includes('COMPACTION_BODY_MARKER'),
+    'precondition: the compaction override is visible while the root is collapsed')
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the visible compaction override must be collapsed by the first press')
+  assert.notEqual(overrides.get(compaction), true, 'the materialized override is cleared')
+})
+
+test('a hidden mid-turn notice override does not consume the first Ctrl+O', async () => {
+  const { vt, app } = startApp('focus')
+  const notice: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'NOTICE_BODY_MARKER', label: 'Background job', context: true,
+    contextPresentation: { form: 'notice', sourceKind: 'tool-jobs', role: 'inject' },
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 1, text: 'go' },
+    { kind: 'thinking', turn: 1, text: 'work reasoning' },
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'r', status: 'ok' },
+    notice,
+    { kind: 'assistant', turn: 1, text: 'final' },
+  ]
+  const activities = new Map([[1, activity(1)]])
+  app.setTranscript(messages, activities)
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  overrides.set(notice, true)
+  app.setTranscript(messages, activities)
+  assert.ok(!(await viewport(vt)).includes('NOTICE_BODY_MARKER'),
+    'precondition: collapsed Focus hides the mid-turn notice')
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the hidden notice override must not consume the first press')
+  assert.equal(overrides.get(notice), true, 'the parked notice override is preserved')
+})
+
 test('a cluster reveal promotes the cluster owner on an ordinary dismiss', async () => {
   const { vt, app } = startApp('compact')
   const first: TranscriptMessage = {
