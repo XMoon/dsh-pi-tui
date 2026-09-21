@@ -851,7 +851,7 @@ test('an already-visible delivered file does not consume the first regular Ctrl+
   assert.ok(after.includes('src/file-5.ts'), `the tail expands with the master:\n${after}`)
 })
 
-test('a collapapsing regular Ctrl+O revokes a hidden delivered-file reveal', async () => {
+test('a collapsing regular Ctrl+O revokes a hidden delivered-file reveal', async () => {
   const { vt, app } = startApp('compact')
   const { messages, assistant } = deliveredFilesTurn()
   app.setTranscript(messages, new Map())
