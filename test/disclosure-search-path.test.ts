@@ -612,6 +612,25 @@ test('searching an already-visible delivered file does not expand the tail', asy
   assert.notEqual(overrides.get(assistant), true, 'dismiss must not mint an override for an already-visible file')
 })
 
+test('a dismiss does not promote an already-expanded delivered tail', async () => {
+  const { vt, app } = startApp('compact')
+  const { messages, assistant } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  app.setTranscriptDetailExpanded(true)
+  await viewport(vt)
+  assert.ok((await viewport(vt)).includes('src/file-5.ts'), 'precondition: the master already expanded the tail')
+  app.setTranscriptSearchTarget(deliverableTarget(assistant, 'file-5', 4))
+  await viewport(vt)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  assert.notEqual(overrides.get(assistant), true,
+    'an already-expanded tail must not mint a durable override on dismiss')
+  app.setTranscriptDetailExpanded(false)
+  const folded = await viewport(vt)
+  assert.ok(!folded.includes('src/file-5.ts'), `the tail folds with the master (no ghost owner):\n${folded}`)
+})
+
 test('a cluster reveal promotes the cluster owner on an ordinary dismiss', async () => {
   const { vt, app } = startApp('compact')
   const first: TranscriptMessage = {

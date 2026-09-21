@@ -374,6 +374,17 @@ When the key is unavailable (remapped away/disabled) every one of those folds
 fails open: no collapsed header, marker or `(ctrl+o to expand)` hint is ever
 rendered for an inoperable owner.
 
+**Delivered files** (an assistant tail with more files than the folded limit)
+are their own message-local family, converged onto the same contract: the
+regular transcript-detail master and fullscreen Full's generic master own the
+capped tail while the effective `app.transcript.toggleExpand` key exists; every
+other surface — fullscreen Compact, fullscreen Focus, or any surface without the
+key — fails the tail open (all files visible), because no operable owner exists
+there. A search reveal only opens the tail when the matched file is beyond the
+folded limit AND the tail is not already expanded; an ordinary dismiss promotes
+the durable override only on a master-owned surface and only for a genuinely
+hidden match.
+
 ### Nested Focus Work (F6)
 
 Expanded Focus materializes each canonical Work span as a nested container
