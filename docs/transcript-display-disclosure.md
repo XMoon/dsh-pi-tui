@@ -132,7 +132,9 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   with the mouse owning the local folds there. Every collapsed representation is
   capability-gated: a fold with no operable owner is not presented collapsed at
   all — the row renders in full and advertises no hint. Alt+T still owns
-  Thinking detail, independently of all of them.
+  Thinking detail, independently of all of them: on a regular surface without an
+  effective `app.transcript.toggleThinking` key the Thinking body fails open
+  (full body, no hint), while fullscreen keeps its mouse per-card owner.
 - Members of an OPEN Work run follow the same surface contract: regular
   full-reveals them, fullscreen keeps the per-card click (`(click to expand)`),
   and a hidden member revealed by search is promoted to a manual Work owner when
