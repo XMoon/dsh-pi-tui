@@ -519,6 +519,51 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   "projection-only": the marker is not a durable field and no new session
   event, and the icon stays a display field, never a semantic signal).
 
+## Compact Work spans and form-aware Context (2026-09-20 PR3/F4)
+
+- **Compact is a real preset now.** `/display compact`, the `display-preset`
+  settings row value, and a persisted `displayPreset: 'compact'` all resolve to
+  Compact without a Full fallback. Focus stays the only preset with the
+  model-facing behavioral policy; Compact keeps `focusBehavior: false`.
+- **Work folds contiguous Process runs, never whole turns.** A maximal run of
+  Process-classified rows becomes one presentation-only span whose owner is its
+  first member `TranscriptMessage` (the stable disclosure identity). Every
+  Conversation/Attention/surfaced-Context/turn boundary ends the run, so
+  Assistant intermediate narration stays visible in chronology and the final
+  answer keeps its existing ownership.
+- **Collapsed Work = Header + Think + Tool, never Message.** The Think row is
+  the latest reasoning tail (one visual row, following the tail while
+  streaming); the Tool row is the presenter-first semantic display (one visual
+  row). Counts describe the span, not the turn; no fact renders a placeholder
+  row; span-local duration is omitted rather than faked from whole-turn timing.
+  Expanding the span re-uses the ordinary message renderers for its members.
+- **The Work/cluster disclosure glyph is the plain triangle** (`▸`/`▾`, new
+  `section-collapsed`/`section-expanded` semantics in every icon style) — the
+  Focus root keeps its whale identity. Both are click-owned in fullscreen;
+  `Ctrl+O` is the Compact Work-span bulk owner in both surfaces.
+- **Surfaced Context is form-aware.** The fold retains the producer-declared
+  `MessageSource.form` as presentation-only provenance; `notice`, `relay` and
+  `recall` become standalone rows (producer summary at normal brightness /
+  Agent message with sender and body / Session recall with labels), while
+  unknown or absent forms stay a standalone generic Context injection. A relay
+  is presented like a message but never reclassified to `user` or `Conversation`.
+- **Only raw-adjacent same-turn ambient rows cluster.** Ambient =
+  `instructions`/`catalog`/`snapshot`; grouping runs on raw chronology BEFORE
+  any Process hiding, so a hidden Tool can never merge two Context rows. The
+  cluster summary uses structured labels/forms only and its duplicate
+  compression is display-only.
+- **Clustering applies to every preset**, and the opening ambient burst (the
+  initial user plus immediately following surfaced Context) stays above the
+  Focus Thought in both Focus states while a mid-turn burst keeps its
+  chronological position.
+- **Performance contract**: a stable Work span's live reasoning/tool updates use
+  the existing content-refresh path; a boundary change or member add/remove is a
+  legitimate structural reprojection; notice/relay rows are render-time
+  width-aware (no baked one-line truncation); there is no second renderer,
+  search index, or viewport owner.
+- **Scope**: Focus expanded is NOT globally Compact yet (F5), Full is not yet
+  Compact + expanded Process, and Compact is not the default (F7).
+
 ## The composer submission policy is the WEB policy
 
 The busy-Enter preference (`busyEnter`, default `queue`) is owned by the

@@ -9,7 +9,8 @@
 
 ### 改进
 
-- **会话展示现在只有一个规范的 Full/Focus 预设状态。** `/display` 是主控制命令，`/focus` 保持兼容；Compact 仍保留给下一阶段实现，当前版本不可选择。
+- **会话展示现在只有一个规范的 Full/Focus/Compact 预设状态。** `/display` 是主控制命令，`/focus` 保持兼容。
+- **Compact 展示预设现已可用。** `/display compact`、设置项 `display-preset` 以及持久化的 `displayPreset: compact` 都会真正启用 Compact：会话和 assistant 中间输出保持按时间顺序可见，连续的思考/工具过程折叠为带 Header / Think / Tool 预览的 `Work` 段（鼠标点击或 `Ctrl+O` 可展开查看原始过程行，`Ctrl+O` 也是批量展开/折叠入口）；注入的 `notice` / `relay` / `recall` 上下文改为独立呈现（生产者摘要、Agent 消息、会话回忆），相邻的环境类注入（instructions/catalog/snapshot）合并为可展开的 Context 簇。Compact 仍是可选预设，默认值不变。
 - **Question / Approval 保留响应所有权，同时允许只读上下文检查。** 模态打开时仍可通过直接或 leader 检查快捷键使用折叠、Thinking 展开、全屏回到最新位置、Todo 展示切换，以及已证明的全屏展示性鼠标目标；固定的 Question / Approval 响应键优先于冲突的全局检查快捷键，提交、会话切换和生命周期操作仍由模态保护。
 - **长会话全文搜索显著更快。** 连续输入、`Enter`/`Shift+Enter` 跳转现在**每个操作最多
   重建一次**会话内容，不再重复重建、重复测量或整窗重绘；同一窗口内的跳转近似即时，
