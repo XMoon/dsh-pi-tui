@@ -893,6 +893,35 @@ test('a search target already full-revealed by a manual root does not consume Ct
     'an already-visible reveal target must not consume the first Ctrl+O')
 })
 
+test('collapsing a derived Focus root revokes the reveal so search cannot reopen it', async () => {
+  const { vt, app } = startApp('focus')
+  const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'work reasoning' }
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 1, name: 'bash', args: JSON.stringify({ command: 'x' }),
+    result: 'TOOL_RESULT_MARKER', status: 'ok',
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 1, text: 'go' },
+    owner,
+    tool,
+    { kind: 'assistant', turn: 1, text: 'final' },
+  ]
+  app.setTranscript(messages, new Map([[1, activity(1)]]))
+  app.setTranscriptDetailExpanded(true)
+  await viewport(vt)
+  assert.ok((await viewport(vt)).includes('TOOL_RESULT_MARKER'), 'precondition: the derived master root opens the Work')
+  assert.equal(app.focusExpandedTurnsForTest().has(1), false, 'precondition: the root is derived, not manual')
+
+  app.setTranscriptSearchTarget(targetFor(tool, 'TOOL_RESULT_MARKER'))
+  await viewport(vt)
+  vt.sendInput('\x0f')
+  const collapsed = await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the master collapses')
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'the derived root was never manual state')
+  assert.ok(!collapsed.includes('TOOL_RESULT_MARKER'),
+    `the revoked reveal must not reopen the collapsed Thought/Work:\n${collapsed}`)
+})
+
 test('collapsed Focus + a hidden process row search still opens the Thought', async () => {
   const { vt, app } = startApp('focus')
   const { messages, activities } = settledTurnFixture()
