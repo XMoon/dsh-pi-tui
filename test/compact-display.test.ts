@@ -465,6 +465,65 @@ test('regular Compact presents a long user prompt in full instead of an inoperab
   assert.ok(view.includes('prompt line 20'), `the middle of the prompt is visible:\n${view}`)
 })
 
+test('a regular Compact long-user search dismiss mints no disclosure owner', async () => {
+  const { vt, app } = startApp('compact')
+  const prompt = Array.from({ length: 40 }, (_, index) => `long line ${index}`).join('\n')
+  const message: TranscriptMessage = { kind: 'user', turn: 1, text: prompt }
+  app.setTranscript([message], new Map())
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('rows compacted'),
+    `precondition: regular Compact presents the prompt in full:\n${vt.getViewport().join('\n')}`)
+
+  // Ctrl+O belongs to the Work spans here, so the search grant must NOT admit a
+  // long-user reveal — the surface has no long-user disclosure to reveal.
+  app.setTranscriptSearchTarget({
+    query: 'long line 20',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  await vt.waitForRender()
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await vt.waitForRender()
+
+  // Switching to a surface that DOES own the fold must show the default
+  // collapsed/click-owned presentation, not a stale promoted owner.
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.match(view, /rows compacted · click to expand/,
+    `the fullscreen surface defaults to the click-owned fold:\n${view}`)
+  assert.ok(!view.includes('long line 20'),
+    `no regular-minted expansion may survive the surface switch:\n${view}`)
+})
+
+test('a fullscreen Compact long-user search dismiss still promotes the disclosure', async () => {
+  const { vt, app } = startApp('compact')
+  app.setFullscreen(true)
+  const prompt = Array.from({ length: 40 }, (_, index) => `long line ${index}`).join('\n')
+  const message: TranscriptMessage = { kind: 'user', turn: 1, text: prompt }
+  app.setTranscript([message], new Map())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.match(view, /rows compacted · click to expand/, `precondition: the click-owned fold exists:\n${view}`)
+  assert.ok(!view.includes('long line 20'), 'the compacted middle is hidden')
+
+  app.setTranscriptSearchTarget({
+    query: 'long line 20',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('long line 20'), `the reveal opens the hidden middle:\n${view}`)
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('long line 20'),
+    `the promotion keeps the revealed long user expanded (must not be over-restricted):\n${view}`)
+  assert.ok(!view.includes('rows compacted'), `the promoted disclosure stays expanded:\n${view}`)
+})
+
 test('regular Compact presents a foldable pending-user row in full', async () => {
   const { vt, app } = startApp('compact')
   const longText = Array.from({ length: 40 }, (_, index) => `pending line ${index}`).join('\n')
