@@ -440,6 +440,54 @@ test('a visible local shell card override is collapsed by the first regular Ctrl
   assert.ok(!collapsed.includes('shell line 0'), `the local card folds:\n${collapsed}`)
 })
 
+function deliveredFilesTurn(): { messages: TranscriptMessage[]; assistant: TranscriptMessage } {
+  const deliverables = Array.from({ length: 5 }, (_, index) => ({
+    path: `src/file-${index + 1}.ts`,
+    description: `file ${index + 1}`,
+  }))
+  const assistant: TranscriptMessage = { kind: 'assistant', turn: 1, text: 'done', deliverables }
+  return { messages: [{ kind: 'user', turn: 1, text: 'go' }, assistant], assistant }
+}
+
+test('a search-revealed delivered-files tail is collapsed by the first regular Ctrl+O', async () => {
+  const { vt, app } = startApp('compact')
+  const { messages, assistant } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(assistant, 'file-5'))
+  assert.ok((await viewport(vt)).includes('src/file-5.ts'), 'precondition: the reveal expands the capped tail')
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the reveal-only tail must be collapsed, not turn the master on')
+  assert.ok(!(await viewport(vt)).includes('src/file-5.ts'), 'the collapsed tail hides file 5 again')
+})
+
+test('an ordinary dismiss promotes the delivered-files disclosure on a master-owned surface', async () => {
+  const { vt, app } = startApp('compact')
+  const { messages, assistant } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map())
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(assistant, 'file-5'))
+  await viewport(vt)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  const promoted = await viewport(vt)
+  assert.ok(promoted.includes('src/file-5.ts'), `the promoted tail stays expanded:\n${promoted}`)
+})
+
+test('a regular Ctrl+O master never leaks into fullscreen Focus for delivered files', async () => {
+  const { vt, app } = startApp('focus')
+  const { messages } = deliveredFilesTurn()
+  app.setTranscript(messages, new Map([[1, activity(1)]]))
+  app.setTranscriptDetailExpanded(true)
+  assert.ok((await viewport(vt)).includes('src/file-5.ts'), 'precondition: the regular master expands the tail')
+
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  const fullscreen = await viewport(vt)
+  assert.ok(!fullscreen.includes('src/file-5.ts'),
+    `fullscreen Focus must not inherit the regular master expansion:\n${fullscreen}`)
+})
+
 test('a cluster reveal promotes the cluster owner on an ordinary dismiss', async () => {
   const { vt, app } = startApp('compact')
   const first: TranscriptMessage = {
