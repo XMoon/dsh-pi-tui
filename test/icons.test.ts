@@ -23,6 +23,9 @@ const MINIMAL_VISIBLE: ReadonlySet<string> = new Set([
   'question',
   'disclosure-collapsed',
   'disclosure-expanded',
+  // Compact Work / Context-cluster section disclosure affordances.
+  'section-collapsed',
+  'section-expanded',
   'working-a',
   'working-b',
   // Structure anchors survive minimal: the message bullet.
@@ -127,6 +130,8 @@ test('the emoji palette preserves the historical glyphs', () => {
     'context-generic': '📎',
     'disclosure-collapsed': '🐋',
     'disclosure-expanded': '🐳',
+    'section-collapsed': '▸',
+    'section-expanded': '▾',
     'working-a': '🐋',
     'working-b': '🐳',
     'assistant-bullet': '🐋',
@@ -161,6 +166,8 @@ test('the symbols palette is the documented compact vocabulary', () => {
     'context-generic': '⋅',
     'disclosure-collapsed': '▸',
     'disclosure-expanded': '▾',
+    'section-collapsed': '▸',
+    'section-expanded': '▾',
     'working-a': '∙',
     'working-b': '◦',
     'assistant-bullet': '∙',

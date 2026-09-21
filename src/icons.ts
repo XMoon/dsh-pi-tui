@@ -64,6 +64,8 @@ export type IconSemantic =
   | 'context-generic'
   | 'disclosure-collapsed'
   | 'disclosure-expanded'
+  | 'section-collapsed'
+  | 'section-expanded'
   | 'working-a'
   | 'working-b'
   | 'assistant-bullet'
@@ -93,6 +95,8 @@ export const ALL_ICON_SEMANTICS: readonly IconSemantic[] = [
   'context-generic',
   'disclosure-collapsed',
   'disclosure-expanded',
+  'section-collapsed',
+  'section-expanded',
   'working-a',
   'working-b',
   'assistant-bullet',
@@ -128,6 +132,8 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     'context-generic': '📎',
     'disclosure-collapsed': '🐋',
     'disclosure-expanded': '🐳',
+    'section-collapsed': '▸',
+    'section-expanded': '▾',
     'working-a': '🐋',
     'working-b': '🐳',
     'assistant-bullet': '🐋',
@@ -160,6 +166,8 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     'context-generic': '⋅',
     'disclosure-collapsed': '▸',
     'disclosure-expanded': '▾',
+    'section-collapsed': '▸',
+    'section-expanded': '▾',
     'working-a': '∙',
     'working-b': '◦',
     // The markdown bullet (the neutral bullet-operator U+2219), the
@@ -193,6 +201,8 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     question: '?',
     'disclosure-collapsed': '▸',
     'disclosure-expanded': '▾',
+    'section-collapsed': '▸',
+    'section-expanded': '▾',
     // The working pair is UNIFIED with symbols — minimal removes static
     // icons, it does not change animation semantics.
     'working-a': '∙',
@@ -210,6 +220,13 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
  * semantic color context paints it. */
 export function iconFor(semantic: IconSemantic, style: IconStyle): string {
   return ICONS[style][semantic]
+}
+
+/** The plain section disclosure semantic used by Compact Work spans and
+ * Context clusters — deliberately distinct from the Focus root's whale
+ * identity. */
+export function sectionDisclosureSemantic(expanded: boolean): 'section-collapsed' | 'section-expanded' {
+  return expanded ? 'section-expanded' : 'section-collapsed'
 }
 
 /** The icon plus its TWO-space trailing separator when the style shows a
