@@ -109,7 +109,7 @@ function workHeaders(view: string, expanded?: boolean): string[] {
 
 function clusterHeaders(view: string, expanded?: boolean): string[] {
   const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
-  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} Context ·`).test(line))
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} .*Context ·`).test(line))
 }
 
 function click(vt: VirtualTerminal, x: number, y: number): void {
@@ -615,7 +615,7 @@ test('fullscreen keeps ambient clusters collapsed by default and click-expandabl
   let view = vt.getViewport()
   assert.equal(clusterHeaders(view.join('\n')).length, 1, `the collapsed cluster header renders:\n${view.join('\n')}`)
   assert.ok(!view.join('\n').includes('Context injection'), 'the member rows stay behind the header')
-  click(vt, 5, rowOf(view, /▸ Context · 2 injections/) + 1)
+  click(vt, 5, rowOf(view, /▸ 📎 Context · 2 injections/) + 1)
   await vt.waitForRender()
   view = vt.getViewport()
   assert.equal(clusterHeaders(view.join('\n'), true).length, 1, `the click opens the cluster:\n${view.join('\n')}`)
@@ -831,7 +831,7 @@ test('an ambient cluster expands into every member row and collapses again', asy
   show(app, folder)
   app.setFullscreen(true)
   await vt.waitForRender()
-  const headerRow = rowOf(vt.getViewport(), /▸ Context · 2 injections/)
+  const headerRow = rowOf(vt.getViewport(), /▸ 📎 Context · 2 injections/)
   assert.ok(headerRow >= 0, 'precondition: the cluster header is visible')
   click(vt, 3, headerRow + 1)
   await vt.waitForRender()
@@ -952,8 +952,14 @@ test('Context rows never occupy the Focus slots or counts', async () => {
   const view = vt.getViewport().join('\n')
   assert.match(view, /1 tool/, 'the header count describes the real tool only')
   assert.match(view, /Think:\s+the real reasoning/)
-  assert.ok(view.includes('child settled summary'))
-  assert.ok(view.includes('Agent message · child-2'))
+  // The mid-turn notice is process feedback: collapsed Focus absorbs it into
+  // the Thought, while the mid-turn relay stays surfaced (external input).
+  assert.ok(!view.includes('child settled summary'), 'a mid-turn notice is hidden inside the collapsed Thought')
+  assert.ok(view.includes('Agent message · child-2'), 'a mid-turn relay remains surfaced')
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('child settled summary'),
+    'expanded Focus restores the notice in raw chronology')
 })
 
 test('fullscreen: a long relay keeps its head and tail collapsed and reveals the hidden middle on search', async () => {

@@ -380,6 +380,43 @@ test('the cluster component renders the header and a width-aware summary', () =>
   assert.equal(expanded.length, 1)
 })
 
+test('the cluster header composes the disclosure marker with the Context identity icon per style', () => {
+  const a = contextRow(0, 'instructions', 'AGENTS.md')
+  const b = contextRow(0, 'catalog', 'skill catalog')
+  const cluster = clusterAdjacentAmbientContext([a, b]).clusters[0]!
+  // Disclosure state survives every style; the Context identity icon follows it
+  // and disappears under minimal without leaving a dangling separator.
+  assert.equal(formatContextClusterHeader(cluster, false, 'emoji'), '▸ 📎 Context · 2 injections')
+  assert.equal(formatContextClusterHeader(cluster, true, 'emoji'), '▾ 📎 Context · 2 injections')
+  assert.equal(formatContextClusterHeader(cluster, false, 'symbols'), '▸ ⋅ Context · 2 injections')
+  assert.equal(formatContextClusterHeader(cluster, true, 'symbols'), '▾ ⋅ Context · 2 injections')
+  assert.equal(formatContextClusterHeader(cluster, false, 'minimal'), '▸ Context · 2 injections')
+  assert.equal(formatContextClusterHeader(cluster, true, 'minimal'), '▾ Context · 2 injections')
+  assert.ok(!formatContextClusterHeader(cluster, false, 'minimal').includes('  '), 'minimal leaves no double space')
+  // The disclosure marker is never replaced by the Context identity icon.
+  for (const style of ['emoji', 'symbols', 'minimal'] as const) {
+    assert.ok(formatContextClusterHeader(cluster, false, style).startsWith('▸ '), `${style}: collapsed marker survives`)
+    assert.ok(formatContextClusterHeader(cluster, true, style).startsWith('▾ '), `${style}: expanded marker survives`)
+  }
+})
+
+test('the identity-icon cluster header never overflows any width or style', () => {
+  const a = contextRow(0, 'instructions', 'AGENTS.md')
+  const b = contextRow(0, 'catalog', 'skill catalog')
+  const cluster = clusterAdjacentAmbientContext([a, b]).clusters[0]!
+  for (const iconStyle of ['emoji', 'symbols', 'minimal'] as const) {
+    for (const width of [1, 2, 3, 4, 8, 20]) {
+      for (const expanded of [false, true]) {
+        const rows = new ContextClusterComponent({ cluster, expanded, iconStyle }).render(width)
+        assert.ok(rows.length > 0, `${iconStyle} width ${width}: the header must render`)
+        for (const row of rows) {
+          assert.ok(visibleWidth(row) <= width, `${iconStyle} width ${width} overflowed: ${JSON.stringify(row)}`)
+        }
+      }
+    }
+  }
+})
+
 test('the cluster header and summary never exceed a very narrow width', () => {
   const a = contextRow(0, 'instructions', 'AGENTS.md')
   const b = contextRow(0, 'catalog', 'skill catalog')
