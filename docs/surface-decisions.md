@@ -588,8 +588,9 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   legitimate structural reprojection; notice/relay rows are render-time
   width-aware (no baked one-line truncation); there is no second renderer,
   search index, or viewport owner.
-- **Scope**: Focus expanded is NOT globally Compact yet (F5), Full is not yet
-  Compact + expanded Process, and Compact is not the default (F7).
+- **Scope**: PR5/F5 converges Focus-expanded and Full onto the canonical
+  structure; disclosure ownership convergence (regular-surface owners, nested
+  Work disclosure) is F6, and Compact is not the default (F7).
 
 ## F4 hardening (2026-09-21 PR4)
 
@@ -639,6 +640,43 @@ F4 behavior and documents the guarantees in
   stats / Tool slot exclude them, running or settled. Every other tool
   (todo/goal/subagent/
   workflow/schedule/cordis/bash/edit/…) stays ordinary Process.
+
+## F5 projection convergence (2026-09-21 PR5)
+
+PR5 extracts the ONE preset-neutral semantic segmentation and makes Compact,
+Full and expanded Focus materialize it instead of each re-deriving boundaries:
+
+- **`transcript-projection.ts` is the canonical authority.**
+  `projectTranscriptStructure(raw window)` returns `Message | Work span |
+  Context cluster` and reads no preset, surface, Ctrl+O, mouse, search,
+  disclosure, viewport or width state. `isTranscriptWorkMember()` is the single
+  Work member predicate (the live Preparing ownership consumes it too), and
+  `clusterAdjacentAmbientContext()` remains the single raw-adjacency cluster
+  authority. The projector is O(n) and references the original
+  `TranscriptMessage` objects for owner/member identity.
+- **Compact is a materialization adapter.** `projectCompact()` no longer owns any
+  segmentation; it only decides collapsed/expanded Work and cluster
+  header/flat output. PR4 Compact behavior, owner/member identity and the
+  settled-interaction boundary are unchanged.
+- **Full materializes the structure flat.** Work expands to its members with no
+  Work chrome, the shared cluster presentation obeys the surface capability, and
+  the message chronology equals the raw window. Full no longer runs an
+  independent `applyContextClusters(raw messages)` semantic path.
+- **Expanded Focus consumes the structure for its process tail.** It computes
+  the canonical segmentation over the UNFILTERED tail (the held-back final never
+  changes raw adjacency), materializes Work flat (no nested Work disclosure
+  before F6), and keeps the Focus-specific lead foundation, committed-answer
+  fence, click marks and final holdback. Its cluster presentation obeys the
+  surface capability exactly like Full. Collapsed Focus keeps its hoist policy
+  and substitutes the canonical cluster identity in Focus-projected order.
+- **`displayPolicyFor()` is the runtime authority** for materialization:
+  `isFocusDisplayPreset()` delegates to `focusBehavior`, and `projectedBlocks()`
+  selects the Compact / Focus / Full materializer from `turnLayer`,
+  `processLayer` and `focusBehavior`, so the policy table and the runtime cannot
+  drift.
+- **Search/viewport are untouched.** Full and flat expanded Focus never mint a
+  `compact-work` search owner; only Compact does that for a span that actually
+  hides the target. No new viewport map, disclosure owner or wire field is added.
 
 ## The composer submission policy is the WEB policy
 

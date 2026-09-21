@@ -52,10 +52,54 @@ Synthetic rows carry source-derived origins (`llm-retry`, `turn-max-tokens`,
 `command`, `subagent-delegation`, `turn-error`, and `turn-interrupted`) so the
 projection never infers meaning from wording.
 
+## Canonical transcript structure
+
+The semantic segmentation is computed once, preset-neutrally, in
+`transcript-projection.ts`:
+
+```text
+raw TranscriptMessage[]
+        │
+        ▼
+projectTranscriptStructure()
+        │
+        ├── Message
+        ├── Work span        (maximal contiguous same-turn Process run)
+        └── Context cluster  (raw-adjacent same-turn ambient Context run)
+```
+
+- `transcript-projection.ts` never reads the preset, the surface, Ctrl+O,
+  mouse, search state, expanded owners, default depth, Focus root, viewport or
+  render width. It answers only where the raw chronology forms a Work span, a
+  Context cluster or a standalone row.
+- `isTranscriptWorkMember()` is the single Work membership authority; the live
+  Preparing ownership consumes the SAME predicate, so a settled surfaced
+  interaction (question / Plan review) closes the trailing run everywhere.
+- `clusterAdjacentAmbientContext()` remains the single cluster membership
+  authority, computed from raw adjacency before any row is hidden.
+- Work `owner`/`members` and cluster `owner`/`members` always reference the
+  original `TranscriptMessage` objects, so presentation caches compare
+  identity/order (never a synthetic hash or a content-derived owner).
+- The projector is a single forward pass plus the linear clustering pass (O(n)).
+
+Compact, Full and expanded Focus all materialize this structure:
+
+- **Compact** (`compact-projection.ts`) is the materialization adapter: a
+  collapsed Work span emits its header, an expanded span its members; clusters
+  obey the surface capability.
+- **Full** emits Work flat (no Work chrome) with the shared cluster
+  presentation; its message chronology equals the raw window.
+- **Expanded Focus** consumes the same structure for its process tail and
+  materializes Work flat (no nested Work disclosure before F6); its cluster
+  presentation obeys the surface capability exactly like Full. It keeps the
+  Focus-specific lead foundation, committed-answer fence and final holdback.
+  Collapsed Focus keeps its own hoist policy and substitutes the canonical
+  cluster identity at its Focus-projected position.
+
 ## Compact projection
 
-Compact folds **contiguous Process runs**, never whole turns, into
-presentation-only `Work` spans (`compact-projection.ts`):
+Compact materializes the canonical Work spans as presentation-only `Work` cards
+(`compact-projection.ts`):
 
 ```text
 raw:      User · Thinking A · Tool A · Assistant A · Thinking B · Tool B · Notice · Tool C · Assistant final
@@ -285,16 +329,19 @@ Host-owned display state or a Remote-only disclosure behavior.
 
 ## Scope and follow-ups
 
-PR3/F4 Core makes Compact a real opt-in preset. It deliberately does not:
+PR3/F4 Core made Compact a real opt-in preset. PR5/F5 completes **projection
+convergence**: the Work / Context-cluster / surfaced-interaction boundaries are
+computed once by the preset-neutral canonical structure, and Compact (Process
+collapsed), Full (Process expanded, flat) and expanded Focus all materialize
+that same structure. PR5 deliberately does NOT:
 
-- convert Focus expanded globally into Compact semantics (F5);
-- make Full equal to Compact plus expanded Process (F5);
 - change the default preset for new users (F7);
+- converge disclosure ownership or add a nested Work disclosure owner (F6);
 - introduce a second search/render/viewport path or a second transcript store.
 
-F4 only guarantees that no INOPERABLE disclosure is rendered; it does not
-converge keyboard disclosure ownership. The following are explicit follow-ups,
-not silent gaps:
+F4/F5 guarantee that no INOPERABLE disclosure is rendered; F5 does not converge
+keyboard disclosure ownership. The following are explicit follow-ups, not
+silent gaps:
 
 - **TODO(F6) — regular-surface disclosure ownership.** Regular Compact reserves
   Ctrl+O for the Work spans, so non-Work folds (long user, pending user, tool,
@@ -305,8 +352,9 @@ not silent gaps:
   semantic on every surface but presented flat (expanded) on the regular surface
   because no manual cluster owner exists there yet. F6 assigns that owner and
   returns the regular default to collapsed.
-- **TODO(F5) — Focus expanded / Full convergence.** Focus expanded is not
-  globally Compact, and Full is not yet Compact plus expanded Process.
+- **TODO(F6) — expanded-Focus Work disclosure.** F5 shares the canonical Work
+  structure with expanded Focus but materializes it flat; a searchable,
+  restorable nested Work owner (with its reveal/dismiss chain) is F6.
 
 ## PR4/F4 hardening guarantees
 
