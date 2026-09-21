@@ -3932,8 +3932,12 @@ export class TranscriptFolder {
         const text = textWithAttachmentMarkers(blocks)
         // Only direct human prompts use the generalized finalized-content
         // predicate. Injected context keeps its text-only empty gate: a
-        // process block must not turn into an empty system row.
-        if (event.data.source.kind === 'user') {
+        // process block must not turn into an empty system row. The source
+        // kind is read through the SINGLE context parser, so a restored or
+        // foreign log that records a null/undefined/non-object source folds
+        // as standalone injected Context instead of crashing the whole fold.
+        const sourcePresentation = contextPresentation(event.data.source)
+        if (sourcePresentation.sourceKind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break
           const activity = this.activityFor(this.currentTurn)
           if (activity.pendingPreSteerAnswerStep !== undefined) {
@@ -3975,7 +3979,7 @@ export class TranscriptFolder {
             // Presentation-only provenance (form/kind/sender) for the
             // form-aware Context roles Compact and Focus present. The
             // semantic marker above stays the surfaced authority.
-            contextPresentation: contextPresentation(event.data.source),
+            contextPresentation: sourcePresentation,
           })
           // Focus aggregation: injected context (skill-invocation,
           // skill-catalog, system reminders) is orchestration, NOT one of
