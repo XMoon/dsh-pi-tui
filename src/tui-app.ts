@@ -7685,15 +7685,43 @@ export class TuiApp {
    * {@link setTranscriptSearchTarget}). */
   private searchForcesMessageExpanded(message: TranscriptMessage): boolean {
     if (!this.searchRevealGranted || this.searchTarget?.message !== message) return false
-    if (!isUserMessageDisclosureCandidate(message)) return true
-    if (!this.searchRevealHostOwned) return false
-    // The affordance latched at grant time must still be available. The
-    // capability gates every kind (a surface that presents the fold in full has
-    // no long-user disclosure at all), and the LATCHED KIND still decides the
-    // rest: a key-based grant stops applying once the key is disabled and never
-    // becomes a fullscreen click reveal later.
-    const affordanceAvailable = this.userRevealAffordanceAvailable()
-    return affordanceAvailable && this.userMessageCompactsAtCurrentWidth(message)
+    if (isUserMessageDisclosureCandidate(message)) {
+      if (!this.searchRevealHostOwned) return false
+      // The affordance latched at grant time must still be available. The
+      // capability gates every kind (a surface that presents the fold in full has
+      // no long-user disclosure at all), and the LATCHED KIND still decides the
+      // rest: a key-based grant stops applying once the key is disabled and never
+      // becomes a fullscreen click reveal later.
+      const affordanceAvailable = this.userRevealAffordanceAvailable()
+      return affordanceAvailable && this.userMessageCompactsAtCurrentWidth(message)
+    }
+    return this.searchNeedsMessageDisclosureReveal(message)
+  }
+
+  /** Whether the CURRENT granted match is ACTUALLY hidden by this message's own
+   * disclosure, so a temporary reveal is necessary. A card the surface presents
+   * in full (no operable owner), a card already expanded without the search, a
+   * delivered file inside the folded limit, and a non-foldable row are all
+   * already visible — search must neither expand them nor mint an owner on
+   * dismiss (plan §35). */
+  private searchNeedsMessageDisclosureReveal(message: TranscriptMessage): boolean {
+    if (isDeliveredFilesDisclosureCandidate(message)) {
+      if (!this.deliveredFilesMasterOwned()) return false
+      const source = this.searchTarget?.match.source
+      // Only the hidden tail (index beyond the folded limit) needs a reveal; a
+      // hit in the already-visible files or the assistant body does not.
+      if (source?.kind !== 'assistant-deliverable') return false
+      return source.index >= DELIVERED_FILES_FOLDED_LIMIT
+    }
+    if (!isFoldableMessageDisclosure(message)) return false
+    if (!this.messageFoldDisclosureAvailable()) return false
+    return !this.messageExpandedIgnoringSearch(message)
+  }
+
+  /** The effective expansion of one foldable message with the GRANTED search
+   * reveal ignored — the "is anything actually hidden?" probe. */
+  private messageExpandedIgnoringSearch(message: TranscriptMessage): boolean {
+    return this.effectiveMessageExpanded(message, this.expandBoundary(), this.userExpandBoundary(), true)
   }
 
   /** Whether the current search target's PTC path contains this sub-call. */
@@ -8024,12 +8052,11 @@ export class TuiApp {
   }
 
   /** Whether one per-card override still contributes to the current effective
-   * disclosure. On the regular surface an OPEN Work run and an expanded Focus
-   * root already full-reveal their non-Thinking process, so a descendant
-   * override is latent; fullscreen keeps the per-card override as the real
-   * owner. */
+   * disclosure. Called only on the regular surface: an OPEN Work run and an
+   * expanded Focus root already full-reveal their non-Thinking process, so a
+   * descendant override is latent (fullscreen keeps the per-card override as
+   * the real owner via the callers' early return). */
   private messageOverrideContributes(message: TranscriptMessage): boolean {
-    if (this.fullscreen !== undefined) return true
     if (this.openWorkRunMembers.has(message)) return false
     if (isFocusDisplayPreset(this.displayState.preset) && 'turn' in message
       && isFocusSecondaryDisclosure(message)
@@ -13636,11 +13663,14 @@ export class TuiApp {
    * state can never surface there. Otherwise the shared bulk preference.
    * Focus ON/OFF is irrelevant: there is exactly one Thinking detail
    * state for the whole app. */
-  private effectiveThinkingExpanded(message: Extract<TranscriptMessage, { kind: 'thinking' }>): boolean {
+  private effectiveThinkingExpanded(
+    message: Extract<TranscriptMessage, { kind: 'thinking' }>,
+    ignoreSearch = false,
+  ): boolean {
     // The temporary search reveal wins over a stale explicit override while it
     // is GRANTED (a new navigation re-opens the card); an explicit collapse
     // revokes the grant instead of writing user state.
-    if (this.searchForcesMessageExpanded(message)) return true
+    if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
     const override = this.expandedOverride.get(message)
     if (override !== undefined) return override
     return this.thinkingExpanded
@@ -13669,9 +13699,14 @@ export class TuiApp {
    * Ctrl+O-derived or manually revealed — full-reveals its non-Thinking
    * process (no mouse, so no dead compact affordances). Every other
    * context keeps the existing rule. */
-  private effectiveMessageExpanded(message: TranscriptMessage, boundary: number, userBoundary: number): boolean {
+  private effectiveMessageExpanded(
+    message: TranscriptMessage,
+    boundary: number,
+    userBoundary: number,
+    ignoreSearch = false,
+  ): boolean {
     if (message.kind === 'thinking') {
-      return this.effectiveThinkingExpanded(message)
+      return this.effectiveThinkingExpanded(message, ignoreSearch)
     }
     // The capability decides BEFORE any renderer builds a folded view: a
     // surface with no operable disclosure action (regular without an effective
@@ -13695,23 +13730,23 @@ export class TuiApp {
       // The temporary search reveal wins over a stale explicit override while
       // it is GRANTED (a new navigation re-opens the card); an explicit
       // collapse revokes the grant instead of writing user state.
-      if (this.searchForcesMessageExpanded(message)) return true
+      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
       const override = this.expandedOverride.get(message)
       if (override !== undefined) return override
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) return false
       return message.turn >= userBoundary
     }
-    // Delivered files are an assistant turn-tail with their own narrow
-    // disclosure: the regular / fullscreen-Full `Ctrl+O` transcript-detail
-    // master owns its capped/complete state, while a surface whose Ctrl+O owns
-    // something else (fullscreen Focus root bulk, fullscreen Compact Work bulk)
-    // must NOT read the leaked master state — only an explicit per-card
-    // override or the temporary search reveal expands it there.
+    // Delivered files are an assistant turn-tail with a per-OWNER capability:
+    // only the regular / fullscreen-Full Ctrl+O master owns the capped state. A
+    // surface whose Ctrl+O owns something else (fullscreen Focus root bulk,
+    // fullscreen Compact Work bulk) — or whose expand key is disabled — has no
+    // operable owner at all, so the tail FAILS OPEN (all files visible) instead
+    // of rendering a collapsed disclosure nobody can operate.
     if (isDeliveredFilesDisclosureCandidate(message)) {
-      if (this.searchForcesMessageExpanded(message)) return true
+      if (!this.deliveredFilesMasterOwned()) return true
+      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
       const override = this.expandedOverride.get(message)
       if (override !== undefined) return override
-      if (!this.deliveredFilesMasterOwned()) return false
       return message.turn >= boundary
     }
     // A member of an OPEN Work run (Compact, or nested Work inside an expanded
@@ -13722,7 +13757,8 @@ export class TuiApp {
     // the user override).
     if ('turn' in message && this.openWorkRunMembers.has(message)) {
       if (this.fullscreen !== undefined) {
-        return this.expandedOverride.get(message) === true || this.searchForcesMessageExpanded(message)
+        return this.expandedOverride.get(message) === true
+          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
       }
       return true
     }
@@ -13730,7 +13766,8 @@ export class TuiApp {
       if (this.fullscreen !== undefined) {
         // Fullscreen: explicit secondary disclosure only (plus the temporary
         // search reveal, which never writes the user override).
-        return this.expandedOverride.get(message) === true || this.searchForcesMessageExpanded(message)
+        return this.expandedOverride.get(message) === true
+          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
       }
       // Regular: no mouse, so no compact secondary affordance — ANY
       // expanded Focus root (Ctrl+O-derived OR manually revealed /
@@ -13739,7 +13776,7 @@ export class TuiApp {
       // cannot open.
       return true
     }
-    return this.existingMessageExpandedRule(message, boundary)
+    return this.existingMessageExpandedRule(message, boundary, ignoreSearch)
   }
 
   /** The pre-secondary expansion rule: LOCAL `!`/`!!` shell cards read the
@@ -13748,7 +13785,7 @@ export class TuiApp {
    * boundary or its per-card override. Thinking is NOT in the foldable
    * set here: Ctrl+O owns tool/system/compaction detail, Alt+T owns
    * Thinking detail (plan §2.4/§18). */
-  private existingMessageExpandedRule(message: TranscriptMessage, boundary: number): boolean {
+  private existingMessageExpandedRule(message: TranscriptMessage, boundary: number, ignoreSearch = false): boolean {
     if (isLocalShellCard(message)) {
       // In FULLSCREEN Focus the Ctrl+O master is NOT consulted (Ctrl+O
       // owns the Thought-root bulk there — documented): a local card
@@ -13756,16 +13793,17 @@ export class TuiApp {
       // per-card override still wins) or the temporary search target
       // reveals it.
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
-        return this.expandedOverride.get(message) === true || this.searchForcesMessageExpanded(message)
+        return this.expandedOverride.get(message) === true
+          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
       }
       return this.transcriptDetailExpanded
         || this.expandedOverride.get(message) === true
-        || this.searchForcesMessageExpanded(message)
+        || (!ignoreSearch && this.searchForcesMessageExpanded(message))
     }
     return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
       && (message.turn >= boundary
         || this.expandedOverride.get(message) === true
-        || this.searchForcesMessageExpanded(message))
+        || (!ignoreSearch && this.searchForcesMessageExpanded(message)))
   }
 
   /**
@@ -17181,6 +17219,13 @@ export class TuiApp {
    * own Ctrl+O for something else, so they must never read the regular
    * master's derived expansion. */
   private deliveredFilesMasterOwned(): boolean {
+    // Per-OWNER capability: the generic "fullscreen has a mouse" answer does not
+    // cover the delivered-files tail (fullscreen clicks route to
+    // `toggleMessageExpanded`, which ignores a non-foldable assistant card), so
+    // fullscreen Compact/Focus have NO operable owner for it. Only the regular
+    // transcript-detail master and fullscreen Full's generic master own it, and
+    // only while the effective `app.transcript.toggleExpand` key exists.
+    if (!this.regularExpandKeyAvailable()) return false
     if (this.fullscreen === undefined) return true
     return !isFocusDisplayPreset(this.displayState.preset) && this.displayState.preset !== 'compact'
   }
