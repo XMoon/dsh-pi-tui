@@ -2201,6 +2201,53 @@ test('Focus ON collapsed: user → FocusActivity → final, process hidden', () 
   }
 })
 
+test('a reasoning-first durable step renders Activity before the final Assistant (cold settlement)', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', { id: MessageId('m-u'), role: 'user', content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('m-a'),
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'checking the plan first' },
+          { type: 'text', text: 'final answer' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [
+        { type: 'chunk', time: 1002, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { type: 'chunk', time: 1003, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the plan first' } },
+        { type: 'chunk', time: 1004, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'checking the plan first' } } },
+        { type: 'chunk', time: 1005, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+        { type: 'chunk', time: 1006, chunk: { type: 'text-delta', index: 1, text: 'final answer' } },
+        { type: 'chunk', time: 1007, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'final answer' } } },
+      ],
+    }, 1008, 2),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 3),
+  ])
+  assert.deepEqual(
+    folder.messages().map(message => message.kind),
+    ['user', 'thinking', 'assistant'],
+    'the folder materializes the durable Thinking → Assistant lane order',
+  )
+  const collapsed = projectTools(folder.messages(), folder.turnActivities(), new Set())
+  assert.deepEqual(
+    blockKinds(collapsed),
+    ['user', 'activity', 'assistant'],
+    'Compact folds the reasoning-first step into Activity BEFORE the final Assistant',
+  )
+  const expanded = projectTools(folder.messages(), folder.turnActivities(), new Set([0]))
+  assert.deepEqual(
+    blockKinds(expanded),
+    ['user', 'activity', 'thinking', 'assistant'],
+    'expanded Focus shows the same canonical lane order (the leading activity block is the expanded span header)',
+  )
+})
+
 test('intermediate assistant messages are hidden when collapsed', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [

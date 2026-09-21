@@ -3972,6 +3972,202 @@ test('compact assistant stream records preserve first-lane parity across represe
   }
 })
 
+// ── assistant/message lane-order authority (post-F6 plan PR A) ───────────
+
+/** One reasoning-first / text-first durable assistant step: the complete
+ * embedded stream records plus the matching assembled message content. */
+function laneOrderedStep(first: 'thinking' | 'assistant'): { stream: AssistantStreamRecord[]; content: ContentBlock[] } {
+  const thought = { type: 'reasoning' as const, text: 'ordered thought' }
+  const answer = { type: 'text' as const, text: 'ordered answer' }
+  const thinkingChunks = [
+    { type: 'block-start' as const, index: 0, blockType: 'reasoning' as const },
+    { type: 'reasoning-delta' as const, index: 0, text: thought.text },
+    { type: 'block-end' as const, index: 0, block: thought },
+  ]
+  const assistantChunks = [
+    { type: 'block-start' as const, index: 1, blockType: 'text' as const },
+    { type: 'text-delta' as const, index: 1, text: answer.text },
+    { type: 'block-end' as const, index: 1, block: answer },
+  ]
+  const firstLane = first === 'thinking' ? thinkingChunks : assistantChunks
+  const secondLane = first === 'thinking' ? assistantChunks : thinkingChunks
+  return {
+    stream: [
+      ...firstLane.map((chunk, index) => ({ type: 'chunk' as const, time: 2 + index, chunk })),
+      ...secondLane.map((chunk, index) => ({ type: 'chunk' as const, time: 5 + index, chunk })),
+    ] as unknown as AssistantStreamRecord[],
+    content: first === 'thinking' ? [thought, answer] : [answer, thought],
+  }
+}
+
+/** One durable `assistant/message` settlement carrying the step evidence. */
+function messageSettlement(seq: number, step: { stream: AssistantStreamRecord[]; content: ContentBlock[] }): SessionEvent {
+  return event('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: { id: MessageId('lane-order'), role: 'assistant', content: step.content, source: { kind: 'model', provider: 'p', model: 'm' } },
+    stream: [...step.stream],
+  }, seq)
+}
+
+test('cold assistant/message settlements preserve the durable lane order in both directions', () => {
+  for (const first of ['thinking', 'assistant'] as const) {
+    const folder = new TranscriptFolder()
+    folder.hydrate([
+      event('turn/start', { turn: 0 }, 0),
+      event('step/start', { turn: 0, step: 0 }, 1),
+      messageSettlement(2, laneOrderedStep(first)),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+    ])
+    assert.deepEqual(
+      kinds(folder.messages()),
+      first === 'thinking' ? ['thinking', 'assistant'] : ['assistant', 'thinking'],
+      `${first}-first durable step must keep its stream order`,
+    )
+    const thinking = folder.messages().find(message => message.kind === 'thinking')
+    assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+    assert.equal(thinking.text, 'ordered thought')
+    assert.equal(thinking.running, false, 'the durable settlement restores the Thinking lane settled')
+  }
+})
+
+test('a stream-less assistant/message settles its lanes from the durable content order', () => {
+  for (const first of ['thinking', 'assistant'] as const) {
+    const content = first === 'thinking'
+      ? [{ type: 'reasoning', text: 'ordered thought' }, { type: 'text', text: 'ordered answer' }] as ContentBlock[]
+      : [{ type: 'text', text: 'ordered answer' }, { type: 'reasoning', text: 'ordered thought' }] as ContentBlock[]
+    const folder = new TranscriptFolder()
+    folder.hydrate([
+      event('turn/start', { turn: 0 }, 0),
+      event('step/start', { turn: 0, step: 0 }, 1),
+      event('assistant/message', {
+        turn: 0,
+        step: 0,
+        message: { id: MessageId('content-order'), role: 'assistant', content, source: { kind: 'model', provider: 'p', model: 'm' } },
+        stream: [],
+      }, 2),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+    ])
+    assert.deepEqual(
+      kinds(folder.messages()),
+      first === 'thinking' ? ['thinking', 'assistant'] : ['assistant', 'thinking'],
+      `${first}-first durable content must keep its block order`,
+    )
+  }
+})
+
+test('a lane-evidence-free stream defers the lane order to the durable content', () => {
+  // A NON-EMPTY stream can still carry no lane evidence (usage/finish frames
+  // only): the content fallback must apply whenever the stream's projection
+  // yields no first lane, not only when the stream array is missing/empty.
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: {
+        id: MessageId('usage-only-stream'),
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'ordered thought' },
+          { type: 'text', text: 'ordered answer' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [
+        { type: 'chunk', time: 2, chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } } },
+        { type: 'chunk', time: 3, chunk: { type: 'finish', reason: { kind: 'stop' } } },
+      ] as unknown as AssistantStreamRecord[],
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  assert.deepEqual(
+    kinds(folder.messages()),
+    ['thinking', 'assistant'],
+    'a stream without lane evidence must not mask the content-proven Thinking → Assistant order',
+  )
+})
+
+test('live streaming plus message settlement matches cold hydration for both lane orders', () => {
+  for (const first of ['thinking', 'assistant'] as const) {
+    const step = laneOrderedStep(first)
+    const prefix = [
+      event('turn/start', { turn: 0 }, 0),
+      event('step/start', { turn: 0, step: 0 }, 1),
+    ]
+    const settlement = messageSettlement(2, step)
+    const end = event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3)
+    const live = new TranscriptFolder()
+    live.apply(prefix)
+    for (const member of expandAssistantStream(step.stream)) {
+      live.applyLiveInput(liveChunk(0, 0, member.chunk as never, member.time))
+    }
+    live.apply([settlement, end])
+    const cold = new TranscriptFolder()
+    cold.hydrate([...prefix, settlement, end])
+    // The live-settled entry clears its transient evidence with explicit
+    // `displayBlocks: undefined` / `interrupted: undefined` own keys, and its
+    // `content` is assigned unconditionally (a `content: undefined` own key
+    // for text-only messages); a cold-materialized entry never had those own
+    // keys. They are behaviorally absent in both, so the parity contract
+    // compares the serialized surface (order, text, content, flags) — JSON
+    // drops undefined own keys.
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(live.messages())),
+      JSON.parse(JSON.stringify(cold.messages())),
+      `${first}-first: live/cold transcript parity`,
+    )
+    assert.deepEqual(
+      kinds(live.messages()),
+      first === 'thinking' ? ['thinking', 'assistant'] : ['assistant', 'thinking'],
+      `${first}-first: live settlement order`,
+    )
+  }
+})
+
+test('first late reasoning after settlement appends no trailing Thinking row', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('assistant/message', {
+      turn: 0,
+      step: 0,
+      message: { id: MessageId('no-reasoning'), role: 'assistant', content: [{ type: 'text', text: 'final answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 2),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['assistant'])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 3, text: 'late diagnostic thought' }, 4))
+  assert.deepEqual(
+    kinds(folder.messages()),
+    ['assistant'],
+    'late reasoning must not append a Thinking row after the settled Assistant',
+  )
+  const activity = folder.turnActivity(0)
+  assert.ok(activity !== undefined)
+  assert.deepEqual([...((activity as { settledSteps?: Set<number> }).settledSteps ?? [])], [0], 'the step remains settled')
+  assert.equal(activity.think, undefined, 'the Think slot stays settled — late reasoning is diagnostic only')
+})
+
+test('late reasoning after settlement refreshes an existing Thinking row in place', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    messageSettlement(2, laneOrderedStep('thinking')),
+  ])
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 0, text: ' +more' }, 4))
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant'], 'the established lane order is preserved')
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  assert.equal(thinking.text, 'ordered thought +more')
+  assert.equal(thinking.running, false, 'late reasoning must not reopen the settled row')
+})
+
 test('tool-call-only assistant attempts stay hidden until the closed boundary', () => {
   const callId = ToolCallId('call-delayed')
   const stream = [
