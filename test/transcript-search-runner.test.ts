@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
-import { MessageId } from '@deepseek-ai/dsh-llm'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../src/tui-app.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
@@ -99,6 +99,7 @@ async function mountSearchRunner(
   turns: number,
   matchTurns: readonly number[],
   term = 'transcript needle',
+  events?: readonly SessionEvent[],
 ): Promise<RunnerFixture> {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-search-runner-')
@@ -119,7 +120,7 @@ async function mountSearchRunner(
   const session: FakeSession = fakeSession({
     id: 'search-runner-session',
     header: { id: 'search-runner-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
-    events: searchSession(turns, matchTurns, term),
+    events: events === undefined ? searchSession(turns, matchTurns, term) : [...events],
   })
   const harness = makeHarness(home, session, { provider: 'p', model: 'm' })
   const fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id })
@@ -276,6 +277,69 @@ test('runner search: fullscreen dismiss preserves the historical result viewport
   assert.equal(vt.getViewport().findIndex(line => line.includes('zzq marker')), beforeTargetRow,
     'the searched historical row keeps the same viewport offset after dismiss')
   assert.equal(app.searchMatchMessagesForTest().size, 0, 'closing clears the weak-match set')
+})
+
+test('runner search: a Compact dismiss promotes the revealed Work span and keeps the match visible', async (t) => {
+  // A Compact turn whose search needle lives in a TOOL row hidden inside the
+  // collapsed Work span, closed by an assistant narration.
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('u-0'), role: 'user',
+      content: [{ type: 'text', text: 'go' }], source: { kind: 'user' },
+    }, 1),
+    event('tool/call', {
+      turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read',
+      arguments: JSON.stringify({ path: 'zzq-needle.ts' }),
+    }, 2),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r-0'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'zzq-needle-body' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, 3),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('a-0'), role: 'assistant',
+        content: [{ type: 'text', text: 'answer 0' }], source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [0], 'zzq-needle', events)
+  const { app, vt } = fixture
+  app.setDisplayPreset('compact')
+  await fixture.settleRender()
+  // The expanded tool card renders its status pill; the collapsed Work preview
+  // does not — that is the observable "the owning span is open" fact.
+  assert.ok(!vt.getViewport().join('\n').includes('[ok]'),
+    'precondition: the tool row is inside the collapsed Work span')
+
+  app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, 'zzq-needle')
+  await fixture.settleRender()
+  assert.equal(app.transcriptSearchPresentationForTest()?.matchTurn, 0,
+    'precondition: the query resolved to the hidden tool row')
+  assert.equal(app.compactExpandedWorkOwnersForTest().size, 0,
+    'the search reveal stays presentation-only while searching')
+  assert.ok(vt.getViewport().join('\n').includes('[ok]'),
+    `the reveal opens the owning Work span so the match is reachable:\n${vt.getViewport().join('\n')}`)
+
+  // The REAL dismiss path: Esc semantics through the runner's onSearchClose
+  // ('dismiss') handler -> preserveCurrentReveal -> owner promotion.
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'the search target is cleared')
+  assert.equal(app.compactExpandedWorkOwnersForTest().size, 1,
+    'the dismissal promotes the revealed Work span to a manual owner')
+  const after = vt.getViewport().join('\n')
+  assert.ok(after.includes('[ok]'),
+    `the promoted span keeps the matched row visible after dismissal:\n${after}`)
 })
 
 test('runner search: a surface switch clears search without latest or promotion', async (t) => {

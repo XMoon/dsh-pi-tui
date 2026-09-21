@@ -79,8 +79,19 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
 - Expanding a `Work` span reveals its raw member rows through the existing
   message renderers; Thinking and tool-local detail keep their own orthogonal
   disclosure.
-- Ctrl+O owns the Compact Work-span bulk (any open span → collapse all, else
-  expand the recent spans); Alt+T still owns Thinking detail.
+- Under Compact, Ctrl+O owns the **Work spans only**. Every other message-level
+  fold is decided by a disclosure CAPABILITY, not by a key that happens to
+  exist: on the regular surface (no mouse, Ctrl+O reserved for Work) a fold with
+  no operable owner is not presented collapsed at all — the row renders in full
+  and advertises no hint. On fullscreen the mouse owns those folds
+  (`(click to expand)`). Alt+T still owns Thinking detail, independently of both.
+- Members of an OPEN Work run follow the same surface contract: regular
+  full-reveals them, fullscreen keeps the per-card click (`(click to expand)`),
+  and a hidden member revealed by search is promoted to a manual Work owner when
+  the search closes.
+- The capability is applied where the renderer BUILDS the disclosure, so no
+  hidden-row count, marker or search geometry is ever produced for a fold that
+  cannot be operated.
 
 ## Surfaced Context
 
@@ -105,8 +116,10 @@ Surfaced Context
   brightness, wrapped naturally at render time. The TUI never invents a
   head/first-row summary, and never truncates the summary to one physical row.
 - A relay names its `senderSessionId`, shows its body by default at normal
-  brightness, and reuses the long-message disclosure geometry for a long body.
-  The semantic class stays Context — presentation is reused, semantics are not
+  brightness, and reuses the long-message disclosure geometry verbatim (the
+  same threshold plus head rows + overflow marker + tail rows) for a long body,
+  so another Agent's concluding lines stay visible while collapsed. The
+  semantic class stays Context — presentation is reused, semantics are not
   rewritten to `user`.
 - A recall names its structured labels; no summary is invented when metadata is
   absent.
@@ -118,11 +131,24 @@ raw-adjacent, surfaced Context, and ambient form; two or more such rows become
 one cluster. Clustering is computed from RAW chronology before any Process
 hiding, so a Process row between two Context rows never merges them. A notice,
 relay, recall, unknown Context, Conversation, Attention, workflow, compaction,
-window summary or turn boundary ends the run. Clusters exist in every preset
-and default collapsed; expanding one re-emits every member as an ordinary
-Context row, and member payload disclosure stays independent. The cluster
-summary is built from structured labels/forms only (duplicate labels compress
-to `label ×N` for display; the transcript is never deduplicated or reordered).
+window summary or turn boundary ends the run.
+
+Clustering is SEMANTIC and identical on every preset and surface: the cluster
+owner, the search reveal/promotion owner, the viewport identity and the
+raw-adjacency rule all stay cluster-based. Only the DISCLOSURE PRESENTATION is
+surface-dependent:
+
+- **regular**: the members are presented directly (flat) — the surface has no
+  manual cluster disclosure owner yet, so a collapsed header would be a dead
+  end. The semantic cluster still groups the rows for search and promotion.
+- **fullscreen**: the cluster defaults collapsed (`▸ Context · N injections`
+  plus the structured summary) and is click-expandable; expanding re-emits every
+  member as an ordinary Context row, and member payload disclosure stays
+  independent.
+
+The cluster summary is built from structured labels/forms only (duplicate labels
+compress to `label ×N` for display; the transcript is never deduplicated or
+reordered).
 
 ### Disclosure chronology
 
@@ -186,7 +212,7 @@ compares the deterministic default Compact projection at both readers. Remote
 parity options may select the client-local preset, but they do not create
 Host-owned display state or a Remote-only disclosure behavior.
 
-## Scope
+## Scope and follow-ups
 
 PR3/F4 Core makes Compact a real opt-in preset. It deliberately does not:
 
@@ -194,3 +220,21 @@ PR3/F4 Core makes Compact a real opt-in preset. It deliberately does not:
 - make Full equal to Compact plus expanded Process (F5);
 - change the default preset for new users (F7);
 - introduce a second search/render/viewport path or a second transcript store.
+
+F4 only guarantees that no INOPERABLE disclosure is rendered; it does not
+converge keyboard disclosure ownership. The following are explicit follow-ups,
+not silent gaps:
+
+- **TODO(F6) — regular-surface disclosure ownership.** Regular Compact reserves
+  Ctrl+O for the Work spans, so non-Work folds (long user, pending user, tool,
+  system/compaction, standalone surfaced Context) currently render in full
+  instead of collapsed. F6 must assign those folds a real regular-surface owner
+  and then restore a collapsed presentation.
+- **TODO(F6) — regular-surface cluster disclosure.** Ambient clusters are
+  semantic on every surface but presented flat (expanded) on the regular surface
+  because no manual cluster owner exists there yet. F6 assigns that owner and
+  returns the regular default to collapsed.
+- **TODO(F5) — Focus expanded / Full convergence.** Focus expanded is not
+  globally Compact, and Full is not yet Compact plus expanded Process.
+- **TODO(PR4) — hardening.** Malformed legacy Context matrices, large-history
+  grouping performance and stress streaming races stay in PR4.

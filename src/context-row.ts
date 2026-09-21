@@ -17,6 +17,7 @@
 
 import { truncateToWidth, wrapTextWithAnsi, type Component } from '@xmoon76/pi-tui'
 import { iconPrefix, type IconStyle } from './icons.ts'
+import { longMessageDisclosureWindow, type LongMessageDisclosureGeometry } from './long-message-disclosure.ts'
 import { systemContextBody } from './present.ts'
 import { color } from './theme.ts'
 import type { TranscriptMessage } from './transcript.ts'
@@ -99,25 +100,18 @@ export class NoticeContextRow implements Component {
   }
 }
 
-/** The relay disclosure geometry: the SAME visual-row threshold and head
- * count the long-user-message disclosure uses. The hidden TAIL is the region
- * the search reveal contract names. */
-export interface RelayDisclosureGeometry {
-  readonly thresholdRows: number
-  readonly headRows: number
-}
-
 /**
  * `form: 'relay'` — a message another Agent addressed to this one. The sender
  * is named, the body is visible by default at normal brightness, and a long
- * body reuses the long-user-message disclosure geometry (head rows + the
- * existing expand affordance) instead of a relay-specific preview.
+ * body reuses the SHARED long-message disclosure geometry (the same
+ * threshold/head/tail window the user bubble uses), so another Agent's
+ * concluding lines stay visible while collapsed.
  */
 export class RelayContextRow implements Component {
   private readonly options: ContextRowOptions
-  private readonly geometry: RelayDisclosureGeometry
+  private readonly geometry: LongMessageDisclosureGeometry
 
-  constructor(options: ContextRowOptions & { geometry: RelayDisclosureGeometry }) {
+  constructor(options: ContextRowOptions & { geometry: LongMessageDisclosureGeometry }) {
     this.options = options
     this.geometry = options.geometry
   }
@@ -130,14 +124,13 @@ export class RelayContextRow implements Component {
     const icon = iconPrefix(message.icon ?? 'context-generic', iconStyle)
     const title = sender === undefined || sender === '' ? 'Agent message' : `Agent message · ${sender}`
     const bodyRows = wrappedRows(message.text, Math.max(1, width), color.text)
-    const long = bodyRows.length > this.geometry.thresholdRows
-    const collapsed = !expanded && long
+    // The marker is chrome: clip it to the current width so every returned
+    // element stays exactly one physical row even on a very narrow terminal.
+    const marker = color.textMuted(truncateToWidth('  …', Math.max(1, width), '…'))
+    const window = longMessageDisclosureWindow(bodyRows, this.geometry, { expanded, marker: () => marker })
+    const collapsed = window.markerRow !== undefined
     const rows = [headerRow(`${icon}${title}${collapsed ? expandAffordance(expandHint) : ''}`, width)]
-    rows.push(...(collapsed ? bodyRows.slice(0, this.geometry.headRows) : bodyRows))
-    // The overflow marker is a fixed-width affordance: truncate it to the
-    // CURRENT width so every returned element stays exactly one physical row
-    // even on a very narrow terminal.
-    if (collapsed) rows.push(color.textMuted(truncateToWidth('  …', Math.max(1, width), '…')))
+    rows.push(...window.rows)
     return rows
   }
 }
