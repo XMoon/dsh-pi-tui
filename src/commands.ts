@@ -35,7 +35,7 @@ import type { ComposerSubmitGesture } from './tui-app.ts'
 import { mergeDraft, sessionUnchanged } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyResult } from './display-preset.ts'
-import { parseOutputStyle, type OutputStyleState } from './output-style.ts'
+import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from './communication-policy.ts'
 import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from './wheel-scroll.ts'
 import { iconStyleOf } from './icons.ts'
@@ -629,7 +629,9 @@ export interface TuiCommandRunner {
    * sessionReader read. */
   forceContextMeasurement?(): number | undefined
   /** Shared with prompt assembly; settings changes take effect on the next step. */
-  readonly outputStyleState: OutputStyleState
+  readonly progressUpdatesState: ProgressUpdatesState
+  /** Shared with prompt assembly; settings changes take effect on the next step. */
+  readonly responseStyleState: ResponseStyleState
   /** The canonical display preset (the authoritative runtime state). */
   displayPreset?(): DisplayPreset
   /** Apply a canonical display preset through the shared setter. */
@@ -2185,11 +2187,18 @@ export function registerTuiCommands(
             values: ['full', 'compact', 'focus'],
           },
           {
-            id: 'output-style',
-            label: 'Output style',
-            description: 'Checkpoint: Brief updates at meaningful milestones; Concise: Result-first with minimal narration; Explanatory: Adds rationale and implementation insights; None: No additional output-style guidance',
-            currentValue: runner.outputStyleState.style,
-            values: ['checkpoint', 'concise', 'explanatory', 'none'],
+            id: 'progress-updates',
+            label: 'Progress updates',
+            description: 'Off: no progress narration; Milestones: update only at substantial phase boundaries (default); Frequent: keep me informed during longer work. Focus suppresses progress-only intermediate messages without changing this saved preference.',
+            currentValue: runner.progressUpdatesState.mode,
+            values: ['off', 'milestones', 'frequent'],
+          },
+          {
+            id: 'response-style',
+            label: 'Response style',
+            description: 'Default: no extra answer-style guidance; Concise: compact and result-first; Explanatory: more rationale, architecture, and tradeoffs',
+            currentValue: runner.responseStyleState.style,
+            values: ['default', 'concise', 'explanatory'],
           },
           {
             id: 'notification-mode',
@@ -2572,14 +2581,24 @@ export function registerTuiCommands(
             if (value === 'full' || value === 'compact' || value === 'focus') {
               applyDisplayPreset(runner, value)
             }
-          } else if (id === 'output-style') {
-            const style = parseOutputStyle(value)
-            runner.outputStyleState.style = style
+          } else if (id === 'progress-updates') {
+            const mode = parseProgressUpdates(value)
+            runner.progressUpdatesState.mode = mode
             const settings = tuiSettings
             if (settings !== undefined) {
-              detach('settings output style write', () => serializeTuiSettingsMutation(
+              detach('settings progress updates write', () => serializeTuiSettingsMutation(
                 settings,
-                () => settings.replace(withUserFooterCustomItems({ ...settings.get(), outputStyle: style }, runner.config)),
+                () => settings.replace(withUserFooterCustomItems({ ...settings.get(), progressUpdates: mode }, runner.config)),
+              ), { notify: true })
+            }
+          } else if (id === 'response-style') {
+            const style = parseResponseStyle(value)
+            runner.responseStyleState.style = style
+            const settings = tuiSettings
+            if (settings !== undefined) {
+              detach('settings response style write', () => serializeTuiSettingsMutation(
+                settings,
+                () => settings.replace(withUserFooterCustomItems({ ...settings.get(), responseStyle: style }, runner.config)),
               ), { notify: true })
             }
           } else if (id === 'notification-mode') {

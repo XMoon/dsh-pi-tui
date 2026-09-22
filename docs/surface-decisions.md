@@ -424,35 +424,48 @@ read the DURABLE descendant catalog, not the live-child list:
   runner's execution path, so an idle continuable has no driver to stop
   and the UI never advertises (or fires) a dead stop.
 
-## Output style and Focus policy
+## Communication policy and Focus surface
 
-`OutputStyleState` is independent of `DisplayState`: `checkpoint` (default),
-`concise`, `explanatory`, and `none` control model communication, not transcript
-projection. Missing or invalid `outputStyle` settings resolve to `checkpoint`.
-The `/settings` row changes the shared runtime state synchronously, then saves
+Communication policy is two independent user preferences, neither of them a
+display preset: `ProgressUpdatesState` (`off` | `milestones` | `frequent`,
+default `milestones`) owns the user-facing mid-turn update cadence, and
+`ResponseStyleState` (`default` | `concise` | `explanatory`, default
+`default`) owns the density/explanation depth of visible assistant text.
+`DisplayState` owns what the surface can make visible. Missing or invalid
+settings resolve to the defaults through the parsers (the single authority).
+The `/settings` rows change the shared runtime states synchronously, then save
 through the existing serialized whole-document ConfigPort write, preserving raw
 extension fields. A failed save is reported without undoing the live choice.
 
-Each composed root TUI agent registers `tui:output-style` at order 80, followed
-by `tui:focus-mode` at 90 and tool guidance at 100+. The providers read live state
-on every assembly; changing either axis does not recompose the agent or change
-the other axis. Plain `composeAgent` callers that omit the style state retain
-their existing composition. `none` returns an empty style section, not a disabled
-base prompt, Focus policy, tool policy, or safety behavior.
+Each composed root TUI agent registers `tui:progress-updates` at order 80 and
+`tui:response-style` at 81, followed by `tui:focus-mode` at 90 and tool
+guidance at 100+. The providers read live state on every assembly; changing
+either axis does not recompose the agent, re-register sections, or change the
+other axis. Plain `composeAgent` callers that omit both states retain their
+existing composition. `default` returns an empty response-style section, not a
+disabled base prompt, Focus policy, tool policy, or safety behavior.
 
-Checkpoint updates follow semantic milestones, never mandatory tool-boundary
-narration. Concise reduces narration, not correctness or requested detail.
-Explanatory adds relevant rationale, not generic verbosity. Focus owns hidden
-intermediate text, self-contained questions/approvals, independent background
-work, truthful pending-work checkpoints, and the user-needed final visible
-message. It does not duplicate those generic communication styles.
+Milestones reports only at closed phase boundaries, material direction
+changes, or required user input — never because a partial finding was just
+established while the same investigation continues. Frequent deliberately
+allows active updates during longer work (semantic guidance, never a
+tool-call counter or timer). Off actively suppresses progress narration.
+Concise and Explanatory steer the visible answer only; they own no cadence,
+tool-narration, or Focus-visibility semantics. Focus owns hidden intermediate
+text, self-contained questions/approvals, independent background work,
+truthful pending-work statements, and the user-needed final visible message.
+While Focus is active the progress provider reads both live states and returns
+an empty effective section — the saved cadence is never mutated and leaving
+Focus restores it on the next assembly; the response style stays active. The
+Focus prompt states the surface fact (progress-only intermediate messages
+cannot reach the user) without owning cadence or style preferences.
 
 Locality is split: preference state and selection are Client-local; persistence
 uses `ConfigPort.tuiSettings`, while Direct composition installs the structural
-`SystemPromptLike` section in the Host's agent scope. A future wire backend must
-round-trip the preference as settings data and install the policy Host-side;
-callbacks and the mutable state object never cross the wire. This adds no Remote
-RPC or production backend and does not change display defaults.
+`SystemPromptLike` sections in the Host's agent scope. A future wire backend
+must round-trip the preferences as settings data and install the policy
+Host-side; callbacks and the mutable state objects never cross the wire. This
+adds no Remote RPC or production backend and does not change display defaults.
 
 ## Focus fullscreen disclosure
 
@@ -752,7 +765,7 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   structure; PR6/F6 converged disclosure ownership (regular-surface owners,
   nested Work disclosure, search reveal path). Compact is not the default (F7);
   the post-F6 Compact UX/identity review decides whether Work gains an identity
-  icon or Compact gains checkpoint narration guidance.
+  icon or Compact gains progress-update narration guidance.
 
 ## F4 hardening (2026-09-21 PR4)
 

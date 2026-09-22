@@ -98,7 +98,7 @@ import { completeDirectory } from './file-completion/directory-completion.ts'
 import { LocalFileSource } from './file-completion/local-file-source.ts'
 import { TranscriptWindowController } from './transcript-window.ts'
 import { installFocusPrompt, type SystemPromptLike } from './focus.ts'
-import { installOutputStylePrompt, parseOutputStyle, type OutputStyleState } from './output-style.ts'
+import { installProgressUpdatesPrompt, installResponseStylePrompt, parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from './communication-policy.ts'
 import {
   isDisplayPresetAvailable,
   isFocusDisplayPreset,
@@ -1446,7 +1446,12 @@ interface LegacyAgentComposition {
  *   section exactly once per composed agent (plan §9 — every composed
  *   root TUI agent gets it; /focus toggles never re-register).
  * @param diag - the diagnostics channel, when the caller has one.
- * @param outputStyleState - optional live communication policy, independent of display.
+ * @param progressUpdatesState - optional live mid-turn update cadence. The
+ *   effective text is derived from this state AND `displayState` (Focus
+ *   suppresses the progress section without mutating this state), so a
+ *   progress state without a display state is not installable.
+ * @param responseStyleState - optional live visible-answer style guidance,
+ *   independent of display.
  * @returns the id to record on the header (absent without a roster) and the setup callback.
  * @throws when the roster supplies no such preset.
  */
@@ -1456,7 +1461,8 @@ export function composeAgent(
   presetId?: string,
   displayState?: DisplayState,
   diag?: Diag,
-  outputStyleState?: OutputStyleState,
+  progressUpdatesState?: ProgressUpdatesState,
+  responseStyleState?: ResponseStyleState,
 ): Promise<LegacyAgentComposition>
 export function composeAgent(
   ctx: Context,
@@ -1464,7 +1470,8 @@ export function composeAgent(
   presetId?: string,
   displayState?: DisplayState,
   diag?: Diag,
-  outputStyleState?: OutputStyleState,
+  progressUpdatesState?: ProgressUpdatesState,
+  responseStyleState?: ResponseStyleState,
 ): Promise<AgentComposition>
 export async function composeAgent(
   ctx: Context,
@@ -1472,13 +1479,24 @@ export async function composeAgent(
   presetId?: string,
   displayState?: DisplayState,
   diag?: Diag,
-  outputStyleState?: OutputStyleState,
+  progressUpdatesState?: ProgressUpdatesState,
+  responseStyleState?: ResponseStyleState,
 ): Promise<LegacyAgentComposition | AgentComposition> {
   const installTuiPrompts = (agentCtx: Context): void => {
-    if (outputStyleState !== undefined) {
+    if (progressUpdatesState !== undefined || responseStyleState !== undefined) {
       const systemPrompt = agentCtx.get('systemPrompt') as SystemPromptLike | undefined
-      if (systemPrompt !== undefined) installOutputStylePrompt(systemPrompt, outputStyleState)
-      else diag?.warn('output style prompt unavailable', { reason: 'systemPrompt service missing' })
+      if (systemPrompt !== undefined) {
+        // The progress section's effective text reads the live display state
+        // (Focus suppresses it), so it needs both live states.
+        if (progressUpdatesState !== undefined && displayState !== undefined) {
+          installProgressUpdatesPrompt(systemPrompt, displayState, progressUpdatesState)
+        } else if (progressUpdatesState !== undefined) {
+          diag?.warn('progress updates prompt unavailable', { reason: 'display state missing' })
+        }
+        if (responseStyleState !== undefined) installResponseStylePrompt(systemPrompt, responseStyleState)
+      } else {
+        diag?.warn('communication policy prompt unavailable', { reason: 'systemPrompt service missing' })
+      }
     }
     if (displayState !== undefined) installFocusPrompt(agentCtx, displayState, diag)
   }
@@ -2098,7 +2116,7 @@ export function apply(ctx: Context, config: Config): void {
         // keybindings parser (src/keybindings/config.ts) owns the
         // validation fail-soft. Adding a schema field here would break
         // the z<T> inference of the whole register call (probed).
-      }).set('displayPreset', z.string()).set('outputStyle', z.string()),
+      }).set('displayPreset', z.string()).set('progressUpdates', z.string()).set('responseStyle', z.string()),
       // `history` used to live here (a per-cwd map in the settings
       // document). It moved to $DSH_HOME/user-history/*.jsonl (see
       // history.ts); the schema deliberately no longer carries it, so the
@@ -2116,7 +2134,9 @@ export function apply(ctx: Context, config: Config): void {
       focusMode: persistedTuiSettings?.focusMode,
     })
     const displayState: DisplayState = { preset: displayResolution.preset }
-    const outputStyleState: OutputStyleState = { style: parseOutputStyle(persistedTuiSettings?.outputStyle) }
+    // Two independent live authorities, resolved before the first compose.
+    const progressUpdatesState: ProgressUpdatesState = { mode: parseProgressUpdates(persistedTuiSettings?.progressUpdates) }
+    const responseStyleState: ResponseStyleState = { style: parseResponseStyle(persistedTuiSettings?.responseStyle) }
 
     // Completion notifications (plan: Client/TUI presentation capability —
     // settled detection, focus detection, terminal output and settings
@@ -2200,7 +2220,7 @@ export function apply(ctx: Context, config: Config): void {
       assembled: undefined,
     }
     const installSessionModelSelection = (_agentCtx: Context, agent: Agent): void => { modelSelections.installForAgent(agent) }
-    const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, installSessionModelSelection, presetId, displayState, diag, outputStyleState)
+    const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, installSessionModelSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState)
 
     // The semantic backend (server/client migration): the TUI consumes
     // Host domains through narrow ports, never ctx.* directly. Direct is the
@@ -9798,7 +9818,8 @@ export function apply(ctx: Context, config: Config): void {
       sessionCwd,
       signal,
       get sessionGeneration() { return sessionGeneration },
-      outputStyleState,
+      progressUpdatesState,
+      responseStyleState,
       /** Canonical display surface: /display and /focus compatibility both
        * read and mutate the shared DisplayState through one setter. */
       displayPreset: () => displayState.preset,

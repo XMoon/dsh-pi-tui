@@ -119,9 +119,9 @@ dsh --profile pi-tui --session <session-id>
 
 需要查看过程时可以展开，关闭 Focus 后恢复普通 Transcript 展示。全屏 Focus 中可以按 Thought root 批量展开/收起,也可以单独点击卡片;切换或缩放时会保留 viewport。展示预设只影响界面投影，不修改 Session 中保存的事件。
 
-### 输出风格
+### 沟通策略
 
-`/settings` → **Output style** 独立于展示预设控制模型的表达方式：`checkpoint`（默认）在重要里程碑提供简短更新，`concise` 结果优先、减少过程叙述，`explanatory` 补充相关原理与取舍，`none` 不添加输出风格指导。切换在下一次提示词组装时生效，无需重启 Agent，并保存供后续会话使用。Focus 仍隐藏中间文字并要求最终回复包含完整必要信息，选择 `none` 也不改变这一点。
+`/settings` 提供两个独立的沟通设置。**Progress updates** 控制 Agent 工作时的中途更新节奏：`milestones`（默认）只在完整的阶段结束、方向实质变化或需要用户输入时简短汇报，不为「刚发现一个局部结论」而打断；`frequent` 在较长的多步工作中持续带用户跟进；`off` 完全不做过程叙述。**Response style** 控制可见回复的密度：`default` 不附加表达指导，`concise` 紧凑且结果优先，`explanatory` 补充原理、架构与取舍。两项切换都在下一次提示词组装时生效，无需重启 Agent，并跨会话保存。Focus 是展示能力而非第三个偏好：进入 Focus 时进度更新节只是暂时失效（不生成只含进度的中间消息），保存的节奏偏好不变，Response style 在 Focus 下仍然生效。
 
 ### Session
 

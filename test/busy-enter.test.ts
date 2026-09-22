@@ -223,7 +223,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
-    outputStyleState: { style: 'checkpoint' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

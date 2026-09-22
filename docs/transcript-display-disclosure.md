@@ -491,7 +491,7 @@ container mints no reveal node.
 ```text
 Post-F6 Compact UX / identity review
 ├ Work semantic identity icon?
-└ checkpoint-oriented Compact narration guidance?
+└ progress-update-oriented Compact narration guidance?
 ```
 
 Neither is implemented in F6. PR7/F7 (Compact default rollout) remains the next

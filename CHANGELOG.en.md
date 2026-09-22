@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Independent Output style setting.** Choose Checkpoint (default), Concise, Explanatory, or None in `/settings`; the next model step uses the selected communication guidance without restarting the agent. The preference is saved across sessions and does not change the display preset. Focus keeps its visibility and completion rules with every style, including None.
+- **Two independent communication settings: Progress updates and Response style.** `/settings` now separates the mid-turn update cadence (Milestones default / Frequent / Off) from the visible answer's density (Default / Concise / Explanatory); the next model step picks up the change without restarting the agent. Preferences are saved across sessions, never affect each other or the display preset, and Focus only suppresses the effective progress section (the saved cadence is untouched) while the response style stays active in Focus.
 
 ### Changed
 

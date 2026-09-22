@@ -1,7 +1,7 @@
 /**
- * Notification and Output style /settings integration tests: live policy
- * changes, defaults, and whole-document persistence through the shared runner
- * fixture. Pure — no dsh tree needed.
+ * Notification and communication-policy /settings integration tests: live
+ * policy changes, defaults, and whole-document persistence through the shared
+ * runner fixture. Pure — no dsh tree needed.
  * @module @xmoon76/dsh-pi-tui/notification-settings.test
  */
 
@@ -19,7 +19,7 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { parseNotificationMethod, parseNotificationMode } from '../src/notification/settings.ts'
-import { installOutputStylePrompt, parseOutputStyle, type OutputStyleState } from '../src/output-style.ts'
+import { installProgressUpdatesPrompt, installResponseStylePrompt, parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../src/communication-policy.ts'
 import { installFocusPrompt, type SystemPromptLike } from '../src/focus.ts'
 import type { DisplayState } from '../src/display-preset.ts'
 
@@ -55,7 +55,7 @@ function fakeSettings(doc: Record<string, unknown>) {
 
 /** Register the TUI commands with a stubbed runner and return /settings
  * plus the recorded runtime notification setter calls. */
-function setupSettings(options: { notificationMode?: string; notificationMethod?: string; outputStyle?: string; failWrite?: boolean } = {}) {
+function setupSettings(options: { notificationMode?: string; notificationMethod?: string; progressUpdates?: string; responseStyle?: string; failWrite?: boolean } = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -81,22 +81,25 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     homeEndKeys: 'viewport',
     focusMode: 'off',
     displayPreset: 'full',
-    outputStyle: options.outputStyle,
+    progressUpdates: options.progressUpdates,
+    responseStyle: options.responseStyle,
     keybindings: { 'app.transcript.toggle': ['ctrl+o'] },
     customExtension: { enabled: true },
     ...(options.notificationMode === undefined ? {} : { notificationMode: options.notificationMode }),
     ...(options.notificationMethod === undefined ? {} : { notificationMethod: options.notificationMethod }),
   })
   if (options.failWrite) settings.value.replace = () => { throw new Error('settings unavailable') }
-  const outputStyleState: OutputStyleState = { style: parseOutputStyle(settings.value.get().outputStyle) }
+  const progressUpdatesState: ProgressUpdatesState = { mode: parseProgressUpdates(settings.value.get().progressUpdates) }
+  const responseStyleState: ResponseStyleState = { style: parseResponseStyle(settings.value.get().responseStyle) }
   const displayState: DisplayState = { preset: 'full' }
   const sections = new Map<string, Parameters<SystemPromptLike['section']>[0]>()
   const systemPrompt: SystemPromptLike = {
     section: section => { sections.set(section.name, section); return () => { sections.delete(section.name) } },
   }
-  installOutputStylePrompt(systemPrompt, outputStyleState)
+  installProgressUpdatesPrompt(systemPrompt, displayState, progressUpdatesState)
+  installResponseStylePrompt(systemPrompt, responseStyleState)
   installFocusPrompt({ get: () => systemPrompt } as never, displayState)
-  const prompt = (name = 'tui:output-style'): string => {
+  const prompt = (name = 'tui:progress-updates'): string => {
     const text = sections.get(name)!.text
     return typeof text === 'function' ? text({}) : text
   }
@@ -164,7 +167,8 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},
-    outputStyleState,
+    progressUpdatesState,
+    responseStyleState,
     displayPreset: () => displayState.preset,
     setDisplayPreset: preset => { displayState.preset = preset; return { kind: 'applied', preset } },
     focusEnabled: () => displayState.preset === 'focus',
@@ -250,7 +254,7 @@ test('cycling the mode row applies the runtime setter and persists the whole doc
   const t = setupSettings({ notificationMode: 'unfocused' })
   await t.run()
   await t.view()
-  for (let i = 0; i < 10; i += 1) t.vt.sendInput('\x1b[B') // move to the mode row
+  for (let i = 0; i < 11; i += 1) t.vt.sendInput('\x1b[B') // move to the mode row
   await t.view()
   t.vt.sendInput('\r') // cycle mode: unfocused -> always
   await t.view()
@@ -269,7 +273,7 @@ test('cycling the method row applies the runtime setter and persists', async () 
   const t = setupSettings({ notificationMode: 'unfocused', notificationMethod: 'auto' })
   await t.run()
   await t.view()
-  for (let i = 0; i < 11; i += 1) t.vt.sendInput('\x1b[B') // move to the method row
+  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B') // move to the method row
   await t.view()
   t.vt.sendInput('\r') // cycle method: auto -> osc9
   await t.view()
@@ -282,24 +286,43 @@ test('cycling the method row applies the runtime setter and persists', async () 
   t.app.stop()
 })
 
-test('Output style cycles live, preserves Display and raw fields, and survives reopening', async () => {
-  const t = setupSettings({ outputStyle: 'checkpoint' })
+test('both communication rows cycle live, preserve Display and raw fields, and survive reopening', async () => {
+  const t = setupSettings({ progressUpdates: 'off', responseStyle: 'concise' })
   await t.run()
   await t.view()
   for (let i = 0; i < 9; i += 1) t.vt.sendInput('\x1b[B')
   const initial = stripTerminalSequences(await t.view())
-  assert.match(initial, /Output style\s+checkpoint/)
-  for (const style of ['concise', 'explanatory', 'none', 'checkpoint'] as const) {
-    t.vt.sendInput('\r')
-    await t.view()
-    assert.equal(t.runner.outputStyleState.style, style)
-    assert.equal(t.runner.displayPreset!(), 'full')
-    assert.equal(t.settings.value.get().outputStyle, style)
-    assert.equal(t.sections.size, 2, 'switching never re-registers prompt sections')
-    if (style === 'none') assert.equal(t.prompt(), '')
-    else assert.match(t.prompt(), new RegExp(`# Output style: ${style}`, 'i'))
-  }
+  assert.match(initial, /Progress updates\s+off/)
+  assert.match(initial, /Response style\s+concise/)
+  // Cycle the progress row: off -> milestones -> frequent.
+  t.vt.sendInput('\r')
+  await t.view()
+  assert.equal(t.runner.progressUpdatesState.mode, 'milestones')
+  assert.match(t.prompt(), /# Progress updates: Milestones/)
+  t.vt.sendInput('\r')
+  await t.view()
+  assert.equal(t.runner.progressUpdatesState.mode, 'frequent')
+  assert.equal(t.runner.responseStyleState.style, 'concise', 'progress changes never touch the response axis')
+  assert.equal(t.runner.displayPreset!(), 'full')
+  assert.equal(t.settings.value.get().progressUpdates, 'frequent')
+  assert.equal(t.settings.value.get().responseStyle, 'concise')
+  assert.equal(t.sections.size, 3, 'switching never re-registers prompt sections')
+  assert.match(t.prompt(), /# Progress updates: Frequent/)
+  assert.match(t.prompt('tui:response-style'), /# Response style: Concise/)
+  // Cycle the response row (one below): concise -> explanatory -> default.
+  t.vt.sendInput('\x1b[B')
+  t.vt.sendInput('\r')
+  await t.view()
+  assert.equal(t.runner.responseStyleState.style, 'explanatory')
+  assert.equal(t.runner.progressUpdatesState.mode, 'frequent', 'response changes never touch the progress axis')
+  assert.match(t.prompt('tui:response-style'), /# Response style: Explanatory/)
+  t.vt.sendInput('\r')
+  await t.view()
+  assert.equal(t.runner.responseStyleState.style, 'default')
+  assert.equal(t.prompt('tui:response-style'), '')
   const last = t.settings.writes.at(-1)!
+  assert.equal(last.progressUpdates, 'frequent')
+  assert.equal(last.responseStyle, 'default')
   assert.equal(last.displayPreset, 'full')
   assert.deepEqual(last.keybindings, { 'app.transcript.toggle': ['ctrl+o'] })
   assert.deepEqual(last.customExtension, { enabled: true })
@@ -308,29 +331,32 @@ test('Output style cycles live, preserves Display and raw fields, and survives r
   await t.run()
   await t.view()
   for (let i = 0; i < 9; i += 1) t.vt.sendInput('\x1b[B')
-  assert.match(stripTerminalSequences(await t.view()), /Output style\s+checkpoint/)
+  const reopened = stripTerminalSequences(await t.view())
+  assert.match(reopened, /Progress updates\s+frequent/)
+  assert.match(reopened, /Response style\s+default/)
 })
 
-test('Output style applies before a failed persistence write and Display switches preserve it', async () => {
-  const t = setupSettings({ outputStyle: 'concise', failWrite: true })
+test('communication changes apply before a failed persistence write and Display switches preserve them', async () => {
+  const t = setupSettings({ progressUpdates: 'milestones', failWrite: true })
   const notifications: string[] = []
   t.app.notify = message => { notifications.push(message) }
   await t.run()
   await t.view()
   for (let i = 0; i < 9; i += 1) t.vt.sendInput('\x1b[B')
   t.vt.sendInput('\r')
-  assert.equal(t.runner.outputStyleState.style, 'explanatory', 'runtime changes synchronously')
-  assert.match(t.prompt(), /# Output style: Explanatory/)
+  assert.equal(t.runner.progressUpdatesState.mode, 'frequent', 'runtime changes synchronously')
+  assert.match(t.prompt(), /# Progress updates: Frequent/)
   await t.view()
   assert.ok(notifications.some(message => message.includes('settings unavailable')))
-  assert.equal(t.settings.value.get().outputStyle, 'concise')
+  assert.notEqual(t.settings.value.get().progressUpdates, 'frequent')
   // Display is the preceding row: full -> compact -> focus.
   t.vt.sendInput('\x1b[A')
   t.vt.sendInput('\r')
   t.vt.sendInput('\r')
   await t.view()
   assert.equal(t.runner.displayPreset!(), 'focus')
-  assert.equal(t.runner.outputStyleState.style, 'explanatory')
+  assert.equal(t.runner.progressUpdatesState.mode, 'frequent', 'entering Focus never mutates the saved cadence')
+  assert.equal(t.prompt(), '', 'Focus suppresses the effective progress section')
   assert.match(t.prompt('tui:focus-mode'), /# Focus mode/)
 })
 
