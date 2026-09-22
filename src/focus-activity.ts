@@ -49,7 +49,7 @@ import {
   type CompactActionStatsAccumulator,
 } from './compact-process-preview.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
-import { isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
+import { isCommandTool, isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
 import { isNoticeContext } from './context-presentation.ts'
 import { projectTranscriptStructure, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
 import type { TranscriptContainerPath } from './transcript-disclosure.ts'
@@ -706,7 +706,13 @@ function assistantForStep(
  * evidence, so it is hoisted out of the collapsed Working exactly like a
  * user/steer row; expanded Focus restores it at its raw chronology. */
 function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
+  // A COMMAND is standalone evidence, not Process: its lifecycle is
+  // session-level (DSH wraps no turn around it) and its settled result is
+  // user feedback. It must therefore stay VISIBLE outside the collapsed
+  // Thought — like a user/steer row or a settled interaction — instead of
+  // being hidden as process and/or claimed by the Thought's Action slot.
   return message.kind === 'user' || isSurfacedContext(message) || isSurfacedInteractionTool(message)
+    || isCommandTool(message)
 }
 
 /**

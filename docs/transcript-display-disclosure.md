@@ -97,14 +97,40 @@ projectTranscriptStructure()
   grouping BOUNDARY, so a late read can never merge with a legal one; the
   stateful folder and the exported `groupConsecutiveReads` mirror share the
   one `isGroupableRead` predicate.
-  **Known attribution boundary:** the two producers whose events carry no turn
-  of their own (`command/done`, `subagent/descriptor`) are attributed to the
-  fold's `currentTurn` (pre-existing behavior). A fragment that arrives after
-  its turn ended while a LATER turn is already active therefore belongs to that
-  active turn and cannot be recognized as replay evidence for the finished one.
-  The synchronous slash-command and launch-time descriptor paths make this
-  unreachable; the fence deliberately does not infer an owning turn from
-  display text, so this stays a documented boundary rather than a heuristic.
+  **The fence requires an OWNING turn, and it covers only rows that carry
+  one.** A `tool/call` card or an orphan `tool/result` materialized after its
+  own turn's `turn/end` is replay evidence. The two producers whose events
+  carry NO turn are never marked, because neither can be late for a turn:
+  - `command/done` follows a SESSION-level lifecycle (DSH opens no model turn
+    for a command — "no turn is opened for it"), so "the merely-current turn is
+    completed" is the NORMAL state for the user's idle `/compact`-style
+    command, not replay provenance; marking it would swallow the Command
+    Action itself. Its presentation owner is therefore captured when the
+    command STARTS: `command/run` records the then-open turn (or standalone
+    when none is open) and `command/done` reuses it — never re-reading
+    `currentTurn` at settlement, which would attribute an async command that
+    crosses a turn boundary to whatever turn happens to be current (polluting
+    that turn's aggregate) and lose the late fence for the command's own turn.
+    A standalone command keeps `currentTurn` purely as its transcript render
+    attribution.
+  - `subagent/descriptor` is a single log-only event appended once inside the
+    establishing child's initial turn (before its first request); a cold replay
+    lands it at that same logged position, so it is original evidence of that
+    turn rather than a late arrival.
+- **A command row is standalone session-level evidence.** DSH appends
+  `command/run` / `command/done` as direct log-only events and explicitly opens
+  no model turn for them ("no turn wraps them"); the settled result renders
+  outside model history. The transcript therefore keeps the command card as its
+  own row — never a Work/Activity member (it SPLITS the surrounding Process
+  run), never an Action candidate or ActionStats input, and never a
+  replay-fence candidate (there is no owning turn to be late for). In collapsed
+  Focus it stays VISIBLE as standalone evidence rather than being hidden as
+  process. Its `turn` field is a legacy display-placement artifact only; a real
+  `TranscriptCommandMessage` (upstream `CommandNode` convergence) retires it in
+  later work, and any correlation with a domain event must use the explicit
+  `sourceEventSeq` rather than the placement turn. A `subagent/descriptor` is
+  NOT this case: it is a durable record appended inside the establishing
+  child's initial turn, so it remains turn-owned Process evidence.
 - **Focus occurrence identity ≠ Focus disclosure identity.** One turn can
   materialize SEVERAL Thought runs (a turn-less window entry splits it), each
   with its own hidden rows, Action winner and component. The presentation

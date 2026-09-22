@@ -5211,21 +5211,23 @@ export class TranscriptFolder {
           : event.data.text === undefined || event.data.text === ''
             ? ''
             : ` — ${event.data.text}`
+        // The `turn` here is a LEGACY DISPLAY-PLACEMENT artifact, never
+        // semantic ownership: a command's lifecycle is standalone (DSH appends
+        // `command/run`/`command/done` as direct log-only events — "no turn
+        // wraps them"), so the row is deliberately excluded from Work spans,
+        // Action candidates and ActionStats wherever it lands (see
+        // `isCommandTool`). It is placed at the current turn position only so
+        // the standalone card renders in chronology.
         const card: Extract<TranscriptMessage, { kind: 'tool' }> = { kind: 'tool', turn: this.currentTurn, name: `/${name}`, args: '', result: `executed${outcome}`, status: event.data.kind === 'error' ? 'error' : 'ok', origin: 'command' }
         // The command card's wall span is run → done (post-F6 plan §12.8);
         // an unmatched done (a fragment) degrades to point evidence.
         setTranscriptTiming(card, run === undefined
           ? pointTiming(event.time)
           : { startedAt: run.startedAt, endedAt: Math.max(run.startedAt, event.time), running: false })
-        // A command card is always NEWLY materialized: one that lands after
-        // the owning turn's `turn/end` is post-turn replay evidence.
-        // ATTRIBUTION BOUNDARY: `command/done` carries no turn, so it is
-        // attributed to `currentTurn` (pre-existing behavior). A fragment that
-        // arrives while a LATER turn is already active belongs to that active
-        // turn and therefore cannot be recognized as replay evidence for the
-        // finished one — unreachable on the synchronous slash-command path, and
-        // deliberately not "fixed" by inferring provenance from display text.
-        if (this.activityByTurn.get(this.currentTurn)?.completed === true) markPostTurnReplayEvidence(card)
+        // No replay mark: a command is not turn Process evidence at all, so
+        // there is no turn aggregate for it to be "late" for. Marking it from
+        // `currentTurn.completed` would misread the NORMAL idle slash command
+        // (turn already ended) as a replay artifact and swallow its feedback.
         this.appendItem(card)
         break
       }
@@ -5251,15 +5253,13 @@ export class TranscriptFolder {
         // only — the child session's lifetime is never the parent
         // Activity's duration (post-F6 plan §12.10).
         setTranscriptTiming(delegationCard, pointTiming(event.time))
-        // One card per launch, always NEWLY materialized: a descriptor that
-        // lands after the owning turn's `turn/end` is post-turn replay
-        // evidence.
-        // ATTRIBUTION BOUNDARY (same as `command/done`): `subagent/descriptor`
-        // carries no turn, so a late launch record arriving while a LATER turn
-        // is active is attributed to that active turn. Launch-time delivery
-        // makes this unreachable; the fence deliberately does not guess the
-        // owning turn from content.
-        if (this.activityByTurn.get(this.currentTurn)?.completed === true) markPostTurnReplayEvidence(delegationCard)
+        // No replay mark: `subagent/descriptor` is a SINGLE log-only event
+        // that upstream appends once inside the establishing child's initial
+        // turn, before its first request — a cold replay lands it at that same
+        // logged position, so it is original evidence of that turn rather than
+        // a row materializing after the turn completed. It carries no turn of
+        // its own to compare against, so the fold never guesses one from
+        // `currentTurn` (which is the merely-current turn, not an owner).
         this.appendItem(delegationCard)
         // Focus aggregation: a delegation record is a durable lifecycle
         // event, NOT a model tool/call — it never touches the Tool slot or

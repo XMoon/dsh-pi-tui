@@ -625,23 +625,25 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   presentation-convergence addendum v2): the collapsed process presentation
   uses `Think:` + `Action:`; Focus additionally keeps `Message:` +
   `Error:`, and BOTH headers say `N actions · subtype ×count`.** `Action` is
-  the latest meaningful non-Thinking Process evidence: genuine Tool,
-  Preparing, Subagent delegation, Command, Retry, and explicit
+  the latest meaningful non-Thinking TURN-OWNED Process evidence: genuine Tool,
+  Preparing, Subagent delegation, Retry, and explicit
   incomplete-result diagnostics, selected purely by canonical chronology
   (never a per-type priority) among the rows the collapsed surface actually
   hides — Focus derives it from the same transcript rows `projectFocus`
   hides under the collapsed Thought root (never a second `TurnActivity`
   chronology store), Activity derives it in `summarizeWorkSpan`'s single
-  member walk. Post-turn replay evidence (a row that materialized after its
-  owning `turn/end`) stays transcript/search evidence but is excluded from the
-  Action aggregate/winner, Work membership and read grouping — the fence and
-  its provenance rule are owned by
+  member walk. Post-turn replay evidence — a row that materialized after the
+  `turn/end` of the turn that OWNS it (only turn-carrying producers can be
+  late for a turn) — stays transcript/search evidence but is excluded from the
+  Action aggregate/winner, Work membership and read grouping; an idle
+  slash command is outside-turn feedback and is never misread as replay. The
+  fence and its provenance rule are owned by
   `docs/transcript-display-disclosure.md`.
   The slot is presentation-only: Tool remains a strict
   underlying semantic (`Command`, `Retry`, `Subagent` are never Tools). The
   shared `CompactActionStats` cardinality: a genuine tool contributes its
-  `callCount`, a subagent/command/retry occurrence contributes one action of
-  its own subtype (`subagent`, the durable command name, `retry`); an
+  `callCount`, a subagent/retry occurrence contributes one action of
+  its own subtype (`subagent`, `retry`); an
   orphan result contributes `0 actions` and renders the honest `Unpaired …
   result` diagnostic instead of pretending a missing call existed; a live
   Preparing run temporarily owns the slot but never increments stats (the
@@ -661,7 +663,15 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   Singleton stats stay visible (`1 action · read ×1`) — no count-sensitive
   presentation branches. Expanded views keep their canonical full-detail
   rows; `Action` exists only in collapsed summary presentation and is never
-  a disclosure owner or a search source.
+  a disclosure owner or a search source. A COMMAND row is deliberately never
+  an Action and never an Activity member: a command lifecycle is session-level
+  standalone evidence — DSH appends `command/run`/`command/done` as direct
+  log-only events with **no turn wrapping them**, and the settled result renders
+  outside model history — so its card stays a standalone transcript row
+  (visible, never folded into a turn's Activity, never claimed by the collapsed
+  `Action:`). Its `turn` field is a legacy display-placement artifact, not
+  semantic ownership; an authoritative `command` transcript kind is deferred
+  follow-up work.
 - **One transcript left edge for container chrome (2026-09-22 v2 addendum
   §28; body-indent supplement).**
   The Focus root, Activity, the pending Activity card and the ambient Context

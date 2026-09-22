@@ -4164,18 +4164,29 @@ test('collapsed Focus: a subagent-only turn has a meaningful Action body', () =>
   assert.equal(activity.toolCalls, 0, 'the delegation never counts as a Focus tool')
 })
 
-test('collapsed Focus: a command-only turn renders the settled command Action', () => {
+test('collapsed Focus: a command row stays standalone-visible and never becomes the Action', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('command/run', { commandId: 'cmd1', name: 'compact' }, 1001, 1),
     eventAt('command/done', { commandId: 'cmd1', kind: 'success' }, 1002, 2),
   ])
+  // A command's lifecycle is session-level (DSH wraps no turn around it): it is
+  // not Process evidence, so the Thought claims no Action for it…
   const block = collapsedFocusActionOf(folder)
-  assert.equal(block?.action?.kind, 'command')
-  const body = focusCollapsedBody(folder.turnActivity(0)!, 80, block?.action === undefined ? undefined : compactActionPresentation(block.action))
-  assert.ok(body.some(line => line.includes('Action:  ✓ /compact')), body.join('\n'))
+  assert.equal(block?.action, undefined, 'a command never owns the collapsed Action')
+  assert.equal(block?.actionStats.total, 0, 'and never counts')
+  const body = focusCollapsedBody(folder.turnActivity(0)!, 80, undefined)
+  assert.ok(!body.some(line => line.includes('/compact')), body.join('\n'))
   assert.equal(folder.turnActivity(0)!.toolCalls, 0)
+  // …while the command row itself stays VISIBLE as standalone transcript
+  // evidence outside the Thought (its feedback must never disappear).
+  const commandRow = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
+  assert.ok(commandRow !== undefined, 'fixture: the command card exists')
+  const projected = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+    .filter(candidate => candidate.kind === 'message')
+    .map(candidate => candidate.kind === 'message' ? candidate.message : undefined)
+  assert.ok(projected.includes(commandRow), 'the collapsed projection keeps the command row visible standalone')
 })
 
 test('collapsed Focus: a retry-only turn renders the retry Action', () => {
@@ -4200,7 +4211,8 @@ test('collapsed Focus: mixed synthetic chronology selects the latest hidden acti
     eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, 1004, 4),
     eventAt('command/done', { commandId: 'cmd1', kind: 'success' }, 1005, 5),
   ])
-  assert.equal(collapsedFocusActionOf(folder)?.action?.kind, 'command', 'chronology wins, no type priority')
+  assert.equal(collapsedFocusActionOf(folder)?.action?.kind, 'retry',
+    'chronology wins among ELIGIBLE evidence; a command row is standalone and skipped')
 })
 
 test('collapsed Focus: a running question never duplicates itself as the Action', () => {
@@ -4372,8 +4384,10 @@ function workSpanToolNames(folder: TranscriptFolder): string[] {
     .map(member => member.name)
 }
 
-test('late-replay fence: every late producer stays transcript evidence but never Action/Work evidence', () => {
-  const producers: ReadonlyArray<readonly [string, (id: string) => SessionEvent[]]> = [
+test('late-replay fence: only TURN-CARRYING producers are replay evidence', () => {
+  // A producer can be fenced as "late for its turn" ONLY when it carries an
+  // owning turn: its row materialized after that turn's `turn/end`.
+  const fenced: ReadonlyArray<readonly [string, (id: string) => SessionEvent[]]> = [
     ['late tool/call', id => [
       eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId(id), name: 'bash', arguments: '{}' }, 6001, 6),
     ]],
@@ -4385,25 +4399,88 @@ test('late-replay fence: every late producer stays transcript evidence but never
         source: { kind: 'tool', callId: ToolCallId(id) },
       },
     }, 6002, 7)]],
-    ['late command/done', id => [
-      eventAt('command/run', { commandId: id, name: 'theme' }, 6003, 8),
-      eventAt('command/done', { commandId: id, kind: 'success' }, 6004, 9),
-    ]],
-    ['late subagent/descriptor', () => [
-      eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, 6005, 10),
-    ]],
   ]
-  for (const [label, late] of producers) {
+  for (const [label, late] of fenced) {
     const folder = lateReplayFolder(late(label))
-    const lateRows = folder.messages().filter(message => message.kind === 'tool'
-      && message.name !== 'read')
+    const lateRows = folder.messages().filter(message => message.kind === 'tool' && message.name !== 'read')
     assert.equal(lateRows.length, 1, `${label}: the row still folds into the transcript`)
     assert.equal(isPostTurnReplayEvidence(lateRows[0]!), true, `${label}: marked as post-turn replay evidence`)
     assert.deepEqual(focusActionState(folder), { total: 1, types: ['read'], winner: 'read' },
       `${label}: the settled turn's Action aggregate and winner are unchanged`)
-    assert.deepEqual(workSpanToolNames(folder), ['read'],
-      `${label}: a replay row never joins a canonical Work span`)
+    assert.deepEqual(workSpanToolNames(folder), ['read'], `${label}: a replay row never joins a canonical Work span`)
   }
+})
+
+test('a subagent descriptor is turn evidence (never replay-marked), a command row is standalone', () => {
+  // Their lifecycles differ: a descriptor is appended inside the establishing
+  // child's initial TURN (durable Process evidence of that turn), while a
+  // command's `command/run`/`command/done` are session-level log-only appends
+  // with no wrapping turn at all.
+  const delegation = lateReplayFolder([
+    eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, 6005, 10),
+  ])
+  const delegationRow = delegation.messages().find(message => message.kind === 'tool' && message.origin === 'subagent-delegation')
+  assert.ok(delegationRow !== undefined)
+  assert.equal(isPostTurnReplayEvidence(delegationRow), false, 'a descriptor is never replay-marked')
+  assert.deepEqual(focusActionState(delegation), { total: 2, types: ['read', 'subagent'], winner: 'subagent' },
+    'the delegation is turn Process evidence and owns the Action')
+  assert.deepEqual(workSpanToolNames(delegation), ['read', 'subagent'], 'and joins canonical Work evidence')
+
+  const command = lateReplayFolder([
+    eventAt('command/run', { commandId: 'standalone-1', name: 'theme' }, 6003, 8),
+    eventAt('command/done', { commandId: 'standalone-1', kind: 'success' }, 6004, 9),
+  ])
+  const commandRow = command.messages().find(message => message.kind === 'tool' && message.origin === 'command')
+  assert.ok(commandRow !== undefined)
+  assert.equal(isPostTurnReplayEvidence(commandRow), false, 'a command is not replay evidence either')
+  assert.deepEqual(focusActionState(command), { total: 1, types: ['read'], winner: 'read' },
+    'but it is NOT turn Process evidence: the turn aggregate is untouched')
+  assert.deepEqual(workSpanToolNames(command), ['read'], 'and it joins no Work span')
+})
+
+test('an idle human command after a completed turn stays standalone-visible and outside every aggregate', () => {
+  // The exact production shape: the agent finished, then the user runs a slash
+  // command while idle (DSH opens no model turn for it).
+  const folder = lateReplayFolder([
+    eventAt('command/run', { commandId: 'idle-1', name: 'compact' }, 7001, 11),
+    eventAt('command/done', { commandId: 'idle-1', kind: 'success' }, 7002, 12),
+  ])
+  const card = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
+  assert.ok(card !== undefined && card.kind === 'tool')
+  assert.equal(card.turn, 0, 'the `turn` is a legacy PLACEMENT artifact, never semantic ownership')
+  assert.equal(isPostTurnReplayEvidence(card), false, 'idle feedback is not replay evidence')
+  assert.deepEqual(focusActionState(folder), { total: 1, types: ['read'], winner: 'read' },
+    'the settled turn gains no Action from the command')
+  assert.deepEqual(workSpanToolNames(folder), ['read'], 'and the command joins no Work span')
+  const visible = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+    .filter(candidate => candidate.kind === 'message')
+    .map(candidate => candidate.kind === 'message' ? candidate.message : undefined)
+  assert.ok(visible.includes(card), 'the command card stays visible standalone (feedback is never swallowed)')
+})
+
+test('a command crossing a later turn never pollutes either turn', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    // The command starts while turn 0 is open …
+    eventAt('command/run', { commandId: 'slow-1', name: 'compact' }, 1001, 1),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1002, 2),
+    eventAt('turn/start', { turn: 1 }, 1003, 3),
+    // … and settles only after turn 1 started.
+    eventAt('command/done', { commandId: 'slow-1', kind: 'success' }, 1004, 4),
+  ])
+  const card = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
+  assert.ok(card !== undefined && card.kind === 'tool')
+  // Session-level standalone evidence: no turn aggregate claims it, so neither
+  // turn can be polluted (and no replay marker is needed to protect them).
+  for (const turn of [0, 1]) {
+    const block = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+      .filter(candidate => candidate.kind === 'activity')
+      .find(candidate => candidate.activity.turn === turn)
+    assert.equal(block?.actionStats.total ?? 0, 0, `turn ${turn} stays clean`)
+    assert.equal(block?.action, undefined, `turn ${turn} has no Action winner from the command`)
+  }
+  assert.deepEqual(workSpanToolNames(folder), [], 'the command joins no Work span')
 })
 
 test('late-replay provenance (A): a pre-turn/end call that settles late stays legal evidence', () => {
