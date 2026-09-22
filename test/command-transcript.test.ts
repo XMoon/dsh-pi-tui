@@ -500,10 +500,13 @@ test('fold parity: a cold hydrate and a live apply produce the same command proj
   assert.equal(searchCold, searchLive, 'cold and live search agree through the fused card')
 })
 
-test('A16: conflicting explicit evidence fails soft: no fusion, no guess', () => {
+test('A16: a leg-1 declaration owns immediately; a contradictory late leg 2 never re-decides', () => {
   const folder = new TranscriptFolder()
-  // compaction cpt-a claims command cmd-1 (leg 1), but command/done's
-  // sourceEventSeq points at cpt-b's summary (leg 2): contradictory.
+  // cpt-a's lifecycle DECLARES command cmd-1 (leg 1) — the ownership is
+  // proven the moment the declaration lands, so the running command is
+  // already fused into cpt-a. A later command/done whose sourceEventSeq
+  // points at cpt-b's summary (contradictory leg 2) must neither move nor
+  // revoke the established ownership — the fold never guesses a new winner.
   folder.apply([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', source: { kind: 'user' } }, 0),
     rawEvent('compaction/start', { compactionId: 'cpt-a', sourceCommandId: CommandId('cmd-1'), turn: null }, 1),
@@ -515,13 +518,127 @@ test('A16: conflicting explicit evidence fails soft: no fusion, no guess', () =>
     event('command/done', { commandId: CommandId('cmd-1'), kind: 'success', sourceEventSeq: SessionSeq(5) }, 7),
   ])
   const messages = folder.messages()
-  const compactions = messages.filter(message => message.kind === 'compaction')
-  assert.equal(compactions.length, 2, 'both compaction cards stay standalone')
-  for (const compaction of compactions) {
-    assert.ok(compaction.kind === 'compaction')
-    assert.equal(compaction.sourceCommand, undefined, 'neither card may claim the contradicted command')
+  const owner = messages.filter(message => message.kind === 'compaction' && message.sourceCommand !== undefined)
+  assert.equal(owner.length, 1, 'exactly cpt-a owns the command')
+  assert.ok(owner[0]?.kind === 'compaction' && owner[0].sourceCommand?.commandId === CommandId('cmd-1'))
+  assert.equal(commandRows(messages).length, 0, 'the command stays behind its established owner')
+})
+
+test('A14: the combined owner is established while the command is still RUNNING', () => {
+  // The official manual /compact order: run → compaction events (carrying
+  // sourceCommandId) → done. The declaration alone proves the relationship,
+  // so the running period must show ONE combined card, never
+  // `/compact [running]` plus `Compacting context…` side by side.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', source: { kind: 'user' } }, 0),
+    rawEvent('compaction/start', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), turn: null }, 1),
+    rawEvent('compaction/summary', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), summary: [{ type: 'text', text: 'body' }], shadowedSeqs: [0], shadowedTokenCount: 10 }, 2),
+  ])
+  const messages = folder.messages()
+  assert.deepEqual(kinds(messages), ['compaction'], 'one combined card while the command is still running')
+  const compaction = messages[0]
+  assert.ok(compaction !== undefined && compaction.kind === 'compaction')
+  assert.ok(compaction.running === true)
+  assert.ok(compaction.sourceCommand !== undefined && compaction.sourceCommand.outcome === null)
+})
+
+test('A14: settlement refreshes the combined owner search corpus', () => {
+  // leg 1 fuses BEFORE settlement (outcome null); command/done then settles
+  // the SAME object — the fused card's corpus must pick the outcome text up,
+  // proving settlement refreshes the owner entry rather than skipping it.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', args: 'unique-arg-token', source: { kind: 'user' } }, 0),
+    rawEvent('compaction/start', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), turn: null }, 1),
+    rawEvent('compaction/summary', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), summary: [{ type: 'text', text: 'body' }], shadowedSeqs: [0], shadowedTokenCount: 10 }, 2),
+    event('command/done', { commandId: CommandId('cmd-1'), kind: 'success', text: 'distinctive-outcome-token' }, 3),
+  ])
+  const resolved = folder.resolveSearchMatch(folder.search('distinctive-outcome-token')[0]!)
+  assert.ok(resolved !== undefined && resolved.kind === 'compaction',
+    'the settled outcome is searchable through the combined owner')
+})
+
+test('A16: a failed manual command keeps its error in the combined owner', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', source: { kind: 'user' } }, 0),
+    rawEvent('compaction/start', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), turn: null }, 1),
+    rawEvent('compaction/end', { compactionId: 'cpt-1', error: 'summarizer failed' }, 2),
+    event('command/done', { commandId: CommandId('cmd-1'), kind: 'error', text: 'compact failed: busy' }, 3),
+  ])
+  const messages = folder.messages()
+  const compaction = messages.find(message => message.kind === 'compaction')
+  assert.ok(compaction !== undefined && compaction.kind === 'compaction')
+  assert.ok(compaction.sourceCommand !== undefined)
+  assert.equal(compaction.sourceCommand?.outcome?.kind, 'error')
+  assert.equal(compaction.sourceCommand?.outcome?.text, 'compact failed: busy',
+    'the command error stays part of the combined presentation facts')
+})
+
+test('A06/Focus: an idle manual compaction keeps the real chronology outside the Thought', () => {
+  // The fused manual compaction is a turn-less standalone boundary: the
+  // collapsed Focus must keep `assistant final` → `Context compacted` in
+  // their real order instead of lifting the card into the finished turn's
+  // Thought and re-emitting the final after it.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 7 }, 0),
+    userMessage('go', 1, 7),
+    assistantMessage('final answer', 2, 7),
+    event('turn/end', { turn: 7, reason: { kind: 'completed' } }, 3),
+    event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', source: { kind: 'user' } }, 4),
+    rawEvent('compaction/start', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), turn: null }, 5),
+    rawEvent('compaction/summary', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), summary: [{ type: 'text', text: 'body' }], shadowedSeqs: [0], shadowedTokenCount: 10 }, 6),
+    rawEvent('compaction/end', { compactionId: 'cpt-1' }, 7),
+    event('command/done', { commandId: CommandId('cmd-1'), kind: 'success', sourceEventSeq: SessionSeq(6) }, 8),
+  ])
+  const messages = folder.messages()
+  assert.deepEqual(kinds(messages), ['user', 'assistant', 'compaction'])
+  const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
+  const shapes: string[] = []
+  for (const block of blocks) {
+    if (block.kind === 'message') shapes.push(block.message.kind)
+    else if (block.kind === 'activity') shapes.push('<Thought>')
   }
-  assert.equal(commandRows(messages).length, 1, 'the command stays standalone')
+  // The turn's own collapsed rendering (user → Thought with the final held
+  // back → final) stays intact, and the manual compaction is a STANDALONE
+  // block after the final — never absorbed into the Thought group and never
+  // lifting the final after it.
+  assert.deepEqual(shapes, ['user', '<Thought>', 'assistant', 'compaction'],
+    `the collapsed Focus keeps the real chronology: ${JSON.stringify(shapes)}`)
+})
+
+test('A08: the non-monotonic defensive window keeps commands bounded by their anchor', () => {
+  // A corrupt/replayed log (non-monotonic turns) takes the defensive slow
+  // window path; turn-less commands there follow the SHARED placement
+  // authority, so a small window must not drag every historical command in.
+  // The replayed turn is carried by tool/call rows (their durable payload
+  // keeps the log turn even after a regressed replay — user rows follow the
+  // monotonic currentTurn fence by design).
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 8 }, 0),
+    toolCall('read', 'call-8', 1, 8),
+    toolResult('call-8', 'r8', 2),
+    event('turn/end', { turn: 8, reason: { kind: 'completed' } }, 3),
+    event('command/run', { commandId: CommandId('cmd-a'), name: 'export', args: 'token-a', source: { kind: 'user' } }, 4),
+    event('command/done', { commandId: CommandId('cmd-a'), kind: 'success', text: 'done a' }, 5),
+    event('turn/start', { turn: 3 }, 6),
+    toolCall('read', 'call-3', 7, 3),
+    toolResult('call-3', 'r3', 8),
+    event('turn/end', { turn: 3, reason: { kind: 'completed' } }, 9),
+    event('command/run', { commandId: CommandId('cmd-b'), name: 'export', args: 'token-b', source: { kind: 'user' } }, 10),
+    event('command/done', { commandId: CommandId('cmd-b'), kind: 'success', text: 'done b' }, 11),
+  ])
+  const windowed = folder.window({ maxTurns: 1, endTurn: 8 })
+  const windowedCommands = windowed.messages.filter(message => message.kind === 'command')
+  assert.equal(windowedCommands.length, 1, `only the anchored command enters the window (got ${windowedCommands.length})`)
+  assert.ok(windowedCommands[0]?.kind === 'command' && windowedCommands[0].args === 'token-a')
+  const replayWindow = folder.window({ maxTurns: 1, endTurn: 3 })
+  const replayCommands = replayWindow.messages.filter(message => message.kind === 'command')
+  assert.equal(replayCommands.length, 1, 'the turn-3 window keeps only its own anchored command')
+  assert.ok(replayCommands[0]?.kind === 'command' && replayCommands[0].args === 'token-b')
 })
 
 test('A16: a leg-2 hit on a card declaring a DIFFERENT command never fuses', () => {

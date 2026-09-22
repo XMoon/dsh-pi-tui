@@ -446,13 +446,20 @@ export type FocusProjectedBlock =
  * The Focus projection TURN of one row — the ONE authority `projectFocus` and
  * its grouping helpers share. A COMMAND row has NO projection turn: it is a
  * turn-less control-plane row (`kind: 'command'` carries no `turn` field at
- * all). Treating it as a turn-less BOUNDARY makes the projection agree with
- * the fold: `process A -> Thought A`, `command -> standalone`, `process B ->
- * Thought B`. Both runs may still belong to one model turn (the run-owner
- * component cache supports that), and the semantic disclosure identity stays
- * the turn number.
+ * all). A CORRELATED manual compaction is turn-less too: once its combined
+ * `/compact` owner is established it is a standalone control boundary, so the
+ * projection must not re-absorb the card into the preceding turn group — the
+ * collapsed Focus reorder would otherwise lift it above the turn's held-back
+ * final and invert the real chronology (`assistant final` → `Context
+ * compacted`). Treating turn-less rows as BOUNDARIES makes the projection
+ * agree with the fold: `process A -> Thought A`, `command -> standalone`,
+ * `process B -> Thought B`. Both runs may still belong to one model turn (the
+ * run-owner component cache supports that), and the semantic disclosure
+ * identity stays the turn number.
  */
 function focusProjectionTurnOf(message: TranscriptMessage): number | undefined {
+  if (message.kind === 'command') return undefined
+  if (message.kind === 'compaction' && message.sourceCommand !== undefined) return undefined
   return 'turn' in message ? message.turn : undefined
 }
 

@@ -207,3 +207,37 @@ test('A19/A15: a search hit in the outcome body reveals the command with the mat
   assert.ok(rendered.includes('needle-in-outcome'), `the revealed matched body is visible:\n${rendered}`)
   app.stop()
 })
+
+test('A15/A18: the combined manual-compaction card renders the fused command facts', async () => {
+  const { vt, app } = startApp()
+  const fused: TranscriptCommandMessage = command({
+    commandId: CommandId('cmd-fused'), name: 'compact',
+    outcome: { kind: 'success', text: 'distinctive fused outcome' },
+  })
+  const compaction: TranscriptMessage = {
+    kind: 'compaction', turn: 3, text: 'summary body', items: 4, tokens: 120,
+    sourceCommandId: CommandId('cmd-fused'), sourceCommand: fused,
+  }
+  app.setTranscript([compaction], new Map())
+  const rendered = await view(vt)
+  assert.ok(rendered.includes('Context compacted'), `the compaction state titles the combined card:\n${rendered}`)
+  assert.ok(rendered.includes('/compact'), `the fused command name is part of the combined presentation:\n${rendered}`)
+  assert.ok(rendered.includes('distinctive fused outcome'), `the command outcome is the presentation fallback:\n${rendered}`)
+  app.stop()
+})
+
+test('A19: a truncated folded outcome gains a light disclosure hint', async () => {
+  const { vt, app } = startApp()
+  const outcome = `first preview line\nsecond body line ${'x'.repeat(50)}\nthird body line`
+  app.setTranscript([command({ name: 'export', outcome: { kind: 'success', text: outcome } })], new Map())
+  const rendered = await view(vt)
+  assert.ok(rendered.includes('first preview line'), `the folded preview shows the first line:\n${rendered}`)
+  assert.ok(rendered.includes('to expand'), `a truncated preview advertises the disclosure:\n${rendered}`)
+  assert.ok(!rendered.includes('third body line'), `the folded preview stays one line:\n${rendered}`)
+  // A short single-line outcome stays clean — no hint for nothing cut (one
+  // live TuiApp per process: reuse the same app for the second projection).
+  app.setTranscript([command({ commandId: CommandId('cmd-clean'), name: 'theme', outcome: { kind: 'success', text: 'theme set to dark' } })], new Map())
+  const clean = await view(vt)
+  assert.ok(!clean.includes('to expand'), `a fully visible one-line outcome carries no hint:\n${clean}`)
+  app.stop()
+})
