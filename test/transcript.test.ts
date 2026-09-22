@@ -4342,10 +4342,53 @@ test('lane displacement keeps TranscriptItemId and search/window/group contracts
   assert.equal(readAfter.length, 1)
   assert.equal(thinkingAfter[0]?.id, thinkingBefore[0]?.id, 'the Thinking hit keeps its TranscriptItemId across the displacement')
   assert.equal(readAfter[0]?.id, readBefore[0]?.id, 'the read hit keeps its TranscriptItemId across the displacement')
+  // Multi-hit search parity: match ORDER follows DISPLAY order (the shared
+  // display traversal), which is what search Next/Prev navigation walks.
+  const multi = folder.search('ordered')
+  assert.deepEqual(
+    multi.map(match => match.id),
+    [thinkingAfter[0]?.id, folder.search('ordered answer')[0]?.id],
+    'search emits hits in display order — the displaced Thinking row first',
+  )
   // Window and grouped-turn projections stay consistent; the reads stay
   // separate cards (grouping follows PHYSICAL adjacency — conservative).
   const windowed = folder.window({ maxTurns: 1 })
   assert.deepEqual(windowed.messages.map(message => message.kind), ['thinking', 'assistant', 'tool', 'tool'])
+  assert.deepEqual([...folder.groupedTurns()], [0])
+})
+
+test('a displaced lane pair stays unique and ordered inside a bounded window', () => {
+  // The window cuts by COMPLETE turns; lane peers share one turn, so a
+  // displaced Thinking row whose physical slot sits many rows after its
+  // anchor must still appear exactly once, in display order, when the
+  // anchor's turn is windowed.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
+  ])
+  for (const [seq, name] of [[3, 'r1'], [5, 'r2'], [7, 'r3']] as const) {
+    folder.apply([
+      event('tool/call', { turn: 0, step: 0, callId: ToolCallId(name), name: 'read', arguments: `{"file_path":"${name}.ts"}` }, seq),
+      toolResult(seq + 1, name, `${name} ok`, 'read'),
+    ])
+  }
+  folder.apply([messageSettlement(9, laneOrderedStep('thinking'))])
+  // Physical: [Assistant, r1, r2, r3, Thinking(displaced before Assistant)].
+  // Grouping follows PHYSICAL adjacency: the three consecutive reads merge
+  // into one card regardless of the display displacement.
+  const full = folder.messages()
+  assert.deepEqual(full.map(message => message.kind), ['thinking', 'assistant', 'tool'])
+  const windowed = folder.window({ maxTurns: 1 })
+  assert.deepEqual(windowed.messages.map(message => message.kind), ['thinking', 'assistant', 'tool'])
+  assert.equal(windowed.messages.filter(message => message.kind === 'thinking').length, 1, 'the displaced Thinking row appears exactly once')
+  assert.equal(windowed.messages.filter(message => message.kind === 'assistant').length, 1, 'the anchor Assistant row appears exactly once')
+  const merged = windowed.messages.find(message => message.kind === 'tool')
+  assert.ok(merged !== undefined && merged.kind === 'tool')
+  assert.ok(merged.result.includes('r1 ok') && merged.result.includes('r2 ok') && merged.result.includes('r3 ok'))
+  const anchored = folder.window({ maxTurns: 1, endTurn: 0 })
+  assert.deepEqual(anchored.messages.map(message => message.kind), ['thinking', 'assistant', 'tool'])
   assert.deepEqual([...folder.groupedTurns()], [0])
 })
 
