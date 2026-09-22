@@ -455,14 +455,29 @@ test('shell command completion works in both shell modes and never writes the pr
   const { vt, app } = startApp(fixtureWorkspace(life))
   life.defer(() => app.stop())
   await vt.waitForRender()
+  // The completion source is the machine's REAL `compgen -A command`, whose
+  // candidate order is NOT sorted and is environment-dependent: the prefix
+  // `gi` also matches e.g. `ginstall-info` (Debian/Ubuntu) and `git-*` helpers,
+  // any of which may be offered first. Assert what the contract owns — the
+  // `git` candidate IS offered, accepting applies SOME completion of the typed
+  // prefix, and the synthetic `!` never enters the buffer — and never which
+  // candidate happens to come first.
+  const assertAppliedCompletion = (mode: string): void => {
+    const text = app.seatTextForTest()
+    // Shell completion may append a trailing separator after the candidate.
+    const applied = text.trimEnd()
+    assert.ok(applied.startsWith('gi'), `${mode}: the applied completion must extend the typed prefix:\n${text}`)
+    assert.ok(applied.length > 'gi'.length, `${mode}: TAB must APPLY a candidate, not leave the bare prefix:\n${text}`)
+    assert.match(applied, /^[A-Za-z0-9._+-]+$/, `${mode}: the applied completion must be one command token:\n${text}`)
+    assert.ok(!text.includes('!'), `${mode}: the synthetic prefix must never enter the buffer`)
+  }
   vt.sendInput('!')
   vt.sendInput('gi')
   vt.sendInput('\t')
   await waitForDropdownRow(vt, 'git', 'command candidates in shell-context')
-  vt.sendInput('\t') // accept the first item
+  vt.sendInput('\t') // accept the first offered item (whose identity is the environment's)
   await vt.waitForRender()
-  assert.ok(app.seatTextForTest().startsWith('git'), `the applied completion must be a git command:\n${app.seatTextForTest()}`)
-  assert.ok(!app.seatTextForTest().includes('!'), 'the synthetic prefix must never enter the buffer')
+  assertAppliedCompletion('shell-context')
   // shell-local: same completion path.
   app.setEditorText('')
   await vt.waitForRender()
@@ -473,8 +488,7 @@ test('shell command completion works in both shell modes and never writes the pr
   await waitForDropdownRow(vt, 'git', 'command candidates in shell-local')
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.ok(app.seatTextForTest().startsWith('git'))
-  assert.ok(!app.seatTextForTest().includes('!'))
+  assertAppliedCompletion('shell-local')
 })
 
 test('a leading / in a shell mode is a PATH, never a slash command', async (t) => {
