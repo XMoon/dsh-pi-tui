@@ -820,3 +820,23 @@ test('A08/A15: a fused manual compaction in a replayed era follows the command a
   assert.ok(!laterWindow.messages.some(message => message.kind === 'compaction'),
     'the turn-8 window does not drag the replayed-era manual compaction in')
 })
+
+test('A09: an ignored replayed turn/start never adopts the leading prefix', () => {
+  // Round-5 probe: a command prefix, a turn/end(3) with no accepted start,
+  // a REPLAYED turn/start(3) (the activity is already completed → ignored),
+  // and only then the real turn/start(8). The ignored replay must not
+  // consume the pending prefix — the command anchors to turn 8.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('command/run', { commandId: CommandId('cmd-1'), name: 'export', args: 'leadtoken', source: { kind: 'user' } }, 0),
+    event('command/done', { commandId: CommandId('cmd-1'), kind: 'success', text: 'done' }, 1),
+    event('turn/end', { turn: 3, reason: { kind: 'completed' } }, 2),
+    event('turn/start', { turn: 3 }, 3),
+    event('turn/start', { turn: 8 }, 4),
+    userMessage('real first turn', 5, 8),
+    event('turn/end', { turn: 8, reason: { kind: 'completed' } }, 6),
+  ])
+  const matches = folder.search('leadtoken')
+  assert.ok(matches.length >= 1)
+  assert.equal(matches[0]!.turn, 8, `the first ACCEPTED turn owns the prefix (got ${matches[0]!.turn})`)
+})
