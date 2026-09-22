@@ -763,3 +763,60 @@ test('B07: descriptor fields are not searchable as human transcript rows', () =>
   assert.deepEqual(folder.search('deepseek-chat'), [])
   assert.equal(folder.search('real prompt').length, 1)
 })
+
+test('A09/A15: a fused pre-turn manual compaction inherits the command placement anchor', () => {
+  // The visible/searchable representative of a manual /compact is the
+  // compaction card; when the whole lifecycle precedes the first model turn
+  // the card must inherit the command's re-anchored placement (the legacy
+  // fold-time currentTurn is 0 there and would send an anchored search to
+  // the wrong window).
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', args: 'unique-pretoken', source: { kind: 'user' } }, 0),
+    rawEvent('compaction/start', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), turn: null }, 1),
+    rawEvent('compaction/summary', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), summary: [{ type: 'text', text: 'body' }], shadowedSeqs: [0], shadowedTokenCount: 10 }, 2),
+    rawEvent('compaction/end', { compactionId: 'cpt-1' }, 3),
+    event('command/done', { commandId: CommandId('cmd-1'), kind: 'success', sourceEventSeq: SessionSeq(2) }, 4),
+    event('turn/start', { turn: 7 }, 5),
+    userMessage('later prompt', 6, 7),
+    event('turn/end', { turn: 7, reason: { kind: 'completed' } }, 7),
+  ])
+  const matches = folder.search('unique-pretoken')
+  assert.ok(matches.length >= 1, 'the command args are searchable through the card')
+  assert.equal(matches[0]!.turn, 7, `the fused card anchors to the first turn (got ${matches[0]!.turn})`)
+  const window = folder.window({ maxTurns: 1, endTurn: matches[0]!.turn })
+  assert.ok(window.messages.some(message => message.kind === 'compaction'),
+    'the anchored window reveals the pre-turn manual-compaction card')
+})
+
+test('A08/A15: a fused manual compaction in a replayed era follows the command anchor', () => {
+  // Non-monotonic replay: the compaction card's fold-time turn follows the
+  // monotonic currentTurn fence (8), but the command physically settles in
+  // the replayed turn-3 era (anchor 3). The combined owner must follow the
+  // COMMAND anchor so the slow window keeps it with its own era.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 8 }, 0),
+    toolCall('read', 'call-8', 1, 8),
+    toolResult('call-8', 'r8', 2),
+    event('turn/end', { turn: 8, reason: { kind: 'completed' } }, 3),
+    event('turn/start', { turn: 3 }, 4),
+    toolCall('read', 'call-3', 5, 3),
+    toolResult('call-3', 'r3', 6),
+    event('turn/end', { turn: 3, reason: { kind: 'completed' } }, 7),
+    event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', args: 'unique-replaytoken', source: { kind: 'user' } }, 8),
+    rawEvent('compaction/start', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), turn: null }, 9),
+    rawEvent('compaction/summary', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), summary: [{ type: 'text', text: 'body' }], shadowedSeqs: [0], shadowedTokenCount: 10 }, 10),
+    rawEvent('compaction/end', { compactionId: 'cpt-1' }, 11),
+    event('command/done', { commandId: CommandId('cmd-1'), kind: 'success', sourceEventSeq: SessionSeq(10) }, 12),
+  ])
+  const matches = folder.search('unique-replaytoken')
+  assert.ok(matches.length >= 1)
+  assert.equal(matches[0]!.turn, 3, `the fused card anchors to the replayed era (got ${matches[0]!.turn})`)
+  const eraWindow = folder.window({ maxTurns: 1, endTurn: 3 })
+  assert.ok(eraWindow.messages.some(message => message.kind === 'compaction'),
+    'the turn-3 window keeps the fused manual compaction of its era')
+  const laterWindow = folder.window({ maxTurns: 1, endTurn: 8 })
+  assert.ok(!laterWindow.messages.some(message => message.kind === 'compaction'),
+    'the turn-8 window does not drag the replayed-era manual compaction in')
+})
