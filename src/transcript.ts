@@ -4863,7 +4863,6 @@ export class TranscriptFolder {
         // regress the current turn (turn-less events would land in the
         // wrong turn — review finding).
         this.currentTurn = Math.max(this.currentTurn, event.data.turn)
-        this.adoptLeadingAnchors(event.data.turn)
         // Advance the shared usage accounting: a delayed fact for the
         // prior turn becomes stale once the next turn starts (review
         // finding).
@@ -4875,6 +4874,11 @@ export class TranscriptFolder {
         const activity = this.activityFor(event.data.turn)
         if (activity.completed || activity.startedAt !== undefined) break
         activity.startedAt = event.time
+        // Only an ACCEPTED turn/start adopts the leading standalone prefix:
+        // a replayed start for an already-finalized (or already-open) turn
+        // breaks above and must not consume the pending anchors — the first
+        // REAL turn owns the prefix (round-5 review finding).
+        this.adoptLeadingAnchors(event.data.turn)
         activity.completed = false
         activity.reason = undefined
         if (event.data.turn === this.currentTurn) {
