@@ -66,7 +66,47 @@ export interface PresentedFilePresentation {
 export type TranscriptSystemOrigin = 'llm-retry' | 'turn-max-tokens'
 
 /** Source-derived origins for synthetic tool presentation rows. */
-export type TranscriptToolOrigin = 'command' | 'subagent-delegation' | 'turn-error' | 'turn-interrupted'
+export type TranscriptToolOrigin = 'turn-error' | 'turn-interrupted'
+
+/** The official command pairing identity (`command/run`/`command/done`),
+ * derived from the official event payload — never a plain-string alias. */
+export type CommandId = Extract<SessionEvent, { type: 'command/run' }>['data']['commandId']
+
+/** The official durable event sequence identity (a branded integer). */
+export type SessionEventSeq = SessionEvent['seq']
+
+/** One settled command outcome: the handler's verbatim result plus, for a
+ * success, the optional earlier authoritative domain event that owns a
+ * richer presentation (the official `sourceEventSeq` relationship). */
+export interface TranscriptCommandOutcome {
+  readonly kind: 'success' | 'error'
+  readonly text?: string
+  readonly sourceEventSeq?: SessionEventSeq
+}
+
+/**
+ * A real session-level slash-command transcript node: `command/run` creates
+ * the running row, `command/done` settles the SAME row in place, paired by
+ * {@link CommandId}. It mirrors the official CommandNode semantics and
+ * deliberately carries NO semantic `turn` — DSH appends the command
+ * lifecycle as direct log-only events, so the row is standalone
+ * control-plane evidence, never model-turn Process/Action input. Window and
+ * search placement is a presentation concern resolved from the physical log
+ * position, never stored here as an owning turn.
+ */
+export interface TranscriptCommandMessage {
+  kind: 'command'
+  /** The `command/run` pairing identity. */
+  readonly commandId: CommandId
+  /** The run event's seq/time; the done event's for a fragment-only fallback. */
+  readonly seq: SessionEventSeq
+  readonly time: number
+  /** Null only for a `command/done` fragment whose run event is unavailable. */
+  readonly name: string | null
+  readonly args: string | null
+  /** Null between command/run and command/done. */
+  outcome: TranscriptCommandOutcome | null
+}
 
 /**
  * The bounded reasoning tail cap: previews never buffer the full reasoning
@@ -119,8 +159,8 @@ function setTranscriptTiming(message: TranscriptMessage, timing: TranscriptTimin
  * completed" — NEVER "this row was touched by a post-`turn/end` event". A
  * `tool/result` that finds its own pending/running card still settles that
  * card normally and leaves it fully legal Action evidence; only a newly
- * created row (an orphan result, or a fresh call/command/delegation card)
- * earns the mark.
+ * created row (an orphan result or a fresh synthetic call card) earns the
+ * mark.
  *
  * Consumers share this ONE predicate so no surface invents its own fence:
  * - the transcript keeps the row (search / Full / expanded Focus);
@@ -264,7 +304,19 @@ export type TranscriptMessage =
     running?: boolean
     /** Non-empty when compaction/end carried an error. */
     error?: string
+    /**
+     * Presentation-only manual-compaction correlation (post-PR166 plan §7.1):
+     * the initiating command identity when the official compaction lifecycle
+     * events carry `sourceCommandId`, the `compaction/summary` event seq, and
+     * the fused `kind: 'command'` row once an authoritative relationship is
+     * proven. Never new Session facts — the card is the sole visible owner of
+     * a correlated manual compaction.
+     */
+    sourceCommandId?: CommandId
+    summaryEventSeq?: SessionEventSeq
+    sourceCommand?: TranscriptCommandMessage
   }
+  | TranscriptCommandMessage
 
 const assistantPresentationRevisions = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
 const assistantStepIdentities = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
@@ -644,6 +696,7 @@ export type TranscriptItemId = number
 export type TranscriptSearchSource =
   | { readonly kind: 'message' }
   | { readonly kind: 'tool-field'; readonly field: 'name' | 'args' | 'result' }
+  | { readonly kind: 'command-field'; readonly field: 'name' | 'args' | 'outcome' }
   | { readonly kind: 'subcall-field'; readonly subCallIds: readonly string[]; readonly field: 'name' | 'args' | 'result' }
   | { readonly kind: 'workflow-run'; readonly field: 'kind' | 'name' | 'status' }
   | { readonly kind: 'workflow-phase'; readonly phaseKey: string }
@@ -657,6 +710,7 @@ export function transcriptSearchSourceKey(source: TranscriptSearchSource): strin
   switch (source.kind) {
     case 'message': return 'message'
     case 'tool-field': return `tool.${source.field}`
+    case 'command-field': return `command.${source.field}`
     case 'subcall-field': return `subcall.${source.subCallIds.join('>')}.${source.field}`
     case 'workflow-run': return `workflow-run.${source.field}`
     case 'workflow-phase': return `workflow-phase.${source.phaseKey}`
@@ -738,6 +792,18 @@ function searchChunksForMessage(message: TranscriptMessage, depth: number): Tran
     }
     return chunks
   }
+  if (message.kind === 'command') {
+    return commandSearchChunks(message)
+  }
+  if (message.kind === 'compaction') {
+    // A correlated manual compaction owns its command's searchable fields
+    // (post-PR166 plan §7.4): the hidden raw command entry produces no hit
+    // of its own, so search keeps finding the command through the card that
+    // visibly owns it. Explicit `command-field` identity — never tool-field.
+    const chunks: TranscriptSearchChunk[] = [{ text: message.text ?? '', source: { kind: 'message' } }]
+    if (message.sourceCommand !== undefined) chunks.push(...commandSearchChunks(message.sourceCommand))
+    return chunks
+  }
   if (message.kind === 'workflow') {
     // The run's search identity (PR2 plan §13): the kind, the run name, the
     // current status, every phase's readable label (Unassigned/Empty stay
@@ -781,6 +847,18 @@ function searchChunksForMessage(message: TranscriptMessage, depth: number): Tran
     return chunks
   }
   return [{ text: message.text ?? '', source: { kind: 'message' } }]
+}
+
+/** The searchable fields of one command row (post-PR166 plan §16): the
+ * slash-prefixed name, the verbatim args, and the settled outcome text.
+ * A running command contributes an empty outcome chunk so the spans stay
+ * stable across settlement. */
+function commandSearchChunks(message: TranscriptCommandMessage): TranscriptSearchChunk[] {
+  return [
+    { text: message.name === null ? '' : `/${message.name}`, source: { kind: 'command-field', field: 'name' } },
+    { text: message.args ?? '', source: { kind: 'command-field', field: 'args' } },
+    { text: message.outcome?.text ?? '', source: { kind: 'command-field', field: 'outcome' } },
+  ]
 }
 
 function searchChunksForSubCall(message: TranscriptToolMessage, depth: number, path: readonly string[]): TranscriptSearchChunk[] {
@@ -1523,7 +1601,7 @@ export function recentTurnThreshold(
   if (recentTurns <= 0) return Number.POSITIVE_INFINITY
   const turns = new Set<number>()
   for (const message of messages) {
-    if (message.kind === 'summary') continue
+    if (message.kind === 'summary' || !('turn' in message)) continue
     if (kinds === undefined || kinds.includes(message.kind)) turns.add(message.turn)
   }
   const sorted = [...turns].sort((a, b) => b - a)
@@ -1768,13 +1846,23 @@ export class TranscriptFolder {
   }>()
   /** Tool names by callId, for result pairing. */
   private readonly callNames = new Map<string, string>()
-  /** Command facts by commandId, from command/run events: the name plus the
-   * run start, so the synthetic command card keeps its real elapsed span
-   * (post-F6 plan §12.8). */
-  /** Live command runs, keyed by commandId: only the durable NAME is needed
-   * (the command card's identity). No timing sidecar is recorded — a command
-   * is never a Work/Activity member, so nothing could consume it. */
-  private readonly commandRuns = new Map<string, { name: string }>()
+  /** The real command lifecycle index (post-PR166 plan §5): commandId → the
+   * ONE `kind: 'command'` row plus its raw item index. Entries survive
+   * settlement — the bounded manual-compaction correlation resolves by
+   * commandId in O(1) even when the compaction evidence lands later. */
+  private readonly commands = new Map<CommandId, { index: number; message: TranscriptCommandMessage }>()
+  /** Search entries of turn-less rows appended before the first turn: they
+   * re-anchor to the first turn value when the turn index is established. */
+  private readonly pendingAnchorEntries: number[] = []
+  /** Manual-compaction correlation legs (post-PR166 plan §7): bounded direct
+   * lookups so `command/done.sourceEventSeq` and compaction
+   * `sourceCommandId` never scan history. */
+  private readonly compactionBySummarySeq = new Map<SessionEventSeq, number>()
+  private readonly compactionBySourceCommandId = new Map<CommandId, number>()
+  /** Commands fused into their compaction card: hidden from every visible
+   * projection (the card is the one visible owner) while the row itself and
+   * its relationship stay inspectable. */
+  private readonly fusedCommands = new WeakSet<TranscriptCommandMessage>()
   /** First streamed tool-call-delta time per call identity, from BOTH the
    * live chunks and the durable embedded streams: the earliest authoritative
    * start of a call, so a Preparing → durable handoff never resets its
@@ -2297,6 +2385,27 @@ export class TranscriptFolder {
     this.turnStarts.push(this.items.length - 1)
     this.turnValues.push(turn)
     this.turnValueSet.add(turn)
+    // The FIRST model turn adopts the leading standalone prefix (pre-turn
+    // commands): their search entries anchored to 0 until now re-anchor to
+    // the first turn value, so an anchored search window that contains the
+    // first turn reveals them (the raw prefix itself renders from index 0).
+    if (this.turnValues.length === 1 && this.pendingAnchorEntries.length > 0) {
+      for (const index of this.pendingAnchorEntries) {
+        const entry = this.searchEntries[index]
+        if (entry !== undefined) entry.turn = turn
+      }
+      this.pendingAnchorEntries.length = 0
+    }
+  }
+
+  /** The PRESENTATION placement anchor of one turn-less standalone row: the
+   * turn currently open, else the latest known turn, else 0 while the log
+   * still has no turn (re-anchored by {@link appendTurnIndex}). This anchor
+   * drives window/search navigation ONLY — it is never stored on the row as
+   * a semantic `turn` (post-PR166 plan §8.1). */
+  private placementAnchorTurn(): number {
+    if (this.openTurn !== undefined) return this.openTurn
+    return this.turnValues.length > 0 ? this.turnValues[this.turnValues.length - 1]! : 0
   }
 
   /** Append one folded message, maintaining the window projections. Returns
@@ -2308,13 +2417,16 @@ export class TranscriptFolder {
     // append — the cold path); later mutations mark the entry dirty and
     // re-normalize lazily at the next search.
     const corpus = transcriptSearchCorpus(message)
+    const ownsTurn = 'turn' in message
+    const anchorTurn = ownsTurn ? message.turn : this.placementAnchorTurn()
     this.searchEntries.push({
-      turn: 'turn' in message ? message.turn : 0,
+      turn: anchorTurn,
       normalizedText: corpus.normalizedText,
       spans: corpus.spans,
     })
+    if (!ownsTurn && anchorTurn === 0) this.pendingAnchorEntries.push(index)
     this.searchRevisionCounter += 1
-    const turn = 'turn' in message ? message.turn : undefined
+    const turn = ownsTurn ? message.turn : undefined
     if (turn !== undefined) {
       if (this.turnValues.length === 0) {
         this.appendTurnIndex(turn)
@@ -2376,7 +2488,12 @@ export class TranscriptFolder {
       if (group !== undefined && this.representativeOf(index) !== index) continue
       const card = group ?? this.items[index]
       if (card === undefined) continue
-      entry.turn = 'turn' in card ? card.turn : 0
+      // A TURN-OWNED card refreshes its navigation turn from the card (a
+      // merged read group may move it). A turn-less row (a real command)
+      // KEEPS its presentation anchor: the appendItem/appendTurnIndex sidecar
+      // is the authority (post-PR166 plan §8.1/§9), and resetting it to 0
+      // would point an inter-turn search match at the wrong bounded window.
+      if ('turn' in card) entry.turn = card.turn
       const corpus = transcriptSearchCorpus(card)
       entry.normalizedText = corpus.normalizedText
       entry.spans = corpus.spans
@@ -2571,6 +2688,10 @@ export class TranscriptFolder {
       return assistantEntryVisibleNow(item)
     }
     if (item.kind === 'thinking') return !this.hiddenThinkingEntries.has(item)
+    // A command fused into its compaction card is hidden: the card is the
+    // one visible owner of the correlated manual compaction (post-PR166
+    // plan §7.3) — the row itself stays in `items` for search identity.
+    if (item.kind === 'command' && this.fusedCommands.has(item)) return false
     return true
   }
 
@@ -3861,7 +3982,10 @@ export class TranscriptFolder {
 
   /** Emit one indexed raw-item range, preserving complete same-turn groups. */
   private projectIndexedRange(startTurn: number, endTurn: number): { messages: TranscriptMessage[]; tools: number } {
-    const itemStart = this.turnStarts[startTurn]
+    // The leading standalone prefix (pre-turn commands) belongs to the first
+    // turn's raw segment: a window that contains the FIRST turn renders from
+    // raw item 0, not from the first turn-owned item (post-PR166 plan §8.2).
+    const itemStart = startTurn === 0 ? 0 : this.turnStarts[startTurn]
     const itemEnd = endTurn + 1 < this.turnStarts.length
       ? this.turnStarts[endTurn + 1]! - 1
       : this.items.length - 1
@@ -3928,7 +4052,15 @@ export class TranscriptFolder {
     const maxTurns = Math.max(1, Math.trunc(options.maxTurns))
     let range = this.indexedWindowRange(maxTurns, options.endTurn)
 
-     if (range === undefined) return { messages: [], hasOlder: false, hasNewer: false }
+    // A turn-less session is not an empty transcript: standalone-only rows
+    // (commands, compaction cards) still project, with no turn navigation
+    // facts (post-PR166 plan §8.2). No fake summary row is synthesized.
+    if (range === undefined) {
+      const standalone = this.groupedMessages()
+      return standalone.length === 0
+        ? { messages: [], hasOlder: false, hasNewer: false }
+        : { messages: standalone, hasOlder: false, hasNewer: false }
+    }
      if (this.turnsMonotonic && this.crossTurnGroups > 0) {
        const groupedRange = this.groupedWindowRange(maxTurns, options.endTurn)
        if (groupedRange !== undefined) {
@@ -4258,7 +4390,7 @@ export class TranscriptFolder {
    * so a resumed session still shows its compaction records.
    */
   private applyCompactionEvent(
-    event: { type: string; data: Record<string, unknown> },
+    event: { type: string; data: Record<string, unknown>; seq?: unknown },
     kind: string,
   ): void {
     const data = event.data as { compactionId?: unknown } & Record<string, unknown>
@@ -4303,6 +4435,64 @@ export class TranscriptFolder {
       if (typeof error === 'string' && error !== '') entry.error = error
       if (compactionId !== undefined) this.compacting.delete(compactionId)
     }
+    // Manual-compaction correlation evidence (post-PR166 plan §7): the
+    // summary's event sequence is leg 2's direct lookup target, and a
+    // lifecycle-carried `sourceCommandId` is leg 1. Both are recorded as
+    // presentation metadata on the card, then any already-known command is
+    // fused immediately — a lifecycle event may land after the command's own
+    // `command/done`.
+    const seq = Number(event.seq)
+    if (kind === 'compaction/summary' && Number.isSafeInteger(seq) && seq >= 0) {
+      entry.summaryEventSeq = seq as SessionEventSeq
+      this.compactionBySummarySeq.set(seq as SessionEventSeq, index)
+    }
+    const sourceCommandId = data.sourceCommandId
+    if (typeof sourceCommandId === 'string' && sourceCommandId !== '') {
+      entry.sourceCommandId = sourceCommandId as CommandId
+      this.compactionBySourceCommandId.set(entry.sourceCommandId, index)
+    }
+    if (entry.sourceCommandId !== undefined) {
+      const command = this.commands.get(entry.sourceCommandId)
+      if (command !== undefined) this.fuseCompactionCommand(command.message, command.index)
+    }
+  }
+
+  /**
+   * Fuse one command with its compaction card when — and only when —
+   * authoritative upstream evidence proves the relationship (post-PR166 plan
+   * §7.2): leg 1 is the compaction lifecycle's `sourceCommandId`, leg 2 the
+   * command outcome's `sourceEventSeq` pointing at a `compaction/summary`
+   * event. The decision runs only AFTER the command settled (both legs are
+   * then maximally known) and when both legs are present they must agree; a
+   * contradiction fuses nothing (fail soft, both rows stay standalone). An
+   * already-established fusion is never re-decided or revoked by later
+   * evidence — the fold never guesses a new winner. Fusing hides the
+   * standalone command row (the card becomes the one visible owner) while the
+   * relationship stays inspectable and searchable through the card.
+   */
+  private fuseCompactionCommand(message: TranscriptCommandMessage, index: number): void {
+    if (this.fusedCommands.has(message)) return
+    if (message.outcome === null) return
+    const byCommandId = this.compactionBySourceCommandId.get(message.commandId)
+    const bySourceEventSeq = message.outcome.kind === 'success' && message.outcome.sourceEventSeq !== undefined
+      ? this.compactionBySummarySeq.get(message.outcome.sourceEventSeq)
+      : undefined
+    if (byCommandId !== undefined && bySourceEventSeq !== undefined && byCommandId !== bySourceEventSeq) return
+    const target = byCommandId ?? bySourceEventSeq
+    if (target === undefined) return
+    const compaction = this.items[target]
+    if (compaction === undefined || compaction.kind !== 'compaction') return
+    // Reverse-leg validation (plan §7.2): a leg-2 hit on a card that
+    // EXPLICITLY declares a different initiating command contradicts the
+    // official evidence — the card belongs to that command, not this one.
+    // Fail soft: no fusion, no guess; both rows stay standalone.
+    if (compaction.sourceCommandId !== undefined && compaction.sourceCommandId !== message.commandId) return
+    compaction.sourceCommand = message
+    this.fusedCommands.add(message)
+    // The card's corpus now carries the command fields and the raw command
+    // entry stops producing hits — both entries re-normalize lazily.
+    this.markSearchEntryDirty(target)
+    this.markSearchEntryDirty(index)
   }
 
   /** Fold the structural durable payload emitted by the present tool. The
@@ -4414,7 +4604,7 @@ export class TranscriptFolder {
       return
     }
     if (kind === 'compaction/start' || kind === 'compaction/summary' || kind === 'compaction/end' || kind === 'session/end-seed') {
-      this.applyCompactionEvent(event as { type: string; data: Record<string, unknown> }, kind)
+      this.applyCompactionEvent(event as { type: string; data: Record<string, unknown>; seq?: unknown }, kind)
       return
     }
     if (kind === 'llm/retry-started') {
@@ -5200,73 +5390,79 @@ export class TranscriptFolder {
         break
       }
       case 'command/run': {
-        this.commandRuns.set(event.data.commandId, { name: event.data.name })
+        // A duplicated/replayed run with a known id fails soft: the original
+        // lifecycle identity wins and no duplicate visible row is created.
+        if (this.commands.has(event.data.commandId)) break
+        const message: TranscriptCommandMessage = {
+          kind: 'command',
+          commandId: event.data.commandId,
+          seq: event.seq,
+          time: event.time,
+          name: event.data.name,
+          args: typeof event.data.args === 'string' ? event.data.args : null,
+          outcome: null,
+        }
+        const index = this.appendItem(message)
+        this.commands.set(event.data.commandId, { index, message })
         break
       }
       case 'command/done': {
-        const run = this.commandRuns.get(event.data.commandId)
-        const name = run?.name ?? 'command'
-        this.commandRuns.delete(event.data.commandId)
-        // Success text (e.g. "title set: x") carries the command's settlement
-        // message; errors prefix it with the failure marker.
-        const outcome = event.data.kind === 'error'
-          ? ` — error: ${event.data.text ?? 'failed'}`
-          : event.data.text === undefined || event.data.text === ''
-            ? ''
-            : ` — ${event.data.text}`
-        // The `turn` here is a LEGACY DISPLAY-PLACEMENT artifact, never
-        // semantic ownership: a command's lifecycle is standalone (DSH appends
-        // `command/run`/`command/done` as direct log-only events — "no turn
-        // wraps them"), so the row is deliberately excluded from Work spans,
-        // Action candidates and ActionStats wherever it lands (see
-        // `isCommandTool`). It is placed at the current turn position only so
-        // the standalone card renders in chronology.
-        const card: Extract<TranscriptMessage, { kind: 'tool' }> = { kind: 'tool', turn: this.currentTurn, name: `/${name}`, args: '', result: `executed${outcome}`, status: event.data.kind === 'error' ? 'error' : 'ok', origin: 'command' }
-        // No replay mark: a command is not turn Process evidence at all, so
-        // there is no turn aggregate for it to be "late" for. Marking it from
-        // `currentTurn.completed` would misread the NORMAL idle slash command
-        // (turn already ended) as a replay artifact and swallow its feedback.
-        this.appendItem(card)
+        const outcome = commandOutcomeOf(event)
+        const known = this.commands.get(event.data.commandId)
+        if (known === undefined) {
+          // A done fragment without its run (a folded log fragment): one
+          // fail-soft fallback row at the done event's real position, never
+          // an invented turn and never a fake `/command` Tool.
+          const message: TranscriptCommandMessage = {
+            kind: 'command',
+            commandId: event.data.commandId,
+            seq: event.seq,
+            time: event.time,
+            name: null,
+            args: null,
+            outcome,
+          }
+          const index = this.appendItem(message)
+          this.commands.set(event.data.commandId, { index, message })
+          this.fuseCompactionCommand(message, index)
+          break
+        }
+        known.message.outcome = outcome
+        this.markSearchEntryDirty(known.index)
+        this.fuseCompactionCommand(known.message, known.index)
         break
       }
       case 'subagent/descriptor': {
-        // Durable delegation record: one card per subagent launch.
-        const { label, mode, provider } = event.data
-        const model = 'agentModel' in event.data ? event.data.agentModel : undefined
-        const result = [
-          mode !== undefined ? `mode: ${mode}` : '',
-          provider !== undefined ? `provider: ${provider}` : '',
-          model !== undefined ? `model: ${model}` : '',
-        ].filter(part => part !== '').join(' · ')
-        const delegationCard: Extract<TranscriptMessage, { kind: 'tool' }> = {
-          kind: 'tool',
-          turn: this.currentTurn,
-          name: 'subagent',
-          args: label ?? 'subagent',
-          origin: 'subagent-delegation',
-          result,
-          status: 'ok',
-        }
-        // A durable delegation record carries one timestamp: point evidence
-        // only — the child session's lifetime is never the parent
-        // Activity's duration (post-F6 plan §12.10).
-        setTranscriptTiming(delegationCard, pointTiming(event.time))
-        // No replay mark: `subagent/descriptor` is a SINGLE log-only event
-        // that upstream appends once inside the establishing child's initial
-        // turn, before its first request — a cold replay lands it at that same
-        // logged position, so it is original evidence of that turn rather than
-        // a row materializing after the turn completed. It carries no turn of
-        // its own to compare against, so the fold never guesses one from
-        // `currentTurn` (which is the merely-current turn, not an owner).
-        this.appendItem(delegationCard)
-        // Focus aggregation: a delegation record is a durable lifecycle
-        // event, NOT a model tool/call — it never touches the Tool slot or
-        // the tool count (plan §17).
+        // Child identity metadata, NOT transcript content: the viewer holds
+        // the authoritative child identity (id/label/mode/activity) through
+        // its own catalog state, and the parent's genuine
+        // `tool/call name=subagent` remains the delegation evidence. No
+        // TranscriptMessage is materialized for the descriptor.
         break
       }
       default:
         break
     }
+  }
+}
+
+/** Validate and retain the official `command/done` outcome (post-PR166 plan
+ * §6): only a SUCCESS may carry the `sourceEventSeq` relationship, and the
+ * sequence must be a safe non-negative integer — anything malformed is
+ * dropped fail-soft (partial/migrated logs), never a throw and never a
+ * re-parse of the result text. */
+function commandOutcomeOf(event: SessionEvent): TranscriptCommandOutcome {
+  const data = event.data as { kind?: unknown; text?: unknown; sourceEventSeq?: unknown }
+  const kind = data.kind === 'error' ? 'error' : 'success'
+  const text = typeof data.text === 'string' ? data.text : undefined
+  const sourceEventSeq = kind === 'success' && typeof data.sourceEventSeq === 'number'
+    && Number.isSafeInteger(data.sourceEventSeq) && data.sourceEventSeq >= 0
+    ? (data.sourceEventSeq as SessionEventSeq)
+    : undefined
+  return {
+    kind,
+    ...(text === undefined ? {} : { text }),
+    ...(sourceEventSeq === undefined ? {} : { sourceEventSeq }),
   }
 }
 

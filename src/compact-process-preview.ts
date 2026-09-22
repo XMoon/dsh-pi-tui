@@ -17,11 +17,9 @@
  * ONLY — the latest meaningful non-Thinking TURN-OWNED Process evidence
  * (genuine Tool, Preparing, Retry, and explicit orphan-result diagnostics)
  * selected purely by chronology. A COMMAND row is
- * deliberately NOT an Action: its lifecycle is session-level standalone
- * evidence (DSH appends `command/run`/`command/done` with no wrapping turn),
- * so it renders as its own transcript card outside the Action/Work
- * aggregates. It is not a transcript semantic class and never changes Tool
- * statistics.
+ * deliberately NOT an Action: it is a turn-less `control`-class row, so it
+ * renders as its own transcript card outside the Action/Work aggregates and
+ * never changes Tool statistics.
  *
  * Every returned string is exactly ONE physical terminal row: embedded line
  * breaks never escape a slot (the fullscreen row hit-map depends on that).
@@ -32,7 +30,7 @@ import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import { focusToolDisplay, toolTitle, type ToolPresenter } from './present.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
 import { activeSubCallsOf, isPostTurnReplayEvidence, THINKING_TAIL_CAP, type TranscriptMessage, type TranscriptToolMessage } from './transcript.ts'
-import { isCommandTool, isSubagentDescriptor, isSurfacedInteractionToolName } from './transcript-semantics.ts'
+import { isSurfacedInteractionToolName } from './transcript-semantics.ts'
 
 /** The fixed label column width of the collapsed body slots: the widest
  * label (`Message: `) — every slot's text starts at the same column
@@ -235,13 +233,11 @@ export type CompactActionSource =
  * - surfaced-interaction tools (`ask_user_question` / `exit_plan_mode`)
  *   return `undefined` — their active/settled panel is the interaction
  *   owner and must never be duplicated as an Action (addendum v2 §5);
- * - a COMMAND row (`origin: 'command'`) returns `undefined` — a session-level
- *   standalone lifecycle, never turn Process evidence;
- * - a SUBAGENT DESCRIPTOR (`origin: 'subagent-delegation'`) returns
- *   `undefined` — the child session's identity metadata, not a delegation
- *   action (the parent's genuine `tool/call name=subagent` is that Action);
- * - Thinking / Conversation / Context / Workflow / Compaction / attention
- *   rows return `undefined`.
+ * - a COMMAND row is a turn-less control-plane node (`kind: 'command'`,
+ *   never `kind: 'tool'`), so it never reaches the tool branch below and is
+ *   never an Action candidate;
+ * - Thinking / Conversation / Context / Control / Workflow / Compaction /
+ *   attention rows return `undefined`.
  */
 export function compactActionSourceOf(message: TranscriptMessage): CompactActionSource | undefined {
   // Post-turn replay evidence is transcript/diagnostic evidence only: it
@@ -249,14 +245,6 @@ export function compactActionSourceOf(message: TranscriptMessage): CompactAction
   // (the fold's late-replay fence, shared with Work membership and read
   // grouping).
   if (isPostTurnReplayEvidence(message)) return undefined
-  // A command is a standalone session-level lifecycle, never turn Process
-  // evidence (DSH wraps no turn around it; the settled result renders outside
-  // model history). Its row still renders as a standalone transcript card.
-  if (isCommandTool(message)) return undefined
-  // A subagent DESCRIPTOR is the child's identity metadata (for a continuable
-  // child it precedes the child's first turn/start), not a delegation action:
-  // the parent's genuine `tool/call name=subagent` is the delegation evidence.
-  if (isSubagentDescriptor(message)) return undefined
   if (message.kind === 'system') {
     return message.origin === 'llm-retry' ? { kind: 'retry', message } : undefined
   }

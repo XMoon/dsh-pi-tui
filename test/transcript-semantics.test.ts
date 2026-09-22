@@ -2,20 +2,28 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { CommandId } from '@deepseek-ai/dsh-commands'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import { classifyTranscriptMessage, isSurfacedContext } from '../src/transcript-semantics.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 
-const tool = (origin?: 'command' | 'subagent-delegation' | 'turn-error' | 'turn-interrupted'): TranscriptMessage => ({
+const tool = (origin?: 'turn-error' | 'turn-interrupted'): TranscriptMessage => ({
   kind: 'tool', turn: 1, name: 'synthetic', args: '', result: '', status: 'ok', ...(origin === undefined ? {} : { origin }),
 })
 
-test('classifies conversation, process, attention, and context without reading display text', () => {
+/** A minimal real command row exactly as the fold produces it. */
+const command: TranscriptMessage = {
+  kind: 'command', commandId: CommandId('cmd-1'), seq: SessionSeq(1), time: 1, name: 'compact', args: null, outcome: null,
+}
+
+test('classifies conversation, process, attention, context and control without reading display text', () => {
   assert.deepEqual(classifyTranscriptMessage({ kind: 'user', turn: 1, text: 'attention' }), { class: 'conversation' })
   assert.deepEqual(classifyTranscriptMessage({ kind: 'assistant', turn: 1, text: 'context' }), { class: 'conversation' })
   assert.deepEqual(classifyTranscriptMessage({ kind: 'thinking', turn: 1, text: 'conversation' }), { class: 'process', origin: 'thinking' })
   assert.deepEqual(classifyTranscriptMessage(tool()), { class: 'process' })
   assert.deepEqual(classifyTranscriptMessage({ kind: 'system', turn: 1, text: 'context', context: true }), { class: 'context', origin: 'injected-context' })
   assert.deepEqual(classifyTranscriptMessage({ kind: 'summary', text: 'conversation' }), { class: 'context', origin: 'window-summary' })
+  assert.deepEqual(classifyTranscriptMessage(command), { class: 'control', origin: 'command' })
 })
 
 test('marks injected context as a surfaced boundary without changing its Context class', () => {
@@ -33,8 +41,6 @@ test('marks injected context as a surfaced boundary without changing its Context
 test('classifies synthetic origins by source semantics', () => {
   assert.deepEqual(classifyTranscriptMessage({ kind: 'system', turn: 1, text: 'retry', origin: 'llm-retry' }), { class: 'process', origin: 'llm-retry' })
   assert.deepEqual(classifyTranscriptMessage({ kind: 'system', turn: 1, text: 'limit', origin: 'turn-max-tokens' }), { class: 'attention', origin: 'turn-max-tokens' })
-  assert.deepEqual(classifyTranscriptMessage(tool('command')), { class: 'process', origin: 'command' })
-  assert.deepEqual(classifyTranscriptMessage(tool('subagent-delegation')), { class: 'process', origin: 'subagent-delegation' })
   assert.deepEqual(classifyTranscriptMessage(tool('turn-error')), { class: 'attention', origin: 'turn-error' })
   assert.deepEqual(classifyTranscriptMessage(tool('turn-interrupted')), { class: 'attention', origin: 'turn-interrupted' })
 })

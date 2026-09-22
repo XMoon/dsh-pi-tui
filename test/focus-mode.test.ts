@@ -4161,10 +4161,9 @@ test('a subagent descriptor is never Work/Activity/Action evidence (both real lo
     eventAt('subagent/descriptor', { label: 'Update command runner fixtures', mode: 'continuable' }, 1000, 0),
     eventAt('turn/start', { turn: 1 }, 1001, 1),
   ])
-  const continuableRow = continuable.messages().find(message => message.kind === 'tool' && message.origin === 'subagent-delegation')
-  assert.ok(continuableRow !== undefined && continuableRow.kind === 'tool')
-  assert.equal(isTranscriptWorkMember(continuableRow), false, 'continuable: not a Work member')
-  assert.equal(compactActionSourceOf(continuableRow), undefined, 'continuable: never an Action candidate')
+  // Post-PR166: the descriptor materializes NO transcript row in either
+  // placement, so there is nothing to be a Work member or an Action.
+  assert.deepEqual(continuable.messages(), [], 'continuable: no descriptor TranscriptMessage')
   assert.equal(collapsedFocusActionOf(continuable), undefined, 'continuable: the pre-turn placement mints no Thought')
 
   const oneShot = new TranscriptFolder()
@@ -4172,13 +4171,8 @@ test('a subagent descriptor is never Work/Activity/Action evidence (both real lo
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('subagent/descriptor', { label: 'scout', mode: 'one-shot' }, 1001, 1),
   ])
-  const oneShotRow = oneShot.messages().find(message => message.kind === 'tool' && message.origin === 'subagent-delegation')
-  assert.ok(oneShotRow !== undefined && oneShotRow.kind === 'tool')
-  assert.equal(isTranscriptWorkMember(oneShotRow), false, 'one-shot: not a Work member even though it is turn-enclosed')
-  assert.equal(compactActionSourceOf(oneShotRow), undefined, 'one-shot: never an Action candidate')
-  const state = focusActionState(oneShot)
-  assert.deepEqual(state, { total: 0, types: [], winner: undefined },
-    'one-shot: the turn keeps no Action from the descriptor')
+  assert.deepEqual(oneShot.messages(), [], 'one-shot: no descriptor TranscriptMessage either')
+  assert.equal(collapsedFocusActionOf(oneShot), undefined, 'one-shot: a descriptor-only turn mints no Thought')
   assert.deepEqual(workSpanToolNames(oneShot), [], 'one-shot: and no Work span member')
 })
 
@@ -4199,7 +4193,7 @@ test('collapsed Focus: a command row stays standalone-visible and never becomes 
   assert.equal(folder.turnActivity(0)!.toolCalls, 0)
   // …while the command row itself stays VISIBLE as standalone transcript
   // evidence outside the Thought (its feedback must never disappear).
-  const commandRow = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
+  const commandRow = folder.messages().find(message => message.kind === 'command')
   assert.ok(commandRow !== undefined, 'fixture: the command card exists')
   const projected = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
     .filter(candidate => candidate.kind === 'message')
@@ -4304,7 +4298,9 @@ test('expanded Focus carries no Action preview and keeps canonical rows', () => 
   // The canonical rows render inside the expanded structure (nested Work),
   // never replaced by an Action summary row.
   const rows = blocks.flatMap(block => block.kind === 'work' ? [...block.span.members] : block.kind === 'message' ? [block.message] : [])
-  assert.ok(rows.some(message => message.kind === 'tool' && message.origin === 'subagent-delegation'), 'the delegation card stays canonical')
+  // Post-PR166: a descriptor no longer materializes a canonical row at all;
+  // the retry row alone proves canonical rows survive expansion.
+  assert.ok(!rows.some(message => message.kind === 'tool' && message.name === 'subagent'), 'no delegation card is synthesized')
   assert.ok(rows.some(message => message.kind === 'system' && message.origin === 'llm-retry'), 'the retry row stays canonical')
 })
 
@@ -4431,21 +4427,21 @@ test('neither a subagent descriptor nor a command row is turn Process evidence',
   // Their lifecycles differ (child identity metadata vs a session-level user
   // operation), but for aggregation they agree: neither owns the turn they are
   // placed at, so neither may feed ActionStats, the Action winner or a span.
+  // Post-PR166: a descriptor materializes NO row, so there is nothing to
+  // replay-mark — the turn aggregate is untouched by construction.
   const delegation = lateReplayFolder([
     eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, 6005, 10),
   ])
-  const delegationRow = delegation.messages().find(message => message.kind === 'tool' && message.origin === 'subagent-delegation')
-  assert.ok(delegationRow !== undefined)
-  assert.equal(isPostTurnReplayEvidence(delegationRow), false, 'a descriptor is never replay-marked')
+  assert.ok(delegation.messages().some(message => message.kind === 'tool' && message.name === 'read'), 'fixture keeps its legal read row')
   assert.deepEqual(focusActionState(delegation), { total: 1, types: ['read'], winner: 'read' },
-    'the delegation is NOT turn Process evidence: the turn aggregate is untouched')
+    'the descriptor is NOT turn Process evidence: the turn aggregate is untouched')
   assert.deepEqual(workSpanToolNames(delegation), ['read'], 'and it joins no Work span')
 
   const command = lateReplayFolder([
     eventAt('command/run', { commandId: 'standalone-1', name: 'theme' }, 6003, 8),
     eventAt('command/done', { commandId: 'standalone-1', kind: 'success' }, 6004, 9),
   ])
-  const commandRow = command.messages().find(message => message.kind === 'tool' && message.origin === 'command')
+  const commandRow = command.messages().find(message => message.kind === 'command')
   assert.ok(commandRow !== undefined)
   assert.equal(isPostTurnReplayEvidence(commandRow), false, 'a command is not replay evidence either')
   assert.deepEqual(focusActionState(command), { total: 1, types: ['read'], winner: 'read' },
@@ -4460,9 +4456,9 @@ test('an idle human command after a completed turn stays standalone-visible and 
     eventAt('command/run', { commandId: 'idle-1', name: 'compact' }, 7001, 11),
     eventAt('command/done', { commandId: 'idle-1', kind: 'success' }, 7002, 12),
   ])
-  const card = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
-  assert.ok(card !== undefined && card.kind === 'tool')
-  assert.equal(card.turn, 0, 'the `turn` is a legacy PLACEMENT artifact, never semantic ownership')
+  const card = folder.messages().find(message => message.kind === 'command')
+  assert.ok(card !== undefined && card.kind === 'command')
+  assert.ok(!('turn' in card), 'a real command carries no turn at all — placement is a projection concern')
   assert.equal(isPostTurnReplayEvidence(card), false, 'idle feedback is not replay evidence')
   assert.deepEqual(focusActionState(folder), { total: 1, types: ['read'], winner: 'read' },
     'the settled turn gains no Action from the command')
@@ -4491,8 +4487,8 @@ test('a command crossing a later turn never pollutes either turn', () => {
     // … and settles only after turn 1 started.
     eventAt('command/done', { commandId: 'slow-1', kind: 'success' }, 1004, 4),
   ])
-  const card = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
-  assert.ok(card !== undefined && card.kind === 'tool')
+  const card = folder.messages().find(message => message.kind === 'command')
+  assert.ok(card !== undefined && card.kind === 'command')
   // Session-level standalone evidence: no turn aggregate claims it, so neither
   // turn can be polluted (and no replay marker is needed to protect them).
   for (const turn of [0, 1]) {
@@ -4536,7 +4532,7 @@ test('a standalone command splits two Process runs of the SAME model turn', () =
     }, 1006, 6),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1007, 7),
   ])
-  const commandRow = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
+  const commandRow = folder.messages().find(message => message.kind === 'command')
   assert.ok(commandRow !== undefined, 'fixture: the command card exists')
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
   assert.deepEqual(blocks.map(block => block.kind === 'activity'

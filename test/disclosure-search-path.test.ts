@@ -9,8 +9,9 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TurnActivity, TranscriptMessage } from '../src/transcript.ts'
 import { TranscriptFolder, windowMessages } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -939,7 +940,7 @@ test('collapsed Focus + a hidden process row search still opens the Thought', as
 test('a standalone command card owns its own disclosure, independent of the Focus root', async () => {
   const { vt, app } = startApp('focus')
   const tool: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'r', status: 'ok' }
-  const command: TranscriptMessage = { kind: 'tool', turn: 1, name: '/compact', args: '', result: 'executed', status: 'ok', origin: 'command' }
+  const command: TranscriptMessage = { kind: 'command', commandId: CommandId('cmd-1'), seq: SessionSeq(1), time: 1, name: 'compact', args: null, outcome: { kind: 'success', text: 'executed' } }
   const messages: TranscriptMessage[] = [
     { kind: 'user', turn: 1, text: 'go' },
     tool,

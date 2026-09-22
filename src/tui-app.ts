@@ -144,7 +144,7 @@ import { QuestionFlow } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
-import { classifyTranscriptMessage, isCommandTool, isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
+import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
@@ -299,12 +299,15 @@ export interface TranscriptViewportAnchor {
  * Workflow is deliberately NOT in the set (PR2 plan §7.1/§12.3): the
  * Workflow card owns its own Run/Phase disclosure and must never be wrapped
  * in a second generic fold. Surfaced context remains generic-foldable so its
- * own click/search disclosure can survive independently of a Thought root. */
+ * own click/search disclosure can survive independently of a Thought root.
+ * A COMMAND row owns its own standalone disclosure the same way (a real
+ * `kind: 'command'` node renders through the Command-owned host path). */
 function isFoldableMessageDisclosure(message: TranscriptMessage): boolean {
   return message.kind === 'thinking'
     || message.kind === 'tool'
     || message.kind === 'system'
     || message.kind === 'compaction'
+    || message.kind === 'command'
 }
 
 /** Whether a generic foldable message is a Thought-owned Focus secondary.
@@ -313,10 +316,9 @@ function isFoldableMessageDisclosure(message: TranscriptMessage): boolean {
 function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
   // A COMMAND row is a turn-less standalone BOUNDARY, never Thought-owned
   // process detail: its own fold must stay independent of the Focus root, so
-  // it is exempt exactly like a settled surfaced-interaction card. Its legacy
-  // placement `turn` must not act as Focus ownership (nor may a root collapse
-  // reset a command card the user opened).
-  return isFoldableMessageDisclosure(message) && !isSurfacedContext(message) && !isCommandTool(message)
+  // it is exempt exactly like a settled surfaced-interaction card (nor may a
+  // root collapse reset a command card the user opened).
+  return isFoldableMessageDisclosure(message) && !isSurfacedContext(message) && message.kind !== 'command'
 }
 
 /** Whether a message is a TEXT-ONLY durable user message — the only kind
@@ -3309,6 +3311,9 @@ interface MessageComponentEntry {
   items?: number
   tokens?: number
   errorText?: string
+  /** Command card facts (kind 'command'): the settled outcome object —
+   * replaced (never mutated) on settlement, so identity is the cache key. */
+  commandOutcome?: unknown
   /** M7: the renderer that produced this component, when one did (the
    * cache identity — plan §12.1: a renderer HMR/unload must rebuild). */
   rendererId?: string
@@ -11896,6 +11901,20 @@ export class TuiApp {
       } else {
         this.expandedOverride.set(message, true)
       }
+    } else if (message.kind === 'command') {
+      // A command's per-card click flips its EFFECTIVE state (the same
+      // model as Thinking): the default (the transcript-detail master)
+      // cannot be "delete"-toggled back like a generic card, because a
+      // command has no turn boundary that would re-derive it — without
+      // this branch the first click would write a no-op `true` and the
+      // card could never fold (post-PR166 plan §11 long-outcome operability).
+      const expanded = this.effectiveMessageExpanded(message, this.expandBoundary(), this.userExpandBoundary())
+      if (expanded) {
+        this.expandedOverride.set(message, false)
+        if (revokesSearchReveal) this.suppressSearchReveal()
+      } else {
+        this.expandedOverride.set(message, true)
+      }
     } else if (this.expandedOverride.get(message) === true) {
       this.expandedOverride.delete(message)
       if (revokesSearchReveal) this.suppressSearchReveal()
@@ -13935,6 +13954,11 @@ export class TuiApp {
       }
       case 'summary':
         return { kind: 'summary', turn: 0, text: message.text }
+      case 'command':
+        // Host-owned card: extension renderers never present command rows
+        // (the public message-renderer snapshot has no command shape yet —
+        // post-PR166 plan §12 keeps the extension boundary unchanged).
+        return undefined
       case 'workflow':
         // Host-owned card: extension renderers never present workflow
         // records (the host fallback below renders them).
@@ -14115,6 +14139,22 @@ export class TuiApp {
       // keeps its folded state unless the MOUSE full-revealed it (the
       // per-card override still wins) or the temporary search target
       // reveals it.
+      if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
+        return this.expandedOverride.get(message) === true
+          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+      }
+      return this.transcriptDetailExpanded
+        || this.expandedOverride.get(message) === true
+        || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+    }
+    // A COMMAND owns its own standalone disclosure, independent of the
+    // Focus root (post-PR166 plan §11): outside fullscreen Focus the
+    // ordinary transcript-detail master (Ctrl+O) owns the bulk default —
+    // exactly like a LOCAL `!` shell card — with the per-card click override
+    // and the temporary search reveal layering on top. In fullscreen Focus
+    // only the per-card click and the search reveal apply (Ctrl+O owns the
+    // Thought-root bulk there).
+    if (message.kind === 'command') {
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
         return this.expandedOverride.get(message) === true
           || (!ignoreSearch && this.searchForcesMessageExpanded(message))
@@ -14334,6 +14374,9 @@ export class TuiApp {
     }
     return message.kind === 'compaction'
       || (message.kind === 'tool' && !isCompactActionTool(message.name, message.args))
+      // A folded Command card bakes its one-line head + outcome preview at
+      // build time (the expanded outcome body is render-time markdown).
+      || (message.kind === 'command' && !expanded)
   }
 
   /**
@@ -14448,6 +14491,9 @@ export class TuiApp {
         break
       case 'summary':
         break
+      case 'command':
+        entry.commandOutcome = message.outcome
+        break
       case 'compaction':
         entry.text = message.text
         entry.items = message.items
@@ -14489,6 +14535,10 @@ export class TuiApp {
           || entry.workflowDisclosureRev !== this.workflowDisclosureRevision
       case 'summary':
         return false
+      case 'command':
+        // The outcome object reference is replaced on settlement, so
+        // reference comparison is the reliable invalidation evidence.
+        return entry.commandOutcome !== message.outcome
       case 'compaction':
         return entry.text !== message.text || entry.items !== message.items
           || entry.tokens !== message.tokens || entry.running !== message.running
@@ -14883,6 +14933,78 @@ export class TuiApp {
       // The Workflow card owns its Run/Phase disclosure (PR2 plan §7.1) —
       // the generic secondary `expanded` never applies to it.
       return this.renderWorkflowCard(message, width)
+    }
+    if (message.kind === 'command') {
+      // The Command-owned host card (post-PR166 plan §11): a real
+      // `kind: 'command'` node never routes through the generic Tool
+      // renderer. The row keeps the slash-command icon family and the
+      // status-pill vocabulary; a no-text success is the pill alone
+      // (never a synthetic "executed" body). Long outcomes stay operable:
+      // folded shows the ONE-LINE first-line preview, expanded renders the
+      // full body (markdown), and the fold is independent of any Thought
+      // root.
+      const card = new Container()
+      const title = message.name === null ? 'command' : `/${message.name}`
+      // The official args are the VERBATIM raw input INCLUDING the separator
+      // whitespace after the name (`parseCommand` keeps it), so the separator
+      // is never doubled: a verbatim leading space is kept, a spaceless
+      // fragment gets exactly one.
+      const rawArgs = message.args
+      const args = rawArgs === null || rawArgs === '' ? ''
+        : /^[\s]/.test(rawArgs) ? rawArgs : ` ${rawArgs}`
+      const icon = iconPrefix('slash-command', this.iconStyle)
+      const pill = message.outcome === null
+        ? color.textDim('[running]')
+        : message.outcome.kind === 'error'
+          ? color.error('[error]')
+          : color.success('[ok]')
+      const headIdentity = color.textDim(`${icon}${title}${args}`)
+      const statusPart = ` ${pill}`
+      const visibleStatus = truncateToWidth(statusPart, width, '…')
+      const identityBudget = Math.max(0, width - visibleWidth(visibleStatus))
+      const visibleIdentity = identityBudget === 0 ? '' : truncateToWidth(headIdentity, identityBudget, '…')
+      // Header field regions (row 0): the title is the command NAME, the
+      // rendered args the ARGS field (anchors, not raw ordinals — the same
+      // rule as the Tool header). The OUTCOME is an anchor-only source while
+      // expanded (a markdown body has no provable column mapping); folded,
+      // its one-line preview row carries the exact geometry.
+      const outcomeText = message.outcome?.text
+      const outcomePreview = outcomeText === undefined || outcomeText === '' ? undefined : firstLine(outcomeText)
+      {
+        const commandRegions: SearchSourceRegion[] = []
+        const nameStart = visibleWidth(icon)
+        const nameEnd = nameStart + visibleWidth(title)
+        if (nameEnd > nameStart) {
+          commandRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'command-field', field: 'name' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: nameStart, endCol: nameEnd }, enumerable: false })
+        }
+        if (args !== '') {
+          const argsStart = nameEnd
+          const argsEnd = argsStart + visibleWidth(args)
+          commandRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'command-field', field: 'args' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: argsStart, endCol: argsEnd }, enumerable: false })
+        }
+        if (!expanded && outcomePreview !== undefined) {
+          const previewStart = 2
+          const previewEnd = previewStart + visibleWidth(outcomePreview)
+          commandRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'command-field', field: 'outcome' }), anchorRow: 1, rowStart: 1, rowEnd: 2, columns: { startCol: previewStart, endCol: previewEnd }, enumerable: false })
+        }
+        if (commandRegions.length > 0) this.searchSourceRegionsByMessage.set(message, commandRegions)
+        else this.searchSourceRegionsByMessage.delete(message)
+      }
+      if (expanded) {
+        card.addChild(new Text(`${headIdentity}${statusPart}`, 0, 0))
+        const body = outcomeText ?? ''
+        if (body !== '') {
+          const outcomeColor = message.outcome?.kind === 'error' ? color.error : undefined
+          card.addChild(new Markdown(outcomeColor === undefined ? body : outcomeColor(body), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS))
+        }
+      } else {
+        card.addChild(new Text(`${visibleIdentity}${visibleStatus}`, 0, 0))
+        if (outcomePreview !== undefined) {
+          const outcomeColor = message.outcome?.kind === 'error' ? color.error : color.textDim
+          card.addChild(new Text(truncateToWidth(`  ${outcomeColor(outcomePreview)}`, width, '…'), 0, 0))
+        }
+      }
+      return card
     }
     // Tool card: the Web row-model header (design title + relativized args
     // summary + status pill), with the result body when expanded. The whole

@@ -93,9 +93,9 @@ test('stats: a subagent descriptor is child identity metadata — no span, no ac
   assert.deepEqual(statsOf(summary), { total: 1, types: { read: 1 } }, 'the descriptor contributes nothing')
   assert.equal(summary.action?.message.kind === 'tool' ? summary.action.message.name : summary.action?.message.kind,
     'read', 'the descriptor never owns the Action slot')
-  const descriptorRow = folder.messages().find(message => message.kind === 'tool' && message.origin === 'subagent-delegation')
-  assert.ok(descriptorRow !== undefined && descriptorRow.kind === 'tool')
-  assert.equal(isTranscriptWorkMember(descriptorRow), false, 'and it is not a Work member')
+  // Post-PR166: a subagent/descriptor materializes NO transcript row at all
+  // (child identity metadata — command-transcript.test.ts B-series pins it).
+  assert.ok(!folder.messages().some(message => message.kind === 'tool' && message.name === 'subagent'), 'no synthetic subagent row is materialized')
 })
 
 test('stats: a command row is standalone evidence — it joins no Activity and counts nothing', () => {
@@ -104,11 +104,11 @@ test('stats: a command row is standalone evidence — it joins no Activity and c
     eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, T0 + 100, 1),
     eventAt('command/done', { commandId: 'cmd1', kind: 'success', text: 'theme set' }, T0 + 300, 2),
   ])
-  // A command's lifecycle is session-level (DSH wraps no turn around it), so it
-  // is not Process evidence: it neither forms an Activity span nor counts.
+  // A command is a turn-less control-plane node, so it is not Process
+  // evidence: it neither forms an Activity span nor counts.
   assert.deepEqual(spansOf(folder.messages()), [], 'no Work span exists for a command-only turn')
-  const commandRow = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
-  assert.ok(commandRow !== undefined && commandRow.kind === 'tool')
+  const commandRow = folder.messages().find(message => message.kind === 'command')
+  assert.ok(commandRow !== undefined && commandRow.kind === 'command')
   assert.equal(isTranscriptWorkMember(commandRow), false, 'the row never becomes a Work member')
 })
 
@@ -136,9 +136,10 @@ test('stats: Focus tool stats and the Activity spans agree on genuine calls', ()
     toolResultEvent(1, 'c2', T0 + 400, 5),
   ])
   const spans = spansOf(folder.messages())
-  // The descriptor is not a Work member, so it SPLITS the run; the turn-level
-  // parity still holds once every span of the turn is summed.
-  assert.equal(spans.length, 2, 'the descriptor splits the Process run')
+  // Post-PR166: a descriptor materializes NO row at all, so it no longer
+  // even splits the Process run — the two genuine calls form ONE span and
+  // the turn-level parity still holds.
+  assert.equal(spans.length, 1, 'the descriptor no longer splits the Process run')
   const perType = new Map<string, number>()
   for (const span of spans) {
     for (const [name, count] of genuineToolTypes(summarizeWorkSpan(span))) {
@@ -340,8 +341,8 @@ test('action slot: a command card (success or failure) reaches no Activity at al
       eventAt('command/done', { commandId: 'cmd1', kind, text: kind === 'error' ? 'unknown command' : 'ok' }, T0 + 300, 2),
     ])
     assert.deepEqual(spansOf(folder.messages()), [], `${kind}: the command never forms an Activity`)
-    const row = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
-    assert.ok(row !== undefined && row.kind === 'tool')
+    const row = folder.messages().find(message => message.kind === 'command')
+    assert.ok(row !== undefined && row.kind === 'command')
     assert.equal(compactActionSourceOf(row), undefined, `${kind}: never an Action candidate`)
   }
 })
