@@ -1538,10 +1538,13 @@ export class TranscriptFolder {
    * strictly append-only (the `TranscriptItemId` contract), so these maps
    * are pure presentation order — every raw-index-keyed structure (search
    * ids, turn boundaries, read groups, compaction/workflow cards) keeps its
-   * physical meaning and needs no remap. */
+   * physical meaning and needs no remap. Mutate ONLY through
+   * `setLaneDisplay`/`dropLaneDisplayFor` (they keep the two inverse maps
+   * in sync and bump the search revision). */
   private readonly laneDisplayByDisplaced = new Map<number, { anchor: number; position: 'before' | 'after' }>()
   /** Inverse of {@link laneDisplayByDisplaced}: anchor Assistant row → the
-   * displaced Thinking row emitted at the anchor during raw-index walks. */
+   * displaced Thinking row emitted at the anchor during
+   * `displayOrderedRawIds`. */
   private readonly laneDisplayByAnchor = new Map<number, number>()
   /** In-flight live block state keyed by logical step. This is required for
    * authoritative block-end replacement: deltas may be partial, while a
@@ -1636,8 +1639,11 @@ export class TranscriptFolder {
    * for query-time lazy normalization — a query normalizes exactly these,
    * never a full-history scan. */
   private readonly dirtySearchEntries = new Set<number>()
-  /** Bumped on EVERY entry mutation (append, settlement, group reflow):
-   * query refinement must not reuse previous candidates across a revision. */
+  /** Bumped on EVERY search-projection change — entry mutation (append,
+   * settlement, group reflow) AND display-order change (lane displacement
+   * via `setLaneDisplay`/`dropLaneDisplayFor`): the projection's content
+   * and its ORDER are both part of the revision, so query refinement must
+   * not reuse previous candidates across one. */
   private searchRevisionCounter = 0
   /** Step key → raw item index, for in-place streaming text updates.
    * Namespaced by entry kind (`assistant:` / `thinking:`): a step streams
@@ -3165,49 +3171,66 @@ export class TranscriptFolder {
     }
     // The Assistant row anchors the step; the Thinking row is displayed
     // immediately before (thinking-first) or after (assistant-first) it.
-    this.laneDisplayByDisplaced.set(thinkingIndex, { anchor: assistantIndex, position: authority === 'thinking' ? 'before' : 'after' })
-    this.laneDisplayByAnchor.set(assistantIndex, thinkingIndex)
+    this.setLaneDisplay(thinkingIndex, assistantIndex, authority === 'thinking' ? 'before' : 'after')
   }
 
   /** Drop any lane display mapping that references one raw item index (as
    * displaced row or as anchor). Called when a lane row is tombstoned so a
-   * stale mapping can never strand the surviving row's display slot. */
+   * stale mapping can never strand the surviving row's display slot. Bumps
+   * the search revision only when a mapping was actually removed. */
   private dropLaneDisplayFor(index: number): void {
     const entry = this.laneDisplayByDisplaced.get(index)
     if (entry !== undefined) {
       this.laneDisplayByDisplaced.delete(index)
       this.laneDisplayByAnchor.delete(entry.anchor)
+      this.searchRevisionCounter += 1
+      return
     }
     const displaced = this.laneDisplayByAnchor.get(index)
     if (displaced !== undefined) {
       this.laneDisplayByAnchor.delete(index)
       this.laneDisplayByDisplaced.delete(displaced)
+      this.searchRevisionCounter += 1
     }
   }
 
-  /** Emit one anchor Assistant row together with its displaced Thinking row
-   * inside a raw-index walk, in the stored authority order ('before' =
-   * Thinking first). The displaced row's own physical slot is skipped by the
-   * walk; search keeps physical corpus order — match ids are untouched
-   * either way. */
-  private emitAnchorWithDisplacedLane(index: number, out: TranscriptMessage[]): void {
-    const displaced = this.laneDisplayByAnchor.get(index)
-    const anchorItem = this.items[index]
-    const anchorVisible = anchorItem !== undefined && this.isVisible(anchorItem)
-    if (displaced === undefined) {
-      if (anchorVisible) out.push(anchorItem!)
-      return
+  /** THE single display-order traversal of the raw items: raw physical
+   * order, with lane rows displaced by `convergeStepLaneOrder` emitted at
+   * their anchor (before/after per the stored authority). Every display
+   * path — `groupedMessages()`, the window projection and `search()` —
+   * consumes THIS traversal so display chronology has exactly one owner;
+   * raw storage stays append-only and raw indexes stay stable
+   * (`TranscriptItemId`).
+   *
+   * Ranged callers (the window) must supply COMPLETE turn ranges — lane
+   * peers always share one turn, so a turn-bounded range always covers a
+   * pair together; an arbitrary raw slice could split one. */
+  private *displayOrderedRawIds(start = 0, end: number = this.items.length - 1): Iterable<number> {
+    for (let index = start; index <= end; index += 1) {
+      // A displaced lane row is emitted at its anchor below, never at its
+      // physical slot.
+      if (this.laneDisplayByDisplaced.has(index)) continue
+      const displaced = this.laneDisplayByAnchor.get(index)
+      if (displaced === undefined) {
+        yield index
+        continue
+      }
+      const placement = this.laneDisplayByDisplaced.get(displaced)
+      if (placement?.position === 'before') yield displaced
+      yield index
+      if (placement?.position === 'after') yield displaced
     }
-    const entry = this.laneDisplayByDisplaced.get(displaced)
-    const laneRow = this.items[displaced]
-    const laneVisible = laneRow !== undefined && this.isVisible(laneRow)
-    if (entry?.position === 'after') {
-      if (anchorVisible) out.push(anchorItem!)
-      if (laneVisible) out.push(laneRow!)
-      return
-    }
-    if (laneVisible) out.push(laneRow!)
-    if (anchorVisible) out.push(anchorItem!)
+  }
+
+  /** The only mutation entry for the lane display maps: records the pair
+   * and bumps the search revision. The revision guards the search
+   * projection's CONTENT **and ORDER** — a display-relation change alters
+   * the order matches are emitted in, so refinement against previous
+   * matches must be invalidated even when no searchable text changed. */
+  private setLaneDisplay(displaced: number, anchor: number, position: 'before' | 'after'): void {
+    this.laneDisplayByDisplaced.set(displaced, { anchor, position })
+    this.laneDisplayByAnchor.set(anchor, displaced)
+    this.searchRevisionCounter += 1
   }
 
 
@@ -3387,10 +3410,7 @@ export class TranscriptFolder {
   /** Build the grouped output list (the full projection). */
   private groupedMessages(): TranscriptMessage[] {
     const grouped: TranscriptMessage[] = []
-    for (let index = 0; index < this.items.length; index += 1) {
-      // A lane row displaced by `convergeStepLaneOrder` is emitted at its
-      // anchor Assistant row below, never at its physical slot.
-      if (this.laneDisplayByDisplaced.has(index)) continue
+    for (const index of this.displayOrderedRawIds()) {
       const group = this.groupOf.get(index)
       if (group !== undefined) {
         const members = this.groupMembers.get(group)
@@ -3399,13 +3419,6 @@ export class TranscriptFolder {
       }
       const item = this.items[index]
       if (item === undefined) continue
-      // An anchor Assistant row emits itself plus its displaced Thinking
-      // row in authority order (single emission point — the displaced
-      // row's physical slot is skipped above).
-      if (this.laneDisplayByAnchor.has(index)) {
-        this.emitAnchorWithDisplacedLane(index, grouped)
-        continue
-      }
       // Tombstoned failed-attempt text never renders.
       if (!this.isVisible(item)) continue
       grouped.push(item)
@@ -3469,12 +3482,7 @@ export class TranscriptFolder {
     if (itemStart === undefined || itemEnd < itemStart || firstTurnValue === undefined || lastTurnValue === undefined) {
       return { messages: kept, tools }
     }
-    for (let index = itemStart; index <= itemEnd; index += 1) {
-      // A lane row displaced by `convergeStepLaneOrder` is emitted at its
-      // anchor Assistant row below, never at its physical slot. Both lane
-      // rows share the anchor's turn, so a turn-bounded range always covers
-      // the pair together.
-      if (this.laneDisplayByDisplaced.has(index)) continue
+    for (const index of this.displayOrderedRawIds(itemStart, itemEnd)) {
       const group = this.groupOf.get(index)
       if (group !== undefined) {
         // A cross-turn group may begin before the selected raw range. Its
@@ -3489,14 +3497,6 @@ export class TranscriptFolder {
       }
       const message = this.items[index]
       if (message === undefined) continue
-      // An anchor Assistant row emits itself plus its displaced Thinking
-      // row in authority order (single emission point — the displaced
-      // row's physical slot is skipped above). Thinking rows are not tool
-      // cards: the range's tool count is unaffected.
-      if (this.laneDisplayByAnchor.has(index)) {
-        this.emitAnchorWithDisplacedLane(index, kept)
-        continue
-      }
       // Tombstoned failed-attempt text never renders.
       if (!this.isVisible(message)) continue
       kept.push(message)
@@ -3700,7 +3700,11 @@ export class TranscriptFolder {
       }
       this.searchRefineCount += 1
     } else {
-      for (let id = 0; id < this.searchEntries.length; id += 1) consider(id)
+      // The full lightweight scan walks DISPLAY order (the shared
+      // `displayOrderedRawIds` traversal): match order mirrors the
+      // transcript the user sees, while match ids stay the stable raw
+      // indexes.
+      for (const id of this.displayOrderedRawIds()) consider(id)
       this.searchFullScanCount += 1
     }
     return matches
