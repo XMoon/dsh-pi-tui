@@ -355,7 +355,12 @@ export interface AdvancedHostState {
   setTitle(title: string | undefined): void
   /** Override the working-indicator message (undefined clears). */
   setWorkingMessage(message: string | undefined): void
-  /** Set the tool-output expansion master switch. */
+  /** Set the transcript-detail bulk-expansion master switch (recent
+   * collapsible transcript content). */
+  setTranscriptDetailExpanded(expanded: boolean): void
+  /** Set the transcript-detail bulk-expansion master switch.
+   * @deprecated Use {@link setTranscriptDetailExpanded} — the same runtime
+   * state under its canonical name (post-F6 plan §5.6). */
   setToolsExpanded(expanded: boolean): void
 }
 

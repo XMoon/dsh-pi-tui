@@ -9,6 +9,12 @@
 
 ### 改进
 
+- **Compact 的过程折叠卡现在以「Activity」呈现，拥有独立身份图标与自己的耗时。** 用户可见名称从 `Work` 改为 `Activity`（内部 owner 类型保持不变），头部新增 registry 身份图标：emoji 为 `▸ 🧰 Activity`、symbols 为 `▸ ✦ Activity`、minimal 为 `▸ Activity`（仅表身份，不携带运行/完成状态）。头部遵循 Focus 的信息层级 `<identity> <duration> · <stats>`（如 `▸ 🧰 Activity 8s · 2 tools · 1 subagent`，时长紧跟身份、不在 `·` 之后），窄宽度按阶梯降级——先丢弃最后的统计、时长与身份保留到最后——且永不换行；`· thinking` 标记移除：思考不是生命周期状态，内容仍由 Think 槽承载。
+- **Activity 头部现在显示该过程段自己的实际耗时。** 计时是仅展示层的 wall-clock 侧账，全部取自会话事件时间（思考、工具调用/结果、命令 run/done，以及重试与子代理委派的点证据），在既有的单次聚合遍历内完成；运行中的卡片随现有重绘心跳实时走秒（不新增每卡定时器），证据缺失时省略时长（绝不显示假的 `0s`）；跨回合合并的连续 read 分组会丢弃计时，一个 Activity 的时间跨度绝不跨越回合边界；Preparing → 正式工具调用沿用最早的权威开始时间，已过秒数不再从 `3s` 重置为 `0s`。
+- **Compact 的 Tool 槽现在与 Focus 一致显示 PTC 活跃子调用。** 例如 `Code · Bash ×2 running`；窄宽度降级时优先保留 running 状态、再舍弃根描述文本；嵌套子调用开始/结束会即时刷新折叠 Activity 卡。
+- **`tools` 统计语义在 Focus 头部与 Activity 头部之间收敛。** `N tools` 只统计真实模型工具调用；subagent 委派单独计为 `N subagents`（不再同时算进 tools）；斜杠命令等合成行不再虚增工具数——同一个标签在两个界面只有一种计数口径。
+- **转录细节词汇收敛。** `/settings` 的 "Tool output" 更名为 "Transcript detail"（Bulk expansion for recent collapsible transcript content）；Ctrl+O 的描述改为 "Expand/collapse recent transcript detail"，Alt+T 改为 "Expand/collapse thinking detail"（折叠语义，而非可见性开关）；Display 描述改为 "…Compact folds contiguous process into Activity spans"；`/help` 同步改用以上措辞与生效键位。
+- **Advanced API 新增 `advanced.host.setTranscriptDetailExpanded()`。** 原 `setToolsExpanded()` 保留为 deprecated 别名，两者驱动同一运行时状态（不维护两个字段）。
 - **全屏滚动在大会话与 Focus/Compact 下更流畅。** 纯滚动/纯重绘帧不再每帧重新测量整份转录几何并重建每行点击身份：快照只在内容、折叠、图片加载或窗口尺寸真正变化时重建（几何 epoch）。~1500 挂载块的会话滚动帧耗时约 −37%，Focus 展开约 −27%，Compact 约 −16%；点击与复制的命中判定语义不变（滚动导致单元格位移的按下/松开仍会被拒绝）。
 
 - **转录折叠 / 搜索 / 视口现在收敛到一套 owner 与揭示模型。** 每个隐藏区域在当前界面上都有一个可操作的 owner：常规界面统一用 `Ctrl+O` 主开关操作 Work、Context 簇、普通折叠、长/待发用户折叠以及 assistant 尾部的 delivered files；当该快捷键不可用（被改键或禁用）时这些折叠全部 fail-open，不再渲染无法打开的折叠头或 `(ctrl+o to expand)` 提示。delivered files 另有单独的 per-owner 能力：fullscreen Compact/Focus 或禁用快捷键时直接全部展开；Thinking 由 Alt+T 单独拥有，regular 面禁用 Alt+T 时同样 fail-open（不产生 compact 卡片或 dead 提示）。展开的 Focus 现在把连续过程呈现为可独立折叠的嵌套 `Work` 容器（全屏默认折叠，可用鼠标或搜索临时揭示；常规界面在 Thought 展开时保持完整揭示），显式折叠 Thought 会让该回合的嵌套 Work 回到 Compact 深度。鼠标点击容器内部的空白行现在折叠“最近的共享容器”（嵌套 Work 优先于外层 Thought，簇内空白折叠簇，边界/全局空白无动作）。搜索揭示改为容器路径：导航期间临时打开所有隐藏祖先且不写入手动状态，普通关闭会原子提升这些 owner，显式折叠会撤销临时揭示；搜索只揭示当前真正隐藏的匹配（fail-open 或已经可见的行不会凭空产生 owner）。折叠/展开仍复用既有的语义视口事务（不新增第二套 viewport 模型）。
@@ -39,6 +45,7 @@
 
 ### 修复
 
+- **折叠 Think 预览不再冻结在第一行。** 无论流式还是结算，Think 槽都读取有界推理尾部的最新逻辑行：流式时窗口贴右缘跟随最新 token，结算后显示最新逻辑行的开头截断（此前多行推理永远显示第一行，流式时 UI 看起来像卡住）。Focus 与 Compact 共用同一预览实现（新增共享的 compact-process-preview 权威模块）。
 - **恢复旧会话时，来源信息缺失或损坏的注入上下文不再让整个会话折叠崩溃。** 当历史日志记录了空/非对象的上下文来源时，该行安全降级为独立的通用 Context；未知或未来版本的上下文形式不会被误判为环境类注入，也不会凭空生成摘要或发送者。
 - **Ctrl+F 全文搜索现在按“命中位置”工作，而不是按卡片。** `N/M` 统计和 `↑`/`↓`
   逐个经过同一张卡片里的每一次出现。所有可见命中都会以弱样式标出；当前命中只有

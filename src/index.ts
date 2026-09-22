@@ -1043,6 +1043,7 @@ function applyStreamingToolPreviewInput(
       index: chunk.index,
       name: chunk.name,
       argumentsDelta: chunk.argumentsDelta,
+      time: input.time,
     })
     return
   }
@@ -1055,6 +1056,7 @@ function applyStreamingToolPreviewInput(
       step: input.step,
       index: chunk.index,
       name,
+      time: input.time,
     })
   }
 }
@@ -8504,6 +8506,7 @@ export function apply(ctx: Context, config: Config): void {
         setTheme: (name) => app.advancedHostState().setTheme(name),
         setTitle: (title) => app.advancedHostState().setTitle(title),
         setWorkingMessage: (message) => app.advancedHostState().setWorkingMessage(message),
+        setTranscriptDetailExpanded: (expanded) => app.advancedHostState().setTranscriptDetailExpanded(expanded),
         setToolsExpanded: (expanded) => app.advancedHostState().setToolsExpanded(expanded),
       })
       // Phase 3: the UNSTABLE low-level surface seam (plan §10) — the

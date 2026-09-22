@@ -83,6 +83,23 @@ test('host state: setToolsExpanded toggles the expansion master switch', async (
   app.stop()
 })
 
+test('host state: setTranscriptDetailExpanded is the canonical name and setToolsExpanded the deprecated alias of the SAME state', async () => {
+  const { app } = await appWithHostState()
+  const host = app.advancedHostStateForTest()
+  assert.equal(app.isTranscriptDetailExpanded(), false)
+  host.setTranscriptDetailExpanded(true)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the canonical name toggles the master')
+  // The deprecated alias drives the SAME runtime state — never a second
+  // field (post-F6 plan §5.6).
+  host.setToolsExpanded(false)
+  assert.equal(app.isTranscriptDetailExpanded(), false)
+  host.setToolsExpanded(true)
+  assert.equal(app.isTranscriptDetailExpanded(), true)
+  host.setTranscriptDetailExpanded(false)
+  assert.equal(app.isTranscriptDetailExpanded(), false)
+  app.stop()
+})
+
 test('host state: setTheme fires the runner handler for non-built-in names; dark/light apply directly', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
@@ -119,6 +136,7 @@ test('host state: a disposed surface is inert', async () => {
   host.setTheme('light')
   host.setTitle('late')
   host.setWorkingMessage('late')
+  host.setTranscriptDetailExpanded(true)
   host.setToolsExpanded(true)
   assert.equal(host.getTheme(), 'dark', 'the disposed surface keeps the last theme')
   app.stop()

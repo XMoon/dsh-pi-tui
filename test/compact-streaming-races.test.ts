@@ -65,7 +65,7 @@ const preparingRows = (view: string): number[] =>
   view.split('\n').flatMap((line, index) => line.includes('Preparing') ? [index] : [])
 
 const workHeaders = (view: string): string[] =>
-  view.split('\n').filter(line => /^\s*(?:▸|▾) Work(?: ·|$)/.test(line))
+  view.split('\n').filter(line => /^\s*(?:▸|▾) (?:🧰 )?Activity(?: | ·|$)/.test(line))
 
 // --- S5: Preparing becomes durable ----------------------------------------
 

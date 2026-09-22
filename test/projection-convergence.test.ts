@@ -381,7 +381,7 @@ function show(app: TuiApp, messages: readonly TranscriptMessage[]): void {
   app.setTranscript(messages, new Map())
 }
 
-const workHeader = (view: string): boolean => view.split('\n').some(line => /^\s*[▸▾] Work(?: ·|$)/.test(line))
+const workHeader = (view: string): boolean => view.split('\n').some(line => /^\s*[▸▾] (?:🧰 )?Activity(?: | ·|$)/.test(line))
 
 /** A short window that fits one viewport: one Work span, one ambient cluster
  * and a trailing Work span, so surface presentation is directly observable. */
@@ -456,7 +456,7 @@ test('an expanded-Focus search reveals the nested Work without minting a manual 
   await vt.waitForRender()
   const revealed = vt.getViewport().join('\n')
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the nested Work reveal is presentation-only')
-  assert.ok(revealed.includes('▾ Work'), `expanded Focus must reveal the nested Work that hides the matched row:\n${revealed}`)
+  assert.ok(revealed.includes('▾ 🧰 Activity'), `expanded Focus must reveal the nested Work that hides the matched row:\n${revealed}`)
   assert.equal(app.expandedContextClusterOwnersForTest().size, 0, 'a Process target is never promoted as a cluster owner')
 })
 

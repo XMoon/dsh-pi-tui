@@ -104,7 +104,10 @@ function workFixture(): SessionEvent[] {
 
 function workHeaders(view: string, expanded?: boolean): string[] {
   const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
-  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} Work(?: ·|$)`).test(line))
+  // post-F6 plan §6.1/§6.2: the visible container is `Activity` with the
+  // registry work icon (emoji style renders 🧰); the grammar is
+  // `<identity> <duration> · <stats>` (§6.3).
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} (?:🧰 )?Activity(?: | ·|$)`).test(line))
 }
 
 function clusterHeaders(view: string, expanded?: boolean): string[] {
@@ -129,9 +132,9 @@ test('Compact renders Work headers with Think/Tool previews and no Message slot'
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
 
-  assert.equal(workHeaders(view).length, 2, `expected two contiguous Work spans:\n${view}`)
-  assert.match(view, /▸ Work · 1 tool · thinking/)
-  assert.match(view, /▸ Work · 1 tool · thinking/)
+  assert.equal(workHeaders(view).length, 2, `expected two contiguous Activity spans:\n${view}`)
+  assert.match(view, /▸ 🧰 Activity \d+(?:m \d+s|s)? · 1 tool/)
+  assert.ok(!view.includes('· thinking'), 'the `· thinking` lifecycle marker is gone (post-F6 plan §6.4)')
   assert.match(view, /Think:\s+verifying upstream wake semantics/)
   assert.match(view, /Tool:\s+✓ Read src\/tui-app\.ts/)
   assert.match(view, /Think:\s+checking the current mount transaction/)
@@ -139,7 +142,7 @@ test('Compact renders Work headers with Think/Tool previews and no Message slot'
   assert.ok(view.includes('I found where the stale viewport identity is introduced.'),
     'the assistant intermediate narration stays visible in chronology')
   assert.ok(view.includes('final answer'))
-  assert.ok(!view.includes('Message:'), 'Compact Work has no Message slot')
+  assert.ok(!view.includes('Message:'), 'Compact Activity has no Message slot')
 })
 
 test('a Work header click expands its member rows and collapses again', async () => {
@@ -150,8 +153,8 @@ test('a Work header click expands its member rows and collapses again', async ()
   app.setFullscreen(true)
   await vt.waitForRender()
   let view = vt.getViewport()
-  const headerRow = rowOf(view, /▸ Work · 1 tool · thinking/)
-  assert.ok(headerRow >= 0, 'precondition: the first Work header is visible')
+  const headerRow = rowOf(view, /▸ 🧰 Activity/)
+  assert.ok(headerRow >= 0, 'precondition: the first Activity header is visible')
   assert.equal(app.expandedWorkOwnersForTest().size, 0)
 
   click(vt, 3, headerRow + 1)
@@ -161,7 +164,7 @@ test('a Work header click expands its member rows and collapses again', async ()
   assert.equal(workHeaders(view.join('\n'), true).length, 1, 'the opened span renders the expanded glyph')
   assert.equal(workHeaders(view.join('\n'), false).length, 1, 'the other span stays collapsed')
 
-  const expandedRow = rowOf(view, /▾ Work · 1 tool · thinking/)
+  const expandedRow = rowOf(view, /▾ 🧰 Activity/)
   // A different column avoids the fork's double-click word-selection gesture.
   click(vt, 5, expandedRow + 1)
   await vt.waitForRender()
@@ -229,7 +232,7 @@ test('a Work span opened only by the search reveal collapses by revoking the rev
     message: hiddenThinking,
   })
   await vt.waitForRender()
-  const revealedRow = rowOf(vt.getViewport(), /▾ Work · 1 tool · thinking/)
+  const revealedRow = rowOf(vt.getViewport(), /▾ 🧰 Activity/)
   assert.ok(revealedRow >= 0, 'precondition: the granted reveal opened the owning span')
   assert.equal(app.expandedWorkOwnersForTest().size, 0)
 
@@ -337,10 +340,10 @@ test('an ephemeral pending Work renders Header + Tool slot with no lifecycle suf
   const lines = vt.getViewport()
   const view = lines.join('\n')
   assert.equal(workHeaders(view).length, 1, `a pending Work header renders:\n${view}`)
-  assert.ok(lines.some(line => /^\s*▸ Work\s*$/.test(line)),
+  assert.ok(lines.some(line => /^\s*▸ 🧰 Activity\s*$/.test(line)),
     `the pending header carries NO lifecycle suffix (no visual jump when the durable span lands):\n${view}`)
   assert.match(view, /Tool:\s+Preparing Bash/)
-  assert.ok(!view.includes('preparing') || !lines.some(line => /▸ Work ·/.test(line)))
+  assert.ok(!view.includes('preparing') || !lines.some(line => /▸ 🧰 Activity ·/.test(line)))
 })
 
 test('a live Preparing call never crosses a closed Work boundary', async () => {
@@ -413,7 +416,7 @@ test('a Work header stays inspectable while a Question owns the modal', async ()
   await vt.waitForRender()
   const promise = app.askQuestions([{ id: 'q1', question: 'Inspect context?', options: [{ label: 'Continue' }] }])
   await vt.waitForRender()
-  const row = rowOf(vt.getViewport(), /▸ Work · 1 tool · thinking/)
+  const row = rowOf(vt.getViewport(), /▸ 🧰 Activity.*· 1 tool/)
   assert.ok(row >= 0, `collapsed Work header missing behind the Question:\n${vt.getViewport().join('\n')}`)
 
   click(vt, 5, row + 1)

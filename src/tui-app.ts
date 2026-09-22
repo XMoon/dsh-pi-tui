@@ -169,7 +169,8 @@ import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallb
 import type { TranscriptWindowState } from './transcript-window.ts'
 import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
 import { createScrollRenderProfiler } from './scroll-render-profile.ts'
-import { FocusActivityComponent, focusPreparingSummary, isCollapsedFocusHiddenRow, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
+import { FocusActivityComponent, isCollapsedFocusHiddenRow, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
+import { compactPreparingSummary } from './compact-process-preview.ts'
 import { projectCompact } from './compact-projection.ts'
 import { clusterByMemberOf, isTranscriptWorkMember, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
 import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './transcript-disclosure.ts'
@@ -524,6 +525,10 @@ export interface StreamingToolPreview {
   readonly summary?: string
   /** Bounded partial args retained until summary is found or a known-name scan reaches the cap. */
   readonly scanPrefix?: string
+  /** The first streamed delta's time (post-F6 plan §12.14): the pending
+   * Activity card's duration and the durable call's start both read it, so
+   * the elapsed time never resets across the Preparing → durable handoff. */
+  readonly startedAt?: number
 }
 
 /** The indeterminate progress-bar frames shown while a compaction runs:
@@ -9303,7 +9308,7 @@ export class TuiApp {
         continue
       }
       // The collapsed run's Tool slot owns the live call (plan §36).
-      const preparingSummary = focusPreparingSummary(previews)
+      const preparingSummary = compactPreparingSummary(previews)
       if (workBlock?.kind === 'work' && preparingSummary !== undefined) {
         blocks[workIndex] = { ...workBlock, preparingSummary }
       }
@@ -9448,7 +9453,12 @@ export class TuiApp {
 
   /** The content signature of one Work card: everything the collapsed header
    * and previews render from. Member topology is compared separately (a
-   * boundary change is structural); this only decides content refresh. */
+   * boundary change is structural); this only decides content refresh. The
+   * active PTC child topology is part of the signature (post-F6 plan §9.4):
+   * a nested child starting/stopping must refresh the collapsed Activity
+   * even when the root tool status/display does not change. All inputs stay
+   * bounded — the Think text is the span's bounded tail, never the raw
+   * body (post-F6 plan §20). */
   private compactWorkSignature(
     span: TranscriptWorkSpan,
     toolDisplay: string | undefined,
@@ -9463,6 +9473,7 @@ export class TuiApp {
       summary.tool?.status ?? '',
       toolDisplay ?? '',
       preparingSummary ?? '',
+      (summary.activeSubCalls ?? []).map(call => `${call.name}:${call.count}`).join('|'),
     ].join('\u0000')
   }
 
@@ -9551,7 +9562,7 @@ export class TuiApp {
         projectionExpanded.has(block.activity.turn),
         this.focusToolDisplayFor(block.activity),
         isFocusDisplayPreset(this.displayState.preset) && !projectionExpanded.has(block.activity.turn)
-          ? focusPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
+          ? compactPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
           : undefined,
       )
     }
@@ -9561,9 +9572,16 @@ export class TuiApp {
     if (block.kind === 'context-cluster') return this.contextClusterComponentFor(block.cluster, block.expanded)
     if (block.kind === 'streaming-tool-previews') {
       if (block.pendingWork === true) {
+        // The pending Activity card's elapsed time starts at the live
+        // call's earliest authoritative start (post-F6 plan §12.14).
+        const startedAt = block.previews
+          .map(preview => preview.startedAt)
+          .filter((at): at is number => at !== undefined)
+          .reduce((earliest, at) => Math.min(earliest, at), Number.POSITIVE_INFINITY)
         return new CompactPendingWorkComponent({
-          preparingSummary: focusPreparingSummary(block.previews) ?? '',
+          preparingSummary: compactPreparingSummary(block.previews) ?? '',
           iconStyle: this.iconStyle,
+          ...(Number.isFinite(startedAt) ? { startedAt } : {}),
         })
       }
       return this.streamingToolPreviewComponent(block.previews, width)
@@ -13493,8 +13511,8 @@ export class TuiApp {
 
   /**
    * Phase 4: the ADVANCED host-state facade (plan §4D) — theme query/
-   * select, title override, working-indicator override and tool-expansion
-   * preference. A disposed surface is inert.
+   * select, title override, working-indicator override and
+   * transcript-detail expansion. A disposed surface is inert.
    */
   advancedHostState(): import('./extension/advanced-types.ts').AdvancedHostState {
     const app = this
@@ -13522,6 +13540,12 @@ export class TuiApp {
         app.workingMessageOverride = message ?? undefined
         app.reconcileWorkingRow()
         app.requestRender()
+      },
+      // Both names drive the SAME runtime state — one field, two spellings
+      // (post-F6 plan §5.6: `setToolsExpanded` is the deprecated alias).
+      setTranscriptDetailExpanded: (expanded) => {
+        if (app.disposed) return
+        app.setTranscriptDetailExpanded(expanded)
       },
       setToolsExpanded: (expanded) => {
         if (app.disposed) return

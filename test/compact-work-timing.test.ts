@@ -1,0 +1,450 @@
+/**
+ * Post-F6 PR B Activity span semantics: origin-aware tool/subagent counts
+ * (§10), active PTC child parity (§9.4) and span-local wall-clock timing
+ * (§12) over TranscriptFolder folds, including live/cold parity, grouped
+ * reads and the Preparing → durable elapsed continuity.
+ * @module @xmoon76/dsh-pi-tui/compact-work-timing.test
+ */
+
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { TranscriptFolder, transcriptTimingOf } from '../src/transcript.ts'
+import { summarizeWorkSpan, formatWorkHeaderLine, CompactWorkComponent } from '../src/compact-work.ts'
+import type { TranscriptWorkSpan } from '../src/transcript-projection.ts'
+import { projectTranscriptStructure } from '../src/transcript-projection.ts'
+
+const T0 = 1_000_000
+
+function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
+  return { type, seq, time, data } as unknown as SessionEvent
+}
+
+function toolResultEvent(turn: number, callId: string, time: number, seq: number): SessionEvent {
+  return eventAt('tool/result', {
+    turn, step: 0,
+    message: {
+      id: MessageId(`r-${callId}`), role: 'user',
+      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text: 'ok' }] }],
+      source: { kind: 'tool', callId: ToolCallId(callId) },
+    },
+  }, time, seq)
+}
+
+function fold(events: readonly SessionEvent[]): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  folder.hydrate(events)
+  return folder
+}
+
+/** The canonical Work spans of the LAST turn in the folder's message list. */
+function spansOf(messages: ReturnType<TranscriptFolder['messages']>): TranscriptWorkSpan[] {
+  const blocks = projectTranscriptStructure(messages)
+  return blocks.filter((block): block is { kind: 'work'; span: TranscriptWorkSpan } => block.kind === 'work').map(block => block.span)
+}
+
+function toolCall(turn: number, callId: string, name: string, time: number, seq: number, args = '{}'): SessionEvent {
+  return eventAt('tool/call', { turn, step: 0, callId: ToolCallId(callId), name, arguments: args }, time, seq)
+}
+
+test('stats: two genuine model tool calls read `2 tools` (no synthetic inflation)', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 100, 1),
+    toolResultEvent(1, 'c1', T0 + 200, 2),
+    toolCall(1, 'c2', 'bash', T0 + 300, 3),
+    toolResultEvent(1, 'c2', T0 + 400, 4),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.toolCount, 2)
+  assert.equal(summary.subagentCount, 0)
+})
+
+test('stats: a subagent delegation counts ONLY as a subagent, never as a tool', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 100, 1),
+    toolResultEvent(1, 'c1', T0 + 200, 2),
+    eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, T0 + 250, 3),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.toolCount, 1, 'the delegation does not inflate tools')
+  assert.equal(summary.subagentCount, 1)
+  assert.match(formatWorkHeaderLine(summary, false, 120), /1 tool · 1 subagent/)
+})
+
+test('stats: a command-only Activity has no fake `1 tool`', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, T0 + 100, 1),
+    eventAt('command/done', { commandId: 'cmd1', kind: 'success', text: 'theme set' }, T0 + 300, 2),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.toolCount, 0)
+  assert.equal(summary.subagentCount, 0)
+  const header = formatWorkHeaderLine(summary, false, 120)
+  assert.ok(!header.includes('tool'), `no fake tool stat:\n${header}`)
+})
+
+test('stats: turn-error synthetic cards are attention rows and never enter a span count', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 100, 1),
+    toolResultEvent(1, 'c1', T0 + 200, 2),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'E', message: 'boom' } } }, T0 + 500, 3),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.toolCount, 1, 'only the genuine call counts')
+  assert.ok(!span.members.some(member => member.kind === 'tool' && member.origin === 'turn-error'),
+    'the synthetic error card is not a Work member')
+})
+
+test('stats: Focus toolCalls and the Activity toolCount agree on genuine calls', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 100, 1),
+    toolResultEvent(1, 'c1', T0 + 200, 2),
+    eventAt('subagent/descriptor', { label: 'scout' }, T0 + 250, 3),
+    toolCall(1, 'c2', 'bash', T0 + 300, 4),
+    toolResultEvent(1, 'c2', T0 + 400, 5),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const activity = folder.turnActivities().get(1)
+  assert.equal(summarizeWorkSpan(span).toolCount, activity?.toolCalls)
+})
+
+test('active PTC children: the Activity summary carries the same active child state as Focus', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'root1', 'run_code', T0 + 100, 1, '{}'),
+  ])
+  folder.apply([eventAt('tool/ptc-dispatch-start', {
+    rootCallId: ToolCallId('root1'), parentCallId: ToolCallId('root1'), subCallId: 's1', name: 'bash', arguments: {},
+  }, T0 + 150, 2)])
+  const running = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  assert.deepEqual(running.activeSubCalls, [{ name: 'bash', count: 1 }], 'a running child shows in the Activity summary')
+  folder.apply([eventAt('tool/ptc-dispatch', {
+    rootCallId: ToolCallId('root1'), parentCallId: ToolCallId('root1'), subCallId: 's1', name: 'bash', arguments: {}, isError: false,
+    content: [{ type: 'text', text: 'done' }],
+  }, T0 + 900, 3)])
+  const settled = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  assert.equal(settled.activeSubCalls, undefined, 'a settled child drops the suffix')
+})
+
+test('timing: a Thinking → Tool Activity uses its own wall span', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 2_000, 1),
+    toolResultEvent(1, 'c1', T0 + 6_000, 2),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'thinking' },
+          { type: 'text', text: 'done' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      // The durable embedded stream carries the lane timing: the Thinking
+      // lane was visible T0+1s → T0+1.5s (post-F6 plan §12.5).
+      stream: [
+        { type: 'chunk', time: T0 + 1_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { type: 'chunk', time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking' } },
+        { type: 'chunk', time: T0 + 1_500, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'thinking' } } },
+        { type: 'chunk', time: T0 + 6_500, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+        { type: 'chunk', time: T0 + 6_500, chunk: { type: 'text-delta', index: 1, text: 'done' } },
+        { type: 'chunk', time: T0 + 6_800, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'done' } } },
+      ],
+    }, T0 + 7_000, 3),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  assert.ok(summary.timing, 'span-local timing exists')
+  assert.equal(summary.timing?.startedAt, T0 + 1_000, 'the span starts at the reasoning evidence')
+  // The latest owned end: the step's lane evidence runs to the stream end
+  // (T0+6.8s) — later than the tool result, and the wall span owns it.
+  assert.equal(summary.timing?.endedAt, T0 + 6_800, 'the span ends at the latest owned evidence')
+  assert.equal(summary.timing?.running, false)
+  assert.match(formatWorkHeaderLine(summary, false, 120, 'emoji', '5s'), /Activity 5s · 1 tool/)
+})
+
+test('timing: overlapping evidence uses the wall span, never the summed durations', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 0, 1),
+    toolCall(1, 'c2', 'bash', T0 + 2_000, 2),
+    toolResultEvent(1, 'c1', T0 + 4_000, 3),
+    toolResultEvent(1, 'c2', T0 + 9_000, 4),
+  ])
+  const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  assert.equal(summary.timing?.startedAt, T0)
+  assert.equal(summary.timing?.endedAt, T0 + 9_000, 'wall span 9s, not 4s + 7s = 11s')
+})
+
+test('timing: a running Tool shows a live duration that follows now', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'bash', T0 + 1_000, 1),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.timing?.running, true)
+  let now = T0 + 4_000
+  const component = new CompactWorkComponent({ span, expanded: false, toolDisplay: 'Bash x', now: () => now })
+  const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
+  assert.match(line, /Activity 3s/, `the running header reads now at render:\n${line}`)
+  now = T0 + 6_500
+  const line2 = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
+  assert.match(line2, /Activity 5s/, 'the duration advances with the repaint heartbeat')
+  assert.equal(summary.tool?.status, 'running')
+})
+
+test('timing: a settled Activity duration stops changing', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 1_000, 1),
+    toolResultEvent(1, 'c1', T0 + 4_000, 2),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const component = new CompactWorkComponent({ span, expanded: false, toolDisplay: 'Read a.ts', now: () => T0 + 999_999 })
+  const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.match(strip(component.render(120)[0] ?? ''), /Activity 3s/)
+  assert.ok(!strip(component.render(120)[0] ?? '').includes('996s'), 'settled does not read now')
+})
+
+test('timing: point-only evidence never fabricates `Activity 0s`', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('llm/retry', { turn: 1, step: 0, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, T0 + 100, 1),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  assert.ok(summary.timing, 'the retry point contributed evidence')
+  const header = formatWorkHeaderLine(summary, false, 120, 'emoji', undefined)
+  assert.ok(!header.includes('0s'), `a point-only span omits the duration:\n${header}`)
+  assert.equal(header.includes('Activity'), true)
+})
+
+test('timing: an llm-retry point contributes to a mixed span without inventing a retry duration', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 1_000, 1),
+    eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 3_000, failure: { code: 'X', message: 'x' } }, T0 + 2_000, 2),
+    toolResultEvent(1, 'c1', T0 + 5_000, 3),
+  ])
+  const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  assert.equal(summary.timing?.startedAt, T0 + 1_000)
+  assert.equal(summary.timing?.endedAt, T0 + 5_000)
+})
+
+test('timing: Preparing → durable handoff keeps the elapsed time (no 3s → 0s reset)', () => {
+  const folder = new TranscriptFolder()
+  // Live streamed tool-call arguments start at T0 + 2s; the durable call
+  // lands at T0 + 5s; the result settles at T0 + 8s.
+  folder.hydrate([eventAt('turn/start', { turn: 1 }, T0, 0)])
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: T0 + 2_000, chunk: { type: 'tool-call-delta', index: 2, id: 'pc1', name: 'bash', argumentsDelta: '{"c"' } })
+  folder.apply([toolCall(1, 'pc1', 'bash', T0 + 5_000, 1)])
+  const runningSpan = spansOf(folder.messages())[0]!
+  const running = summarizeWorkSpan(runningSpan)
+  assert.equal(running.timing?.startedAt, T0 + 2_000, 'the durable card inherits the preparing start')
+  folder.apply([toolResultEvent(1, 'pc1', T0 + 8_000, 2)])
+  const settled = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  assert.equal(settled.timing?.startedAt, T0 + 2_000)
+  assert.equal(settled.timing?.endedAt, T0 + 8_000, '6s wall span, never a reset to 3s')
+})
+
+test('timing: grouped reads aggregate their members within one turn', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 1_000, 1),
+    toolResultEvent(1, 'c1', T0 + 2_000, 2),
+  ])
+  folder.apply([
+    toolCall(1, 'c2', 'read', T0 + 3_000, 3),
+    toolResultEvent(1, 'c2', T0 + 4_000, 4),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.toolCount, 1, 'the merged group is one tool row')
+  assert.equal(summary.timing?.startedAt, T0 + 1_000, 'the group aggregates its members')
+  assert.equal(summary.timing?.endedAt, T0 + 4_000)
+})
+
+test('timing: a cross-turn grouped read never leaks timing across turn boundaries', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 1_000, 1),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, T0 + 2_000, 2),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2_500, 3),
+    eventAt('turn/start', { turn: 2 }, T0 + 3_000, 4),
+    toolCall(2, 'c2', 'read', T0 + 4_000, 5),
+    toolResultEvent(2, 'c2', T0 + 6_000, 6),
+  ])
+  const messages = folder.messages()
+  const group = messages.find(message => message.kind === 'tool' && message.args === '2 files')
+  assert.ok(group !== undefined && group.kind === 'tool', 'fixture: the cross-turn read group merged')
+  assert.equal(group.kind === 'tool' ? group.turn : undefined, 2, 'the group is displayed on its latest turn')
+  assert.equal(transcriptTimingOf(group), undefined, 'cross-turn attribution omits the group timing')
+  const turn2 = summarizeWorkSpan(spansOf(messages).find(span => span.turn === 2)!)
+  assert.equal(turn2.timing, undefined, 'turn 2 Activity must not inherit turn 1 read timing')
+})
+
+test('timing: live folding and cold hydration produce the same Activity timing', () => {
+  const durableEvents: SessionEvent[] = [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 2_000, 1),
+    toolResultEvent(1, 'c1', T0 + 5_000, 2),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'think' },
+          { type: 'text', text: 'done' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [
+        { type: 'chunk', time: T0 + 1_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { type: 'chunk', time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } },
+        { type: 'chunk', time: T0 + 1_500, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'think' } } },
+        { type: 'chunk', time: T0 + 6_000, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+        { type: 'chunk', time: T0 + 6_000, chunk: { type: 'text-delta', index: 1, text: 'done' } },
+        { type: 'chunk', time: T0 + 6_200, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'done' } } },
+      ],
+    }, T0 + 6_000, 3),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 7_000, 4),
+  ]
+  // The LIVE folder saw the same reasoning deltas through the transient
+  // plane BEFORE the durable settlement; the COLD folder only hydrates the
+  // durable log. The Activity timing must agree.
+  const live = new TranscriptFolder()
+  live.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } })
+  for (const event of durableEvents) live.apply([event])
+  const cold = new TranscriptFolder()
+  cold.hydrate(durableEvents)
+  const liveSummary = summarizeWorkSpan(spansOf(live.messages())[0]!)
+  const coldSummary = summarizeWorkSpan(spansOf(cold.messages())[0]!)
+  assert.deepEqual(liveSummary.timing, coldSummary.timing, 'live and cold agree')
+  assert.equal(liveSummary.timing?.startedAt, T0 + 1_000)
+  assert.equal(liveSummary.timing?.endedAt, T0 + 6_200, 'the wall span ends at the latest lane evidence')
+  assert.deepEqual(liveSummary.think, coldSummary.think)
+})
+
+test('timing: a group that BECOMES cross-turn on append drops its stale same-turn timing', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 1_000, 1),
+    toolResultEvent(1, 'c1', T0 + 2_000, 2),
+  ])
+  folder.apply([
+    toolCall(1, 'c2', 'read', T0 + 3_000, 3),
+    toolResultEvent(1, 'c2', T0 + 4_000, 4),
+  ])
+  const merged = folder.messages().find(message => message.kind === 'tool' && message.args === '2 files')
+  assert.ok(merged !== undefined && merged.kind === 'tool', 'fixture: the same-turn group formed')
+  const before = transcriptTimingOf(merged)
+  assert.ok(before !== undefined && before.startedAt === T0 + 1_000,
+    `precondition: the same-turn group carries its aggregate timing:\n${JSON.stringify(before)}`)
+  // A third consecutive read settles in the NEXT turn: the SAME group card
+  // becomes cross-turn via appendTailGrouping and is displayed on turn 2.
+  folder.apply([
+    eventAt('turn/start', { turn: 2 }, T0 + 5_000, 5),
+    toolCall(2, 'c3', 'read', T0 + 6_000, 6),
+    toolResultEvent(2, 'c3', T0 + 8_000, 7),
+  ])
+  const group = folder.messages().find(message => message.kind === 'tool' && message.args === '3 files')
+  assert.ok(group !== undefined && group.kind === 'tool', 'fixture: the group extended to three members')
+  assert.equal(group.turn, 2, 'the group is displayed on its latest turn')
+  // §25 reject condition: cross-turn grouped read must not leak timing.
+  assert.equal(transcriptTimingOf(group), undefined,
+    'a group that becomes cross-turn must DROP its stale same-turn span')
+  const turn2 = summarizeWorkSpan(spansOf(folder.messages()).find(span => span.turn === 2)!)
+  assert.equal(turn2.timing, undefined, 'turn 2 Activity must not inherit turn-1 read timing')
+})
+
+test('timing: a retried Thinking re-records the new attempt start', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([eventAt('turn/start', { turn: 1 }, T0, 0)])
+  // Attempt 1 streams reasoning; its live plane closes as COMMITTED (the
+  // entry stays mounted, closed) while the step itself never settled.
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a1', turn: 1, step: 0, time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'first attempt' } })
+  folder.applyLiveInput({ kind: 'end', sessionId: 's', attemptId: 'a1', turn: 1, step: 0, status: 'committed' })
+  // Attempt 2 reopens the SAME (turn, step): the reopen clears the stale
+  // sidecar, and the new attempt's FIRST chunk must re-record the start
+  // (post-F6 plan §12.6) — otherwise the streaming reasoning runs UNTIMED.
+  folder.applyLiveInput({ kind: 'start', sessionId: 's', attemptId: 'a2', turn: 1, step: 0 })
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a2', turn: 1, step: 0, time: T0 + 5_000, chunk: { type: 'reasoning-delta', index: 0, text: 'second attempt' } })
+  const thinking = folder.messages().find(message => message.kind === 'thinking' && message.text.includes('second attempt'))
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking', 'fixture: the reopened reasoning row exists')
+  const timing = transcriptTimingOf(thinking)
+  assert.ok(timing !== undefined, 'the reopened reasoning must carry timing evidence while it streams')
+  assert.equal(timing.startedAt, T0 + 5_000, 'the start is the NEW attempt first chunk, not the old one')
+  assert.equal(timing.running, true, 'the new attempt is still streaming')
+  assert.equal(timing.endedAt, undefined, 'no fabricated end while running')
+})
+
+test('timing: a thinking-only Activity wall-spans its reasoning evidence', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'only reasoning' },
+          { type: 'text', text: 'answer' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [
+        { type: 'chunk', time: T0 + 1_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { type: 'chunk', time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'only reasoning' } },
+        { type: 'chunk', time: T0 + 3_000, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'only reasoning' } } },
+        { type: 'chunk', time: T0 + 4_000, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+        { type: 'chunk', time: T0 + 4_000, chunk: { type: 'text-delta', index: 1, text: 'answer' } },
+        { type: 'chunk', time: T0 + 4_500, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'answer' } } },
+      ],
+    }, T0 + 5_000, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 6_000, 2),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.toolCount, 0, 'a thinking-only Activity has no tools')
+  assert.equal(summary.tool, undefined)
+  assert.equal(summary.timing?.startedAt, T0 + 1_000, 'the span starts with the reasoning lane')
+  assert.equal(summary.timing?.endedAt, T0 + 4_500, 'the span ends at the latest lane evidence')
+  const header = formatWorkHeaderLine(summary, false, 120, 'emoji', '3s')
+  assert.ok(!header.includes('tool'), `no tool stat:\n${header}`)
+  assert.match(header, /Activity 3s/)
+})
+
+test('timing: a running Thinking shows a live Activity duration', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([eventAt('turn/start', { turn: 1 }, T0, 0)])
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'streaming reasoning...' } })
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.timing?.running, true, 'the reasoning row is still streaming')
+  assert.equal(summary.timing?.startedAt, T0 + 1_000)
+  assert.equal(summary.think?.running, true)
+  const component = new CompactWorkComponent({ span, expanded: false, now: () => T0 + 4_500 })
+  const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
+  assert.match(line, /Activity 3s/, `the running header reads now at render:\n${line}`)
+})

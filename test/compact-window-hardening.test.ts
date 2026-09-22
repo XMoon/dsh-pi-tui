@@ -124,7 +124,7 @@ test('9.1 an A -> B -> A page round-trip on the SAME message objects never resur
     'the A -> B -> A round-trip must not resurrect the Work owner')
   assert.equal(app.expandedContextClusterOwnersForTest().has(clusterOwner), false,
     'the round-trip must not resurrect the cluster owner')
-  assert.ok(!view.split('\n').some(line => /^\s*▾ Work(?: ·|$)/.test(line)),
+  assert.ok(!view.split('\n').some(line => /^\s*▾ 🧰 Activity(?: | ·|$)/.test(line)),
     `the Work span stays collapsed after the round-trip:\n${view}`)
   assert.ok(!view.split('\n').some(line => /^\s*▾ .*Context ·/.test(line)),
     `the cluster stays collapsed after the round-trip:\n${view}`)
@@ -181,7 +181,7 @@ test('9.2 the window prune keeps owners that are still projected when paging fro
   app.setDisplayPreset('compact')
   await vt.waitForRender()
   assert.equal(app.expandedWorkOwnersForTest().has(owner), true)
-  assert.ok(vt.getViewport().join('\n').split('\n').some(line => /^\s*▾ Work(?: ·|$)/.test(line)),
+  assert.ok(vt.getViewport().join('\n').split('\n').some(line => /^\s*▾ 🧰 Activity(?: | ·|$)/.test(line)),
     `the span stays expanded in Compact:\n${vt.getViewport().join('\n')}`)
 })
 
@@ -198,7 +198,7 @@ test('9.2 a Work disclosure from an older window is not re-applied to a new page
   app.setTranscript([newOwner, tool(9, 'new result')], new Map(), { mode: 'history', endTurn: 9, firstTurn: 9, lastTurn: 9 })
   await vt.waitForRender()
   assert.equal(app.expandedWorkOwnersForTest().has(newOwner), false, 'the new page owner starts collapsed')
-  assert.match(vt.getViewport().join('\n'), /▸ Work · 1 tool/)
+  assert.match(vt.getViewport().join('\n'), /▸ 🧰 Activity.*· 1 tool/)
 })
 
 // --- 9.3 restored legacy Context inside a window ---------------------------

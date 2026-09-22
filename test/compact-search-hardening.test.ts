@@ -38,7 +38,7 @@ function clusterHeaderCount(view: string, expanded?: boolean): number {
 
 function workHeaderCount(view: string, expanded?: boolean): number {
   const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
-  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} Work(?: ·|$)`).test(line)).length
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} (?:🧰 )?Activity(?: | ·|$)`).test(line)).length
 }
 
 const ambient = (label: string, form: 'instructions' | 'catalog' | 'snapshot', text: string): TranscriptMessage => ({
