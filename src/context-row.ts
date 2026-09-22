@@ -51,16 +51,36 @@ function bodyGeometry(width: number): { indent: string; contentWidth: number } {
 
 /** Wrap one logical text at the current width and paint every physical row.
  * Never truncates to a single row: the caller's contract decides how many
- * rows are shown. */
+ * rows are shown.
+ *
+ * Wide-grapheme artifact suppression (width contract): `wrapTextWithAnsi`
+ * cannot split a wide grapheme, so a CONTENT-BEARING logical line can come
+ * back as a zero-width physical row beside an over-wide one (a CJK/emoji
+ * glyph at content width 1 yields `['', glyph]`). That zero-width row carries
+ * no visible content — it is a wrapping artifact, and keeping it would add a
+ * ghost physical row and shift the long-message window/threshold math.
+ * Provenance is per LOGICAL LINE: a blank or whitespace-only line keeps its
+ * established blank-row contract. A blanket `visibleWidth(row) === 0` filter
+ * would delete genuinely blank source lines, so it is deliberately not used.
+ */
 function wrappedRows(text: string, width: number, paint: (row: string) => string): string[] {
   if (text === '') return []
   const safeWidth = Math.max(1, width)
-  // `wrapTextWithAnsi` cannot split a wide grapheme: an over-wide token (CJK,
-  // an emoji) comes back as a row WIDER than the requested width (and a
-  // zero-width row beside it). Truncate every wrapped row at the current
-  // width so each returned element is exactly one physical row — the same
-  // defensive rule CompactTextPreview applies.
-  return wrapTextWithAnsi(text, safeWidth).map(row => paint(truncateToWidth(row, safeWidth, '…')))
+  const rows: string[] = []
+  for (const logical of text.split(/\r\n|\r|\n/)) {
+    const wrapped = wrapTextWithAnsi(logical, safeWidth)
+    // A blank/whitespace-only logical line is NOT an artifact question: its
+    // rows are kept exactly as the blank-line contract produces them.
+    if (!/\S/.test(logical)) {
+      for (const row of wrapped) rows.push(truncateToWidth(row, safeWidth, '…'))
+      continue
+    }
+    for (const row of wrapped) {
+      const clipped = truncateToWidth(row, safeWidth, '…')
+      if (clipped !== '') rows.push(clipped)
+    }
+  }
+  return rows.map(paint)
 }
 
 /** The card BODY rows of one logical text: the text wraps/truncates at the

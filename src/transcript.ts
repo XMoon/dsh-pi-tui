@@ -108,6 +108,44 @@ function setTranscriptTiming(message: TranscriptMessage, timing: TranscriptTimin
   transcriptTimings.set(message, timing)
 }
 
+/**
+ * Post-turn replay evidence: the rows that MATERIALIZED after their owning
+ * turn's authoritative `turn/end` (weakly held sidecar — the fact dies with
+ * its row). The fold is the ONLY authority that can know this: a row's
+ * `turn`/`kind` alone cannot distinguish a durable row of a settled turn from
+ * a replay artifact that arrived afterwards.
+ *
+ * The provenance is exactly "this row was NEWLY created after the turn
+ * completed" — NEVER "this row was touched by a post-`turn/end` event". A
+ * `tool/result` that finds its own pending/running card still settles that
+ * card normally and leaves it fully legal Action evidence; only a newly
+ * created row (an orphan result, or a fresh call/command/delegation card)
+ * earns the mark.
+ *
+ * Consumers share this ONE predicate so no surface invents its own fence:
+ * - the transcript keeps the row (search / Full / expanded Focus);
+ * - it is never Process aggregation evidence: it is excluded from the Action
+ *   classifier, from Work-span membership, and from consecutive-read
+ *   grouping (a group card is a synthesized object that could otherwise
+ *   launder the provenance back into an aggregate).
+ */
+const postTurnReplayEvidence = new WeakSet<TranscriptMessage>()
+
+/** Whether one row materialized after its owning turn's `turn/end` (see
+ * {@link postTurnReplayEvidence}). Presentation/persistence consumers use
+ * this to keep the row as transcript evidence while excluding it from the
+ * settled turn's Process/Action aggregates. */
+export function isPostTurnReplayEvidence(message: TranscriptMessage): boolean {
+  return postTurnReplayEvidence.has(message)
+}
+
+/** Mark one newly materialized row as post-turn replay evidence
+ * (fold-internal authority — called ONLY where a row is created while its
+ * owning turn is already `completed`). */
+function markPostTurnReplayEvidence(message: TranscriptMessage): void {
+  postTurnReplayEvidence.add(message)
+}
+
 /** The last ACCEPTED reasoning-evidence time per thinking row (live fold):
  * the fallback end when a settlement carries no authoritative lane end (a
  * legacy `assistant/message` without the embedded stream). Without it the
@@ -1549,11 +1587,25 @@ export function windowMessages(messages: readonly TranscriptMessage[], maxTurns:
 }
 
 /**
+ * Whether one row may join a consecutive-read group: a settled-ok `read`
+ * card that is NOT post-turn replay evidence. This is the ONE grouping
+ * eligibility authority — the stateful folder (`TranscriptFolder.groupable`)
+ * and the exported mirror (`groupConsecutiveReads`) both delegate here, so a
+ * replay row can never be laundered into an aggregate through a synthesized
+ * group card (which is a fresh object the replay sidecar does not cover).
+ */
+export function isGroupableRead(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'tool' }> {
+  return message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
+    && !isPostTurnReplayEvidence(message)
+}
+
+/**
  * Merge consecutive completed `read` tool cards into one card ("N files").
  * A single read stays untouched; groups break on any other kind or status,
- * AND on a turn boundary — a group never crosses turns, so every Activity
- * span's own facts (count, timing) stay attributable to the turn that
- * renders the card (post-F6 plan §10.2/§12.11).
+ * on post-turn replay evidence, AND on a turn boundary — a group never
+ * crosses turns, so every Activity span's own facts (count, timing) stay
+ * attributable to the turn that renders the card (post-F6 plan
+ * §10.2/§12.11).
  * @param messages - the folded transcript.
  * @returns a new list with grouped read cards (same object references).
  */
@@ -1562,7 +1614,7 @@ export function groupConsecutiveReads(messages: readonly TranscriptMessage[]): T
   let group: Extract<TranscriptMessage, { kind: 'tool' }> | undefined
   let count = 0
   for (const message of messages) {
-    const groupable = message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
+    const groupable = isGroupableRead(message)
       && (group === undefined || group.turn === message.turn)
     if (groupable) {
       if (group !== undefined) {
@@ -2343,11 +2395,14 @@ export class TranscriptFolder {
     return first === undefined ? id : first
   }
 
-  /** Whether an item is groupable as a consecutive read (settled ok).
-   * Nested PTC sub-calls never reach the top-level items (they live in
-   * their parent card's `subCalls` tree), so no exclusion is needed here. */
+  /** Whether an item is groupable as a consecutive read (settled ok, never
+   * post-turn replay evidence). Nested PTC sub-calls never reach the
+   * top-level items (they live in their parent card's `subCalls` tree), so no
+   * exclusion is needed here. Delegates to the module-level
+   * {@link isGroupableRead} so the folder and the exported mirror share ONE
+   * eligibility contract. */
   private static groupable(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'tool' }> {
-    return message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
+    return isGroupableRead(message)
   }
 
   /** Whether the item at this position CONTINUES a read-group run: groupable
@@ -4793,6 +4848,11 @@ export class TranscriptFolder {
           startedAt: preparingStart === undefined ? event.time : Math.min(preparingStart.at, event.time),
           running: true,
         })
+        // Post-turn replay provenance: this card is NEWLY materialized, so if
+        // its owning turn already ended it is transcript/diagnostic evidence
+        // only (read the map BEFORE `activityFor` below can create a fresh,
+        // non-completed activity for the turn).
+        if (this.activityByTurn.get(callTurn)?.completed === true) markPostTurnReplayEvidence(card)
         this.appendItem(card)
         this.pendingCalls.set(key, {
           name: event.data.name,
@@ -4900,6 +4960,10 @@ export class TranscriptFolder {
             // slot (Focus counts only genuine tool/call events, §10.2).
             card.callCount = 0
             setTranscriptTiming(card, pointTiming(event.time))
+            // This orphan card is NEWLY materialized (the branches above
+            // settle an EXISTING card, which stays legal evidence): if its
+            // owning turn already ended, it is post-turn replay evidence.
+            if (this.activityByTurn.get(turn)?.completed === true) markPostTurnReplayEvidence(card)
             this.appendItem(card)
             this.scheduleGrouping(this.items.length - 1)
           }
@@ -5153,6 +5217,15 @@ export class TranscriptFolder {
         setTranscriptTiming(card, run === undefined
           ? pointTiming(event.time)
           : { startedAt: run.startedAt, endedAt: Math.max(run.startedAt, event.time), running: false })
+        // A command card is always NEWLY materialized: one that lands after
+        // the owning turn's `turn/end` is post-turn replay evidence.
+        // ATTRIBUTION BOUNDARY: `command/done` carries no turn, so it is
+        // attributed to `currentTurn` (pre-existing behavior). A fragment that
+        // arrives while a LATER turn is already active belongs to that active
+        // turn and therefore cannot be recognized as replay evidence for the
+        // finished one — unreachable on the synchronous slash-command path, and
+        // deliberately not "fixed" by inferring provenance from display text.
+        if (this.activityByTurn.get(this.currentTurn)?.completed === true) markPostTurnReplayEvidence(card)
         this.appendItem(card)
         break
       }
@@ -5178,6 +5251,15 @@ export class TranscriptFolder {
         // only — the child session's lifetime is never the parent
         // Activity's duration (post-F6 plan §12.10).
         setTranscriptTiming(delegationCard, pointTiming(event.time))
+        // One card per launch, always NEWLY materialized: a descriptor that
+        // lands after the owning turn's `turn/end` is post-turn replay
+        // evidence.
+        // ATTRIBUTION BOUNDARY (same as `command/done`): `subagent/descriptor`
+        // carries no turn, so a late launch record arriving while a LATER turn
+        // is active is attributed to that active turn. Launch-time delivery
+        // makes this unreachable; the fence deliberately does not guess the
+        // owning turn from content.
+        if (this.activityByTurn.get(this.currentTurn)?.completed === true) markPostTurnReplayEvidence(delegationCard)
         this.appendItem(delegationCard)
         // Focus aggregation: a delegation record is a durable lifecycle
         // event, NOT a model tool/call — it never touches the Tool slot or

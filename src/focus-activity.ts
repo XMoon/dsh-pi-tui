@@ -400,6 +400,17 @@ export type FocusProjectedBlock =
     kind: 'activity'
     activity: TurnActivity
     /**
+     * The presentation OCCURRENCE identity of this Thought block: the first
+     * `TranscriptMessage` of the consecutive same-turn run it summarizes.
+     * A turn is NOT a sufficient identity — a turn-less window entry can
+     * split one turn into several runs, each with its own hidden rows, Action
+     * winner and component. This is the same stable occurrence-owner pattern
+     * the Work span and Context cluster already use; the SEMANTIC disclosure
+     * identity (Ctrl+O, click ownership, `focusExpandedTurns`,
+     * `containerPath`) stays the turn number.
+     */
+    owner: TranscriptMessage
+    /**
      * The turn-level Action aggregate the Focus header renders (addendum v2
      * §17/§18): derived ONCE from the turn group's canonical Process
      * evidence — independent of collapsed/expanded state, search reveals
@@ -442,14 +453,15 @@ export type FocusProjectedBlock =
  */
 function focusActivityBlock(
   activity: TurnActivity | undefined,
+  owner: TranscriptMessage,
   actionStats: CompactActionStats,
   hidden: readonly TranscriptMessage[] | undefined,
 ): FocusProjectedBlock[] {
   if (activity === undefined) return []
   const action = hidden === undefined ? undefined : latestCompactAction(hidden)
   return [action === undefined
-    ? { kind: 'activity', activity, actionStats }
-    : { kind: 'activity', activity, actionStats, action }]
+    ? { kind: 'activity', activity, owner, actionStats }
+    : { kind: 'activity', activity, owner, actionStats, action }]
 }
 
 /** The empty action aggregate for a turn with no eligible Process evidence:
@@ -549,7 +561,7 @@ export function projectFocus(
       for (const member of group.slice(0, boundary)) {
         out.push({ kind: 'message', message: member })
       }
-      if (activity !== undefined) out.push(...focusActivityBlock(activity, actionStats, undefined))
+      if (activity !== undefined) out.push(...focusActivityBlock(activity, group[0]!, actionStats, undefined))
       const emitTailRow = (member: TranscriptMessage): void => {
         if (isFocusPersistentInputRow(member)) {
           out.push({ kind: 'message', message: member })
@@ -611,7 +623,7 @@ export function projectFocus(
           hidden.push(member)
         }
       }
-      out.push(...focusActivityBlock(activity, actionStats, hidden))
+      out.push(...focusActivityBlock(activity, group[0]!, actionStats, hidden))
       // Compaction cards keep their existing lifecycle in the collapsed
       // view (plan §12.3 v1 — never hidden into the Thought).
       for (const member of group) {
@@ -641,7 +653,7 @@ export function projectFocus(
           hidden.push(member)
         }
       }
-      out.push(...focusActivityBlock(activity, actionStats, hidden))
+      out.push(...focusActivityBlock(activity, group[0]!, actionStats, hidden))
       for (const member of beforeCommitted) {
         if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
       }

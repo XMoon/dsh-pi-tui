@@ -11,8 +11,9 @@ import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { TranscriptFolder, type TranscriptMessage, type TurnActivity } from '../src/transcript.ts'
+import { TranscriptFolder, groupConsecutiveReads, isPostTurnReplayEvidence, type TranscriptMessage, type TurnActivity } from '../src/transcript.ts'
 import { projectCompact } from '../src/compact-projection.ts'
+import { projectTranscriptStructure } from '../src/transcript-projection.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import {
   FOCUS_MODE_PROMPT,
@@ -4321,4 +4322,141 @@ test('Focus action stats stay turn-level when a turn-less entry splits the turn 
     assert.equal(block.actionStats.total, 2, 'every run reports the whole turn (read + retry), never only its own run')
     assert.deepEqual([...block.actionStats.types.keys()].sort(), ['read', 'retry'])
   }
+})
+
+// ── Post-turn replay fence (late-replay provenance) ───────────────────────
+
+/** One settled turn holding a genuine `read`, plus the given late events. */
+function lateReplayFolder(late: SessionEvent[]): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1002, 2),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, 1003, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1004, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1005, 5),
+    ...late,
+  ])
+  return folder
+}
+
+/** The collapsed Focus Action aggregate + winner of the folder's turn. */
+function focusActionState(folder: TranscriptFolder): { total: number; types: string[]; winner: string | undefined } {
+  const block = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true).find(candidate => candidate.kind === 'activity')
+  const action = block?.action
+  return {
+    total: block?.actionStats.total ?? -1,
+    types: [...(block?.actionStats.types.keys() ?? [])].sort(),
+    // A tool/command/subagent source carries its durable name; a retry row is
+    // a system message and has none.
+    winner: action === undefined ? undefined : action.message.kind === 'tool' ? action.message.name : 'retry',
+  }
+}
+
+/** The names of the tool rows that joined a canonical Work span. */
+function workSpanToolNames(folder: TranscriptFolder): string[] {
+  return projectTranscriptStructure(folder.messages())
+    .filter(block => block.kind === 'work')
+    .flatMap(block => block.kind === 'work' ? [...block.span.members] : [])
+    .filter(member => member.kind === 'tool')
+    .map(member => member.name)
+}
+
+test('late-replay fence: every late producer stays transcript evidence but never Action/Work evidence', () => {
+  const producers: ReadonlyArray<readonly [string, (id: string) => SessionEvent[]]> = [
+    ['late tool/call', id => [
+      eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId(id), name: 'bash', arguments: '{}' }, 6001, 6),
+    ]],
+    ['late orphan result', id => [eventAt('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId(`r-${id}`), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId(id), content: [{ type: 'text', text: 'fragment' }] }],
+        source: { kind: 'tool', callId: ToolCallId(id) },
+      },
+    }, 6002, 7)]],
+    ['late command/done', id => [
+      eventAt('command/run', { commandId: id, name: 'theme' }, 6003, 8),
+      eventAt('command/done', { commandId: id, kind: 'success' }, 6004, 9),
+    ]],
+    ['late subagent/descriptor', () => [
+      eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, 6005, 10),
+    ]],
+  ]
+  for (const [label, late] of producers) {
+    const folder = lateReplayFolder(late(label))
+    const lateRows = folder.messages().filter(message => message.kind === 'tool'
+      && message.name !== 'read')
+    assert.equal(lateRows.length, 1, `${label}: the row still folds into the transcript`)
+    assert.equal(isPostTurnReplayEvidence(lateRows[0]!), true, `${label}: marked as post-turn replay evidence`)
+    assert.deepEqual(focusActionState(folder), { total: 1, types: ['read'], winner: 'read' },
+      `${label}: the settled turn's Action aggregate and winner are unchanged`)
+    assert.deepEqual(workSpanToolNames(folder), ['read'],
+      `${label}: a replay row never joins a canonical Work span`)
+  }
+})
+
+test('late-replay provenance (A): a pre-turn/end call that settles late stays legal evidence', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    // The call is created BEFORE turn/end and is still running…
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1002, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1003, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
+    // …and its OWN result arrives afterwards: the existing card SETTLES.
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, 6001, 5),
+  ])
+  const card = folder.messages().find(message => message.kind === 'tool')
+  assert.ok(card !== undefined && card.kind === 'tool')
+  assert.equal(card.status, 'ok', 'the existing card settles normally')
+  assert.equal(isPostTurnReplayEvidence(card), false, 'a settle is NOT a newly materialized row')
+  assert.deepEqual(focusActionState(folder), { total: 1, types: ['read'], winner: 'read' },
+    'the legal read keeps its action')
+  assert.deepEqual(workSpanToolNames(folder), ['read'], 'the legal read stays Work evidence')
+})
+
+test('late-replay provenance (B): a late read never merges with the legal read', () => {
+  const folder = lateReplayFolder([
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('c2'), name: 'read', arguments: '{}' }, 6001, 6),
+    eventAt('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('r2'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c2') },
+      },
+    }, 6002, 7),
+  ])
+  const reads = folder.messages().filter(message => message.kind === 'tool')
+  assert.equal(reads.length, 2, 'both cards stay in the transcript')
+  assert.equal(isPostTurnReplayEvidence(reads[1]!), true, 'only the late read is replay evidence')
+  assert.ok(!folder.messages().some(message => message.kind === 'tool' && message.args === '2 files'),
+    'a replay read is a grouping BOUNDARY: never a synthesized 2-file group')
+  assert.deepEqual(focusActionState(folder), { total: 1, types: ['read'], winner: 'read' })
+  assert.deepEqual(workSpanToolNames(folder), ['read'], 'the synthesized group never launders the provenance')
+  // The exported grouping mirror must agree with the stateful folder.
+  const mirrored = groupConsecutiveReads(folder.messages())
+  assert.equal(mirrored.filter(message => message.kind === 'tool').length, 2,
+    'the exported mirror applies the same grouping boundary')
 })
