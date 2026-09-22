@@ -13,13 +13,16 @@ import type {
   TranscriptToolOrigin,
 } from './transcript.ts'
 
-/** The four semantic layers used by the future Compact projection. */
-export type TranscriptSemanticClass = 'conversation' | 'process' | 'attention' | 'context'
+/** The five semantic layers used by the shared transcript projection.
+ * `control` is standalone control-plane evidence (slash commands) — never
+ * Process aggregation input, never Context. */
+export type TranscriptSemanticClass = 'conversation' | 'process' | 'attention' | 'context' | 'control'
 
 /** Source-derived origins for the currently ambiguous presentation rows. */
 export type TranscriptSemanticOrigin =
   | TranscriptSystemOrigin
   | TranscriptToolOrigin
+  | 'command'
   | 'thinking'
   | 'injected-context'
   | 'workflow'
@@ -56,6 +59,12 @@ export function classifyTranscriptMessage(message: TranscriptMessage): Transcrip
       return { class: 'context', origin: 'workflow' }
     case 'compaction':
       return { class: 'context', origin: 'compaction' }
+    case 'command':
+      // A slash command is a standalone control-plane lifecycle node: it
+      // owns no model turn and is never Work/Activity/Action/ActionStats
+      // input by construction — the `control` class excludes it from every
+      // Process aggregation without a predicate blacklist.
+      return { class: 'control', origin: 'command' }
     case 'summary':
       return { class: 'context', origin: 'window-summary' }
   }
@@ -85,40 +94,6 @@ export const SURFACED_INTERACTION_TOOL_NAMES: ReadonlySet<string> = new Set([
   'ask_user_question',
   'exit_plan_mode',
 ])
-
-/**
- * Whether one row is a COMMAND row (a session-level slash-command record).
- *
- * A command's lifecycle is standalone: DSH appends `command/run` /
- * `command/done` as direct log-only events — "no turn wraps them" — and the
- * settled result is rendered OUTSIDE model history. The row therefore carries
- * no semantic turn ownership (its `turn` field is a legacy display-placement
- * artifact only), so it is NEVER Process aggregation evidence: not a Work
- * member, not an Action candidate/count, and not turn ActionStats input.
- * This is the ONE shared predicate for that rule.
- */
-export function isCommandTool(message: TranscriptMessage): boolean {
-  return message.kind === 'tool' && message.origin === 'command'
-}
-
-/**
- * Whether one row is a SUBAGENT DESCRIPTOR row: the CHILD session's durable
- * identity record (version / mode / provider / label), appended once by the
- * establishing provider. For a continuable child it PRECEDES the child's first
- * `turn/start` (upstream asserts `descriptorIndex < turnStartIndex`), so it
- * owns no model turn even when a one-shot path happens to place it inside the
- * child's initial turn.
- *
- * It is identity METADATA, not a delegation action: the parent's own genuine
- * `tool/call name=subagent` is the delegation evidence (and the Action). A
- * descriptor is therefore never Work/Activity membership, never an Action
- * candidate and never ActionStats input — consuming its placement as
- * ownership would synthesize a `Subagent` Action for a child that may not have
- * started a turn yet.
- */
-export function isSubagentDescriptor(message: TranscriptMessage): boolean {
-  return message.kind === 'tool' && message.origin === 'subagent-delegation'
-}
 
 /** Whether one tool NAME belongs to the surfaced-interaction set, regardless of
  * settled state. The fold uses this to keep such calls out of the turn's work

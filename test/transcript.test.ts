@@ -1340,34 +1340,35 @@ test('turn/end error renders a failure line', () => {
   assert.equal(tool.origin, 'turn-error')
 })
 
-test('command/run + command/done fold into an executed line', () => {
+test('command/run + command/done fold into one real command node', () => {
   const messages = foldTranscript([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', source: { kind: 'user' } }, 0),
     event('command/done', { commandId: CommandId('cmd-1'), kind: 'success' }, 1),
   ])
-  assert.deepEqual(kinds(messages), ['tool'])
-  const tool = messages[0]
-  assert.ok(tool !== undefined && tool.kind === 'tool')
-  assert.equal(tool.name, '/compact')
-  assert.equal(tool.origin, 'command')
+  assert.deepEqual(kinds(messages), ['command'])
+  const command = messages[0]
+  assert.ok(command !== undefined && command.kind === 'command')
+  assert.equal(command.name, 'compact')
+  assert.ok(!('turn' in command), 'a real command node carries no semantic turn')
+  assert.equal(command.outcome?.kind, 'success')
 })
 
-test('command/done success text and error text fold into the card', () => {
+test('command/done success text and error text settle the same command row', () => {
   const success = foldTranscript([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'title', source: { kind: 'user' } }, 0),
     event('command/done', { commandId: CommandId('cmd-1'), kind: 'success', text: 'title set: hello' }, 1),
   ])
   const ok = success[0]
-  assert.ok(ok !== undefined && ok.kind === 'tool')
-  assert.equal(ok.result, 'executed — title set: hello')
+  assert.ok(ok !== undefined && ok.kind === 'command')
+  assert.equal(ok.outcome?.text, 'title set: hello')
   const failed = foldTranscript([
     event('command/run', { commandId: CommandId('cmd-2'), name: 'title', source: { kind: 'user' } }, 0),
     event('command/done', { commandId: CommandId('cmd-2'), kind: 'error', text: 'boom' }, 1),
   ])
   const bad = failed[0]
-  assert.ok(bad !== undefined && bad.kind === 'tool')
-  assert.equal(bad.status, 'error')
-  assert.equal(bad.result, 'executed — error: boom')
+  assert.ok(bad !== undefined && bad.kind === 'command')
+  assert.equal(bad.outcome?.kind, 'error')
+  assert.equal(bad.outcome?.text, 'boom')
 })
 
 test('plugin-sourced user messages fold as system entries', () => {
@@ -2167,7 +2168,11 @@ test('cold hydrate defers adjacent-read reflow and preserves apply semantics', (
   assert.ok(liveTools[0]?.result.endsWith('live-result'))
 })
 
-test('subagent/descriptor folds into a delegation card', () => {
+test('subagent/descriptor materializes no transcript message', () => {
+  // Post-PR166 convergence: the descriptor is child identity metadata, not
+  // transcript content — the viewer holds the authoritative child identity
+  // and the parent's genuine tool/call name=subagent is the delegation
+  // evidence. The fold consumes the event without appending any row.
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
     event('subagent/descriptor', {
@@ -2177,16 +2182,9 @@ test('subagent/descriptor folds into a delegation card', () => {
       label: 'do the thing',
       agentModel: 'deepseek-chat',
     }, 1),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
   ])
-  assert.deepEqual(kinds(messages), ['tool'])
-  const card = messages[0]
-  assert.ok(card !== undefined && card.kind === 'tool')
-  assert.equal(card.name, 'subagent')
-  assert.equal(card.args, 'do the thing')
-  assert.equal(card.status, 'ok')
-  assert.equal(card.origin, 'subagent-delegation')
-  assert.ok(card.result.includes('mode: continuable'))
-  assert.ok(card.result.includes('model: deepseek-chat'))
+  assert.deepEqual(kinds(messages), [])
 })
 
 test('workflow run events fold into one workflow card with member rows', () => {

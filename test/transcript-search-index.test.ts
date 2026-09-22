@@ -141,6 +141,7 @@ function compactionEvent(type: 'compaction/start' | 'compaction/summary' | 'comp
 function cardText(message: TranscriptMessage | undefined): string {
   if (message === undefined) return ''
   if (message.kind === 'tool') return `${message.name} ${message.args} ${message.result}`
+  if (message.kind === 'command') return commandCorpus(message)
   if (message.kind === 'workflow') return workflowCorpus(message)
   return message.text ?? ''
 }
@@ -172,8 +173,15 @@ function legacySearchForTest(folder: TranscriptFolder, query: string): Transcrip
 /** The raw searchable text of one legacy card (the pre-D1 corpus). */
 function cardSearchCorpus(message: TranscriptMessage): string {
   if (message.kind === 'tool') return `${message.name} ${message.args} ${message.result}`
+  if (message.kind === 'command') return commandCorpus(message)
   if (message.kind === 'workflow') return workflowCorpus(message)
   return message.text ?? ''
+}
+
+/** The command corpus mirrors the production chunk builder: the
+ * slash-prefixed name, the verbatim args and the settled outcome text. */
+function commandCorpus(message: Extract<TranscriptMessage, { kind: 'command' }>): string {
+  return `${message.name === null ? '' : `/${message.name}`} ${message.args ?? ''} ${message.outcome?.text ?? ''}`
 }
 
 /** Count NON-OVERLAPPING occurrences of the normalized needle in one text. */
@@ -220,8 +228,12 @@ function assertSearchParity(folder: TranscriptFolder, query: string, label = '')
     const resolved = folder.resolveSearchMatch(indexed[i]!)
     assert.equal(resolved, expected.message, `${label} match ${i} for ${JSON.stringify(query)} must resolve to the legacy card`)
     assert.equal(indexed[i]!.occurrence, expected.occurrence, `${label} match ${i} occurrence for ${JSON.stringify(query)}`)
-    const legacyTurn = 'turn' in expected.message ? expected.message.turn : undefined
-    assert.equal(indexed[i]!.turn, legacyTurn, `${label} match ${i} turn for ${JSON.stringify(query)}`)
+    // A turn-less row (a real `kind: 'command'` node) has no legacy turn to
+    // mirror: the indexed match carries the PRESENTATION navigation anchor
+    // instead, pinned by command-transcript.test.ts (A08/A09).
+    if ('turn' in expected.message) {
+      assert.equal(indexed[i]!.turn, expected.message.turn, `${label} match ${i} turn for ${JSON.stringify(query)}`)
+    }
   }
 }
 

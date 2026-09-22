@@ -49,7 +49,7 @@ import {
   type CompactActionStatsAccumulator,
 } from './compact-process-preview.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
-import { isCommandTool, isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
+import { isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
 import { isNoticeContext } from './context-presentation.ts'
 import { projectTranscriptStructure, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
 import type { TranscriptContainerPath } from './transcript-disclosure.ts'
@@ -444,18 +444,15 @@ export type FocusProjectedBlock =
 
 /**
  * The Focus projection TURN of one row — the ONE authority `projectFocus` and
- * its grouping helpers share. A COMMAND row has NO projection turn: its `turn`
- * field is a legacy display-PLACEMENT artifact (a command is session-level
- * standalone evidence; DSH wraps no model turn around it). Consuming that field
- * for grouping would both hoist an idle command ahead of the turn it followed
- * and mint an empty Thought for a turn whose only row is a command. Treating a
- * command as a turn-less BOUNDARY makes the projection agree with the fold:
- * `process A -> Thought A`, `command -> standalone`, `process B -> Thought B`.
- * Both runs may still belong to one model turn (the run-owner component cache
- * supports that), and the semantic disclosure identity stays the turn number.
+ * its grouping helpers share. A COMMAND row has NO projection turn: it is a
+ * turn-less control-plane row (`kind: 'command'` carries no `turn` field at
+ * all). Treating it as a turn-less BOUNDARY makes the projection agree with
+ * the fold: `process A -> Thought A`, `command -> standalone`, `process B ->
+ * Thought B`. Both runs may still belong to one model turn (the run-owner
+ * component cache supports that), and the semantic disclosure identity stays
+ * the turn number.
  */
 function focusProjectionTurnOf(message: TranscriptMessage): number | undefined {
-  if (isCommandTool(message)) return undefined
   return 'turn' in message ? message.turn : undefined
 }
 
@@ -725,13 +722,13 @@ function assistantForStep(
  * evidence, so it is hoisted out of the collapsed Working exactly like a
  * user/steer row; expanded Focus restores it at its raw chronology. */
 function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
-  // A COMMAND is standalone evidence, not Process: its lifecycle is
-  // session-level (DSH wraps no turn around it) and its settled result is
-  // user feedback. It must therefore stay VISIBLE outside the collapsed
-  // Thought — like a user/steer row or a settled interaction — instead of
-  // being hidden as process and/or claimed by the Thought's Action slot.
+  // A COMMAND is standalone `control` evidence, not Process: it is a
+  // turn-less session-level lifecycle whose settled result is user feedback.
+  // It must therefore stay VISIBLE outside the collapsed Thought — like a
+  // user/steer row or a settled interaction — instead of being hidden as
+  // process and/or claimed by the Thought's Action slot.
   return message.kind === 'user' || isSurfacedContext(message) || isSurfacedInteractionTool(message)
-    || isCommandTool(message)
+    || message.kind === 'command'
 }
 
 /**
@@ -768,8 +765,8 @@ function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: num
   let index = start + 1
   while (index < messages.length) {
     const next = messages[index]!
-    // `focusProjectionTurnOf` — never the raw `turn` — so a command row's
-    // legacy placement cannot join (or split) the run it merely sits in.
+    // `focusProjectionTurnOf` — never the raw `turn` — so a turn-less
+    // standalone row cannot join (or split) the run it merely sits in.
     if (focusProjectionTurnOf(next) !== turn) break
     group.push(next)
     index += 1
@@ -792,8 +789,8 @@ export function isCollapsedFocusHiddenRow(messages: readonly TranscriptMessage[]
   const position = messages.indexOf(message)
   if (position < 0) return false
   // Walk back to the start of the CONSECUTIVE run the projection would group,
-  // with the SAME projection-turn authority (a command row is a boundary even
-  // though it carries a legacy `turn`).
+  // with the SAME projection-turn authority (a command row is a boundary —
+  // it is a real turn-less `kind: 'command'` node).
   let start = position
   while (start > 0) {
     const previous = messages[start - 1]!

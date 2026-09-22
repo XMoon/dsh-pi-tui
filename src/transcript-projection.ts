@@ -23,7 +23,7 @@
  */
 
 import { clusterAdjacentAmbientContext, type ContextCluster } from './context-presentation.ts'
-import { classifyTranscriptMessage, isCommandTool, isSubagentDescriptor, isSurfacedInteractionTool } from './transcript-semantics.ts'
+import { classifyTranscriptMessage, isSurfacedInteractionTool } from './transcript-semantics.ts'
 import { isPostTurnReplayEvidence, type TranscriptMessage } from './transcript.ts'
 
 /**
@@ -48,12 +48,14 @@ export type TranscriptStructureBlock =
 /**
  * Whether one row continues the current Work run. Process rows with a turn
  * number extend the run only while the turn is unchanged; turn-less rows
- * (window summaries) never enter Work. A settled surfaced-interaction card
- * (question / Plan review) is human-decision evidence, not Process work — it
- * never joins a span (and so never counts toward its tool count/preview); it
- * flushes the run and renders standalone. Exported so the live Preparing
- * ownership consumes the SAME boundary authority as every projection: a
- * settled interaction closes the trailing run.
+ * (window summaries, standalone control-plane commands) never enter Work by
+ * construction — a `kind: 'command'` row has no turn and a `control` class.
+ * A settled surfaced-interaction card (question / Plan review) is
+ * human-decision evidence, not Process work — it never joins a span (and so
+ * never counts toward its tool count/preview); it flushes the run and
+ * renders standalone. Exported so the live Preparing ownership consumes the
+ * SAME boundary authority as every projection: a settled interaction closes
+ * the trailing run.
  */
 export function isTranscriptWorkMember(message: TranscriptMessage): message is TranscriptMessage & { turn: number } {
   return 'turn' in message
@@ -63,14 +65,6 @@ export function isTranscriptWorkMember(message: TranscriptMessage): message is T
     // aggregation evidence for the settled turn: it must not join a Work
     // span (and so must not feed its Action stats/preview).
     && !isPostTurnReplayEvidence(message)
-    // A command is a standalone session-level lifecycle (no turn wraps it), so
-    // it never joins a Work span: it renders as its own transcript row and
-    // splits the surrounding Process run.
-    && !isCommandTool(message)
-    // A subagent DESCRIPTOR is the child's identity metadata, not Process
-    // work: it never joins a span, so it can neither form an Activity nor feed
-    // its Action stats/preview.
-    && !isSubagentDescriptor(message)
 }
 
 /**

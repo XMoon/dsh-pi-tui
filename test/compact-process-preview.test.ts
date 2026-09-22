@@ -24,8 +24,10 @@ import {
   latestCompactAction,
   type CompactActionPresentation,
 } from '../src/compact-process-preview.ts'
+import { CommandId } from '@deepseek-ai/dsh-commands'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import { focusCollapsedBody } from '../src/focus-activity.ts'
-import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../src/transcript.ts'
+import type { TranscriptCommandMessage, TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../src/transcript.ts'
 
 const WIDTH = 40
 
@@ -42,6 +44,20 @@ function toolMessage(overrides: Partial<TranscriptToolMessage> = {}): Transcript
     result: 'ok',
     status: 'ok',
     ...overrides,
+  }
+}
+
+/** A minimal real command row exactly as the fold produces it (post-PR166:
+ * a turn-less `kind: 'command'` node, never a fake Tool). */
+function commandMessage(): TranscriptCommandMessage {
+  return {
+    kind: 'command',
+    commandId: CommandId('cmd-1'),
+    seq: SessionSeq(1),
+    time: 1_700_000_000_001,
+    name: 'compact',
+    args: null,
+    outcome: { kind: 'success' },
   }
 }
 
@@ -165,12 +181,11 @@ test('classifier: grouped genuine tool card -> tool', () => {
   assert.deepEqual(compactActionSourceOf(toolMessage({ callCount: 3 }))?.kind, 'tool')
 })
 
-test('classifier: subagent-delegation -> none (child identity metadata)', () => {
-  // A descriptor is the child session's identity record (for a continuable
-  // child it precedes the child's first turn/start). The parent's own genuine
-  // `tool/call name=subagent` is the delegation Action — the descriptor must
-  // not synthesize a second one.
-  assert.equal(compactActionSourceOf(toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'reviewer' })), undefined)
+test('classifier: a real command node -> none (turn-less control row)', () => {
+  // Post-PR166: a command is a real `kind: 'command'` row with no turn; a
+  // subagent/descriptor no longer materializes as a transcript message at
+  // all (command-transcript.test.ts B-series pins that).
+  assert.equal(compactActionSourceOf(commandMessage()), undefined)
 })
 
 test('classifier: a genuine tool/call named subagent IS the delegation Action', () => {
@@ -184,11 +199,11 @@ test('classifier: a genuine tool/call named subagent IS the delegation Action', 
   assert.deepEqual([...stats.types.entries()], [['subagent', 1]])
 })
 
-test('classifier: command -> none (standalone session-level lifecycle)', () => {
+test('classifier: an unsettled command -> none (standalone session-level lifecycle)', () => {
   // DSH appends command/run + command/done as direct log-only events with NO
   // wrapping turn, and renders the settled result outside model history: a
   // command is never turn Process evidence, so it can never be an Action.
-  assert.equal(compactActionSourceOf(toolMessage({ origin: 'command', name: '/compact' })), undefined)
+  assert.equal(compactActionSourceOf({ ...commandMessage(), outcome: null }), undefined)
 })
 
 test('classifier: llm-retry -> retry', () => {
@@ -206,6 +221,7 @@ test('classifier: Thinking / Context / Workflow / Compaction -> none', () => {
   assert.equal(compactActionSourceOf({ kind: 'assistant', turn: 1, text: 'narration' }), undefined)
   assert.equal(compactActionSourceOf({ kind: 'user', turn: 1, text: 'hi' }), undefined)
   assert.equal(compactActionSourceOf({ kind: 'compaction', turn: 1, text: 'summary', items: 1, tokens: 1 }), undefined)
+  assert.equal(compactActionSourceOf(commandMessage()), undefined)
   assert.equal(compactActionSourceOf(toolMessage({ origin: 'turn-error' })), undefined)
 })
 
@@ -218,15 +234,16 @@ test('latest-selection: chronology owns selection, no type priority', () => {
   const messages: TranscriptMessage[] = [
     toolMessage({ name: 'read' }),
     retryMessage(),
-    // A command row in the same stream is skipped: it is standalone evidence,
-    // not a candidate.
-    toolMessage({ origin: 'command', name: '/compact' }),
+    // A real command row in the same stream is skipped: it is turn-less
+    // control evidence, not a candidate.
+    commandMessage(),
   ]
   assert.equal(latestCompactAction(messages)?.kind, 'retry')
-  // A stream holding ONLY a descriptor row has no candidate at all…
-  assert.equal(latestCompactAction([toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'x' })]), undefined)
-  // …and neither has one holding only a command row.
-  assert.equal(latestCompactAction([messages[2]!]), undefined)
+  // A stream holding ONLY a command row has no candidate at all…
+  assert.equal(latestCompactAction([commandMessage()]), undefined)
+  // …and neither does one holding only a descriptor-less child log (a
+  // subagent/descriptor materializes no row to feed here at all).
+  assert.equal(latestCompactAction([]), undefined)
   // No eligible evidence -> undefined.
   assert.equal(latestCompactAction([{ kind: 'thinking', turn: 1, text: 'reasoning' }]), undefined)
   assert.equal(latestCompactAction([]), undefined)
@@ -244,13 +261,8 @@ test('presentation: genuine tool keeps presenter-first display and PTC suffix fa
   assert.equal(settled.status, 'error')
 })
 
-test('presentation: a subagent descriptor has no Action presentation (identity metadata)', () => {
-  const source = compactActionSourceOf(toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'scout' }))
-  assert.equal(source, undefined, 'a descriptor never becomes an Action source')
-})
-
 test('presentation: a command row has no Action presentation (standalone)', () => {
-  const source = compactActionSourceOf(toolMessage({ origin: 'command', name: '/compact', status: 'ok' }))
+  const source = compactActionSourceOf(commandMessage())
   assert.equal(source, undefined, 'a command never becomes an Action source')
 })
 
@@ -304,11 +316,10 @@ test('action stats: cardinality per source kind (v2 §47 example)', () => {
   const stats = compactActionStatsOf([
     toolMessage({ name: 'read', callCount: 2 }),
     toolMessage({ name: 'bash' }),
-    toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'x' }),
     retryMessage(),
-    toolMessage({ origin: 'command', name: '/compact', status: 'ok' }),
+    commandMessage(),
   ])
-  assert.equal(stats.total, 4, 'neither a command row nor a subagent descriptor contributes')
+  assert.equal(stats.total, 4, 'a command row contributes nothing')
   assert.deepEqual(
     [...stats.types.entries()].sort(),
     [['bash', 1], ['read', 2], ['retry', 1]].sort(),
@@ -329,11 +340,10 @@ test('action stats: subtype parts keep the shared sort/cap and +N counts kinds',
     toolMessage({ name: 'read', callCount: 3 }),
     toolMessage({ name: 'bash', callCount: 2 }),
     retryMessage(),
-    toolMessage({ origin: 'command', name: '/compact', status: 'ok' }),
-    toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'x' }),
+    commandMessage(),
   ])
   assert.deepEqual(compactActionStatParts(stats), ['6 actions', 'read ×3', 'bash ×2', 'retry ×1'],
-    'a command row and a subagent descriptor both contribute nothing')
+    'a command row contributes nothing')
 })
 
 test('signature: an over-cap display stays bounded AND sensitive past the cap', () => {
