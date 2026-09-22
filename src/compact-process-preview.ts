@@ -15,8 +15,8 @@
  * Action vocabulary (post-F6 presentation-convergence addendum v2 §4/§5): the collapsed
  * process presentation is `Think:` + `Action:`. `Action` is PRESENTATION
  * ONLY — the latest meaningful non-Thinking TURN-OWNED Process evidence
- * (genuine Tool, Preparing, Subagent delegation, Retry, and explicit
- * orphan-result diagnostics) selected purely by chronology. A COMMAND row is
+ * (genuine Tool, Preparing, Retry, and explicit orphan-result diagnostics)
+ * selected purely by chronology. A COMMAND row is
  * deliberately NOT an Action: its lifecycle is session-level standalone
  * evidence (DSH appends `command/run`/`command/done` with no wrapping turn),
  * so it renders as its own transcript card outside the Action/Work
