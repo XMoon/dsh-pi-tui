@@ -101,6 +101,25 @@ export function isCommandTool(message: TranscriptMessage): boolean {
   return message.kind === 'tool' && message.origin === 'command'
 }
 
+/**
+ * Whether one row is a SUBAGENT DESCRIPTOR row: the CHILD session's durable
+ * identity record (version / mode / provider / label), appended once by the
+ * establishing provider. For a continuable child it PRECEDES the child's first
+ * `turn/start` (upstream asserts `descriptorIndex < turnStartIndex`), so it
+ * owns no model turn even when a one-shot path happens to place it inside the
+ * child's initial turn.
+ *
+ * It is identity METADATA, not a delegation action: the parent's own genuine
+ * `tool/call name=subagent` is the delegation evidence (and the Action). A
+ * descriptor is therefore never Work/Activity membership, never an Action
+ * candidate and never ActionStats input — consuming its placement as
+ * ownership would synthesize a `Subagent` Action for a child that may not have
+ * started a turn yet.
+ */
+export function isSubagentDescriptor(message: TranscriptMessage): boolean {
+  return message.kind === 'tool' && message.origin === 'subagent-delegation'
+}
+
 /** Whether one tool NAME belongs to the surfaced-interaction set, regardless of
  * settled state. The fold uses this to keep such calls out of the turn's work
  * accounting even while they are running. */

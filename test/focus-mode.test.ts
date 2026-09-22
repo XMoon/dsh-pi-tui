@@ -13,7 +13,7 @@ import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, groupConsecutiveReads, isPostTurnReplayEvidence, type TranscriptMessage, type TurnActivity } from '../src/transcript.ts'
 import { projectCompact } from '../src/compact-projection.ts'
-import { projectTranscriptStructure } from '../src/transcript-projection.ts'
+import { isTranscriptWorkMember, projectTranscriptStructure } from '../src/transcript-projection.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import {
   FOCUS_MODE_PROMPT,
@@ -35,7 +35,7 @@ import {
   projectFocus,
   type FocusProjectedBlock,
 } from '../src/focus-activity.ts'
-import { COMPACT_ACTION_SUMMARY_MAX_TYPES, compactActionPresentation, compactActionStatParts, type CompactActionPresentation, type CompactActionStats } from '../src/compact-process-preview.ts'
+import { COMPACT_ACTION_SUMMARY_MAX_TYPES, compactActionPresentation, compactActionSourceOf, compactActionStatParts, type CompactActionPresentation, type CompactActionStats } from '../src/compact-process-preview.ts'
 
 /** One action-stats literal for header fixtures. */
 function actionStatsOf(total: number, types: Record<string, number> = {}): CompactActionStats {
@@ -4150,18 +4150,36 @@ function collapsedFocusActionOf(
   return block?.kind === 'activity' ? block : undefined
 }
 
-test('collapsed Focus: a subagent-only turn has a meaningful Action body', () => {
-  const folder = new TranscriptFolder()
-  applyMixed(folder, [
-    eventAt('turn/start', { turn: 0 }, 1000, 0),
-    eventAt('subagent/descriptor', { label: 'Update command runner fixtures', mode: 'task' }, 1001, 1),
+test('a subagent descriptor is never Work/Activity/Action evidence (both real log orders)', () => {
+  // The parent's genuine `tool/call name=subagent` is the delegation Action;
+  // the descriptor is the CHILD's identity record and must not synthesize one.
+  // Continuable children log it BEFORE the child's first turn/start (upstream
+  // asserts `descriptorIndex < turnStartIndex`); a one-shot child logs it
+  // inside its initial turn. Neither order may turn it into Process evidence.
+  const continuable = new TranscriptFolder()
+  applyMixed(continuable, [
+    eventAt('subagent/descriptor', { label: 'Update command runner fixtures', mode: 'continuable' }, 1000, 0),
+    eventAt('turn/start', { turn: 1 }, 1001, 1),
   ])
-  const activity = folder.turnActivity(0)!
-  const block = collapsedFocusActionOf(folder)
-  assert.equal(block?.action?.kind, 'subagent')
-  const body = focusCollapsedBody(activity, 80, block?.action === undefined ? undefined : compactActionPresentation(block.action))
-  assert.ok(body.some(line => line.includes('Action:  Subagent · Update command runner fixtures')), `no empty Thought body:\n${body.join('\n')}`)
-  assert.equal(activity.toolCalls, 0, 'the delegation never counts as a Focus tool')
+  const continuableRow = continuable.messages().find(message => message.kind === 'tool' && message.origin === 'subagent-delegation')
+  assert.ok(continuableRow !== undefined && continuableRow.kind === 'tool')
+  assert.equal(isTranscriptWorkMember(continuableRow), false, 'continuable: not a Work member')
+  assert.equal(compactActionSourceOf(continuableRow), undefined, 'continuable: never an Action candidate')
+  assert.equal(collapsedFocusActionOf(continuable), undefined, 'continuable: the pre-turn placement mints no Thought')
+
+  const oneShot = new TranscriptFolder()
+  applyMixed(oneShot, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('subagent/descriptor', { label: 'scout', mode: 'one-shot' }, 1001, 1),
+  ])
+  const oneShotRow = oneShot.messages().find(message => message.kind === 'tool' && message.origin === 'subagent-delegation')
+  assert.ok(oneShotRow !== undefined && oneShotRow.kind === 'tool')
+  assert.equal(isTranscriptWorkMember(oneShotRow), false, 'one-shot: not a Work member even though it is turn-enclosed')
+  assert.equal(compactActionSourceOf(oneShotRow), undefined, 'one-shot: never an Action candidate')
+  const state = focusActionState(oneShot)
+  assert.deepEqual(state, { total: 0, types: [], winner: undefined },
+    'one-shot: the turn keeps no Action from the descriptor')
+  assert.deepEqual(workSpanToolNames(oneShot), [], 'one-shot: and no Work span member')
 })
 
 test('collapsed Focus: a command row stays standalone-visible and never becomes the Action', () => {
@@ -4206,7 +4224,6 @@ test('collapsed Focus: mixed synthetic chronology selects the latest hidden acti
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1001, 1),
-    eventAt('subagent/descriptor', { label: 'scout' }, 1002, 2),
     eventAt('llm/retry', { turn: 0, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, 1003, 3),
     eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, 1004, 4),
     eventAt('command/done', { commandId: 'cmd1', kind: 'success' }, 1005, 5),
@@ -4259,7 +4276,7 @@ test('collapsed Focus: the committed-answer boundary keeps the Action on hidden 
     claimSteer(1008, 8),
     eventAt('step/start', { turn: 0, step: 2 }, 1009, 9),
     eventAt('user/message', steer, 1010, 10),
-    eventAt('subagent/descriptor', { label: 'post-steer helper' }, 1011, 11),
+    eventAt('llm/retry', { turn: 0, step: 2, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, 1011, 11),
   ])
   const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
   // The committed answer renders OUTSIDE the Thought, in raw order.
@@ -4270,8 +4287,7 @@ test('collapsed Focus: the committed-answer boundary keeps the Action on hidden 
   // The Action comes from the hidden root rows only: the read (hidden before
   // the boundary) and the post-steer delegation — chronology picks the
   // delegation; the committed answer itself is never a candidate.
-  assert.equal(activityBlock.action?.kind, 'subagent')
-  assert.equal(activityBlock.action?.message.kind === 'tool' ? activityBlock.action.message.name : '', 'subagent')
+  assert.equal(activityBlock.action?.kind, 'retry', 'the chronologically-latest eligible hidden row owns the Action')
 })
 
 test('expanded Focus carries no Action preview and keeps canonical rows', () => {
@@ -4411,20 +4427,19 @@ test('late-replay fence: only TURN-CARRYING producers are replay evidence', () =
   }
 })
 
-test('a subagent descriptor is turn evidence (never replay-marked), a command row is standalone', () => {
-  // Their lifecycles differ: a descriptor is appended inside the establishing
-  // child's initial TURN (durable Process evidence of that turn), while a
-  // command's `command/run`/`command/done` are session-level log-only appends
-  // with no wrapping turn at all.
+test('neither a subagent descriptor nor a command row is turn Process evidence', () => {
+  // Their lifecycles differ (child identity metadata vs a session-level user
+  // operation), but for aggregation they agree: neither owns the turn they are
+  // placed at, so neither may feed ActionStats, the Action winner or a span.
   const delegation = lateReplayFolder([
     eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, 6005, 10),
   ])
   const delegationRow = delegation.messages().find(message => message.kind === 'tool' && message.origin === 'subagent-delegation')
   assert.ok(delegationRow !== undefined)
   assert.equal(isPostTurnReplayEvidence(delegationRow), false, 'a descriptor is never replay-marked')
-  assert.deepEqual(focusActionState(delegation), { total: 2, types: ['read', 'subagent'], winner: 'subagent' },
-    'the delegation is turn Process evidence and owns the Action')
-  assert.deepEqual(workSpanToolNames(delegation), ['read', 'subagent'], 'and joins canonical Work evidence')
+  assert.deepEqual(focusActionState(delegation), { total: 1, types: ['read'], winner: 'read' },
+    'the delegation is NOT turn Process evidence: the turn aggregate is untouched')
+  assert.deepEqual(workSpanToolNames(delegation), ['read'], 'and it joins no Work span')
 
   const command = lateReplayFolder([
     eventAt('command/run', { commandId: 'standalone-1', name: 'theme' }, 6003, 8),
@@ -4434,7 +4449,7 @@ test('a subagent descriptor is turn evidence (never replay-marked), a command ro
   assert.ok(commandRow !== undefined)
   assert.equal(isPostTurnReplayEvidence(commandRow), false, 'a command is not replay evidence either')
   assert.deepEqual(focusActionState(command), { total: 1, types: ['read'], winner: 'read' },
-    'but it is NOT turn Process evidence: the turn aggregate is untouched')
+    'and it is not turn Process evidence')
   assert.deepEqual(workSpanToolNames(command), ['read'], 'and it joins no Work span')
 })
 

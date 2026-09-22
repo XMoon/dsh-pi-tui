@@ -3727,22 +3727,22 @@ test('collapsed Focus repaints the Action line and action stats when synthetic e
   assert.ok(joined.includes('Action:  Read src/transcript.ts'), `the initial Action line:\n${joined}`)
   assert.ok(joined.includes('1 action'), `the initial action total:\n${joined}`)
 
-  // A subagent delegation lands WITHOUT any genuine tool-state mutation:
-  // the header stats and the collapsed Action line must both refresh.
-  folder.apply([eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, T0 + 4, 4)])
+  // A retry lands WITHOUT any genuine tool-state mutation: the header stats
+  // and the collapsed Action line must both refresh.
+  folder.apply([eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, T0 + 4, 4)])
   show(app, folder)
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('2 actions'), `the action total repaints:\n${joined}`)
-  assert.ok(joined.includes('subagent ×1'), `the subtype stat repaints:\n${joined}`)
-  assert.ok(joined.includes('Action:  Subagent · scout'), `the Action line repaints:\n${joined}`)
+  assert.ok(joined.includes('retry ×1'), `the subtype stat repaints:\n${joined}`)
+  assert.ok(joined.includes('Action:  Retry 1 in 2s · X: x'), `the Action line repaints:\n${joined}`)
 
-  // A retry occurrence lands next: same repaint requirement.
-  folder.apply([eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, T0 + 5, 5)])
+  // Another retry lands next: same repaint requirement.
+  folder.apply([eventAt('llm/retry', { turn: 1, step: 2, retry: 2, delayMs: 4_000, failure: { code: 'X', message: 'y' } }, T0 + 5, 5)])
   show(app, folder)
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(joined.includes('3 actions'), `the retry counts:\n${joined}`)
-  assert.ok(joined.includes('Action:  Retry 1 in 2s · X: x'), `the retry owns the Action line:\n${joined}`)
+  assert.ok(joined.includes('Action:  Retry 2 in 4s · X: y'), `the latest retry owns the Action line:\n${joined}`)
   app.stop()
 })
