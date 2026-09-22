@@ -840,3 +840,53 @@ test('A09: an ignored replayed turn/start never adopts the leading prefix', () =
   assert.ok(matches.length >= 1)
   assert.equal(matches[0]!.turn, 8, `the first ACCEPTED turn owns the prefix (got ${matches[0]!.turn})`)
 })
+
+test('A09: turn 0 is a legal anchor — an in-turn-0 command is never re-anchored by turn 1', () => {
+  // The pending-prefix decision is keyed on "has an ACCEPTED turn/start been
+  // seen", never on `anchor === 0`: a command issued inside REAL turn 0
+  // keeps its legal 0 anchor, and the later turn 1 must not steal it.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('command/run', { commandId: CommandId('cmd-0'), name: 'title', args: 'turnzerotoken', source: { kind: 'user' } }, 1),
+    event('command/done', { commandId: CommandId('cmd-0'), kind: 'success', text: 'title set' }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+    event('turn/start', { turn: 1 }, 4),
+    userMessage('next turn', 5, 1),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6),
+  ])
+  const matches = folder.search('turnzerotoken')
+  assert.ok(matches.length >= 1)
+  assert.equal(matches[0]!.turn, 0, `an in-turn-0 command anchors to turn 0 (got ${matches[0]!.turn})`)
+  const turnZero = folder.window({ maxTurns: 1, endTurn: 0 })
+  assert.ok(turnZero.messages.some(message => message.kind === 'command'),
+    'the turn-0 anchored window contains the command')
+  const turnOne = folder.window({ maxTurns: 1, endTurn: 1 })
+  assert.ok(!turnOne.messages.some(message => message.kind === 'command'),
+    'the turn-1 window does not contain the turn-0 command')
+})
+
+test('A09: a turn-0 fused manual compaction keeps its legal 0 anchor', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    userMessage('wakeup', 1, 0),
+    event('command/run', { commandId: CommandId('cmd-0'), name: 'compact', args: 'turnzerofused', source: { kind: 'user' } }, 2),
+    rawEvent('compaction/start', { compactionId: 'cpt-0', sourceCommandId: CommandId('cmd-0'), turn: null }, 3),
+    rawEvent('compaction/summary', { compactionId: 'cpt-0', sourceCommandId: CommandId('cmd-0'), summary: [{ type: 'text', text: 'body' }], shadowedSeqs: [0], shadowedTokenCount: 10 }, 4),
+    rawEvent('compaction/end', { compactionId: 'cpt-0' }, 5),
+    event('command/done', { commandId: CommandId('cmd-0'), kind: 'success', sourceEventSeq: SessionSeq(4) }, 6),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7),
+    event('turn/start', { turn: 1 }, 8),
+    userMessage('next turn', 9, 1),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 10),
+  ])
+  const matches = folder.search('turnzerofused')
+  assert.ok(matches.length >= 1)
+  assert.equal(matches[0]!.turn, 0, `the fused owner keeps the legal turn-0 anchor (got ${matches[0]!.turn})`)
+  const resolved = folder.resolveSearchMatch(matches[0]!)
+  assert.ok(resolved !== undefined && resolved.kind === 'compaction')
+  const turnOne = folder.window({ maxTurns: 1, endTurn: 1 })
+  assert.ok(!turnOne.messages.some(message => message.kind === 'compaction'),
+    'the turn-1 window does not steal the turn-0 fused manual compaction')
+})
