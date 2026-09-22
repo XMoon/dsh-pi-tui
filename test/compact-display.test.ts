@@ -104,10 +104,10 @@ function workFixture(): SessionEvent[] {
 
 function workHeaders(view: string, expanded?: boolean): string[] {
   const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
-  // post-F6 plan §6.1/§6.2: the visible container is `Activity` with the
-  // registry work icon (emoji style renders 🧰); the grammar is
-  // `<identity> <duration> · <stats>` (§6.3).
-  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} (?:🧰 )?Activity(?: | ·|$)`).test(line))
+  // post-F6 plan §6.1/§6.3 + the 2026-09-22 v2 addendum: the visible
+  // container is `Activity` with NO identity icon; the grammar is
+  // `<identity> <duration> · <stats>`.
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} Activity(?: | ·|$)`).test(line))
 }
 
 function clusterHeaders(view: string, expanded?: boolean): string[] {
@@ -133,12 +133,12 @@ test('Compact renders Work headers with Think/Tool previews and no Message slot'
   const view = vt.getViewport().join('\n')
 
   assert.equal(workHeaders(view).length, 2, `expected two contiguous Activity spans:\n${view}`)
-  assert.match(view, /▸ 🧰 Activity \d+(?:m \d+s|s)? · 1 tool/)
+  assert.match(view, /▸ Activity \d+(?:m \d+s|s)? · 1 action · read ×1/)
   assert.ok(!view.includes('· thinking'), 'the `· thinking` lifecycle marker is gone (post-F6 plan §6.4)')
   assert.match(view, /Think:\s+verifying upstream wake semantics/)
-  assert.match(view, /Tool:\s+✓ Read src\/tui-app\.ts/)
+  assert.match(view, /Action:\s+✓ Read src\/tui-app\.ts/)
   assert.match(view, /Think:\s+checking the current mount transaction/)
-  assert.match(view, /Tool:\s+Bash pnpm test transcript-search/)
+  assert.match(view, /Action:\s+Bash pnpm test transcript-search/)
   assert.ok(view.includes('I found where the stale viewport identity is introduced.'),
     'the assistant intermediate narration stays visible in chronology')
   assert.ok(view.includes('final answer'))
@@ -153,20 +153,20 @@ test('a Work header click expands its member rows and collapses again', async ()
   app.setFullscreen(true)
   await vt.waitForRender()
   let view = vt.getViewport()
-  const headerRow = rowOf(view, /▸ 🧰 Activity/)
+  const headerRow = rowOf(view, /▸ Activity/)
   assert.ok(headerRow >= 0, 'precondition: the first Activity header is visible')
   assert.equal(app.expandedWorkOwnersForTest().size, 0)
 
-  click(vt, 3, headerRow + 1)
+  click(vt, 0, headerRow + 1)
   await vt.waitForRender()
   view = vt.getViewport()
   assert.equal(app.expandedWorkOwnersForTest().size, 1, 'the header click opens exactly its own span')
   assert.equal(workHeaders(view.join('\n'), true).length, 1, 'the opened span renders the expanded glyph')
   assert.equal(workHeaders(view.join('\n'), false).length, 1, 'the other span stays collapsed')
 
-  const expandedRow = rowOf(view, /▾ 🧰 Activity/)
+  const expandedRow = rowOf(view, /▾ Activity/)
   // A different column avoids the fork's double-click word-selection gesture.
-  click(vt, 5, expandedRow + 1)
+  click(vt, 1, expandedRow + 1)
   await vt.waitForRender()
   assert.equal(app.expandedWorkOwnersForTest().size, 0, `a second click collapses the span:\n${vt.getViewport().join('\n')}`)
 })
@@ -232,7 +232,7 @@ test('a Work span opened only by the search reveal collapses by revoking the rev
     message: hiddenThinking,
   })
   await vt.waitForRender()
-  const revealedRow = rowOf(vt.getViewport(), /▾ 🧰 Activity/)
+  const revealedRow = rowOf(vt.getViewport(), /▾ Activity/)
   assert.ok(revealedRow >= 0, 'precondition: the granted reveal opened the owning span')
   assert.equal(app.expandedWorkOwnersForTest().size, 0)
 
@@ -282,7 +282,7 @@ test('a live Preparing call follows the trailing Process run ownership matrix', 
     const view = vt.getViewport().join('\n')
     assert.equal(workHeaders(view).length, 1, `one trailing Work span:\n${view}`)
     assert.equal(preparingRows(view).length, 1, `the call joins the run's Tool slot:\n${view}`)
-    assert.ok(!view.includes('Tool:    Preparing') === false)
+    assert.ok(!view.includes('Action:  Preparing') === false)
     app.dispose()
     startedApps.delete(app)
   }
@@ -340,10 +340,10 @@ test('an ephemeral pending Work renders Header + Tool slot with no lifecycle suf
   const lines = vt.getViewport()
   const view = lines.join('\n')
   assert.equal(workHeaders(view).length, 1, `a pending Work header renders:\n${view}`)
-  assert.ok(lines.some(line => /^\s*▸ 🧰 Activity\s*$/.test(line)),
+  assert.ok(lines.some(line => /^\s*▸ Activity\s*$/.test(line)),
     `the pending header carries NO lifecycle suffix (no visual jump when the durable span lands):\n${view}`)
-  assert.match(view, /Tool:\s+Preparing Bash/)
-  assert.ok(!view.includes('preparing') || !lines.some(line => /▸ 🧰 Activity ·/.test(line)))
+  assert.match(view, /Action:\s+Preparing Bash/)
+  assert.ok(!view.includes('preparing') || !lines.some(line => /▸ Activity ·/.test(line)))
 })
 
 test('a live Preparing call never crosses a closed Work boundary', async () => {
@@ -377,7 +377,7 @@ test('a live Preparing call never crosses a closed Work boundary', async () => {
     assert.ok(boundaryRow >= 0, `boundary row missing (${boundary.name}):\n${view}`)
     assert.ok(preparingRows[0]! > boundaryRow,
       `the live call must follow the closed ${boundary.name} boundary, never move back inside the previous Work span:\n${view}`)
-    assert.equal(lines.filter(line => /Tool:\s/.test(line) && !line.includes('Preparing')).length, 1,
+    assert.equal(lines.filter(line => /Action:\s/.test(line) && !line.includes('Preparing')).length, 1,
       `the closed Work span keeps its own durable Tool row (${boundary.name}):\n${view}`)
     app.dispose()
     startedApps.delete(app)
@@ -416,7 +416,7 @@ test('a Work header stays inspectable while a Question owns the modal', async ()
   await vt.waitForRender()
   const promise = app.askQuestions([{ id: 'q1', question: 'Inspect context?', options: [{ label: 'Continue' }] }])
   await vt.waitForRender()
-  const row = rowOf(vt.getViewport(), /▸ 🧰 Activity.*· 1 tool/)
+  const row = rowOf(vt.getViewport(), /▸ Activity.*· 1 action · read ×1/)
   assert.ok(row >= 0, `collapsed Work header missing behind the Question:\n${vt.getViewport().join('\n')}`)
 
   click(vt, 5, row + 1)
@@ -437,12 +437,12 @@ test('regular Compact Ctrl+O opens the Work run without a dead ctrl+o card hint'
     { kind: 'thinking', turn: 1, text: 'reasoning one' },
     // A foldable process card that advertises its fold key when collapsed —
     // the exact card class that produced the dead `(ctrl+o to expand)` hint.
-    { kind: 'system', turn: 1, text: 'RETRY_BODY_MARKER', origin: 'llm-retry' },
+    { kind: 'system', turn: 1, text: 'llm retry 1 in 2s — RETRY_BODY_MARKER', origin: 'llm-retry' },
   ], new Map())
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.equal(workHeaders(view).length, 1, `precondition: one collapsed Work span:\n${view}`)
-  assert.ok(!view.includes('RETRY_BODY_MARKER'), 'the collapsed preview hides the member card')
+  assert.ok(!view.includes('llm retry'), 'the collapsed preview hides the member card (the Action slot renders the compact Retry summary)')
   assert.ok(!view.includes('ctrl+o'), 'no foldable row advertises ctrl+o before the bulk reveal')
 
   vt.sendInput('\x0f')
@@ -967,7 +967,7 @@ test('Context rows never occupy the Focus slots or counts', async () => {
   assert.equal(folder.turnActivity(1)?.toolCalls, 1, 'Context rows never count as tools')
   assert.equal(folder.turnActivity(1)?.think?.text, 'the real reasoning', 'Context never owns the Think slot')
   const view = vt.getViewport().join('\n')
-  assert.match(view, /1 tool/, 'the header count describes the real tool only')
+  assert.match(view, /1 action · read ×1/, 'the header count describes the real action only')
   assert.match(view, /Think:\s+the real reasoning/)
   // The mid-turn notice is process feedback: collapsed Focus absorbs it into
   // the Thought, while the mid-turn relay stays surfaced (external input).
@@ -1074,7 +1074,7 @@ test('a same-step timing replacement refreshes the mounted Activity duration', a
   const strip = (view: string): string => view.replace(/\x1b\[[0-9;]*m/g, '')
   const first = strip(vt.getViewport().join('\n'))
   // Wall span: reasoning 2s → tool result 9s = 7s.
-  assert.match(first, /▸ 🧰 Activity 7s · 1 tool/, `the initial span:\n${first}`)
+  assert.match(first, /▸ Activity 7s · 1 action · read ×1/, `the initial span:\n${first}`)
 
   // The authoritative replacement corrects ONLY the timing (same text,
   // same topology): the reasoning start moves 1s earlier, so the mounted
@@ -1083,5 +1083,95 @@ test('a same-step timing replacement refreshes the mounted Activity duration', a
   show(app, folder)
   await vt.waitForRender()
   const corrected = strip(vt.getViewport().join('\n'))
-  assert.match(corrected, /▸ 🧰 Activity 8s · 1 tool/, `the corrected timing must refresh the mounted card:\n${corrected}`)
+  assert.match(corrected, /▸ Activity 8s · 1 action · read ×1/, `the corrected timing must refresh the mounted card:\n${corrected}`)
+})
+
+// ── Compact Activity in-place Action repaint (addendum v2 §40) ────────────
+
+test('a Compact Activity repaints in place when its ActionStats change without a topology change', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, T0 + 1, 1),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('rr1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('r1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('r1') },
+      },
+    }, T0 + 2, 2),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.match(view, /1 action · read ×1/, `the initial span stat:\n${view}`)
+
+  // A second read MERGES INTO THE SAME group card in place: the span member
+  // identities are unchanged, only `callCount`/args move — so only the
+  // bounded ActionStats signature can invalidate the mounted component.
+  folder.apply([
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: JSON.stringify({ path: 'b.ts' }) }, T0 + 3, 3),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('rr2'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('r2'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('r2') },
+      },
+    }, T0 + 4, 4),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.match(view, /2 actions · read ×2/, `the in-place stat change must repaint the collapsed card:\n${view}`)
+  app.stop()
+})
+
+// ── Internal hierarchy stays indented (addendum v2 §56) ───────────────────
+
+/** The leading-space count of one stripped terminal row. */
+function indentOf(rows: readonly string[], needle: string): number | undefined {
+  const row = rows.find(candidate => candidate.includes(needle))
+  return row === undefined ? undefined : row.length - row.trimStart().length
+}
+
+test('internal card hierarchy keeps its indent while the outer chrome stays flat (v2 §56)', async () => {
+  const { vt, app } = startApp('full')
+  app.setFullscreen(true)
+  app.setTranscript([
+    { kind: 'thinking', turn: 0, text: 'reasoning body line' },
+    {
+      kind: 'tool', turn: 0, name: 'run_code',
+      args: '{"code":"print(1)","description":"Inspect project"}',
+      result: 'program output', status: 'ok',
+      subCalls: [{
+        kind: 'tool', turn: 0, name: 'bash', args: '{"command":"npm test","description":"Run tests"}',
+        result: '1 failed\n2 failed', status: 'ok',
+        subCallId: 'code-1:code:1', parentCallId: 'code-1', rootCallId: 'code-1',
+      }],
+    },
+  ])
+  await vt.waitForRender()
+  const strip = (row: string): string => row.replace(/\u001b\[[0-9;]*m/g, '').trimEnd()
+  let rows = vt.getViewport().map(strip)
+  // Outer rows: the Thinking header and the tool card header sit at column 0.
+  assert.equal(indentOf(rows, 'Thinking'), 0, `the Thinking header must not be indented:\n${rows.join('\n')}`)
+  assert.equal(indentOf(rows, 'Code'), 0, `the tool card header must not be indented:\n${rows.join('\n')}`)
+  // Internal hierarchy: the Thinking body is subordinate to its header and
+  // the PTC child header is deeper than the root.
+  const thinkingBody = indentOf(rows, 'reasoning body line')
+  assert.ok(thinkingBody !== undefined && thinkingBody > 0, `the Thinking body keeps its internal indent:\n${rows.join('\n')}`)
+  const childHeader = indentOf(rows, 'Bash')
+  assert.ok(childHeader !== undefined && childHeader > 0, `the PTC child header stays indented under the root:\n${rows.join('\n')}`)
+  // Expand the child (a click on its header) so its body rows are visible:
+  // they must stay deeper than the child header, never flattened.
+  const childRow = rows.findIndex(row => row.includes('Bash'))
+  click(vt, 11, childRow + 1)
+  await vt.waitForRender()
+  rows = vt.getViewport().map(strip)
+  const childBody = indentOf(rows, '1 failed')
+  assert.ok(childBody !== undefined && childBody > childHeader, `the PTC child body stays deeper than its header:\n${rows.join('\n')}`)
+  app.stop()
 })

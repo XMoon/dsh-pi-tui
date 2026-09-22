@@ -484,7 +484,7 @@ test('renders preparing rows with the selected icon style and no spinner state',
   app.setTranscript(focusMessages, new Map([[1, focusActivity]]), undefined, [preview])
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Tool:    Preparing Edit…'), `Focus collapsed Tool slot missing:\n${view}`)
+  assert.ok(view.includes('Action:  Preparing Edit…'), `Focus collapsed Tool slot missing:\n${view}`)
   assert.ok(!view.includes('src/foo.ts'), `Focus collapsed must not show the live path:\n${view}`)
   assert.ok(!view.includes('1.2 KiB'), `Focus collapsed must not show live argument bytes:\n${view}`)
   assert.ok(!view.includes('Preparing Edit src/foo.ts...'), `Focus collapsed must not render a standalone row:\n${view}`)

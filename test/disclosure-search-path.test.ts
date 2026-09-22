@@ -110,7 +110,7 @@ test('an expanded Compact Work internal spacer collapses that Work (F6 blank-row
   app.toggleWorkSpan(owner)
   await viewport(vt)
   let view = vt.getViewport()
-  assert.ok(view.join('\n').includes('▾ 🧰 Activity'), `precondition: the Work is open:\n${view.join('\n')}`)
+  assert.ok(view.join('\n').includes('▾ Activity'), `precondition: the Work is open:\n${view.join('\n')}`)
   const toolY = view.findIndex(line => line.includes('Read'))
   assert.ok(toolY > 0, `precondition: the Work member row is visible:\n${view.join('\n')}`)
   assert.ok(isBlankRow(view[toolY - 1]!), `the clicked row must be an internal blank spacer:\n${view.join('\n')}`)
@@ -118,7 +118,7 @@ test('an expanded Compact Work internal spacer collapses that Work (F6 blank-row
   await vt.waitForRender()
   view = vt.getViewport()
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the internal spacer collapses the owning Work')
-  assert.ok(view.join('\n').includes('▸ 🧰 Activity'), `the Work collapses to its header:\n${view.join('\n')}`)
+  assert.ok(view.join('\n').includes('▸ Activity'), `the Work collapses to its header:\n${view.join('\n')}`)
 })
 
 test('a collapsed fullscreen Focus reveals root + nested Work temporarily for search', async () => {
@@ -134,7 +134,7 @@ test('a collapsed fullscreen Focus reveals root + nested Work temporarily for se
   const revealed = await viewport(vt)
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'the root reveal stays temporary (no manual state)')
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the nested Work reveal stays temporary')
-  assert.ok(revealed.includes('▾ 🧰 Activity'), `the nested Work must be revealed:\n${revealed}`)
+  assert.ok(revealed.includes('▾ Activity'), `the nested Work must be revealed:\n${revealed}`)
   assert.ok(revealed.includes('Read'), `the matched Work member must render:\n${revealed}`)
 
   // Ordinary dismiss preserves the current reveal: BOTH necessary ancestors are
@@ -143,7 +143,7 @@ test('a collapsed fullscreen Focus reveals root + nested Work temporarily for se
   const promoted = await viewport(vt)
   assert.equal(app.focusExpandedTurnsForTest().has(1), true, 'the root is promoted')
   assert.equal(app.expandedWorkOwnersForTest().has(owner), true, 'the nested Work is promoted too')
-  assert.ok(promoted.includes('▾ 🧰 Activity'), `the promoted Work stays open:\n${promoted}`)
+  assert.ok(promoted.includes('▾ Activity'), `the promoted Work stays open:\n${promoted}`)
 })
 
 test('an explicit Work collapse under search revokes the temporary reveal', async () => {
@@ -153,13 +153,13 @@ test('an explicit Work collapse under search revokes the temporary reveal', asyn
   app.setFullscreen(true)
   await viewport(vt)
   app.setTranscriptSearchTarget(targetFor(tool, 'READ_RESULT_MARKER'))
-  assert.ok((await viewport(vt)).includes('▾ 🧰 Activity'), 'precondition: the reveal opens the Work')
+  assert.ok((await viewport(vt)).includes('▾ Activity'), 'precondition: the reveal opens the Work')
   assert.equal(app.expandedWorkOwnersForTest().size, 0)
 
   app.toggleWorkSpan(owner)
   const collapsed = await viewport(vt)
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'a reveal-only Work collapse writes no manual owner')
-  assert.ok(!collapsed.includes('▾ 🧰 Activity'), `the collapsed Work stays collapsed (no instant reopen):\n${collapsed}`)
+  assert.ok(!collapsed.includes('▾ Activity'), `the collapsed Work stays collapsed (no instant reopen):\n${collapsed}`)
 })
 
 test('a manual-open Work collapses under an active search without reopening', async () => {
@@ -171,7 +171,7 @@ test('a manual-open Work collapses under an active search without reopening', as
   app.toggleFocusTurn(1)
   await viewport(vt)
   app.toggleWorkSpan(owner)
-  assert.ok((await viewport(vt)).includes('▾ 🧰 Activity'), 'precondition: the Work is manually open')
+  assert.ok((await viewport(vt)).includes('▾ Activity'), 'precondition: the Work is manually open')
   // The target lives INSIDE the Work, but the reveal path omits an already-open
   // Work — the explicit collapse must still revoke the grant by ancestry.
   app.setTranscriptSearchTarget(targetFor(tool, 'READ_RESULT_MARKER'))
@@ -179,7 +179,7 @@ test('a manual-open Work collapses under an active search without reopening', as
   app.toggleWorkSpan(owner)
   const collapsed = await viewport(vt)
   assert.equal(app.expandedWorkOwnersForTest().size, 0)
-  assert.ok(!collapsed.includes('▾ 🧰 Activity'), `the manual-open Work must stay collapsed under search:\n${collapsed}`)
+  assert.ok(!collapsed.includes('▾ Activity'), `the manual-open Work must stay collapsed under search:\n${collapsed}`)
 })
 
 test('a manual-open cluster collapses under an active search without reopening', async () => {
@@ -210,12 +210,12 @@ test('regular Ctrl+O collapses a search-only-open Work instead of turning the ma
   app.setTranscript(messages, activities)
   await viewport(vt)
   app.setTranscriptSearchTarget(targetFor(tool, 'READ_RESULT_MARKER'))
-  assert.ok((await viewport(vt)).includes('▾ 🧰 Activity'), 'precondition: search temporarily opened the collapsed Work')
+  assert.ok((await viewport(vt)).includes('▾ Activity'), 'precondition: search temporarily opened the collapsed Work')
   vt.sendInput('\x0f')
   await viewport(vt)
   assert.equal(app.isTranscriptDetailExpanded(), false, 'Ctrl+O must collapse/revoke, not turn the master on')
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the reveal-only Work writes no manual owner')
-  assert.ok(!(await viewport(vt)).includes('▾ 🧰 Activity'), 'the search-only Work collapses and its reveal is revoked')
+  assert.ok(!(await viewport(vt)).includes('▾ Activity'), 'the search-only Work collapses and its reveal is revoked')
 })
 
 test('a Work owner parked behind a collapsed Focus root does not consume the first Ctrl+O', async () => {
@@ -288,8 +288,8 @@ test('a regular Focus with the disclosure action disabled fails the nested Work 
   await viewport(vt)
   app.setTranscriptSearchTarget(targetFor(tool, 'READ_RESULT_MARKER'))
   const revealed = await viewport(vt)
-  assert.ok(!revealed.includes('▸ 🧰 Activity'), `no collapsed Work header may render without an operable action:\n${revealed}`)
-  assert.ok(!revealed.includes('▾ 🧰 Activity'), `no Work container may render without an operable action:\n${revealed}`)
+  assert.ok(!revealed.includes('▸ Activity'), `no collapsed Work header may render without an operable action:\n${revealed}`)
+  assert.ok(!revealed.includes('▾ Activity'), `no Work container may render without an operable action:\n${revealed}`)
   assert.ok(revealed.includes('Read'), `the nested Work members must fail open flat:\n${revealed}`)
 })
 
@@ -300,13 +300,13 @@ test('the reveal path re-evaluates open state after a master toggle (no stale me
   app.setTranscriptDetailExpanded(true)
   await viewport(vt)
   app.setTranscriptSearchTarget(targetFor(tool, 'READ_RESULT_MARKER'))
-  assert.ok((await viewport(vt)).includes('▾ 🧰 Activity'), 'precondition: the derived master opened the recent Work')
+  assert.ok((await viewport(vt)).includes('▾ Activity'), 'precondition: the derived master opened the recent Work')
 
   // Turning the master OFF re-hides the Work, so the still-granted reveal must
   // now open it — the memoized ancestry must not be served a stale open state.
   app.setTranscriptDetailExpanded(false)
   const stillRevealed = await viewport(vt)
-  assert.ok(stillRevealed.includes('▾ 🧰 Activity'), `the granted reveal must open the now-hidden Work:\n${stillRevealed}`)
+  assert.ok(stillRevealed.includes('▾ Activity'), `the granted reveal must open the now-hidden Work:\n${stillRevealed}`)
 })
 
 test('a regular Ctrl+O never clears a settled surfaced-interaction card override', async () => {
@@ -336,7 +336,7 @@ test('a fail-open regular surface renders a live call without Work chrome', asyn
   ])
   app.expandFocusTurn(1)
   const view = await viewport(vt)
-  assert.ok(!view.includes('▸ 🧰 Activity') && !view.includes('▾ 🧰 Activity'), `no Work chrome may render on a fail-open surface:\n${view}`)
+  assert.ok(!view.includes('▸ Activity') && !view.includes('▾ Activity'), `no Work chrome may render on a fail-open surface:\n${view}`)
   assert.ok(view.includes('Preparing Edit'), `the live call renders as an ordinary preview:\n${view}`)
 })
 

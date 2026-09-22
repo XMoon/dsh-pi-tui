@@ -173,6 +173,15 @@ Surfaced Context
   rewritten to `user`.
 - A recall names its structured labels; no summary is invented when metadata is
   absent.
+- **Card-internal header→body layout.** A standalone Context card's HEADER sits
+  at the transcript left edge like every other container chrome; the card's OWN
+  body is subordinate to it and indented 2 cells — the notice summary and its
+  expanded payload, the relay body and its long-message overflow marker, and the
+  recall payload. The body wraps/truncates at the reduced content budget BEFORE
+  the indent is applied, so the lead can never push a row past the terminal
+  (below 3 columns it is dropped rather than overflowing). This is the card's own
+  hierarchy, the same relationship the Tool card's payload inset expresses; the
+  outer container flattening and `containerPath` semantics are unaffected.
 
 ### Ambient clustering
 

@@ -72,6 +72,11 @@ const ALLOWLIST = [
   "} else if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {",
   // The approval dialog's own keys (a capturing overlay component).
   "else if (matchesKey(data, 'ctrl+c')) this.settleApproval(pending, 'cancelled')",
+  // The SAME approval-overlay seam reached through the modal-inspection
+  // precedence check (`approvalOwnsFixedKey`, which must beat a conflicting
+  // inspection remap). Its `y`/`n`/`escape` checks carry no chord and are not
+  // scanned; the bare continuation is the overlay's own Ctrl+C.
+  "|| matchesKey(data, 'ctrl+c')",
   // The effective-submit mirror (PR review): the host-owned seams exclude
   // Shift+Enter (the fork editor's newline) from the submit-key check —
   // an editor-level key, not a Host action.

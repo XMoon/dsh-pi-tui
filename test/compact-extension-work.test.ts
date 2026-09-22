@@ -24,7 +24,7 @@ afterEach(() => {
 
 function workHeaderCount(view: string, expanded?: boolean): number {
   const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
-  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} (?:🧰 )?Activity(?: | ·|$)`).test(line)).length
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} Activity(?: | ·|$)`).test(line)).length
 }
 
 test('a custom tool is extension-owned only inside an expanded Work span', async () => {

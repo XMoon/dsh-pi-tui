@@ -75,13 +75,13 @@ function assertRowsWithin(rows: readonly string[], width: number, where: string)
 // family, expanded and collapsed.
 test('the grapheme/ANSI matrix never overflows any F4 row family', () => {
   for (const [name, sample] of SAMPLES) {
-    const workSummary: CompactWorkSummary = { toolCount: 4, subagentCount: 1, think: { text: sample, running: true }, tool: undefined }
+    const workSummary: CompactWorkSummary = { actionStats: { total: 5, types: new Map([['read', 4], ['subagent', 1]]) }, think: { text: sample, running: true }, action: undefined }
     const clusterRows = [ambient(sample, 'instructions', 'a'), ambient(sample, 'catalog', 'b')]
     const { clusters } = clusterAdjacentAmbientContext(clusterRows)
     assert.equal(clusters.length, 1, `${name}: fixture clusters`)
     for (const width of WIDTHS) {
       const batches: ReadonlyArray<readonly [string, string[]]> = [
-        ['work collapsed', new CompactWorkComponent({ span: compactSpan(), expanded: false, summary: workSummary, toolDisplay: sample, iconStyle: 'emoji' }).render(width)],
+        ['work collapsed', new CompactWorkComponent({ span: compactSpan(), expanded: false, summary: workSummary, action: { kind: 'tool', display: sample, rootName: 'read' }, iconStyle: 'emoji' }).render(width)],
         ['work expanded', new CompactWorkComponent({ span: compactSpan(), expanded: true, summary: workSummary, iconStyle: 'emoji' }).render(width)],
         ['pending work', new CompactPendingWorkComponent({ preparingSummary: sample, iconStyle: 'emoji' }).render(width)],
         ['cluster collapsed', new ContextClusterComponent({ cluster: clusters[0]!, expanded: false, iconStyle: 'emoji' }).render(width)],
@@ -156,9 +156,9 @@ test('the cluster summary composes deterministically from wide/duplicate labels'
 })
 
 test('an oversized Work header degrades without wrapping to extra rows', () => {
-  const summary: CompactWorkSummary = { toolCount: 12345, subagentCount: 6789, think: { text: 'x', running: true } }
+  const summary: CompactWorkSummary = { actionStats: { total: 1234567890, types: new Map([['read', 123456789], ['bash', 1234567890 - 123456789]]) }, think: { text: 'x', running: true } }
   for (const width of WIDTHS) {
-    const rows = new CompactWorkComponent({ span: compactSpan(), expanded: false, summary, toolDisplay: 'very long tool display '.repeat(10), iconStyle: 'symbols' }).render(width)
+    const rows = new CompactWorkComponent({ span: compactSpan(), expanded: false, summary, action: { kind: 'tool', display: 'very long tool display '.repeat(10), rootName: 'read' }, iconStyle: 'symbols' }).render(width)
     assert.equal(rows.length <= 3, true, `width ${width}: header + at most two slot rows`)
     assertRowsWithin(rows, width, 'oversized work header')
   }

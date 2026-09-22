@@ -116,7 +116,6 @@ test('the emoji palette preserves the historical glyphs', () => {
     'tool-edit': '✏️',
     'tool-code': '⚙️',
     'tool-generic': '🛠️',
-    work: '🧰',
     subagent: '🤖',
     workflow: '🧵',
     error: '❌',
@@ -153,7 +152,6 @@ test('the symbols palette is the documented compact vocabulary', () => {
     'tool-edit': '~',
     'tool-code': '⊞',
     'tool-generic': '∗',
-    work: '✦',
     subagent: '⋄',
     workflow: '⇄',
     error: '⨯',
@@ -193,4 +191,11 @@ test('iconStyleOf normalizes every persisted value', () => {
   // Unknown/legacy values fail safe to emoji.
   assert.equal(iconStyleOf('hello'), 'emoji')
   assert.equal(iconStyleOf('1'), 'emoji')
+})
+
+test('the Activity identity icon semantic is retired (2026-09-22 v2 addendum)', () => {
+  // Activity is identified by its disclosure marker + name only; the old
+  // `work` semantic must not come back as a dead registry entry.
+  assert.ok(!(ALL_ICON_SEMANTICS as readonly string[]).includes('work'), 'no `work` icon semantic remains')
+  assert.ok(!JSON.stringify(iconFor('subagent', 'emoji')).includes('🧰'))
 })

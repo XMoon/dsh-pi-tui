@@ -1,8 +1,10 @@
 /**
- * The shared compact process-preview authority (post-F6 plan §7/§8/§9):
- * Think latest-line selection, running right-edge follow, Tool status
- * prefix + active PTC child suffix + width degradation, the Preparing
- * summary, and Focus/Activity Think-slot equivalence.
+ * The shared compact process-preview authority (post-F6 plan §7/§8/§9 +
+ * presentation-convergence addendum v2): Think latest-line selection, running right-edge
+ * follow, Action status prefix + active PTC child suffix + width
+ * degradation, the Preparing summary, Focus/Activity Think-slot
+ * equivalence, the shared Action classifier matrix, latest-candidate
+ * chronology, the synthetic Action labels and the bounded cache signature.
  * @module @xmoon76/dsh-pi-tui/compact-process-preview.test
  */
 
@@ -10,18 +12,43 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import {
+  compactActionPresentation,
+  compactActionSignature,
+  compactActionStatParts,
+  compactActionStatsOf,
+  compactActionSlotLine,
+  compactActionSourceOf,
   compactPreparingSummary,
   compactSlotLine,
   compactThinkSlotLine,
-  compactToolSlotLine,
+  latestCompactAction,
+  type CompactActionPresentation,
 } from '../src/compact-process-preview.ts'
 import { focusCollapsedBody } from '../src/focus-activity.ts'
-import type { TurnActivity } from '../src/transcript.ts'
+import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../src/transcript.ts'
 
 const WIDTH = 40
 
 const think = (options: { text: string; running: boolean; width?: number }): string =>
   compactThinkSlotLine({ ...options, width: options.width ?? WIDTH })
+
+/** A minimal genuine tool row (origin absent → one call by definition). */
+function toolMessage(overrides: Partial<TranscriptToolMessage> = {}): TranscriptToolMessage {
+  return {
+    kind: 'tool',
+    turn: 1,
+    name: 'read',
+    args: '{"file_path":"src/a.ts"}',
+    result: 'ok',
+    status: 'ok',
+    ...overrides,
+  }
+}
+
+/** A minimal retry system row exactly as the fold produces it. */
+function retryMessage(text = 'llm retry 2/6 in 3s — authentication failed'): Extract<TranscriptMessage, { kind: 'system' }> {
+  return { kind: 'system', turn: 1, text, origin: 'llm-retry' }
+}
 
 test('Think: multiline running shows the LATEST line, not the frozen first line', () => {
   const line = think({ text: 'line 1\nline 2 streaming...\nline 3 streaming...', running: true })
@@ -63,32 +90,31 @@ test('Think: CJK/wide content never wraps past the width', () => {
   assert.ok(visibleWidth(line) <= 30, `wide chars stay within the budget: ${visibleWidth(line)}`)
 })
 
-test('Tool: status prefix + active-child suffix semantics', () => {
+test('Action: status prefix + active-child suffix semantics', () => {
   // root running, no child → no prefix.
-  const running = compactToolSlotLine({ status: 'running', display: 'Code program', rootName: 'code', width: WIDTH })
-  assert.ok(running.startsWith('Tool:'), 'running has no status prefix')
+  const running = compactActionSlotLine({ display: 'Code program', rootName: 'code', width: WIDTH })
+  assert.ok(running.startsWith('Action:'), 'running has no status prefix')
   assert.ok(running.includes('Code program'))
   // settled statuses keep their prefixes.
-  assert.ok(compactToolSlotLine({ status: 'ok', display: 'Read a.ts', rootName: 'read', width: WIDTH }).includes('✓ Read a.ts'))
-  assert.ok(compactToolSlotLine({ status: 'error', display: 'Read a.ts', rootName: 'read', width: WIDTH }).includes('✗ Read a.ts'))
+  assert.ok(compactActionSlotLine({ status: 'ok', display: 'Read a.ts', rootName: 'read', width: WIDTH }).includes('✓ Read a.ts'))
+  assert.ok(compactActionSlotLine({ status: 'error', display: 'Read a.ts', rootName: 'read', width: WIDTH }).includes('✗ Read a.ts'))
   // one active child → `Bash running`.
-  const one = compactToolSlotLine({ status: 'running', display: 'Code program', rootName: 'code', activeSubCalls: [{ name: 'bash', count: 1 }], width: WIDTH })
+  const one = compactActionSlotLine({ display: 'Code program', rootName: 'code', activeSubCalls: [{ name: 'bash', count: 1 }], width: WIDTH })
   assert.ok(one.includes('Bash running'), `one child:\n${one}`)
   // repeated same child type → `Bash ×2 running`.
-  const repeated = compactToolSlotLine({ status: 'running', display: 'Code program', rootName: 'code', activeSubCalls: [{ name: 'bash', count: 2 }], width: WIDTH })
+  const repeated = compactActionSlotLine({ display: 'Code program', rootName: 'code', activeSubCalls: [{ name: 'bash', count: 2 }], width: WIDTH })
   assert.ok(repeated.includes('Bash ×2 running'), `repeated child:\n${repeated}`)
   // mixed types → first type + remaining count.
-  const mixed = compactToolSlotLine({ status: 'running', display: 'Code program', rootName: 'code', activeSubCalls: [{ name: 'bash', count: 2 }, { name: 'read', count: 1 }], width: WIDTH })
+  const mixed = compactActionSlotLine({ display: 'Code program', rootName: 'code', activeSubCalls: [{ name: 'bash', count: 2 }, { name: 'read', count: 1 }], width: WIDTH })
   assert.ok(mixed.includes('Bash ×2 +1 running'), `mixed children:\n${mixed}`)
   // children settle → the suffix disappears.
-  const settled = compactToolSlotLine({ status: 'ok', display: 'Code program', rootName: 'code', activeSubCalls: [], width: WIDTH })
+  const settled = compactActionSlotLine({ status: 'ok', display: 'Code program', rootName: 'code', activeSubCalls: [], width: WIDTH })
   assert.ok(!settled.includes('running'), `no suffix after children settle:\n${settled}`)
 })
 
-test('Tool: narrow width keeps the active suffix before the root description', () => {
+test('Action: narrow width keeps the active suffix before the root description', () => {
   const display = 'Code a-very-long-program-description-that-would-never-fit'
-  const narrow = compactToolSlotLine({
-    status: 'running',
+  const narrow = compactActionSlotLine({
     display,
     rootName: 'bash',
     activeSubCalls: [{ name: 'bash', count: 1 }],
@@ -97,7 +123,7 @@ test('Tool: narrow width keeps the active suffix before the root description', (
   assert.ok(narrow.includes('Bash running'), `the active state survives degradation:\n${narrow}`)
   assert.ok(!narrow.includes(display), 'the long root description is degraded first')
   assert.ok(visibleWidth(narrow) <= 30, `no wrap:\n${narrow}`)
-  const floor = compactToolSlotLine({ status: 'running', display, rootName: 'bash', activeSubCalls: [{ name: 'bash', count: 1 }], width: 10 })
+  const floor = compactActionSlotLine({ display, rootName: 'bash', activeSubCalls: [{ name: 'bash', count: 1 }], width: 10 })
   assert.ok(!floor.includes('running'), `below identity+suffix even the suffix yields:\n${floor}`)
 })
 
@@ -112,19 +138,224 @@ test('Focus and Activity produce equivalent Think preview semantics', () => {
   const text = 'first line\nsecond line streaming tail'
   const activity = {
     think: { text, running: true },
-    tool: { callId: 'c1', name: 'code', args: '{}', status: 'running' },
   } as unknown as TurnActivity
-  const focusLines = focusCollapsedBody(activity, WIDTH, 'Code program')
-  assert.ok(focusLines.length >= 2, `Focus renders the Think and Tool slots:\n${focusLines.join('\n')}`)
+  const action = compactActionPresentation({ kind: 'tool', message: toolMessage({ name: 'code', args: '{}', status: 'running' }) })
+  const focusLines = focusCollapsedBody(activity, WIDTH, action)
+  assert.ok(focusLines.length >= 2, `Focus renders the Think and Action slots:\n${focusLines.join('\n')}`)
   const activityThink = compactThinkSlotLine({ text, running: true, width: WIDTH })
   assert.equal(focusLines[0], activityThink, 'the Focus Think slot consumes the SAME helper output')
-  // The Tool slot shares the same geometry (status prefix, one row).
-  const activityTool = compactToolSlotLine({ status: 'running', display: 'Code program', rootName: 'code', width: WIDTH })
-  assert.equal(focusLines[1], activityTool, 'the Focus Tool slot matches the shared Tool slot line')
+  // The Action slot shares the same geometry (status prefix, one row).
+  const activityAction = compactActionSlotLine({ display: action.display, rootName: action.rootName, width: WIDTH })
+  assert.equal(focusLines[1], activityAction, 'the Focus Action slot matches the shared Action slot line')
 })
 
 test('compactSlotLine keeps first-line normalization for non-Think slots', () => {
-  const line = compactSlotLine('Tool:', 'first\nsecond', WIDTH)
+  const line = compactSlotLine('Action:', 'first\nsecond', WIDTH)
   assert.ok(line.includes('first'))
   assert.ok(!line.includes('second'), 'non-Think slots never smuggle later lines')
+})
+
+// ── Shared Action classifier matrix (addendum v2 §46) ────────────
+
+test('classifier: genuine tool call -> tool', () => {
+  assert.deepEqual(compactActionSourceOf(toolMessage())?.kind, 'tool')
+})
+
+test('classifier: grouped genuine tool card -> tool', () => {
+  assert.deepEqual(compactActionSourceOf(toolMessage({ callCount: 3 }))?.kind, 'tool')
+})
+
+test('classifier: subagent-delegation -> subagent', () => {
+  assert.deepEqual(compactActionSourceOf(toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'reviewer' }))?.kind, 'subagent')
+})
+
+test('classifier: command -> command', () => {
+  assert.deepEqual(compactActionSourceOf(toolMessage({ origin: 'command', name: '/compact' }))?.kind, 'command')
+})
+
+test('classifier: llm-retry -> retry', () => {
+  assert.deepEqual(compactActionSourceOf(retryMessage())?.kind, 'retry')
+})
+
+test('classifier: orphan result callCount=0 -> orphan-tool-result', () => {
+  assert.deepEqual(compactActionSourceOf(toolMessage({ callCount: 0, args: '' }))?.kind, 'orphan-tool-result')
+})
+
+test('classifier: Thinking / Context / Workflow / Compaction -> none', () => {
+  assert.equal(compactActionSourceOf({ kind: 'thinking', turn: 1, text: 'reasoning' }), undefined)
+  assert.equal(compactActionSourceOf({ kind: 'system', turn: 1, text: 'reminder', context: true }), undefined)
+  assert.equal(compactActionSourceOf({ kind: 'system', turn: 1, text: 'max tokens reached', origin: 'turn-max-tokens' }), undefined)
+  assert.equal(compactActionSourceOf({ kind: 'assistant', turn: 1, text: 'narration' }), undefined)
+  assert.equal(compactActionSourceOf({ kind: 'user', turn: 1, text: 'hi' }), undefined)
+  assert.equal(compactActionSourceOf({ kind: 'compaction', turn: 1, text: 'summary', items: 1, tokens: 1 }), undefined)
+  assert.equal(compactActionSourceOf(toolMessage({ origin: 'turn-error' })), undefined)
+})
+
+test('classifier: active/settled surfaced interaction -> none (externally owned)', () => {
+  assert.equal(compactActionSourceOf(toolMessage({ name: 'ask_user_question', status: 'running' })), undefined)
+  assert.equal(compactActionSourceOf(toolMessage({ name: 'exit_plan_mode', status: 'ok' })), undefined)
+})
+
+test('latest-selection: chronology owns selection, no type priority', () => {
+  const messages: TranscriptMessage[] = [
+    toolMessage({ name: 'read' }),
+    toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'helper' }),
+    retryMessage(),
+    toolMessage({ origin: 'command', name: '/compact' }),
+  ]
+  assert.equal(latestCompactAction(messages)?.kind, 'command')
+  // The same rows in a different order select a different latest.
+  assert.equal(latestCompactAction([messages[3]!, messages[1]!])?.kind, 'subagent')
+  // No eligible evidence -> undefined.
+  assert.equal(latestCompactAction([{ kind: 'thinking', turn: 1, text: 'reasoning' }]), undefined)
+  assert.equal(latestCompactAction([]), undefined)
+})
+
+// ── Shared Action presentations (addendum v2 §11) ─────────────────
+
+test('presentation: genuine tool keeps presenter-first display and PTC suffix facts', () => {
+  const message = toolMessage({ name: 'read', status: 'running' })
+  const presentation = compactActionPresentation({ kind: 'tool', message })
+  assert.equal(presentation.status, undefined, 'a running tool carries no prefix')
+  assert.ok(presentation.display.includes('src/a.ts'), `fallback display renders the args:\n${presentation.display}`)
+  assert.equal(presentation.rootName, 'read')
+  const settled = compactActionPresentation({ kind: 'tool', message: toolMessage({ status: 'error' }) })
+  assert.equal(settled.status, 'error')
+})
+
+test('presentation: subagent renders the durable label without a ✓ prefix', () => {
+  const presentation = compactActionPresentation({
+    kind: 'subagent',
+    message: toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'Update command runner fixtures' }),
+  })
+  assert.equal(presentation.status, undefined, 'a descriptor record is a launch fact, never a completion')
+  assert.equal(presentation.display, 'Subagent · Update command runner fixtures')
+  const fallback = compactActionPresentation({
+    kind: 'subagent',
+    message: toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: '' }),
+  })
+  assert.equal(fallback.display, 'Subagent')
+})
+
+test('presentation: command renders name with settlement prefix', () => {
+  const ok = compactActionPresentation({ kind: 'command', message: toolMessage({ origin: 'command', name: '/compact', status: 'ok' }) })
+  assert.equal(ok.status, 'ok')
+  assert.equal(ok.display, '/compact')
+  const failed = compactActionPresentation({ kind: 'command', message: toolMessage({ origin: 'command', name: '/foo', status: 'error' }) })
+  assert.equal(failed.status, 'error')
+})
+
+test('presentation: retry transforms the known producer label only', () => {
+  const presentation = compactActionPresentation({ kind: 'retry', message: retryMessage() })
+  assert.equal(presentation.status, undefined)
+  assert.equal(presentation.display, 'Retry 2/6 in 3s · authentication failed')
+  assert.equal(
+    compactActionPresentation({ kind: 'retry', message: retryMessage('llm retry 4 in 9s — provider unavailable') }).display,
+    'Retry 4 in 9s · provider unavailable',
+  )
+  // An upstream format change renders verbatim instead of being parsed.
+  assert.equal(
+    compactActionPresentation({ kind: 'retry', message: retryMessage('retry scheduled soon') }).display,
+    'retry scheduled soon',
+  )
+})
+
+test('presentation: orphan result renders the honest diagnostic', () => {
+  assert.equal(
+    compactActionPresentation({ kind: 'orphan-tool-result', message: toolMessage({ name: 'read', callCount: 0 }) }).display,
+    'Unpaired Read result',
+  )
+  assert.equal(
+    compactActionPresentation({ kind: 'orphan-tool-result', message: toolMessage({ name: '', callCount: 0 }) }).display,
+    'Unpaired tool result',
+  )
+})
+
+test('signature: bounded cache identity separates synthetic Action changes', () => {
+  const base = compactActionPresentation({ kind: 'command', message: toolMessage({ origin: 'command', name: '/compact' }) })
+  const same = compactActionPresentation({ kind: 'command', message: toolMessage({ origin: 'command', name: '/compact' }) })
+  assert.equal(compactActionSignature(base), compactActionSignature(same))
+  const changed = compactActionPresentation({ kind: 'command', message: toolMessage({ origin: 'command', name: '/foo' }) })
+  assert.notEqual(compactActionSignature(base), compactActionSignature(changed))
+  assert.notEqual(compactActionSignature(base), compactActionSignature(undefined))
+  const ptc = compactActionPresentation({
+    kind: 'tool',
+    message: toolMessage({ name: 'code', status: 'running' }),
+  })
+  const ptcSame = compactActionPresentation({
+    kind: 'tool',
+    message: toolMessage({ name: 'code', status: 'running' }),
+  })
+  assert.equal(compactActionSignature(ptc), compactActionSignature(ptcSame))
+})
+
+// ── ActionStats matrix (addendum v2 §47) ───────────────────────────────────
+
+test('action stats: cardinality per source kind (v2 §47 example)', () => {
+  const stats = compactActionStatsOf([
+    toolMessage({ name: 'read', callCount: 2 }),
+    toolMessage({ name: 'bash' }),
+    toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'x' }),
+    retryMessage(),
+    toolMessage({ origin: 'command', name: '/compact', status: 'ok' }),
+  ])
+  assert.equal(stats.total, 6)
+  assert.deepEqual(
+    [...stats.types.entries()].sort(),
+    [['/compact', 1], ['bash', 1], ['read', 2], ['retry', 1], ['subagent', 1]].sort(),
+  )
+})
+
+test('action stats: orphan, Preparing and surfaced interactions never increment', () => {
+  assert.equal(compactActionStatsOf([toolMessage({ callCount: 0, args: '' })]).total, 0, 'an orphan result is diagnostic evidence')
+  // Preparing never reaches the classifier at all (live-only rows are not
+  // transcript messages) — the surfaced interaction is filtered by name.
+  assert.equal(compactActionStatsOf([toolMessage({ name: 'ask_user_question', status: 'running' })]).total, 0)
+  assert.equal(compactActionStatsOf([toolMessage({ name: 'exit_plan_mode', status: 'ok' })]).total, 0)
+  assert.equal(compactActionStatsOf([{ kind: 'thinking', turn: 1, text: 'r' }]).total, 0)
+})
+
+test('action stats: subtype parts keep the shared sort/cap and +N counts kinds', () => {
+  const stats = compactActionStatsOf([
+    toolMessage({ name: 'read', callCount: 3 }),
+    toolMessage({ name: 'bash', callCount: 2 }),
+    retryMessage(),
+    toolMessage({ origin: 'command', name: '/compact', status: 'ok' }),
+    toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'x' }),
+  ])
+  assert.deepEqual(compactActionStatParts(stats), ['8 actions', 'read ×3', 'bash ×2', '/compact ×1', '+2'], 'count-desc then name-asc; +2 counts the hidden retry/subagent kinds')
+})
+
+test('signature: an over-cap display stays bounded AND sensitive past the cap', () => {
+  const failure = 'x'.repeat(200)
+  const tailA = compactActionPresentation({
+    kind: 'retry',
+    message: retryMessage(`llm retry 2/6 in 3s — ${failure}-TAIL-A`),
+  })
+  const tailB = compactActionPresentation({
+    kind: 'retry',
+    message: retryMessage(`llm retry 2/6 in 3s — ${failure}-TAIL-B`),
+  })
+  assert.ok(tailA.display.startsWith('Retry 2/6 in 3s · '), 'fixture: the producer-shaped retry is transformed')
+  assert.ok(tailA.display.length > 120, 'fixture: the display is over the signature cap')
+  // A change AFTER the cap with the SAME total length must still invalidate —
+  // a truncated prefix would silently collide here.
+  assert.equal(tailA.display.length, tailB.display.length, 'fixture: same length')
+  assert.notEqual(compactActionSignature(tailA), compactActionSignature(tailB),
+    'a tail-only change past the cap must repaint')
+  // The signature itself stays bounded (digest, not the raw long display).
+  assert.ok(compactActionSignature(tailA).length < 200, `signature stays bounded: ${compactActionSignature(tailA).length}`)
+  // A short display keeps joining verbatim (exact, not digested).
+  const short = compactActionPresentation({ kind: 'command', message: toolMessage({ origin: 'command', name: '/compact' }) })
+  assert.ok(compactActionSignature(short).includes('/compact'))
+  // The exact cap boundary: AT the cap the display joins verbatim, ONE over it
+  // is digested (`>` comparison) — locks the boundary against an off-by-one.
+  const commandDisplay = (length: number): CompactActionPresentation =>
+    compactActionPresentation({ kind: 'command', message: toolMessage({ origin: 'command', name: `/${'x'.repeat(length - 1)}` }) })
+  const atCap = commandDisplay(120)
+  const overCap = commandDisplay(121)
+  assert.equal(atCap.display.length, 120, 'fixture: exactly at the cap')
+  assert.equal(overCap.display.length, 121, 'fixture: one over the cap')
+  assert.ok(compactActionSignature(atCap).includes(atCap.display), 'at the cap the display joins verbatim')
+  assert.ok(!compactActionSignature(overCap).includes(overCap.display), 'one over the cap the display is digested')
 })

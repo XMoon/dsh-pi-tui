@@ -21,7 +21,8 @@ import {
 } from '../src/context-presentation.ts'
 import { contextPresentation, isTranscriptContextForm } from '../src/context.ts'
 import { projectCompact } from '../src/compact-projection.ts'
-import { summarizeWorkSpan, formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../src/compact-work.ts'
+import { summarizeWorkSpan, formatWorkHeaderLine, compactWorkBody, CompactWorkComponent, CompactPendingWorkComponent } from '../src/compact-work.ts'
+import { compactActionPresentation } from '../src/compact-process-preview.ts'
 import { contextClusterSummaryParts, formatContextClusterHeader, ContextClusterComponent } from '../src/context-cluster.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 
@@ -316,12 +317,22 @@ test('the Work summary counts only ITS OWN span, not the whole turn', () => {
   assert.ok(first !== undefined && first.kind === 'work' && second !== undefined && second.kind === 'work')
   const firstSummary = summarizeWorkSpan(first.span)
   const secondSummary = summarizeWorkSpan(second.span)
-  assert.equal(firstSummary.toolCount, 1)
-  assert.equal(secondSummary.toolCount, 2)
+  assert.equal(firstSummary.actionStats.total, 1)
+  assert.equal(secondSummary.actionStats.total, 2)
   assert.equal(firstSummary.think?.text, 'first reasoning')
   assert.equal(secondSummary.think?.text, 'second reasoning')
-  assert.equal(secondSummary.tool?.name, 'search')
+  assert.equal(secondSummary.action?.kind, 'tool')
+  assert.equal(secondSummary.action?.message.name, 'search')
 })
+
+/** One summary carrying only the given action stats (test fixture). */
+function statsSummary(total: number, types: Record<string, number>): Parameters<typeof formatWorkHeaderLine>[0] {
+  return { actionStats: { total, types: new Map(Object.entries(types)) } }
+}
+const EMPTY_STATS_SUMMARY = statsSummary(0, {})
+function mixedStatsSummary(): Parameters<typeof formatWorkHeaderLine>[0] {
+  return statsSummary(3, { read: 1, bash: 1, subagent: 1 })
+}
 
 test('the Activity header reports span facts, omits zero counts and degrades to width', () => {
   const span = projectCompact([thinking(0), tool(0), tool(0)], noOptions)[0]
@@ -330,54 +341,55 @@ test('the Activity header reports span facts, omits zero counts and degrades to 
   // post-F6 plan §6.1/§6.3/§6.4: visible identity is `Activity` with the
   // registry work icon, the grammar is `<identity> <duration> · <stats>`,
   // and the `· thinking` marker is gone.
-  assert.equal(formatWorkHeaderLine(summary, false, 80, 'symbols'), '▸ ✦ Activity · 2 tools')
-  assert.equal(formatWorkHeaderLine({ toolCount: 0, subagentCount: 0 }, false, 80, 'symbols'), '▸ ✦ Activity')
-  assert.equal(formatWorkHeaderLine({ toolCount: 1, subagentCount: 0 }, true, 80, 'symbols'), '▾ ✦ Activity · 1 tool')
+  assert.equal(formatWorkHeaderLine(summary, false, 80, 'symbols'), '▸ Activity · 2 actions · read ×2')
+  assert.equal(formatWorkHeaderLine(EMPTY_STATS_SUMMARY, false, 80, 'symbols'), '▸ Activity')
+  assert.equal(formatWorkHeaderLine(statsSummary(1, { read: 1 }), true, 80, 'symbols'), '▾ Activity · 1 action · read ×1')
   // The duration sits directly beside the identity (§6.3), not behind a dot.
-  assert.equal(formatWorkHeaderLine(summary, false, 80, 'symbols', '18s'), '▸ ✦ Activity 18s · 2 tools')
-  assert.equal(formatWorkHeaderLine(summary, false, 80, 'minimal', '18s'), '▸ Activity 18s · 2 tools')
+  assert.equal(formatWorkHeaderLine(summary, false, 80, 'symbols', '18s'), '▸ Activity 18s · 2 actions · read ×2')
+  assert.equal(formatWorkHeaderLine(summary, false, 80, 'minimal', '18s'), '▸ Activity 18s · 2 actions · read ×2')
   // Narrow: drops the LAST stat first, keeps identity + duration to the
   // end (§6.5), never wraps.
-  assert.equal(formatWorkHeaderLine({ toolCount: 2, subagentCount: 1 }, false, 26, 'symbols', '18s'), '▸ ✦ Activity 18s · 2 tools')
+  assert.equal(formatWorkHeaderLine(mixedStatsSummary(), false, 28, 'symbols', '18s'), '▸ Activity 18s · 3 actions')
   // Below identity+duration, the duration falls too; the bare identity is
   // the floor (then a hard truncate as the last resort).
-  assert.equal(formatWorkHeaderLine({ toolCount: 2, subagentCount: 1 }, false, 14, 'symbols', '18s'), '▸ ✦ Activity')
+  assert.equal(formatWorkHeaderLine(mixedStatsSummary(), false, 14, 'symbols', '18s'), '▸ Activity 18s')
+  assert.equal(formatWorkHeaderLine(mixedStatsSummary(), false, 11, 'symbols', '18s'), '▸ Activity')
   const narrow = formatWorkHeaderLine(summary, false, 10, 'symbols')
   assert.ok(visibleWidth(narrow) <= 10)
 })
 
-test('the collapsed Activity body renders at most one Think row and one Tool row, never a Message slot', () => {
+test('the collapsed Activity body renders at most one Think row and one Action row, never a Message slot', () => {
   const span = projectCompact([thinking(0, 'checking\nsecond line'), tool(0)], noOptions)[0]
   assert.ok(span !== undefined && span.kind === 'work')
   const summary = summarizeWorkSpan(span.span)
-  const lines = compactWorkBody(summary, 60, 'Read src/tui-app.ts')
+  const lines = compactWorkBody(summary, 60, compactActionPresentation(summary.action!))
   assert.equal(lines.length, 2)
   assert.match(lines[0]!, /Think:/)
   // post-F6 plan §8.2: the SETTLED Think preview reads the LATEST logical
   // line (head-truncated), never the frozen first line.
   assert.match(lines[0]!, /second line/)
   assert.ok(!lines[0]!.includes('checking'), 'the Think preview shows the latest line, not the first')
-  assert.match(lines[1]!, /Tool:/)
-  assert.match(lines[1]!, /Read src\/tui-app\.ts/)
+  assert.match(lines[1]!, /Action:/)
+  assert.match(lines[1]!, /✓ Read/)
   assert.ok(!lines.some(line => line.includes('Message:')), 'Compact Activity has no Message slot')
-  // No tool/thinking -> no placeholder rows.
-  assert.deepEqual(compactWorkBody({ toolCount: 0, subagentCount: 0 }, 60), [])
+  // No action/thinking -> no placeholder rows.
+  assert.deepEqual(compactWorkBody(EMPTY_STATS_SUMMARY, 60), [])
 })
 
-test('a live Preparing summary owns the Tool slot over the settled display', () => {
+test('a live Preparing summary owns the Action slot over the settled display', () => {
   const span = projectCompact([thinking(0), tool(0, 'read')], noOptions)[0]
   assert.ok(span !== undefined && span.kind === 'work')
   const summary = summarizeWorkSpan(span.span)
-  const lines = compactWorkBody(summary, 80, 'Read src/index.ts', 'Preparing Bash…')
+  const lines = compactWorkBody(summary, 80, compactActionPresentation(summary.action!), 'Preparing Bash…')
   assert.match(lines[1]!, /Preparing Bash/)
 })
 
 test('the Work component renders one header row and, collapsed, the slot rows', () => {
   const span = projectCompact([thinking(0), tool(0)], noOptions)[0]
   assert.ok(span !== undefined && span.kind === 'work')
-  const collapsed = new CompactWorkComponent({ span: span.span, expanded: false, toolDisplay: 'Read a.ts', iconStyle: 'symbols' }).render(80)
-  assert.equal(collapsed.length, 3, 'header + Think + Tool')
-  const expanded = new CompactWorkComponent({ span: span.span, expanded: true, toolDisplay: 'Read a.ts', iconStyle: 'symbols' }).render(80)
+  const collapsed = new CompactWorkComponent({ span: span.span, expanded: false, action: { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' }, iconStyle: 'symbols' }).render(80)
+  assert.equal(collapsed.length, 3, 'header + Think + Action')
+  const expanded = new CompactWorkComponent({ span: span.span, expanded: true, action: { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' }, iconStyle: 'symbols' }).render(80)
   assert.equal(expanded.length, 1, 'expanded Work renders only the header — children render after it')
 })
 
@@ -440,5 +452,31 @@ test('the cluster header and summary never exceed a very narrow width', () => {
     for (const row of rows) {
       assert.ok(visibleWidth(row) <= width, `width ${width} overflowed: ${JSON.stringify(row)}`)
     }
+  }
+})
+
+// ── Outer alignment + internal structure (addendum v2 §54-§56) ─────────────
+
+test('container chrome shares the transcript left edge; internal card structure keeps its indent', () => {
+  const span = projectCompact([thinking(0, 'reasoning'), tool(0)], noOptions)[0]
+  assert.ok(span !== undefined && span.kind === 'work')
+  // Collapsed Activity: header + Think + Action rows all start at column 0.
+  for (const row of new CompactWorkComponent({
+    span: span.span,
+    expanded: false,
+    action: { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' },
+    iconStyle: 'symbols',
+  }).render(80)) {
+    assert.ok(!row.startsWith(' '), `outer chrome row must not indent:\n${row}`)
+  }
+  // The pending Activity card: same flat geometry.
+  for (const row of new CompactPendingWorkComponent({ preparingSummary: 'Preparing Bash…', iconStyle: 'symbols' }).render(80)) {
+    assert.ok(!row.startsWith(' '), `pending Activity row must not indent:\n${row}`)
+  }
+  // The ambient Context cluster: header + summary share the same edge.
+  const clusterRows = [contextRow(0, 'instructions', 'a'), contextRow(0, 'catalog', 'b')]
+  const { clusters } = clusterAdjacentAmbientContext(clusterRows)
+  for (const row of new ContextClusterComponent({ cluster: clusters[0]!, expanded: false, iconStyle: 'symbols' }).render(80)) {
+    assert.ok(!row.startsWith(' '), `cluster chrome row must not indent:\n${row}`)
   }
 })

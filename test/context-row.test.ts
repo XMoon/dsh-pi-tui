@@ -1,7 +1,8 @@
 /**
  * Pure tests for the form-aware standalone Context rows (notice / relay /
- * recall): brightness, natural wrapping, producer-authored summaries, and
- * the reused long-message disclosure geometry.
+ * recall): brightness, natural wrapping, producer-authored summaries, the
+ * reused long-message disclosure geometry, and the card-internal header→body
+ * indent (header at the transcript left edge, body indented 2 cells).
  * @module @xmoon76/dsh-pi-tui/context-row.test
  */
 
@@ -11,6 +12,16 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../src/context-row.ts'
 import { color } from '../src/theme.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
+
+/** The card-internal body indent every standalone Context body row carries
+ * (context-card body-indent supplement). */
+const BODY = '  '
+
+/** The visible text of one painted row (the indent lives before/inside the
+ * paint, so column assertions read the stripped form). */
+function visible(row: string): string {
+  return row.replace(/\u001b\[[0-9;]*m/g, '')
+}
 
 type SystemRow = Extract<TranscriptMessage, { kind: 'system' }>
 
@@ -42,7 +53,8 @@ test('a collapsed notice shows the producer summary at normal brightness, never 
   assert.equal(rows.length, 2, 'header + summary only')
   assert.match(rows[0]!, /Background job/)
   assert.match(rows[0]!, /ctrl\+o to expand/)
-  assert.equal(rows[1], color.text(summary), 'the summary is normal brightness, never dim')
+  assert.equal(rows[1], color.text(`${BODY}${summary}`), 'the summary is normal brightness, never dim, and indented under its header')
+  assert.ok(!visible(rows[0]!).startsWith(' '), 'the header stays at the transcript left edge')
   assert.ok(!rows.some(row => row.includes('full payload body')), 'the payload stays hidden')
   assert.ok(!rows.some(row => row.includes('Context injection')), 'a notice is never a generic Context injection')
 })
@@ -60,9 +72,9 @@ test('a notice summary wraps naturally at narrow widths instead of being truncat
 test('an expanded notice adds the complete payload and keeps the summary', () => {
   const summary = 'job finished'
   const rows = new NoticeContextRow({ message: noticeRow(summary, 'line one\nline two'), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(80)
-  assert.ok(rows.includes(color.text(summary)))
-  assert.ok(rows.includes(color.textDim('line one')), 'the payload renders through the existing Context body rules')
-  assert.ok(rows.includes(color.textDim('line two')))
+  assert.ok(rows.includes(color.text(`${BODY}${summary}`)))
+  assert.ok(rows.includes(color.textDim(`${BODY}line one`)), 'the payload renders through the existing Context body rules, indented on the SAME body edge as the summary')
+  assert.ok(rows.includes(color.textDim(`${BODY}line two`)))
   assert.ok(!rows.some(row => row.includes('to expand')), 'an open row carries no expand affordance')
 })
 
@@ -80,7 +92,8 @@ test('a relay names its sender, shows the body at normal brightness, and is not 
   }).render(100)
   assert.equal(rows.length, 2)
   assert.match(rows[0]!, /Agent message · child-2/)
-  assert.equal(rows[1], color.text(body))
+  assert.equal(rows[1], color.text(`${BODY}${body}`), 'the relay body is indented under its header')
+  assert.ok(!visible(rows[0]!).startsWith(' '), 'the relay header stays at the transcript left edge')
   assert.ok(!rows.some(row => row.includes('Context injection')))
 })
 
@@ -160,11 +173,60 @@ test('a recall names its labels and keeps the payload behind the ordinary disclo
   assert.match(collapsed[0]!, /Session recall · prior work/)
   assert.ok(!collapsed[0]!.includes('recalled body'))
   const expanded = new RecallContextRow({ message: recallRow('recalled body'), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(80)
-  assert.ok(expanded.includes(color.textDim('recalled body')))
+  assert.ok(expanded.includes(color.textDim(`${BODY}recalled body`)), 'the recall payload is indented under its header')
+  assert.ok(!visible(expanded[0]!).startsWith(' '), 'the recall header stays at the transcript left edge')
   // No metadata -> no invented summary.
   const bare = new RecallContextRow({
     message: { kind: 'system', turn: 0, text: 'x', context: true, contextPresentation: { form: 'recall', role: 'recall' } },
     expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
   }).render(80)
   assert.equal(bare[0]!.includes('Session recall'), true)
+})
+
+// ── Card-internal header→body indent (body-indent supplement §11/§12) ─────
+
+test('the long-relay marker shares the body left edge with the head/tail rows', () => {
+  const body = Array.from({ length: 40 }, (_, index) => `line ${index}`).join(' ')
+  const geometry = { thresholdRows: 3, headRows: 2, tailRows: 2 }
+  const rows = new RelayContextRow({
+    message: relayRow(body), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji', geometry,
+  }).render(60)
+  assert.ok(!visible(rows[0]!).startsWith(' '), 'the header is not indented')
+  for (const row of rows.slice(1)) {
+    assert.ok(visible(row).startsWith(BODY), `every relay body row shares the 2-cell body edge:\n${JSON.stringify(row)}`)
+  }
+  // The marker is the overflow row between the head and the tail.
+  assert.ok(visible(rows[3]!).startsWith(`${BODY}…`), `the marker follows the same body indent:\n${JSON.stringify(rows[3])}`)
+})
+
+test('a notice body row and its payload keep one body edge (no mixed left boundary)', () => {
+  const rows = new NoticeContextRow({
+    message: noticeRow('short summary', 'payload line'), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji',
+  }).render(80)
+  const bodyRows = rows.slice(1)
+  assert.equal(bodyRows.length, 2, 'summary + payload')
+  for (const row of bodyRows) assert.ok(visible(row).startsWith(BODY), `body edge:\n${JSON.stringify(row)}`)
+})
+
+test('the standalone Context body indent never overflows at 1-3 columns', () => {
+  const cases: ReadonlyArray<readonly [string, (width: number) => string[]]> = [
+    ['notice summary', width => new NoticeContextRow({ message: noticeRow('后台任务完成 🐋'), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(width)],
+    ['notice payload', width => new NoticeContextRow({ message: noticeRow('s', '展开载荷 🐳'), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(width)],
+    ['relay body', width => new RelayContextRow({ message: relayRow('relay 🐋 body'), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji', geometry: { thresholdRows: 1, headRows: 1, tailRows: 1 } }).render(width)],
+    ['recall payload', width => new RecallContextRow({ message: recallRow('回忆 🐳'), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(width)],
+  ]
+  for (const [where, render] of cases) {
+    for (const width of [1, 2, 3, 10]) {
+      for (const row of render(width)) {
+        assert.ok(visibleWidth(row) <= width, `${where} width ${width} overflowed: ${JSON.stringify(row)}`)
+      }
+      // Below the 3-column floor the defensive drop keeps the header edge
+      // too: the card never manufactures a wider-than-terminal lead.
+      if (width <= 2) {
+        for (const row of render(width)) {
+          assert.ok(!visible(row).startsWith(' '), `${where} width ${width} must drop the indent rather than overflow: ${JSON.stringify(row)}`)
+        }
+      }
+    }
+  }
 })
