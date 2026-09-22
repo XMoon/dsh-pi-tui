@@ -108,10 +108,25 @@ function setTranscriptTiming(message: TranscriptMessage, timing: TranscriptTimin
   transcriptTimings.set(message, timing)
 }
 
+/** The last ACCEPTED reasoning-evidence time per thinking row (live fold):
+ * the fallback end when a settlement carries no authoritative lane end (a
+ * legacy `assistant/message` without the embedded stream). Without it the
+ * known reasoning end would be lost and the row would settle end-less.
+ * Weakly held — the fallback dies with its row. */
+const thinkingLastEvidence = new WeakMap<TranscriptMessage, number>()
+
 /** A point-evidence timing: the row proves presence at one instant only
  * (post-F6 plan §12.9) — never an invented duration. */
 function pointTiming(at: number): TranscriptTiming {
   return { startedAt: at, endedAt: at, running: false }
+}
+
+/** The fold-internal fallback identity of a streamed tool-call delta whose
+ * formal call id has not arrived yet: the SAME (turn, step, block index)
+ * identity the live preview projection uses, so Preparing timing survives
+ * the delayed-id handoff (post-F6 plan §12.14). */
+function preparingFallbackKey(turn: number, step: number, index: number): string {
+  return `\u0000tool-call-preparing:${turn}:${step}:${index}`
 }
 
 /** Record a running row's authoritative end (post-F6 plan §12.7). A row the
@@ -523,6 +538,14 @@ export interface TranscriptToolMessage {
   status: 'ok' | 'error' | 'running'
   /** Source-derived provenance for synthetic non-model tool rows. */
   origin?: TranscriptToolOrigin
+  /**
+   * Genuine model `tool/call` cardinality: HOW MANY real tool/call events
+   * this card carries. Only a MERGED read-group card sets it (the merged
+   * sum — two grouped reads are still TWO calls, never `"2 files" → 1`);
+   * a plain card is one call by definition, so absence means 1. Synthetic
+   * rows carry `origin` instead and never count toward `tools`.
+   */
+  callCount?: number
   /** The completed result's content blocks, for tool-owned presentation. */
   resultBlocks?: readonly ContentBlock[]
   /** The tool-private presentation payload from the tool/result event. */
@@ -2332,12 +2355,14 @@ export class TranscriptFolder {
     const turns = new Set<number>()
     let firstResult: string | undefined
     let maxTurn = first.turn
+    let callCount = 0
     for (let index = start; index <= end; index += 1) {
       const member = this.items[index]
       if (member === undefined || !TranscriptFolder.groupable(member)) continue
       members.push(index)
       turns.add(member.turn)
       maxTurn = Math.max(maxTurn, member.turn)
+      if (member.kind === 'tool') callCount += member.callCount ?? 1
       // Match the existing projection's empty-result behavior: leading empty
       // results are omitted, but an empty result after the first non-empty one
       // remains a real (separator-delimited) member.
@@ -2352,6 +2377,10 @@ export class TranscriptFolder {
       args: `${members.length} files`,
       result: firstResult === undefined ? '' : [firstResult, ...results].join('\n\n'),
       turn: maxTurn,
+      // The group's genuine-call cardinality is the SUM of its members:
+      // two grouped reads are still two model tool calls, never
+      // `"2 files" → 1` (post-F6 plan §10.2).
+      ...(callCount > 0 ? { callCount } : {}),
     }
     this.mergedReadGroupTiming(group, members, turns.size > 1)
     return { group, members, firstTurn: first.turn, spansTurns: turns.size > 1 }
@@ -2661,6 +2690,11 @@ export class TranscriptFolder {
       previousGroup.args = `${members.length} files`
       previousGroup.result = previousGroup.result === '' ? item.result : `${previousGroup.result}\n\n${item.result}`
       previousGroup.turn = Math.max(previousGroup.turn, item.turn)
+      // The extended group carries the merged genuine-call cardinality:
+      // the grouped members are still that many model tool calls.
+      const mergedCallCount = (previousGroup.callCount ?? 1) + (item.callCount ?? 1)
+      if (mergedCallCount > 0) previousGroup.callCount = mergedCallCount
+      else delete previousGroup.callCount
        this.addGroupedTurn(previousGroup.turn)
       const spansTurns = wasCross || item.turn !== firstTurn
       this.groupMeta.set(previousGroup, { firstTurn, spansTurns })
@@ -2689,6 +2723,9 @@ export class TranscriptFolder {
       result: previous.result === '' ? item.result : `${previous.result}\n\n${item.result}`,
       turn: Math.max(previous.turn, item.turn),
     }
+    // The promoted group carries the merged genuine-call cardinality.
+    const promotedCallCount = (previous.callCount ?? 1) + (item.callCount ?? 1)
+    if (promotedCallCount > 0) group.callCount = promotedCallCount
     this.groupOf.set(previousIndex, group)
     this.groupOf.set(index, group)
     this.groupMembers.set(group, [previousIndex, index])
@@ -2881,6 +2918,9 @@ export class TranscriptFolder {
         this.liveAssistantBlocks.delete(stepKey(input.turn, input.step))
         if (input.status === 'abandoned') {
           this.settleFailedAttempt(input.turn, input.step, true, true)
+          // The abandoned attempt's preparing starts are dead evidence: a
+          // reused call id in a later attempt must not inherit its timer.
+          this.clearPreparingStartsForStep(input.turn, input.step)
         }
         // Any remaining open reasoning entries stop animating at settlement.
         // The notification frame carries no time: there is no authoritative
@@ -3042,9 +3082,12 @@ export class TranscriptFolder {
       case 'tool-call-delta':
       case 'block-end': {
         // Preparing continuity (post-F6 plan §12.14): the FIRST streamed
-        // delta of a tool call is the call's earliest authoritative start.
-        if (chunk.type === 'tool-call-delta' && chunk.id !== '') {
-          if (!this.toolCallPreparingStarts.has(chunk.id)) this.toolCallPreparingStarts.set(chunk.id, time)
+        // delta of a tool call is the call's earliest authoritative start —
+        // keyed by the formal call id when it is known, else by the same
+        // (turn, step, index) fallback identity the preview projection
+        // uses, and migrated when the formal id arrives.
+        if (chunk.type === 'tool-call-delta') {
+          this.recordPreparingDelta(turn, step, chunk.id, chunk.index, time)
         }
         const previous = projection.states.get(chunk.index)
         if (applyAssistantBlockChunk(projection.states, chunk)) {
@@ -3056,6 +3099,15 @@ export class TranscriptFolder {
             }
           }
           this.syncLiveAssistantPresentation(turn, step, time)
+          // Accepted reasoning evidence is the Thinking row's honest end
+          // candidate: remember it so a streamless settlement can close the
+          // row at its real reasoning end instead of end-less (post-F6 plan
+          // §12.6).
+          if (chunk.type === 'reasoning-delta'
+            || (chunk.type === 'block-end' && chunk.block.type === 'reasoning')) {
+            const thinkingRow = this.thinkingEntries.get(key)
+            if (thinkingRow !== undefined) thinkingLastEvidence.set(thinkingRow, time)
+          }
         }
         break
       }
@@ -3216,7 +3268,7 @@ export class TranscriptFolder {
   /** Fold one durable assistant stream once for both presentation order and
    * restored content. The indexed state is updated in O(1) per accepted chunk;
    * only the final projections sort the retained indexes. */
-  private assistantStreamProjection(stream: readonly unknown[]): AssistantStreamProjection {
+  private assistantStreamProjection(stream: readonly unknown[], turn: number, step: number): AssistantStreamProjection {
     const states = new Map<number, AssistantBlockState>()
     const rowOrder: Array<'thinking' | 'assistant'> = []
     let assistantVisibleCount = 0
@@ -3244,9 +3296,20 @@ export class TranscriptFolder {
       if (firstVisibleAt === undefined && assistantChunkHasVisibleReply(chunk)) firstVisibleAt = time
       // Preparing evidence for the Preparing → durable elapsed continuity
       // (post-F6 plan §12.14): the FIRST streamed delta of a tool call is
-      // the call's earliest authoritative start.
-      if (chunk.type === 'tool-call-delta' && chunk.id !== '' && !toolCallStarts.has(chunk.id)) {
-        toolCallStarts.set(chunk.id, time)
+      // the call's earliest authoritative start — keyed by the formal call
+      // id when it is known (migrating the fallback identity's earlier
+      // start), else by the (turn, step, index) fallback identity, exactly
+      // like the live fold.
+      if (chunk.type === 'tool-call-delta') {
+        if (chunk.id !== '') {
+          const fallbackKey = preparingFallbackKey(turn, step, chunk.index)
+          if (!toolCallStarts.has(chunk.id)) {
+            toolCallStarts.set(chunk.id, toolCallStarts.get(fallbackKey) ?? time)
+          }
+        } else {
+          const fallbackKey = preparingFallbackKey(turn, step, chunk.index)
+          if (!toolCallStarts.has(fallbackKey)) toolCallStarts.set(fallbackKey, time)
+        }
       }
       const previous = states.get(chunk.index)
       if (!applyAssistantBlockChunk(states, chunk)) continue
@@ -3256,9 +3319,17 @@ export class TranscriptFolder {
 
       const visibleNow = assistantVisibleCount > 0
       const nextThinking = thinkingVisibleCount > 0
+      // The Thinking lane's TIMING evidence ends with its OWN reasoning
+      // chunks: the reasoning block remains "visible" for the rest of the
+      // decode, so updating on every visible chunk would stretch the
+      // Thinking span to the end of the whole step stream (post-F6 plan
+      // §12.6 — the reasoning block-end is the authoritative end; assistant
+      // text is Conversation evidence, never Process).
+      const reasoningEvidence = chunk.type === 'reasoning-delta'
+        || (chunk.type === 'block-end' && chunk.block.type === 'reasoning')
       if (nextThinking) {
         thinkingStartedAt ??= time
-        thinkingEndedAt = time
+        if (reasoningEvidence) thinkingEndedAt = time
       }
       // Match live step-level materialization: a hidden aggregate lane is
       // removed, and a later recreation is appended after surviving rows.
@@ -3290,6 +3361,42 @@ export class TranscriptFolder {
       thinkingStartedAt,
       thinkingEndedAt,
       toolCallStarts,
+    }
+  }
+
+  /** First-wins record of one streamed tool-call delta's time: keyed by the
+   * formal call id once it arrives (migrating the fallback identity's
+   * earlier start so the preparing seconds survive the delayed-id handoff),
+   * else by the (turn, step, index) fallback identity. */
+  private recordPreparingDelta(turn: number, step: number, callId: string, index: number, time: number): void {
+    if (callId !== '') {
+      const fallbackKey = preparingFallbackKey(turn, step, index)
+      const migrated = this.toolCallPreparingStarts.get(fallbackKey)
+      if (!this.toolCallPreparingStarts.has(callId)) {
+        this.toolCallPreparingStarts.set(callId, migrated ?? time)
+      }
+      if (migrated !== undefined) this.toolCallPreparingStarts.delete(fallbackKey)
+      return
+    }
+    const fallbackKey = preparingFallbackKey(turn, step, index)
+    if (!this.toolCallPreparingStarts.has(fallbackKey)) this.toolCallPreparingStarts.set(fallbackKey, time)
+  }
+
+  /** Drop the preparing-start evidence of one step: a retry/step boundary
+   * invalidates the failed attempt's starts, so a reused call id can never
+   * inherit another attempt's timer (post-F6 plan §12.14). */
+  private clearPreparingStartsForStep(turn: number, step: number): void {
+    const prefix = `\u0000tool-call-preparing:${turn}:${step}:`
+    for (const key of this.toolCallPreparingStarts.keys()) {
+      if (key.startsWith(prefix)) this.toolCallPreparingStarts.delete(key)
+    }
+  }
+
+  /** Drop every preparing-start evidence of one turn (its `turn/end`). */
+  private clearPreparingStartsForTurn(turn: number): void {
+    const prefix = `\u0000tool-call-preparing:${turn}:`
+    for (const key of this.toolCallPreparingStarts.keys()) {
+      if (key.startsWith(prefix)) this.toolCallPreparingStarts.delete(key)
     }
   }
 
@@ -3433,6 +3540,11 @@ export class TranscriptFolder {
     this.hiddenThinkingEntries.delete(entry)
     entry.text = text
     this.markStreamingEntryDirty(`thinking:${key}`)
+    // The durable lane timing is AUTHORITY at settlement: a same-step
+    // replacement re-anchors BOTH bounds (§12.6), never only the end.
+    if (projection.thinkingStartedAt !== undefined) {
+      setTranscriptTiming(entry, { startedAt: projection.thinkingStartedAt, running: true })
+    }
     this.closeThinking(entry, projection.thinkingEndedAt)
     this.restoreThinkingPreview(this.activityFor(turn), step, text)
   }
@@ -3551,6 +3663,13 @@ export class TranscriptFolder {
     this.hiddenThinkingEntries.delete(entry)
     entry.text = text
     this.markStreamingEntryDirty(`thinking:${key}`)
+    // The durable lane timing is AUTHORITY at settlement: a same-step
+    // replacement re-anchors BOTH bounds (§12.6), never only the end. A
+    // streamless settlement has no lane authority — closeThinking falls
+    // back to the last accepted live reasoning evidence.
+    if (projection?.thinkingStartedAt !== undefined) {
+      setTranscriptTiming(entry, { startedAt: projection.thinkingStartedAt, running: true })
+    }
     this.closeThinking(entry, projection?.thinkingEndedAt)
     this.restoreThinkingPreview(this.activityFor(turn), step, text)
   }
@@ -3921,15 +4040,18 @@ export class TranscriptFolder {
 
   /** Settle one thinking entry: it stops streaming and records its
    * authoritative end in the timing sidecar (post-F6 plan §12.6). An absent
-   * `endedAt` (an abandoned attempt has no authoritative end) keeps
-   * `endedAt` undefined — consumers treat unknown as UNKNOWN, never zero. */
+   * `endedAt` (an abandoned attempt, a streamless legacy settlement) falls
+   * back to the last ACCEPTED reasoning evidence — the honest end — never
+   * the settlement's own late time; with neither, `endedAt` stays
+   * undefined. Consumers treat unknown as UNKNOWN, never zero. */
   private closeThinking(entry: Extract<TranscriptMessage, { kind: 'thinking' }>, endedAt?: number): void {
     entry.running = false
-    const startedAt = transcriptTimingOf(entry)?.startedAt ?? endedAt
+    const evidenceEnd = endedAt ?? thinkingLastEvidence.get(entry)
+    const startedAt = transcriptTimingOf(entry)?.startedAt ?? evidenceEnd
     if (startedAt !== undefined) {
       setTranscriptTiming(entry, {
         startedAt,
-        ...(endedAt === undefined ? {} : { endedAt: Math.max(startedAt, endedAt) }),
+        ...(evidenceEnd === undefined ? {} : { endedAt: Math.max(startedAt, evidenceEnd) }),
         running: false,
       })
     }
@@ -4231,7 +4353,7 @@ export class TranscriptFolder {
       this.liveAssistantBlocks.delete(key)
       // One durable stream projection per settlement: lane order, restored
       // reasoning and usage come from the same pass (plan §4.4/§12.5).
-      const projection = this.assistantStreamProjection(stream)
+      const projection = this.assistantStreamProjection(stream, data.turn, data.step)
       this.absorbPreparingStarts(projection.toolCallStarts)
       if (!alreadySettled) {
         // Store/refresh the step's lane authority from the attempt; a later
@@ -4314,6 +4436,9 @@ export class TranscriptFolder {
         // A failed attempt closes at step/end even when the turn continues;
         // expose its preserved evidence without waiting for turn/end.
         this.markAttemptEvidenceInterrupted(event.data.turn, event.data.step)
+        // The step's preparing evidence is dead with the attempt: a later
+        // attempt reusing the identity must not inherit its timer.
+        this.clearPreparingStartsForStep(event.data.turn, event.data.step)
         this.usage.onStepEnd(event.data.turn, event.data.step)
         this.syncUsage(activity)
         // Owner lifecycle: the step closed — clear the matching open step
@@ -4441,7 +4566,7 @@ export class TranscriptFolder {
         // projection (post-F6 plan §4.4 — the one durable step projection
         // shared by message and attempt settlements).
         const projection = event.data.stream !== undefined && event.data.stream.length > 0
-          ? this.assistantStreamProjection(event.data.stream)
+          ? this.assistantStreamProjection(event.data.stream, event.data.turn, event.data.step)
           : undefined
         if (projection !== undefined) this.absorbPreparingStarts(projection.toolCallStarts)
         const messageUsage = event.data.usage ?? projection?.usage
@@ -4614,6 +4739,10 @@ export class TranscriptFolder {
           args: event.data.arguments,
           result: '',
           status: 'running',
+          // Genuine model tool/call provenance (post-F6 plan §10.2): the
+          // span `tools` stat and the Tool-slot ownership read THIS, never
+          // the projected card shape.
+          callCount: 1,
         }
         // The call's wall span starts at its earliest authoritative
         // evidence: the first streamed arguments delta when the call was
@@ -4844,6 +4973,8 @@ export class TranscriptFolder {
         }
         this.markAttemptEvidenceInterrupted(endTurn)
         this.closeThinkingForTurn(endTurn, event.time)
+        // The turn closed: its preparing starts are dead evidence.
+        this.clearPreparingStartsForTurn(endTurn)
         if (event.data.reason.kind === 'error') {
           // Defensive: a malformed/legacy reason without the error detail
           // degrades to the bare marker instead of crashing the fold
@@ -4942,6 +5073,10 @@ export class TranscriptFolder {
         // the failed attempt immediately, while the later retry-started event
         // only opens the next usage replacement slot.
         this.resetThinkingForRetry(turn, step)
+        // The retry invalidates the failed attempt's preparing starts: a
+        // reused call id must never inherit the old attempt's timer
+        // (post-F6 plan §12.14).
+        this.clearPreparingStartsForStep(turn, step)
         const maxRetries = 'maxRetries' in event.data ? event.data.maxRetries : undefined
         const label = maxRetries === undefined
           ? `llm retry ${retry} in ${Math.round(delayMs / 1000)}s`

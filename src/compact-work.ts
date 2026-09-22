@@ -31,15 +31,17 @@ import { isSurfacedInteractionToolName } from './transcript-semantics.ts'
 
 /** The span-local aggregate facts the collapsed Activity card renders. */
 export interface CompactWorkSummary {
-  /** GENUINE model tool-call rows in THIS span (never the whole turn, never
-   * a synthetic command/delegation row — post-F6 plan §10.2/§10.3). */
+  /** GENUINE model `tool/call` cardinality in THIS span (never the whole
+   * turn, never a synthetic command/delegation row; a merged read group
+   * contributes its merged callCount — post-F6 plan §10.2/§10.3). */
   readonly toolCount: number
   /** Durable subagent delegation rows in THIS span, counted SEPARATELY so a
    * delegation never inflates `tools` (post-F6 plan §10.3). */
   readonly subagentCount: number
   /** The latest reasoning member's bounded tail + live lifecycle fact. */
   readonly think?: { readonly text: string; readonly running: boolean }
-  /** The latest tool member, for the presenter-first Tool slot. */
+  /** The latest GENUINE model tool-call member, for the presenter-first
+   * Tool slot (synthetic rows never own the slot — the Focus rule). */
   readonly tool?: TranscriptToolMessage
   /** The tool member's RUNNING PTC descendants — the same active-child
    * semantics the Focus Tool slot shows (post-F6 plan §9.1). */
@@ -57,14 +59,18 @@ function countPart(count: number, noun: string): string {
 
 /**
  * Derive one Activity span's aggregate facts from its own members, in raw
- * order. The LAST reasoning member owns the Think slot; the LAST tool
- * member owns the Tool slot. Counting is ORIGIN-aware (post-F6 plan
- * §10.3): an ordinary model tool call counts as a tool, a
- * `subagent-delegation` row counts ONLY as a subagent, and a synthetic
- * `command` row counts as neither. `llm-retry` process rows contribute
- * point timing evidence but no count. Timing aggregates the members' OWN
- * sidecar evidence in the same walk — earliest start, latest end, any
- * running — never a second scan (post-F6 plan §12.12).
+ * order. The LAST reasoning member owns the Think slot; the LAST GENUINE
+ * model tool-call member owns the Tool slot. Counting is PROVENANCE-based
+ * (post-F6 plan §10.2/§10.3): a member's `callCount` carries the genuine
+ * `tool/call` cardinality (a merged read group of two reads is TWO calls,
+ * never `"2 files" → 1`, so Focus and Activity always share one counting
+ * unit); a `subagent-delegation` row counts ONLY as a subagent; a synthetic
+ * `command` row counts as neither, and neither ever owns the Tool slot —
+ * exactly like the Focus Tool slot, which only genuine `tool/call` events
+ * can own. `llm-retry` process rows contribute point timing evidence but no
+ * count. Timing aggregates the members' OWN sidecar evidence in the same
+ * walk — earliest start, latest end, any running — never a second scan
+ * (post-F6 plan §12.12).
  * @param span - the presentation-only Activity (Work) span.
  */
 export function summarizeWorkSpan(span: TranscriptWorkSpan): CompactWorkSummary {
@@ -102,13 +108,19 @@ export function summarizeWorkSpan(span: TranscriptWorkSpan): CompactWorkSummary 
       // panel owns the interaction), but it must not skew the span either —
       // this keeps Compact and the Focus turn accounting in agreement.
       if (isSurfacedInteractionToolName(member.name)) continue
-      // Origin-aware counting (post-F6 plan §10.3): `tools` means genuine
-      // model tool calls, `subagents` means durable delegation rows, and a
-      // synthetic command row is neither — the same label never carries two
-      // counting units across Focus and Activity.
-      if (member.origin === undefined) toolCount += 1
-      else if (member.origin === 'subagent-delegation') subagentCount += 1
-      tool = member
+      // Genuine-call provenance: `origin` marks SYNTHETIC rows, so an
+      // origin-less member is a model tool call — the cardinality AND the
+      // Tool-slot ownership both read this, exactly like the Focus slot
+      // that only genuine `tool/call` events can own. A merged read group
+      // contributes its merged `callCount` (two grouped reads are still
+      // two calls, never `"2 files" → 1`); a plain card is one call.
+      if (member.origin === undefined) {
+        toolCount += member.callCount ?? 1
+        tool = member
+      } else if (member.origin === 'subagent-delegation') {
+        subagentCount += 1
+      }
+      // origin 'command' (and any other synthetic) counts as neither.
     }
   }
   const activeSubCalls = tool === undefined ? [] : activeSubCallsOf(tool)

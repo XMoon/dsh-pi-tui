@@ -174,7 +174,7 @@ import { compactPreparingSummary } from './compact-process-preview.ts'
 import { projectCompact } from './compact-projection.ts'
 import { clusterByMemberOf, isTranscriptWorkMember, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
 import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './transcript-disclosure.ts'
-import { CompactPendingWorkComponent, CompactWorkComponent, summarizeWorkSpan } from './compact-work.ts'
+import { CompactPendingWorkComponent, CompactWorkComponent, summarizeWorkSpan, type CompactWorkSummary } from './compact-work.ts'
 import { ContextClusterComponent } from './context-cluster.ts'
 import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './context-presentation.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from './context-row.ts'
@@ -9454,17 +9454,19 @@ export class TuiApp {
   /** The content signature of one Work card: everything the collapsed header
    * and previews render from. Member topology is compared separately (a
    * boundary change is structural); this only decides content refresh. The
-   * active PTC child topology is part of the signature (post-F6 plan §9.4):
-   * a nested child starting/stopping must refresh the collapsed Activity
-   * even when the root tool status/display does not change. All inputs stay
-   * bounded — the Think text is the span's bounded tail, never the raw
-   * body (post-F6 plan §20). */
+   * active PTC child topology AND the span timing are part of the signature
+   * (post-F6 plan §9.4): a nested child starting/stopping or a corrected
+   * durable timing (a same-step replacement with identical text) must
+   * refresh the collapsed Activity even when nothing else changes. All
+   * inputs stay bounded — the Think text is the span's bounded tail, never
+   * the raw body (post-F6 plan §20). Takes the ALREADY-SUMMARIZED span so
+   * one Activity refresh walks its members exactly once. */
   private compactWorkSignature(
-    span: TranscriptWorkSpan,
+    summary: CompactWorkSummary,
     toolDisplay: string | undefined,
     preparingSummary: string | undefined,
   ): string {
-    const summary = summarizeWorkSpan(span)
+    const timing = summary.timing
     return [
       summary.toolCount,
       summary.subagentCount,
@@ -9474,6 +9476,7 @@ export class TuiApp {
       toolDisplay ?? '',
       preparingSummary ?? '',
       (summary.activeSubCalls ?? []).map(call => `${call.name}:${call.count}`).join('|'),
+      timing === undefined ? '' : `${timing.startedAt}\u0000${timing.endedAt ?? ''}\u0000${timing.running ? '1' : '0'}`,
     ].join('\u0000')
   }
 
@@ -9481,7 +9484,9 @@ export class TuiApp {
    * is the cache key (stable across content updates and rebuilds); the
    * signature covers the span-local facts the card renders. The live
    * Preparing summary arrives from the BLOCK (only the newest span of a turn
-   * carries it) and is consumed by a collapsed span's Tool slot. */
+   * carries it) and is consumed by a collapsed span's Tool slot. The span is
+   * summarized ONCE and the summary feeds both the signature and the
+   * component (never a second member walk). */
   private compactWorkComponentFor(span: TranscriptWorkSpan, blockPreparingSummary: string | undefined): CompactWorkComponent {
     const expanded = this.workSpanExpanded(span)
     const summary = summarizeWorkSpan(span)
@@ -9491,7 +9496,7 @@ export class TuiApp {
     // An EXPANDED span renders the standalone Preparing preview block instead
     // of the Tool slot, so the block's summary never reaches its card.
     const preparingSummary = expanded ? undefined : blockPreparingSummary
-    const signature = this.compactWorkSignature(span, toolDisplay, preparingSummary)
+    const signature = this.compactWorkSignature(summary, toolDisplay, preparingSummary)
     const entry = this.workComponents.get(span.owner)
     if (entry !== undefined && sameWorkSpanShape(entry.span, span)
       && entry.expanded === expanded && entry.themeRev === this.themeRevision

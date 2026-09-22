@@ -1031,3 +1031,57 @@ test('form-aware Context rows are render-time width-aware, not width-baked', asy
   assert.equal(app.messageCacheEntryForTest(relay, collapsedBoundary)?.builtWidth, undefined, 'the relay body re-wraps at render time')
   assert.notEqual(app.messageCacheEntryForTest(legacy, collapsedBoundary)?.builtWidth, undefined, 'a generic folded Context row still bakes its one-line width')
 })
+
+test('a same-step timing replacement refreshes the mounted Activity duration', async () => {
+  // §12.6/§25: a durable replacement that corrects the Thinking timing
+  // while keeping the SAME text and topology must still refresh the
+  // mounted card — the span timing is part of the content signature (the
+  // stale component kept rendering the old duration).
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  const settlement = (reasoningStart: number, reasoningEnd: number, seq: number): SessionEvent =>
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'steady reasoning' },
+          { type: 'text', text: 'final' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [
+        { type: 'chunk', time: reasoningStart, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { type: 'chunk', time: reasoningStart, chunk: { type: 'reasoning-delta', index: 0, text: 'steady reasoning' } },
+        { type: 'chunk', time: reasoningEnd, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'steady reasoning' } } },
+      ],
+    }, reasoningEnd + 1_000, seq)
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, T0 + 3_000, 1),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, T0 + 9_000, 2),
+    settlement(T0 + 2_000, T0 + 2_500, 3),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const strip = (view: string): string => view.replace(/\x1b\[[0-9;]*m/g, '')
+  const first = strip(vt.getViewport().join('\n'))
+  // Wall span: reasoning 2s → tool result 9s = 7s.
+  assert.match(first, /▸ 🧰 Activity 7s · 1 tool/, `the initial span:\n${first}`)
+
+  // The authoritative replacement corrects ONLY the timing (same text,
+  // same topology): the reasoning start moves 1s earlier, so the mounted
+  // header must refresh to 8s.
+  applyMixed(folder, [settlement(T0 + 1_000, T0 + 2_500, 4)])
+  show(app, folder)
+  await vt.waitForRender()
+  const corrected = strip(vt.getViewport().join('\n'))
+  assert.match(corrected, /▸ 🧰 Activity 8s · 1 tool/, `the corrected timing must refresh the mounted card:\n${corrected}`)
+})

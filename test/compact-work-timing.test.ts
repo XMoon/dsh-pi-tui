@@ -11,7 +11,7 @@ import { test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptTimingOf } from '../src/transcript.ts'
-import { summarizeWorkSpan, formatWorkHeaderLine, CompactWorkComponent } from '../src/compact-work.ts'
+import { summarizeWorkSpan, formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../src/compact-work.ts'
 import type { TranscriptWorkSpan } from '../src/transcript-projection.ts'
 import { projectTranscriptStructure } from '../src/transcript-projection.ts'
 
@@ -168,9 +168,14 @@ test('timing: a Thinking → Tool Activity uses its own wall span', () => {
   const summary = summarizeWorkSpan(span)
   assert.ok(summary.timing, 'span-local timing exists')
   assert.equal(summary.timing?.startedAt, T0 + 1_000, 'the span starts at the reasoning evidence')
-  // The latest owned end: the step's lane evidence runs to the stream end
-  // (T0+6.8s) — later than the tool result, and the wall span owns it.
-  assert.equal(summary.timing?.endedAt, T0 + 6_800, 'the span ends at the latest owned evidence')
+  // The Thinking row's OWN end is its reasoning block-end (T0+1.5s): the
+  // later text lane is Conversation evidence and must never stretch it.
+  const thinkingRow = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinkingRow !== undefined && thinkingRow.kind === 'thinking')
+  const thinkingTiming = transcriptTimingOf(thinkingRow)
+  assert.equal(thinkingTiming?.endedAt, T0 + 1_500, 'the Thinking span ends at its reasoning block-end, not the text tail')
+  // The span's latest owned end is the tool result.
+  assert.equal(summary.timing?.endedAt, T0 + 6_000, 'the span ends at the latest owned Process evidence')
   assert.equal(summary.timing?.running, false)
   assert.match(formatWorkHeaderLine(summary, false, 120, 'emoji', '5s'), /Activity 5s · 1 tool/)
 })
@@ -273,7 +278,11 @@ test('timing: grouped reads aggregate their members within one turn', () => {
   ])
   const span = spansOf(folder.messages())[0]!
   const summary = summarizeWorkSpan(span)
-  assert.equal(summary.toolCount, 1, 'the merged group is one tool row')
+  // §10.2: the merged group is ONE displayed card but still TWO genuine
+  // model tool calls — the same counting unit as the Focus header.
+  assert.equal(summary.toolCount, 2, 'a merged read group keeps its genuine call cardinality')
+  assert.equal(folder.turnActivities().get(1)?.toolCalls, 2)
+  assert.equal(summary.toolCount, folder.turnActivities().get(1)?.toolCalls, 'Focus and Activity agree on genuine calls')
   assert.equal(summary.timing?.startedAt, T0 + 1_000, 'the group aggregates its members')
   assert.equal(summary.timing?.endedAt, T0 + 4_000)
 })
@@ -302,6 +311,125 @@ test('timing: a cross-turn grouped read never leaks timing across turn boundarie
   assert.equal(transcriptTimingOf(group), undefined, 'cross-turn attribution omits the group timing')
   const turn2 = summarizeWorkSpan(spansOf(messages).find(span => span.turn === 2)!)
   assert.equal(turn2.timing, undefined, 'turn 2 Activity must not inherit turn 1 read timing')
+  // The merged card carries the merged genuine-call cardinality (2 model
+  // calls) on its DISPLAY turn — the one-card-one-turn display model cannot
+  // split provenance per turn, so the count stays where the card renders.
+  assert.equal(turn2.toolCount, 2)
+})
+
+test('stats: synthetic command and delegation rows never own the Tool slot', () => {
+  const commandFolder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, T0 + 100, 1),
+    eventAt('command/done', { commandId: 'cmd1', kind: 'success', text: 'theme set' }, T0 + 300, 2),
+  ])
+  const commandSummary = summarizeWorkSpan(spansOf(commandFolder.messages())[0]!)
+  assert.equal(commandSummary.toolCount, 0)
+  assert.equal(commandSummary.tool, undefined, 'a command row never owns the Tool slot')
+  assert.deepEqual(compactWorkBody(commandSummary, 80), [], 'a command-only Activity renders no Tool row')
+
+  const delegationFolder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, T0 + 100, 1),
+  ])
+  const delegationSummary = summarizeWorkSpan(spansOf(delegationFolder.messages())[0]!)
+  assert.equal(delegationSummary.toolCount, 0)
+  assert.equal(delegationSummary.subagentCount, 1)
+  assert.equal(delegationSummary.tool, undefined, 'a delegation row never owns the Tool slot')
+  assert.deepEqual(compactWorkBody(delegationSummary, 80), [], 'a delegation-only Activity renders no Tool row')
+})
+
+test('timing: a long final-text tail never stretches the Thinking span', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'brief thought' },
+          { type: 'text', text: 'a very long final answer' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [
+        { type: 'chunk', time: T0 + 1_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { type: 'chunk', time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'brief thought' } },
+        { type: 'chunk', time: T0 + 2_000, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'brief thought' } } },
+        { type: 'chunk', time: T0 + 3_000, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+        { type: 'chunk', time: T0 + 3_000, chunk: { type: 'text-delta', index: 1, text: 'a very long final answer' } },
+        { type: 'chunk', time: T0 + 30_000, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'a very long final answer' } } },
+      ],
+    }, T0 + 31_000, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 32_000, 2),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  // §25: the Thinking span must stop at its reasoning block-end (T0+2s);
+  // the 27s text tail is Conversation evidence and never stretches it.
+  assert.equal(summary.timing?.endedAt, T0 + 2_000, 'the Thinking span ignores the text tail')
+  assert.equal(summary.timing?.startedAt, T0 + 1_000)
+  const header = formatWorkHeaderLine(summary, false, 120, 'emoji', '1s')
+  assert.match(header, /Activity 1s/, `no 29s stretch:\n${header}`)
+})
+
+test('timing: a streamless settlement keeps the last live reasoning evidence as the end', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([eventAt('turn/start', { turn: 1 }, T0, 0)])
+  // Live reasoning streams (two accepted deltas) but the durable
+  // `assistant/message` arrives WITHOUT the embedded stream (legacy log):
+  // the last accepted reasoning evidence is the row's honest end.
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking ' } })
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: T0 + 2_500, chunk: { type: 'reasoning-delta', index: 0, text: 'harder' } })
+  folder.apply([eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId('a1'), role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'thinking harder' },
+        { type: 'text', text: 'done' },
+      ],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+  }, T0 + 9_000, 1)])
+  const thinkingRow = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinkingRow !== undefined && thinkingRow.kind === 'thinking')
+  const timing = transcriptTimingOf(thinkingRow)
+  assert.equal(timing?.startedAt, T0 + 1_000)
+  assert.equal(timing?.endedAt, T0 + 2_500, 'the streamless settlement falls back to the last reasoning evidence, not end-less')
+  assert.equal(timing?.running, false)
+})
+
+test('timing: Preparing continuity survives a delayed formal call id', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([eventAt('turn/start', { turn: 1 }, T0, 0)])
+  // The first deltas carry NO formal id yet (the preview keys on
+  // turn/step/index); the formal id arrives 3s later, the durable call 1s
+  // after that. The earliest delta owns the start (§12.14).
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: T0 + 1_000, chunk: { type: 'tool-call-delta', index: 2, id: '', name: 'bash', argumentsDelta: '{"c"' } })
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: T0 + 4_000, chunk: { type: 'tool-call-delta', index: 2, id: 'late-1', name: 'bash', argumentsDelta: '}' } })
+  folder.apply([toolCall(1, 'late-1', 'bash', T0 + 5_000, 1)])
+  const card = folder.messages().findLast(message => message.kind === 'tool' && message.name === 'bash')
+  assert.ok(card !== undefined && card.kind === 'tool', 'fixture: the durable call card exists')
+  assert.equal(transcriptTimingOf(card)?.startedAt, T0 + 1_000, 'the delayed-id handoff inherits the fallback identity start')
+  assert.equal(transcriptTimingOf(card)?.running, true)
+})
+
+test('timing: a retried attempt never lends its preparing start to a reused call id', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([eventAt('turn/start', { turn: 1 }, T0, 0)])
+  // Attempt A prepares (no formal id yet)…
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a1', turn: 1, step: 0, time: T0 + 1_000, chunk: { type: 'tool-call-delta', index: 2, id: '', name: 'bash', argumentsDelta: '{"c"' } })
+  // …then the retry invalidates the attempt's preparing evidence.
+  folder.apply([eventAt('llm/retry', { turn: 1, step: 0, retry: 1, delayMs: 1_000, failure: { code: 'X', message: 'x' } }, T0 + 2_000, 1)])
+  folder.applyLiveInput({ kind: 'start', sessionId: 's', attemptId: 'a2', turn: 1, step: 0 })
+  // Attempt B reuses the SAME identity (empty id → formal id → durable call).
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a2', turn: 1, step: 0, time: T0 + 5_000, chunk: { type: 'tool-call-delta', index: 2, id: '', name: 'bash', argumentsDelta: '{"c"' } })
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a2', turn: 1, step: 0, time: T0 + 6_000, chunk: { type: 'tool-call-delta', index: 2, id: 'reused-1', name: 'bash', argumentsDelta: '}' } })
+  folder.apply([toolCall(1, 'reused-1', 'bash', T0 + 7_000, 2)])
+  const card = folder.messages().findLast(message => message.kind === 'tool' && message.name === 'bash')
+  assert.ok(card !== undefined && card.kind === 'tool')
+  assert.equal(transcriptTimingOf(card)?.startedAt, T0 + 5_000, 'attempt B starts at its OWN first delta, never attempt A timer')
 })
 
 test('timing: live folding and cold hydration produce the same Activity timing', () => {
@@ -342,7 +470,9 @@ test('timing: live folding and cold hydration produce the same Activity timing',
   const coldSummary = summarizeWorkSpan(spansOf(cold.messages())[0]!)
   assert.deepEqual(liveSummary.timing, coldSummary.timing, 'live and cold agree')
   assert.equal(liveSummary.timing?.startedAt, T0 + 1_000)
-  assert.equal(liveSummary.timing?.endedAt, T0 + 6_200, 'the wall span ends at the latest lane evidence')
+  // The span's end is the tool result (T0+5s): the Thinking lane ended at
+  // its own reasoning block-end (T0+1.5s), the text tail is Conversation.
+  assert.equal(liveSummary.timing?.endedAt, T0 + 5_000)
   assert.deepEqual(liveSummary.think, coldSummary.think)
 })
 
@@ -429,10 +559,12 @@ test('timing: a thinking-only Activity wall-spans its reasoning evidence', () =>
   assert.equal(summary.toolCount, 0, 'a thinking-only Activity has no tools')
   assert.equal(summary.tool, undefined)
   assert.equal(summary.timing?.startedAt, T0 + 1_000, 'the span starts with the reasoning lane')
-  assert.equal(summary.timing?.endedAt, T0 + 4_500, 'the span ends at the latest lane evidence')
-  const header = formatWorkHeaderLine(summary, false, 120, 'emoji', '3s')
+  // The Thinking span ends at its OWN reasoning block-end (T0+3s); the
+  // later text lane (T0+4s–4.5s) is Conversation evidence, never Process.
+  assert.equal(summary.timing?.endedAt, T0 + 3_000, 'the text tail never stretches the Thinking span')
+  const header = formatWorkHeaderLine(summary, false, 120, 'emoji', '2s')
   assert.ok(!header.includes('tool'), `no tool stat:\n${header}`)
-  assert.match(header, /Activity 3s/)
+  assert.match(header, /Activity 2s/)
 })
 
 test('timing: a running Thinking shows a live Activity duration', () => {
