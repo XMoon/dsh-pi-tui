@@ -1771,7 +1771,10 @@ export class TranscriptFolder {
   /** Command facts by commandId, from command/run events: the name plus the
    * run start, so the synthetic command card keeps its real elapsed span
    * (post-F6 plan §12.8). */
-  private readonly commandRuns = new Map<string, { name: string; startedAt: number }>()
+  /** Live command runs, keyed by commandId: only the durable NAME is needed
+   * (the command card's identity). No timing sidecar is recorded — a command
+   * is never a Work/Activity member, so nothing could consume it. */
+  private readonly commandRuns = new Map<string, { name: string }>()
   /** First streamed tool-call-delta time per call identity, from BOTH the
    * live chunks and the durable embedded streams: the earliest authoritative
    * start of a call, so a Preparing → durable handoff never resets its
@@ -5197,7 +5200,7 @@ export class TranscriptFolder {
         break
       }
       case 'command/run': {
-        this.commandRuns.set(event.data.commandId, { name: event.data.name, startedAt: event.time })
+        this.commandRuns.set(event.data.commandId, { name: event.data.name })
         break
       }
       case 'command/done': {
@@ -5219,11 +5222,6 @@ export class TranscriptFolder {
         // `isCommandTool`). It is placed at the current turn position only so
         // the standalone card renders in chronology.
         const card: Extract<TranscriptMessage, { kind: 'tool' }> = { kind: 'tool', turn: this.currentTurn, name: `/${name}`, args: '', result: `executed${outcome}`, status: event.data.kind === 'error' ? 'error' : 'ok', origin: 'command' }
-        // The command card's wall span is run → done (post-F6 plan §12.8);
-        // an unmatched done (a fragment) degrades to point evidence.
-        setTranscriptTiming(card, run === undefined
-          ? pointTiming(event.time)
-          : { startedAt: run.startedAt, endedAt: Math.max(run.startedAt, event.time), running: false })
         // No replay mark: a command is not turn Process evidence at all, so
         // there is no turn aggregate for it to be "late" for. Marking it from
         // `currentTurn.completed` would misread the NORMAL idle slash command

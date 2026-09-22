@@ -609,9 +609,10 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   content), and the degradation ladder drops the LAST stat first and keeps
   duration with the identity to the end. The header duration is the span's
   OWN wall clock: the fold records a presentation-only `TranscriptTiming`
-  sidecar (`SessionEvent.time` only) on thinking/tool/command/retry/
-  delegation rows, `summarizeWorkSpan` aggregates earliest-start/latest-end/
-  any-running in its existing single walk, running spans re-read `now()` per
+  sidecar (`SessionEvent.time` only) on thinking/tool/retry/delegation rows
+  (a command row is never a span member, so it carries no Activity timing);
+  `summarizeWorkSpan` aggregates earliest-start/latest-end/any-running in its
+  existing single walk, running spans re-read `now()` per
   render (the shared repaint heartbeat — no per-card timers), missing
   evidence omits the duration (never `0s`), and read grouping never crosses
   a turn boundary so no Activity span ever inherits another turn's count or

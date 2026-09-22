@@ -104,15 +104,15 @@ projectTranscriptStructure()
   - `command/done` follows a SESSION-level lifecycle (DSH opens no model turn
     for a command — "no turn is opened for it"), so "the merely-current turn is
     completed" is the NORMAL state for the user's idle `/compact`-style
-    command, not replay provenance; marking it would swallow the Command
-    Action itself. Its presentation owner is therefore captured when the
-    command STARTS: `command/run` records the then-open turn (or standalone
-    when none is open) and `command/done` reuses it — never re-reading
-    `currentTurn` at settlement, which would attribute an async command that
-    crosses a turn boundary to whatever turn happens to be current (polluting
-    that turn's aggregate) and lose the late fence for the command's own turn.
-    A standalone command keeps `currentTurn` purely as its transcript render
-    attribution.
+    command, not replay provenance. The card carries the settlement
+    `currentTurn` purely as a display PLACEMENT (the fold records only the
+    command's name), and that placement is irrelevant to aggregation because a
+    command is excluded unconditionally — there is no owning turn to be late
+    for, and no owner is derived or reused. The Focus PROJECTION additionally
+    treats a command row as a turn-less BOUNDARY (its own authority,
+    `focusProjectionTurnOf`), so a standalone command keeps its real chronology
+    — after the Thought and the held-back final — and never mints an empty
+    Thought for a turn whose only row is a command.
   - `subagent/descriptor` is a single log-only event appended once inside the
     establishing child's initial turn (before its first request); a cold replay
     lands it at that same logged position, so it is original evidence of that
