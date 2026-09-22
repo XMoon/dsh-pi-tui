@@ -68,8 +68,12 @@ export interface TuiSettingsDoc {
   busyEnter: string
   localShellSandbox: string
   homeEndKeys: string
-  /** Independent communication policy; absent/invalid values resolve to checkpoint. */
-  outputStyle?: string
+  /** Mid-turn progress-update cadence ('off' | 'milestones' | 'frequent');
+   * absent/invalid values resolve to milestones. */
+  progressUpdates?: string
+  /** Visible-answer density guidance ('default' | 'concise' |
+   * 'explanatory'); absent/invalid values resolve to default. */
+  responseStyle?: string
   displayPreset?: string
   /** @deprecated Legacy migration input; runtime writes use displayPreset. */
   focusMode: string

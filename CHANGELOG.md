@@ -9,7 +9,7 @@
 
 ### 新增
 
-- **独立的 Output style 设置。** 在 `/settings` 选择 Checkpoint（默认）、Concise、Explanatory 或 None，下一次模型步骤即采用所选表达指导，无需重启 Agent。偏好会跨会话保存，不改变展示预设；包括 None 在内的所有风格都保留 Focus 的可见性与完成规则。
+- **两个独立的沟通设置：Progress updates 与 Response style。** 在 `/settings` 分别控制工作时的中途更新节奏（Milestones 默认 / Frequent / Off）与可见回复的密度（Default 默认 / Concise / Explanatory）；下一次模型步骤即生效，无需重启 Agent。偏好跨会话保存、互不影响，也不改变展示预设；Focus 只暂时抑制进度更新节（保存的节奏不变），Response style 在 Focus 下仍生效。
 
 ### 改进
 

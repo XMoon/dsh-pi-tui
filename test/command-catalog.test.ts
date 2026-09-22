@@ -164,7 +164,7 @@ function stubRunner(
       state.displayWrites?.push(preset)
       return { kind: 'applied', preset }
     },
-    outputStyleState: { style: 'checkpoint' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
     focusEnabled: () => displayPreset === 'focus',
     setFocusMode: (enabled) => { displayPreset = enabled ? 'focus' : 'full' },
     setNotificationMode: () => {},

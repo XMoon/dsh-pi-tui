@@ -33,7 +33,7 @@ export const FOCUS_SECTION_ORDER = 90
  * both need truthful, self-contained visible communication.
  */
 export const FOCUS_MODE_PROMPT = `# Focus mode
-The user has focus mode enabled. They only see your final text message in each response — not tool calls, tool results, or any text you write between tool calls. Intermediate assistant text is not visible. Put the information the user needs into the final visible message: the outcome, important findings, changes made, relevant decisions, and anything still pending. Summarize hidden work rather than replaying the full hidden process. Do not assume they saw earlier output.
+The user has focus mode enabled. They only see your final text message in each response — not tool calls, tool results, or any text you write between tool calls. Intermediate assistant text is not visible. Progress-only intermediate assistant messages cannot reach the user on this surface, so continue working instead of generating them. Put the information the user needs into the final visible message: the outcome, important findings, changes made, relevant decisions, and anything still pending. Summarize hidden work rather than replaying the full hidden process. Do not assume they saw earlier output.
 
 When you need user input, approval, or a decision, assume the user did not see hidden reasoning, tool calls, tool results, or mid-turn narration. Make the question self-contained: state what input or decision is needed and include the minimum context required to answer it. Do not refer to hidden context with phrases such as "as above", "the issue I mentioned", "that plan", or "the previous result", and do not dump the full hidden process merely to reconstruct context.
 
