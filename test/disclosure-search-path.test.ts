@@ -935,3 +935,31 @@ test('collapsed Focus + a hidden process row search still opens the Thought', as
   assert.ok(revealed.includes('PROCESS_RESULT_MARKER'),
     `a genuinely hidden process row must still open its Thought:\n${revealed}`)
 })
+
+test('a standalone command card owns its own disclosure, independent of the Focus root', async () => {
+  const { vt, app } = startApp('focus')
+  const tool: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'r', status: 'ok' }
+  const command: TranscriptMessage = { kind: 'tool', turn: 1, name: '/compact', args: '', result: 'executed', status: 'ok', origin: 'command' }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 1, text: 'go' },
+    tool,
+    command,
+    { kind: 'assistant', turn: 1, text: 'f1' },
+  ]
+  app.setTranscript(messages, new Map([[1, activity(1)]]))
+  app.setFullscreen(true)
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
+  overrides.set(tool, true)
+  overrides.set(command, true)
+  // Expand the turn's Thought root, then collapse it (the explicit Collapse
+  // All path resets that turn's SECONDARY expansions).
+  app.toggleFocusTurn(1)
+  await viewport(vt)
+  app.toggleFocusTurn(1)
+  await viewport(vt)
+  assert.equal(overrides.get(command), true,
+    'the standalone command (a turn-less boundary) keeps its own fold across the root collapse')
+  assert.equal(overrides.get(tool), undefined,
+    'a Thought-owned process detail is still reset by the root collapse')
+})

@@ -144,7 +144,7 @@ import { QuestionFlow } from './question.ts'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
 import { MentionProvider } from './mentions.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
-import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
+import { classifyTranscriptMessage, isCommandTool, isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
@@ -311,7 +311,12 @@ function isFoldableMessageDisclosure(message: TranscriptMessage): boolean {
  * Surfaced context is persistent input/context, not process revealed by the
  * Thought, so root auto-reveal and secondary cleanup must exclude it. */
 function isFocusSecondaryDisclosure(message: TranscriptMessage): boolean {
-  return isFoldableMessageDisclosure(message) && !isSurfacedContext(message)
+  // A COMMAND row is a turn-less standalone BOUNDARY, never Thought-owned
+  // process detail: its own fold must stay independent of the Focus root, so
+  // it is exempt exactly like a settled surfaced-interaction card. Its legacy
+  // placement `turn` must not act as Focus ownership (nor may a root collapse
+  // reset a command card the user opened).
+  return isFoldableMessageDisclosure(message) && !isSurfacedContext(message) && !isCommandTool(message)
 }
 
 /** Whether a message is a TEXT-ONLY durable user message — the only kind
