@@ -22,6 +22,7 @@
  */
 
 import { sliceByColumn, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { singlePhysicalLine } from './presentation-lines.ts'
 
 /** Pause before the label starts moving (ms). */
 export const MARQUEE_INITIAL_PAUSE_MS = 800
@@ -125,6 +126,13 @@ export class SelectedMarquee {
    *   whether it is the selected row.
    */
   render(input: { key: string; text: string; maxWidth: number; selected: boolean }): string {
+    // Single-row contract: one returned string is ONE physical terminal
+    // row. Caller text may carry real CR/LF (a multiline job label); the
+    // projection, the anchor identity, the width measurement, the
+    // truncation and the cell window must all derive from the SAME
+    // normalized text — measuring the projection while anchoring the raw
+    // multiline text would leave the cycle identity unstable.
+    const text = singlePhysicalLine(input.text)
     const width = Math.max(0, Math.floor(input.maxWidth))
     // An UNSELECTED row (or a zero budget) must NOT touch the marquee
     // state: a panel renders every row through this driver, and an
@@ -133,7 +141,7 @@ export class SelectedMarquee {
     // move (review finding). Unselected rows are plain ellipsis rows; only
     // the selected row owns the anchor and the timer.
     if (!input.selected || width <= 0) {
-      return truncateToWidth(input.text, Math.max(0, width), '…')
+      return truncateToWidth(text, Math.max(0, width), '…')
     }
     // Capture the clock ONCE per render: the anchor, the phase state and
     // the timer deadline must all derive from the SAME instant. Reading
@@ -141,21 +149,21 @@ export class SelectedMarquee {
     // between calls and shift the absolute deadline, needlessly
     // re-arming the timer (review round 4).
     const nowMs = this.now()
-    const identity = `${input.key}\u0000${input.text}\u0000${width}`
+    const identity = `${input.key}\u0000${text}\u0000${width}`
     if (identity !== this.anchor) {
       this.anchor = identity
       this.anchorMs = nowMs
     }
-    const totalWidth = visibleWidth(input.text)
+    const totalWidth = visibleWidth(text)
     if (totalWidth <= width) {
       // Fits: no marquee, no timer (the timer contract — only overflow
       // arms it, plan §7.8).
       this.clearTimer()
-      return input.text
+      return text
     }
     const state = marqueeStateAt(nowMs - this.anchorMs, totalWidth - width,
       this.initialPauseMs, this.stepMs, this.endPauseMs)
-    const window = sliceByColumn(input.text, state.offset, width)
+    const window = sliceByColumn(text, state.offset, width)
     const windowWidth = visibleWidth(window)
     const padded = window + ' '.repeat(Math.max(0, width - windowWidth))
     // Re-arm the timer for the NEXT phase transition (or the cycle wrap).
