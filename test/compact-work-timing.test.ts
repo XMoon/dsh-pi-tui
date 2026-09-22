@@ -1,5 +1,5 @@
 /**
- * Post-F6 PR B Activity span semantics: origin-aware tool/subagent counts
+ * Post-F6 PR B Activity span semantics: origin-aware action counts
  * (§10), active PTC child parity (§9.4) and span-local wall-clock timing
  * (§12) over TranscriptFolder folds, including live/cold parity, grouped
  * reads and the Preparing → durable elapsed continuity. The post-F6
@@ -79,17 +79,23 @@ test('stats: two genuine model tool calls read `2 tools` (no synthetic inflation
   assert.deepEqual(statsOf(summary), { total: 2, types: { read: 1, bash: 1 } })
 })
 
-test('stats: a subagent delegation counts ONLY as its own action subtype, never as a tool', () => {
+test('stats: a subagent descriptor is child identity metadata — no span, no action', () => {
+  // The descriptor owns no model turn (a continuable child's descriptor even
+  // precedes its first turn/start) and is NOT a delegation action: the parent's
+  // genuine `tool/call name=subagent` is that evidence.
   const folder = fold([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall(1, 'c1', 'read', T0 + 100, 1),
     toolResultEvent(1, 'c1', T0 + 200, 2),
     eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, T0 + 250, 3),
   ])
-  const span = spansOf(folder.messages())[0]!
-  const summary = summarizeWorkSpan(span)
-  assert.deepEqual(statsOf(summary), { total: 2, types: { read: 1, subagent: 1 } }, 'the delegation never counts as a read')
-  assert.match(formatWorkHeaderLine(summary, false, 120), /2 actions · read ×1 · subagent ×1/)
+  const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  assert.deepEqual(statsOf(summary), { total: 1, types: { read: 1 } }, 'the descriptor contributes nothing')
+  assert.equal(summary.action?.message.kind === 'tool' ? summary.action.message.name : summary.action?.message.kind,
+    'read', 'the descriptor never owns the Action slot')
+  const descriptorRow = folder.messages().find(message => message.kind === 'tool' && message.origin === 'subagent-delegation')
+  assert.ok(descriptorRow !== undefined && descriptorRow.kind === 'tool')
+  assert.equal(isTranscriptWorkMember(descriptorRow), false, 'and it is not a Work member')
 })
 
 test('stats: a command row is standalone evidence — it joins no Activity and counts nothing', () => {
@@ -120,7 +126,7 @@ test('stats: turn-error synthetic cards are attention rows and never enter a spa
     'the synthetic error card is not a Work member')
 })
 
-test('stats: Focus toolCalls and the Activity toolCount agree on genuine calls', () => {
+test('stats: Focus tool stats and the Activity spans agree on genuine calls', () => {
   const folder = fold([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall(1, 'c1', 'read', T0 + 100, 1),
@@ -129,9 +135,18 @@ test('stats: Focus toolCalls and the Activity toolCount agree on genuine calls',
     toolCall(1, 'c2', 'bash', T0 + 300, 4),
     toolResultEvent(1, 'c2', T0 + 400, 5),
   ])
-  const span = spansOf(folder.messages())[0]!
+  const spans = spansOf(folder.messages())
+  // The descriptor is not a Work member, so it SPLITS the run; the turn-level
+  // parity still holds once every span of the turn is summed.
+  assert.equal(spans.length, 2, 'the descriptor splits the Process run')
+  const perType = new Map<string, number>()
+  for (const span of spans) {
+    for (const [name, count] of genuineToolTypes(summarizeWorkSpan(span))) {
+      perType.set(name, (perType.get(name) ?? 0) + count)
+    }
+  }
   const activity = folder.turnActivities().get(1)
-  assert.deepEqual(genuineToolTypes(summarizeWorkSpan(span)), activity?.tools, 'genuine per-type actions match the Focus tool stats')
+  assert.deepEqual(perType, activity?.tools, 'genuine per-type actions match the Focus tool stats')
 })
 
 test('active PTC children: the Action presentation carries the same active child state as Focus', () => {
@@ -313,12 +328,8 @@ test('action slot: a delegation row owns the Action without ever counting as a t
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, T0 + 100, 1),
   ])
-  const delegationSummary = summarizeWorkSpan(spansOf(delegationFolder.messages())[0]!)
-  assert.deepEqual(statsOf(delegationSummary), { total: 1, types: { subagent: 1 } })
-  assert.equal(delegationSummary.action?.kind, 'subagent', 'a delegation-only Activity owns the Action slot')
-  const delegationBody = compactWorkBody(delegationSummary, 80, compactActionPresentation(delegationSummary.action!))
-  assert.match(delegationBody.join('\n'), /Action:\s+Subagent · scout/, `the delegation-only body is meaningful:\n${delegationBody.join('\n')}`)
-  assert.match(formatWorkHeaderLine(delegationSummary, false, 120), /1 action · subagent ×1/, 'the header count remains `subagent ×1`')
+  assert.deepEqual(spansOf(delegationFolder.messages()), [],
+    'a descriptor-only turn forms no Activity, so it can never own the Action slot')
 })
 
 test('action slot: a command card (success or failure) reaches no Activity at all', () => {
@@ -355,25 +366,25 @@ test('action slot: mixed chronology keeps counts independent from the Action', (
     toolResultEvent(1, 'c1', T0 + 200, 2),
     toolCall(1, 'c2', 'bash', T0 + 300, 3),
     toolResultEvent(1, 'c2', T0 + 400, 4),
-    eventAt('subagent/descriptor', { label: 'reviewer', mode: 'task' }, T0 + 500, 5),
+    eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, T0 + 500, 5),
   ])
   const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
-  assert.deepEqual(statsOf(summary), { total: 3, types: { read: 1, bash: 1, subagent: 1 } }, 'the genuine calls still count')
-  assert.equal(summary.action?.kind, 'subagent', 'the chronologically-latest candidate owns the slot')
+  assert.deepEqual(statsOf(summary), { total: 3, types: { read: 1, bash: 1, retry: 1 } }, 'the genuine calls still count')
+  assert.equal(summary.action?.kind, 'retry', 'the chronologically-latest eligible candidate owns the slot')
   const body = compactWorkBody(summary, 80, compactActionPresentation(summary.action!))
-  assert.match(body.join('\n'), /Action:\s+Subagent · reviewer/, body.join('\n'))
-  assert.match(formatWorkHeaderLine(summary, false, 120), /3 actions · bash ×1 · read ×1 · subagent ×1/, 'the Action and the stats answer different questions')
+  assert.match(body.join('\n'), /Action:\s+Retry 1 in 2s · X: x/, body.join('\n'))
+  assert.match(formatWorkHeaderLine(summary, false, 120), /3 actions · bash ×1 · read ×1 · retry ×1/, 'the Action and the stats answer different questions')
 })
 
 test('action slot: Preparing temporarily overrides the durable Action candidate', () => {
   const folder = fold([
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('subagent/descriptor', { label: 'scout' }, T0 + 100, 1),
+    eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, T0 + 100, 1),
   ])
   const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
   const body = compactWorkBody(summary, 80, compactActionPresentation(summary.action!), 'Preparing Edit…')
   assert.match(body.join('\n'), /Action:\s+Preparing Edit…/, `the live call owns the slot:\n${body.join('\n')}`)
-  assert.ok(!body.some(line => line.includes('Subagent')), 'the durable candidate is overridden while Preparing')
+  assert.ok(!body.some(line => line.includes('Retry')), 'the durable candidate is overridden while Preparing')
 })
 
 test('singleton stats: `1 action` with its subtype stays visible (no singleton suppression)', () => {
@@ -385,12 +396,12 @@ test('singleton stats: `1 action` with its subtype stays visible (no singleton s
   const toolSummary = summarizeWorkSpan(spansOf(oneTool.messages())[0]!)
   assert.equal(toolSummary.action?.kind, 'tool')
   assert.match(formatWorkHeaderLine(toolSummary, false, 120), /1 action · read ×1/, 'the current header keeps the singleton action stat')
-  const oneSubagent = fold([
+  const oneRetry = fold([
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('subagent/descriptor', { label: 'scout' }, T0 + 100, 1),
+    eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, T0 + 100, 1),
   ])
-  const subagentSummary = summarizeWorkSpan(spansOf(oneSubagent.messages())[0]!)
-  assert.match(formatWorkHeaderLine(subagentSummary, false, 120), /1 action · subagent ×1/, 'the current header keeps `subagent ×1`')
+  const retrySummary = summarizeWorkSpan(spansOf(oneRetry.messages())[0]!)
+  assert.match(formatWorkHeaderLine(retrySummary, false, 120), /1 action · retry ×1/, 'the current header keeps `retry ×1`')
 })
 
 test('timing: a long final-text tail never stretches the Thinking span', () => {
@@ -732,18 +743,18 @@ test('Activity header degrades duration→stats without tokens and never fabrica
     toolResultEvent(1, 'c1', T0 + 2_000, 2),
     toolCall(1, 'c2', 'bash', T0 + 3_000, 3),
     toolResultEvent(1, 'c2', T0 + 9_000, 4),
-    eventAt('subagent/descriptor', { label: 'scout' }, T0 + 9_500, 5),
+    eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 1_000, failure: { code: 'X', message: 'x' } }, T0 + 9_500, 5),
   ])
   const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
   // duration + full stats.
-  assert.equal(formatWorkHeaderLine(summary, false, 120, 'emoji', '9s'), '▸ Activity 9s · 3 actions · bash ×1 · read ×1 · subagent ×1')
+  assert.equal(formatWorkHeaderLine(summary, false, 120, 'emoji', '9s'), '▸ Activity 9s · 3 actions · bash ×1 · read ×1 · retry ×1')
   // duration + action total only.
   assert.equal(formatWorkHeaderLine(summary, false, 34, 'emoji', '9s'), '▸ Activity 9s · 3 actions')
   // duration only, then the bare identity.
   assert.equal(formatWorkHeaderLine(summary, false, 16, 'emoji', '9s'), '▸ Activity 9s')
   assert.equal(formatWorkHeaderLine(summary, false, 11, 'emoji', '9s'), '▸ Activity')
   // Without duration: full stats → total → identity.
-  assert.equal(formatWorkHeaderLine(summary, false, 120), '▸ Activity · 3 actions · bash ×1 · read ×1 · subagent ×1')
+  assert.equal(formatWorkHeaderLine(summary, false, 120), '▸ Activity · 3 actions · bash ×1 · read ×1 · retry ×1')
   assert.equal(formatWorkHeaderLine(summary, false, 24), '▸ Activity · 3 actions')
   assert.equal(formatWorkHeaderLine(summary, false, 10), '▸ Activity')
   // The Activity header NEVER renders a token segment under any width.

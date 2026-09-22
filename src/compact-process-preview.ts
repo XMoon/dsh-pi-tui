@@ -32,7 +32,7 @@ import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import { focusToolDisplay, toolTitle, type ToolPresenter } from './present.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
 import { activeSubCallsOf, isPostTurnReplayEvidence, THINKING_TAIL_CAP, type TranscriptMessage, type TranscriptToolMessage } from './transcript.ts'
-import { isCommandTool, isSurfacedInteractionToolName } from './transcript-semantics.ts'
+import { isCommandTool, isSubagentDescriptor, isSurfacedInteractionToolName } from './transcript-semantics.ts'
 
 /** The fixed label column width of the collapsed body slots: the widest
  * label (`Message: `) — every slot's text starts at the same column
@@ -219,7 +219,6 @@ export function compactPreparingSummary(
  */
 export type CompactActionSource =
   | { readonly kind: 'tool'; readonly message: TranscriptToolMessage }
-  | { readonly kind: 'subagent'; readonly message: TranscriptToolMessage }
   | { readonly kind: 'retry'; readonly message: Extract<TranscriptMessage, { kind: 'system' }> }
   | { readonly kind: 'orphan-tool-result'; readonly message: TranscriptToolMessage }
 
@@ -250,11 +249,14 @@ export function compactActionSourceOf(message: TranscriptMessage): CompactAction
   // evidence (DSH wraps no turn around it; the settled result renders outside
   // model history). Its row still renders as a standalone transcript card.
   if (isCommandTool(message)) return undefined
+  // A subagent DESCRIPTOR is the child's identity metadata (for a continuable
+  // child it precedes the child's first turn/start), not a delegation action:
+  // the parent's genuine `tool/call name=subagent` is the delegation evidence.
+  if (isSubagentDescriptor(message)) return undefined
   if (message.kind === 'system') {
     return message.origin === 'llm-retry' ? { kind: 'retry', message } : undefined
   }
   if (message.kind !== 'tool' || isSurfacedInteractionToolName(message.name)) return undefined
-  if (message.origin === 'subagent-delegation') return { kind: 'subagent', message }
   if (message.origin !== undefined) return undefined
   return (message.callCount ?? 1) > 0 ? { kind: 'tool', message } : { kind: 'orphan-tool-result', message }
 }
@@ -326,11 +328,6 @@ export function compactActionPresentation(
         ...(activeSubCalls.length === 0 ? {} : { activeSubCalls }),
       }
     }
-    case 'subagent':
-      // The durable delegation label only — a descriptor record means the
-      // delegation was launched, never that it completed (no `✓`), and
-      // provider/model metadata stays on the expanded row (addendum v2 §11.3).
-      return { kind: 'subagent', display: subagentActionLabel(source.message) }
     case 'retry':
       return { kind: 'retry', display: retryActionLabel(source.message) }
     case 'orphan-tool-result':
@@ -338,15 +335,6 @@ export function compactActionPresentation(
       // call (addendum v2 §11.6).
       return { kind: 'orphan-tool-result', display: orphanToolResultLabel(source.message) }
   }
-}
-
-/** `Subagent · <label>` — the durable delegation label from the card args.
- * The fold writes the literal `'subagent'` when the descriptor carried no
- * label, so that placeholder renders as the plain `Subagent` (never the
- * redundant `Subagent · subagent`). */
-function subagentActionLabel(message: TranscriptToolMessage): string {
-  const label = compactSingleLine(message.args).trim()
-  return label === '' || label === 'subagent' ? 'Subagent' : `Subagent · ${label}`
 }
 
 /** The exact producer shape of the durable retry row's text (transcript.ts
@@ -464,10 +452,6 @@ export function addCompactActionStats(
       stats.types.set(source.message.name, (stats.types.get(source.message.name) ?? 0) + calls)
       break
     }
-    case 'subagent':
-      stats.total += 1
-      stats.types.set('subagent', (stats.types.get('subagent') ?? 0) + 1)
-      break
     case 'retry':
       stats.total += 1
       stats.types.set('retry', (stats.types.get('retry') ?? 0) + 1)

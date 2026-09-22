@@ -165,8 +165,12 @@ test('classifier: grouped genuine tool card -> tool', () => {
   assert.deepEqual(compactActionSourceOf(toolMessage({ callCount: 3 }))?.kind, 'tool')
 })
 
-test('classifier: subagent-delegation -> subagent', () => {
-  assert.deepEqual(compactActionSourceOf(toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'reviewer' }))?.kind, 'subagent')
+test('classifier: subagent-delegation -> none (child identity metadata)', () => {
+  // A descriptor is the child session's identity record (for a continuable
+  // child it precedes the child's first turn/start). The parent's own genuine
+  // `tool/call name=subagent` is the delegation Action — the descriptor must
+  // not synthesize a second one.
+  assert.equal(compactActionSourceOf(toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'reviewer' })), undefined)
 })
 
 test('classifier: command -> none (standalone session-level lifecycle)', () => {
@@ -202,17 +206,16 @@ test('classifier: active/settled surfaced interaction -> none (externally owned)
 test('latest-selection: chronology owns selection, no type priority', () => {
   const messages: TranscriptMessage[] = [
     toolMessage({ name: 'read' }),
-    toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'helper' }),
     retryMessage(),
     // A command row in the same stream is skipped: it is standalone evidence,
     // not a candidate.
     toolMessage({ origin: 'command', name: '/compact' }),
   ]
   assert.equal(latestCompactAction(messages)?.kind, 'retry')
-  // The same rows in a different order select a different latest…
-  assert.equal(latestCompactAction([messages[0]!, messages[1]!])?.kind, 'subagent')
-  // …and a stream holding ONLY a command row has no candidate at all.
-  assert.equal(latestCompactAction([messages[3]!]), undefined)
+  // A stream holding ONLY a descriptor row has no candidate at all…
+  assert.equal(latestCompactAction([toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'x' })]), undefined)
+  // …and neither has one holding only a command row.
+  assert.equal(latestCompactAction([messages[2]!]), undefined)
   // No eligible evidence -> undefined.
   assert.equal(latestCompactAction([{ kind: 'thinking', turn: 1, text: 'reasoning' }]), undefined)
   assert.equal(latestCompactAction([]), undefined)
@@ -230,18 +233,9 @@ test('presentation: genuine tool keeps presenter-first display and PTC suffix fa
   assert.equal(settled.status, 'error')
 })
 
-test('presentation: subagent renders the durable label without a ✓ prefix', () => {
-  const presentation = compactActionPresentation({
-    kind: 'subagent',
-    message: toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'Update command runner fixtures' }),
-  })
-  assert.equal(presentation.status, undefined, 'a descriptor record is a launch fact, never a completion')
-  assert.equal(presentation.display, 'Subagent · Update command runner fixtures')
-  const fallback = compactActionPresentation({
-    kind: 'subagent',
-    message: toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: '' }),
-  })
-  assert.equal(fallback.display, 'Subagent')
+test('presentation: a subagent descriptor has no Action presentation (identity metadata)', () => {
+  const source = compactActionSourceOf(toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'scout' }))
+  assert.equal(source, undefined, 'a descriptor never becomes an Action source')
 })
 
 test('presentation: a command row has no Action presentation (standalone)', () => {
@@ -276,10 +270,10 @@ test('presentation: orphan result renders the honest diagnostic', () => {
 })
 
 test('signature: bounded cache identity separates synthetic Action changes', () => {
-  const base = compactActionPresentation({ kind: 'subagent', message: toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'scout' }) })
-  const same = compactActionPresentation({ kind: 'subagent', message: toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'scout' }) })
+  const base = compactActionPresentation({ kind: 'retry', message: retryMessage('llm retry 1 in 2s — alpha') })
+  const same = compactActionPresentation({ kind: 'retry', message: retryMessage('llm retry 1 in 2s — alpha') })
   assert.equal(compactActionSignature(base), compactActionSignature(same))
-  const changed = compactActionPresentation({ kind: 'subagent', message: toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'reviewer' }) })
+  const changed = compactActionPresentation({ kind: 'retry', message: retryMessage('llm retry 1 in 2s — beta') })
   assert.notEqual(compactActionSignature(base), compactActionSignature(changed))
   assert.notEqual(compactActionSignature(base), compactActionSignature(undefined))
   const ptc = compactActionPresentation({
@@ -303,10 +297,10 @@ test('action stats: cardinality per source kind (v2 §47 example)', () => {
     retryMessage(),
     toolMessage({ origin: 'command', name: '/compact', status: 'ok' }),
   ])
-  assert.equal(stats.total, 5, 'a command row contributes nothing')
+  assert.equal(stats.total, 4, 'neither a command row nor a subagent descriptor contributes')
   assert.deepEqual(
     [...stats.types.entries()].sort(),
-    [['bash', 1], ['read', 2], ['retry', 1], ['subagent', 1]].sort(),
+    [['bash', 1], ['read', 2], ['retry', 1]].sort(),
   )
 })
 
@@ -327,8 +321,8 @@ test('action stats: subtype parts keep the shared sort/cap and +N counts kinds',
     toolMessage({ origin: 'command', name: '/compact', status: 'ok' }),
     toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'x' }),
   ])
-  assert.deepEqual(compactActionStatParts(stats), ['7 actions', 'read ×3', 'bash ×2', 'retry ×1', '+1'],
-    'the command contributes no action; +1 counts the hidden subagent kind')
+  assert.deepEqual(compactActionStatParts(stats), ['6 actions', 'read ×3', 'bash ×2', 'retry ×1'],
+    'a command row and a subagent descriptor both contribute nothing')
 })
 
 test('signature: an over-cap display stays bounded AND sensitive past the cap', () => {
@@ -351,13 +345,14 @@ test('signature: an over-cap display stays bounded AND sensitive past the cap', 
   // The signature itself stays bounded (digest, not the raw long display).
   assert.ok(compactActionSignature(tailA).length < 200, `signature stays bounded: ${compactActionSignature(tailA).length}`)
   // A short display keeps joining verbatim (exact, not digested).
-  const short = compactActionPresentation({ kind: 'subagent', message: toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'scout' }) })
-  assert.ok(compactActionSignature(short).includes('scout'))
+  const short = compactActionPresentation({ kind: 'retry', message: retryMessage('llm retry 1 in 2s — alpha') })
+  assert.ok(compactActionSignature(short).includes('alpha'))
   // The exact cap boundary: AT the cap the display joins verbatim, ONE over it
   // is digested (`>` comparison) — locks the boundary against an off-by-one.
-  // The subagent label is `Subagent · <args>`, so the args length shifts it.
+  // The retry label embeds its failure text, so the failure length shifts it.
+  const retryPrefix = 'Retry 1 in 2s · '
   const labelDisplay = (total: number): CompactActionPresentation =>
-    compactActionPresentation({ kind: 'subagent', message: toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'x'.repeat(total - 'Subagent · '.length) }) })
+    compactActionPresentation({ kind: 'retry', message: retryMessage(`llm retry 1 in 2s — ${'x'.repeat(total - retryPrefix.length)}`) })
   const atCap = labelDisplay(120)
   const overCap = labelDisplay(121)
   assert.equal(atCap.display.length, 120, 'fixture: exactly at the cap')

@@ -23,7 +23,7 @@
  */
 
 import { clusterAdjacentAmbientContext, type ContextCluster } from './context-presentation.ts'
-import { classifyTranscriptMessage, isCommandTool, isSurfacedInteractionTool } from './transcript-semantics.ts'
+import { classifyTranscriptMessage, isCommandTool, isSubagentDescriptor, isSurfacedInteractionTool } from './transcript-semantics.ts'
 import { isPostTurnReplayEvidence, type TranscriptMessage } from './transcript.ts'
 
 /**
@@ -67,6 +67,10 @@ export function isTranscriptWorkMember(message: TranscriptMessage): message is T
     // it never joins a Work span: it renders as its own transcript row and
     // splits the surrounding Process run.
     && !isCommandTool(message)
+    // A subagent DESCRIPTOR is the child's identity metadata, not Process
+    // work: it never joins a span, so it can neither form an Activity nor feed
+    // its Action stats/preview.
+    && !isSubagentDescriptor(message)
 }
 
 /**

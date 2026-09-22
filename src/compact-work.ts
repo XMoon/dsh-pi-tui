@@ -15,9 +15,10 @@
  * narration stays visible outside Activity. The Action slot is
  * presentation-only (post-F6 presentation-convergence addendum v2): the
  * latest eligible non-Thinking TURN-OWNED Process evidence — genuine Tool,
- * Preparing, Subagent delegation, Retry or an orphan-result diagnostic —
- * selected purely by chronology (a command row is session-level standalone
- * evidence and never joins an Activity), while the header's `N actions · subtype`
+ * Preparing, Retry or an orphan-result diagnostic — selected purely by
+ * chronology, while a command row (session-level standalone evidence) and a
+ * subagent descriptor (child identity metadata) are never members and never
+ * join an Activity. The header's `N actions · subtype`
  * stats use the SAME shared cardinality rules as the Focus header. Activity
  * carries NO identity icon (the disclosure marker + name identify it) and
  * its chrome shares the transcript left edge (no outer indent).
@@ -46,17 +47,18 @@ import { THINKING_TAIL_CAP, transcriptTimingOf, type TranscriptTiming } from './
 /** The span-local aggregate facts the collapsed Activity card renders. */
 export interface CompactWorkSummary {
   /** The span's shared Action stats (addendum v2 §22/§23): genuine
-   * `tool/call` cardinality by `callCount`, plus one per subagent
-   * delegation and retry occurrence — aggregated in the SAME single member
-   * walk, with the same authority the Focus header uses. An orphan result
-   * adds nothing, and a command row is never a member at all. */
+   * `tool/call` cardinality by `callCount`, plus one per retry occurrence —
+   * aggregated in the SAME single member walk, with the same authority the
+   * Focus header uses. An orphan result adds nothing, and neither a command
+   * row nor a subagent descriptor (child identity metadata) is ever a
+   * member. */
   readonly actionStats: CompactActionStats
   /** The latest reasoning member's bounded tail + live lifecycle fact. */
   readonly think?: { readonly text: string; readonly running: boolean }
   /** The LATEST eligible non-Thinking Process evidence of the span — the
    * presentation-only collapsed Action source (addendum v2 §23).
-   * Chronology owns selection: a chronologically-later subagent / retry
-   * overwrites an earlier genuine tool without touching the stats. */
+   * Chronology owns selection: a chronologically-later retry overwrites an
+   * earlier genuine tool without touching the stats. */
   readonly action?: CompactActionSource
   /** The span-local wall-clock span of the members' OWN timed Process
    * evidence (post-F6 plan §12.12) — absent when no member carries
@@ -72,8 +74,8 @@ export interface CompactWorkSummary {
  * priority). The Action stats and the Action winner come from the ONE
  * shared classifier in the SAME single walk (addendum v2 §23): a genuine
  * tool contributes its `callCount` (a merged read group of two reads is
- * TWO actions), a `subagent-delegation` / retry row contributes one action
- * of its own subtype, an orphan result contributes nothing, and
+ * TWO actions), a retry row contributes one action of its own subtype, an
+ * orphan result contributes nothing, and
  * a surfaced-interaction tool (question / Plan review) contributes and
  * presents nothing (its interaction surface owns it). Timing aggregates the
  * members' OWN sidecar evidence in the same walk — earliest start, latest
@@ -111,8 +113,9 @@ export function summarizeWorkSpan(span: TranscriptWorkSpan): CompactWorkSummary 
     }
     // One shared classifier serves the stats cardinality AND the Action
     // slot (addendum v2 §8/§23): `tool` kinds are exactly the
-    // genuine-call rows, `subagent` kinds exactly the delegations, and
-    // every other kind (retry / orphan) carries its own subtype.
+    // genuine-call rows, and every other eligible kind (retry / orphan)
+    // carries its own subtype. A subagent descriptor and a command row are
+    // excluded by the classifier entirely.
     const source = compactActionSourceOf(member)
     if (source === undefined) continue
     addCompactActionStats(actionStats, source)
@@ -140,7 +143,7 @@ export function summarizeWorkSpan(span: TranscriptWorkSpan): CompactWorkSummary 
  * actions`). The identity is the disclosure marker + the name ONLY —
  * Activity carries no style-resolved identity icon (addendum v2 §26/§27),
  * so every icon style reads `▸ Activity`. The stats are the SHARED action
- * parts (`3 actions · read ×2 · subagent ×1`), never a token segment (the
+ * parts (`3 actions · read ×2 · bash ×1`), never a token segment (the
  * span has no trustworthy token authority — addendum v2 §25). Degradation
  * drops the LAST stat first and keeps the duration with the identity to
  * the end, so the header NEVER wraps.
