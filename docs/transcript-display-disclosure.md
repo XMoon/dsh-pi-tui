@@ -43,14 +43,16 @@ preset.
 text:
 
 - `conversation`: user and assistant messages, including intermediate and final replies;
-- `process`: thinking, ordinary tool activity, retries, commands, and
-  delegation records;
+- `process`: thinking, ordinary tool activity, and retries;
 - `attention`: turn errors, interruption cards, and max-token notices;
-- `context`: injected context, workflows, compaction, and window summaries.
+- `context`: injected context, workflows, compaction, and window summaries;
+- `control`: session-level slash commands — a real `kind: 'command'` node
+  with no model turn, never Work/Activity/Action input.
 
 Synthetic rows carry source-derived origins (`llm-retry`, `turn-max-tokens`,
-`command`, `subagent-delegation`, `turn-error`, and `turn-interrupted`) so the
-projection never infers meaning from wording.
+`turn-error`, and `turn-interrupted`) so the projection never infers meaning
+from wording; the `command` origin belongs to the REAL `kind: 'command'`
+control node, not a synthetic Tool.
 
 ## Canonical transcript structure
 
