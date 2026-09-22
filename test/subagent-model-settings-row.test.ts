@@ -219,6 +219,7 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean } =
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
+    outputStyleState: { style: 'checkpoint' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

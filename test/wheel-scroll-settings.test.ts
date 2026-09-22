@@ -176,6 +176,7 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},
+    outputStyleState: { style: 'checkpoint' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
@@ -215,10 +216,10 @@ test('/settings lists the Mouse wheel lines row; missing and invalid persisted v
   const t = setupSettings({})
   await t.run()
   await t.view()
-  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B')
+  t.vt.sendInput('Mouse wheel lines')
   const view = await t.view()
   assert.ok(view.includes('Mouse wheel lines'), `row missing:\n${view}`)
-  const row = stripTerminalSequences(view).split('\n').find(line => line.includes('Mouse wheel lines'))
+  const row = stripTerminalSequences(view).split('\n').find(line => line.includes('›Mouse wheel lines'))
   assert.ok(row !== undefined && row.includes('1'),
     `missing persisted value must fall back to 1 (row: ${row}):\n${view}`)
   t.app.dispose()
@@ -227,7 +228,7 @@ test('/settings lists the Mouse wheel lines row; missing and invalid persisted v
   const t2 = setupSettings({ wheelScrollLines: 'garbage' })
   await t2.run()
   await t2.view()
-  for (let i = 0; i < 10; i += 1) t2.vt.sendInput('\x1b[B')
+  t2.vt.sendInput('Mouse wheel lines')
   const view2 = await t2.view()
   assert.ok(stripTerminalSequences(view2).split('\n').some(line => line.includes('Mouse wheel lines') && line.includes('1')),
     `invalid persisted value must fall back to 1:\n${view2}`)
@@ -238,7 +239,7 @@ test('/settings lists the Mouse wheel lines row; missing and invalid persisted v
   const t3 = setupSettings({ wheelScrollLines: '8' })
   await t3.run()
   await t3.view()
-  for (let i = 0; i < 10; i += 1) t3.vt.sendInput('\x1b[B')
+  t3.vt.sendInput('Mouse wheel lines')
   const view3 = await t3.view()
   assert.ok(stripTerminalSequences(view3).split('\n').some(line => line.includes('Mouse wheel lines') && line.includes('8')),
     `persisted 8 must render on the row:\n${view3}`)
@@ -249,7 +250,7 @@ test('the Mouse wheel lines row toggle persists without dropping other fields', 
   const t = setupSettings({ wheelScrollLines: '1' })
   await t.run()
   await t.view()
-  for (let i = 0; i < 12; i += 1) t.vt.sendInput('\x1b[B') // move to the wheel row
+  t.vt.sendInput('Mouse wheel lines') // move to the wheel row
   await t.view()
   t.vt.sendInput('\r') // toggle 1 -> 2
   await t.view()

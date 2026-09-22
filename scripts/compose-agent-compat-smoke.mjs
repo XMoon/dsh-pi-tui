@@ -82,6 +82,9 @@ const current = await composeAgent(ctx, (setupCtx, setupAgent) => {
   void typedAgent
 })
 await current.setup(agentCtx, agent)
+
+const styled = await composeAgent(ctx, ref, undefined, { preset: 'focus' }, undefined, { style: 'none' })
+await styled.setup(agentCtx)
 // @ts-expect-error The explicit-Agent production setup requires its Agent.
 await current.setup(agentCtx)
 `)
@@ -120,6 +123,20 @@ let receivedAgent
 const current = await composeAgent(noRoster, (_ctx, agent) => { receivedAgent = agent })
 await current.setup(recordingContext([]), suppliedAgent)
 if (receivedAgent !== suppliedAgent) throw new Error('explicit installer received the wrong Agent')
+
+const sections = new Map()
+const style = { style: 'explanatory' }
+const styled = await composeAgent(noRoster, () => {}, undefined, { preset: 'focus' }, undefined, style)
+await styled.setup({
+  get: () => ({ section: section => { sections.set(section.name, section); return () => {} } }),
+}, suppliedAgent)
+if (!sections.get('tui:output-style').text().includes('# Output style: Explanatory')) {
+  throw new Error('first assembly did not see the supplied style')
+}
+style.style = 'none'
+if (sections.get('tui:output-style').text() !== '' || !sections.get('tui:focus-mode').text().includes('# Focus mode')) {
+  throw new Error('live None switch disabled Focus or retained output-style guidance')
+}
 
 console.log('compose-agent-compat-smoke: passed')
 `)

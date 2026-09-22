@@ -132,6 +132,7 @@ function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
+    outputStyleState: { style: 'checkpoint' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

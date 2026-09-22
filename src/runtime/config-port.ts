@@ -68,6 +68,8 @@ export interface TuiSettingsDoc {
   busyEnter: string
   localShellSandbox: string
   homeEndKeys: string
+  /** Independent communication policy; absent/invalid values resolve to checkpoint. */
+  outputStyle?: string
   displayPreset?: string
   /** @deprecated Legacy migration input; runtime writes use displayPreset. */
   focusMode: string

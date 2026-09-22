@@ -172,6 +172,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},
+    outputStyleState: { style: 'checkpoint' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

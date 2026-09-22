@@ -97,7 +97,8 @@ import type { SaveLocationResult } from './save-location.ts'
 import { completeDirectory } from './file-completion/directory-completion.ts'
 import { LocalFileSource } from './file-completion/local-file-source.ts'
 import { TranscriptWindowController } from './transcript-window.ts'
-import { installFocusPrompt } from './focus.ts'
+import { installFocusPrompt, type SystemPromptLike } from './focus.ts'
+import { installOutputStylePrompt, parseOutputStyle, type OutputStyleState } from './output-style.ts'
 import {
   isDisplayPresetAvailable,
   isFocusDisplayPreset,
@@ -1445,6 +1446,7 @@ interface LegacyAgentComposition {
  *   section exactly once per composed agent (plan §9 — every composed
  *   root TUI agent gets it; /focus toggles never re-register).
  * @param diag - the diagnostics channel, when the caller has one.
+ * @param outputStyleState - optional live communication policy, independent of display.
  * @returns the id to record on the header (absent without a roster) and the setup callback.
  * @throws when the roster supplies no such preset.
  */
@@ -1454,6 +1456,7 @@ export function composeAgent(
   presetId?: string,
   displayState?: DisplayState,
   diag?: Diag,
+  outputStyleState?: OutputStyleState,
 ): Promise<LegacyAgentComposition>
 export function composeAgent(
   ctx: Context,
@@ -1461,6 +1464,7 @@ export function composeAgent(
   presetId?: string,
   displayState?: DisplayState,
   diag?: Diag,
+  outputStyleState?: OutputStyleState,
 ): Promise<AgentComposition>
 export async function composeAgent(
   ctx: Context,
@@ -1468,7 +1472,16 @@ export async function composeAgent(
   presetId?: string,
   displayState?: DisplayState,
   diag?: Diag,
+  outputStyleState?: OutputStyleState,
 ): Promise<LegacyAgentComposition | AgentComposition> {
+  const installTuiPrompts = (agentCtx: Context): void => {
+    if (outputStyleState !== undefined) {
+      const systemPrompt = agentCtx.get('systemPrompt') as SystemPromptLike | undefined
+      if (systemPrompt !== undefined) installOutputStylePrompt(systemPrompt, outputStyleState)
+      else diag?.warn('output style prompt unavailable', { reason: 'systemPrompt service missing' })
+    }
+    if (displayState !== undefined) installFocusPrompt(agentCtx, displayState, diag)
+  }
   const presets = ctx.get('agentPresets')
   if (presets === undefined) {
     if (presetId === 'code') {
@@ -1478,20 +1491,14 @@ export async function composeAgent(
       return {
         setup: (agentCtx: Context, agent: Agent): void => {
           installSelection(agentCtx, agent)
-          // Focus is a TUI surface policy: install it only when the runner
-          // supplied the shared state (other callers — the headless tests —
-          // keep the plain composition).
-          if (displayState !== undefined) installFocusPrompt(agentCtx, displayState, diag)
+          installTuiPrompts(agentCtx)
         },
       }
     }
     return {
       setup: (agentCtx: Context): void => {
         installModelSelection(agentCtx, installSelection)
-        // Focus is a TUI surface policy: install it only when the runner
-        // supplied the shared state (other callers — the headless tests —
-        // keep the plain composition).
-        if (displayState !== undefined) installFocusPrompt(agentCtx, displayState, diag)
+        installTuiPrompts(agentCtx)
       },
     }
   }
@@ -1504,14 +1511,9 @@ export async function composeAgent(
   // omitted-default resolver above.
   const finishSetup = async (agentCtx: Context): Promise<void> => {
     await presets.mount(agentCtx, resolved.id)
-    // Focus is a TUI surface policy, installed AFTER the preset mount so
-    // it exists consistently across every preset (standard/ptc/minimal/
-    // cordis) without depending on what the preset itself installs
-    // (plan §9.1). A preset recompose that only swaps preset-owned rows
-    // keeps this outer scoped section; a full agent rebuild re-runs this
-    // setup, so the section still lands exactly once. Only the runner
-    // (which owns the shared state) requests the install.
-    if (displayState !== undefined) installFocusPrompt(agentCtx, displayState, diag)
+    // Install after the preset mounts its services. Preset-only recomposition
+    // preserves these outer-scoped sections; a new agent installs them anew.
+    installTuiPrompts(agentCtx)
   }
   if (typeof installSelection === 'function') {
     return {
@@ -2096,7 +2098,7 @@ export function apply(ctx: Context, config: Config): void {
         // keybindings parser (src/keybindings/config.ts) owns the
         // validation fail-soft. Adding a schema field here would break
         // the z<T> inference of the whole register call (probed).
-      }).set('displayPreset', z.string()),
+      }).set('displayPreset', z.string()).set('outputStyle', z.string()),
       // `history` used to live here (a per-cwd map in the settings
       // document). It moved to $DSH_HOME/user-history/*.jsonl (see
       // history.ts); the schema deliberately no longer carries it, so the
@@ -2114,6 +2116,7 @@ export function apply(ctx: Context, config: Config): void {
       focusMode: persistedTuiSettings?.focusMode,
     })
     const displayState: DisplayState = { preset: displayResolution.preset }
+    const outputStyleState: OutputStyleState = { style: parseOutputStyle(persistedTuiSettings?.outputStyle) }
 
     // Completion notifications (plan: Client/TUI presentation capability —
     // settled detection, focus detection, terminal output and settings
@@ -2197,7 +2200,7 @@ export function apply(ctx: Context, config: Config): void {
       assembled: undefined,
     }
     const installSessionModelSelection = (_agentCtx: Context, agent: Agent): void => { modelSelections.installForAgent(agent) }
-    const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, installSessionModelSelection, presetId, displayState, diag)
+    const compose = (presetId?: string): Promise<AgentComposition> => composeAgent(ctx, installSessionModelSelection, presetId, displayState, diag, outputStyleState)
 
     // The semantic backend (server/client migration): the TUI consumes
     // Host domains through narrow ports, never ctx.* directly. Direct is the
@@ -9795,6 +9798,7 @@ export function apply(ctx: Context, config: Config): void {
       sessionCwd,
       signal,
       get sessionGeneration() { return sessionGeneration },
+      outputStyleState,
       /** Canonical display surface: /display and /focus compatibility both
        * read and mutate the shared DisplayState through one setter. */
       displayPreset: () => displayState.preset,

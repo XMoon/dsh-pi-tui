@@ -159,6 +159,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
+    outputStyleState: { style: 'checkpoint' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
