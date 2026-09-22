@@ -1851,9 +1851,14 @@ export class TranscriptFolder {
    * settlement — the bounded manual-compaction correlation resolves by
    * commandId in O(1) even when the compaction evidence lands later. */
   private readonly commands = new Map<CommandId, { index: number; message: TranscriptCommandMessage }>()
-  /** Search entries of turn-less rows appended before the first turn: they
-   * re-anchor to the first turn value when the turn index is established. */
+  /** Search entries of turn-less rows appended before the first ACCEPTED
+   * turn/start: they re-anchor to that turn when it arrives. */
   private readonly pendingAnchorEntries: number[] = []
+  /** Whether an ACCEPTED `turn/start` has been seen. The leading-prefix
+   * re-anchor decision is keyed on THIS — never on `anchor === 0`, because
+   * turn 0 itself is a perfectly legal first turn (an in-turn-0 command
+   * anchored to 0 must NOT be re-anchored away by turn 1). */
+  private seenAcceptedTurnStart = false
   /** The placement-anchor AUTHORITY for turn-less standalone rows (plan
    * §8.1/§9): one anchor per command object, written at append time and
    * re-anchored with the leading prefix. Search navigation, the fast
@@ -2415,6 +2420,8 @@ export class TranscriptFolder {
    * manual compaction registering the initial currentTurn) is not a real
    * turn and must not consume it. */
   private adoptLeadingAnchors(turn: number): void {
+    if (this.seenAcceptedTurnStart) return
+    this.seenAcceptedTurnStart = true
     if (this.pendingAnchorEntries.length === 0) return
     for (const index of this.pendingAnchorEntries) {
       const item = this.items[index]
@@ -2479,7 +2486,7 @@ export class TranscriptFolder {
       normalizedText: corpus.normalizedText,
       spans: corpus.spans,
     })
-    if (!ownsTurn && anchorTurn === 0) this.pendingAnchorEntries.push(index)
+    if (!ownsTurn && !this.seenAcceptedTurnStart) this.pendingAnchorEntries.push(index)
     this.searchRevisionCounter += 1
     const turn = ownsTurn ? message.turn : undefined
     if (turn !== undefined) {
@@ -4041,10 +4048,7 @@ export class TranscriptFolder {
 
   /** Emit one indexed raw-item range, preserving complete same-turn groups. */
   private projectIndexedRange(startTurn: number, endTurn: number): { messages: TranscriptMessage[]; tools: number } {
-    // The leading standalone prefix (pre-turn commands) belongs to the first
-    // turn's raw segment: a window that contains the FIRST turn renders from
-    // raw item 0, not from the first turn-owned item (post-PR166 plan §8.2).
-    const itemStart = startTurn === 0 ? 0 : this.turnStarts[startTurn]
+    const itemStart = this.turnStarts[startTurn]
     const itemEnd = endTurn + 1 < this.turnStarts.length
       ? this.turnStarts[endTurn + 1]! - 1
       : this.items.length - 1
@@ -4195,6 +4199,27 @@ export class TranscriptFolder {
     }
 
     const projected = this.projectIndexedRange(range.start, range.end)
+    // The LEADING standalone region (raw items before the first turn-owned
+    // row) belongs to the first turn's window by PLACEMENT, not blindly: an
+    // ANCHORED window (a search/navigation jump) keeps a leading row only
+    // when its placement anchor is the first selected turn (a pre-turn row
+    // adopted by it); a turn whose only standalone row anchored elsewhere
+    // (e.g. an in-turn-0 command of a session whose turn 0 has no other rows)
+    // stays out. The latest/fallback window shows the whole prefix.
+    const firstTurnBoundary = this.turnStarts[0]
+    if (range.start === 0 && firstTurnBoundary !== undefined && firstTurnBoundary > 0) {
+     const firstTurnValue = this.turnValues[0]
+     const leading: TranscriptMessage[] = []
+     for (let index = 0; index < firstTurnBoundary; index += 1) {
+       const item = this.items[index]
+       if (item === undefined || !this.isVisible(item)) continue
+       const anchor = this.placementAnchorOf(item)
+       if (anchored && firstTurnValue !== undefined && anchor !== undefined && anchor !== firstTurnValue) continue
+       leading.push(item)
+     }
+     if (leading.length > 0) projected.messages = [...leading, ...projected.messages]
+    }
+
     const visibleTurns = projected.messages
       .filter(message => 'turn' in message)
       .map(message => message.turn)
