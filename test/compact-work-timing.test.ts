@@ -287,36 +287,6 @@ test('timing: grouped reads aggregate their members within one turn', () => {
   assert.equal(summary.timing?.endedAt, T0 + 4_000)
 })
 
-test('timing: a cross-turn grouped read never leaks timing across turn boundaries', () => {
-  const folder = fold([
-    eventAt('turn/start', { turn: 1 }, T0, 0),
-    toolCall(1, 'c1', 'read', T0 + 1_000, 1),
-    eventAt('tool/result', {
-      turn: 1, step: 0,
-      message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
-        source: { kind: 'tool', callId: ToolCallId('c1') },
-      },
-    }, T0 + 2_000, 2),
-    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2_500, 3),
-    eventAt('turn/start', { turn: 2 }, T0 + 3_000, 4),
-    toolCall(2, 'c2', 'read', T0 + 4_000, 5),
-    toolResultEvent(2, 'c2', T0 + 6_000, 6),
-  ])
-  const messages = folder.messages()
-  const group = messages.find(message => message.kind === 'tool' && message.args === '2 files')
-  assert.ok(group !== undefined && group.kind === 'tool', 'fixture: the cross-turn read group merged')
-  assert.equal(group.kind === 'tool' ? group.turn : undefined, 2, 'the group is displayed on its latest turn')
-  assert.equal(transcriptTimingOf(group), undefined, 'cross-turn attribution omits the group timing')
-  const turn2 = summarizeWorkSpan(spansOf(messages).find(span => span.turn === 2)!)
-  assert.equal(turn2.timing, undefined, 'turn 2 Activity must not inherit turn 1 read timing')
-  // The merged card carries the merged genuine-call cardinality (2 model
-  // calls) on its DISPLAY turn — the one-card-one-turn display model cannot
-  // split provenance per turn, so the count stays where the card renders.
-  assert.equal(turn2.toolCount, 2)
-})
-
 test('stats: synthetic command and delegation rows never own the Tool slot', () => {
   const commandFolder = fold([
     eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -476,7 +446,35 @@ test('timing: live folding and cold hydration produce the same Activity timing',
   assert.deepEqual(liveSummary.think, coldSummary.think)
 })
 
-test('timing: a group that BECOMES cross-turn on append drops its stale same-turn timing', () => {
+test('timing: read grouping never crosses a turn boundary (per-turn ownership)', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 1_000, 1),
+    toolResultEvent(1, 'c1', T0 + 2_000, 2),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 2_500, 3),
+    eventAt('turn/start', { turn: 2 }, T0 + 3_000, 4),
+    toolCall(2, 'c2', 'read', T0 + 4_000, 5),
+    toolResultEvent(2, 'c2', T0 + 6_000, 6),
+  ])
+  const messages = folder.messages()
+  // Reads in DIFFERENT turns never merge into one cross-turn card: each
+  // turn's Activity owns its own count and timing.
+  assert.ok(!messages.some(message => message.kind === 'tool' && message.args === '2 files'),
+    'a group must not cross a turn boundary')
+  const turn1 = summarizeWorkSpan(spansOf(messages).find(span => span.turn === 1)!)
+  const turn2 = summarizeWorkSpan(spansOf(messages).find(span => span.turn === 2)!)
+  assert.equal(turn1.toolCount, 1)
+  assert.equal(turn1.timing?.startedAt, T0 + 1_000)
+  assert.equal(turn1.timing?.endedAt, T0 + 2_000)
+  assert.equal(turn2.toolCount, 1)
+  assert.equal(turn2.timing?.startedAt, T0 + 4_000)
+  assert.equal(turn2.timing?.endedAt, T0 + 6_000)
+  // Full Focus/Activity parity on BOTH turns.
+  assert.equal(turn1.toolCount, folder.turnActivities().get(1)?.toolCalls)
+  assert.equal(turn2.toolCount, folder.turnActivities().get(2)?.toolCalls)
+})
+
+test('timing: a next-turn read starts a NEW run and never touches the previous group', () => {
   const folder = new TranscriptFolder()
   folder.hydrate([
     eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -487,26 +485,69 @@ test('timing: a group that BECOMES cross-turn on append drops its stale same-tur
     toolCall(1, 'c2', 'read', T0 + 3_000, 3),
     toolResultEvent(1, 'c2', T0 + 4_000, 4),
   ])
+  // Precondition: the turn-1 same-turn group is merged and timed.
   const merged = folder.messages().find(message => message.kind === 'tool' && message.args === '2 files')
   assert.ok(merged !== undefined && merged.kind === 'tool', 'fixture: the same-turn group formed')
-  const before = transcriptTimingOf(merged)
-  assert.ok(before !== undefined && before.startedAt === T0 + 1_000,
-    `precondition: the same-turn group carries its aggregate timing:\n${JSON.stringify(before)}`)
-  // A third consecutive read settles in the NEXT turn: the SAME group card
-  // becomes cross-turn via appendTailGrouping and is displayed on turn 2.
+  assert.equal(merged.turn, 1)
+  const groupTiming = transcriptTimingOf(merged)
+  assert.equal(groupTiming?.startedAt, T0 + 1_000)
+  assert.equal(groupTiming?.endedAt, T0 + 4_000)
+  // A third read settles in the NEXT turn: it starts its OWN run — the
+  // turn-1 group stays exactly as it was.
   folder.apply([
     eventAt('turn/start', { turn: 2 }, T0 + 5_000, 5),
     toolCall(2, 'c3', 'read', T0 + 6_000, 6),
     toolResultEvent(2, 'c3', T0 + 8_000, 7),
   ])
-  const group = folder.messages().find(message => message.kind === 'tool' && message.args === '3 files')
-  assert.ok(group !== undefined && group.kind === 'tool', 'fixture: the group extended to three members')
-  assert.equal(group.turn, 2, 'the group is displayed on its latest turn')
-  // §25 reject condition: cross-turn grouped read must not leak timing.
-  assert.equal(transcriptTimingOf(group), undefined,
-    'a group that becomes cross-turn must DROP its stale same-turn span')
-  const turn2 = summarizeWorkSpan(spansOf(folder.messages()).find(span => span.turn === 2)!)
-  assert.equal(turn2.timing, undefined, 'turn 2 Activity must not inherit turn-1 read timing')
+  const messages = folder.messages()
+  assert.ok(!messages.some(message => message.kind === 'tool' && message.args === '3 files'),
+    'the next-turn read must not extend the previous group')
+  const untouched = messages.find(message => message.kind === 'tool' && message.args === '2 files')
+  assert.ok(untouched !== undefined && untouched.kind === 'tool')
+  assert.equal(untouched.turn, 1)
+  const still = transcriptTimingOf(untouched)
+  assert.equal(still?.startedAt, T0 + 1_000)
+  assert.equal(still?.endedAt, T0 + 4_000)
+  // Turn 2 owns exactly its own read — full Focus/Activity parity.
+  const turn2 = summarizeWorkSpan(spansOf(messages).find(span => span.turn === 2)!)
+  assert.equal(turn2.toolCount, 1)
+  assert.equal(turn2.toolCount, folder.turnActivities().get(2)?.toolCalls)
+  assert.equal(turn2.timing?.startedAt, T0 + 6_000)
+  assert.equal(turn2.timing?.endedAt, T0 + 8_000)
+})
+
+test('stats: an orphan tool/result (no seen call) never counts as a genuine tool call', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    // A result whose call was never seen (post-compaction fragment): the
+    // fold materializes the card, but no genuine tool/call event exists.
+    toolResultEvent(1, 'orphan-1', T0 + 1_000, 1),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.toolCount, 0, 'an orphan result is not a genuine tool call')
+  assert.equal(summary.tool, undefined, 'an orphan result never owns the Tool slot')
+  assert.deepEqual(compactWorkBody(summary, 80), [], 'no Tool row renders')
+  // The same counting unit as the Focus header: Focus also counts ZERO.
+  assert.equal(folder.turnActivities().get(1)?.toolCalls, 0)
+  assert.equal(summary.toolCount, folder.turnActivities().get(1)?.toolCalls)
+})
+
+test('timing: a retried attempt never lends its preparing start to a reused call id', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([eventAt('turn/start', { turn: 1 }, T0, 0)])
+  // Attempt A prepares WITH a formal id…
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a1', turn: 1, step: 0, time: T0 + 1_000, chunk: { type: 'tool-call-delta', index: 2, id: 'reused-1', name: 'bash', argumentsDelta: '{"c"' } })
+  // …then the retry invalidates the attempt's preparing evidence — BOTH
+  // the fallback identity and the formal call id.
+  folder.apply([eventAt('llm/retry', { turn: 1, step: 0, retry: 1, delayMs: 1_000, failure: { code: 'X', message: 'x' } }, T0 + 2_000, 1)])
+  folder.applyLiveInput({ kind: 'start', sessionId: 's', attemptId: 'a2', turn: 1, step: 0 })
+  // Attempt B reuses the SAME formal id.
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a2', turn: 1, step: 0, time: T0 + 5_000, chunk: { type: 'tool-call-delta', index: 2, id: 'reused-1', name: 'bash', argumentsDelta: '{"c"' } })
+  folder.apply([toolCall(1, 'reused-1', 'bash', T0 + 7_000, 2)])
+  const card = folder.messages().findLast(message => message.kind === 'tool' && message.name === 'bash')
+  assert.ok(card !== undefined && card.kind === 'tool')
+  assert.equal(transcriptTimingOf(card)?.startedAt, T0 + 5_000, 'attempt B starts at its OWN delta, never attempt A timer')
 })
 
 test('timing: a retried Thinking re-records the new attempt start', () => {
@@ -528,6 +569,22 @@ test('timing: a retried Thinking re-records the new attempt start', () => {
   assert.equal(timing.startedAt, T0 + 5_000, 'the start is the NEW attempt first chunk, not the old one')
   assert.equal(timing.running, true, 'the new attempt is still streaming')
   assert.equal(timing.endedAt, undefined, 'no fabricated end while running')
+})
+
+test('timing: a reopened Thinking never inherits the PREVIOUS attempt evidence', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([eventAt('turn/start', { turn: 1 }, T0, 0)])
+  // Attempt 1 streams reasoning and its live plane closes committed.
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a1', turn: 1, step: 0, time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'first attempt' } })
+  folder.applyLiveInput({ kind: 'end', sessionId: 's', attemptId: 'a1', turn: 1, step: 0, status: 'committed' })
+  // Attempt 2 reopens the SAME (turn, step) but closes WITHOUT producing
+  // any new reasoning evidence: the previous attempt's last-evidence time
+  // is stale and must not survive as attempt 2's point.
+  folder.applyLiveInput({ kind: 'start', sessionId: 's', attemptId: 'a2', turn: 1, step: 0 })
+  folder.applyLiveInput({ kind: 'end', sessionId: 's', attemptId: 'a2', turn: 1, step: 0, status: 'committed' })
+  const thinking = folder.messages().find(message => message.kind === 'thinking' && message.text === '')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking', 'fixture: the reopened (evidence-free) row exists')
+  assert.equal(transcriptTimingOf(thinking), undefined, 'stale attempt-A evidence must not become attempt-B point timing')
 })
 
 test('timing: a thinking-only Activity wall-spans its reasoning evidence', () => {

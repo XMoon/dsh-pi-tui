@@ -1550,9 +1550,10 @@ export function windowMessages(messages: readonly TranscriptMessage[], maxTurns:
 
 /**
  * Merge consecutive completed `read` tool cards into one card ("N files").
- * A single read stays untouched; groups break on any other kind or status.
- * Nested PTC sub-calls never reach this top-level projection (they live in
- * their parent card's `subCalls` tree).
+ * A single read stays untouched; groups break on any other kind or status,
+ * AND on a turn boundary — a group never crosses turns, so every Activity
+ * span's own facts (count, timing) stay attributable to the turn that
+ * renders the card (post-F6 plan §10.2/§12.11).
  * @param messages - the folded transcript.
  * @returns a new list with grouped read cards (same object references).
  */
@@ -1561,12 +1562,13 @@ export function groupConsecutiveReads(messages: readonly TranscriptMessage[]): T
   let group: Extract<TranscriptMessage, { kind: 'tool' }> | undefined
   let count = 0
   for (const message of messages) {
-    if (message.kind === 'tool' && message.name === 'read' && message.status === 'ok') {
+    const groupable = message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
+      && (group === undefined || group.turn === message.turn)
+    if (groupable) {
       if (group !== undefined) {
         count += 1
         group.args = `${count} files`
         group.result = group.result === '' ? message.result : `${group.result}\n\n${message.result}`
-        group.turn = Math.max(group.turn, message.turn)
         continue
       }
       group = { ...message }
@@ -1714,11 +1716,14 @@ export class TranscriptFolder {
    * run start, so the synthetic command card keeps its real elapsed span
    * (post-F6 plan §12.8). */
   private readonly commandRuns = new Map<string, { name: string; startedAt: number }>()
-  /** First streamed tool-call-delta time per call id, from BOTH the live
-   * chunks and the durable embedded streams: the earliest authoritative
+  /** First streamed tool-call-delta time per call identity, from BOTH the
+   * live chunks and the durable embedded streams: the earliest authoritative
    * start of a call, so a Preparing → durable handoff never resets its
-   * elapsed time (post-F6 plan §12.14). */
-  private readonly toolCallPreparingStarts = new Map<string, number>()
+   * elapsed time (post-F6 plan §12.14). Keyed by the formal call id OR the
+   * (turn, step, index) fallback identity, and each entry carries its
+   * OWNING step so a retry/boundary clears BOTH key shapes — a reused call
+   * id in a later attempt must never inherit a dead attempt's timer. */
+  private readonly toolCallPreparingStarts = new Map<string, { at: number; owner: string }>()
   /** Active Workflow runs: the shared semantic projection (owner tracking,
    * interruption projection, member/run settlement) plus the raw item index
    * of each active run's card for search dirty marking. */
@@ -2341,7 +2346,18 @@ export class TranscriptFolder {
     return message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
   }
 
-  /** Build one merged read card without repeatedly concatenating its result. */
+  /** Whether the item at this position CONTINUES a read-group run: groupable
+   * AND the same turn as the run's anchor (post-F6 plan §10.2/§12.11 — a
+   * group never crosses turns, so every Activity span's own facts — count,
+   * timing, slot — stay attributable to the turn that renders the card). */
+  private static continuesReadRun(message: TranscriptMessage, turn: number): message is Extract<TranscriptMessage, { kind: 'tool' }> {
+    return TranscriptFolder.groupable(message) && message.turn === turn
+  }
+
+  /** Build one merged read card without repeatedly concatenating its result.
+   * Runs are TURN-BOUND by the walks above (`continuesReadRun`), so all
+   * members share one turn; the cross-turn drop paths downstream stay as
+   * defensive guards for that invariant. */
   private makeReadGroup(start: number, end: number): {
     group: ReadGroupCard
     members: number[]
@@ -2611,7 +2627,7 @@ export class TranscriptFolder {
         continue
       }
       let end = start + 1
-      while (end < this.items.length && TranscriptFolder.groupable(this.items[end]!)) end += 1
+      while (end < this.items.length && TranscriptFolder.continuesReadRun(this.items[end]!, item.turn)) end += 1
       if (end - start === 1) {
          this.addGroupedTurn(item.turn)
          // The single read has no merged card yet.
@@ -2674,6 +2690,10 @@ export class TranscriptFolder {
     const previousIndex = index - 1
     const previous = this.items[previousIndex]
     if (previous === undefined || !TranscriptFolder.groupable(previous)) return true
+    // A group never crosses turns (post-F6 plan §10.2/§12.11): a next-turn
+    // read starts its OWN run instead of extending the previous turn's
+    // group/singleton, so every span's count and timing stay attributable.
+    if (previous.turn !== item.turn) return true
 
     const previousGroup = this.groupOf.get(previousIndex)
     if (previousGroup !== undefined) {
@@ -2762,10 +2782,13 @@ export class TranscriptFolder {
     const item = this.items[index]
     if (item === undefined || !TranscriptFolder.groupable(item)) return
     this.groupedTurnIndexDirty = true
+    // The re-flown run stays within the settled read's OWN turn: a group
+    // never crosses turns (post-F6 plan §10.2/§12.11).
+    const runTurn = item.turn
      let start = index
-    while (start > 0 && TranscriptFolder.groupable(this.items[start - 1]!)) start -= 1
+    while (start > 0 && TranscriptFolder.continuesReadRun(this.items[start - 1]!, runTurn)) start -= 1
     let end = index
-    while (end + 1 < this.items.length && TranscriptFolder.groupable(this.items[end + 1]!)) end += 1
+    while (end + 1 < this.items.length && TranscriptFolder.continuesReadRun(this.items[end + 1]!, runTurn)) end += 1
     // Detach the run's items from any existing groups (a settle can splice
     // a previously-running item into the middle of the run).
     for (let i = start; i <= end; i += 1) {
@@ -2891,10 +2914,11 @@ export class TranscriptFolder {
           thinking.text = ''
           thinking.running = true
           // The reopen starts a NEW reasoning span: the previous attempt's
-          // sidecar timing is stale evidence and must not straddle the
-          // retry (the first chunk of the new attempt re-records the
-          // start).
+          // sidecar timing AND its last-evidence fallback are stale
+          // evidence and must not straddle the retry (the first chunk of
+          // the new attempt re-records the start).
           transcriptTimings.delete(thinking)
+          thinkingLastEvidence.delete(thinking)
           this.markStreamingEntryDirty(`thinking:${key}`)
           let open = this.openThinkingByTurn.get(input.turn)
           if (open === undefined) {
@@ -3367,44 +3391,54 @@ export class TranscriptFolder {
   /** First-wins record of one streamed tool-call delta's time: keyed by the
    * formal call id once it arrives (migrating the fallback identity's
    * earlier start so the preparing seconds survive the delayed-id handoff),
-   * else by the (turn, step, index) fallback identity. */
+   * else by the (turn, step, index) fallback identity. Every entry is
+   * owned by its (turn, step) so lifecycle cleanup can clear BOTH key
+   * shapes. */
   private recordPreparingDelta(turn: number, step: number, callId: string, index: number, time: number): void {
+    const owner = `${turn}:${step}`
     if (callId !== '') {
       const fallbackKey = preparingFallbackKey(turn, step, index)
-      const migrated = this.toolCallPreparingStarts.get(fallbackKey)
+      const fallback = this.toolCallPreparingStarts.get(fallbackKey)
       if (!this.toolCallPreparingStarts.has(callId)) {
-        this.toolCallPreparingStarts.set(callId, migrated ?? time)
+        this.toolCallPreparingStarts.set(callId, { at: fallback?.at ?? time, owner })
       }
-      if (migrated !== undefined) this.toolCallPreparingStarts.delete(fallbackKey)
+      if (fallback !== undefined) this.toolCallPreparingStarts.delete(fallbackKey)
       return
     }
     const fallbackKey = preparingFallbackKey(turn, step, index)
-    if (!this.toolCallPreparingStarts.has(fallbackKey)) this.toolCallPreparingStarts.set(fallbackKey, time)
+    if (!this.toolCallPreparingStarts.has(fallbackKey)) {
+      this.toolCallPreparingStarts.set(fallbackKey, { at: time, owner })
+    }
   }
 
-  /** Drop the preparing-start evidence of one step: a retry/step boundary
-   * invalidates the failed attempt's starts, so a reused call id can never
+  /** Drop the preparing-start evidence of one step — BOTH the fallback
+   * identities and the formal call ids it owns: a retry/step boundary
+   * invalidates the dead attempt's starts, so a reused call id can never
    * inherit another attempt's timer (post-F6 plan §12.14). */
   private clearPreparingStartsForStep(turn: number, step: number): void {
-    const prefix = `\u0000tool-call-preparing:${turn}:${step}:`
-    for (const key of this.toolCallPreparingStarts.keys()) {
-      if (key.startsWith(prefix)) this.toolCallPreparingStarts.delete(key)
+    const owner = `${turn}:${step}`
+    for (const [key, start] of this.toolCallPreparingStarts) {
+      if (start.owner === owner) this.toolCallPreparingStarts.delete(key)
     }
   }
 
   /** Drop every preparing-start evidence of one turn (its `turn/end`). */
   private clearPreparingStartsForTurn(turn: number): void {
-    const prefix = `\u0000tool-call-preparing:${turn}:`
-    for (const key of this.toolCallPreparingStarts.keys()) {
-      if (key.startsWith(prefix)) this.toolCallPreparingStarts.delete(key)
+    const ownerPrefix = `${turn}:`
+    for (const [key, start] of this.toolCallPreparingStarts) {
+      if (start.owner.startsWith(ownerPrefix)) this.toolCallPreparingStarts.delete(key)
     }
   }
 
   /** First-wins merge of one durable stream's tool-call preparing starts
-   * into the folder-wide map (post-F6 plan §12.14). */
-  private absorbPreparingStarts(starts: ReadonlyMap<string, number>): void {
-    for (const [callId, at] of starts) {
-      if (!this.toolCallPreparingStarts.has(callId)) this.toolCallPreparingStarts.set(callId, at)
+   * into the folder-wide map, owned by the stream's own (turn, step)
+   * (post-F6 plan §12.14). */
+  private absorbPreparingStarts(starts: ReadonlyMap<string, number>, turn: number, step: number): void {
+    const owner = `${turn}:${step}`
+    for (const [key, at] of starts) {
+      if (!this.toolCallPreparingStarts.has(key)) {
+        this.toolCallPreparingStarts.set(key, { at, owner })
+      }
     }
   }
 
@@ -4354,7 +4388,7 @@ export class TranscriptFolder {
       // One durable stream projection per settlement: lane order, restored
       // reasoning and usage come from the same pass (plan §4.4/§12.5).
       const projection = this.assistantStreamProjection(stream, data.turn, data.step)
-      this.absorbPreparingStarts(projection.toolCallStarts)
+      this.absorbPreparingStarts(projection.toolCallStarts, data.turn, data.step)
       if (!alreadySettled) {
         // Store/refresh the step's lane authority from the attempt; a later
         // message settlement (higher authority) overwrites it.
@@ -4568,7 +4602,7 @@ export class TranscriptFolder {
         const projection = event.data.stream !== undefined && event.data.stream.length > 0
           ? this.assistantStreamProjection(event.data.stream, event.data.turn, event.data.step)
           : undefined
-        if (projection !== undefined) this.absorbPreparingStarts(projection.toolCallStarts)
+        if (projection !== undefined) this.absorbPreparingStarts(projection.toolCallStarts, event.data.turn, event.data.step)
         const messageUsage = event.data.usage ?? projection?.usage
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
@@ -4751,7 +4785,7 @@ export class TranscriptFolder {
         const preparingStart = this.toolCallPreparingStarts.get(key)
         this.toolCallPreparingStarts.delete(key)
         setTranscriptTiming(card, {
-          startedAt: preparingStart === undefined ? event.time : Math.min(preparingStart, event.time),
+          startedAt: preparingStart === undefined ? event.time : Math.min(preparingStart.at, event.time),
           running: true,
         })
         this.appendItem(card)
@@ -4856,9 +4890,10 @@ export class TranscriptFolder {
             }
           } else {
             const card: Extract<TranscriptMessage, { kind: 'tool' }> = { kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta, error: event.data.error }
-            // An orphan settle with no seen call has only one timestamp: it
-            // contributes point evidence, never an invented duration
-            // (post-F6 plan §12.9).
+            // An orphan settle has NO seen tool/call: explicit zero-call
+            // provenance — it must neither inflate `tools` nor own the Tool
+            // slot (Focus counts only genuine tool/call events, §10.2).
+            card.callCount = 0
             setTranscriptTiming(card, pointTiming(event.time))
             this.appendItem(card)
             this.scheduleGrouping(this.items.length - 1)

@@ -328,7 +328,10 @@ test('G1: same-turn adjacent reads merge into ONE representative card, parity ke
   assert.equal(folder.search('src/b.ts').length, 0, 'member paths are NOT searchable: strict legacy parity')
 })
 
-test('G2: cross-turn read grouping keeps one representative with the max turn', () => {
+test('G2: read grouping never crosses a turn boundary; each turn owns its card', () => {
+  // Post-F6 PR B (§10.2/§12.11): a group never crosses turns, so every
+  // Activity span's own facts stay attributable to the turn that renders
+  // the card. The reads stay per-turn cards with per-turn search corpora.
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(0, 0),
@@ -341,12 +344,12 @@ test('G2: cross-turn read grouping keeps one representative with the max turn', 
     turnEnd(7, 1),
   ])
   const grouped = folder.messages().filter((message): message is Extract<TranscriptMessage, { turn: number }> => message.kind === 'tool' && message.name === 'read')
-  assert.equal(grouped.length, 1, 'the cross-turn reads merge into one card')
-  assert.equal(grouped[0]!.turn, 1, 'the merged card carries the max turn')
+  assert.equal(grouped.length, 2, 'the cross-turn reads stay per-turn cards')
+  assert.deepEqual(grouped.map(message => message.turn), [0, 1], 'each card stays on its own turn')
   assertCorpusParity(folder, ['cross-turn', 'keyword', 'part one', 'part two'])
   const matches = folder.search('cross-turn')
   assert.equal(matches.length, 2, 'one occurrence per member result')
-  assert.ok(matches.every(match => match.turn === 1))
+  assert.deepEqual([...new Set(matches.map(match => match.turn))].sort(), [0, 1], 'each match reports its own turn')
 })
 
 test('G3: a late non-tail result reflows the run; search text updates, no duplicate', () => {
@@ -804,40 +807,37 @@ test('stale search overlay: Next/Prev refreshes matches when the transcript chan
     turnStart(0, 0),
     readToolCall(1, 'r1', 'src/a.ts', 0),
     toolResult(2, 'r1', 'alpha payload'),
-    turnEnd(3, 0),
-    turnStart(4, 1),
-    readToolCall(5, 'r2', 'src/b.ts', 1),
-    toolResult(6, 'r2', 'beta payload'),
-    turnEnd(7, 1),
+    readToolCall(3, 'r2', 'src/b.ts', 0),
+    toolResult(4, 'r2', 'beta payload'),
   ])
-  // The overlay queried while the merged cross-turn card (turn 1) matched.
+  // The overlay queried the SAME-turn merged card (turn 0).
   const initial = folder.search('payload')
   assert.equal(initial.length, 2, 'one occurrence per member result')
-  assert.equal(initial[0]!.turn, 1)
+  assert.equal(initial[0]!.turn, 0)
   const state = { matches: initial, current: 0, query: 'payload', revision: folder.searchRevision(), folder }
 
-  // The agent keeps running: a turn-2 read joins the group — the card's
-  // turn moved to 2 and the projection revision changed. Next/Prev with
-  // the query untouched must refresh before jumping.
+  // The agent keeps running: a turn-1 read's result joins the candidate
+  // list and the projection revision changed. Next/Prev with the query
+  // untouched must refresh before jumping.
   folder.apply([
-    turnStart(8, 2),
-    readToolCall(9, 'r3', 'src/c.ts', 2),
-    toolResult(10, 'r3', 'c-gamma payload'),
-    turnEnd(11, 2),
+    turnStart(5, 1),
+    readToolCall(6, 'r3', 'src/c.ts', 1),
+    toolResult(7, 'r3', 'c-gamma payload'),
+    turnEnd(8, 1),
   ])
   const refreshed = refreshedSearchState(state, folder)
   assert.equal(refreshed.changed, true, 'a moved revision must mark the overlay state stale')
   assert.equal(refreshed.matches.length, 3)
-  assert.equal(refreshed.matches[0]!.turn, 2, 'the jump must use the NEW group turn, never the stale 1')
+  assert.equal(refreshed.matches[0]!.turn, 0, 'the merged card stays on its own turn')
   assert.equal(refreshed.matches[0]!.id, initial[0]!.id, 'the same logical card is recovered by stable id')
   assert.equal(refreshed.current, 0)
   assert.equal(refreshed.revision, folder.searchRevision(), 'the runner commits the new revision')
 
   // Live NEW matches are visible to Next/Prev without a query change.
   folder.apply([
-    turnStart(12, 3),
-    userMessage(13, 'three payload mentions', 3),
-    turnEnd(14, 3),
+    turnStart(9, 2),
+    userMessage(10, 'three payload mentions', 2),
+    turnEnd(11, 2),
   ])
   const withNew = refreshedSearchState({ matches: refreshed.matches, current: refreshed.current, query: 'payload', revision: refreshed.revision, folder }, folder)
   assert.equal(withNew.matches.length, 4, 'a live new occurrence enters the candidate list')

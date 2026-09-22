@@ -456,6 +456,10 @@ test('navigation: every visible matching card is weak-highlighted, the current c
 })
 
 test('navigation: a live group reflow keeps the current highlight via stable-match rebind', async () => {
+  // Post-F6 PR B: groups never cross turns, so the object-replacing reflow
+  // is exercised WITHIN one turn — a late-settling pending read in the
+  // middle of a run rebuilds the group card object while the search match
+  // id/source stay stable.
   const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
     ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
   const readCall = (seq: number, callId: string, file: string, turn: number): SessionEvent =>
@@ -477,7 +481,6 @@ test('navigation: a live group reflow keeps the current highlight via stable-mat
     readResult(2, 'r1', 'shared token A', 0),
     readCall(3, 'r2', 'src/b.ts', 0),
     readResult(4, 'r2', 'shared token B', 0),
-    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
   ])
   const project = () => folder.window({ maxTurns: 50 })
   const { vt, app } = startApp()
@@ -493,20 +496,21 @@ test('navigation: a live group reflow keeps the current highlight via stable-mat
   let row = lines.findIndex(line => line.includes('Read 2 files'))
   assert.ok(row >= 0 && vt.getCellUnderline(row, lines[row]!.indexOf('Read')), 'precondition: the target card is decorated (anchor-only source)')
 
-  // A late cross-turn read joins the group: the representative card OBJECT is
-  // replaced by the reflow, while match.id/source stay stable.
+  // A pending read parks between the group and a settled tail read; when it
+  // settles IN PLACE (non-tail) the run reflows and the representative card
+  // OBJECT is replaced, while match.id/source stay stable.
   folder.apply([
-    event('turn/start', { turn: 1 }, 6),
-    readCall(7, 'r3', 'src/c.ts', 1),
-    readResult(8, 'r3', 'shared token C', 1),
-    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 9),
+    readCall(5, 'r3', 'src/c.ts', 0),
+    readCall(6, 'r4', 'src/d.ts', 0),
+    readResult(7, 'r4', 'shared token D', 0),
+    readResult(8, 'r3', 'shared token C', 0),
   ])
   app.setTranscript(project().messages, folder.turnActivities())
   // The runner's per-repaint sync (stable match → current card object).
   app.rebindTranscriptSearchTarget(folder.resolveSearchMatch(match))
 
   lines = await viewport(vt)
-  row = lines.findIndex(line => line.includes('Read 3 files'))
+  row = lines.findIndex(line => line.includes('Read 4 files'))
   assert.ok(row >= 0, `the reflowed group card is visible:\n${lines.join('\n')}`)
   // The rebind re-attached the presentation to the NEW card object: without it
   // the card would not even be decorated (identity would not match).

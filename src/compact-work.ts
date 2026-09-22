@@ -108,15 +108,19 @@ export function summarizeWorkSpan(span: TranscriptWorkSpan): CompactWorkSummary 
       // panel owns the interaction), but it must not skew the span either —
       // this keeps Compact and the Focus turn accounting in agreement.
       if (isSurfacedInteractionToolName(member.name)) continue
-      // Genuine-call provenance: `origin` marks SYNTHETIC rows, so an
-      // origin-less member is a model tool call — the cardinality AND the
-      // Tool-slot ownership both read this, exactly like the Focus slot
-      // that only genuine `tool/call` events can own. A merged read group
-      // contributes its merged `callCount` (two grouped reads are still
-      // two calls, never `"2 files" → 1`); a plain card is one call.
+      // Genuine-call provenance: `origin` marks SYNTHETIC rows, and
+      // `callCount` carries the explicit genuine-call cardinality — a
+      // plain tool/call card is one call, a merged read group carries its
+      // merged sum, and an orphan result (a result without a seen call)
+      // explicitly carries ZERO. So `tools` keeps the same counting unit
+      // as the Focus header (genuine tool/call events only), and a zero
+      // or synthetic row can never own the Tool slot the Focus slot owns.
       if (member.origin === undefined) {
-        toolCount += member.callCount ?? 1
-        tool = member
+        const calls = member.callCount ?? 1
+        if (calls > 0) {
+          toolCount += calls
+          tool = member
+        }
       } else if (member.origin === 'subagent-delegation') {
         subagentCount += 1
       }
