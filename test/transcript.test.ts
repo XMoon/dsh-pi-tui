@@ -4301,6 +4301,55 @@ test('remove and re-add reasoning keeps the lane chronology drift-free', () => {
   assert.equal(assistant.text, 'ordered answer', 'the final replacement owns the Assistant text')
 })
 
+test('a replacement durable attempt converges the lane topology in both directions', () => {
+  // Attempt replacement without a presentation reset: `llm/retry-started`
+  // only opens the usage replacement slot, so BOTH rows persist and the
+  // newer attempt's durable authority must converge their display order —
+  // otherwise the stale topology would survive into the final message
+  // settlement behind the §4.5 first-settlement gate.
+  const prefix = [
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+  ]
+  const retryStarted = event('llm/retry-started', { retryId: 'retry-conv' as RetryId, turn: 0, step: 0, retry: 1 }, 4)
+  const cases = [
+    {
+      name: 'thinking-first then assistant-first replacement',
+      first: 'thinking' as const,
+      replacement: 'assistant' as const,
+      expected: ['assistant', 'thinking'],
+    },
+    {
+      name: 'assistant-first then thinking-first replacement',
+      first: 'assistant' as const,
+      replacement: 'thinking' as const,
+      expected: ['thinking', 'assistant'],
+    },
+  ]
+  for (const scenario of cases) {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      ...prefix,
+      event('assistant/attempt', { turn: 0, step: 0, stream: laneOrderedStep(scenario.first).stream }, 2),
+      retryStarted,
+      event('assistant/attempt', { turn: 0, step: 0, stream: laneOrderedStep(scenario.replacement).stream }, 3),
+    ])
+    assert.deepEqual(
+      kinds(folder.messages()),
+      scenario.expected,
+      `${scenario.name}: the replacement attempt owns the lane topology`,
+    )
+    // A same-topology final message settlement must not regress the
+    // converged order behind the §4.5 gate (the anchored topology IS the
+    // converged one now).
+    folder.apply([messageSettlement(5, laneOrderedStep(scenario.replacement))])
+    assert.deepEqual(kinds(folder.messages()), scenario.expected, `${scenario.name}: the final settlement keeps the converged order`)
+    const thinking = folder.messages().find(message => message.kind === 'thinking')
+    assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+    assert.equal(thinking.running, false, 'attempt replacement restores the Thinking lane settled')
+  }
+})
+
 test('lane displacement keeps TranscriptItemId and search/window/group contracts intact', () => {
   // Scenario H: a display-displaced Thinking row must keep every
   // index-keyed contract — ABOVE ALL the stable TranscriptItemId the search
