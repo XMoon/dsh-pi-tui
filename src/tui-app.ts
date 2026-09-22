@@ -14920,9 +14920,14 @@ export class TuiApp {
       // the hidden row.
       const command = message.sourceCommand
       const commandName = command?.name === null || command?.name === undefined ? '' : ` /${command.name}`
-      const commandError = command !== undefined && command.outcome?.kind === 'error' ? command.outcome.text : undefined
+      // The command's error KIND drives the failed state even when the
+      // normalized outcome omitted its text ('' = failed without a message)
+      // — a failed manual /compact must never title `Context compacted`.
+      const commandError = command !== undefined && command.outcome?.kind === 'error'
+        ? command.outcome.text ?? ''
+        : undefined
       const lead = iconLead('compaction', this.iconStyle)
-      const failed = message.error ?? commandError
+      const failed = commandError !== undefined ? commandError : message.error
       const title = failed !== undefined
         ? color.error(`${lead}Compaction failed${commandName}`)
         : message.running === true
@@ -14937,7 +14942,7 @@ export class TuiApp {
         if (counts !== '') card.addChild(new Text(color.textDim(counts), 0, 0))
         if (message.text !== '') {
           card.addChild(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS))
-        } else if (failed !== undefined) {
+        } else if (failed !== undefined && failed !== '') {
           card.addChild(new Text(color.error(failed), 0, 0))
         }
         const commandOutcome = command?.outcome?.text
@@ -14945,7 +14950,10 @@ export class TuiApp {
           card.addChild(new Text(color.textDim(commandOutcome), 0, 0))
         }
       } else {
-        const outcomePreview = command?.outcome?.text ?? failed
+        // ONE physical preview row: a multiline command outcome folds to its
+        // first line (the full body is the expanded presentation).
+        const outcomeFallback = command?.outcome?.text ?? (failed !== undefined && failed !== '' ? failed : undefined)
+        const outcomePreview = outcomeFallback === undefined ? undefined : firstLine(outcomeFallback)
         const parts = [counts, outcomePreview].filter(part => part !== '' && part !== undefined)
         card.addChild(new Text(truncateToWidth(
           color.textDim(`${parts.join(' — ')}${parts.length === 0 ? '' : ' '}(${this.expandHint(expandHint)} to expand)`),
@@ -15028,15 +15036,16 @@ export class TuiApp {
         if (outcomePreview !== undefined) {
           // A disclosure hint appears ONLY when content was actually cut
           // (more lines than the preview, or a width truncation) — a fully
-          // visible one-line outcome stays clean.
+          // visible one-line outcome stays clean. The hint's width is
+          // RESERVED up front, so a width cut still leaves the affordance
+          // visible instead of truncating it away with the preview tail.
           const truncated = (outcomeText?.includes('\n') === true)
             || visibleWidth(outcomePreview) > Math.max(0, width - 2)
           const outcomeColor = message.outcome?.kind === 'error' ? color.error : color.textDim
-          card.addChild(new Text(truncateToWidth(
-            `  ${outcomeColor(outcomePreview)}${truncated ? color.textDim(` (${this.expandHint(expandHint)} to expand)`) : ''}`,
-            width,
-            '…',
-          ), 0, 0))
+          const hint = truncated ? color.textDim(` (${this.expandHint(expandHint)} to expand)`) : ''
+          const previewBudget = hint === '' ? width : Math.max(2, width - visibleWidth(hint))
+          const preview = truncateToWidth(`  ${outcomeColor(outcomePreview)}`, previewBudget, '…')
+          card.addChild(new Text(truncateToWidth(`${preview}${hint}`, width, '…'), 0, 0))
         }
       }
       return card

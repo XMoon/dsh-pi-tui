@@ -1861,6 +1861,14 @@ export class TranscriptFolder {
    * all derive placement from this ONE sidecar — never a semantic `turn` on
    * the row. */
   private readonly commandPlacementTurns = new WeakMap<TranscriptCommandMessage, number>()
+  /** The placement anchor a fused command HANDS OVER to its combined
+   * manual-compaction owner: the visible representative of a manual
+   * `/compact` is the compaction card, so its window/search placement must
+   * inherit the command's anchor (a pre-turn or replayed manual compaction
+   * would otherwise keep the legacy `currentTurn` and anchor the wrong
+   * bounded window). Written at fuse time; re-anchored with the leading
+   * prefix exactly like the command sidecar. */
+  private readonly manualCompactionPlacementTurns = new WeakMap<Extract<TranscriptMessage, { kind: 'compaction' }>, number>()
   /** Manual-compaction correlation legs (post-PR166 plan §7): bounded direct
    * lookups so `command/done.sourceEventSeq` and compaction
    * `sourceCommandId` never scan history. */
@@ -2397,19 +2405,22 @@ export class TranscriptFolder {
     this.turnStarts.push(this.items.length - 1)
     this.turnValues.push(turn)
     this.turnValueSet.add(turn)
-    // The FIRST model turn adopts the leading standalone prefix (pre-turn
-    // commands): their search entries anchored to 0 until now re-anchor to
-    // the first turn value, so an anchored search window that contains the
-    // first turn reveals them (the raw prefix itself renders from index 0).
-    if (this.turnValues.length === 1 && this.pendingAnchorEntries.length > 0) {
-      for (const index of this.pendingAnchorEntries) {
-        const entry = this.searchEntries[index]
-        if (entry !== undefined) entry.turn = turn
-        const item = this.items[index]
-        if (item !== undefined && item.kind === 'command') this.commandPlacementTurns.set(item, turn)
-      }
-      this.pendingAnchorEntries.length = 0
+  }
+
+  /** The FIRST REAL model turn (turn/start) adopts the leading standalone
+   * prefix (pre-turn commands): their anchors — 0 until now — re-anchor to
+   * the first turn value, so an anchored search window that contains the
+   * first turn reveals them (the raw prefix itself renders from index 0).
+   * Only turn/start adopts the prefix: a GHOST legacy turn (a pre-turn
+   * manual compaction registering the initial currentTurn) is not a real
+   * turn and must not consume it. */
+  private adoptLeadingAnchors(turn: number): void {
+    if (this.pendingAnchorEntries.length === 0) return
+    for (const index of this.pendingAnchorEntries) {
+      const item = this.items[index]
+      if (item !== undefined && item.kind === 'command') this.setPlacementAnchor(item, index, turn)
     }
+    this.pendingAnchorEntries.length = 0
   }
 
   /** The PRESENTATION placement anchor of one turn-less standalone row: the
@@ -2422,10 +2433,33 @@ export class TranscriptFolder {
     return this.turnValues.length > 0 ? this.turnValues[this.turnValues.length - 1]! : 0
   }
 
+  /** Write one command's placement anchor and hand it over to an already
+   * fused manual-compaction owner: the owner is the VISIBLE representative,
+   * so its sidecar and search entry must follow the same anchor. */
+  private setPlacementAnchor(message: TranscriptCommandMessage, index: number, turn: number): void {
+    this.commandPlacementTurns.set(message, turn)
+    const entry = this.searchEntries[index]
+    if (entry !== undefined) entry.turn = turn
+    const owner = this.compactionOwnerByCommandId.get(message.commandId)
+    if (owner === undefined) return
+    const compaction = this.items[owner]
+    if (compaction !== undefined && compaction.kind === 'compaction') {
+      this.manualCompactionPlacementTurns.set(compaction, turn)
+      const ownerEntry = this.searchEntries[owner]
+      if (ownerEntry !== undefined) ownerEntry.turn = turn
+    }
+  }
+
   /** The placement anchor of one turn-less standalone row from the shared
-   * authority sidecar (undefined for turn-owned rows). */
+   * authority sidecar (undefined for turn-owned rows): a plain command, or
+   * the COMBINED manual-compaction owner inheriting its fused command's
+   * anchor. */
   private placementAnchorOf(message: TranscriptMessage): number | undefined {
-    return message.kind === 'command' ? this.commandPlacementTurns.get(message) : undefined
+    if (message.kind === 'command') return this.commandPlacementTurns.get(message)
+    if (message.kind === 'compaction' && message.sourceCommand !== undefined) {
+      return this.manualCompactionPlacementTurns.get(message)
+    }
+    return undefined
   }
 
   /** Append one folded message, maintaining the window projections. Returns
@@ -2514,7 +2548,11 @@ export class TranscriptFolder {
       // KEEPS its presentation anchor: the appendItem/appendTurnIndex sidecar
       // is the authority (post-PR166 plan §8.1/§9), and resetting it to 0
       // would point an inter-turn search match at the wrong bounded window.
-      if ('turn' in card) entry.turn = card.turn
+      // A fused manual compaction keeps its HANDED-OVER anchor for the same
+      // reason — its legacy `turn` is not the placement authority.
+      if ('turn' in card && !(card.kind === 'compaction' && card.sourceCommand !== undefined)) {
+        entry.turn = card.turn
+      }
       const corpus = transcriptSearchCorpus(card)
       entry.normalizedText = corpus.normalizedText
       entry.spans = corpus.spans
@@ -4099,26 +4137,44 @@ export class TranscriptFolder {
     // long read run cannot make every navigation repaint rescan history.
     if (!this.turnsMonotonic) {
       const full = this.groupedMessages()
-       const allTurns = [...new Set(full.filter(message => 'turn' in message).map(message => message.turn))]
-         .sort((a, b) => a - b)
-
-       const windowed = windowMessages(full, maxTurns, options.endTurn)
-       // `windowMessages` keeps every TURN-LESS row unconditionally (it has no
-       // folder state). Turn-less standalone rows follow the SHARED placement
-       // authority instead: a command stays in the window only when its anchor's
-       // turn is one of the window's turns, so a corrupt/non-monotonic history
-       // with many commands cannot drag them all into every small window (the
+       // Turn-less standalone rows (commands AND fused manual-compaction owners)
+       // follow the SHARED placement authority — never the turn predicates of the
+       // pure `windowMessages` helper (which keeps every turn-less row
+       // unconditionally and would fold a fused owner away by its legacy turn).
+       // They are windowed separately here and merged back in raw order, so a
+       // small window never drags every historical command/compaction in (the
        // bounded-window and anchored-search contracts, plan §8).
-       const sortedDesc = [...allTurns].sort((a, b) => b - a)
-       const anchorIndex = options.endTurn === undefined ? -1 : sortedDesc.indexOf(options.endTurn)
-       const windowTurnSet = new Set(anchorIndex >= 0
-         ? sortedDesc.slice(anchorIndex, anchorIndex + maxTurns)
-         : sortedDesc.slice(0, maxTurns))
-       const messages = windowed.filter(message => {
-         const anchor = this.placementAnchorOf(message)
-         return anchor === undefined || windowTurnSet.has(anchor)
-       })
-       const visibleSet = new Set(messages.filter(message => 'turn' in message).map(message => message.turn))
+      const anchoredRows = new Map<TranscriptMessage, number>()
+      const windowInput: TranscriptMessage[] = []
+      for (const message of full) {
+       const anchor = this.placementAnchorOf(message)
+       if (anchor !== undefined) anchoredRows.set(message, anchor)
+       else windowInput.push(message)
+      }
+      const allTurns = [...new Set(windowInput.filter(message => 'turn' in message).map(message => message.turn))]
+       .sort((a, b) => a - b)
+
+      const windowed = windowMessages(windowInput, maxTurns, options.endTurn)
+      const sortedDesc = [...allTurns].sort((a, b) => b - a)
+      const anchorIndex = options.endTurn === undefined ? -1 : sortedDesc.indexOf(options.endTurn)
+      const windowTurnSet = new Set(anchorIndex >= 0
+       ? sortedDesc.slice(anchorIndex, anchorIndex + maxTurns)
+       : sortedDesc.slice(0, maxTurns))
+      const summaryRows = windowed.filter(message => message.kind === 'summary')
+      const windowedBody = new Set<TranscriptMessage>(windowed.filter(message => message.kind !== 'summary'))
+      const messages: TranscriptMessage[] = [...summaryRows]
+      for (const message of full) {
+       const anchor = anchoredRows.get(message)
+       if (anchor !== undefined) {
+         if (windowTurnSet.has(anchor)) messages.push(message)
+         continue
+       }
+       if (windowedBody.has(message)) messages.push(message)
+      }
+      const visibleSet = new Set<number>()
+      for (const message of messages) {
+        if ('turn' in message) visibleSet.add(message.turn)
+      }
        const visibleTurnValues = [...visibleSet].sort((a, b) => a - b)
        const firstTurn = visibleTurnValues[0] ?? this.turnValues[range.start]
        const lastTurn = visibleTurnValues[visibleTurnValues.length - 1] ?? this.turnValues[range.end]
@@ -4536,6 +4592,27 @@ export class TranscriptFolder {
     compaction.sourceCommand = message
     this.fusedCommands.add(message)
     this.compactionOwnerByCommandId.set(message.commandId, target)
+    // The combined owner INHERITS the command's placement anchor: the card is
+    // the visible/searchable representative now, and its legacy `turn` (the
+    // fold-time currentTurn, which never regresses for replays and is 0 for
+    // a pre-turn manual compaction) must not steer the anchored window.
+    const anchor = this.commandPlacementTurns.get(message)
+    if (anchor !== undefined) this.setPlacementAnchor(message, index, anchor)
+    // A fused owner whose legacy turn is a GHOST singleton (that turn's only
+    // raw item is this very card — e.g. a pre-turn manual compaction
+    // registering the initial currentTurn) drops the ghost turn
+    // registration: the card is placement-anchored now, and the ghost would
+    // otherwise claim the leading raw prefix and push the first REAL turn's
+    // segment past it, hiding the card from the first-turn window.
+    const ghostIndex = this.turnValues.indexOf(compaction.turn)
+    if (ghostIndex >= 0 && this.turnStarts[ghostIndex] === target
+      && this.activityByTurn.get(compaction.turn)?.startedAt === undefined
+      && (ghostIndex + 1 >= this.turnStarts.length || this.turnStarts[ghostIndex + 1]! === target + 1)) {
+      this.turnValues.splice(ghostIndex, 1)
+      this.turnStarts.splice(ghostIndex, 1)
+      this.turnValueSet.delete(compaction.turn)
+      this.removeGroupedTurn(compaction.turn)
+    }
     // The card's corpus now carries the command fields and the raw command
     // entry stops producing hits — both entries re-normalize lazily.
     this.markSearchEntryDirty(target)
@@ -4786,6 +4863,7 @@ export class TranscriptFolder {
         // regress the current turn (turn-less events would land in the
         // wrong turn — review finding).
         this.currentTurn = Math.max(this.currentTurn, event.data.turn)
+        this.adoptLeadingAnchors(event.data.turn)
         // Advance the shared usage accounting: a delayed fact for the
         // prior turn becomes stale once the next turn starts (review
         // finding).
