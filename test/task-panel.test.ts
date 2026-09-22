@@ -9,6 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test, { mock } from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { TaskBrowserPanel, formatElapsed, type TaskPanelItem } from '../src/task-panel.ts'
 import { MARQUEE_STEP_MS } from '../src/marquee.ts'
 
@@ -998,4 +999,131 @@ test('task panel: a click cannot bypass a pending stop confirmation (mouse parit
   panel.handleMouse(mouse('press', 10, row, 100, 24))
   panel.handleMouse(mouse('click', 10, row, 100, 24))
   assert.deepEqual(selected, [], 'the click must not bypass the pending confirmation')
+})
+
+// --- single-physical-row containment (presentation boundary) ---
+
+/** Every returned element is ONE physical terminal row: no embedded CR/LF
+ * can escape the row budget, and nothing paints wider than the grant. */
+function assertPhysicalRows(lines: readonly string[], width: number): void {
+  for (const line of lines) {
+    assert.equal(/[\r\n]/.test(line), false, `an embedded row break leaked into a row: ${JSON.stringify(line)}`)
+    assert.ok(visibleWidth(line) <= width, `a row exceeds the grant (${visibleWidth(line)} > ${width}): ${JSON.stringify(line)}`)
+  }
+}
+
+const multilineJob = (): TaskPanelItem => runningJob({
+  label: "bash · set -e\necho 'build'\r\npnpm test",
+})
+
+test('Quick Tasks: a multiline job label stays ONE physical row and the raw item is untouched', () => {
+  const item = multilineJob()
+  const panel = new TaskBrowserPanel(
+    [item],
+    10,
+    { mode: 'quick' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const lines = panel.render(100).map(strip)
+  assertPhysicalRows(lines, 100)
+  // The three command lines did not leak as extra terminal rows: the
+  // collapsed projection carries them on the ONE main row instead.
+  const joined = lines.join('\n')
+  assert.ok(joined.includes("set -e echo 'build' pnpm test"), `the collapsed projection must stay visible:\n${joined}`)
+  assert.ok(item.label.includes('\n'), 'the raw runtime label must keep its newlines (no data rewrite)')
+  panel.dispose()
+})
+
+test('Full Task Center: a multiline job main row stays ONE physical row', () => {
+  const panel = new TaskBrowserPanel(
+    [multilineJob(), doneJob()],
+    10,
+    { mode: 'full', header: 'tasks · subagents' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const lines = panel.render(100).map(strip)
+  assertPhysicalRows(lines, 100)
+  assert.ok(lines.join('\n').includes("set -e echo 'build' pnpm test"), 'the collapsed label must stay visible')
+  panel.dispose()
+})
+
+test('Full Task Center detail: multiline label/detail project to single rows in BOTH layouts', () => {
+  const item: TaskPanelItem = runningJob({
+    label: 'job first\njob second',
+    detail: 'detail first\r\ndetail second',
+  })
+  const panel = new TaskBrowserPanel(
+    [item],
+    10,
+    { mode: 'full', header: 'tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  // Wide width: the side detail pane renders detailLines rows.
+  const wide = panel.render(120).map(strip)
+  assertPhysicalRows(wide, 120)
+  const wideJoined = wide.join('\n')
+  assert.ok(wideJoined.includes('job first job second'), `wide pane must show the collapsed label:\n${wideJoined}`)
+  assert.ok(wideJoined.includes('detail first detail second'), `wide pane must show the collapsed detail:\n${wideJoined}`)
+  // Medium width: the compact inline detail under the selected row (it
+  // carries label/status/elapsed — the full detail rows live in the wide
+  // side pane above).
+  const medium = panel.render(100).map(strip)
+  assertPhysicalRows(medium, 100)
+  const mediumJoined = medium.join('\n')
+  assert.ok(mediumJoined.includes('job first job second'), `inline detail must show the collapsed label:\n${mediumJoined}`)
+  assert.ok(mediumJoined.includes('job first job second · status'), `inline detail stays one collapsed row:\n${mediumJoined}`)
+  // The raw domain text is never rewritten.
+  assert.equal(item.label, 'job first\njob second')
+  assert.equal(item.detail, 'detail first\r\ndetail second')
+  panel.dispose()
+})
+
+test('multiline input respects the row budget: every painted row is one physical row', () => {
+  const panel = new TaskBrowserPanel(
+    [multilineJob(), doneJob(), runningJob({ value: 'job:c', label: 'bash · test' })],
+    10,
+    { mode: 'full', header: 'tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.setMaxRows(6)
+  const lines = panel.render(100).map(strip)
+  assertPhysicalRows(lines, 100)
+  assert.ok(lines.length <= 6, `the multiline input must not break the row budget (${lines.length} > 6)`)
+  panel.dispose()
+})
+
+test('a multiline refresh error stays ONE physical row', () => {
+  const panel = new TaskBrowserPanel(
+    [multilineJob()],
+    10,
+    { mode: 'full', header: 'tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  panel.setRefreshState('stale', 'fetch failed\nretry later\nEOF')
+  const lines = panel.render(100).map(strip)
+  assertPhysicalRows(lines, 100)
+  assert.ok(lines.join('\n').includes('fetch failed retry later EOF'), 'the collapsed error must stay visible')
+  assert.ok(lines.length <= 12, 'the banner must stay a single row')
+  // Narrow grant: the banner is also WIDTH-truncated — a long dynamic
+  // error must not wrap into extra terminal rows in a direct embedding
+  // (only the banner rows are asserted; the static hint text is a
+  // separate pre-existing behavior, unchanged by this containment).
+  const narrow = panel.render(20).map(strip)
+  const banner = narrow.filter(line => line.includes('fetch failed'))
+  assert.ok(banner.length >= 1, `the truncated banner must stay visible:\n${narrow.join('\n')}`)
+  for (const line of banner) {
+    assert.equal(/[\r\n]/.test(line), false, `the banner must be one physical row: ${JSON.stringify(line)}`)
+    assert.ok(visibleWidth(line) <= 20, `the banner must fit the narrow grant (${visibleWidth(line)} > 20): ${JSON.stringify(line)}`)
+  }
+  panel.dispose()
 })

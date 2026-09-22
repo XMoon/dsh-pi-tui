@@ -15,6 +15,7 @@ import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@
 import { componentKeymap } from './keybindings/component-keymap.ts'
 import { color, taskStatusColor } from './theme.ts'
 import { SelectedMarquee } from './marquee.ts'
+import { singlePhysicalLine } from './presentation-lines.ts'
 import {
   isTaskItemActive,
   isTaskItemFailure,
@@ -840,6 +841,14 @@ export class TaskBrowserPanel implements Component, Focusable {
     // its stale/error banner shows the message without advertising a key
     // that cannot work there.
     const retrySuffix = this.mode === 'quick' ? '' : ' · R retry'
+    // The banner is one physical row: a transport/refresh error message
+    // (Error.message) may carry CR/LF AND arbitrary length, so it is
+    // projected and width-truncated before it enters the row budget (a
+    // direct embedding without a clipping frame must never wrap it into
+    // extra terminal rows). The raw `refreshError` state stays untouched.
+    const refreshErrorText = this.refreshError === undefined ? undefined : singlePhysicalLine(this.refreshError)
+    const refreshErrorLine = refreshErrorText === undefined ? undefined
+      : truncateToWidth(`${refreshErrorText}${retrySuffix}`, safeWidth, '…')
     // Hoisted chrome texts: the short-grant degradation rebuilds from
     // them without the unconditionally-kept blank spacers.
     const headerText = this.options.header === undefined ? undefined
@@ -858,7 +867,7 @@ export class TaskBrowserPanel implements Component, Focusable {
 
     if (this.loading && this.items.length === 0) {
       push(color.textDim('Loading tasks…'), { kind: 'inert' })
-      if (this.refreshError !== undefined) push(color.textMuted(`${this.refreshError}${retrySuffix}`), { kind: 'inert' })
+      if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
       push('', { kind: 'inert' })
       push(hintLine, { kind: 'inert' })
       this.lastRenderedStart = 0
@@ -880,7 +889,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     const rows = this.filtered
     if (rows.length === 0) {
       push(color.textDim(this.refreshError === undefined ? (this.options.noMatchText ?? 'No matching tasks') : 'Could not load tasks'), { kind: 'inert' })
-      if (this.refreshError !== undefined) push(color.textMuted(`${this.refreshError}${retrySuffix}`), { kind: 'inert' })
+      if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
       push('', { kind: 'inert' })
       push(hintLine, { kind: 'inert' })
       this.lastRenderedStart = 0
@@ -952,7 +961,7 @@ export class TaskBrowserPanel implements Component, Focusable {
         outHits.push({ kind: 'inert' })
       }
       if (this.refreshError !== undefined) {
-        out.push(color.textMuted(`  ${this.refreshError}${retrySuffix}`))
+        out.push(color.textMuted(truncateToWidth(`  ${refreshErrorText}${retrySuffix}`, safeWidth, '…')))
         outHits.push({ kind: 'inert' })
       }
       out.push('')
@@ -1200,7 +1209,11 @@ export class TaskBrowserPanel implements Component, Focusable {
     const leftWidth = visibleWidth(leftPrefix)
     const available = Math.max(1, width - leftWidth)
     const labelBudget = Math.max(0, available - treeWidth - suffixWidth - tailWidth - 1)
-    const label = this.marquee.render({ key: item.value, text: item.label, maxWidth: labelBudget, selected })
+    // Single-row contract: the main task row owns exactly one physical
+    // row, so its label is projected BEFORE measurement/truncation. The
+    // raw `item.label` (runtime truth) stays untouched.
+    const rowLabel = singlePhysicalLine(item.label)
+    const label = this.marquee.render({ key: item.value, text: rowLabel, maxWidth: labelBudget, selected })
     const tone = item.ancestorContext === true ? color.textDim : selected ? color.textStrong : color.text
     const left = leftPrefix + tree + tone(label) + (selected ? color.textStrong(suffix) : color.text(suffix))
     const tailPart = tailWidth <= width - visibleWidth(left) ? tail : (labelBudget === 0 ? truncateToWidth(tail, Math.max(1, width - visibleWidth(left)), '…') : '')
@@ -1228,7 +1241,13 @@ export class TaskBrowserPanel implements Component, Focusable {
       if (item.detail !== undefined && item.detail !== '') lines.push(`detail    ${item.detail}`)
     }
     if (this.pendingStopValue === item.value) lines.push(`Stop ${item.label}?  Y confirm · Esc cancel`)
-    return lines
+    // Single-row contract: every semantic line detailLines returns is
+    // budgeted as one physical terminal row (the wide side pane and the
+    // compact inline detail both truncate these). Dynamic text (label,
+    // parentLabel, detail, …) is projected HERE, once, so no embedded
+    // CR/LF can leak past the row budget or the hit map. The item's raw
+    // fields are never rewritten.
+    return lines.map(singlePhysicalLine)
   }
 
   private renderInlineDetail(item: TaskPanelItem, width: number): string[] {
