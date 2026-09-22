@@ -513,7 +513,8 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   (reasoning-delta), Message (assistant text), Tool (tool/call — ANY
   name, known or custom). Injected context (skill-invocation,
   skill-catalog, system reminders) and lifecycle events (workflow,
-  subagent/descriptor, llm/retry) never count as tools.
+  llm/retry) never count as tools; a `subagent/descriptor` is not a
+  transcript row at all (child identity metadata, post-PR166).
   (2026-09-22 presentation-convergence addendum v2: the COLLAPSED
   presentation vocabulary is `Think:` + `Action:` and both headers say
   `N actions`. Tool stays the STRICT underlying semantic — a `llm/retry` row
@@ -657,8 +658,9 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   fence and its provenance rule are owned by
   `docs/transcript-display-disclosure.md`.
   The slot is presentation-only: Tool remains a strict
-  underlying semantic (a `Retry` row is never a Tool, and neither is a command
-  row nor a subagent descriptor — while a genuine `tool/call name=subagent`
+  underlying semantic (a `Retry` row is never a Tool, and neither is a
+  command row — a turn-less `control` node — nor a subagent descriptor,
+  which is not a transcript row at all; a genuine `tool/call name=subagent`
   IS a Tool literally named `subagent`, and is the delegation Action). The
   shared `CompactActionStats` cardinality: a genuine tool contributes its
   `callCount`, a retry occurrence contributes one action of
@@ -688,13 +690,18 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   log-only events with **no turn wrapping them**, and the settled result renders
   outside model history — so its card stays a standalone transcript row
   (visible, never folded into a turn's Activity, never claimed by the collapsed
-  `Action:`). Its `turn` field is a legacy display-placement artifact, not
-  semantic ownership; an authoritative `command` transcript kind is deferred
-  follow-up work. A `subagent/descriptor` is likewise never Action/Work
-  evidence: it is the CHILD session's identity record (a continuable child
-  logs it before its first `turn/start`; upstream asserts
-  `descriptorIndex < turnStartIndex`), so it can neither form an Activity nor
-  feed ActionStats. The parent's own genuine `tool/call name=subagent` is the
+  `Action:`). Since the post-PR166 convergence this is structural: commands
+  are a real `kind: 'command'` transcript node with NO `turn` field and the
+  `control` semantic class, paired by `commandId` (`command/run` creates the
+  running row, `command/done` settles the same row), with an explicit
+  `sourceEventSeq`/`sourceCommandId` manual-compaction correlation joining a
+  correlated `/compact` command into its compaction card (one visible owner,
+  the card's search corpus keeps the command fields searchable). A
+  `subagent/descriptor` materializes NO transcript row at all: it is the CHILD
+  session's identity record (a continuable child logs it before its first
+  `turn/start`; upstream asserts `descriptorIndex < turnStartIndex`), held by
+  the viewer/catalog state, so it can neither form an Activity nor feed
+  ActionStats. The parent's own genuine `tool/call name=subagent` is the
   delegation evidence and the Action.
 - **One transcript left edge for container chrome (2026-09-22 v2 addendum
   §28; body-indent supplement).**
