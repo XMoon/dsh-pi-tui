@@ -891,7 +891,13 @@ export class TaskBrowserPanel implements Component, Focusable {
 
     const rows = this.filtered
     if (rows.length === 0) {
-      push(color.textDim(this.refreshError === undefined ? singlePhysicalLine(this.options.noMatchText ?? 'No matching tasks') : 'Could not load tasks'), { kind: 'inert' })
+      // Caller-provided no-match text: projected AND width-truncated —
+      // the same single-row contract as the refresh-error banner (a long
+      // dynamic message must never wrap into extra terminal rows).
+      const noMatchText = this.refreshError === undefined
+        ? truncateToWidth(singlePhysicalLine(this.options.noMatchText ?? 'No matching tasks'), safeWidth, '…')
+        : 'Could not load tasks'
+      push(color.textDim(noMatchText), { kind: 'inert' })
       if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
       push('', { kind: 'inert' })
       push(hintLine, { kind: 'inert' })
