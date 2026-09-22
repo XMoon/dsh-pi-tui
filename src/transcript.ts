@@ -3223,11 +3223,15 @@ export class TranscriptFolder {
   }
 
   /** The only mutation entry for the lane display maps: records the pair
-   * and bumps the search revision. The revision guards the search
-   * projection's CONTENT **and ORDER** — a display-relation change alters
-   * the order matches are emitted in, so refinement against previous
-   * matches must be invalidated even when no searchable text changed. */
+   * and bumps the search revision when the recorded relation actually
+   * changes (an idempotent re-record of the same pair is revision-neutral).
+   * The revision guards the search projection's CONTENT **and ORDER** — a
+   * display-relation change alters the order matches are emitted in, so
+   * refinement against previous matches must be invalidated even when no
+   * searchable text changed. */
   private setLaneDisplay(displaced: number, anchor: number, position: 'before' | 'after'): void {
+    const current = this.laneDisplayByDisplaced.get(displaced)
+    if (current?.anchor === anchor && current.position === position) return
     this.laneDisplayByDisplaced.set(displaced, { anchor, position })
     this.laneDisplayByAnchor.set(anchor, displaced)
     this.searchRevisionCounter += 1
@@ -4024,8 +4028,14 @@ export class TranscriptFolder {
       // transient/open presentation. Its usage is still folded independently
       // below so Focus and Stats keep the same late-fact policy.
       const alreadySettled = existingActivity?.settledSteps.has(data.step) === true
+      const key = stepKey(data.turn, data.step)
+      // Whether the step already had a stored durable lane authority: a
+      // REPLACEMENT attempt (one existed) is newer authoritative evidence
+      // and may converge the lane topology; a FIRST attempt preserves the
+      // live chronology anchor (§4.5 — the message path's same rule).
+      const hadLaneAuthority = this.stepLaneOrders.has(key)
       const stream = data.stream ?? []
-      this.liveAssistantBlocks.delete(stepKey(data.turn, data.step))
+      this.liveAssistantBlocks.delete(key)
       // One durable stream projection per settlement: lane order, restored
       // reasoning and usage come from the same pass (plan §4.4/§12.5).
       const projection = this.assistantStreamProjection(stream)
@@ -4033,7 +4043,7 @@ export class TranscriptFolder {
         // Store/refresh the step's lane authority from the attempt; a later
         // message settlement (higher authority) overwrites it.
         if (projection.firstLane !== undefined) {
-          this.stepLaneOrders.set(stepKey(data.turn, data.step), projection.firstLane)
+          this.stepLaneOrders.set(key, projection.firstLane)
         }
         // The durable embedded stream is COMPLETE and authoritative for
         // reasoning; restore the first lane before the other one so cold
@@ -4044,9 +4054,17 @@ export class TranscriptFolder {
       }
       this.usage.onAssistantAttempt(data.turn, data.step, projection.usage)
       const activity = this.activityFor(data.turn)
-      const key = stepKey(data.turn, data.step)
       if (!alreadySettled && projection.firstLane !== 'thinking') {
         this.restoreThinkingFromProjection(data.turn, data.step, projection)
+      }
+      // A replacement durable attempt is newer authoritative evidence: after
+      // both lanes are restored, converge their display order to the just-
+      // stored authority (same model as the message path's replacement rule —
+      // without this, attempt B's topology flip would never reach the rows
+      // and would even survive into the final message settlement via the
+      // §4.5 first-settlement gate).
+      if (!alreadySettled && hadLaneAuthority && projection.firstLane !== undefined) {
+        this.convergeStepLaneOrder(data.turn, data.step)
       }
       this.syncUsage(activity)
       const thinking = this.thinkingEntries.get(key)
