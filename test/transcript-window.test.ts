@@ -55,7 +55,9 @@ test('indexed windows expose latest and anchored turn bounds', () => {
   assert.match(anchored.messages[0]?.kind === 'summary' ? anchored.messages[0].text : '', /50 newer turns/)
 })
 
-test('controller pages by grouped-output turns across a cross-turn read card', () => {
+test('controller pages by grouped-output turns across a same-turn read group', () => {
+  // Post-F6 PR B (§10.2/§12.11): read groups never cross turns, so the
+  // paged window exercises a SAME-turn merged card plus later turns.
   const folder = new TranscriptFolder()
   const pair = (turn: number, call: string, seq: number): SessionEvent[] => {
     const callId = ToolCallId(call)
@@ -74,7 +76,7 @@ test('controller pages by grouped-output turns across a cross-turn read card', (
           turn,
           step: 0,
           message: {
-            id: MessageId(`cross-turn-${call}`),
+            id: MessageId(`same-turn-${call}`),
             role: 'user',
             content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: call }] }],
             source: { kind: 'tool', callId },
@@ -85,16 +87,17 @@ test('controller pages by grouped-output turns across a cross-turn read card', (
   }
   folder.apply([
     ...pair(0, 'r0', 0),
-    ...pair(1, 'r1', 2),
+    ...pair(0, 'r0b', 2),
+    ...pair(1, 'r1', 4),
     {
       type: 'assistant/message',
-      seq: 4,
-      time: 1_700_000_000_004,
+      seq: 6,
+      time: 1_700_000_000_006,
       data: {
         turn: 2,
         step: 0,
         message: {
-          id: MessageId('cross-turn-tail'),
+          id: MessageId('same-turn-tail'),
           role: 'assistant',
           content: [{ type: 'text', text: 'tail' }],
           source: { kind: 'model', provider: 'test', model: 'test' },
@@ -104,12 +107,14 @@ test('controller pages by grouped-output turns across a cross-turn read card', (
   ])
 
   assert.deepEqual(folder.turns(), [0, 1, 2])
-  assert.deepEqual(folder.groupedTurns(), [1, 2])
+  // Turn 0's two reads merge into ONE same-turn card displayed ON turn 0,
+  // so turn 0 remains a grouped output turn.
+  assert.deepEqual(folder.groupedTurns(), [0, 1, 2])
   const controller = new TranscriptWindowController({ windowTurns: 1, stepTurns: 2, turns: folder.groupedTurns() })
   assert.equal(controller.moveOlder(), true)
-  assert.equal(controller.endTurn(), 1)
+  assert.equal(controller.endTurn(), 0)
   const projection = folder.window({ maxTurns: 1, endTurn: controller.endTurn() })
-  assert.equal(projection.lastTurn, 1)
+  assert.equal(projection.lastTurn, 0)
   assert.equal(projection.messages.some(message => message.kind === 'tool' && message.args === '2 files'), true)
   assert.equal(controller.moveOlder(), false)
 })

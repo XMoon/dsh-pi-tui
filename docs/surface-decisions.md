@@ -569,9 +569,11 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   delegation rows, `summarizeWorkSpan` aggregates earliest-start/latest-end/
   any-running in its existing single walk, running spans re-read `now()` per
   render (the shared repaint heartbeat — no per-card timers), missing
-  evidence omits the duration (never `0s`), and a grouped read that spans
-  turns drops its timing entirely so no Activity span ever crosses a turn
-  boundary. The shared Think/Tool/Preparing slot geometry lives in
+  evidence omits the duration (never `0s`), and read grouping never crosses
+  a turn boundary so no Activity span ever inherits another turn's count or
+  timing (a group's genuine-call cardinality and wall span stay on the turn
+  that renders the card). The shared Think/Tool/Preparing slot geometry
+  lives in
   `src/compact-process-preview.ts` (one authority for Focus and Activity);
   the Think slot shows the LATEST logical line of the bounded reasoning tail
   in both states (running follows the right edge, settled head-truncates).

@@ -1654,11 +1654,11 @@ test('the window projection reads incremental counts: deep history never rescann
   assert.equal(folder.messages().length, 1200)
 })
 
-test('a cross-turn read group keeps the fast window consistent with the full scan', () => {
-  // turn 1: read ok; turn 2: read ok (merges with turn 1's read into one
-  // card with turn 2); turn 3: plain user message. The fast window's
-  // turn index counts the RAW items (3 turns) while the grouped output
-  // only has turns {2, 3} — the summaries must still agree.
+test('a same-turn read group keeps the fast window consistent with the full scan', () => {
+  // turn 1: two reads (merge into one "2 files" card on turn 1); turn 2:
+  // plain user message. The fast window's turn index counts the RAW items
+  // while the grouped output merges turn 1's reads — the summaries must
+  // still agree.
   const folder = new TranscriptFolder()
   const events: SessionEvent[] = [
     event('turn/start', { turn: 1 }, 0),
@@ -1667,18 +1667,17 @@ test('a cross-turn read group keeps the fast window consistent with the full sca
       turn: 1, step: 0,
       message: { id: MessageId('msg-1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('call-1'), content: [{ type: 'text', text: 'a' }] }], source: { kind: 'tool', callId: ToolCallId('call-1') } },
     }, 2),
-    event('turn/start', { turn: 2 }, 3),
-    event('tool/call', { turn: 2, step: 0, callId: ToolCallId('call-2'), name: 'read', arguments: '{}' }, 4),
+    event('tool/call', { turn: 1, step: 0, callId: ToolCallId('call-2'), name: 'read', arguments: '{}' }, 3),
     event('tool/result', {
-      turn: 2, step: 0,
+      turn: 1, step: 0,
       message: { id: MessageId('msg-2'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('call-2'), content: [{ type: 'text', text: 'b' }] }], source: { kind: 'tool', callId: ToolCallId('call-2') } },
-    }, 5),
-    event('turn/start', { turn: 3 }, 6),
+    }, 4),
+    event('turn/start', { turn: 2 }, 5),
     event('user/message', {
       id: MessageId('msg-3'), role: 'user',
       content: [{ type: 'text', text: 'q3' }],
       source: { kind: 'user' },
-    }, 7),
+    }, 6),
   ]
   folder.apply(events)
   const fast = folder.messages({ maxTurns: 1 })
@@ -1687,12 +1686,12 @@ test('a cross-turn read group keeps the fast window consistent with the full sca
   assert.equal(JSON.stringify(bounded.messages), JSON.stringify(full),
     `the indexed window must match the full scan:\n${JSON.stringify(bounded.messages)}\nvs\n${JSON.stringify(full)}`)
   assert.deepEqual({ firstTurn: bounded.firstTurn, lastTurn: bounded.lastTurn, hasOlder: bounded.hasOlder, hasNewer: bounded.hasNewer }, {
-    firstTurn: 3, lastTurn: 3, hasOlder: true, hasNewer: false,
+    firstTurn: 2, lastTurn: 2, hasOlder: true, hasNewer: false,
   })
   assert.equal(JSON.stringify(fast), JSON.stringify(full),
     `the fast window must match the full scan:\n${JSON.stringify(fast)}\nvs\n${JSON.stringify(full)}`)
-  const anchored = folder.window({ maxTurns: 1, endTurn: 2 })
-  const anchoredFull = windowMessages(folder.messages(), 1, 2)
+  const anchored = folder.window({ maxTurns: 1, endTurn: 1 })
+  const anchoredFull = windowMessages(folder.messages(), 1, 1)
   assert.equal(JSON.stringify(anchored.messages), JSON.stringify(anchoredFull),
     `anchored indexed window must match the full scan:\n${JSON.stringify(anchored.messages)}\nvs\n${JSON.stringify(anchoredFull)}`)
   const summary = fast[0]
@@ -1962,7 +1961,7 @@ test('consecutive read results group into one card', () => {
 })
 
 
-test('consecutive read grouping spans turn boundaries (incremental projection parity)', () => {
+test('consecutive read grouping never spans turn boundaries (incremental projection parity)', () => {
   const readResult = (seq: number, callId: string, text: string): SessionEvent => event('tool/result', {
     turn: 0,
     step: 0,
@@ -1973,7 +1972,8 @@ test('consecutive read grouping spans turn boundaries (incremental projection pa
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq)
-  // Two reads in DIFFERENT turns, applied incrementally.
+  // Two reads in DIFFERENT turns, applied incrementally: grouping must not
+  // merge them (post-F6 PR B — per-turn Activity ownership).
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -1986,9 +1986,21 @@ test('consecutive read grouping spans turn boundaries (incremental projection pa
     readResult(5, 'r2', 'bbb'),
   ])
   const tools = folder.messages().filter(message => message.kind === 'tool')
-  assert.equal(tools.length, 1, 'grouping ignores turn boundaries (same as the one-shot pass)')
-  assert.equal(tools[0]?.args, '2 files')
-  assert.ok((tools[0]?.result ?? '').includes('aaa') && (tools[0]?.result ?? '').includes('bbb'))
+  assert.equal(tools.length, 2, 'a group never crosses a turn boundary')
+  assert.equal(tools[0]?.args, '{"file":"a.ts"}')
+  assert.equal(tools[1]?.args, '{"file":"b.ts"}')
+  // Same-turn incremental merging still works exactly as before.
+  const sameTurn = new TranscriptFolder()
+  sameTurn.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file":"a.ts"}' }, 1),
+    readResult(2, 'r1', 'aaa'),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file":"b.ts"}' }, 3),
+    readResult(4, 'r2', 'bbb'),
+  ])
+  const merged = sameTurn.messages().filter(message => message.kind === 'tool')
+  assert.equal(merged.length, 1, 'same-turn reads still merge incrementally')
+  assert.equal(merged[0]?.args, '2 files')
 })
 
 test('a failed read breaks the group; late settlement preserves reflow counts', () => {
