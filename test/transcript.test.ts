@@ -2001,6 +2001,9 @@ test('consecutive read grouping never spans turn boundaries (incremental project
   const merged = sameTurn.messages().filter(message => message.kind === 'tool')
   assert.equal(merged.length, 1, 'same-turn reads still merge incrementally')
   assert.equal(merged[0]?.args, '2 files')
+  // The exported mirror carries the SAME merged genuine-call cardinality as
+  // the folder's group card (field-for-field parity, post-F6 plan §10.2).
+  assert.equal(groupConsecutiveReads(sameTurn.messages()).filter(message => message.kind === 'tool')[0]?.callCount, 2)
 })
 
 test('a failed read breaks the group; late settlement preserves reflow counts', () => {

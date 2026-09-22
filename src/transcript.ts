@@ -1569,6 +1569,10 @@ export function groupConsecutiveReads(messages: readonly TranscriptMessage[]): T
         count += 1
         group.args = `${count} files`
         group.result = group.result === '' ? message.result : `${group.result}\n\n${message.result}`
+        // The mirror carries the same genuine-call cardinality as the
+        // folder's makeReadGroup card: a merged group is still that many
+        // model tool calls (a plain card is one by definition).
+        group.callCount = (group.callCount ?? 1) + (message.callCount ?? 1)
         continue
       }
       group = { ...message }
@@ -2403,14 +2407,13 @@ export class TranscriptFolder {
   }
 
   /** Attach the merged read group's OWN timing, aggregated from its member
-   * cards WITH turn attribution (post-F6 plan §12.11): a group that spans
-   * turns is displayed as ONE card on its latest turn, so its members'
-   * spans cannot be attributed to one Activity — DROP the timing entirely
-   * rather than leak a cross-turn span. This is a SET-OR-CLEAR contract:
-   * a group that BECOMES cross-turn on append (or whose recomputed members
-   * carry no evidence) must not keep a stale previously-recorded span. A
-   * same-turn group aggregates its members' evidence (earliest start,
-   * latest end); members without sidecar evidence contribute nothing. */
+   * cards WITH turn attribution (post-F6 plan §12.11). Runs are TURN-BOUND
+   * (`continuesReadRun`), so `spansTurns` is an invariant guard here — a
+   * defensive SET-OR-CLEAR: if a group ever carried members of more than
+   * one turn, its timing would be DROPPED (never a cross-turn leak), and a
+   * recomputation with no evidence clears a stale span too. A same-turn
+   * group aggregates its members' evidence (earliest start, latest end);
+   * members without sidecar evidence contribute nothing. */
   private mergedReadGroupTiming(
     group: Extract<TranscriptMessage, { kind: 'tool' }>,
     memberIndexes: readonly number[],
@@ -3322,14 +3325,16 @@ export class TranscriptFolder {
       // (post-F6 plan §12.14): the FIRST streamed delta of a tool call is
       // the call's earliest authoritative start — keyed by the formal call
       // id when it is known (migrating the fallback identity's earlier
-      // start), else by the (turn, step, index) fallback identity, exactly
-      // like the live fold.
+      // start and dropping the stale fallback key), else by the (turn,
+      // step, index) fallback identity, exactly like the live fold.
       if (chunk.type === 'tool-call-delta') {
         if (chunk.id !== '') {
           const fallbackKey = preparingFallbackKey(turn, step, chunk.index)
+          const fallback = toolCallStarts.get(fallbackKey)
           if (!toolCallStarts.has(chunk.id)) {
-            toolCallStarts.set(chunk.id, toolCallStarts.get(fallbackKey) ?? time)
+            toolCallStarts.set(chunk.id, fallback ?? time)
           }
+          if (fallback !== undefined) toolCallStarts.delete(fallbackKey)
         } else {
           const fallbackKey = preparingFallbackKey(turn, step, chunk.index)
           if (!toolCallStarts.has(fallbackKey)) toolCallStarts.set(fallbackKey, time)
