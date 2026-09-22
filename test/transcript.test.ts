@@ -4332,7 +4332,7 @@ test('a replacement durable attempt converges the lane topology in both directio
       ...prefix,
       event('assistant/attempt', { turn: 0, step: 0, stream: laneOrderedStep(scenario.first).stream }, 2),
       retryStarted,
-      event('assistant/attempt', { turn: 0, step: 0, stream: laneOrderedStep(scenario.replacement).stream }, 3),
+      event('assistant/attempt', { turn: 0, step: 0, stream: laneOrderedStep(scenario.replacement).stream }, 5),
     ])
     assert.deepEqual(
       kinds(folder.messages()),
@@ -4342,7 +4342,7 @@ test('a replacement durable attempt converges the lane topology in both directio
     // A same-topology final message settlement must not regress the
     // converged order behind the §4.5 gate (the anchored topology IS the
     // converged one now).
-    folder.apply([messageSettlement(5, laneOrderedStep(scenario.replacement))])
+    folder.apply([messageSettlement(6, laneOrderedStep(scenario.replacement))])
     assert.deepEqual(kinds(folder.messages()), scenario.expected, `${scenario.name}: the final settlement keeps the converged order`)
     const thinking = folder.messages().find(message => message.kind === 'thinking')
     assert.ok(thinking !== undefined && thinking.kind === 'thinking')

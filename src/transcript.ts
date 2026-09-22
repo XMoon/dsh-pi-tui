@@ -3615,10 +3615,12 @@ export class TranscriptFolder {
     return this.window({ maxTurns, ...options }).messages
   }
 
-  /** The search-projection revision: bumped on EVERY entry mutation
-   * (append, settlement, group reflow). The runner's query refinement must
-   * never reuse previous candidates across a revision — the projection may
-   * hold new matches the old candidate list cannot see. */
+  /** The search-projection revision: bumped on EVERY projection change —
+   * entry mutations (append, settlement, group reflow) and lane
+   * display-order mutations (`setLaneDisplay`/`dropLaneDisplayFor`). The
+   * runner's query refinement must never reuse previous candidates across
+   * a revision — the projection may hold new matches OR a new match order
+   * the old candidate list cannot see. */
   searchRevision(): number {
     return this.searchRevisionCounter
   }
