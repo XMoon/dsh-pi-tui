@@ -934,3 +934,69 @@ test('the default badge layout keeps the badge TRAILING the label (no right-alig
   assert.ok(line.includes('Alpha  allowed'), `the badge must trail the label:\n${JSON.stringify(line)}`)
   assert.ok(visibleWidth(line) < 60, `the default layout must not pad to the row edge:\n${JSON.stringify(line)}`)
 })
+
+test('multiline label/description project to ONE physical row while raw search still matches', () => {
+  const items = [
+    { value: 'multi', label: 'first\nsecond', description: 'desc\r\nmore' },
+    { value: 'plain', label: 'ordinary' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { enableSearch: true })
+  const rows = picker.render(80)
+  for (const row of rows) {
+    assert.equal(/[\r\n]/.test(row), false, `an embedded row break leaked into a row: ${JSON.stringify(row)}`)
+    assert.ok(visibleWidth(row) <= 80, `a row exceeds the grant: ${JSON.stringify(row)}`)
+  }
+  // The primary display value is collapsed onto its one row.
+  assert.ok(rows.some(row => row.includes('first second')), `the collapsed label must render:\n${rows.join('\n')}`)
+  assert.ok(rows.some(row => row.includes('desc more')), `the collapsed description must render:\n${rows.join('\n')}`)
+  // Raw search semantics: the SECOND line of the raw label still matches
+  // the item (the filter corpus reads the raw item, not the projection).
+  picker.setFilter('second')
+  const filtered = picker.render(80)
+  assert.ok(filtered.some(row => row.includes('first second')), 'the multiline item must still match by its raw text')
+  assert.ok(!filtered.some(row => row.includes('ordinary')), 'the non-matching row must be filtered out')
+})
+
+test('caller-provided chrome (header/noMatch/group) projects to ONE physical row', () => {
+  // Group label and custom header: dynamic caller text rendered as one row.
+  const items = [
+    { value: 'a', label: 'alpha', group: 'group\nsecond' },
+    { value: 'b', label: 'beta', group: 'group\nsecond' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { header: 'head\r\nline' })
+  const rows = picker.render(80)
+  for (const row of rows) {
+    assert.equal(/[\r\n]/.test(row), false, `an embedded row break leaked into chrome: ${JSON.stringify(row)}`)
+    assert.ok(visibleWidth(row) <= 80, `a chrome row exceeds the grant: ${JSON.stringify(row)}`)
+  }
+  assert.ok(rows.some(row => row.includes('head line')), `the collapsed header must render:\n${rows.join('\n')}`)
+  assert.ok(rows.some(row => row.includes('group second · 2')), `the collapsed group header must render:\n${rows.join('\n')}`)
+  // The raw group identity/search corpus is untouched (the raw group text
+  // still matches a filter).
+  picker.setFilter('second')
+  assert.ok(picker.render(80).some(row => row.includes('alpha')), 'the raw group text must still be searchable')
+  // No-match text: untrusted transport message text on one row.
+  const empty = new SearchablePicker([], 5, testTheme, {}, { noMatchText: 'oops\nnope' })
+  const emptyRows = empty.render(80)
+  for (const row of emptyRows) {
+    assert.equal(/[\r\n]/.test(row), false, `an embedded row break leaked into no-match: ${JSON.stringify(row)}`)
+    assert.ok(visibleWidth(row) <= 80, `a no-match row exceeds the grant: ${JSON.stringify(row)}`)
+  }
+  assert.ok(emptyRows.some(row => row.includes('oops nope')), `the collapsed no-match text must render:\n${emptyRows.join('\n')}`)
+})
+
+test('a custom multiline hint projects to ONE physical row', () => {
+  const picker = new SearchablePicker(
+    [{ value: 'a', label: 'alpha' }],
+    5,
+    testTheme,
+    {},
+    { showHint: true, hint: 'foo\nbar' },
+  )
+  const rows = picker.render(80)
+  for (const row of rows) {
+    assert.equal(/[\r\n]/.test(row), false, `an embedded row break leaked into the hint: ${JSON.stringify(row)}`)
+    assert.ok(visibleWidth(row) <= 80, `a hint row exceeds the grant: ${JSON.stringify(row)}`)
+  }
+  assert.ok(rows.some(row => row.includes('foo bar')), `the collapsed hint must render:\n${rows.join('\n')}`)
+})

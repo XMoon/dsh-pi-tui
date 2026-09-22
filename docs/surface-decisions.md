@@ -1181,6 +1181,31 @@ mode (only `TuiAltScreen` wires `onCellClick`):
   (no fork divergence): the label is split into a fixed presentation
   prefix (lineage + marker) and the marqueeable title.
 
+## Single-row presentation boundaries are explicit
+
+Any renderer that budgets one returned `string` as one terminal row must
+normalize caller-provided CR/LF before width measurement, marquee windowing,
+hit-map construction, or truncation. Raw domain/runtime text remains unchanged;
+the normalization belongs only to the presentation boundary.
+
+A surface that intentionally supports multiline content must instead use a
+multiline-aware renderer (for example `wrapTextWithAnsi` / `Text`) and budget
+the resulting physical rows explicitly. `visibleWidth`, `truncateToWidth`,
+`Frame`, and the overlay compositor are not newline sanitizers; fixing the
+problem at those layers would hide already-wrong measurement and hit-map
+assumptions.
+
+The current containment applies this rule to `TaskBrowserPanel`,
+`SearchablePicker`, and `SelectedMarquee`. During the planned interaction-panel
+refactor, row cardinality must become an explicit presentation contract
+(single-row vs multiline) rather than an accidental property of arbitrary
+strings. The refactor must audit the remaining sibling surfaces, including
+vendored `SettingsList` / `SelectList` consumers, extension header/dock/footer
+single-row slots, history cwd rows, and attachment/file-name fallbacks.
+
+Do not move this normalization into runtime/domain models: search, persistence,
+replay, exports, and semantic projections must keep the original text.
+
 ## Local shell display policy
 
 - The capture layer (bounded-output byte/line/disk caps) is the memory

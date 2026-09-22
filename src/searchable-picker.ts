@@ -21,12 +21,15 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
+import { singlePhysicalLine } from './presentation-lines.ts'
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32
 const PRIMARY_COLUMN_GAP = 2
 const MIN_DESCRIPTION_WIDTH = 10
 
-const normalizeToSingleLine = (text: string): string => text.replace(/[\r\n]+/g, ' ').trim()
+// Description/badge presentation keeps its historical trim; the CR/LF
+// collapse itself is the shared single-physical-row projection.
+const normalizeToSingleLine = (text: string): string => singlePhysicalLine(text).trim()
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max))
 
 /** One physical row of the last painted picker frame (mouse hit-testing).
@@ -382,7 +385,7 @@ export class SearchablePicker implements Component, Focusable {
 
     if (this.options.header !== undefined) {
       const countSuffix = this.searchEnabled ? `  ${this.filteredItems.length}/${this.items.length}` : ''
-      const headerText = truncateToWidth(`${this.options.header}${countSuffix}`, width, '')
+      const headerText = truncateToWidth(`${singlePhysicalLine(this.options.header)}${countSuffix}`, width, '')
       push((this.theme.groupHeader ?? this.theme.description)(headerText), { kind: 'inert' }, ROW_PRIORITY.header)
       push('', { kind: 'inert' }, ROW_PRIORITY.spacer)
     }
@@ -396,9 +399,10 @@ export class SearchablePicker implements Component, Focusable {
     // If no items match filter, show message
     if (this.filteredItems.length === 0) {
       // The empty/error message is untrusted-length (a catalog failure can
-      // carry an arbitrary transport message): clip it to the grant so the
-      // overlay can never be widened by its own status text.
-      const noMatch = truncateToWidth(this.options.noMatchText ?? '  No matching commands', width, '')
+      // carry an arbitrary transport message): project its CR/LF onto one
+      // row and clip it to the grant so the overlay can never be widened
+      // — or wrapped into extra rows — by its own status text.
+      const noMatch = truncateToWidth(singlePhysicalLine(this.options.noMatchText ?? '  No matching commands'), width, '')
       push(this.theme.noMatch(noMatch), { kind: 'inert' }, ROW_PRIORITY.noMatch)
       if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, hits, priorities, width)
       const result = this.finalizeEmpty(lines, hits)
@@ -522,7 +526,7 @@ export class SearchablePicker implements Component, Focusable {
         if (groupKey !== '') {
           const count = groupCounts.get(groupKey) ?? 0
           const label = item.group ?? groupKey
-          const headerText = truncateToWidth(`  ${label} · ${count}`, width, '')
+          const headerText = truncateToWidth(`  ${singlePhysicalLine(label)} · ${count}`, width, '')
           lines.push((this.theme.groupHeader ?? this.theme.description)(headerText))
           hits.push({ kind: 'inert' })
           priorities.push(ROW_PRIORITY.groupHeader)
@@ -797,9 +801,12 @@ export class SearchablePicker implements Component, Focusable {
   }
 
   private addHintLine(lines: string[], hits: PickerMouseHit[], priorities: number[], width: number): void {
-    const hint = this.options.hint ?? (this.searchEnabled
+    // The hint is one physical row: a caller-provided hint text is
+    // projected before truncation (same single-row contract as the rest
+    // of the chrome).
+    const hint = singlePhysicalLine(this.options.hint ?? (this.searchEnabled
       ? 'type to filter · ↑↓ navigate · enter select · esc close'
-      : '↑↓ navigate · enter select · esc close')
+      : '↑↓ navigate · enter select · esc close'))
     lines.push('')
     hits.push({ kind: 'inert' })
     priorities.push(ROW_PRIORITY.spacer)
@@ -965,7 +972,14 @@ export class SearchablePicker implements Component, Focusable {
   }
 
   private getDisplayValue(item: SearchablePickerItem): string {
-    return item.label || item.value
+    // Single-row contract: the primary display value is projected so an
+    // embedded CR/LF can never leak into the framebuffer as extra
+    // physical rows; measurement (column width, badge wrap) and rendering
+    // share the same projection. Deliberately NOT trimmed — a label may
+    // carry structural whitespace. Search stays RAW (see
+    // searchableTextOf): a multiline label still matches by any of its
+    // lines while the row renders collapsed.
+    return singlePhysicalLine(item.label || item.value)
   }
 
   private notifySelectionChange(): void {
