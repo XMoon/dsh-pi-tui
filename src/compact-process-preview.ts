@@ -14,10 +14,14 @@
  *
  * Action vocabulary (post-F6 presentation-convergence addendum v2 §4/§5): the collapsed
  * process presentation is `Think:` + `Action:`. `Action` is PRESENTATION
- * ONLY — the latest meaningful non-Thinking Process evidence (genuine Tool,
- * Preparing, Subagent delegation, Command, Retry, and explicit orphan-result
- * diagnostics) selected purely by chronology. It is not a transcript
- * semantic class and never changes Tool statistics.
+ * ONLY — the latest meaningful non-Thinking TURN-OWNED Process evidence
+ * (genuine Tool, Preparing, Subagent delegation, Retry, and explicit
+ * orphan-result diagnostics) selected purely by chronology. A COMMAND row is
+ * deliberately NOT an Action: its lifecycle is session-level standalone
+ * evidence (DSH appends `command/run`/`command/done` with no wrapping turn),
+ * so it renders as its own transcript card outside the Action/Work
+ * aggregates. It is not a transcript semantic class and never changes Tool
+ * statistics.
  *
  * Every returned string is exactly ONE physical terminal row: embedded line
  * breaks never escape a slot (the fullscreen row hit-map depends on that).
@@ -28,7 +32,7 @@ import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import { focusToolDisplay, toolTitle, type ToolPresenter } from './present.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
 import { activeSubCallsOf, isPostTurnReplayEvidence, THINKING_TAIL_CAP, type TranscriptMessage, type TranscriptToolMessage } from './transcript.ts'
-import { isSurfacedInteractionToolName } from './transcript-semantics.ts'
+import { isCommandTool, isSurfacedInteractionToolName } from './transcript-semantics.ts'
 
 /** The fixed label column width of the collapsed body slots: the widest
  * label (`Message: `) — every slot's text starts at the same column
@@ -216,7 +220,6 @@ export function compactPreparingSummary(
 export type CompactActionSource =
   | { readonly kind: 'tool'; readonly message: TranscriptToolMessage }
   | { readonly kind: 'subagent'; readonly message: TranscriptToolMessage }
-  | { readonly kind: 'command'; readonly message: TranscriptToolMessage }
   | { readonly kind: 'retry'; readonly message: Extract<TranscriptMessage, { kind: 'system' }> }
   | { readonly kind: 'orphan-tool-result'; readonly message: TranscriptToolMessage }
 
@@ -230,7 +233,6 @@ export type CompactActionSource =
  * - orphan result (`origin` absent, explicit `callCount === 0`) →
  *   `orphan-tool-result`;
  * - `origin: 'subagent-delegation'` → `subagent`;
- * - `origin: 'command'` → `command`;
  * - `origin: 'llm-retry'` system row → `retry`;
  * - surfaced-interaction tools (`ask_user_question` / `exit_plan_mode`)
  *   return `undefined` — their active/settled panel is the interaction
@@ -244,12 +246,15 @@ export function compactActionSourceOf(message: TranscriptMessage): CompactAction
   // (the fold's late-replay fence, shared with Work membership and read
   // grouping).
   if (isPostTurnReplayEvidence(message)) return undefined
+  // A command is a standalone session-level lifecycle, never turn Process
+  // evidence (DSH wraps no turn around it; the settled result renders outside
+  // model history). Its row still renders as a standalone transcript card.
+  if (isCommandTool(message)) return undefined
   if (message.kind === 'system') {
     return message.origin === 'llm-retry' ? { kind: 'retry', message } : undefined
   }
   if (message.kind !== 'tool' || isSurfacedInteractionToolName(message.name)) return undefined
   if (message.origin === 'subagent-delegation') return { kind: 'subagent', message }
-  if (message.origin === 'command') return { kind: 'command', message }
   if (message.origin !== undefined) return undefined
   return (message.callCount ?? 1) > 0 ? { kind: 'tool', message } : { kind: 'orphan-tool-result', message }
 }
@@ -326,16 +331,6 @@ export function compactActionPresentation(
       // delegation was launched, never that it completed (no `✓`), and
       // provider/model metadata stays on the expanded row (addendum v2 §11.3).
       return { kind: 'subagent', display: subagentActionLabel(source.message) }
-    case 'command': {
-      // The command name with its settlement prefix; no second command
-      // presenter exists and none is built here (addendum v2 §11.4).
-      const message = source.message
-      return {
-        kind: 'command',
-        status: message.status === 'error' ? 'error' : 'ok',
-        display: message.name,
-      }
-    }
     case 'retry':
       return { kind: 'retry', display: retryActionLabel(source.message) }
     case 'orphan-tool-result':
@@ -432,7 +427,7 @@ export function compactActionSignature(presentation: CompactActionPresentation |
 
 /** The presentation-only action aggregate both headers render: the TOTAL
  * counted action occurrences and the per-subtype counts (`read`, `bash`,
- * `subagent`, `retry`, the concrete command name…). Presentation-only —
+ * `subagent`, `retry`). Presentation-only —
  * never stored on `TurnActivity` or persisted (addendum v2 §17). */
 export interface CompactActionStats {
   readonly total: number
@@ -454,7 +449,7 @@ export function newCompactActionStats(): CompactActionStatsAccumulator {
 
 /** Fold ONE Action source into an accumulator using the shared action
  * cardinality rules (addendum v2 §14): a genuine tool contributes its
- * `callCount`; a subagent, command (by durable name) and retry occurrence
+ * `callCount`; a subagent and a retry occurrence
  * contribute one each; an orphan result is diagnostic evidence and
  * contributes NOTHING. Preparing and surfaced interactions never reach
  * here (they are not `CompactActionSource`s). */
@@ -472,10 +467,6 @@ export function addCompactActionStats(
     case 'subagent':
       stats.total += 1
       stats.types.set('subagent', (stats.types.get('subagent') ?? 0) + 1)
-      break
-    case 'command':
-      stats.total += 1
-      stats.types.set(source.message.name, (stats.types.get(source.message.name) ?? 0) + 1)
       break
     case 'retry':
       stats.total += 1

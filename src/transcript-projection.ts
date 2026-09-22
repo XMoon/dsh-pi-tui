@@ -23,7 +23,7 @@
  */
 
 import { clusterAdjacentAmbientContext, type ContextCluster } from './context-presentation.ts'
-import { classifyTranscriptMessage, isSurfacedInteractionTool } from './transcript-semantics.ts'
+import { classifyTranscriptMessage, isCommandTool, isSurfacedInteractionTool } from './transcript-semantics.ts'
 import { isPostTurnReplayEvidence, type TranscriptMessage } from './transcript.ts'
 
 /**
@@ -63,6 +63,10 @@ export function isTranscriptWorkMember(message: TranscriptMessage): message is T
     // aggregation evidence for the settled turn: it must not join a Work
     // span (and so must not feed its Action stats/preview).
     && !isPostTurnReplayEvidence(message)
+    // A command is a standalone session-level lifecycle (no turn wraps it), so
+    // it never joins a Work span: it renders as its own transcript row and
+    // splits the surrounding Process run.
+    && !isCommandTool(message)
 }
 
 /**

@@ -86,6 +86,21 @@ export const SURFACED_INTERACTION_TOOL_NAMES: ReadonlySet<string> = new Set([
   'exit_plan_mode',
 ])
 
+/**
+ * Whether one row is a COMMAND row (a session-level slash-command record).
+ *
+ * A command's lifecycle is standalone: DSH appends `command/run` /
+ * `command/done` as direct log-only events — "no turn wraps them" — and the
+ * settled result is rendered OUTSIDE model history. The row therefore carries
+ * no semantic turn ownership (its `turn` field is a legacy display-placement
+ * artifact only), so it is NEVER Process aggregation evidence: not a Work
+ * member, not an Action candidate/count, and not turn ActionStats input.
+ * This is the ONE shared predicate for that rule.
+ */
+export function isCommandTool(message: TranscriptMessage): boolean {
+  return message.kind === 'tool' && message.origin === 'command'
+}
+
 /** Whether one tool NAME belongs to the surfaced-interaction set, regardless of
  * settled state. The fold uses this to keep such calls out of the turn's work
  * accounting even while they are running. */

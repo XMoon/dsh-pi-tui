@@ -14,6 +14,8 @@ import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptTimingOf } from '../src/transcript.ts'
 import { summarizeWorkSpan, formatWorkHeaderLine, compactWorkBody, CompactWorkComponent, type CompactWorkSummary } from '../src/compact-work.ts'
+import { isTranscriptWorkMember } from '../src/transcript-projection.ts'
+import { compactActionSourceOf } from '../src/compact-process-preview.ts'
 import { compactActionPresentation } from '../src/compact-process-preview.ts'
 
 /** The summary's action stats as a plain record, for exact assertions. */
@@ -90,17 +92,18 @@ test('stats: a subagent delegation counts ONLY as its own action subtype, never 
   assert.match(formatWorkHeaderLine(summary, false, 120), /2 actions · read ×1 · subagent ×1/)
 })
 
-test('stats: a command-only Activity has no fake `1 tool`', () => {
+test('stats: a command row is standalone evidence — it joins no Activity and counts nothing', () => {
   const folder = fold([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, T0 + 100, 1),
     eventAt('command/done', { commandId: 'cmd1', kind: 'success', text: 'theme set' }, T0 + 300, 2),
   ])
-  const span = spansOf(folder.messages())[0]!
-  const summary = summarizeWorkSpan(span)
-  assert.deepEqual(statsOf(summary), { total: 1, types: { '/theme': 1 } }, 'the command counts as its own action subtype')
-  const header = formatWorkHeaderLine(summary, false, 120)
-  assert.match(header, /1 action · \/theme ×1/, `the command name is the subtype:\n${header}`)
+  // A command's lifecycle is session-level (DSH wraps no turn around it), so it
+  // is not Process evidence: it neither forms an Activity span nor counts.
+  assert.deepEqual(spansOf(folder.messages()), [], 'no Work span exists for a command-only turn')
+  const commandRow = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
+  assert.ok(commandRow !== undefined && commandRow.kind === 'tool')
+  assert.equal(isTranscriptWorkMember(commandRow), false, 'the row never becomes a Work member')
 })
 
 test('stats: turn-error synthetic cards are attention rows and never enter a span count', () => {
@@ -305,19 +308,7 @@ test('timing: grouped reads aggregate their members within one turn', () => {
   assert.equal(summary.timing?.endedAt, T0 + 4_000)
 })
 
-test('action slot: synthetic command and delegation rows own the Action without ever counting as tools', () => {
-  const commandFolder = fold([
-    eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, T0 + 100, 1),
-    eventAt('command/done', { commandId: 'cmd1', kind: 'success', text: 'theme set' }, T0 + 300, 2),
-  ])
-  const commandSummary = summarizeWorkSpan(spansOf(commandFolder.messages())[0]!)
-  assert.equal(commandSummary.actionStats.total, 1)
-  assert.equal(commandSummary.action?.kind, 'command', 'a command-only Activity owns the Action slot')
-  const commandBody = compactWorkBody(commandSummary, 80, compactActionPresentation(commandSummary.action!))
-  assert.match(commandBody.join('\n'), /Action:\s+✓ \/theme/, `the command-only body is meaningful:\n${commandBody.join('\n')}`)
-  assert.ok(!formatWorkHeaderLine(commandSummary, false, 120).includes('tool'), 'no `1 tool` stat is invented')
-
+test('action slot: a delegation row owns the Action without ever counting as a tool (a command never does)', () => {
   const delegationFolder = fold([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, T0 + 100, 1),
@@ -330,16 +321,18 @@ test('action slot: synthetic command and delegation rows own the Action without 
   assert.match(formatWorkHeaderLine(delegationSummary, false, 120), /1 action · subagent ×1/, 'the header count remains `subagent ×1`')
 })
 
-test('action slot: a failed command keeps its honest ✗ prefix', () => {
-  const folder = fold([
-    eventAt('turn/start', { turn: 1 }, T0, 0),
-    eventAt('command/run', { commandId: 'cmd1', name: 'foo' }, T0 + 100, 1),
-    eventAt('command/done', { commandId: 'cmd1', kind: 'error', text: 'unknown command' }, T0 + 300, 2),
-  ])
-  const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
-  assert.equal(summary.action?.kind, 'command')
-  const body = compactWorkBody(summary, 80, compactActionPresentation(summary.action!))
-  assert.match(body.join('\n'), /Action:\s+✗ \/foo/, body.join('\n'))
+test('action slot: a command card (success or failure) reaches no Activity at all', () => {
+  for (const kind of ['success', 'error'] as const) {
+    const folder = fold([
+      eventAt('turn/start', { turn: 1 }, T0, 0),
+      eventAt('command/run', { commandId: 'cmd1', name: 'foo' }, T0 + 100, 1),
+      eventAt('command/done', { commandId: 'cmd1', kind, text: kind === 'error' ? 'unknown command' : 'ok' }, T0 + 300, 2),
+    ])
+    assert.deepEqual(spansOf(folder.messages()), [], `${kind}: the command never forms an Activity`)
+    const row = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
+    assert.ok(row !== undefined && row.kind === 'tool')
+    assert.equal(compactActionSourceOf(row), undefined, `${kind}: never an Action candidate`)
+  }
 })
 
 test('action slot: a retry-only Activity owns the Action with its own subtype stat', () => {
