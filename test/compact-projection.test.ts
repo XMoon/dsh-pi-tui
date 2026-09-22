@@ -323,30 +323,43 @@ test('the Work summary counts only ITS OWN span, not the whole turn', () => {
   assert.equal(secondSummary.tool?.name, 'search')
 })
 
-test('the Work header reports span facts, omits zero counts and degrades to width', () => {
+test('the Activity header reports span facts, omits zero counts and degrades to width', () => {
   const span = projectCompact([thinking(0), tool(0), tool(0)], noOptions)[0]
   assert.ok(span !== undefined && span.kind === 'work')
   const summary = summarizeWorkSpan(span.span)
-  assert.equal(formatWorkHeaderLine(summary, false, 80, 'symbols'), '▸ Work · 2 tools · thinking')
-  assert.equal(formatWorkHeaderLine({ toolCount: 0, subagentCount: 0 }, false, 80, 'symbols'), '▸ Work')
-  assert.equal(formatWorkHeaderLine({ toolCount: 1, subagentCount: 0 }, true, 80, 'symbols'), '▾ Work · 1 tool')
-  // Narrow: drops the tail rather than wrapping.
+  // post-F6 plan §6.1/§6.3/§6.4: visible identity is `Activity` with the
+  // registry work icon, the grammar is `<identity> <duration> · <stats>`,
+  // and the `· thinking` marker is gone.
+  assert.equal(formatWorkHeaderLine(summary, false, 80, 'symbols'), '▸ ✦ Activity · 2 tools')
+  assert.equal(formatWorkHeaderLine({ toolCount: 0, subagentCount: 0 }, false, 80, 'symbols'), '▸ ✦ Activity')
+  assert.equal(formatWorkHeaderLine({ toolCount: 1, subagentCount: 0 }, true, 80, 'symbols'), '▾ ✦ Activity · 1 tool')
+  // The duration sits directly beside the identity (§6.3), not behind a dot.
+  assert.equal(formatWorkHeaderLine(summary, false, 80, 'symbols', '18s'), '▸ ✦ Activity 18s · 2 tools')
+  assert.equal(formatWorkHeaderLine(summary, false, 80, 'minimal', '18s'), '▸ Activity 18s · 2 tools')
+  // Narrow: drops the LAST stat first, keeps identity + duration to the
+  // end (§6.5), never wraps.
+  assert.equal(formatWorkHeaderLine({ toolCount: 2, subagentCount: 1 }, false, 26, 'symbols', '18s'), '▸ ✦ Activity 18s · 2 tools')
+  // Below identity+duration, the duration falls too; the bare identity is
+  // the floor (then a hard truncate as the last resort).
+  assert.equal(formatWorkHeaderLine({ toolCount: 2, subagentCount: 1 }, false, 14, 'symbols', '18s'), '▸ ✦ Activity')
   const narrow = formatWorkHeaderLine(summary, false, 10, 'symbols')
-  assert.ok(narrow.length <= 10)
+  assert.ok(visibleWidth(narrow) <= 10)
 })
 
-test('the collapsed Work body renders at most one Think row and one Tool row, never a Message slot', () => {
+test('the collapsed Activity body renders at most one Think row and one Tool row, never a Message slot', () => {
   const span = projectCompact([thinking(0, 'checking\nsecond line'), tool(0)], noOptions)[0]
   assert.ok(span !== undefined && span.kind === 'work')
   const summary = summarizeWorkSpan(span.span)
   const lines = compactWorkBody(summary, 60, 'Read src/tui-app.ts')
   assert.equal(lines.length, 2)
   assert.match(lines[0]!, /Think:/)
-  assert.match(lines[0]!, /checking/)
-  assert.ok(!lines[0]!.includes('second line'), 'the Think preview is one visual row')
+  // post-F6 plan §8.2: the SETTLED Think preview reads the LATEST logical
+  // line (head-truncated), never the frozen first line.
+  assert.match(lines[0]!, /second line/)
+  assert.ok(!lines[0]!.includes('checking'), 'the Think preview shows the latest line, not the first')
   assert.match(lines[1]!, /Tool:/)
   assert.match(lines[1]!, /Read src\/tui-app\.ts/)
-  assert.ok(!lines.some(line => line.includes('Message:')), 'Compact Work has no Message slot')
+  assert.ok(!lines.some(line => line.includes('Message:')), 'Compact Activity has no Message slot')
   // No tool/thinking -> no placeholder rows.
   assert.deepEqual(compactWorkBody({ toolCount: 0, subagentCount: 0 }, 60), [])
 })

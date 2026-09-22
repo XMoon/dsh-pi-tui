@@ -151,7 +151,7 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   'app.transcript.toggleExpand': {
     id: 'app.transcript.toggleExpand',
     defaultKeys: ['ctrl+o'],
-    description: 'Expand/collapse recent tool output and thinking',
+    description: 'Expand/collapse recent transcript detail',
     category: 'Transcript',
     scope: 'global',
     configurable: true,
@@ -159,7 +159,9 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   'app.transcript.toggleThinking': {
     id: 'app.transcript.toggleThinking',
     defaultKeys: ['alt+t'],
-    description: 'Hide/show thinking blocks',
+    // Disclosure, not visibility (post-F6 plan §5.3): Thinking blocks stay
+    // visible; Alt+T owns their bulk detail level.
+    description: 'Expand/collapse thinking detail',
     category: 'Transcript',
     scope: 'global',
     configurable: true,

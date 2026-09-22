@@ -68,6 +68,62 @@ export type TranscriptSystemOrigin = 'llm-retry' | 'turn-max-tokens'
 /** Source-derived origins for synthetic tool presentation rows. */
 export type TranscriptToolOrigin = 'command' | 'subagent-delegation' | 'turn-error' | 'turn-interrupted'
 
+/**
+ * The bounded reasoning tail cap: previews never buffer the full reasoning
+ * stream. Shared with the compact Think preview (post-F6 plan §8.3) so the
+ * preview bound comes from the ONE existing constant, never a duplicate
+ * magic number.
+ */
+export const THINKING_TAIL_CAP = 400
+
+/**
+ * Presentation-only timing sidecar for one transcript row (post-F6 plan
+ * §12.4): the wall-clock span its OWN durable Process evidence covers, from
+ * `SessionEvent.time` (never a second clock). `running` is true while the
+ * row's authoritative end has not landed; an `endedAt` may be missing even
+ * when settled (an abandoned attempt has no authoritative end) — consumers
+ * treat unknown as UNKNOWN, never zero (plan §12.16).
+ */
+export interface TranscriptTiming {
+  readonly startedAt: number
+  readonly endedAt?: number
+  readonly running: boolean
+}
+
+/** The presentation-only sidecar store: keyed by row object identity, so a
+ * merged read group's fresh card object simply gets its own entry. */
+const transcriptTimings = new WeakMap<TranscriptMessage, TranscriptTiming>()
+
+/**
+ * The timing sidecar of one transcript row, if the fold recorded any
+ * (post-F6 plan §12.4). Absent means NO reliable timing evidence —
+ * consumers omit the duration (never fabricate `0s`).
+ */
+export function transcriptTimingOf(message: TranscriptMessage): TranscriptTiming | undefined {
+  return transcriptTimings.get(message)
+}
+
+/** Record/replace one row's timing sidecar (fold-internal authority). */
+function setTranscriptTiming(message: TranscriptMessage, timing: TranscriptTiming): void {
+  transcriptTimings.set(message, timing)
+}
+
+/** A point-evidence timing: the row proves presence at one instant only
+ * (post-F6 plan §12.9) — never an invented duration. */
+function pointTiming(at: number): TranscriptTiming {
+  return { startedAt: at, endedAt: at, running: false }
+}
+
+/** Record a running row's authoritative end (post-F6 plan §12.7). A row the
+ * fold never started (a missing-call fragment) degrades to point evidence
+ * at the end time instead of inventing a start. */
+function settleToolTiming(message: TranscriptMessage, endedAt: number): void {
+  const previous = transcriptTimings.get(message)
+  transcriptTimings.set(message, previous === undefined
+    ? { startedAt: endedAt, endedAt, running: false }
+    : { startedAt: previous.startedAt, endedAt: Math.max(previous.startedAt, endedAt), running: false })
+}
+
 /** One renderable message in the TUI transcript. */
 export type TranscriptMessage =
   /**
@@ -975,6 +1031,31 @@ export function subCallDisplayStatus(child: {
   return 'ok'
 }
 
+/**
+ * The RUNNING PTC descendants of one root card, aggregated by tool name in
+ * durable dispatch order — the SAME projection the Focus Tool slot consumes
+ * (post-F6 plan §9.1: an Activity member card must not drop what Focus
+ * shows). Presentation metadata ONLY: never part of the tool stats.
+ */
+export function activeSubCallsOf(
+  root: TranscriptToolMessage,
+): { readonly name: string; readonly count: number }[] {
+  const counts = new Map<string, number>()
+  const order: string[] = []
+  const visit = (card: TranscriptToolMessage, depth: number): void => {
+    if (depth >= PTC_MAX_DEPTH) return
+    for (const sub of card.subCalls ?? []) {
+      if (sub.status === 'running') {
+        if (!counts.has(sub.name)) order.push(sub.name)
+        counts.set(sub.name, (counts.get(sub.name) ?? 0) + 1)
+      }
+      visit(sub, depth + 1)
+    }
+  }
+  visit(root, 0)
+  return order.map(name => ({ name, count: counts.get(name)! }))
+}
+
 /** Reconstruct the logical blocks used by any Assistant entry. */
 function assistantEntryBlocks(entry: Extract<TranscriptMessage, { kind: 'assistant' }>): readonly ContentBlock[] {
   if (entry.content !== undefined) return entry.content
@@ -1102,6 +1183,16 @@ interface AssistantStreamProjection {
   firstVisibleAt: number | undefined
   /** The last usage sample in the stream, `undefined` when none. */
   usage: UsageLike | undefined
+  /** Lane timing from the SAME single decode (post-F6 plan §12.5): the
+   * first/last chunk time at which the Thinking lane was visible, so the
+   * durable Thinking row's sidecar timing costs no second pass. (The
+   * Assistant lane needs no sidecar: assistant rows are Conversation
+   * evidence and never Activity members.) */
+  thinkingStartedAt: number | undefined
+  thinkingEndedAt: number | undefined
+  /** First tool-call-delta time per call id, for the Preparing → durable
+   * elapsed continuity (post-F6 plan §12.14). */
+  toolCallStarts: Map<string, number>
 }
 
 /**
@@ -1596,8 +1687,15 @@ export class TranscriptFolder {
   }>()
   /** Tool names by callId, for result pairing. */
   private readonly callNames = new Map<string, string>()
-  /** Command names by commandId, from command/run events. */
-  private readonly commandNames = new Map<string, string>()
+  /** Command facts by commandId, from command/run events: the name plus the
+   * run start, so the synthetic command card keeps its real elapsed span
+   * (post-F6 plan §12.8). */
+  private readonly commandRuns = new Map<string, { name: string; startedAt: number }>()
+  /** First streamed tool-call-delta time per call id, from BOTH the live
+   * chunks and the durable embedded streams: the earliest authoritative
+   * start of a call, so a Preparing → durable handoff never resets its
+   * elapsed time (post-F6 plan §12.14). */
+  private readonly toolCallPreparingStarts = new Map<string, number>()
   /** Active Workflow runs: the shared semantic projection (owner tracking,
    * interruption projection, member/run settlement) plus the raw item index
    * of each active run's card for search dirty marking. */
@@ -1704,7 +1802,7 @@ export class TranscriptFolder {
    * drift). */
   private readonly usage = new StepUsageAccumulator()
   /** The bounded reasoning tail cap: previews never buffer the full stream. */
-  private static readonly THINKING_TAIL_CAP = 400
+  private static readonly THINKING_TAIL_CAP = THINKING_TAIL_CAP
   /** The bounded message candidate tail cap (streaming assistant text). */
   private static readonly MESSAGE_TAIL_CAP = 400
 
@@ -1907,23 +2005,11 @@ export class TranscriptFolder {
     if (rootEntry !== undefined) this.markSearchEntryDirty(rootEntry.index)
     const activity = this.activityFor(root.turn)
     if (activity.tool === undefined) return
-    const counts = new Map<string, number>()
-    const order: string[] = []
-    const visit = (card: TranscriptToolMessage, depth: number): void => {
-      if (depth >= PTC_MAX_DEPTH) return
-      for (const sub of card.subCalls ?? []) {
-        if (sub.status === 'running') {
-          if (!counts.has(sub.name)) order.push(sub.name)
-          counts.set(sub.name, (counts.get(sub.name) ?? 0) + 1)
-        }
-        visit(sub, depth + 1)
-      }
-    }
-    visit(root, 0)
-    if (order.length === 0) {
+    const active = activeSubCallsOf(root)
+    if (active.length === 0) {
       activity.tool.activeSubCalls = undefined
     } else {
-      activity.tool.activeSubCalls = order.map(name => ({ name, count: counts.get(name)! }))
+      activity.tool.activeSubCalls = active
     }
     activity.revision += 1
   }
@@ -2267,7 +2353,49 @@ export class TranscriptFolder {
       result: firstResult === undefined ? '' : [firstResult, ...results].join('\n\n'),
       turn: maxTurn,
     }
+    this.mergedReadGroupTiming(group, members, turns.size > 1)
     return { group, members, firstTurn: first.turn, spansTurns: turns.size > 1 }
+  }
+
+  /** Attach the merged read group's OWN timing, aggregated from its member
+   * cards WITH turn attribution (post-F6 plan §12.11): a group that spans
+   * turns is displayed as ONE card on its latest turn, so its members'
+   * spans cannot be attributed to one Activity — DROP the timing entirely
+   * rather than leak a cross-turn span. This is a SET-OR-CLEAR contract:
+   * a group that BECOMES cross-turn on append (or whose recomputed members
+   * carry no evidence) must not keep a stale previously-recorded span. A
+   * same-turn group aggregates its members' evidence (earliest start,
+   * latest end); members without sidecar evidence contribute nothing. */
+  private mergedReadGroupTiming(
+    group: Extract<TranscriptMessage, { kind: 'tool' }>,
+    memberIndexes: readonly number[],
+    spansTurns: boolean,
+  ): void {
+    if (spansTurns) {
+      transcriptTimings.delete(group)
+      return
+    }
+    let startedAt: number | undefined
+    let endedAt: number | undefined
+    let running = false
+    for (const index of memberIndexes) {
+      const member = this.items[index]
+      if (member === undefined) continue
+      const timing = transcriptTimingOf(member)
+      if (timing === undefined) continue
+      startedAt = startedAt === undefined ? timing.startedAt : Math.min(startedAt, timing.startedAt)
+      if (timing.endedAt !== undefined) endedAt = endedAt === undefined ? timing.endedAt : Math.max(endedAt, timing.endedAt)
+      running = running || timing.running
+    }
+    if (startedAt === undefined) {
+      transcriptTimings.delete(group)
+      return
+    }
+    setTranscriptTiming(group, {
+      startedAt,
+      ...(endedAt === undefined ? {} : { endedAt }),
+      running,
+    })
   }
 
   /** Add one grouped-output turn to the monotonic display index. */
@@ -2536,6 +2664,7 @@ export class TranscriptFolder {
        this.addGroupedTurn(previousGroup.turn)
       const spansTurns = wasCross || item.turn !== firstTurn
       this.groupMeta.set(previousGroup, { firstTurn, spansTurns })
+      this.mergedReadGroupTiming(previousGroup, members, spansTurns)
       if (!wasCross && spansTurns) this.crossTurnGroups += 1
       this.groupedToolCount -= 1
       // The merged card's text changed (args count + result): mark the
@@ -2564,7 +2693,8 @@ export class TranscriptFolder {
     this.groupOf.set(index, group)
     this.groupMembers.set(group, [previousIndex, index])
     this.groupMeta.set(group, { firstTurn: previous.turn, spansTurns: previous.turn !== item.turn })
-     this.addGroupedTurn(group.turn)
+    this.mergedReadGroupTiming(group, [previousIndex, index], previous.turn !== item.turn)
+      this.addGroupedTurn(group.turn)
     if (previous.turn !== item.turn) this.crossTurnGroups += 1
     this.groupedToolCount -= 1
     // The promoted singleton becomes the new group's representative: its
@@ -2620,7 +2750,12 @@ export class TranscriptFolder {
             this.groupMembers.set(group, remaining)
             const first = this.items[remaining[0]!]
             if (first !== undefined && TranscriptFolder.groupable(first)) {
-              this.groupMeta.set(group, { firstTurn: first.turn, spansTurns: this.crossTurn(remaining) })
+              // The surviving group keeps only ITS remaining members'
+              // evidence: recompute the timing from `remaining` (or drop
+              // it) — never keep a span aggregated over members that left.
+              const spansTurns = this.crossTurn(remaining)
+              this.groupMeta.set(group, { firstTurn: first.turn, spansTurns })
+              this.mergedReadGroupTiming(group, remaining, spansTurns)
             }
           }
         }
@@ -2718,6 +2853,11 @@ export class TranscriptFolder {
         if (thinking !== undefined && thinking.running === false) {
           thinking.text = ''
           thinking.running = true
+          // The reopen starts a NEW reasoning span: the previous attempt's
+          // sidecar timing is stale evidence and must not straddle the
+          // retry (the first chunk of the new attempt re-records the
+          // start).
+          transcriptTimings.delete(thinking)
           this.markStreamingEntryDirty(`thinking:${key}`)
           let open = this.openThinkingByTurn.get(input.turn)
           if (open === undefined) {
@@ -2743,10 +2883,12 @@ export class TranscriptFolder {
           this.settleFailedAttempt(input.turn, input.step, true, true)
         }
         // Any remaining open reasoning entries stop animating at settlement.
+        // The notification frame carries no time: there is no authoritative
+        // end, so the sidecar keeps `endedAt` undefined (plan §12.16).
         {
           const open = this.openThinkingByTurn.get(input.turn)
           if (open !== undefined) {
-            for (const entry of open) entry.running = false
+            for (const entry of open) this.closeThinking(entry)
             this.openThinkingByTurn.delete(input.turn)
           }
           // The turn may continue (tool execution, later model output): the
@@ -2848,10 +2990,10 @@ export class TranscriptFolder {
         // check never hides an empty Thinking row, so it would leak a blank
         // process row into the Work span.
         if (existing === undefined && chunk.text === '') return
-        const thinking = existing ?? this.thinkingEntry(turn, step)
+        const thinking = this.thinkingEntry(turn, step, time)
         thinking.text += chunk.text
         thinking.running = false
-        this.closeThinking(thinking)
+        this.closeThinking(thinking, time)
         this.markStreamingEntryDirty(`thinking:${key}`)
         this.foldThinking(activity, step, chunk.text)
         if (existing === undefined) this.convergeStepLaneOrder(turn, step)
@@ -2865,10 +3007,10 @@ export class TranscriptFolder {
             this.clearThinkingPreview(activity, step)
           }
         } else {
-          const thinking = existing ?? this.thinkingEntry(turn, step)
+          const thinking = this.thinkingEntry(turn, step, time)
           thinking.text = chunk.block.text
           thinking.running = false
-          this.closeThinking(thinking)
+          this.closeThinking(thinking, time)
           this.markStreamingEntryDirty(`thinking:${key}`)
           this.restoreThinkingPreview(activity, step, chunk.block.text)
           if (existing === undefined) this.convergeStepLaneOrder(turn, step)
@@ -2899,6 +3041,11 @@ export class TranscriptFolder {
       case 'reasoning-delta':
       case 'tool-call-delta':
       case 'block-end': {
+        // Preparing continuity (post-F6 plan §12.14): the FIRST streamed
+        // delta of a tool call is the call's earliest authoritative start.
+        if (chunk.type === 'tool-call-delta' && chunk.id !== '') {
+          if (!this.toolCallPreparingStarts.has(chunk.id)) this.toolCallPreparingStarts.set(chunk.id, time)
+        }
         const previous = projection.states.get(chunk.index)
         if (applyAssistantBlockChunk(projection.states, chunk)) {
           this.updateLiveAssistantProjection(projection, chunk.index, previous)
@@ -2908,7 +3055,7 @@ export class TranscriptFolder {
               activity.firstVisibleAssistantTimes.set(step, time)
             }
           }
-          this.syncLiveAssistantPresentation(turn, step)
+          this.syncLiveAssistantPresentation(turn, step, time)
         }
         break
       }
@@ -2979,7 +3126,7 @@ export class TranscriptFolder {
   }
 
   /** Project the current live block map without duplicating block-end text. */
-  private syncLiveAssistantPresentation(turn: number, step: number): void {
+  private syncLiveAssistantPresentation(turn: number, step: number, time?: number): void {
     const key = stepKey(turn, step)
     const projection = this.liveAssistantProjectionFor(turn, step)
     const { blocks, displayBlocks } = projection
@@ -3058,7 +3205,7 @@ export class TranscriptFolder {
       }
       return
     }
-    const thinking = this.thinkingEntry(turn, step)
+    const thinking = this.thinkingEntry(turn, step, time)
     this.hiddenThinkingEntries.delete(thinking)
     thinking.text = reasoning
     thinking.running = true
@@ -3078,6 +3225,9 @@ export class TranscriptFolder {
     let thinkingPresent = false
     let firstVisibleAt: number | undefined
     let usage: UsageLike | undefined
+    let thinkingStartedAt: number | undefined
+    let thinkingEndedAt: number | undefined
+    const toolCallStarts = new Map<string, number>()
 
     const adjustVisibility = (state: AssistantBlockState, amount: number): void => {
       const projection = assistantBlockProjection(state)
@@ -3092,6 +3242,12 @@ export class TranscriptFolder {
       }
       if (chunk.type === 'finish') continue
       if (firstVisibleAt === undefined && assistantChunkHasVisibleReply(chunk)) firstVisibleAt = time
+      // Preparing evidence for the Preparing → durable elapsed continuity
+      // (post-F6 plan §12.14): the FIRST streamed delta of a tool call is
+      // the call's earliest authoritative start.
+      if (chunk.type === 'tool-call-delta' && chunk.id !== '' && !toolCallStarts.has(chunk.id)) {
+        toolCallStarts.set(chunk.id, time)
+      }
       const previous = states.get(chunk.index)
       if (!applyAssistantBlockChunk(states, chunk)) continue
       if (previous !== undefined) adjustVisibility(previous, -1)
@@ -3100,6 +3256,10 @@ export class TranscriptFolder {
 
       const visibleNow = assistantVisibleCount > 0
       const nextThinking = thinkingVisibleCount > 0
+      if (nextThinking) {
+        thinkingStartedAt ??= time
+        thinkingEndedAt = time
+      }
       // Match live step-level materialization: a hidden aggregate lane is
       // removed, and a later recreation is appended after surviving rows.
       if (visibleNow !== assistantPresent) {
@@ -3127,6 +3287,17 @@ export class TranscriptFolder {
       firstLane: rowOrder[0],
       firstVisibleAt,
       usage,
+      thinkingStartedAt,
+      thinkingEndedAt,
+      toolCallStarts,
+    }
+  }
+
+  /** First-wins merge of one durable stream's tool-call preparing starts
+   * into the folder-wide map (post-F6 plan §12.14). */
+  private absorbPreparingStarts(starts: ReadonlyMap<string, number>): void {
+    for (const [callId, at] of starts) {
+      if (!this.toolCallPreparingStarts.has(callId)) this.toolCallPreparingStarts.set(callId, at)
     }
   }
 
@@ -3258,11 +3429,11 @@ export class TranscriptFolder {
       }
       return
     }
-    const entry = this.thinkingEntry(turn, step)
+    const entry = this.thinkingEntry(turn, step, projection.thinkingStartedAt)
     this.hiddenThinkingEntries.delete(entry)
     entry.text = text
     this.markStreamingEntryDirty(`thinking:${key}`)
-    this.closeThinking(entry)
+    this.closeThinking(entry, projection.thinkingEndedAt)
     this.restoreThinkingPreview(this.activityFor(turn), step, text)
   }
 
@@ -3376,11 +3547,11 @@ export class TranscriptFolder {
       }
       return
     }
-    const entry = this.thinkingEntry(turn, step)
+    const entry = this.thinkingEntry(turn, step, projection?.thinkingStartedAt)
     this.hiddenThinkingEntries.delete(entry)
     entry.text = text
     this.markStreamingEntryDirty(`thinking:${key}`)
-    this.closeThinking(entry)
+    this.closeThinking(entry, projection?.thinkingEndedAt)
     this.restoreThinkingPreview(this.activityFor(turn), step, text)
   }
 
@@ -3748,9 +3919,20 @@ export class TranscriptFolder {
     }
   }
 
-  /** Remove one thinking entry from the open-lifecycle index. */
-  private closeThinking(entry: Extract<TranscriptMessage, { kind: 'thinking' }>): void {
+  /** Settle one thinking entry: it stops streaming and records its
+   * authoritative end in the timing sidecar (post-F6 plan §12.6). An absent
+   * `endedAt` (an abandoned attempt has no authoritative end) keeps
+   * `endedAt` undefined — consumers treat unknown as UNKNOWN, never zero. */
+  private closeThinking(entry: Extract<TranscriptMessage, { kind: 'thinking' }>, endedAt?: number): void {
     entry.running = false
+    const startedAt = transcriptTimingOf(entry)?.startedAt ?? endedAt
+    if (startedAt !== undefined) {
+      setTranscriptTiming(entry, {
+        startedAt,
+        ...(endedAt === undefined ? {} : { endedAt: Math.max(startedAt, endedAt) }),
+        running: false,
+      })
+    }
     const open = this.openThinkingByTurn.get(entry.turn)
     if (open === undefined) return
     open.delete(entry)
@@ -3797,22 +3979,29 @@ export class TranscriptFolder {
     activity.revision += 1
   }
 
-  /** Settle only the thinking entries owned by one ended turn. */
-  private closeThinkingForTurn(turn: number): void {
+  /** Settle only the thinking entries owned by one ended turn: the
+   * authoritative `turn/end` time is their end (post-F6 plan §12.6). */
+  private closeThinkingForTurn(turn: number, endedAt?: number): void {
     const open = this.openThinkingByTurn.get(turn)
     if (open === undefined) return
-    for (const entry of open) entry.running = false
+    for (const entry of open) this.closeThinking(entry, endedAt)
     this.openThinkingByTurn.delete(turn)
     const activity = this.activityByTurn.get(turn)
     if (activity?.thinkingStep !== undefined) this.markThinkSettled(activity, activity.thinkingStep)
   }
 
-  /** The thinking entry object for one (turn, step), created on first reasoning. */
-  private thinkingEntry(turn: number, step: number): Extract<TranscriptMessage, { kind: 'thinking' }> {
+  /** The thinking entry object for one (turn, step), created on first
+   * reasoning. The first accepted reasoning evidence's time is the row's
+   * sidecar start (post-F6 plan §12.6). A retried REOPEN deletes the stale
+   * sidecar and reuses the same entry object — the new attempt's first
+   * chunk re-records the start here (first-wins: an entry that already has
+   * timing keeps it). */
+  private thinkingEntry(turn: number, step: number, startedAt?: number): Extract<TranscriptMessage, { kind: 'thinking' }> {
     const key = stepKey(turn, step)
     let entry = this.thinkingEntries.get(key)
     if (entry === undefined) {
       entry = { kind: 'thinking', turn, text: '', running: true }
+      if (startedAt !== undefined) setTranscriptTiming(entry, { startedAt, running: true })
       this.thinkingEntries.set(key, entry)
       this.searchIndexByStepKey.set(`thinking:${key}`, this.appendItem(entry))
       let open = this.openThinkingByTurn.get(turn)
@@ -3821,6 +4010,8 @@ export class TranscriptFolder {
         this.openThinkingByTurn.set(turn, open)
       }
       open.add(entry)
+    } else if (startedAt !== undefined && transcriptTimingOf(entry) === undefined) {
+      setTranscriptTiming(entry, { startedAt, running: true })
     }
     return entry
   }
@@ -4041,6 +4232,7 @@ export class TranscriptFolder {
       // One durable stream projection per settlement: lane order, restored
       // reasoning and usage come from the same pass (plan §4.4/§12.5).
       const projection = this.assistantStreamProjection(stream)
+      this.absorbPreparingStarts(projection.toolCallStarts)
       if (!alreadySettled) {
         // Store/refresh the step's lane authority from the attempt; a later
         // message settlement (higher authority) overwrites it.
@@ -4251,6 +4443,7 @@ export class TranscriptFolder {
         const projection = event.data.stream !== undefined && event.data.stream.length > 0
           ? this.assistantStreamProjection(event.data.stream)
           : undefined
+        if (projection !== undefined) this.absorbPreparingStarts(projection.toolCallStarts)
         const messageUsage = event.data.usage ?? projection?.usage
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
@@ -4422,6 +4615,16 @@ export class TranscriptFolder {
           result: '',
           status: 'running',
         }
+        // The call's wall span starts at its earliest authoritative
+        // evidence: the first streamed arguments delta when the call was
+        // preparing, else the tool/call event (post-F6 plan §12.7/§12.14 —
+        // never a Preparing → durable elapsed reset).
+        const preparingStart = this.toolCallPreparingStarts.get(key)
+        this.toolCallPreparingStarts.delete(key)
+        setTranscriptTiming(card, {
+          startedAt: preparingStart === undefined ? event.time : Math.min(preparingStart, event.time),
+          running: true,
+        })
         this.appendItem(card)
         this.pendingCalls.set(key, {
           name: event.data.name,
@@ -4488,6 +4691,9 @@ export class TranscriptFolder {
           card.result = text
           card.args = pending.args
           card.turn = turn
+          // The paired result is the card's authoritative end (post-F6 plan
+          // §12.7).
+          settleToolTiming(card, event.time)
           // Raw result data for the tool-owned presentation (presentResult).
           card.resultBlocks = block?.content
           card.meta = event.data.meta
@@ -4512,6 +4718,7 @@ export class TranscriptFolder {
               running.result = text
               running.args = ''
               running.turn = turn
+              settleToolTiming(running, event.time)
               running.resultBlocks = block?.content
               running.meta = event.data.meta
               running.error = event.data.error
@@ -4519,7 +4726,12 @@ export class TranscriptFolder {
               this.scheduleGrouping(runningIndex)
             }
           } else {
-            this.appendItem({ kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta, error: event.data.error })
+            const card: Extract<TranscriptMessage, { kind: 'tool' }> = { kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta, error: event.data.error }
+            // An orphan settle with no seen call has only one timestamp: it
+            // contributes point evidence, never an invented duration
+            // (post-F6 plan §12.9).
+            setTranscriptTiming(card, pointTiming(event.time))
+            this.appendItem(card)
             this.scheduleGrouping(this.items.length - 1)
           }
         }
@@ -4631,7 +4843,7 @@ export class TranscriptFolder {
           if (key.startsWith(`${endTurn}/`)) this.liveAssistantBlocks.delete(key)
         }
         this.markAttemptEvidenceInterrupted(endTurn)
-        this.closeThinkingForTurn(endTurn)
+        this.closeThinkingForTurn(endTurn, event.time)
         if (event.data.reason.kind === 'error') {
           // Defensive: a malformed/legacy reason without the error detail
           // degrades to the bare marker instead of crashing the fold
@@ -4734,19 +4946,25 @@ export class TranscriptFolder {
         const label = maxRetries === undefined
           ? `llm retry ${retry} in ${Math.round(delayMs / 1000)}s`
           : `llm retry ${retry}/${maxRetries} in ${Math.round(delayMs / 1000)}s`
-        this.appendItem({ kind: 'system', turn, text: `${label} — ${displayFailureText(failure)}`, origin: 'llm-retry' })
+        const retryCard: Extract<TranscriptMessage, { kind: 'system' }> = { kind: 'system', turn, text: `${label} — ${displayFailureText(failure)}`, origin: 'llm-retry' }
+        // A retry row has only its event time: it contributes point
+        // evidence to the enclosing Activity wall span (post-F6 plan
+        // §12.9) — never an invented retry duration.
+        setTranscriptTiming(retryCard, pointTiming(event.time))
+        this.appendItem(retryCard)
         // Focus aggregation: retries are orchestration, not a Tool — they
         // stay in the expanded process and never touch the Tool slot
         // (plan §16.2).
         break
       }
       case 'command/run': {
-        this.commandNames.set(event.data.commandId, event.data.name)
+        this.commandRuns.set(event.data.commandId, { name: event.data.name, startedAt: event.time })
         break
       }
       case 'command/done': {
-        const name = this.commandNames.get(event.data.commandId) ?? 'command'
-        this.commandNames.delete(event.data.commandId)
+        const run = this.commandRuns.get(event.data.commandId)
+        const name = run?.name ?? 'command'
+        this.commandRuns.delete(event.data.commandId)
         // Success text (e.g. "title set: x") carries the command's settlement
         // message; errors prefix it with the failure marker.
         const outcome = event.data.kind === 'error'
@@ -4754,7 +4972,13 @@ export class TranscriptFolder {
           : event.data.text === undefined || event.data.text === ''
             ? ''
             : ` — ${event.data.text}`
-        this.appendItem({ kind: 'tool', turn: this.currentTurn, name: `/${name}`, args: '', result: `executed${outcome}`, status: event.data.kind === 'error' ? 'error' : 'ok', origin: 'command' })
+        const card: Extract<TranscriptMessage, { kind: 'tool' }> = { kind: 'tool', turn: this.currentTurn, name: `/${name}`, args: '', result: `executed${outcome}`, status: event.data.kind === 'error' ? 'error' : 'ok', origin: 'command' }
+        // The command card's wall span is run → done (post-F6 plan §12.8);
+        // an unmatched done (a fragment) degrades to point evidence.
+        setTranscriptTiming(card, run === undefined
+          ? pointTiming(event.time)
+          : { startedAt: run.startedAt, endedAt: Math.max(run.startedAt, event.time), running: false })
+        this.appendItem(card)
         break
       }
       case 'subagent/descriptor': {
@@ -4766,15 +4990,20 @@ export class TranscriptFolder {
           provider !== undefined ? `provider: ${provider}` : '',
           model !== undefined ? `model: ${model}` : '',
         ].filter(part => part !== '').join(' · ')
-        this.appendItem({
+        const delegationCard: Extract<TranscriptMessage, { kind: 'tool' }> = {
           kind: 'tool',
           turn: this.currentTurn,
           name: 'subagent',
           args: label ?? 'subagent',
-           origin: 'subagent-delegation',
+          origin: 'subagent-delegation',
           result,
           status: 'ok',
-        })
+        }
+        // A durable delegation record carries one timestamp: point evidence
+        // only — the child session's lifetime is never the parent
+        // Activity's duration (post-F6 plan §12.10).
+        setTranscriptTiming(delegationCard, pointTiming(event.time))
+        this.appendItem(delegationCard)
         // Focus aggregation: a delegation record is a durable lifecycle
         // event, NOT a model tool/call — it never touches the Tool slot or
         // the tool count (plan §17).

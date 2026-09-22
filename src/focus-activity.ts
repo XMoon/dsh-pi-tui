@@ -27,16 +27,39 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui
 import { color } from './theme.ts'
 import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
-import { toolTitle } from './present.ts'
+import {
+  COMPACT_SLOT_LABEL_WIDTH,
+  compactSlotLine,
+  compactThinkSlotLine,
+  compactToolSlotLine,
+  formatCompactDuration,
+} from './compact-process-preview.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
 import { isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
 import { isNoticeContext } from './context-presentation.ts'
 import { projectTranscriptStructure, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
 import type { TranscriptContainerPath } from './transcript-disclosure.ts'
 import { displayFailureText } from './failure-presentation.ts'
-import { thinkingPreviewTail } from './thinking-preview.ts'
 import { focusTiming, type FocusTimingStore } from './focus-timing.ts'
 import type { RunPhase } from './status/types.ts'
+
+/**
+ * The Focus-facing names of the SHARED compact process-preview authority
+ * (`compact-process-preview.ts`, post-F6 plan §7): the slot geometry, the
+ * Preparing summary and the duration format have exactly one
+ * implementation served to Focus and Activity alike — these aliases keep
+ * the historical Focus import surface stable.
+ */
+export { compactPreparingSummary as focusPreparingSummary } from './compact-process-preview.ts'
+export type { CompactPreparingPreview as FocusPreparingPreview } from './compact-process-preview.ts'
+
+/** Human duration from millis: seconds under a minute, `m s` above (the
+ * elapsed TURN time — plan §14.2: the user waited the whole turn). The
+ * FORMAT is the shared compact duration authority; the Focus policy (WHICH
+ * span it measures) lives in {@link focusDurationText}. */
+export function formatFocusDuration(ms: number | undefined): string | undefined {
+  return formatCompactDuration(ms)
+}
 
 /** The max tool-type names the header stats show before the `+N` tail
  * (plan §10.4). */
@@ -94,17 +117,6 @@ export function focusStatusLabel(activity: TurnActivity, phase: RunPhase, durati
   }
 }
 
-/** Human duration from millis: seconds under a minute, `m s` above (the
- * elapsed TURN time — plan §14.2: the user waited the whole turn). */
-export function formatFocusDuration(ms: number | undefined): string | undefined {
-  if (ms === undefined) return undefined
-  const total = Math.max(0, Math.floor(ms / 1000))
-  if (total < 60) return `${total}s`
-  const minutes = Math.floor(total / 60)
-  const seconds = total % 60
-  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`
-}
-
 /** The responsive tool-stats tail parts (`14 tools`, `read ×7`, …, `+2`):
  * types sorted count-desc / name-asc, capped at
  * {@link FOCUS_TOOL_SUMMARY_MAX_TYPES}, with a `+N` remainder counting the
@@ -131,34 +143,6 @@ export function focusDurationText(
   timing: FocusTimingStore = focusTiming,
 ): string | undefined {
   return formatFocusDuration(timing.activeMillis(activity, phase, now()))
-}
-
-/** The presentation-only shape needed to summarize one live Preparing row.
- * It deliberately excludes the call id, turn and arguments: Focus owns no
- * lifecycle state and only needs the stable visual order plus an optional
- * display name. */
-export interface FocusPreparingPreview {
-  readonly index: number
-  readonly name?: string
-}
-
-/** The compact Focus-collapsed Tool-slot text for live Preparing rows.
- * Names that do not map to a known tool title remain generic, so model-facing
- * names never make the compact Thought card noisy. The input is copied and
- * sorted so the summary is deterministic even when a caller supplies a fresh
- * order. */
-export function focusPreparingSummary(
-  previews: readonly FocusPreparingPreview[],
-): string | undefined {
-  if (previews.length === 0) return undefined
-  const ordered = [...previews].sort((left, right) => left.index - right.index)
-  const known = ordered
-    .map(preview => preview.name === undefined || preview.name === '' ? undefined : toolTitle(preview.name))
-    .find(title => title !== undefined && title !== 'Tool' && title !== 'tool')
-  if (known === undefined) {
-    return ordered.length === 1 ? 'Preparing tool…' : `Preparing ${ordered.length} tools…`
-  }
-  return ordered.length === 1 ? `Preparing ${known}…` : `Preparing ${known} +${ordered.length - 1}`
 }
 
 /** Assemble the one-line header, dropping the stat tail progressively so
@@ -198,55 +182,11 @@ export function formatFocusHeaderLine(
   return truncateToWidth(head, width, '…')
 }
 
-/** The fixed label column width of the collapsed body slots: the widest
- * label (`Message: `) — every slot's text starts at the same column
- * (plan §25, aligned by visible width). */
-const FOCUS_SLOT_LABEL_WIDTH = 9
-
 /** The max visual rows the collapsed Message slot renders: the LATEST
  * tail rows of the bounded message text (plan: Message is the third
  * process slot and shows up to three terminal rows, always the newest
  * tail — streaming appends naturally roll toward it). */
 const FOCUS_MESSAGE_MAX_ROWS = 3
-
-/** Collapse arbitrary slot text to ONE physical terminal row: CR/LF
- * sequences (LF, CRLF, lone CR) are normalized to the FIRST line. This is
- * the final boundary the fullscreen compositor depends on — every
- * string[] element a component renders is exactly one framebuffer row, so
- * no caller-provided multiline text (bash heredocs, multiline errors, …)
- * may ever escape a compact slot as embedded line breaks (ghost-row fix).
- * The first line is kept rather than joining the lines with spaces: the
- * compact preview must not smuggle later lines' content into the row, and
- * width truncation would keep the leading lines anyway. */
-function compactSingleLine(text: string): string {
-  return text.split(/\r\n|\r|\n/)[0] ?? ''
-}
-
-/** One collapsed body slot line, truncated to the content width: the body
- * budget is the width MINUS the lead ('Think:   ' / 'Error:   '), and a
- * lead that alone exceeds the width truncates too — a preview line can
- * never wrap (the fullscreen row hit-map depends on that). The returned
- * string is one PHYSICAL terminal row: CR/LF are normalized before width
- * truncation; no caller-provided multiline text may escape. */
-export function compactSlotLine(label: string, text: string, width: number): string {
-  const singleLine = compactSingleLine(text)
-  const lead = `${label}${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth(label)))}`
-  const bodyBudget = width - visibleWidth(lead)
-  const body = bodyBudget > 0 ? truncateToWidth(singleLine, bodyBudget, '…') : ''
-  return truncateToWidth(`${lead}${body}`, Math.max(1, width), '…')
-}
-
-/** The RUNNING Think slot line: the same one-row geometry as
- * {@link compactSlotLine}, but the reasoning body is windowed at its RIGHT edge
- * so the latest token stays visible (dsh-web running collapsed-reasoning
- * parity). The fixed `Think:` lead is never part of the scrollable body. */
-export function compactThinkSlotLine(text: string, width: number): string {
-  const singleLine = compactSingleLine(text)
-  const lead = `Think:${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth('Think:')))}`
-  const bodyBudget = width - visibleWidth(lead)
-  const body = bodyBudget > 0 ? thinkingPreviewTail(singleLine, bodyBudget) : ''
-  return truncateToWidth(`${lead}${body}`, Math.max(1, width), '…')
-}
 
 /**
  * The collapsed Message slot: the bounded message tail wrapped to the
@@ -260,7 +200,7 @@ export function compactThinkSlotLine(text: string, width: number): string {
  * (the fullscreen row hit-map depends on one row per element).
  */
 function previewTailLines(label: string, text: string, width: number, maxRows: number): string[] {
-  const lead = `${label}${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth(label)))}`
+  const lead = `${label}${' '.repeat(Math.max(0, COMPACT_SLOT_LABEL_WIDTH - visibleWidth(label)))}`
   const bodyBudget = Math.max(1, width - visibleWidth(lead))
   // ANSI / Unicode-aware wrap (the fork's wrapTextWithAnsi): a single
   // logical line may wrap into several visual rows, so the tail cut
@@ -293,22 +233,23 @@ export function focusCollapsedBody(
   if (activity.think !== undefined) {
     // Only LIVE reasoning follows its tail (the latest token is visible);
     // once reasoning settles — even while the turn keeps running a tool or
-    // later output — the preview reads from the start of its line. The gate
-    // is the reasoning lifecycle fact, never `activity.completed`.
-    lines.push(activity.think.running
-      ? compactThinkSlotLine(activity.think.text, width)
-      : compactSlotLine('Think:', activity.think.text, width))
+    // later output — the preview reads from the start of its LATEST line.
+    // The gate is the reasoning lifecycle fact, never `activity.completed`.
+    // The line selection lives in the shared helper (post-F6 plan §8.2).
+    lines.push(compactThinkSlotLine({ text: activity.think.text, running: activity.think.running, width }))
   }
   if (preparingDisplay !== undefined) {
     lines.push(compactSlotLine('Tool:', preparingDisplay, width))
   } else if (activity.tool !== undefined && toolDisplay !== undefined) {
-    const prefix = activity.tool.status === 'ok' ? '✓ ' : activity.tool.status === 'error' ? '✗ ' : ''
-    const active = activity.tool.activeSubCalls
-    if (active !== undefined && active.length > 0) {
-      lines.push(toolLineWithActive(prefix, toolDisplay, activity.tool.name, active, width))
-    } else {
-      lines.push(compactSlotLine('Tool:', `${prefix}${toolDisplay}`, width))
-    }
+    // The shared Tool slot: status prefix + presenter-first root display +
+    // active PTC sub-call suffix + width degradation (post-F6 plan §9.2).
+    lines.push(compactToolSlotLine({
+      status: activity.tool.status,
+      display: toolDisplay,
+      rootName: activity.tool.name,
+      ...(activity.tool.activeSubCalls === undefined ? {} : { activeSubCalls: activity.tool.activeSubCalls }),
+      width,
+    }))
   }
   if (activity.message !== undefined) {
     lines.push(...previewTailLines('Message:', activity.message.text, width, FOCUS_MESSAGE_MAX_ROWS))
@@ -318,43 +259,6 @@ export function focusCollapsedBody(
     lines.push(compactSlotLine('Error:', displayFailureText(reason.error), width))
   }
   return lines
-}
-
-/** The compact active-sub-call summary: one running child → `Bash running`;
- * several of the same type → `Bash ×2 running`; mixed types → the first
- * type (durable dispatch order) with its own count plus the remaining
- * running count (`Bash ×2 +1 running`). Titles go through the existing
- * tool-title mapping. */
-function activeSubCallSuffix(active: readonly { name: string; count: number }[]): string {
-  if (active.length === 1) {
-    const { name, count } = active[0]!
-    return `${toolTitle(name)}${count > 1 ? ` ×${count}` : ''} running`
-  }
-  const first = active[0]!
-  const rest = active.slice(1).reduce((sum, entry) => sum + entry.count, 0)
-  const firstCount = first.count > 1 ? ` ×${first.count}` : ''
-  return `${toolTitle(first.name)}${firstCount} +${rest} running`
-}
-
-/** The Tool line with the active-sub-call suffix, using the width-degradation
- * ladder: full root display + suffix → root title + suffix → root title
- * alone (the active child is never silently truncated away by a long root
- * description). */
-function toolLineWithActive(
-  prefix: string,
-  toolDisplay: string,
-  rootName: string,
-  active: readonly { name: string; count: number }[],
-  width: number,
-): string {
-  const suffix = activeSubCallSuffix(active)
-  const lead = `Tool:${' '.repeat(Math.max(0, FOCUS_SLOT_LABEL_WIDTH - visibleWidth('Tool:')))}`
-  const bodyBudget = width - visibleWidth(lead)
-  const full = `${prefix}${toolDisplay} · ${suffix}`
-  if (bodyBudget > 0 && visibleWidth(full) <= bodyBudget) return compactSlotLine('Tool:', full, width)
-  const degraded = `${prefix}${toolTitle(rootName)} · ${suffix}`
-  if (bodyBudget > 0 && visibleWidth(degraded) <= bodyBudget) return compactSlotLine('Tool:', degraded, width)
-  return compactSlotLine('Tool:', `${prefix}${toolTitle(rootName)}`, width)
 }
 
 

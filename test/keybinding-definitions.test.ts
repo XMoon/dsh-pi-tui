@@ -29,6 +29,15 @@ test('every default key is a valid KeyId', () => {
   }
 })
 
+test('the disclosure copy matches the canonical transcript-detail vocabulary (post-F6 plan §5.3)', () => {
+  // Ctrl+O owns the generic transcript disclosure master — never Thinking.
+  assert.equal(APP_KEYBINDINGS['app.transcript.toggleExpand'].description, 'Expand/collapse recent transcript detail')
+  // Alt+T owns the independent Thinking disclosure: detail, not visibility.
+  assert.equal(APP_KEYBINDINGS['app.transcript.toggleThinking'].description, 'Expand/collapse thinking detail')
+  assert.ok(!APP_KEYBINDINGS['app.transcript.toggleThinking'].description.toLowerCase().includes('hide'),
+    'Thinking is disclosure, not hide/show')
+})
+
 test('every definition carries description, category and scope', () => {
   for (const [id, definition] of Object.entries(APP_KEYBINDINGS)) {
     assert.ok(definition.description.length > 0, `"${id}" needs a description`)

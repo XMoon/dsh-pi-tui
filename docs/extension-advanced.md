@@ -192,7 +192,8 @@ ui.host.getTheme()                    // 'dark' | 'light' | 'custom'
 ui.host.setTheme('dark')              // or a registered plugin theme name
 ui.host.setTitle('my title')          // header title override (undefined clears)
 ui.host.setWorkingMessage('working')  // working-indicator label override
-ui.host.setToolsExpanded(true)        // tool-output expansion master switch
+ui.host.setTranscriptDetailExpanded(true) // transcript-detail bulk-expansion master switch
+ui.host.setToolsExpanded(true)        // deprecated alias of setTranscriptDetailExpanded
 ```
 
 - The Host owns persistence and repaint; these are LIVE overrides. Theme
