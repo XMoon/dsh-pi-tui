@@ -129,8 +129,12 @@ projectTranscriptStructure()
   `TranscriptCommandMessage` (upstream `CommandNode` convergence) retires it in
   later work, and any correlation with a domain event must use the explicit
   `sourceEventSeq` rather than the placement turn. A `subagent/descriptor` is
-  NOT this case: it is a durable record appended inside the establishing
-  child's initial turn, so it remains turn-owned Process evidence.
+  likewise NOT Process evidence, for a different reason: it is the CHILD
+  session's identity record (version / mode / provider / label), which a
+  continuable child logs BEFORE its first `turn/start` (upstream asserts
+  `descriptorIndex < turnStartIndex`) — so it owns no model turn to belong to,
+  and it never joins a Work span, an Action or ActionStats. The parent's own
+  genuine `tool/call name=subagent` is the delegation evidence.
 - **Focus occurrence identity ≠ Focus disclosure identity.** One turn can
   materialize SEVERAL Thought runs (a turn-less window entry splits it), each
   with its own hidden rows, Action winner and component. The presentation

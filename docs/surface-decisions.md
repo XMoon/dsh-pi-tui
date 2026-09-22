@@ -506,7 +506,7 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   `N actions`. Tool stays the STRICT underlying semantic — a
   subagent/descriptor or llm/retry row still never counts as a tool — but
   those lifecycle rows DO own the collapsed `Action:` slot and DO count as
-  their own action subtype (`subagent`, `retry`); workflow rows remain
+  their own action subtype (`retry`); workflow rows remain
   neither. The Message/Tool aggregation facts above are the turn-level
   inputs, not the collapsed slot vocabulary — see the collapsed Action slot
   decision below.)
@@ -609,8 +609,9 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   content), and the degradation ladder drops the LAST stat first and keeps
   duration with the identity to the end. The header duration is the span's
   OWN wall clock: the fold records a presentation-only `TranscriptTiming`
-  sidecar (`SessionEvent.time` only) on thinking/tool/retry/delegation rows
-  (a command row is never a span member, so it carries no Activity timing);
+  sidecar (`SessionEvent.time` only) on thinking/tool/retry rows (a command row
+  and a subagent descriptor are never span members, so they carry no Activity
+  timing);
   `summarizeWorkSpan` aggregates earliest-start/latest-end/any-running in its
   existing single walk, running spans re-read `now()` per
   render (the shared repaint heartbeat — no per-card timers), missing
@@ -627,7 +628,7 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   uses `Think:` + `Action:`; Focus additionally keeps `Message:` +
   `Error:`, and BOTH headers say `N actions · subtype ×count`.** `Action` is
   the latest meaningful non-Thinking TURN-OWNED Process evidence: genuine Tool,
-  Preparing, Subagent delegation, Retry, and explicit
+  Preparing, Retry, and explicit
   incomplete-result diagnostics, selected purely by canonical chronology
   (never a per-type priority) among the rows the collapsed surface actually
   hides — Focus derives it from the same transcript rows `projectFocus`
@@ -644,7 +645,7 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   underlying semantic (`Command`, `Retry`, `Subagent` are never Tools). The
   shared `CompactActionStats` cardinality: a genuine tool contributes its
   `callCount`, a subagent/retry occurrence contributes one action of
-  its own subtype (`subagent`, `retry`); an
+  its own subtype (`retry`); an
   orphan result contributes `0 actions` and renders the honest `Unpaired …
   result` diagnostic instead of pretending a missing call existed; a live
   Preparing run temporarily owns the slot but never increments stats (the
@@ -672,7 +673,12 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   (visible, never folded into a turn's Activity, never claimed by the collapsed
   `Action:`). Its `turn` field is a legacy display-placement artifact, not
   semantic ownership; an authoritative `command` transcript kind is deferred
-  follow-up work.
+  follow-up work. A `subagent/descriptor` is likewise never Action/Work
+  evidence: it is the CHILD session's identity record (a continuable child
+  logs it before its first `turn/start`; upstream asserts
+  `descriptorIndex < turnStartIndex`), so it can neither form an Activity nor
+  feed ActionStats. The parent's own genuine `tool/call name=subagent` is the
+  delegation evidence and the Action.
 - **One transcript left edge for container chrome (2026-09-22 v2 addendum
   §28; body-indent supplement).**
   The Focus root, Activity, the pending Activity card and the ambient Context
