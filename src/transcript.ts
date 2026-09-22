@@ -1854,11 +1854,23 @@ export class TranscriptFolder {
   /** Search entries of turn-less rows appended before the first turn: they
    * re-anchor to the first turn value when the turn index is established. */
   private readonly pendingAnchorEntries: number[] = []
+  /** The placement-anchor AUTHORITY for turn-less standalone rows (plan
+   * §8.1/§9): one anchor per command object, written at append time and
+   * re-anchored with the leading prefix. Search navigation, the fast
+   * indexed window's physical ranges and the non-monotonic defensive window
+   * all derive placement from this ONE sidecar — never a semantic `turn` on
+   * the row. */
+  private readonly commandPlacementTurns = new WeakMap<TranscriptCommandMessage, number>()
   /** Manual-compaction correlation legs (post-PR166 plan §7): bounded direct
    * lookups so `command/done.sourceEventSeq` and compaction
    * `sourceCommandId` never scan history. */
   private readonly compactionBySummarySeq = new Map<SessionEventSeq, number>()
   private readonly compactionBySourceCommandId = new Map<CommandId, number>()
+  /** The ESTABLISHED combined owner per command (commandId → the owning
+   * compaction card's raw index): once leg 1 proves the relationship the
+   * ownership is fixed, and the command's settlement refreshes the owner's
+   * search corpus through this relation. */
+  private readonly compactionOwnerByCommandId = new Map<CommandId, number>()
   /** Commands fused into their compaction card: hidden from every visible
    * projection (the card is the one visible owner) while the row itself and
    * its relationship stay inspectable. */
@@ -2393,6 +2405,8 @@ export class TranscriptFolder {
       for (const index of this.pendingAnchorEntries) {
         const entry = this.searchEntries[index]
         if (entry !== undefined) entry.turn = turn
+        const item = this.items[index]
+        if (item !== undefined && item.kind === 'command') this.commandPlacementTurns.set(item, turn)
       }
       this.pendingAnchorEntries.length = 0
     }
@@ -2408,6 +2422,12 @@ export class TranscriptFolder {
     return this.turnValues.length > 0 ? this.turnValues[this.turnValues.length - 1]! : 0
   }
 
+  /** The placement anchor of one turn-less standalone row from the shared
+   * authority sidecar (undefined for turn-owned rows). */
+  private placementAnchorOf(message: TranscriptMessage): number | undefined {
+    return message.kind === 'command' ? this.commandPlacementTurns.get(message) : undefined
+  }
+
   /** Append one folded message, maintaining the window projections. Returns
    * the raw item index (the stable search identity). */
   private appendItem(message: TranscriptMessage): number {
@@ -2419,6 +2439,7 @@ export class TranscriptFolder {
     const corpus = transcriptSearchCorpus(message)
     const ownsTurn = 'turn' in message
     const anchorTurn = ownsTurn ? message.turn : this.placementAnchorTurn()
+    if (!ownsTurn && message.kind === 'command') this.commandPlacementTurns.set(message, anchorTurn)
     this.searchEntries.push({
       turn: anchorTurn,
       normalizedText: corpus.normalizedText,
@@ -4081,7 +4102,22 @@ export class TranscriptFolder {
        const allTurns = [...new Set(full.filter(message => 'turn' in message).map(message => message.turn))]
          .sort((a, b) => a - b)
 
-      const messages = windowMessages(full, maxTurns, options.endTurn)
+       const windowed = windowMessages(full, maxTurns, options.endTurn)
+       // `windowMessages` keeps every TURN-LESS row unconditionally (it has no
+       // folder state). Turn-less standalone rows follow the SHARED placement
+       // authority instead: a command stays in the window only when its anchor's
+       // turn is one of the window's turns, so a corrupt/non-monotonic history
+       // with many commands cannot drag them all into every small window (the
+       // bounded-window and anchored-search contracts, plan §8).
+       const sortedDesc = [...allTurns].sort((a, b) => b - a)
+       const anchorIndex = options.endTurn === undefined ? -1 : sortedDesc.indexOf(options.endTurn)
+       const windowTurnSet = new Set(anchorIndex >= 0
+         ? sortedDesc.slice(anchorIndex, anchorIndex + maxTurns)
+         : sortedDesc.slice(0, maxTurns))
+       const messages = windowed.filter(message => {
+         const anchor = this.placementAnchorOf(message)
+         return anchor === undefined || windowTurnSet.has(anchor)
+       })
        const visibleSet = new Set(messages.filter(message => 'turn' in message).map(message => message.turn))
        const visibleTurnValues = [...visibleSet].sort((a, b) => a - b)
        const firstTurn = visibleTurnValues[0] ?? this.turnValues[range.start]
@@ -4458,23 +4494,33 @@ export class TranscriptFolder {
   }
 
   /**
-   * Fuse one command with its compaction card when — and only when —
-   * authoritative upstream evidence proves the relationship (post-PR166 plan
-   * §7.2): leg 1 is the compaction lifecycle's `sourceCommandId`, leg 2 the
-   * command outcome's `sourceEventSeq` pointing at a `compaction/summary`
-   * event. The decision runs only AFTER the command settled (both legs are
-   * then maximally known) and when both legs are present they must agree; a
-   * contradiction fuses nothing (fail soft, both rows stay standalone). An
-   * already-established fusion is never re-decided or revoked by later
-   * evidence — the fold never guesses a new winner. Fusing hides the
-   * standalone command row (the card becomes the one visible owner) while the
-   * relationship stays inspectable and searchable through the card.
+   * Fuse one command with its compaction card — establishing the ONE
+   * combined manual-compaction owner (post-PR166 plan §7, official
+   * `manual-compaction` node semantics). Leg 1 — the compaction lifecycle's
+   * `sourceCommandId` — is the ownership AUTHORITY: the moment the official
+   * event names the initiating command, the relationship is proven, so the
+   * ownership is established immediately even while the command is still
+   * running (never two visible cards for one manual compaction). Leg 2 — a
+   * settled outcome's `sourceEventSeq` pointing at a `compaction/summary`
+   * event — fuses only when no leg-1 declaration exists, and only when both
+   * legs present must they agree: contradictions (including a leg-2 hit on a
+   * card declaring a DIFFERENT command) fuse nothing, fail soft. An
+   * established ownership is never re-decided or revoked by later evidence —
+   * the fold never guesses a new winner — while the command's settlement
+   * still refreshes the combined owner's search corpus (the command fields
+   * live on the card's entry).
    */
   private fuseCompactionCommand(message: TranscriptCommandMessage, index: number): void {
-    if (this.fusedCommands.has(message)) return
-    if (message.outcome === null) return
+    const ownedBy = this.compactionOwnerByCommandId.get(message.commandId)
+    if (ownedBy !== undefined) {
+      // Established combined owner: a settlement (outcome replaced) refreshes
+      // the owner's corpus — the command name/args/outcome it now carries.
+      this.markSearchEntryDirty(ownedBy)
+      this.markSearchEntryDirty(index)
+      return
+    }
     const byCommandId = this.compactionBySourceCommandId.get(message.commandId)
-    const bySourceEventSeq = message.outcome.kind === 'success' && message.outcome.sourceEventSeq !== undefined
+    const bySourceEventSeq = message.outcome !== null && message.outcome.kind === 'success' && message.outcome.sourceEventSeq !== undefined
       ? this.compactionBySummarySeq.get(message.outcome.sourceEventSeq)
       : undefined
     if (byCommandId !== undefined && bySourceEventSeq !== undefined && byCommandId !== bySourceEventSeq) return
@@ -4489,6 +4535,7 @@ export class TranscriptFolder {
     if (compaction.sourceCommandId !== undefined && compaction.sourceCommandId !== message.commandId) return
     compaction.sourceCommand = message
     this.fusedCommands.add(message)
+    this.compactionOwnerByCommandId.set(message.commandId, target)
     // The card's corpus now carries the command fields and the raw command
     // entry stops producing hits — both entries re-normalize lazily.
     this.markSearchEntryDirty(target)
@@ -5404,6 +5451,12 @@ export class TranscriptFolder {
         }
         const index = this.appendItem(message)
         this.commands.set(event.data.commandId, { index, message })
+        // A compaction card may ALREADY have declared this command id (its
+        // lifecycle events landed while the run fragment was unavailable, or
+        // simply later in the same batch): leg 1 is proven the moment the
+        // declaration exists, so resolve the combined ownership now — even
+        // while the command is still running.
+        this.fuseCompactionCommand(message, index)
         break
       }
       case 'command/done': {

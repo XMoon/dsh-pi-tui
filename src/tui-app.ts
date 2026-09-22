@@ -3312,8 +3312,13 @@ interface MessageComponentEntry {
   tokens?: number
   errorText?: string
   /** Command card facts (kind 'command'): the settled outcome object —
-   * replaced (never mutated) on settlement, so identity is the cache key. */
+   * replaced (never mutated) on settlement, so identity is the cache key.
+   * The compaction card reuses it for its fused command's outcome. */
   commandOutcome?: unknown
+  /** The fused manual-compaction command (kind 'compaction'): the combined
+   * owner appears when the correlation is established — a later fuse or
+   * settlement must rebuild the card. */
+  compactionSourceCommand?: unknown
   /** M7: the renderer that produced this component, when one did (the
    * cache identity — plan §12.1: a renderer HMR/unload must rebuild). */
   rendererId?: string
@@ -14500,6 +14505,11 @@ export class TuiApp {
         entry.tokens = message.tokens
         entry.running = message.running
         entry.errorText = message.error
+        // The combined manual-compaction owner: the fused command (and its
+        // outcome reference) is part of the card's rendered facts, so a fuse
+        // or settlement must rebuild it.
+        entry.compactionSourceCommand = message.sourceCommand
+        entry.commandOutcome = message.sourceCommand?.outcome
         break
     }
   }
@@ -14543,6 +14553,8 @@ export class TuiApp {
         return entry.text !== message.text || entry.items !== message.items
           || entry.tokens !== message.tokens || entry.running !== message.running
           || entry.errorText !== message.error
+          || entry.compactionSourceCommand !== message.sourceCommand
+          || entry.commandOutcome !== message.sourceCommand?.outcome
     }
   }
 
@@ -14901,12 +14913,21 @@ export class TuiApp {
       // running card shows "Compacting context…" until the summary lands.
       // The title icon follows the icon style (hidden under minimal — the
       // text and the error colour carry the state).
+      // A CORRELATED manual compaction is the combined owner of its `/compact`
+      // command (official CompactionCommandCard parity): the command's name
+      // joins the title and its outcome is the presentation fallback — the
+      // command's error text and settlement message must not disappear into
+      // the hidden row.
+      const command = message.sourceCommand
+      const commandName = command?.name === null || command?.name === undefined ? '' : ` /${command.name}`
+      const commandError = command !== undefined && command.outcome?.kind === 'error' ? command.outcome.text : undefined
       const lead = iconLead('compaction', this.iconStyle)
-      const title = message.error !== undefined
-        ? color.error(`${lead}Compaction failed`)
+      const failed = message.error ?? commandError
+      const title = failed !== undefined
+        ? color.error(`${lead}Compaction failed${commandName}`)
         : message.running === true
-          ? color.textMuted(`${lead}Compacting context…`)
-          : color.text(`${lead}Context compacted`)
+          ? color.textMuted(`${lead}Compacting context…${commandName}`)
+          : color.text(`${lead}Context compacted${commandName}`)
       const counts = (message.items > 0 || message.tokens > 0)
         ? `Compacted ${message.items} history item${message.items === 1 ? '' : 's'} (~${message.tokens} tokens)`
         : ''
@@ -14916,13 +14937,18 @@ export class TuiApp {
         if (counts !== '') card.addChild(new Text(color.textDim(counts), 0, 0))
         if (message.text !== '') {
           card.addChild(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS))
-        } else if (message.error !== undefined) {
-          card.addChild(new Text(color.textDim(message.error), 0, 0))
+        } else if (failed !== undefined) {
+          card.addChild(new Text(color.error(failed), 0, 0))
+        }
+        const commandOutcome = command?.outcome?.text
+        if (commandOutcome !== undefined && commandOutcome !== '' && commandOutcome !== failed) {
+          card.addChild(new Text(color.textDim(commandOutcome), 0, 0))
         }
       } else {
-        const summary = counts === '' ? '' : counts
+        const outcomePreview = command?.outcome?.text ?? failed
+        const parts = [counts, outcomePreview].filter(part => part !== '' && part !== undefined)
         card.addChild(new Text(truncateToWidth(
-          color.textDim(`${summary}${summary === '' ? '' : ' '}(${this.expandHint(expandHint)} to expand)`),
+          color.textDim(`${parts.join(' — ')}${parts.length === 0 ? '' : ' '}(${this.expandHint(expandHint)} to expand)`),
           width,
           '…',
         ), 0, 0))
@@ -15000,8 +15026,17 @@ export class TuiApp {
       } else {
         card.addChild(new Text(`${visibleIdentity}${visibleStatus}`, 0, 0))
         if (outcomePreview !== undefined) {
+          // A disclosure hint appears ONLY when content was actually cut
+          // (more lines than the preview, or a width truncation) — a fully
+          // visible one-line outcome stays clean.
+          const truncated = (outcomeText?.includes('\n') === true)
+            || visibleWidth(outcomePreview) > Math.max(0, width - 2)
           const outcomeColor = message.outcome?.kind === 'error' ? color.error : color.textDim
-          card.addChild(new Text(truncateToWidth(`  ${outcomeColor(outcomePreview)}`, width, '…'), 0, 0))
+          card.addChild(new Text(truncateToWidth(
+            `  ${outcomeColor(outcomePreview)}${truncated ? color.textDim(` (${this.expandHint(expandHint)} to expand)`) : ''}`,
+            width,
+            '…',
+          ), 0, 0))
         }
       }
       return card
