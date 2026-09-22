@@ -1121,6 +1121,28 @@ test('caller-provided header and no-match text project to ONE physical row', () 
   const noMatch = panel.render(100).map(strip)
   assertPhysicalRows(noMatch, 100)
   assert.ok(noMatch.some(line => line.includes('nothing here')), `the collapsed no-match text must render:\n${noMatch.join('\n')}`)
+  // Narrow grants: a LONG no-match message is also width-truncated (the
+  // same one-row contract as the refresh-error banner). Only the
+  // no-match rows are asserted — the static hint text's pre-existing
+  // overflow is separate behavior, unchanged by this containment.
+  const longPanel = new TaskBrowserPanel(
+    [],
+    10,
+    { mode: 'full', enableSearch: true, noMatchText: `nothing here${' padding'.repeat(6)}\nend` },
+    () => {},
+    () => {},
+    () => {},
+  )
+  for (const narrowWidth of [20, 30]) {
+    const narrow = longPanel.render(narrowWidth).map(strip)
+    const noMatchRows = narrow.filter(line => line.includes('nothing'))
+    assert.ok(noMatchRows.length >= 1, `width ${narrowWidth}: the truncated no-match row must stay visible:\n${narrow.join('\n')}`)
+    for (const line of noMatchRows) {
+      assert.equal(/[\r\n]/.test(line), false, `width ${narrowWidth}: the no-match row must be one physical row: ${JSON.stringify(line)}`)
+      assert.ok(visibleWidth(line) <= narrowWidth, `width ${narrowWidth}: the no-match row must fit the grant (${visibleWidth(line)} > ${narrowWidth}): ${JSON.stringify(line)}`)
+    }
+  }
+  longPanel.dispose()
   panel.dispose()
 })
 
