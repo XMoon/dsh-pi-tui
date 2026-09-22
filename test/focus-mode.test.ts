@@ -11,7 +11,7 @@ import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
+import { TranscriptFolder, type TranscriptMessage, type TurnActivity } from '../src/transcript.ts'
 import { projectCompact } from '../src/compact-projection.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import {
@@ -22,7 +22,6 @@ import {
 } from '../src/focus.ts'
 import { resolveDisplayPreset, type DisplayState } from '../src/display-preset.ts'
 import {
-  FOCUS_TOOL_SUMMARY_MAX_TYPES,
   FocusActivityComponent,
   focusCollapsedBody,
   focusDisclosureIcon,
@@ -30,12 +29,17 @@ import {
   focusDurationText,
   focusPreparingSummary,
   focusStatusLabel,
-  focusToolStatParts,
   formatFocusDuration,
   formatFocusHeaderLine,
   projectFocus,
   type FocusProjectedBlock,
 } from '../src/focus-activity.ts'
+import { COMPACT_ACTION_SUMMARY_MAX_TYPES, compactActionPresentation, compactActionStatParts, type CompactActionPresentation, type CompactActionStats } from '../src/compact-process-preview.ts'
+
+/** One action-stats literal for header fixtures. */
+function actionStatsOf(total: number, types: Record<string, number> = {}): CompactActionStats {
+  return { total, types: new Map(Object.entries(types)) }
+}
 import { focusToolDisplay, toolPresenterFrom, type ToolPresenter } from '../src/present.ts'
 import { formatTokens, totalTokens } from '../src/token-usage.ts'
 import { FocusTimingStore } from '../src/focus-timing.ts'
@@ -1246,7 +1250,7 @@ test('no usage fact → no token segment (never a fake 0 tok)', () => {
   const activity = folder.turnActivity(0)!
   assert.equal(activity.usage, undefined)
   assert.equal(activity.totalTokens, undefined)
-  const header = formatFocusHeaderLine(activity, false, 'working', '6s', 120)
+  const header = formatFocusHeaderLine(activity, false, 'working', '6s', 120, actionStatsOf(1, { read: 1 }))
   assert.ok(!header.includes('tok'), `no usage → no token segment:\n${header}`)
 })
 
@@ -1281,6 +1285,17 @@ function activityOf(turn: number, events: SessionEvent[]): ReturnType<Transcript
   const folder = new TranscriptFolder()
   applyMixed(folder, events)
   return folder.turnActivity(turn)
+}
+
+/** The collapsed-Focus Action presentation derived through the REAL
+ * production path: `projectFocus` hides the turn's Process rows under the
+ * Thought root and the activity block carries the shared classifier's
+ * latest candidate (addendum v2 §19). */
+function focusActionPresentationOf(folder: TranscriptFolder): CompactActionPresentation | undefined {
+  const block = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+    .find(candidate => candidate.kind === 'activity')
+  if (!(block?.kind === 'activity') || block.action === undefined) return undefined
+  return compactActionPresentation(block.action)
 }
 
 test('formatFocusDuration renders seconds and minutes', () => {
@@ -1337,6 +1352,7 @@ test('FocusActivityComponent reads the live phase without a rebuild and freezes 
     expanded: false,
     now: () => 35_000,
     phase: () => phase,
+    actionStats: actionStatsOf(0),
     timing: new FocusTimingStore(),
   })
   assert.ok(component.render(80).some(line => line.includes('Working 34s')), component.render(80).join('\n'))
@@ -1354,7 +1370,7 @@ test('FocusActivityComponent reads the live phase without a rebuild and freezes 
 test('a completed Focus turn renders Turn complete instead of Thought', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
-  const header = new FocusActivityComponent({ activity: folder.turnActivity(0)!, expanded: false, now: () => 35_000 }).render(80).join('\n')
+  const header = new FocusActivityComponent({ activity: folder.turnActivity(0)!, expanded: false, actionStats: actionStatsOf(2, { read: 2 }), now: () => 35_000 }).render(80).join('\n')
   assert.ok(header.includes('Turn complete 6s'), header)
   assert.ok(!header.includes('Thought'), `the live label must not read Thought: ${header}`)
 })
@@ -1379,7 +1395,7 @@ test('the whale icon encodes ONLY the disclosure state (plan §2/§39)', () => {
     assert.equal(focusDisclosureIcon(true), '🐳', 'expanded is ALWAYS 🐳')
   }
   // The old mixed symbols are gone from the header line.
-  const header = formatFocusHeaderLine(failed!, false, 'idle', '1s', 120)
+  const header = formatFocusHeaderLine(failed!, false, 'idle', '1s', 120, actionStatsOf(0))
   assert.ok(header.includes('🐋 Failed after 1s'), header)
   assert.ok(!header.includes('◐') && !header.includes('▸') && !header.includes('▾') && !header.includes('⚠'), header)
 })
@@ -1392,63 +1408,68 @@ test('the disclosure resolves per icon style and is NEVER hidden under minimal (
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'E', message: 'boom' } } }, 2000, 1),
   ])!
-  assert.equal(formatFocusHeaderLine(failed, false, 'idle', '1s', 120, 'emoji'), '🐋 Failed after 1s')
-  assert.equal(formatFocusHeaderLine(failed, true, 'idle', '1s', 120, 'emoji'), '🐳 Failed after 1s')
-  assert.equal(formatFocusHeaderLine(failed, false, 'idle', '1s', 120, 'symbols'), '▸ Failed after 1s')
-  assert.equal(formatFocusHeaderLine(failed, true, 'idle', '1s', 120, 'symbols'), '▾ Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, false, 'idle', '1s', 120, actionStatsOf(0), 'emoji'), '🐋 Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, true, 'idle', '1s', 120, actionStatsOf(0), 'emoji'), '🐳 Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, false, 'idle', '1s', 120, actionStatsOf(0), 'symbols'), '▸ Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, true, 'idle', '1s', 120, actionStatsOf(0), 'symbols'), '▾ Failed after 1s')
   // Minimal is an interaction affordance, never a decorative icon.
-  assert.equal(formatFocusHeaderLine(failed, false, 'idle', '1s', 120, 'minimal'), '▸ Failed after 1s')
-  assert.equal(formatFocusHeaderLine(failed, true, 'idle', '1s', 120, 'minimal'), '▾ Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, false, 'idle', '1s', 120, actionStatsOf(0), 'minimal'), '▸ Failed after 1s')
+  assert.equal(formatFocusHeaderLine(failed, true, 'idle', '1s', 120, actionStatsOf(0), 'minimal'), '▾ Failed after 1s')
 })
 
-test('tool stats sort count-desc/name-asc, cap at 3 types, +N counts TYPES', () => {
-  const tools = new Map<string, number>([['read', 7], ['search', 4], ['bash', 3], ['grep', 2]])
-  const parts = focusToolStatParts(tools, 16)
-  assert.equal(parts[0], '16 tools')
-  assert.deepEqual(parts.slice(1, 1 + FOCUS_TOOL_SUMMARY_MAX_TYPES), ['read ×7', 'search ×4', 'bash ×3'])
-  assert.equal(parts.at(-1), '+1', 'the +N remainder counts the OTHER types')
-  assert.equal(focusToolStatParts(new Map(), 0).length, 0, 'zero tools → no stats tail')
+test('action stats sort count-desc/name-asc, cap at 3 subtypes, +N counts SUBTYPES', () => {
+  const stats = actionStatsOf(16, { read: 7, search: 4, bash: 3, grep: 2 })
+  const parts = compactActionStatParts(stats)
+  assert.equal(parts[0], '16 actions')
+  assert.deepEqual(parts.slice(1, 1 + COMPACT_ACTION_SUMMARY_MAX_TYPES), ['read ×7', 'search ×4', 'bash ×3'])
+  assert.equal(parts.at(-1), '+1', 'the +N remainder counts the OTHER subtypes, not occurrences')
+  assert.equal(compactActionStatParts(actionStatsOf(0)).length, 0, 'zero actions → no stats tail')
+  assert.equal(compactActionStatParts(actionStatsOf(1, { subagent: 1 }))[0], '1 action', 'singular form')
 })
 
-test('the header drops the token/tool tail progressively on narrow widths (plan §46)', () => {
+test('the header drops the token/action tail progressively on narrow widths (plan §46; addendum v2 §21)', () => {
   const done = activityOf(0, completedTurn(0, 0, 1000))
-  const tools = new Map<string, number>([['read', 7], ['search', 4], ['bash', 3], ['z', 2]])
-  const rich = { ...done!, tools, toolCalls: 16, usage: { inputTokens: 62_000, outputTokens: 800, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 62_800 }
-  const wide = formatFocusHeaderLine(rich, false, 'idle', '6s', 120)
-  assert.ok(wide.includes('🐋 Turn complete 6s · 63k tok · 16 tools · read ×7 · search ×4 · bash ×3 · +1'), wide)
-  const medium = formatFocusHeaderLine(rich, false, 'idle', '6s', 50)
-  assert.ok(medium.includes('· 63k tok · 16 tools') && !medium.includes('read ×7'), `medium drops the types:\n${medium}`)
-  const narrow = formatFocusHeaderLine(rich, false, 'idle', '6s', 30)
+  const stats = actionStatsOf(16, { read: 7, search: 4, bash: 3, z: 2 })
+  const rich = { ...done!, usage: { inputTokens: 62_000, outputTokens: 800, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 62_800 }
+  const wide = formatFocusHeaderLine(rich, false, 'idle', '6s', 120, stats)
+  assert.ok(wide.includes('🐋 Turn complete 6s · 63k tok · 16 actions · read ×7 · search ×4 · bash ×3 · +1'), wide)
+  const medium = formatFocusHeaderLine(rich, false, 'idle', '6s', 50, stats)
+  assert.ok(medium.includes('· 63k tok · 16 actions') && !medium.includes('read ×7'), `medium drops the subtypes:\n${medium}`)
+  const narrow = formatFocusHeaderLine(rich, false, 'idle', '6s', 30, stats)
   assert.equal(narrow, '🐋 Turn complete 6s · 63k tok', `narrow keeps token + label:\n${narrow}`)
-  const tiny = formatFocusHeaderLine(rich, false, 'idle', '6s', 16)
+  const tiny = formatFocusHeaderLine(rich, false, 'idle', '6s', 16, stats)
   assert.ok(visibleWidth(tiny) <= 16, `tiny remains within width:\n${tiny}`)
   assert.ok(tiny.includes('Turn complet'), `tiny keeps the start of the outcome label:\n${tiny}`)
-  const minuscule = formatFocusHeaderLine(rich, false, 'idle', '6s', 4)
+  const minuscule = formatFocusHeaderLine(rich, false, 'idle', '6s', 4, stats)
   assert.ok(visibleWidth(minuscule) <= 4, `hard truncate as the last resort:\n${minuscule}`)
 })
 
 test('the header never wraps: every candidate fits its width', () => {
   const done = activityOf(0, completedTurn(0, 0, 1000))
-  const rich = { ...done!, tools: new Map([['read', 3], ['bash', 2], ['skill', 1]]), toolCalls: 6, usage: { inputTokens: 34_000, outputTokens: 700, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 34_700 }
+  const stats = actionStatsOf(6, { read: 3, bash: 2, skill: 1 })
+  const rich = { ...done!, usage: { inputTokens: 34_000, outputTokens: 700, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 34_700 }
   for (const width of [8, 12, 20, 30, 40, 60, 80, 120]) {
-    const line = formatFocusHeaderLine(rich, false, 'idle', '6s', width)
+    const line = formatFocusHeaderLine(rich, false, 'idle', '6s', width, stats)
     assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)} (${visibleWidth(line)})`)
   }
 })
 
-test('Focus collapsed Preparing temporarily overrides the formal Tool slot', () => {
+test('Focus collapsed Preparing temporarily overrides the formal Action slot', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: 'think' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/foo.ts' }) }, 1002, 2),
-    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'message' } }, 1003, 3),
+    eventAt('tool/result', { turn: 0, step: 0, message: { id: MessageId('r1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId('c1') } } }, 1003, 3),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'message' } }, 1004, 4),
   ])
   const activity = folder.turnActivity(0)!
-  const formal = focusCollapsedBody(activity, 80, '✓ Read src/foo.ts')
-  const preparing = focusCollapsedBody(activity, 80, '✓ Read src/foo.ts', 'Preparing Edit +1')
+  const action = focusActionPresentationOf(folder)
+  assert.equal(action?.kind, 'tool')
+  const formal = focusCollapsedBody(activity, 80, action)
+  const preparing = focusCollapsedBody(activity, 80, action, 'Preparing Edit +1')
   assert.ok(formal.some(line => line.includes('✓ Read src/foo.ts')), formal.join('\n'))
-  assert.ok(preparing.some(line => line.includes('Tool:    Preparing Edit +1')), preparing.join('\n'))
+  assert.ok(preparing.some(line => line.includes('Action:  Preparing Edit +1')), preparing.join('\n'))
   assert.ok(!preparing.some(line => line.includes('Read src/foo.ts')), preparing.join('\n'))
 })
 
@@ -1466,20 +1487,23 @@ test('focusPreparingSummary is deterministic and keeps unknown names generic', (
   assert.deepEqual(previews.map(preview => preview.index), [2, 0, 1])
 })
 
-// The collapsed body preserves its fixed Think → Tool → Message slot order.
-test('the collapsed body renders the three slots in fixed order — Think, Tool, Message (plan §24/§25/§47)', () => {
+// The collapsed body preserves its fixed Think → Action → Message slot order.
+test('the collapsed body renders the slots in fixed order — Think, Action, Message (plan §24/§25/§47)', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: '这应该是 presenter fallback。' } }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '我已经找到 skill 的特殊处理。' } }, 1002, 2),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/present.ts' }) }, 1003, 3),
+    eventAt('tool/result', { turn: 0, step: 0, message: { id: MessageId('r1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId('c1') } } }, 1004, 4),
   ])
   const activity = folder.turnActivity(0)!
-  const body = focusCollapsedBody(activity, 60, focusToolDisplay(activity.tool!, {}))
+  const action = focusActionPresentationOf(folder)
+  assert.equal(action?.kind, 'tool')
+  const body = focusCollapsedBody(activity, 60, action)
   assert.equal(body.length, 3, `exactly the three slots:\n${body.join('\n')}`)
   assert.ok(body[0]!.startsWith('Think:   '), body[0])
-  assert.ok(body[1]!.startsWith('Tool:    '), body[1])
+  assert.ok(body[1]!.startsWith('Action:  '), body[1])
   assert.ok(body[1]!.includes('Read src/present.ts'), body[1])
   assert.ok(body[2]!.startsWith('Message: '), body[2])
   // The labels align at the same column (visible width 9).
@@ -1557,6 +1581,7 @@ test('an unknown active baseline renders Waiting for approval without a fake 0s'
     activity: folder.turnActivity(0)!,
     expanded: false,
     phase: () => 'waiting-approval',
+    actionStats: actionStatsOf(0),
     timing: new FocusTimingStore(),
   })
   const header = component.render(80).join('\n')
@@ -1581,12 +1606,18 @@ test('the Focus Think projection keeps the reasoning tail beyond the old head ca
 // ── PTC active-child projection (supplement plan §5-§6) ─────────────────
 
 /** A run_code turn with the given nested dispatch events folded in. */
-function ptcActivity(events: SessionEvent[]): NonNullable<ReturnType<TranscriptFolder['turnActivity']>> {
-  return activityOf(0, [
+function ptcTurn(events: SessionEvent[]): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: JSON.stringify({ code: 'print(1)', description: 'Inspect project and run tests' }) }, 1001, 1),
     ...events,
-  ])!
+  ])
+  return folder
+}
+
+function ptcActivity(events: SessionEvent[]): NonNullable<ReturnType<TranscriptFolder['turnActivity']>> {
+  return ptcTurn(events).turnActivity(0)!
 }
 
 function dispatchStart(seq: number, subCallId: string, name: string, args: Record<string, unknown>): SessionEvent {
@@ -1611,48 +1642,50 @@ function dispatchSettle(seq: number, subCallId: string, name: string, isError: b
   }, 1_700_000_000_000 + seq, seq)
 }
 
-test('PTC active child: header stats stay 1 tool while the Tool line shows the running child', () => {
-  const activity = ptcActivity([dispatchStart(2, 'code-1:code:1', 'bash', { command: 'run tests', description: 'Run tests' })])
+test('PTC active child: header stats stay 1 tool while the Action line shows the running child', () => {
+  const folder = ptcTurn([dispatchStart(2, 'code-1:code:1', 'bash', { command: 'run tests', description: 'Run tests' })])
+  const activity = folder.turnActivity(0)!
   assert.equal(activity.toolCalls, 1, 'nested dispatch must not count as a model tool call')
   assert.deepEqual([...activity.tools.keys()], ['run_code'], 'the tool stats stay run_code-only')
-  const body = focusCollapsedBody(activity, 80, focusToolDisplay(activity.tool!, {}))
-  const toolLine = body.find(line => line.startsWith('Tool:'))
-  assert.ok(toolLine !== undefined && toolLine.includes('Code'), toolLine)
-  assert.ok(toolLine.includes('Bash running'), `active child suffix:\n${toolLine}`)
+  const body = focusCollapsedBody(activity, 80, focusActionPresentationOf(folder))
+  const actionLine = body.find(line => line.startsWith('Action:'))
+  assert.ok(actionLine !== undefined && actionLine.includes('Code'), actionLine)
+  assert.ok(actionLine.includes('Bash running'), `active child suffix:\n${actionLine}`)
 })
 
 test('PTC active child disappears once the child settles', () => {
-  const activity = ptcActivity([
+  const folder = ptcTurn([
     dispatchStart(2, 'code-1:code:1', 'bash', { command: 'run tests', description: 'Run tests' }),
     dispatchSettle(3, 'code-1:code:1', 'bash', false, '128 passed', { command: 'run tests', description: 'Run tests' }),
   ])
-  const body = focusCollapsedBody(activity, 80, focusToolDisplay(activity.tool!, {}))
-  const toolLine = body.find(line => line.startsWith('Tool:'))
-  assert.ok(toolLine !== undefined)
-  assert.ok(!toolLine.includes('running'), `no active suffix after settle:\n${toolLine}`)
-  assert.ok(toolLine.includes('Code'), toolLine)
+  const activity = folder.turnActivity(0)!
+  const body = focusCollapsedBody(activity, 80, focusActionPresentationOf(folder))
+  const actionLine = body.find(line => line.startsWith('Action:'))
+  assert.ok(actionLine !== undefined)
+  assert.ok(!actionLine.includes('running'), `no active suffix after settle:\n${actionLine}`)
+  assert.ok(actionLine.includes('Code'), actionLine)
 })
 
 test('PTC parallel same-type children aggregate as Bash ×2 running', () => {
-  const activity = ptcActivity([
+  const folder = ptcTurn([
     dispatchStart(2, 'code-1:code:1', 'bash', { command: 'a', description: 'A' }),
     dispatchStart(3, 'code-1:code:2', 'bash', { command: 'b', description: 'B' }),
   ])
-  const body = focusCollapsedBody(activity, 80, focusToolDisplay(activity.tool!, {}))
-  const toolLine = body.find(line => line.startsWith('Tool:'))
-  assert.ok(toolLine !== undefined && toolLine.includes('Bash ×2 running'), toolLine)
+  const body = focusCollapsedBody(folder.turnActivity(0)!, 80, focusActionPresentationOf(folder))
+  const actionLine = body.find(line => line.startsWith('Action:'))
+  assert.ok(actionLine !== undefined && actionLine.includes('Bash ×2 running'), actionLine)
 })
 
 test('PTC mixed parallel children pick the first type stably and show the remainder', () => {
-  const activity = ptcActivity([
+  const folder = ptcTurn([
     dispatchStart(2, 'code-1:code:1', 'bash', { command: 'a', description: 'A' }),
     dispatchStart(3, 'code-1:code:2', 'bash', { command: 'b', description: 'B' }),
     dispatchStart(4, 'code-1:code:3', 'read', { file_path: 'x', offset: 1, limit: 200 }),
   ])
-  const body = focusCollapsedBody(activity, 80, focusToolDisplay(activity.tool!, {}))
-  const toolLine = body.find(line => line.startsWith('Tool:'))
-  assert.ok(toolLine !== undefined && toolLine.includes('Bash ×2 +1 running'), `mixed parallel count:
-${toolLine}`)
+  const body = focusCollapsedBody(folder.turnActivity(0)!, 80, focusActionPresentationOf(folder))
+  const actionLine = body.find(line => line.startsWith('Action:'))
+  assert.ok(actionLine !== undefined && actionLine.includes('Bash ×2 +1 running'), `mixed parallel count:
+${actionLine}`)
 })
 
 test('PTC dispatch start/settle bump the Focus revision without touching tool stats', () => {
@@ -1678,13 +1711,13 @@ test('PTC dispatch start/settle bump the Focus revision without touching tool st
 })
 
 test('PTC child error never marks the root; the outer result decides', () => {
-  const failedChild = ptcActivity([
+  const failedChild = ptcTurn([
     dispatchStart(2, 'code-1:code:1', 'bash', { command: 'boom', description: 'Boom' }),
     dispatchSettle(3, 'code-1:code:1', 'bash', true, 'failed', { command: 'boom', description: 'Boom' }),
   ])
-  const body = focusCollapsedBody(failedChild, 80, focusToolDisplay(failedChild.tool!, {}))
-  const toolLine = body.find(line => line.startsWith('Tool:'))
-  assert.ok(toolLine !== undefined && !toolLine.includes('✗'), `child failure must not mark the root:\n${toolLine}`)
+  const body = focusCollapsedBody(failedChild.turnActivity(0)!, 80, focusActionPresentationOf(failedChild))
+  const actionLine = body.find(line => line.startsWith('Action:'))
+  assert.ok(actionLine !== undefined && !actionLine.includes('✗'), `child failure must not mark the root:\n${actionLine}`)
   // Root success after a failed child: ✓ Code.
   const folder = new TranscriptFolder()
   applyMixed(folder, [
@@ -1702,22 +1735,23 @@ test('PTC child error never marks the root; the outer result decides', () => {
     }, 1004, 4),
   ])
   const settled = folder.turnActivity(0)!
-  const settledBody = focusCollapsedBody(settled, 80, focusToolDisplay(settled.tool!, {}))
-  const settledLine = settledBody.find(line => line.startsWith('Tool:'))
+  const settledBody = focusCollapsedBody(settled, 80, focusActionPresentationOf(folder))
+  const settledLine = settledBody.find(line => line.startsWith('Action:'))
   assert.ok(settledLine !== undefined && settledLine.includes('✓'), `root success wins:\n${settledLine}`)
 })
 
 test('PTC active-child suffix degrades by width instead of being truncated away', () => {
-  const activity = ptcActivity([dispatchStart(2, 'code-1:code:1', 'bash', { command: 'run tests', description: 'Run tests' })])
-  const display = 'Code · Inspect project and run the focused test suite'
+  const folder = ptcTurn([dispatchStart(2, 'code-1:code:1', 'bash', { command: 'run tests', description: 'Run tests' })])
+  const activity = folder.turnActivity(0)!
+  const display = { kind: 'tool' as const, display: 'Code · Inspect project and run the focused test suite', rootName: 'run_code', activeSubCalls: [{ name: 'bash', count: 1 }] }
   const wide = focusCollapsedBody(activity, 100, display)
-  const wideLine = wide.find(line => line.startsWith('Tool:'))
+  const wideLine = wide.find(line => line.startsWith('Action:'))
   assert.ok(wideLine !== undefined && wideLine.includes('Bash running'), `wide keeps the suffix:\n${wideLine}`)
   const narrow = focusCollapsedBody(activity, 30, display)
-  const narrowLine = narrow.find(line => line.startsWith('Tool:'))
+  const narrowLine = narrow.find(line => line.startsWith('Action:'))
   assert.ok(narrowLine !== undefined && narrowLine.includes('Bash running'), `narrow degrades but keeps the suffix:\n${narrowLine}`)
   const tiny = focusCollapsedBody(activity, 12, display)
-  const tinyLine = tiny.find(line => line.startsWith('Tool:'))
+  const tinyLine = tiny.find(line => line.startsWith('Action:'))
   assert.ok(tinyLine !== undefined && visibleWidth(tinyLine) <= 12, `tiny stays in bounds:\n${tinyLine}`)
 })
 
@@ -1731,7 +1765,7 @@ function messageActivity(text: string): ReturnType<TranscriptFolder['turnActivit
   ])
 }
 
-test('the Message slot is the THIRD process slot: Think, Tool, Message', () => {
+test('the Message slot is the THIRD process slot: Think, Action, Message', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
@@ -1740,9 +1774,9 @@ test('the Message slot is the THIRD process slot: Think, Tool, Message', () => {
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'read', arguments: '{}' }, 1003, 3),
   ])
   const activity = folder.turnActivity(0)!
-  const body = focusCollapsedBody(activity, 60, focusToolDisplay(activity.tool!, {}))
+  const body = focusCollapsedBody(activity, 60, focusActionPresentationOf(folder))
   assert.ok(body[0]!.startsWith('Think:   '), body[0])
-  assert.ok(body[1]!.startsWith('Tool:    '), body[1])
+  assert.ok(body[1]!.startsWith('Action:  '), body[1])
   assert.ok(body[2]!.startsWith('Message: '), body[2])
 })
 
@@ -1849,13 +1883,15 @@ test('streaming appends roll the Message tail forward (no scroll index)', () => 
   assert.ok(!after[0]!.includes('first'), `the oldest row rolls out: ${after.join('|')}`)
 })
 
-test('the Tool slot line carries the status prefix: none running, ✓ ok, ✗ error (plan §10)', () => {
-  const running = activityOf(0, [
+test('the Action slot line carries the status prefix: none running, ✓ ok, ✗ error (plan §10)', () => {
+  const runningFolder = new TranscriptFolder()
+  applyMixed(runningFolder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, 1001, 1),
-  ])!
-  const body = focusCollapsedBody(running, 60, focusToolDisplay(running.tool!, {}))
-  assert.ok(body.some(line => line.includes('Tool:    Bash pnpm test')), body.join('|'))
+  ])
+  const running = runningFolder.turnActivity(0)!
+  const body = focusCollapsedBody(running, 60, focusActionPresentationOf(runningFolder))
+  assert.ok(body.some(line => line.includes('Action:  Bash pnpm test')), body.join('|'))
   // Settled ok.
   const ok = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
@@ -1869,7 +1905,7 @@ test('the Tool slot line carries the status prefix: none running, ✓ ok, ✗ er
       },
     }, 1002, 2),
   ])!
-  const okBody = focusCollapsedBody(ok, 60, focusToolDisplay(ok.tool!, {}))
+  const okBody = focusCollapsedBody(ok, 60, { kind: 'tool', status: 'ok', display: 'Bash pnpm test', rootName: 'bash' })
   assert.ok(okBody.some(line => line.includes('✓ Bash pnpm test')), okBody.join('|'))
   // Settled error.
   const err = activityOf(0, [
@@ -1885,7 +1921,7 @@ test('the Tool slot line carries the status prefix: none running, ✓ ok, ✗ er
       error: { code: 'E', message: 'boom' },
     }, 1002, 2),
   ])!
-  const errBody = focusCollapsedBody(err, 60, focusToolDisplay(err.tool!, {}))
+  const errBody = focusCollapsedBody(err, 60, { kind: 'tool', status: 'error', display: 'Bash pnpm test', rootName: 'bash' })
   assert.ok(errBody.some(line => line.includes('✗ Bash pnpm test')), errBody.join('|'))
 })
 
@@ -1908,20 +1944,20 @@ test('Focus Error sanitizes AUTH failure messages', () => {
   assert.ok(!body.some(line => line.includes('secret-provider-credential')), body.join('|'))
 })
 
-test('the component renders an indented muted card and refreshes duration live', () => {
+test('the component renders a flat muted card and refreshes duration live', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
-  const component = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
+  const component = new FocusActivityComponent({ activity, expanded: false, actionStats: actionStatsOf(1, { read: 1 }), now: () => 35000 })
   const lines = component.render(80)
-  assert.ok(lines[0]!.includes('🐋 Turn complete 6s · 1 tool · read ×1'), lines[0])
-  assert.ok(lines[0]!.startsWith('  '), 'the card is indented')
+  assert.ok(lines[0]!.includes('🐋 Turn complete 6s · 1 action · read ×1'), lines[0])
+  assert.ok(!lines[0]!.startsWith('  '), 'the card chrome shares the transcript left edge (addendum v2 §28)')
   // Running turns re-read `now` per render: a later frame shows the new
   // duration (the WorkingIndicator heartbeat drives the repaint).
   const running = activityOf(0, [eventAt('turn/start', { turn: 0 }, 1000, 0)])!
-  const live = new FocusActivityComponent({ activity: running, expanded: false, now: () => 12000 })
+  const live = new FocusActivityComponent({ activity: running, expanded: false, actionStats: actionStatsOf(0), now: () => 12000 })
   assert.ok(live.render(80)[0]!.includes('🐋 Working 11s'))
-  const later = new FocusActivityComponent({ activity: running, expanded: false, now: () => 14000 })
+  const later = new FocusActivityComponent({ activity: running, expanded: false, actionStats: actionStatsOf(0), now: () => 14000 })
   assert.ok(later.render(80)[0]!.includes('🐋 Working 13s'))
 })
 
@@ -1932,7 +1968,7 @@ test('the symbols/minimal disclosure keeps every narrow width inside the termina
   for (const iconStyle of ['symbols', 'minimal'] as const) {
     for (const width of [1, 2, 3, 4, 8]) {
       for (const expanded of [false, true]) {
-        const component = new FocusActivityComponent({ activity, expanded, now: () => 35000, iconStyle })
+        const component = new FocusActivityComponent({ activity, expanded, actionStats: actionStatsOf(0), now: () => 35000, iconStyle })
         for (const line of component.render(width)) {
           assert.ok(visibleWidth(line) <= width, `row wider than ${width} cols under ${iconStyle} (${expanded ? 'expanded' : 'collapsed'}): ${JSON.stringify(line)}`)
         }
@@ -2107,17 +2143,17 @@ test('Focus compact Tool keeps the generic title/rawInput summary for a non-exec
   assert.equal(focusToolDisplay({ name: 'skill', args: '{}' }, { presenter }), 'Load skill session-review')
 })
 
-test('focusCollapsedBody keeps a multiline Tool slot on ONE physical row (ghost-row fix)', () => {
+test('focusCollapsedBody keeps a multiline Action slot on ONE physical row (ghost-row fix)', () => {
   const activity = activityOf(0, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1001, 1),
   ])!
-  const rows = focusCollapsedBody(activity, 100, MULTILINE_BASH_COMMAND)
-  const toolRow = rows.find(row => row.startsWith('Tool:'))
-  assert.ok(toolRow !== undefined, rows.join('|'))
-  assert.equal(toolRow.includes('\n'), false, JSON.stringify(toolRow))
-  assert.equal(toolRow.includes('\r'), false, JSON.stringify(toolRow))
-  assert.ok(visibleWidth(toolRow) <= 100, `${JSON.stringify(toolRow)} (${visibleWidth(toolRow)})`)
+  const rows = focusCollapsedBody(activity, 100, { kind: 'tool', display: MULTILINE_BASH_COMMAND, rootName: 'bash' })
+  const actionRow = rows.find(row => row.startsWith('Action:'))
+  assert.ok(actionRow !== undefined, rows.join('|'))
+  assert.equal(actionRow.includes('\n'), false, JSON.stringify(actionRow))
+  assert.equal(actionRow.includes('\r'), false, JSON.stringify(actionRow))
+  assert.ok(visibleWidth(actionRow) <= 100, `${JSON.stringify(actionRow)} (${visibleWidth(actionRow)})`)
   // Heredoc continuation lines must never surface in the collapsed rows
   // (they are the ghost rows), even though they fit the width.
   assert.equal(rows.some(row => row.includes('p = "src/commands.ts"')), false, rows.join('|'))
@@ -2132,9 +2168,9 @@ test('every compact slot is ONE physical row even with multiline input (ghost-ro
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1003, 3),
     eventAt('turn/end', { turn: 0, reason: { kind: 'error', error: { code: 'E', message: 'first error line\nsecond error line' } } }, 2000, 4),
   ])!
-  const rows = focusCollapsedBody(activity, 80, MULTILINE_BASH_COMMAND)
+  const rows = focusCollapsedBody(activity, 80, { kind: 'tool', display: MULTILINE_BASH_COMMAND, rootName: 'bash' })
   // All four slots render, and every one is a single physical row.
-  for (const label of ['Think:', 'Message:', 'Tool:', 'Error:']) {
+  for (const label of ['Think:', 'Message:', 'Action:', 'Error:']) {
     assert.ok(rows.some(row => row.startsWith(label)), `${label} missing:\n${rows.join('\n')}`)
   }
   for (const row of rows) {
@@ -2152,8 +2188,9 @@ test('FocusActivityComponent.render returns only physical rows for a multiline T
   const component = new FocusActivityComponent({
     activity,
     expanded: false,
+    actionStats: actionStatsOf(1, { bash: 1 }),
+    action: { kind: 'tool', display: MULTILINE_BASH_COMMAND, rootName: 'bash' },
     now: () => 35000,
-    toolDisplay: MULTILINE_BASH_COMMAND,
   })
   const rendered = component.render(120)
   for (const row of rendered) {
@@ -2546,7 +2583,7 @@ test('the Thought component never exceeds the terminal at widths 1-3', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
-  const component = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
+  const component = new FocusActivityComponent({ activity, expanded: false, actionStats: actionStatsOf(0), now: () => 35000 })
   for (const width of [1, 2, 3]) {
     for (const line of component.render(width)) {
       assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)} (${visibleWidth(line)})`)
@@ -2558,8 +2595,8 @@ test('the Thought component never renders a line wider than the terminal', () =>
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
-  const running = new FocusActivityComponent({ activity, expanded: false, now: () => 35000 })
-  const open = new FocusActivityComponent({ activity, expanded: true, now: () => 35000 })
+  const running = new FocusActivityComponent({ activity, expanded: false, actionStats: actionStatsOf(0), now: () => 35000 })
+  const open = new FocusActivityComponent({ activity, expanded: true, actionStats: actionStatsOf(0), now: () => 35000 })
   for (const width of [12, 20, 40, 80]) {
     for (const line of [...running.render(width), ...open.render(width)]) {
       assert.ok(visibleWidth(line) <= width, `line ${JSON.stringify(line)} exceeds width ${width}`)
@@ -4097,4 +4134,191 @@ test('installFocusPrompt tolerates a throwing registration', () => {
   }
   const dispose = installFocusPrompt(agentCtx as never, { preset: 'focus' })
   assert.equal(dispose, undefined)
+})
+
+// ── Collapsed Focus Action slot (post-F6 presentation-convergence addendum v2 §51) ────────
+
+/** The collapsed activity block's Action source derived through the REAL
+ * projection path (`projectFocus` over the folded window). */
+function collapsedFocusActionOf(
+  folder: TranscriptFolder,
+  forcedVisible?: ReadonlySet<TranscriptMessage>,
+): FocusProjectedBlock & { kind: 'activity' } | undefined {
+  const block = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true, forcedVisible)
+    .find(candidate => candidate.kind === 'activity')
+  return block?.kind === 'activity' ? block : undefined
+}
+
+test('collapsed Focus: a subagent-only turn has a meaningful Action body', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('subagent/descriptor', { label: 'Update command runner fixtures', mode: 'task' }, 1001, 1),
+  ])
+  const activity = folder.turnActivity(0)!
+  const block = collapsedFocusActionOf(folder)
+  assert.equal(block?.action?.kind, 'subagent')
+  const body = focusCollapsedBody(activity, 80, block?.action === undefined ? undefined : compactActionPresentation(block.action))
+  assert.ok(body.some(line => line.includes('Action:  Subagent · Update command runner fixtures')), `no empty Thought body:\n${body.join('\n')}`)
+  assert.equal(activity.toolCalls, 0, 'the delegation never counts as a Focus tool')
+})
+
+test('collapsed Focus: a command-only turn renders the settled command Action', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('command/run', { commandId: 'cmd1', name: 'compact' }, 1001, 1),
+    eventAt('command/done', { commandId: 'cmd1', kind: 'success' }, 1002, 2),
+  ])
+  const block = collapsedFocusActionOf(folder)
+  assert.equal(block?.action?.kind, 'command')
+  const body = focusCollapsedBody(folder.turnActivity(0)!, 80, block?.action === undefined ? undefined : compactActionPresentation(block.action))
+  assert.ok(body.some(line => line.includes('Action:  ✓ /compact')), body.join('\n'))
+  assert.equal(folder.turnActivity(0)!.toolCalls, 0)
+})
+
+test('collapsed Focus: a retry-only turn renders the retry Action', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('llm/retry', { turn: 0, step: 0, retry: 2, maxRetries: 6, delayMs: 3_000, failure: { code: 'AUTH' } }, 1001, 1),
+  ])
+  const block = collapsedFocusActionOf(folder)
+  assert.equal(block?.action?.kind, 'retry')
+  const body = focusCollapsedBody(folder.turnActivity(0)!, 80, block?.action === undefined ? undefined : compactActionPresentation(block.action))
+  assert.ok(body.some(line => line.includes('Action:  Retry 2/6 in 3s · authentication failed')), body.join('\n'))
+})
+
+test('collapsed Focus: mixed synthetic chronology selects the latest hidden action', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1001, 1),
+    eventAt('subagent/descriptor', { label: 'scout' }, 1002, 2),
+    eventAt('llm/retry', { turn: 0, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, 1003, 3),
+    eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, 1004, 4),
+    eventAt('command/done', { commandId: 'cmd1', kind: 'success' }, 1005, 5),
+  ])
+  assert.equal(collapsedFocusActionOf(folder)?.action?.kind, 'command', 'chronology wins, no type priority')
+})
+
+test('collapsed Focus: a running question never duplicates itself as the Action', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1001, 1),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('q1'), name: 'ask_user_question', arguments: '{}' }, 1002, 2),
+  ])
+  const block = collapsedFocusActionOf(folder)
+  assert.equal(block?.action?.kind, 'tool', 'the previous genuine tool keeps the slot')
+  assert.equal(block?.action?.message.kind === 'tool' ? block.action.message.name : '', 'read')
+})
+
+test('collapsed Focus: a forced-visible row is never duplicated as the Action', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1001, 1),
+    eventAt('llm/retry', { turn: 0, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, 1002, 2),
+  ])
+  const retryRow = folder.messages().find(message => message.kind === 'system' && message.origin === 'llm-retry')
+  assert.ok(retryRow !== undefined, 'fixture: the retry row exists')
+  // Without the reveal the retry owns the slot…
+  assert.equal(collapsedFocusActionOf(folder)?.action?.kind, 'retry')
+  // …and once the exact row is forced visible outside the Thought it stops
+  // being Action candidate scope (§16: no standalone row + Action duplicate).
+  assert.equal(collapsedFocusActionOf(folder, new Set([retryRow]))?.action?.kind, 'tool')
+})
+
+test('collapsed Focus: the committed-answer boundary keeps the Action on hidden root rows only', () => {
+  const folder = new TranscriptFolder()
+  const initial = steerMessage('focus-initial', 'initial prompt')
+  const steer = steerMessage('focus-steer', 'human steer')
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('step/start', { turn: 0, step: 1 }, 1001, 1),
+    eventAt('user/message', initial, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1003, 3),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: 'committed answer A' } }, 1004, 4),
+    queueSteer(steer, 1005, 5),
+    assistantSettlement(0, 1, 'focus-a', 'committed answer A', 1006, 6, [{ type: 'text', text: 'committed answer A' }], 1004),
+    eventAt('step/end', { turn: 0, step: 1 }, 1007, 7),
+    claimSteer(1008, 8),
+    eventAt('step/start', { turn: 0, step: 2 }, 1009, 9),
+    eventAt('user/message', steer, 1010, 10),
+    eventAt('subagent/descriptor', { label: 'post-steer helper' }, 1011, 11),
+  ])
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  // The committed answer renders OUTSIDE the Thought, in raw order.
+  const answerBlock = blocks.find(block => block.kind === 'message' && block.message.kind === 'assistant')
+  assert.ok(answerBlock !== undefined, 'the committed answer is persistent outside')
+  const activityBlock = blocks.find(block => block.kind === 'activity')
+  assert.ok(activityBlock?.kind === 'activity')
+  // The Action comes from the hidden root rows only: the read (hidden before
+  // the boundary) and the post-steer delegation — chronology picks the
+  // delegation; the committed answer itself is never a candidate.
+  assert.equal(activityBlock.action?.kind, 'subagent')
+  assert.equal(activityBlock.action?.message.kind === 'tool' ? activityBlock.action.message.name : '', 'subagent')
+})
+
+test('expanded Focus carries no Action preview and keeps canonical rows', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, 1001, 1),
+    eventAt('llm/retry', { turn: 0, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, 1002, 2),
+  ])
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const activityBlock = blocks.find(block => block.kind === 'activity')
+  assert.ok(activityBlock?.kind === 'activity')
+  assert.equal(activityBlock.action, undefined, 'expanded Focus needs no Action preview body')
+  // The canonical rows render inside the expanded structure (nested Work),
+  // never replaced by an Action summary row.
+  const rows = blocks.flatMap(block => block.kind === 'work' ? [...block.span.members] : block.kind === 'message' ? [block.message] : [])
+  assert.ok(rows.some(message => message.kind === 'tool' && message.origin === 'subagent-delegation'), 'the delegation card stays canonical')
+  assert.ok(rows.some(message => message.kind === 'system' && message.origin === 'llm-retry'), 'the retry row stays canonical')
+})
+
+// ── Turn-level stats invariants (addendum v2 §18/§42) ────────────────────
+
+test('collapsed Focus: a forced-visible reveal never changes the turn-level action total', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1001, 1),
+    eventAt('llm/retry', { turn: 0, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, 1002, 2),
+  ])
+  const retryRow = folder.messages().find(message => message.kind === 'system' && message.origin === 'llm-retry')
+  assert.ok(retryRow !== undefined, 'fixture: the retry row exists')
+  const base = collapsedFocusActionOf(folder)
+  const revealed = collapsedFocusActionOf(folder, new Set([retryRow]))
+  assert.equal(base?.actionStats.total, 2, 'read + retry')
+  assert.deepEqual(revealed?.actionStats, base?.actionStats,
+    'the temporary reveal is presentation-only and cannot change the header number')
+  // …while the collapsed WINNER does fall back to the still-hidden evidence.
+  assert.equal(base?.action?.kind, 'retry')
+  assert.equal(revealed?.action?.kind, 'tool')
+})
+
+test('Focus action stats stay turn-level when a turn-less entry splits the turn (v2 §18)', () => {
+  const readRow: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' }
+  const retryRow: TranscriptMessage = { kind: 'system', turn: 1, text: 'llm retry 1 in 2s — x', origin: 'llm-retry' }
+  // A turn-less window summary SPLITS turn 1 into two consecutive runs: both
+  // Thought blocks must still report the WHOLE turn's aggregate.
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 1, text: 'go' },
+    readRow,
+    { kind: 'summary', text: '… older' },
+    retryRow,
+  ]
+  const activity = {
+    turn: 1, completed: false, assistantMessages: 0, toolCalls: 1, tools: new Map([['read', 1]]), revision: 1,
+  } as TurnActivity
+  const blocks = projectFocus(messages, new Map([[1, activity]]), new Set(), true)
+  const activityBlocks = blocks.filter((block): block is Extract<FocusProjectedBlock, { kind: 'activity' }> => block.kind === 'activity')
+  assert.equal(activityBlocks.length, 2, 'the turn-less entry splits the turn into two Thought runs')
+  for (const block of activityBlocks) {
+    assert.equal(block.actionStats.total, 2, 'every run reports the whole turn (read + retry), never only its own run')
+    assert.deepEqual([...block.actionStats.types.keys()].sort(), ['read', 'retry'])
+  }
 })

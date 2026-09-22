@@ -250,15 +250,15 @@ test('Compact materializes exactly the canonical Work spans (owner and member id
   assertSameSpans(compact, canonical)
 })
 
-test('a settled interaction is never a Work member, count or Tool preview in any projection', () => {
+test('a settled interaction is never a Work member, count or Action preview in any projection', () => {
   const { messages, rows } = convergenceFixture()
   const structure = projectTranscriptStructure(messages)
   for (const span of workSpansOf(structure)) {
     assert.ok(!span.members.includes(rows.question), 'the settled question never joins a span')
     assert.ok(!span.members.includes(rows.plan), 'the settled Plan review never joins a span')
     const summary = summarizeWorkSpan(span)
-    assert.notEqual(summary.tool?.name, 'ask_user_question')
-    assert.notEqual(summary.tool?.name, 'exit_plan_mode')
+    assert.notEqual(summary.action?.message.kind === 'tool' ? summary.action.message.name : '', 'ask_user_question')
+    assert.notEqual(summary.action?.message.kind === 'tool' ? summary.action.message.name : '', 'exit_plan_mode')
   }
   // The question and plan review are standalone message blocks in raw order.
   const blocks = projectCompact(messages, {
@@ -381,7 +381,7 @@ function show(app: TuiApp, messages: readonly TranscriptMessage[]): void {
   app.setTranscript(messages, new Map())
 }
 
-const workHeader = (view: string): boolean => view.split('\n').some(line => /^\s*[▸▾] (?:🧰 )?Activity(?: | ·|$)/.test(line))
+const workHeader = (view: string): boolean => view.split('\n').some(line => /^\s*[▸▾] Activity(?: | ·|$)/.test(line))
 
 /** A short window that fits one viewport: one Work span, one ambient cluster
  * and a trailing Work span, so surface presentation is directly observable. */
@@ -456,7 +456,7 @@ test('an expanded-Focus search reveals the nested Work without minting a manual 
   await vt.waitForRender()
   const revealed = vt.getViewport().join('\n')
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the nested Work reveal is presentation-only')
-  assert.ok(revealed.includes('▾ 🧰 Activity'), `expanded Focus must reveal the nested Work that hides the matched row:\n${revealed}`)
+  assert.ok(revealed.includes('▾ Activity'), `expanded Focus must reveal the nested Work that hides the matched row:\n${revealed}`)
   assert.equal(app.expandedContextClusterOwnersForTest().size, 0, 'a Process target is never promoted as a cluster owner')
 })
 

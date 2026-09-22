@@ -50,7 +50,6 @@ export type IconSemantic =
   | 'tool-edit'
   | 'tool-code'
   | 'tool-generic'
-  | 'work'
   | 'subagent'
   | 'workflow'
   | 'error'
@@ -82,7 +81,6 @@ export const ALL_ICON_SEMANTICS: readonly IconSemantic[] = [
   'tool-edit',
   'tool-code',
   'tool-generic',
-  'work',
   'subagent',
   'workflow',
   'error',
@@ -120,7 +118,6 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     'tool-edit': '✏️',
     'tool-code': '⚙️',
     'tool-generic': '🛠️',
-    work: '🧰',
     subagent: '🤖',
     workflow: '🧵',
     error: '❌',
@@ -155,9 +152,6 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     'tool-edit': '~',
     'tool-code': '⊞',
     'tool-generic': '∗',
-    // The four-pointed star (U+2726): the Activity identity mark. Verified
-    // by the width gate like every symbols glyph (1 cell, EAW neutral).
-    work: '✦',
     subagent: '⋄',
     workflow: '⇄',
     error: '⨯',
@@ -193,7 +187,6 @@ const ICONS: Record<IconStyle, Record<IconSemantic, string>> = {
     'tool-edit': '',
     'tool-code': '',
     'tool-generic': '',
-    work: '',
     subagent: '',
     workflow: '',
     'slash-command': '',

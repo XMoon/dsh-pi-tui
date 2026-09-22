@@ -500,7 +500,16 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   (reasoning-delta), Message (assistant text), Tool (tool/call — ANY
   name, known or custom). Injected context (skill-invocation,
   skill-catalog, system reminders) and lifecycle events (workflow,
-  subagent/descriptor, llm/retry) never occupy a slot or count as tools.
+  subagent/descriptor, llm/retry) never count as tools.
+  (2026-09-22 presentation-convergence addendum v2: the COLLAPSED
+  presentation vocabulary is `Think:` + `Action:` and both headers say
+  `N actions`. Tool stays the STRICT underlying semantic — a
+  subagent/descriptor or llm/retry row still never counts as a tool — but
+  those lifecycle rows DO own the collapsed `Action:` slot and DO count as
+  their own action subtype (`subagent`, `retry`); workflow rows remain
+  neither. The Message/Tool aggregation facts above are the turn-level
+  inputs, not the collapsed slot vocabulary — see the collapsed Action slot
+  decision below.)
 - **Message candidate/confirmed**: streaming text-delta feeds the
   candidate immediately; a later tool/call, step/start or output confirms
   it as an intermediate message; at turn/end the candidate that IS the
@@ -542,7 +551,7 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   surfaces it through a presentation-only temporary reveal (`projectFocus`
   `forcedVisible`) without opening the Thought or writing a manual owner.
   The durable `steer`/source facts are never rewritten, and injected
-  context still does not occupy Think/Tool/Message slots and never counts
+  context still does not occupy Think/Action/Message slots and never counts
   as a tool.
 - **The foundation is identified by a source-derived `context` marker,
   never by bare `kind: 'system'`**: the fold writes `context: true` only
@@ -567,10 +576,11 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   Conversation/Attention/surfaced-Context/turn boundary ends the run, so
   Assistant intermediate narration stays visible in chronology and the final
   answer keeps its existing ownership.
-- **Collapsed Work = Header + Think + Tool, never Message.** The Think row is
+- **Collapsed Work = Header + Think + Action, never Message.** The Think row is
   the latest reasoning tail (one visual row, following the tail while
-  streaming); the Tool row is the presenter-first semantic display (one visual
-  row). Counts describe the span, not the turn; no fact renders a placeholder
+  streaming); the Action row is the latest meaningful non-Thinking Process
+  evidence (one visual row — see the collapsed Action slot decision below).
+  Counts describe the span, not the turn; no fact renders a placeholder
   row; span-local duration is omitted rather than faked from whole-turn timing.
   Expanding the span re-uses the ordinary message renderers for its members.
 - **The Work header keeps the plain triangle** (`▸`/`▾`, the
@@ -580,16 +590,20 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   `📎` emoji / `⋅` symbols / hidden minimal), so it reads
   `▸ 📎 Context · N injections` under emoji and `▸ Context · N injections` under
   minimal with no dangling separator (`iconLead` supplies each separator only
-  when its glyph exists). Work remains plain `▸`/`▾` through F6; the post-F6
-  Compact UX/identity review decides whether a registry-backed `IconSemantic`
-  `'work'` is added before F7. Both disclosures are click-owned in fullscreen.
-- **Post-F6 (2026-09-21 PR B): the visible container is `Activity`, with a
-  registry-backed identity icon and span-local wall timing.** The user-visible
-  name is `Activity` (🧰 emoji / `✦` symbols / hidden minimal, resolved through
-  `iconFor` like every structural glyph — identity only, never a
-  running/completed state); the internal owner kind stays `work`
-  (`TranscriptWorkSpan`), no internal rename. The collapsed header follows the
-  Focus information hierarchy `<identity> <duration> · <stats>` (duration
+  when its glyph exists). Activity is plain `▸`/`▾` + its name — the 2026-09-22
+  v2 addendum retired the Activity identity icon entirely (see the Activity
+  decision below). Both disclosures are click-owned in fullscreen.
+- **Post-F6 (2026-09-21 PR B; 2026-09-22 v2 addendum): the visible container
+  is `Activity`, with NO identity icon and span-local wall timing.** The
+  user-visible name is `Activity`; the internal owner kind stays `work`
+  (`TranscriptWorkSpan`), no internal rename. Activity is a frequent
+  structural/disclosure container, not a high-priority semantic event, so the
+  2026-09-22 presentation-convergence addendum removed the entire
+  style-resolved identity mark (`🧰` emoji / `✦` symbols / empty minimal, and
+  the `IconSemantic 'work'` registry entry with it): the disclosure marker +
+  the name identify it in every style (`▸ Activity` / `▾ Activity`), and the
+  Context cluster keeps its own identity icon. The collapsed header follows
+  the Focus information hierarchy `<identity> <duration> · <stats>` (duration
   directly beside the identity, never `· 18s`), the `· thinking` marker is
   gone (thinking presence is not a lifecycle state; the Think slot owns the
   content), and the degradation ladder drops the LAST stat first and keeps
@@ -601,12 +615,65 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   render (the shared repaint heartbeat — no per-card timers), missing
   evidence omits the duration (never `0s`), and read grouping never crosses
   a turn boundary so no Activity span ever inherits another turn's count or
-  timing (a group's genuine-call cardinality and wall span stay on the turn
-  that renders the card). The shared Think/Tool/Preparing slot geometry
-  lives in
-  `src/compact-process-preview.ts` (one authority for Focus and Activity);
-  the Think slot shows the LATEST logical line of the bounded reasoning tail
-  in both states (running follows the right edge, settled head-truncates).
+  timing (a group's action cardinality and wall span stay on the turn that
+  renders the card). The shared Think/Action/Preparing slot geometry lives
+  in `src/compact-process-preview.ts` (one authority for Focus and
+  Activity); the Think slot shows the LATEST logical line of the bounded
+  reasoning tail in both states (running follows the right edge, settled
+  head-truncates).
+- **Collapsed Action slot + `actions` header stats (2026-09-22
+  presentation-convergence addendum v2): the collapsed process presentation
+  uses `Think:` + `Action:`; Focus additionally keeps `Message:` +
+  `Error:`, and BOTH headers say `N actions · subtype ×count`.** `Action` is
+  the latest meaningful non-Thinking Process evidence: genuine Tool,
+  Preparing, Subagent delegation, Command, Retry, and explicit
+  incomplete-result diagnostics, selected purely by canonical chronology
+  (never a per-type priority) among the rows the collapsed surface actually
+  hides — Focus derives it from the same transcript rows `projectFocus`
+  hides under the collapsed Thought root (never a second `TurnActivity`
+  chronology store), Activity derives it in `summarizeWorkSpan`'s single
+  member walk. The slot is presentation-only: Tool remains a strict
+  underlying semantic (`Command`, `Retry`, `Subagent` are never Tools). The
+  shared `CompactActionStats` cardinality: a genuine tool contributes its
+  `callCount`, a subagent/command/retry occurrence contributes one action of
+  its own subtype (`subagent`, the durable command name, `retry`); an
+  orphan result contributes `0 actions` and renders the honest `Unpaired …
+  result` diagnostic instead of pretending a missing call existed; a live
+  Preparing run temporarily owns the slot but never increments stats (the
+  formal call counts once when it materializes). Active surfaced
+  interactions (`ask_user_question` / `exit_plan_mode`) remain externally
+  owned, never duplicate themselves in Action and never count. Focus and
+  Activity share ONE classifier, ONE latest-candidate rule, ONE Action
+  formatter and ONE subtype-stat formatter (`compact-process-preview.ts` —
+  count-desc/name-asc, max 3 named subtypes, `+N` counts remaining SUBTYPES),
+  and their component caches key on bounded Action + ActionStats signatures
+  so a synthetic Action repaints even when the turn's tool state is
+  unchanged. Focus stats are TURN-level (projected once from the turn group,
+  unaffected by search reveals); Activity stats are SPAN-level (its own
+  members). Focus keeps its turn-level `tok` segment; Activity
+  intentionally NEVER shows tokens — a span has no trustworthy per-span
+  usage authority, and unknown is omitted, never allocated or estimated.
+  Singleton stats stay visible (`1 action · read ×1`) — no count-sensitive
+  presentation branches. Expanded views keep their canonical full-detail
+  rows; `Action` exists only in collapsed summary presentation and is never
+  a disclosure owner or a search source.
+- **One transcript left edge for container chrome (2026-09-22 v2 addendum
+  §28; body-indent supplement).**
+  The Focus root, Activity, the pending Activity card and the ambient Context
+  cluster render their header/body chrome at the transcript content column
+  with NO decorative two-cell outer indent, so a collapsed container header
+  and its expanded canonical member rows align on one boundary (no
+  collapsed/expanded left-edge inversion). `containerPath` stays semantic
+  ancestry for disclosure/mouse/search/viewport resolution and NEVER controls
+  visual indentation. Genuine internal structure keeps its indentation:
+  Thinking bodies, Tool payload/result insets, PTC child/grandchild trees,
+  assistant/user wrapped continuations and `Message:` continuation rows. The
+  standalone Context cards (notice / relay / recall) apply the same principle
+  one level down, at the card: the header stays at the left edge while the
+  card's own body is indented 2 cells — the structural contract, its width
+  rule and the overflow-safe drop below 3 columns are owned by
+  `docs/transcript-display-disclosure.md` (`Card-internal header→body
+  layout`).
 - **`Ctrl+O` is the ONE regular transcript-detail owner; a disclosure
   CAPABILITY decides what may be collapsed.** On the regular surface the shared
   master (and, when it exists, the effective `app.transcript.toggleExpand` key)
@@ -706,9 +773,10 @@ F4 behavior and documents the guarantees in
   the tool-detail master) and therefore fails open/full with no fold hint. A
   RUNNING interaction remains owned by its panel (QuestionFlow / plan-mode
   approval) with no duplicate surfaced card. The turn's tool count / tool-type
-  stats / Tool slot exclude them, running or settled. Every other tool
-  (todo/goal/subagent/
-  workflow/schedule/cordis/bash/edit/…) stays ordinary Process.
+  stats / collapsed Action slot exclude them, running or settled (the
+  presentation-convergence addendum v2 §43 active-interaction exception).
+  Every other tool (todo/goal/subagent/workflow/schedule/cordis/bash/edit/…)
+  stays ordinary Process.
 
 ## F5 projection convergence (2026-09-21 PR5)
 

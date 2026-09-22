@@ -95,7 +95,10 @@ test('fullscreen Focus: an expanded root wins over an expanded user on Ctrl+O (r
   const view = rows.join('\n')
   assert.equal(rows.filter(row => row.includes('rows compacted')).length, 1, `the user collapses:\n${view}`)
   assert.ok(!view.includes('u-5'), 'the user middle is hidden again')
-  assert.ok(!view.includes('Read a'), 'the Thought root collapses too (Collapse All)')
+  // The expanded tool CARD is gone; the collapsed body legitimately keeps
+  // its one-line `Action:` summary of the same evidence (2026-09-22 v2
+  // addendum), so the assertion targets the card shape, not any trace.
+  assert.ok(!view.includes('Read a [ok]'), `the Thought root collapses too (Collapse All):\n${view}`)
   app.setFullscreen(false)
   app.setFocusMode(false)
   app.stop()

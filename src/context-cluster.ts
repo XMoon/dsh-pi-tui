@@ -16,7 +16,7 @@
  * @module @xmoon76/dsh-pi-tui/context-cluster
  */
 
-import { truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
+import { truncateToWidth, type Component } from '@xmoon76/pi-tui'
 import type { ContextCluster } from './context-presentation.ts'
 import { contextFormOf } from './context-presentation.ts'
 import { iconLead, sectionDisclosureSemantic, type IconStyle } from './icons.ts'
@@ -83,7 +83,9 @@ export function formatContextClusterHeader(
  * The collapsed ambient Context cluster header + structured summary. The
  * summary wraps naturally at the CURRENT width (render-time truncation, never
  * a width-baked one-line string); expanding hides the summary because the
- * member rows follow.
+ * member rows follow. The chrome shares the transcript left edge
+ * (presentation-convergence addendum v2 §33): no outer indent, so the
+ * expanded member rows and the cluster header align on one boundary.
  */
 export class ContextClusterComponent implements Component {
   private readonly cluster: ContextCluster
@@ -99,8 +101,7 @@ export class ContextClusterComponent implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
-    const indent = width >= 4 ? '  ' : ''
-    const contentWidth = Math.max(1, width - visibleWidth(indent))
+    const contentWidth = Math.max(1, width)
     // The header is chrome: truncate it to the CURRENT width at render time
     // (never bake a width), so every returned element stays exactly one
     // physical row even on a very narrow terminal.
@@ -109,10 +110,10 @@ export class ContextClusterComponent implements Component {
       contentWidth,
       '…',
     )
-    const lines = [`${indent}${color.textDim(header)}`]
+    const lines = [color.textDim(header)]
     if (!this.expanded) {
       const summary = contextClusterSummaryParts(this.cluster).join(' · ')
-      if (summary !== '') lines.push(`${indent}${color.textDim(truncateToWidth(summary, contentWidth, '…'))}`)
+      if (summary !== '') lines.push(color.textDim(truncateToWidth(summary, contentWidth, '…')))
     }
     return lines
   }

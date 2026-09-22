@@ -65,7 +65,7 @@ const preparingRows = (view: string): number[] =>
   view.split('\n').flatMap((line, index) => line.includes('Preparing') ? [index] : [])
 
 const workHeaders = (view: string): string[] =>
-  view.split('\n').filter(line => /^\s*(?:▸|▾) (?:🧰 )?Activity(?: | ·|$)/.test(line))
+  view.split('\n').filter(line => /^\s*(?:▸|▾) Activity(?: | ·|$)/.test(line))
 
 // --- S5: Preparing becomes durable ----------------------------------------
 
@@ -87,7 +87,7 @@ test('S5: a durable Process row replaces the ephemeral preview without duplicati
   view = vt.getViewport().join('\n')
   assert.equal(preparingRows(view).length, 0, `the ephemeral evidence is gone:\n${view}`)
   assert.equal(workHeaders(view).length, 1, `one durable Work span remains:\n${view}`)
-  const toolRows = view.split('\n').filter(line => /Tool:\s/.test(line))
+  const toolRows = view.split('\n').filter(line => /Action:\s/.test(line))
   assert.equal(toolRows.length, 1, `exactly one Tool row, never a duplicate:\n${view}`)
   assert.ok(!toolRows[0]!.includes('Preparing'), 'the durable row owns the slot')
 })
@@ -130,7 +130,7 @@ test('S7: multiple previews stay deterministic and never duplicate the pending W
   // ONE pending Work root; the collapsed Tool slot names the deterministic
   // latest meaningful preview, never one row per call.
   assert.equal(workHeaders(view).length, 1, `exactly one pending Work root:\n${view}`)
-  const toolRows = view.split('\n').filter(line => /Tool:\s/.test(line))
+  const toolRows = view.split('\n').filter(line => /Action:\s/.test(line))
   assert.equal(toolRows.length, 1, `the collapsed slot is one row:\n${view}`)
   assert.ok(!view.includes('Preparing Bash'), 'the collapsed slot names the deterministic first known preview')
   assert.match(view, /Preparing Read \+2/)
@@ -233,7 +233,7 @@ test('an expanded trailing run renders the live call once and keeps raw member o
   const view = vt.getViewport().join('\n')
   assert.equal(workHeaders(view).length, 1, `one expanded Work span:\n${view}`)
   assert.equal(preparingRows(view).length, 1, `the live call renders once:\n${view}`)
-  assert.ok(!view.includes('Tool:    Preparing'), 'an expanded span renders the standalone preview, not a Tool slot')
+  assert.ok(!view.includes('Action:  Preparing'), 'an expanded span renders the standalone preview, not a Tool slot')
 
   // Collapsing returns to the Tool-slot presentation with no residue.
   app.toggleWorkSpan(owner)

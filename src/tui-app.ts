@@ -128,7 +128,6 @@ import {
   compactToolPresentation,
   compactToolExpandedLines,
   isCompactActionTool,
-  focusToolDisplay,
   systemContextBody,
   toolCardHeader,
   toolIconSemantic,
@@ -170,7 +169,7 @@ import type { TranscriptWindowState } from './transcript-window.ts'
 import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
 import { createScrollRenderProfiler } from './scroll-render-profile.ts'
 import { FocusActivityComponent, isCollapsedFocusHiddenRow, projectFocus, type FocusProjectedBlock } from './focus-activity.ts'
-import { compactPreparingSummary } from './compact-process-preview.ts'
+import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation, type CompactActionSource, type CompactActionStats } from './compact-process-preview.ts'
 import { projectCompact } from './compact-projection.ts'
 import { clusterByMemberOf, isTranscriptWorkMember, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './transcript-projection.ts'
 import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './transcript-disclosure.ts'
@@ -4138,7 +4137,9 @@ export class TuiApp {
   private turnActivities: ReadonlyMap<number, TurnActivity> = new Map()
   /** The FocusActivityComponent cache, keyed by turn: rebuilds on the
    * activity revision, the expansion state, the theme revision, the icon
-   * style, or the precomputed Tool display (plan §39 + §34.9). render()
+   * style, the bounded Action signature, or the live Preparing summary
+   * (plan §39 + §34.9; addendum v2 §39 — synthetic Action changes
+   * must repaint even when `TurnActivity.tool` did not move). render()
    * still re-reads Date.now() per frame, so the running duration refreshes
    * on the WorkingIndicator's repaint heartbeat. */
   private readonly focusActivityComponents = new Map<number, {
@@ -4149,7 +4150,8 @@ export class TuiApp {
     expanded: boolean
     themeRev: number
     iconStyle: IconStyle
-    toolDisplay?: string
+    actionSignature: string
+    statsSignature: string
     preparingSummary?: string
   }>()
   /** The parent session's expansion set while the subagent viewer covers
@@ -9387,34 +9389,45 @@ export class TuiApp {
     return new Text(lines.join('\n'), 0, 0)
   }
 
-  /** The precomputed Focus Tool-line display for one activity: presenter-
-   * first, static fallback second (plan §38/§9.4). The FocusActivityComponent
-   * stays a pure renderer — the presentation bridge lives here. */
-  private focusToolDisplayFor(activity: TurnActivity): string | undefined {
-    const tool = activity.tool
-    if (tool === undefined) return undefined
-    return focusToolDisplay(tool, { presenter: this.present, cwd: this.workspaceRoot })
+  /** The presenter bridge for one collapsed Action source
+   * (presentation-convergence addendum v2 §35): a genuine tool keeps the
+   * presenter-first display (`focusToolDisplay`, static fallback second —
+   * plan §38/§9.4); the synthetic kinds use the shared pure Action labels
+   * and never route through the ToolPresenter registry as fake tools. Focus
+   * and Activity consume this ONE bridge — no divergent focus/activity
+   * action paths. */
+  private compactActionPresentationFor(action: CompactActionSource | undefined): CompactActionPresentation | undefined {
+    return action === undefined
+      ? undefined
+      : compactActionPresentation(action, { presenter: this.present, cwd: this.workspaceRoot })
   }
 
   /** Get (or rebuild) the FocusActivityComponent for one turn: rebuilds
    * when the activity OBJECT changed (session/viewer switches mint fresh
    * folder objects, so the same turn number from another session can
    * never reuse this one's component), the activity revision moved, the
-   * disclosure flipped, the theme switched, the precomputed Tool display
-   * changed, or the live Preparing summary changed (plan §39). render()
-   * re-reads Date.now() every frame, so the running duration is always live. */
+   * disclosure flipped, the theme switched, the effective Action
+   * presentation/stats changed, or the live Preparing summary changed
+   * (plan §39; addendum v2 §39 — a subagent/command/retry landing moves
+   * NEITHER `TurnActivity.tool` NOR the usage facts, so the bounded Action
+   * + ActionStats signatures are mandatory cache keys). render() re-reads
+   * Date.now() every frame, so the running duration is always live. */
   private focusActivityComponentFor(
     activity: TurnActivity,
     expanded: boolean,
-    toolDisplay: string | undefined,
+    action: CompactActionPresentation | undefined,
+    actionStats: CompactActionStats,
     preparingSummary: string | undefined,
   ): FocusActivityComponent {
+    const actionSignature = compactActionSignature(action)
+    const statsSignature = compactActionStatsSignature(actionStats)
     const entry = this.focusActivityComponents.get(activity.turn)
     if (entry !== undefined && entry.activity === activity
       && entry.revision === activity.revision
       && entry.expanded === expanded && entry.themeRev === this.themeRevision
       && entry.iconStyle === this.iconStyle
-      && entry.toolDisplay === toolDisplay
+      && entry.actionSignature === actionSignature
+      && entry.statsSignature === statsSignature
       && entry.preparingSummary === preparingSummary) {
       return entry.component
     }
@@ -9425,7 +9438,8 @@ export class TuiApp {
       // an approval/question opens without a component rebuild, so a baked
       // phase would strand the header on `Working` (plan §5.5).
       phase: () => this.statusStore.snapshot().activity.phase,
-      toolDisplay,
+      ...(action === undefined ? {} : { action }),
+      actionStats,
       iconStyle: this.iconStyle,
       preparingSummary,
       timing: this.focusTiming,
@@ -9437,7 +9451,8 @@ export class TuiApp {
       expanded,
       themeRev: this.themeRevision,
       iconStyle: this.iconStyle,
-      toolDisplay,
+      actionSignature,
+      statsSignature,
       preparingSummary,
     })
     return component
@@ -9454,28 +9469,28 @@ export class TuiApp {
   /** The content signature of one Work card: everything the collapsed header
    * and previews render from. Member topology is compared separately (a
    * boundary change is structural); this only decides content refresh. The
-   * active PTC child topology AND the span timing are part of the signature
-   * (post-F6 plan §9.4): a nested child starting/stopping or a corrected
-   * durable timing (a same-step replacement with identical text) must
-   * refresh the collapsed Activity even when nothing else changes. All
-   * inputs stay bounded — the Think text is the span's bounded tail, never
-   * the raw body (post-F6 plan §20). Takes the ALREADY-SUMMARIZED span so
-   * one Activity refresh walks its members exactly once. */
+   * effective Action signature AND the span timing are part of the
+   * signature (post-F6 plan §9.4; addendum v2 §40): a nested
+   * child starting/stopping, a corrected durable timing (a same-step
+   * replacement with identical text), or a NEW synthetic Action (a
+   * subagent/command/retry landing) must refresh the collapsed Activity
+   * even when nothing else changes. All inputs stay bounded — the Think
+   * text is the span's bounded tail and the Action signature is the same
+   * one-line presentation the slot renders, never a raw payload (post-F6
+   * plan §20). Takes the ALREADY-SUMMARIZED span so one Activity refresh
+   * walks its members exactly once. */
   private compactWorkSignature(
     summary: CompactWorkSummary,
-    toolDisplay: string | undefined,
+    action: CompactActionPresentation | undefined,
     preparingSummary: string | undefined,
   ): string {
     const timing = summary.timing
     return [
-      summary.toolCount,
-      summary.subagentCount,
+      compactActionStatsSignature(summary.actionStats),
       summary.think?.text ?? '',
       summary.think?.running === true ? '1' : '0',
-      summary.tool?.status ?? '',
-      toolDisplay ?? '',
+      compactActionSignature(action),
       preparingSummary ?? '',
-      (summary.activeSubCalls ?? []).map(call => `${call.name}:${call.count}`).join('|'),
       timing === undefined ? '' : `${timing.startedAt}\u0000${timing.endedAt ?? ''}\u0000${timing.running ? '1' : '0'}`,
     ].join('\u0000')
   }
@@ -9484,19 +9499,17 @@ export class TuiApp {
    * is the cache key (stable across content updates and rebuilds); the
    * signature covers the span-local facts the card renders. The live
    * Preparing summary arrives from the BLOCK (only the newest span of a turn
-   * carries it) and is consumed by a collapsed span's Tool slot. The span is
-   * summarized ONCE and the summary feeds both the signature and the
-   * component (never a second member walk). */
+   * carries it) and is consumed by a collapsed span's Action slot. The span
+   * is summarized ONCE and the summary feeds the signature, the shared
+   * Action bridge and the component (never a second member walk). */
   private compactWorkComponentFor(span: TranscriptWorkSpan, blockPreparingSummary: string | undefined): CompactWorkComponent {
     const expanded = this.workSpanExpanded(span)
     const summary = summarizeWorkSpan(span)
-    const toolDisplay = summary.tool === undefined
-      ? undefined
-      : focusToolDisplay(summary.tool, { presenter: this.present, cwd: this.workspaceRoot })
+    const action = this.compactActionPresentationFor(summary.action)
     // An EXPANDED span renders the standalone Preparing preview block instead
-    // of the Tool slot, so the block's summary never reaches its card.
+    // of the Action slot, so the block's summary never reaches its card.
     const preparingSummary = expanded ? undefined : blockPreparingSummary
-    const signature = this.compactWorkSignature(summary, toolDisplay, preparingSummary)
+    const signature = this.compactWorkSignature(summary, action, preparingSummary)
     const entry = this.workComponents.get(span.owner)
     if (entry !== undefined && sameWorkSpanShape(entry.span, span)
       && entry.expanded === expanded && entry.themeRev === this.themeRevision
@@ -9507,7 +9520,7 @@ export class TuiApp {
       span,
       expanded,
       summary,
-      ...(toolDisplay === undefined ? {} : { toolDisplay }),
+      ...(action === undefined ? {} : { action }),
       ...(preparingSummary === undefined ? {} : { preparingSummary }),
       iconStyle: this.iconStyle,
     })
@@ -9565,7 +9578,8 @@ export class TuiApp {
       return this.focusActivityComponentFor(
         block.activity,
         projectionExpanded.has(block.activity.turn),
-        this.focusToolDisplayFor(block.activity),
+        this.compactActionPresentationFor(block.action),
+        block.actionStats,
         isFocusDisplayPreset(this.displayState.preset) && !projectionExpanded.has(block.activity.turn)
           ? compactPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
           : undefined,

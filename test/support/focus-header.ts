@@ -18,14 +18,14 @@
  * line-start anchor excludes those look-alikes. */
 const HEADER_LABEL = 'Work|Wait|Turn c|Compl|Fail|Interr|Block|Max'
 
-/** The plain Activity container header (`▸ 🧰 Activity`, `▸ 🧰 Activity 8s ·
- * 2 tools`; the icon is style-dependent: `✦` under symbols, hidden under
- * minimal) reuses the same section triangle as a Focus disclosure header, so
- * the label stem alone would misclassify it. Exclude the Activity header
+/** The plain Activity container header (`▸ Activity`, `▸ Activity 8s ·
+ * 2 actions · …`; no identity icon in any style since the 2026-09-22 v2
+ * addendum) reuses the same section triangle as a Focus disclosure header,
+ * so the label stem alone would misclassify it. Exclude the Activity header
  * SHAPE explicitly instead of relying on a brittle lookahead on the label
  * stem (post-F6 plan §6: the visible container is `Activity`; the internal
  * owner kind stays `work`). */
-const WORK_CONTAINER_HEADER = /^\s*[▸▾] (?:🧰 |✦ )?Activity(?:\s*(?:\S.*|…+|\.\.\.))?\s*$/u
+const WORK_CONTAINER_HEADER = /^\s*[▸▾] Activity(?:\s*(?:\S.*|…|\.\.\.)?)?\s*$/u
 
 function headerPattern(expanded: boolean | undefined): RegExp {
   const collapsed = '(?:🐋|▸)'

@@ -2,7 +2,9 @@
  * Post-F6 PR B Activity span semantics: origin-aware tool/subagent counts
  * (§10), active PTC child parity (§9.4) and span-local wall-clock timing
  * (§12) over TranscriptFolder folds, including live/cold parity, grouped
- * reads and the Preparing → durable elapsed continuity.
+ * reads and the Preparing → durable elapsed continuity. The post-F6
+ * presentation-convergence addendum v2 adds the collapsed Action slot coverage: synthetic
+ * rows own the slot by chronology without ever counting as tools.
  * @module @xmoon76/dsh-pi-tui/compact-work-timing.test
  */
 
@@ -11,7 +13,21 @@ import { test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptTimingOf } from '../src/transcript.ts'
-import { summarizeWorkSpan, formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../src/compact-work.ts'
+import { summarizeWorkSpan, formatWorkHeaderLine, compactWorkBody, CompactWorkComponent, type CompactWorkSummary } from '../src/compact-work.ts'
+import { compactActionPresentation } from '../src/compact-process-preview.ts'
+
+/** The summary's action stats as a plain record, for exact assertions. */
+function statsOf(summary: CompactWorkSummary): { total: number; types: Record<string, number> } {
+  const types: Record<string, number> = {}
+  for (const [name, count] of summary.actionStats.types) types[name] = count
+  return { total: summary.actionStats.total, types }
+}
+
+/** The GENUINE tool action types (every non-synthetic subtype) — the
+ * per-name counts that must equal the Focus header's `activity.tools`. */
+function genuineToolTypes(summary: CompactWorkSummary): Map<string, number> {
+  return new Map([...summary.actionStats.types].filter(([name]) => name !== 'subagent' && name !== 'retry' && !name.startsWith('/')))
+}
 import type { TranscriptWorkSpan } from '../src/transcript-projection.ts'
 import { projectTranscriptStructure } from '../src/transcript-projection.ts'
 
@@ -58,11 +74,10 @@ test('stats: two genuine model tool calls read `2 tools` (no synthetic inflation
   ])
   const span = spansOf(folder.messages())[0]!
   const summary = summarizeWorkSpan(span)
-  assert.equal(summary.toolCount, 2)
-  assert.equal(summary.subagentCount, 0)
+  assert.deepEqual(statsOf(summary), { total: 2, types: { read: 1, bash: 1 } })
 })
 
-test('stats: a subagent delegation counts ONLY as a subagent, never as a tool', () => {
+test('stats: a subagent delegation counts ONLY as its own action subtype, never as a tool', () => {
   const folder = fold([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall(1, 'c1', 'read', T0 + 100, 1),
@@ -71,9 +86,8 @@ test('stats: a subagent delegation counts ONLY as a subagent, never as a tool', 
   ])
   const span = spansOf(folder.messages())[0]!
   const summary = summarizeWorkSpan(span)
-  assert.equal(summary.toolCount, 1, 'the delegation does not inflate tools')
-  assert.equal(summary.subagentCount, 1)
-  assert.match(formatWorkHeaderLine(summary, false, 120), /1 tool · 1 subagent/)
+  assert.deepEqual(statsOf(summary), { total: 2, types: { read: 1, subagent: 1 } }, 'the delegation never counts as a read')
+  assert.match(formatWorkHeaderLine(summary, false, 120), /2 actions · read ×1 · subagent ×1/)
 })
 
 test('stats: a command-only Activity has no fake `1 tool`', () => {
@@ -84,10 +98,9 @@ test('stats: a command-only Activity has no fake `1 tool`', () => {
   ])
   const span = spansOf(folder.messages())[0]!
   const summary = summarizeWorkSpan(span)
-  assert.equal(summary.toolCount, 0)
-  assert.equal(summary.subagentCount, 0)
+  assert.deepEqual(statsOf(summary), { total: 1, types: { '/theme': 1 } }, 'the command counts as its own action subtype')
   const header = formatWorkHeaderLine(summary, false, 120)
-  assert.ok(!header.includes('tool'), `no fake tool stat:\n${header}`)
+  assert.match(header, /1 action · \/theme ×1/, `the command name is the subtype:\n${header}`)
 })
 
 test('stats: turn-error synthetic cards are attention rows and never enter a span count', () => {
@@ -99,7 +112,7 @@ test('stats: turn-error synthetic cards are attention rows and never enter a spa
   ])
   const span = spansOf(folder.messages())[0]!
   const summary = summarizeWorkSpan(span)
-  assert.equal(summary.toolCount, 1, 'only the genuine call counts')
+  assert.equal(summary.actionStats.total, 1, 'only the genuine call counts')
   assert.ok(!span.members.some(member => member.kind === 'tool' && member.origin === 'turn-error'),
     'the synthetic error card is not a Work member')
 })
@@ -115,10 +128,10 @@ test('stats: Focus toolCalls and the Activity toolCount agree on genuine calls',
   ])
   const span = spansOf(folder.messages())[0]!
   const activity = folder.turnActivities().get(1)
-  assert.equal(summarizeWorkSpan(span).toolCount, activity?.toolCalls)
+  assert.deepEqual(genuineToolTypes(summarizeWorkSpan(span)), activity?.tools, 'genuine per-type actions match the Focus tool stats')
 })
 
-test('active PTC children: the Activity summary carries the same active child state as Focus', () => {
+test('active PTC children: the Action presentation carries the same active child state as Focus', () => {
   const folder = new TranscriptFolder()
   folder.hydrate([
     eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -127,14 +140,18 @@ test('active PTC children: the Activity summary carries the same active child st
   folder.apply([eventAt('tool/ptc-dispatch-start', {
     rootCallId: ToolCallId('root1'), parentCallId: ToolCallId('root1'), subCallId: 's1', name: 'bash', arguments: {},
   }, T0 + 150, 2)])
-  const running = summarizeWorkSpan(spansOf(folder.messages())[0]!)
-  assert.deepEqual(running.activeSubCalls, [{ name: 'bash', count: 1 }], 'a running child shows in the Activity summary')
+  const runningSummary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  assert.equal(runningSummary.action?.kind, 'tool')
+  const running = runningSummary.action === undefined ? undefined : compactActionPresentation(runningSummary.action)
+  assert.deepEqual(running?.activeSubCalls, [{ name: 'bash', count: 1 }], 'a running child shows in the Action presentation')
+  assert.match(compactWorkBody(runningSummary, 80, running).join('\n'), /Action:\s+Code.* · Bash running/)
   folder.apply([eventAt('tool/ptc-dispatch', {
     rootCallId: ToolCallId('root1'), parentCallId: ToolCallId('root1'), subCallId: 's1', name: 'bash', arguments: {}, isError: false,
     content: [{ type: 'text', text: 'done' }],
   }, T0 + 900, 3)])
-  const settled = summarizeWorkSpan(spansOf(folder.messages())[0]!)
-  assert.equal(settled.activeSubCalls, undefined, 'a settled child drops the suffix')
+  const settledSummary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  const settled = settledSummary.action === undefined ? undefined : compactActionPresentation(settledSummary.action)
+  assert.equal(settled?.activeSubCalls, undefined, 'a settled child drops the suffix')
 })
 
 test('timing: a Thinking → Tool Activity uses its own wall span', () => {
@@ -177,7 +194,7 @@ test('timing: a Thinking → Tool Activity uses its own wall span', () => {
   // The span's latest owned end is the tool result.
   assert.equal(summary.timing?.endedAt, T0 + 6_000, 'the span ends at the latest owned Process evidence')
   assert.equal(summary.timing?.running, false)
-  assert.match(formatWorkHeaderLine(summary, false, 120, 'emoji', '5s'), /Activity 5s · 1 tool/)
+  assert.match(formatWorkHeaderLine(summary, false, 120, 'emoji', '5s'), /Activity 5s · 1 action · read ×1/)
 })
 
 test('timing: overlapping evidence uses the wall span, never the summed durations', () => {
@@ -202,13 +219,14 @@ test('timing: a running Tool shows a live duration that follows now', () => {
   const summary = summarizeWorkSpan(span)
   assert.equal(summary.timing?.running, true)
   let now = T0 + 4_000
-  const component = new CompactWorkComponent({ span, expanded: false, toolDisplay: 'Bash x', now: () => now })
+  const component = new CompactWorkComponent({ span, expanded: false, action: { kind: 'tool', display: 'Bash x', rootName: 'bash' }, now: () => now })
   const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
   assert.match(line, /Activity 3s/, `the running header reads now at render:\n${line}`)
   now = T0 + 6_500
   const line2 = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
   assert.match(line2, /Activity 5s/, 'the duration advances with the repaint heartbeat')
-  assert.equal(summary.tool?.status, 'running')
+  assert.equal(summary.action?.kind, 'tool')
+  assert.equal(summary.action?.message.status, 'running')
 })
 
 test('timing: a settled Activity duration stops changing', () => {
@@ -218,7 +236,7 @@ test('timing: a settled Activity duration stops changing', () => {
     toolResultEvent(1, 'c1', T0 + 4_000, 2),
   ])
   const span = spansOf(folder.messages())[0]!
-  const component = new CompactWorkComponent({ span, expanded: false, toolDisplay: 'Read a.ts', now: () => T0 + 999_999 })
+  const component = new CompactWorkComponent({ span, expanded: false, action: { kind: 'tool', status: 'ok', display: 'Read a.ts', rootName: 'read' }, now: () => T0 + 999_999 })
   const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '')
   assert.match(strip(component.render(120)[0] ?? ''), /Activity 3s/)
   assert.ok(!strip(component.render(120)[0] ?? '').includes('996s'), 'settled does not read now')
@@ -279,34 +297,107 @@ test('timing: grouped reads aggregate their members within one turn', () => {
   const span = spansOf(folder.messages())[0]!
   const summary = summarizeWorkSpan(span)
   // §10.2: the merged group is ONE displayed card but still TWO genuine
-  // model tool calls — the same counting unit as the Focus header.
-  assert.equal(summary.toolCount, 2, 'a merged read group keeps its genuine call cardinality')
+  // model tool actions — the same counting unit as the Focus header.
+  assert.equal(summary.actionStats.types.get('read'), 2, 'a merged read group keeps its genuine call cardinality')
   assert.equal(folder.turnActivities().get(1)?.toolCalls, 2)
-  assert.equal(summary.toolCount, folder.turnActivities().get(1)?.toolCalls, 'Focus and Activity agree on genuine calls')
+  assert.deepEqual(genuineToolTypes(summary), folder.turnActivities().get(1)?.tools, 'Focus and Activity agree on genuine calls')
   assert.equal(summary.timing?.startedAt, T0 + 1_000, 'the group aggregates its members')
   assert.equal(summary.timing?.endedAt, T0 + 4_000)
 })
 
-test('stats: synthetic command and delegation rows never own the Tool slot', () => {
+test('action slot: synthetic command and delegation rows own the Action without ever counting as tools', () => {
   const commandFolder = fold([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, T0 + 100, 1),
     eventAt('command/done', { commandId: 'cmd1', kind: 'success', text: 'theme set' }, T0 + 300, 2),
   ])
   const commandSummary = summarizeWorkSpan(spansOf(commandFolder.messages())[0]!)
-  assert.equal(commandSummary.toolCount, 0)
-  assert.equal(commandSummary.tool, undefined, 'a command row never owns the Tool slot')
-  assert.deepEqual(compactWorkBody(commandSummary, 80), [], 'a command-only Activity renders no Tool row')
+  assert.equal(commandSummary.actionStats.total, 1)
+  assert.equal(commandSummary.action?.kind, 'command', 'a command-only Activity owns the Action slot')
+  const commandBody = compactWorkBody(commandSummary, 80, compactActionPresentation(commandSummary.action!))
+  assert.match(commandBody.join('\n'), /Action:\s+✓ \/theme/, `the command-only body is meaningful:\n${commandBody.join('\n')}`)
+  assert.ok(!formatWorkHeaderLine(commandSummary, false, 120).includes('tool'), 'no `1 tool` stat is invented')
 
   const delegationFolder = fold([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, T0 + 100, 1),
   ])
   const delegationSummary = summarizeWorkSpan(spansOf(delegationFolder.messages())[0]!)
-  assert.equal(delegationSummary.toolCount, 0)
-  assert.equal(delegationSummary.subagentCount, 1)
-  assert.equal(delegationSummary.tool, undefined, 'a delegation row never owns the Tool slot')
-  assert.deepEqual(compactWorkBody(delegationSummary, 80), [], 'a delegation-only Activity renders no Tool row')
+  assert.deepEqual(statsOf(delegationSummary), { total: 1, types: { subagent: 1 } })
+  assert.equal(delegationSummary.action?.kind, 'subagent', 'a delegation-only Activity owns the Action slot')
+  const delegationBody = compactWorkBody(delegationSummary, 80, compactActionPresentation(delegationSummary.action!))
+  assert.match(delegationBody.join('\n'), /Action:\s+Subagent · scout/, `the delegation-only body is meaningful:\n${delegationBody.join('\n')}`)
+  assert.match(formatWorkHeaderLine(delegationSummary, false, 120), /1 action · subagent ×1/, 'the header count remains `subagent ×1`')
+})
+
+test('action slot: a failed command keeps its honest ✗ prefix', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('command/run', { commandId: 'cmd1', name: 'foo' }, T0 + 100, 1),
+    eventAt('command/done', { commandId: 'cmd1', kind: 'error', text: 'unknown command' }, T0 + 300, 2),
+  ])
+  const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  assert.equal(summary.action?.kind, 'command')
+  const body = compactWorkBody(summary, 80, compactActionPresentation(summary.action!))
+  assert.match(body.join('\n'), /Action:\s+✗ \/foo/, body.join('\n'))
+})
+
+test('action slot: a retry-only Activity owns the Action with its own subtype stat', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('llm/retry', { turn: 1, step: 0, retry: 2, maxRetries: 6, delayMs: 3_000, failure: { code: 'AUTH' } }, T0 + 100, 1),
+  ])
+  const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  assert.deepEqual(statsOf(summary), { total: 1, types: { retry: 1 } }, 'the retry occurrence counts as its own action subtype')
+  assert.equal(summary.action?.kind, 'retry')
+  const body = compactWorkBody(summary, 80, compactActionPresentation(summary.action!))
+  assert.match(body.join('\n'), /Action:\s+Retry 2\/6 in 3s · authentication failed/, body.join('\n'))
+  assert.match(formatWorkHeaderLine(summary, false, 120), /1 action · retry ×1/, 'the retry is never a tool stat')
+})
+
+test('action slot: mixed chronology keeps counts independent from the Action', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 100, 1),
+    toolResultEvent(1, 'c1', T0 + 200, 2),
+    toolCall(1, 'c2', 'bash', T0 + 300, 3),
+    toolResultEvent(1, 'c2', T0 + 400, 4),
+    eventAt('subagent/descriptor', { label: 'reviewer', mode: 'task' }, T0 + 500, 5),
+  ])
+  const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  assert.deepEqual(statsOf(summary), { total: 3, types: { read: 1, bash: 1, subagent: 1 } }, 'the genuine calls still count')
+  assert.equal(summary.action?.kind, 'subagent', 'the chronologically-latest candidate owns the slot')
+  const body = compactWorkBody(summary, 80, compactActionPresentation(summary.action!))
+  assert.match(body.join('\n'), /Action:\s+Subagent · reviewer/, body.join('\n'))
+  assert.match(formatWorkHeaderLine(summary, false, 120), /3 actions · bash ×1 · read ×1 · subagent ×1/, 'the Action and the stats answer different questions')
+})
+
+test('action slot: Preparing temporarily overrides the durable Action candidate', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('subagent/descriptor', { label: 'scout' }, T0 + 100, 1),
+  ])
+  const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  const body = compactWorkBody(summary, 80, compactActionPresentation(summary.action!), 'Preparing Edit…')
+  assert.match(body.join('\n'), /Action:\s+Preparing Edit…/, `the live call owns the slot:\n${body.join('\n')}`)
+  assert.ok(!body.some(line => line.includes('Subagent')), 'the durable candidate is overridden while Preparing')
+})
+
+test('singleton stats: `1 action` with its subtype stays visible (no singleton suppression)', () => {
+  const oneTool = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 100, 1),
+    toolResultEvent(1, 'c1', T0 + 200, 2),
+  ])
+  const toolSummary = summarizeWorkSpan(spansOf(oneTool.messages())[0]!)
+  assert.equal(toolSummary.action?.kind, 'tool')
+  assert.match(formatWorkHeaderLine(toolSummary, false, 120), /1 action · read ×1/, 'the current header keeps the singleton action stat')
+  const oneSubagent = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('subagent/descriptor', { label: 'scout' }, T0 + 100, 1),
+  ])
+  const subagentSummary = summarizeWorkSpan(spansOf(oneSubagent.messages())[0]!)
+  assert.match(formatWorkHeaderLine(subagentSummary, false, 120), /1 action · subagent ×1/, 'the current header keeps `subagent ×1`')
 })
 
 test('timing: a long final-text tail never stretches the Thinking span', () => {
@@ -463,15 +554,15 @@ test('timing: read grouping never crosses a turn boundary (per-turn ownership)',
     'a group must not cross a turn boundary')
   const turn1 = summarizeWorkSpan(spansOf(messages).find(span => span.turn === 1)!)
   const turn2 = summarizeWorkSpan(spansOf(messages).find(span => span.turn === 2)!)
-  assert.equal(turn1.toolCount, 1)
+  assert.equal(turn1.actionStats.total, 1)
   assert.equal(turn1.timing?.startedAt, T0 + 1_000)
   assert.equal(turn1.timing?.endedAt, T0 + 2_000)
-  assert.equal(turn2.toolCount, 1)
+  assert.equal(turn2.actionStats.total, 1)
   assert.equal(turn2.timing?.startedAt, T0 + 4_000)
   assert.equal(turn2.timing?.endedAt, T0 + 6_000)
   // Full Focus/Activity parity on BOTH turns.
-  assert.equal(turn1.toolCount, folder.turnActivities().get(1)?.toolCalls)
-  assert.equal(turn2.toolCount, folder.turnActivities().get(2)?.toolCalls)
+  assert.deepEqual(genuineToolTypes(turn1), folder.turnActivities().get(1)?.tools)
+  assert.deepEqual(genuineToolTypes(turn2), folder.turnActivities().get(2)?.tools)
 })
 
 test('timing: a next-turn read starts a NEW run and never touches the previous group', () => {
@@ -510,8 +601,8 @@ test('timing: a next-turn read starts a NEW run and never touches the previous g
   assert.equal(still?.endedAt, T0 + 4_000)
   // Turn 2 owns exactly its own read — full Focus/Activity parity.
   const turn2 = summarizeWorkSpan(spansOf(messages).find(span => span.turn === 2)!)
-  assert.equal(turn2.toolCount, 1)
-  assert.equal(turn2.toolCount, folder.turnActivities().get(2)?.toolCalls)
+  assert.equal(turn2.actionStats.total, 1)
+  assert.deepEqual(genuineToolTypes(turn2), folder.turnActivities().get(2)?.tools)
   assert.equal(turn2.timing?.startedAt, T0 + 6_000)
   assert.equal(turn2.timing?.endedAt, T0 + 8_000)
 })
@@ -525,12 +616,13 @@ test('stats: an orphan tool/result (no seen call) never counts as a genuine tool
   ])
   const span = spansOf(folder.messages())[0]!
   const summary = summarizeWorkSpan(span)
-  assert.equal(summary.toolCount, 0, 'an orphan result is not a genuine tool call')
-  assert.equal(summary.tool, undefined, 'an orphan result never owns the Tool slot')
-  assert.deepEqual(compactWorkBody(summary, 80), [], 'no Tool row renders')
+  assert.equal(summary.actionStats.total, 0, 'an orphan result is not a genuine tool action')
+  assert.equal(summary.action?.kind, 'orphan-tool-result', 'the orphan owns the Action with the honest diagnostic')
+  const body = compactWorkBody(summary, 80, compactActionPresentation(summary.action!))
+  assert.match(body.join('\n'), /Action:\s+Unpaired tool result/, `never a normal successful Tool:\n${body.join('\n')}`)
   // The same counting unit as the Focus header: Focus also counts ZERO.
   assert.equal(folder.turnActivities().get(1)?.toolCalls, 0)
-  assert.equal(summary.toolCount, folder.turnActivities().get(1)?.toolCalls)
+  assert.equal(summary.actionStats.total, 0)
 })
 
 test('timing: a retried attempt never lends its preparing start to a reused call id', () => {
@@ -613,14 +705,14 @@ test('timing: a thinking-only Activity wall-spans its reasoning evidence', () =>
   ])
   const span = spansOf(folder.messages())[0]!
   const summary = summarizeWorkSpan(span)
-  assert.equal(summary.toolCount, 0, 'a thinking-only Activity has no tools')
-  assert.equal(summary.tool, undefined)
+  assert.equal(summary.actionStats.total, 0, 'a thinking-only Activity has no actions')
+  assert.equal(summary.action, undefined, 'Thinking evidence never owns the Action slot')
   assert.equal(summary.timing?.startedAt, T0 + 1_000, 'the span starts with the reasoning lane')
   // The Thinking span ends at its OWN reasoning block-end (T0+3s); the
   // later text lane (T0+4s–4.5s) is Conversation evidence, never Process.
   assert.equal(summary.timing?.endedAt, T0 + 3_000, 'the text tail never stretches the Thinking span')
   const header = formatWorkHeaderLine(summary, false, 120, 'emoji', '2s')
-  assert.ok(!header.includes('tool'), `no tool stat:\n${header}`)
+  assert.ok(!header.includes('action'), `no action stat:\n${header}`)
   assert.match(header, /Activity 2s/)
 })
 
@@ -636,4 +728,34 @@ test('timing: a running Thinking shows a live Activity duration', () => {
   const component = new CompactWorkComponent({ span, expanded: false, now: () => T0 + 4_500 })
   const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
   assert.match(line, /Activity 3s/, `the running header reads now at render:\n${line}`)
+})
+
+// ── Activity header degradation + the no-token contract (addendum v2 §24/§25/§50) ──
+
+test('Activity header degrades duration→stats without tokens and never fabricates tok', () => {
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'read', T0 + 1_000, 1),
+    toolResultEvent(1, 'c1', T0 + 2_000, 2),
+    toolCall(1, 'c2', 'bash', T0 + 3_000, 3),
+    toolResultEvent(1, 'c2', T0 + 9_000, 4),
+    eventAt('subagent/descriptor', { label: 'scout' }, T0 + 9_500, 5),
+  ])
+  const summary = summarizeWorkSpan(spansOf(folder.messages())[0]!)
+  // duration + full stats.
+  assert.equal(formatWorkHeaderLine(summary, false, 120, 'emoji', '9s'), '▸ Activity 9s · 3 actions · bash ×1 · read ×1 · subagent ×1')
+  // duration + action total only.
+  assert.equal(formatWorkHeaderLine(summary, false, 34, 'emoji', '9s'), '▸ Activity 9s · 3 actions')
+  // duration only, then the bare identity.
+  assert.equal(formatWorkHeaderLine(summary, false, 16, 'emoji', '9s'), '▸ Activity 9s')
+  assert.equal(formatWorkHeaderLine(summary, false, 11, 'emoji', '9s'), '▸ Activity')
+  // Without duration: full stats → total → identity.
+  assert.equal(formatWorkHeaderLine(summary, false, 120), '▸ Activity · 3 actions · bash ×1 · read ×1 · subagent ×1')
+  assert.equal(formatWorkHeaderLine(summary, false, 24), '▸ Activity · 3 actions')
+  assert.equal(formatWorkHeaderLine(summary, false, 10), '▸ Activity')
+  // The Activity header NEVER renders a token segment under any width.
+  for (const width of [8, 12, 20, 40, 80, 120]) {
+    const header = formatWorkHeaderLine(summary, false, width, 'emoji', '9s')
+    assert.ok(!header.includes('tok'), `no fabricated span tokens at width ${width}:\n${header}`)
+  }
 })

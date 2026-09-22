@@ -5,14 +5,19 @@
  * and the system-prompt policy in focus.ts (plan §14).
  *
  * The collapsed card shows: a status header (whale disclosure icon +
- * duration + per-turn token + responsive tool stats) and the three compact
- * process slots — Think / Tool / Message (Message shows the latest up to
- * three visual rows) — plus the Error line, all muted,
- * never competing with the final assistant. The expanded card renders ONLY
- * the header: the hidden process rows render below as ordinary transcript
- * messages (plan §15 — no second renderer family), and inside an open
- * Thought the foldable process cards default COMPACT with their own
- * per-card disclosure (the secondary-disclosure supplement).
+ * duration + per-turn token + responsive tool stats) and the compact
+ * process slots — Think / Action / Message (Message shows the latest up to
+ * three visual rows) — plus the Error line, all muted, never competing
+ * with the final assistant. The Action slot is the presentation-only
+ * latest meaningful non-Thinking Process evidence hidden under the
+ * collapsed root (post-F6 presentation-convergence addendum v2): genuine Tool, Preparing,
+ * Subagent delegation, Command, Retry or an orphan-result diagnostic,
+ * selected by chronology from the SAME transcript rows the projection
+ * hides — never a second `TurnActivity` chronology store. The expanded
+ * card renders ONLY the header: the hidden process rows render below as
+ * ordinary transcript messages (plan §15 — no second renderer family), and
+ * inside an open Thought the foldable process cards default COMPACT with
+ * their own per-card disclosure (the secondary-disclosure supplement).
  *
  * The whale icon encodes ONLY the disclosure state (🐋 collapsed / 🐳
  * expanded); the execution state is carried by the header label — an open
@@ -29,10 +34,19 @@ import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import {
   COMPACT_SLOT_LABEL_WIDTH,
+  addCompactActionStats,
+  compactActionSlotLine,
+  compactActionSourceOf,
+  compactActionStatParts,
   compactSlotLine,
   compactThinkSlotLine,
-  compactToolSlotLine,
   formatCompactDuration,
+  latestCompactAction,
+  newCompactActionStats,
+  type CompactActionPresentation,
+  type CompactActionSource,
+  type CompactActionStats,
+  type CompactActionStatsAccumulator,
 } from './compact-process-preview.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
 import { isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
@@ -61,9 +75,9 @@ export function formatFocusDuration(ms: number | undefined): string | undefined 
   return formatCompactDuration(ms)
 }
 
-/** The max tool-type names the header stats show before the `+N` tail
- * (plan §10.4). */
-export const FOCUS_TOOL_SUMMARY_MAX_TYPES = 3
+/** The max action-subtype names the header stats show before the `+N`
+ * tail lives in the shared compact preview authority
+ * (`COMPACT_ACTION_SUMMARY_MAX_TYPES`, addendum v2 §15). */
 
 /** The disclosure icon SEMANTIC: collapsed / expanded — disclosure state
  * ONLY (plan §2.1/§2.2). The execution outcome lives in the header label.
@@ -117,22 +131,13 @@ export function focusStatusLabel(activity: TurnActivity, phase: RunPhase, durati
   }
 }
 
-/** The responsive tool-stats tail parts (`14 tools`, `read ×7`, …, `+2`):
- * types sorted count-desc / name-asc, capped at
- * {@link FOCUS_TOOL_SUMMARY_MAX_TYPES}, with a `+N` remainder counting the
- * OTHER tool TYPES (not calls). Empty when the turn called no tools. */
-export function focusToolStatParts(tools: ReadonlyMap<string, number>, toolCalls: number): string[] {
-  if (toolCalls <= 0) return []
-  const parts = [`${toolCalls} tool${toolCalls === 1 ? '' : 's'}`]
-  const types = [...tools.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-  for (const [name, count] of types.slice(0, FOCUS_TOOL_SUMMARY_MAX_TYPES)) {
-    parts.push(`${name} ×${count}`)
-  }
-  if (types.length > FOCUS_TOOL_SUMMARY_MAX_TYPES) {
-    parts.push(`+${types.length - FOCUS_TOOL_SUMMARY_MAX_TYPES}`)
-  }
-  return parts
-}
+/** The header's responsive action-stat tail parts (`7 actions`, `read ×3`,
+ * …, `+1`) come from the SHARED authority (`compactActionStatParts`,
+ * addendum v2 §15) — types sorted count-desc / name-asc, capped at
+ * `COMPACT_ACTION_SUMMARY_MAX_TYPES`, with a `+N` remainder counting the
+ * OTHER action SUBTYPES (not occurrences); an empty aggregate yields no
+ * parts. There is deliberately no Focus-local alias: Focus and Activity
+ * consume the one formatter. */
 
 /** The effective duration text for one activity at `now`: the ACTIVE elapsed
  * time (user-blocked waits excluded — see focus-timing.ts), formatted. */
@@ -146,26 +151,31 @@ export function focusDurationText(
 }
 
 /** Assemble the one-line header, dropping the stat tail progressively so
- * the header NEVER breaks the terminal (plan §14/§46): full tail → token +
- * tool count → token → bare label (then a hard truncate as the last
- * resort). The per-turn token segment is hidden entirely when the turn has
- * no usage fact (never a fake `0 tok` — plan §13.3). The disclosure glyph
- * resolves against the CURRENT icon style (the disclosure is an
- * interaction affordance and is never hidden — not even under minimal,
- * plan §34.7); the single-space lead keeps the historical `🐋 Working`
- * layout. */
+ * the header NEVER breaks the terminal (plan §14/§46; addendum v2 §21):
+ * full tail → token + action total → token → bare label (then a hard
+ * truncate as the last resort). The stat tail is the SHARED action-stats
+ * parts — `N actions · subtype ×count` — derived turn-level by the
+ * projection (never from a synthetic `TurnActivity` store). The per-turn
+ * token segment is hidden entirely when the turn has no usage fact (never
+ * a fake `0 tok` — plan §13.3) and remains Focus-only: Activity has no
+ * trustworthy span-level token authority and never fabricates one
+ * (addendum v2 §25). The disclosure glyph resolves against the CURRENT
+ * icon style (the disclosure is an interaction affordance and is never
+ * hidden — not even under minimal, plan §34.7); the single-space lead
+ * keeps the historical `🐋 Working` layout. */
 export function formatFocusHeaderLine(
   activity: TurnActivity,
   expanded: boolean,
   phase: RunPhase,
   duration: string | undefined,
   width: number,
+  actionStats: CompactActionStats,
   iconStyle: IconStyle = 'emoji',
 ): string {
   const label = focusStatusLabel(activity, phase, duration)
   const head = `${iconFor(focusDisclosureSemantic(expanded), iconStyle)} ${label}`
   const token = activity.totalTokens === undefined ? undefined : `${formatTokens(activity.totalTokens)} tok`
-  const tail = focusToolStatParts(activity.tools, activity.toolCalls)
+  const tail = compactActionStatParts(actionStats)
   const candidates: string[] = []
   if (token !== undefined) {
     candidates.push(`${head} · ${token}${tail.length > 0 ? ` · ${tail.join(' · ')}` : ''}`)
@@ -214,19 +224,19 @@ function previewTailLines(label: string, text: string, width: number, maxRows: n
   })
 }
 
-/** The collapsed card body: the three process slots in FIXED order —
- * Think, Tool, Message — then the error reason (plan §24). Think and
- * Tool are at most ONE visual row (a RUNNING Think follows its reasoning
- * tail, a settled one reads from the start); Message is the third process
- * slot and shows the latest up to {@link FOCUS_MESSAGE_MAX_ROWS} visual
- * rows of its bounded tail. Only existing slots render. A live Preparing
- * display, when supplied, temporarily owns the Tool slot over the formal
- * Tool display. The formal Tool line's status prefix follows plan §10:
- * none while running, ✓ settled ok, ✗ settled error. */
+/** The collapsed card body: the process slots in FIXED order — Think,
+ * Action, Message — then the error reason (plan §24; addendum v2 §20). Think and Action are at most ONE visual row (a RUNNING Think
+ * follows its reasoning tail, a settled one reads from the start); Message
+ * shows the latest up to {@link FOCUS_MESSAGE_MAX_ROWS} visual rows of its
+ * bounded tail. Only existing slots render. A live Preparing display, when
+ * supplied, temporarily owns the Action slot over the durable Action
+ * presentation. The Action line's status prefix follows plan §10: none
+ * while running, ✓ settled ok, ✗ settled error; the synthetic kinds carry
+ * no prefix or their own honest one. */
 export function focusCollapsedBody(
   activity: TurnActivity,
   width: number,
-  toolDisplay?: string,
+  action?: CompactActionPresentation,
   preparingDisplay?: string,
 ): string[] {
   const lines: string[] = []
@@ -239,15 +249,17 @@ export function focusCollapsedBody(
     lines.push(compactThinkSlotLine({ text: activity.think.text, running: activity.think.running, width }))
   }
   if (preparingDisplay !== undefined) {
-    lines.push(compactSlotLine('Tool:', preparingDisplay, width))
-  } else if (activity.tool !== undefined && toolDisplay !== undefined) {
-    // The shared Tool slot: status prefix + presenter-first root display +
-    // active PTC sub-call suffix + width degradation (post-F6 plan §9.2).
-    lines.push(compactToolSlotLine({
-      status: activity.tool.status,
-      display: toolDisplay,
-      rootName: activity.tool.name,
-      ...(activity.tool.activeSubCalls === undefined ? {} : { activeSubCalls: activity.tool.activeSubCalls }),
+    lines.push(compactSlotLine('Action:', preparingDisplay, width))
+  } else if (action !== undefined) {
+    // The shared Action slot (addendum v2 §10/§11): status prefix
+    // + presenter-first tool display + active PTC sub-call suffix + width
+    // degradation, or the pure synthetic labels — one authority with
+    // Activity.
+    lines.push(compactActionSlotLine({
+      ...(action.status === undefined ? {} : { status: action.status }),
+      display: action.display,
+      ...(action.rootName === undefined ? {} : { rootName: action.rootName }),
+      ...(action.activeSubCalls === undefined ? {} : { activeSubCalls: action.activeSubCalls }),
       width,
     }))
   }
@@ -266,22 +278,26 @@ export function focusCollapsedBody(
  * The live Thought disclosure. render() re-reads `now()` on EVERY frame, so
  * the WorkingIndicator's 500ms repaint heartbeat refreshes the running
  * duration without a second timer (plan §3.2); the TuiApp component cache
- * (keyed on the activity revision + expansion + theme + tool display +
- * icon style) keeps that cheap. The phase is a LIVE provider over the
- * authoritative unified status, never a value baked at construction: an
- * approval/question opens without minting a new component, so a captured
- * phase would freeze the header (and the timer) on the old state. The
- * component never mutates Focus state — clicks route through the app's hit
- * map to toggleFocusTurn (plan §17). The Tool line's display text is
- * PRECOMPUTED by the app (presenter-first, plan §38) — the component stays a
- * pure renderer. A collapsed Preparing summary is presentation input only;
- * expanded rows are composed by TuiApp after the projected process tail.
+ * (keyed on the activity revision + expansion + theme + the Action
+ * presentation/stats signatures + icon style) keeps that cheap. The phase is
+ * a LIVE provider over the authoritative unified status, never a value baked
+ * at construction: an approval/question opens without minting a new
+ * component, so a captured phase would freeze the header (and the timer) on
+ * the old state. The component never mutates Focus state — clicks route
+ * through the app's hit map to toggleFocusTurn (plan §17). The turn-level
+ * Action stats and the Action line's presentation are PRECOMPUTED by the
+ * app through the ONE shared bridge (addendum v2 §35) — the component stays
+ * a pure renderer. The chrome shares the transcript left edge (addendum v2
+ * §28): no outer indent. A collapsed Preparing summary is presentation
+ * input only; expanded rows are composed by TuiApp after the projected
+ * process tail.
  */
 export class FocusActivityComponent {
   private readonly activity: TurnActivity
   private readonly expanded: boolean
   private readonly now: () => number
-  private readonly toolDisplay: string | undefined
+  private readonly action: CompactActionPresentation | undefined
+  private readonly actionStats: CompactActionStats
   private readonly iconStyle: IconStyle
   private readonly preparingSummary: string | undefined
   private readonly phase: () => RunPhase
@@ -292,7 +308,10 @@ export class FocusActivityComponent {
     expanded: boolean
     phase?: () => RunPhase
     now?: () => number
-    toolDisplay?: string
+    action?: CompactActionPresentation
+    /** The turn-level action aggregate the header renders (addendum v2
+     * §16) — projected once from the turn's canonical Process evidence. */
+    actionStats: CompactActionStats
     iconStyle?: IconStyle
     preparingSummary?: string
     timing?: FocusTimingStore
@@ -301,7 +320,8 @@ export class FocusActivityComponent {
     this.expanded = options.expanded
     this.phase = options.phase ?? (() => 'working')
     this.now = options.now ?? (() => Date.now())
-    this.toolDisplay = options.toolDisplay
+    this.action = options.action
+    this.actionStats = options.actionStats
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.preparingSummary = options.preparingSummary
     this.timing = options.timing ?? focusTiming
@@ -313,26 +333,24 @@ export class FocusActivityComponent {
 
   render(width: number): string[] {
     const lines: string[] = []
-    // At very narrow widths (1-3 cells) the unconditional two-cell indent
-    // would make every row wider than the terminal — drop it (review
-    // finding).
-    const indent = width >= 4 ? '  ' : ''
-    const contentWidth = Math.max(1, width - visibleWidth(indent))
+    const contentWidth = Math.max(1, width)
     const phase = this.phase()
-    // The header formatter budgets the CONTENT width (the indent is added
-    // after), so a header that fits never wraps past the terminal — the
-    // fullscreen row hit-map depends on that (review fix).
-    lines.push(`${indent}${color.textDim(formatFocusHeaderLine(
+    // The header formatter budgets the transcript CONTENT width (the host
+    // gutter owns the horizontal geometry — addendum v2 §28), so a header
+    // that fits never wraps past the terminal — the fullscreen row hit-map
+    // depends on that.
+    lines.push(color.textDim(formatFocusHeaderLine(
       this.activity,
       this.expanded,
       phase,
       focusDurationText(this.activity, phase, this.now, this.timing),
       contentWidth,
+      this.actionStats,
       this.iconStyle,
-    ))}`)
+    )))
     if (!this.expanded) {
-      for (const line of focusCollapsedBody(this.activity, contentWidth, this.toolDisplay, this.preparingSummary)) {
-        lines.push(`${indent}${color.textDim(line)}`)
+      for (const line of focusCollapsedBody(this.activity, contentWidth, this.action, this.preparingSummary)) {
+        lines.push(color.textDim(line))
       }
     }
     return lines
@@ -378,7 +396,27 @@ export type FocusProjectedBlock =
      */
     containerPath?: TranscriptContainerPath
   }
-  | { kind: 'activity'; activity: TurnActivity }
+  | {
+    kind: 'activity'
+    activity: TurnActivity
+    /**
+     * The turn-level Action aggregate the Focus header renders (addendum v2
+     * §17/§18): derived ONCE from the turn group's canonical Process
+     * evidence — independent of collapsed/expanded state, search reveals
+     * and forced-visible rows (a temporary reveal must not change `7
+     * actions`). Presentation-only: never stored on `TurnActivity`, never
+     * persisted.
+     */
+    actionStats: CompactActionStats
+    /**
+     * The presentation-only collapsed Action source (addendum v2
+     * §19): derived from the SAME transcript rows this projection hides
+     * under the collapsed Thought root — never stored on `TurnActivity`
+     * (§14). Absent when no eligible hidden Process evidence exists (or
+     * the Thought is expanded, where no preview body renders).
+     */
+    action?: CompactActionSource
+  }
   | {
     /**
      * A canonical Work span materialized inside the expanded Thought. F6 keeps
@@ -392,6 +430,59 @@ export type FocusProjectedBlock =
      * materializes the nested header). */
     containerPath?: TranscriptContainerPath
   }
+
+/**
+ * The Thought block for one turn: the caller-resolved TURN-LEVEL Action
+ * stats (addendum v2 §18) plus — collapsed only (`hidden !== undefined`) —
+ * the presentation-only Action source. `latestCompactAction` picks the
+ * latest eligible candidate among EXACTLY the rows the collapsed projection
+ * hides under the root, so nothing already visible outside (a
+ * forced-visible search row, a committed answer, the held-back final) can
+ * duplicate itself in the Action slot.
+ */
+function focusActivityBlock(
+  activity: TurnActivity | undefined,
+  actionStats: CompactActionStats,
+  hidden: readonly TranscriptMessage[] | undefined,
+): FocusProjectedBlock[] {
+  if (activity === undefined) return []
+  const action = hidden === undefined ? undefined : latestCompactAction(hidden)
+  return [action === undefined
+    ? { kind: 'activity', activity, actionStats }
+    : { kind: 'activity', activity, actionStats, action }]
+}
+
+/** The empty action aggregate for a turn with no eligible Process evidence:
+ * shared so the absent case allocates nothing per block. */
+const EMPTY_ACTION_STATS: CompactActionStats = { total: 0, types: new Map() }
+
+/**
+ * One linear pass over the window: each turn's WHOLE-TURN action aggregate
+ * (addendum v2 §18). Focus stats describe the turn, not the row run: a
+ * turn-less entry can split one turn into separate consecutive runs
+ * ({@link consecutiveTurnGroup}), and every Thought block of that turn must
+ * still report the same turn-level number — never merely its own run's.
+ * A search reveal / forced-visible row / disclosure state cannot change it
+ * because none of them participate here. O(n) once per projection, never a
+ * per-frame rescan of an unchanged window.
+ */
+function focusActionStatsByTurn(messages: readonly TranscriptMessage[]): Map<number, CompactActionStats> {
+  const accumulators = new Map<number, CompactActionStatsAccumulator>()
+  for (const message of messages) {
+    if (!('turn' in message)) continue
+    const source = compactActionSourceOf(message)
+    if (source === undefined) continue
+    let accumulator = accumulators.get(message.turn)
+    if (accumulator === undefined) {
+      accumulator = newCompactActionStats()
+      accumulators.set(message.turn, accumulator)
+    }
+    addCompactActionStats(accumulator, source)
+  }
+  const byTurn = new Map<number, CompactActionStats>()
+  for (const [turn, accumulator] of accumulators) byTurn.set(turn, accumulator)
+  return byTurn
+}
 
 /**
  * Project one transcript window into Focus presentation blocks. Collapsed
@@ -408,6 +499,7 @@ export function projectFocus(
   forcedVisible?: ReadonlySet<TranscriptMessage>,
 ): FocusProjectedBlock[] {
   if (!focusMode) return messages.map(message => ({ kind: 'message', message }))
+  const actionStatsByTurn = focusActionStatsByTurn(messages)
   const out: FocusProjectedBlock[] = []
   let index = 0
   while (index < messages.length) {
@@ -423,6 +515,7 @@ export function projectFocus(
     const group = consecutiveTurnGroup(messages, index, turn)
     index += group.length
     const activity = activities.get(turn)
+    const actionStats = actionStatsByTurn.get(turn) ?? EMPTY_ACTION_STATS
     const expanded = expandedTurns.has(turn)
     // The final assistant is decided ONCE from the exact last assistant
     // row (shared by the expanded and collapsed branches — one semantic,
@@ -456,7 +549,7 @@ export function projectFocus(
       for (const member of group.slice(0, boundary)) {
         out.push({ kind: 'message', message: member })
       }
-      if (activity !== undefined) out.push({ kind: 'activity', activity })
+      if (activity !== undefined) out.push(...focusActivityBlock(activity, actionStats, undefined))
       const emitTailRow = (member: TranscriptMessage): void => {
         if (isFocusPersistentInputRow(member)) {
           out.push({ kind: 'message', message: member })
@@ -500,16 +593,25 @@ export function projectFocus(
     // `form:'notice'` is the other exception (see
     // {@link isCollapsedFocusVisibleRow}): it is process feedback and hides
     // inside the Thought, while an opening-foundation notice stays visible.
+    //
+    // The collapsed Action source (addendum v2 §19/§42) is selected
+    // from EXACTLY the rows this projection hides under the Thought root —
+    // the emit loops below record them — so a forced-visible search row, a
+    // committed answer, the held-back final and every persistent boundary
+    // can never duplicate themselves in the Action slot.
     const leadBoundary = focusThoughtLeadBoundary(group)
     const firstCommittedIndex = group.findIndex(isCommittedAnswer)
+    const hidden: TranscriptMessage[] = []
     if (firstCommittedIndex < 0) {
       for (let index = 0; index < group.length; index += 1) {
         const member = group[index]!
         if (isCollapsedFocusVisibleRow(member, index, leadBoundary) || forcedVisible?.has(member) === true) {
           out.push({ kind: 'message', message: member })
+        } else if (member.kind !== 'compaction' && member !== final?.message) {
+          hidden.push(member)
         }
       }
-      if (activity !== undefined) out.push({ kind: 'activity', activity })
+      out.push(...focusActivityBlock(activity, actionStats, hidden))
       // Compaction cards keep their existing lifecycle in the collapsed
       // view (plan §12.3 v1 — never hidden into the Thought).
       for (const member of group) {
@@ -521,20 +623,30 @@ export function projectFocus(
         const member = beforeCommitted[index]!
         if (isCollapsedFocusVisibleRow(member, index, leadBoundary) || forcedVisible?.has(member) === true) {
           out.push({ kind: 'message', message: member })
+        } else if (member.kind !== 'compaction') {
+          hidden.push(member)
         }
       }
-      if (activity !== undefined) out.push({ kind: 'activity', activity })
-      for (const member of beforeCommitted) {
-        if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
-      }
+      // The post-boundary emission is decided FIRST (pure) so the Action
+      // selection sees the whole hidden scope before the Thought renders.
+      const postCommitted: TranscriptMessage[] = []
       for (let index = firstCommittedIndex; index < group.length; index += 1) {
         const member = group[index]!
         if (final !== undefined && member === final.message) continue
         if (isCollapsedFocusVisibleRow(member, index, leadBoundary)
           || forcedVisible?.has(member) === true
           || member.kind === 'compaction' || isCommittedAnswer(member)) {
-          out.push({ kind: 'message', message: member })
+          postCommitted.push(member)
+        } else {
+          hidden.push(member)
         }
+      }
+      out.push(...focusActivityBlock(activity, actionStats, hidden))
+      for (const member of beforeCommitted) {
+        if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
+      }
+      for (const member of postCommitted) {
+        out.push({ kind: 'message', message: member })
       }
     }
     // The collapsed final: only after the authoritative turn/end.

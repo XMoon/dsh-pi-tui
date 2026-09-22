@@ -9,13 +9,21 @@
  * and its body is visible by default at normal brightness. `recall` is
  * material lifted from another session and names its labels.
  *
+ * Layout contract (context-card body-indent supplement): the HEADER stays at
+ * the transcript left edge like every other container chrome, while the
+ * card's OWN body — notice summary/payload, relay body and its long-message
+ * marker, recall payload — is subordinate to that header and indented by
+ * {@link BODY_INDENT}, matching the Tool card's payload inset. The indent is
+ * applied AFTER the body wraps/truncates at the reduced content budget, so
+ * the two-cell lead can never push a row past the terminal.
+ *
  * Every row stays semantic Context: only presentation primitives are reused.
  * All three wrap/truncate at RENDER time (a resize re-wraps), so no width is
  * baked into the cached component.
  * @module @xmoon76/dsh-pi-tui/context-row
  */
 
-import { truncateToWidth, wrapTextWithAnsi, type Component } from '@xmoon76/pi-tui'
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from '@xmoon76/pi-tui'
 import { iconPrefix, type IconStyle } from './icons.ts'
 import { longMessageDisclosureWindow, type LongMessageDisclosureGeometry } from './long-message-disclosure.ts'
 import { systemContextBody } from './present.ts'
@@ -24,6 +32,22 @@ import type { TranscriptMessage } from './transcript.ts'
 
 /** One surfaced `system` Context row narrowed for presentation. */
 type ContextSystemRow = Extract<TranscriptMessage, { kind: 'system' }>
+
+/** The card-internal header→body lead. OUTER container chrome stays flat
+ * (presentation-convergence addendum v2 §28); this is the card's own
+ * header/body hierarchy, the same relationship the Tool card's payload inset
+ * expresses. */
+const BODY_INDENT = '  '
+
+/** The body geometry of one standalone Context card at `width`: the shared
+ * indent (EMPTY when the terminal cannot hold it beside at least one content
+ * cell, so the lead never overflows a narrow framebuffer) and the content
+ * budget the body wraps/truncates at. */
+function bodyGeometry(width: number): { indent: string; contentWidth: number } {
+  const safeWidth = Math.max(1, width)
+  const indent = safeWidth > visibleWidth(BODY_INDENT) ? BODY_INDENT : ''
+  return { indent, contentWidth: Math.max(1, safeWidth - visibleWidth(indent)) }
+}
 
 /** Wrap one logical text at the current width and paint every physical row.
  * Never truncates to a single row: the caller's contract decides how many
@@ -39,14 +63,23 @@ function wrappedRows(text: string, width: number, paint: (row: string) => string
   return wrapTextWithAnsi(text, safeWidth).map(row => paint(truncateToWidth(row, safeWidth, '…')))
 }
 
+/** The card BODY rows of one logical text: the text wraps/truncates at the
+ * reduced body budget, then each physical row takes the shared indent INSIDE
+ * the paint call — so the painted row and its indent stay one unit and
+ * `visibleWidth(row) <= width` holds at every width. */
+function indentedWrappedRows(text: string, width: number, paint: (row: string) => string): string[] {
+  const { indent, contentWidth } = bodyGeometry(width)
+  return wrappedRows(text, contentWidth, row => paint(`${indent}${row}`))
+}
+
 /** The existing Context body rules for an expanded payload (parsed skill /
  * system envelopes render their content, never raw XML); plain text keeps its
- * raw body. */
+ * raw body. Every payload row is an indented card body row. */
 function payloadRows(text: string, width: number): string[] {
   const body = systemContextBody(text)
   const lines = body ?? text.split('\n')
   const rows: string[] = []
-  for (const line of lines) rows.push(...wrappedRows(line, width, color.textDim))
+  for (const line of lines) rows.push(...indentedWrappedRows(line, width, color.textDim))
   return rows
 }
 
@@ -93,7 +126,7 @@ export class NoticeContextRow implements Component {
     const head = `${icon}${title}${expanded ? '' : expandAffordance(expandHint)}`
     const rows = [headerRow(head, width)]
     if (message.summary !== undefined && message.summary !== '') {
-      rows.push(...wrappedRows(message.summary, width, color.text))
+      rows.push(...indentedWrappedRows(message.summary, width, color.text))
     }
     if (expanded) rows.push(...payloadRows(message.text, width))
     return rows
@@ -123,10 +156,14 @@ export class RelayContextRow implements Component {
     const sender = message.contextPresentation?.senderSessionId
     const icon = iconPrefix(message.icon ?? 'context-generic', iconStyle)
     const title = sender === undefined || sender === '' ? 'Agent message' : `Agent message · ${sender}`
-    const bodyRows = wrappedRows(message.text, Math.max(1, width), color.text)
+    // The relay body is the card's body: it wraps at the reduced budget and
+    // takes the shared indent so its own disclosure marker (below) sits on
+    // the SAME left edge — never a mixed boundary.
+    const { indent, contentWidth } = bodyGeometry(width)
+    const bodyRows = wrappedRows(message.text, contentWidth, row => color.text(`${indent}${row}`))
     // The marker is chrome: clip it to the current width so every returned
     // element stays exactly one physical row even on a very narrow terminal.
-    const marker = color.textMuted(truncateToWidth('  …', Math.max(1, width), '…'))
+    const marker = color.textMuted(truncateToWidth(`${indent}…`, Math.max(1, width), '…'))
     const window = longMessageDisclosureWindow(bodyRows, this.geometry, { expanded, marker: () => marker })
     const collapsed = window.markerRow !== undefined
     const rows = [headerRow(`${icon}${title}${collapsed ? expandAffordance(expandHint) : ''}`, width)]

@@ -85,23 +85,24 @@ test('Q1 Compact: a settled question ends the Work run and renders standalone be
   const workBlocks = blocks.filter(block => block.kind === 'work')
   assert.equal(workBlocks.length, 2, 'two Work spans flank the question')
   for (const block of workBlocks) {
-    assert.equal(block.kind === 'work' ? summarizeWorkSpan(block.span).toolCount : -1, 1)
+    assert.equal(block.kind === 'work' ? summarizeWorkSpan(block.span).actionStats.total : -1, 1)
   }
   const allMembers = blocks.flatMap(block => block.kind === 'work' ? [...block.span.members] : [])
   assert.ok(!allMembers.includes(questionRow), 'the question never joins a Work span')
 })
 
-test('Q5 Compact: the question is neither counted nor chosen as the span tool preview', () => {
+test('Q5 Compact: the question is neither counted nor chosen as the span Action preview', () => {
   const questionRow = question('ok', answersJson(1, 1))
   // Question is the LAST tool before the boundary: a span before it must keep
-  // its own latest meaningful tool, and the question must not be counted.
+  // its own latest meaningful Action, and the question must not be counted.
   const messages = [tool('read'), questionRow]
   const blocks = projectCompact(messages, noOptions)
   const span = blocks[0]
   assert.ok(span?.kind === 'work')
   const summary = summarizeWorkSpan(span.span)
-  assert.equal(summary.toolCount, 1, 'only the read tool counts')
-  assert.equal(summary.tool?.name, 'read', 'the question never becomes the Tool preview')
+  assert.equal(summary.actionStats.total, 1, 'only the read action counts')
+  assert.equal(summary.action?.kind, 'tool', 'the read keeps the Action slot')
+  assert.equal(summary.action?.message.kind === 'tool' ? summary.action.message.name : '', 'read', 'the question never becomes the Action preview')
 })
 
 // --- Q9: a RUNNING question stays process (QuestionFlow owns it) -----------
@@ -394,8 +395,9 @@ test('a RUNNING interaction tool is a Work member but never counts or previews i
   const work = blocks.find(block => block.kind === 'work')
   assert.ok(work?.kind === 'work')
   const summary = summarizeWorkSpan(work.span)
-  assert.equal(summary.toolCount, 2, 'read + bash only, even while the question runs')
-  assert.equal(summary.tool?.name, 'bash', 'the question never becomes the Tool preview while running')
+  assert.equal(summary.actionStats.total, 2, 'read + bash only, even while the question runs')
+  assert.equal(summary.action?.kind, 'tool', 'the bash keeps the Action slot')
+  assert.equal(summary.action?.message.kind === 'tool' ? summary.action.message.name : '', 'bash', 'the question never becomes the Action preview while running')
 
   // Focus: the same agreement at the turn level.
   const folder = new TranscriptFolder()
@@ -462,7 +464,7 @@ test('E4 exit_plan_mode never counts or previews, and its plan body stays expand
   const compact = projectCompact(folder.messages(), noOptions)
   const span = compact.find(block => block.kind === 'work')
   assert.ok(span?.kind === 'work')
-  assert.equal(summarizeWorkSpan(span.span).toolCount, 1, 'the Plan review never joins a span count')
+  assert.equal(summarizeWorkSpan(span.span).actionStats.total, 1, 'the Plan review never joins a span count')
   assert.equal(planReviewRow.kind === 'tool' ? planReviewRow.name : undefined, 'exit_plan_mode')
 })
 

@@ -187,7 +187,7 @@ test('Focus collapsed Edit Tool slot keeps the presenter-owned path once', async
   app.setFocusMode(true)
   show(app, folder)
   await vt.waitForRender()
-  const toolLine = vt.getViewport().find(line => line.includes('Tool:')) ?? ''
+  const toolLine = vt.getViewport().find(line => line.includes('Action:')) ?? ''
   assert.ok(toolLine.includes('Edit src/foo.ts'), `presenter-owned Edit title missing:\n${vt.getViewport().join('\n')}`)
   assert.equal(toolLine.split('src/foo.ts').length - 1, 1, `Focus Tool path duplicated:\n${toolLine}`)
   app.stop()
@@ -207,7 +207,7 @@ test('Focus ON running: the Thought card is collapsed with previews, the process
   // The collapsed card: running symbol + the muted summary previews.
   assert.ok(hasFocusHeader(joined, false), `running Thought header missing:\n${joined}`)
   assert.ok(joined.includes('Think:   locating the transcript path…'), `narrative preview missing:\n${joined}`)
-  assert.ok(joined.includes('Tool:    Read src/transcript.ts'), `operation preview missing:\n${joined}`)
+  assert.ok(joined.includes('Action:  Read src/transcript.ts'), `operation preview missing:\n${joined}`)
   // The FULL process rows must NOT render (no thinking card, no tool card).
   assert.ok(!joined.includes('🐳'), `collapsed must hide the thinking card:\n${joined}`)
   assert.ok(!joined.includes('📖'), `collapsed must hide the tool card:\n${joined}`)
@@ -230,21 +230,21 @@ test('Focus collapsed Preparing uses the Tool slot and temporarily overrides the
   await vt.waitForRender()
   let view = vt.getViewport()
   let joined = view.join('\n')
-  assert.ok(joined.includes('Tool:    Preparing Edit +1'), `Preparing must own the compact Tool slot:\n${joined}`)
-  assert.ok(!joined.includes('Tool:    Read src/transcript.ts'), `the formal Tool slot must be overridden:\n${joined}`)
+  assert.ok(joined.includes('Action:  Preparing Edit +1'), `Preparing must own the compact Tool slot:\n${joined}`)
+  assert.ok(!joined.includes('Action:  Read src/transcript.ts'), `the formal Tool slot must be overridden:\n${joined}`)
   assert.ok(!joined.includes('Preparing Edit...'), `collapsed Focus must not append a standalone preview row:\n${joined}`)
 
   show(app, folder, [{ callId: 'p-read', turn: 1, step: 0, index: 0, name: 'read', argumentBytes: 0 }])
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
-  assert.ok(joined.includes('Tool:    Preparing Read…'), `the live Tool-slot summary must refresh:\n${joined}`)
+  assert.ok(joined.includes('Action:  Preparing Read…'), `the live Tool-slot summary must refresh:\n${joined}`)
   assert.ok(!joined.includes('Preparing Edit +1'), `the cached previous summary must be replaced:\n${joined}`)
 
   show(app, folder)
   await vt.waitForRender()
   view = vt.getViewport()
   joined = view.join('\n')
-  assert.ok(joined.includes('Tool:    Read src/transcript.ts'), `clearing Preparing must restore the formal Tool slot:\n${joined}`)
+  assert.ok(joined.includes('Action:  Read src/transcript.ts'), `clearing Preparing must restore the formal Tool slot:\n${joined}`)
   assert.ok(!joined.includes('Preparing'), `clearing Preparing must remove its presentation:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
@@ -2462,7 +2462,7 @@ test('blank-row collapse works when the Thought header scrolled OUT of view (pla
   // collapses that Work container (its header anchors near the top) while the
   // outer Thought stays expanded.
   assert.ok(hasFocusHeader(joined, true), `the Thought root must stay expanded:\n${joined}`)
-  assert.ok(joined.includes('▸ 🧰 Activity'), `the internal blank-row click must collapse the owning Work:\n${joined}`)
+  assert.ok(joined.includes('▸ Activity'), `the internal blank-row click must collapse the owning Work:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -2510,7 +2510,7 @@ test('a secondary content row toggles only the secondary; the adjacent blank row
   await vt.waitForRender()
   joined = vt.getViewport().join('\n')
   assert.ok(hasFocusHeader(joined, true), `the Thought root must stay expanded:\n${joined}`)
-  assert.ok(joined.includes('▸ 🧰 Activity'), `the internal blank row must collapse the owning Work:\n${joined}`)
+  assert.ok(joined.includes('▸ Activity'), `the internal blank row must collapse the owning Work:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -2586,7 +2586,7 @@ test('a blank-row click inside turn 2 collapses ONLY that turn\'s nested Work (F
   assert.deepEqual([...app.focusExpandedTurnsForTest()].sort(), [1, 2], 'the Thought roots stay expanded')
   const after = vt.getViewport().join('\n')
   assert.equal(countFocusHeaders(after, true), 2, `both Thoughts stay expanded:\n${after}`)
-  assert.ok(after.includes('▸ 🧰 Activity'), `the OWNING Work container collapses:\n${after}`)
+  assert.ok(after.includes('▸ Activity'), `the OWNING Work container collapses:\n${after}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -2800,7 +2800,7 @@ test('resize keeps the blank-row click map aligned (plan §23.8)', async () => {
   const after = vt.getViewport().join('\n')
   // F6: the spacer inside the nested Work collapses that Work, not the Thought.
   assert.ok(hasFocusHeader(after, true), `the Thought must stay expanded:\n${after}`)
-  assert.ok(after.includes('▸ 🧰 Activity'), `the blank-row collapse must work after resize:\n${after}`)
+  assert.ok(after.includes('▸ Activity'), `the blank-row collapse must work after resize:\n${after}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -2853,7 +2853,7 @@ test('a blank-row click BEFORE the first paint after a resize is dropped — reb
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
   assert.ok(hasFocusHeader(after, true), `the Thought must stay expanded:\n${after}`)
-  assert.ok(after.includes('▸ 🧰 Activity'), `the post-paint blank click must collapse the Work:\n${after}`)
+  assert.ok(after.includes('▸ Activity'), `the post-paint blank click must collapse the Work:\n${after}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -3078,7 +3078,7 @@ test('the collapsed header block trailing spacer stays a no-op — never expands
   // The collapsed block = header + preview rows; the blank BELOW the last
   // preview row is its trailing spacer — a no-op (the Thought is not
   // expanded, so nothing collapses; it must not toggle-open either).
-  const toolY = findRow(view, 'Tool:')
+  const toolY = findRow(view, 'Action:')
   assert.ok(toolY >= 0, `collapsed preview missing:\n${view.join('\n')}`)
   assert.ok(isBlankRow(view[toolY + 1]), 'precondition: the clicked row is blank')
   click(vt, 3, toolY + 2)
@@ -3711,5 +3711,38 @@ test('search target: Ctrl+O collapses a search-only Thought instead of expanding
   await vt.waitForRender()
   assert.ok(!hasFocusHeader(vt.getViewport().join('\n'), true), 'Ctrl+O must Collapse All (revoke the search reveal), not expand recent roots')
   app.setFullscreen(false)
+  app.stop()
+})
+
+// ── Synthetic-Action repaint (presentation-convergence addendum v2 §39) ───
+
+test('collapsed Focus repaints the Action line and action stats when synthetic evidence lands', async () => {
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  applyMixed(folder, runningTurn(0))
+  app.setFocusMode(true)
+  show(app, folder)
+  await vt.waitForRender()
+  let joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('Action:  Read src/transcript.ts'), `the initial Action line:\n${joined}`)
+  assert.ok(joined.includes('1 action'), `the initial action total:\n${joined}`)
+
+  // A subagent delegation lands WITHOUT any genuine tool-state mutation:
+  // the header stats and the collapsed Action line must both refresh.
+  folder.apply([eventAt('subagent/descriptor', { label: 'scout', mode: 'task' }, T0 + 4, 4)])
+  show(app, folder)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('2 actions'), `the action total repaints:\n${joined}`)
+  assert.ok(joined.includes('subagent ×1'), `the subtype stat repaints:\n${joined}`)
+  assert.ok(joined.includes('Action:  Subagent · scout'), `the Action line repaints:\n${joined}`)
+
+  // A retry occurrence lands next: same repaint requirement.
+  folder.apply([eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, T0 + 5, 5)])
+  show(app, folder)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('3 actions'), `the retry counts:\n${joined}`)
+  assert.ok(joined.includes('Action:  Retry 1 in 2s · X: x'), `the retry owns the Action line:\n${joined}`)
   app.stop()
 })
