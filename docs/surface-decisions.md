@@ -503,12 +503,14 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   subagent/descriptor, llm/retry) never count as tools.
   (2026-09-22 presentation-convergence addendum v2: the COLLAPSED
   presentation vocabulary is `Think:` + `Action:` and both headers say
-  `N actions`. Tool stays the STRICT underlying semantic — a
-  subagent/descriptor or llm/retry row still never counts as a tool — but
-  those lifecycle rows DO own the collapsed `Action:` slot and DO count as
-  their own action subtype (`retry`); workflow rows remain
-  neither. The Message/Tool aggregation facts above are the turn-level
-  inputs, not the collapsed slot vocabulary — see the collapsed Action slot
+  `N actions`. Tool stays the STRICT underlying semantic — a `llm/retry` row
+  never counts as a tool — but that lifecycle row DOES own the collapsed
+  `Action:` slot and DOES count as its own action subtype (`retry`). A
+  `subagent/descriptor` does NOT: it is the child session's identity metadata
+  (a continuable child logs it before its first `turn/start`), so it is never
+  an Action nor an action subtype. A workflow row remains neither. The
+  Message/Tool aggregation facts above are the turn-level inputs, not the
+  collapsed slot vocabulary — see the collapsed Action slot
   decision below.)
 - **Message candidate/confirmed**: streaming text-delta feeds the
   candidate immediately; a later tool/call, step/start or output confirms
@@ -642,9 +644,11 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   fence and its provenance rule are owned by
   `docs/transcript-display-disclosure.md`.
   The slot is presentation-only: Tool remains a strict
-  underlying semantic (`Command`, `Retry`, `Subagent` are never Tools). The
+  underlying semantic (a `Retry` row is never a Tool, and neither is a command
+  row nor a subagent descriptor — while a genuine `tool/call name=subagent`
+  IS a Tool literally named `subagent`, and is the delegation Action). The
   shared `CompactActionStats` cardinality: a genuine tool contributes its
-  `callCount`, a subagent/retry occurrence contributes one action of
+  `callCount`, a retry occurrence contributes one action of
   its own subtype (`retry`); an
   orphan result contributes `0 actions` and renders the honest `Unpaired …
   result` diagnostic instead of pretending a missing call existed; a live

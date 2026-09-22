@@ -231,11 +231,15 @@ export type CompactActionSource =
  * - genuine `tool/call` (`origin` absent, `callCount > 0`) → `tool`;
  * - orphan result (`origin` absent, explicit `callCount === 0`) →
  *   `orphan-tool-result`;
- * - `origin: 'subagent-delegation'` → `subagent`;
  * - `origin: 'llm-retry'` system row → `retry`;
  * - surfaced-interaction tools (`ask_user_question` / `exit_plan_mode`)
  *   return `undefined` — their active/settled panel is the interaction
  *   owner and must never be duplicated as an Action (addendum v2 §5);
+ * - a COMMAND row (`origin: 'command'`) returns `undefined` — a session-level
+ *   standalone lifecycle, never turn Process evidence;
+ * - a SUBAGENT DESCRIPTOR (`origin: 'subagent-delegation'`) returns
+ *   `undefined` — the child session's identity metadata, not a delegation
+ *   action (the parent's genuine `tool/call name=subagent` is that Action);
  * - Thinking / Conversation / Context / Workflow / Compaction / attention
  *   rows return `undefined`.
  */
