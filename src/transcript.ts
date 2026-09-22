@@ -1532,6 +1532,17 @@ export class TranscriptFolder {
    * stored authority, never by row existence (a row's presence proves
    * nothing about the step's chronology). */
   private readonly stepLaneOrders = new Map<string, 'thinking' | 'assistant'>()
+  /** Display-order displacements for lane rows whose physical append order
+   * contradicts the step's stored authority (`convergeStepLaneOrder`):
+   * displaced raw index → its anchor Assistant row. `items` itself stays
+   * strictly append-only (the `TranscriptItemId` contract), so these maps
+   * are pure presentation order — every raw-index-keyed structure (search
+   * ids, turn boundaries, read groups, compaction/workflow cards) keeps its
+   * physical meaning and needs no remap. */
+  private readonly laneDisplayByDisplaced = new Map<number, { anchor: number; position: 'before' | 'after' }>()
+  /** Inverse of {@link laneDisplayByDisplaced}: anchor Assistant row → the
+   * displaced Thinking row emitted at the anchor during raw-index walks. */
+  private readonly laneDisplayByAnchor = new Map<number, number>()
   /** In-flight live block state keyed by logical step. This is required for
    * authoritative block-end replacement: deltas may be partial, while a
    * completed block replaces the entire indexed state without duplication. */
@@ -2749,6 +2760,10 @@ export class TranscriptFolder {
     const key = stepKey(turn, step)
     const entry = this.assistantEntries.get(key)
     if (entry === undefined || !this.transientAssistantEntries.has(entry)) return false
+    // A tombstoned anchor Assistant row can no longer honor a display
+    // displacement — drop the mapping so the Thinking lane falls back to
+    // its physical slot (the raw index stays the stable TranscriptItemId).
+    this.dropLaneDisplayFor(this.searchIndexByStepKey.get(`assistant:${key}`) ?? -1)
     const activity = this.activityByTurn.get(turn)
     const clearLatestVisibility = activity !== undefined
       && activity.lastAssistantStep === step
@@ -2821,6 +2836,12 @@ export class TranscriptFolder {
       // an in-place refresh never re-judges it.
       const existing = this.thinkingEntries.get(key)
       if (chunk.type === 'reasoning-delta') {
+        // Empty reasoning is NOT Thinking lane evidence (the shared
+        // `assistantBlockProjection` contract: `reasoning.text !== ''`): an
+        // empty first delta must not CREATE a missing row — the visibility
+        // check never hides an empty Thinking row, so it would leak a blank
+        // process row into the Work span.
+        if (existing === undefined && chunk.text === '') return
         const thinking = existing ?? this.thinkingEntry(turn, step)
         thinking.text += chunk.text
         thinking.running = false
@@ -2829,13 +2850,23 @@ export class TranscriptFolder {
         this.foldThinking(activity, step, chunk.text)
         if (existing === undefined) this.convergeStepLaneOrder(turn, step)
       } else if (chunk.type === 'block-end' && chunk.block.type === 'reasoning' && 'text' in chunk.block && typeof chunk.block.text === 'string') {
-        const thinking = existing ?? this.thinkingEntry(turn, step)
-        thinking.text = chunk.block.text
-        thinking.running = false
-        this.closeThinking(thinking)
-        this.markStreamingEntryDirty(`thinking:${key}`)
-        this.restoreThinkingPreview(activity, step, chunk.block.text)
-        if (existing === undefined) this.convergeStepLaneOrder(turn, step)
+        if (chunk.block.text === '') {
+          // An authoritative EMPTY finalized reasoning replaces any existing
+          // row — the same rule the non-settled restore path applies
+          // (reasoning === '' hides Thinking) — and never creates one.
+          if (existing !== undefined) {
+            this.hideThinkingEntry(turn, step)
+            this.clearThinkingPreview(activity, step)
+          }
+        } else {
+          const thinking = existing ?? this.thinkingEntry(turn, step)
+          thinking.text = chunk.block.text
+          thinking.running = false
+          this.closeThinking(thinking)
+          this.markStreamingEntryDirty(`thinking:${key}`)
+          this.restoreThinkingPreview(activity, step, chunk.block.text)
+          if (existing === undefined) this.convergeStepLaneOrder(turn, step)
+        }
       } else if (chunk.type === 'usage') {
         this.usage.onUsageChunk(turn, step, chunk.usage)
         this.syncUsage(activity)
@@ -3108,12 +3139,14 @@ export class TranscriptFolder {
   }
 
   /** Converge one step's Thinking/Assistant rows to its stored lane
-   * authority. A row materialized out of order (a late lane appended after
-   * the step already owned the other row — same-step replacement or late
-   * diagnostic reasoning) is RELOCATED here, at the single canonical owner,
-   * never patched in a preset projection (post-F6 plan §4.3/§4.7). Steps
-   * with fewer than two live lane rows, or without stored authority, are
-   * already conformant. */
+   * authority. When the physical append order contradicts the authority (a
+   * lane materialized after the step already owned the other row — same-step
+   * replacement or late diagnostic reasoning), the Thinking row is
+   * DISPLAY-DISPLACED around the Assistant row: `items` stays strictly
+   * append-only and the raw index keeps its `TranscriptItemId` stable-
+   * identity meaning (the search overlay recovers hits by it). Steps with
+   * fewer than two live lane rows, without stored authority, or already
+   * conformant drop any stale mapping instead. */
   private convergeStepLaneOrder(turn: number, step: number): void {
     const key = stepKey(turn, step)
     const authority = this.stepLaneOrders.get(key)
@@ -3124,96 +3157,59 @@ export class TranscriptFolder {
     const thinkingIndex = this.searchIndexByStepKey.get(`thinking:${key}`)
     const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
     if (thinkingIndex === undefined || assistantIndex === undefined) return
-    if ((thinkingIndex < assistantIndex) === (authority === 'thinking')) return
-    // Moving the Thinking row to the Assistant row's index lands it
-    // immediately BEFORE the Assistant row for thinking-first authority and
-    // immediately AFTER it for assistant-first authority — the same splice
-    // arithmetic covers both directions.
-    this.moveItem(thinkingIndex, assistantIndex)
-  }
-
-  /** Relocate one raw item — the tested folder-level relocation primitive
-   * (post-F6 plan §4.7). The item and its search entry move together (the
-   * two arrays are index-aligned), and EVERY index-keyed structure is
-   * remapped across the shifted range in the same pass: turn boundaries,
-   * compaction/workflow cards, pending calls, step search indexes, dirty
-   * search entries, and read-group membership. The vacated gap re-flows its
-   * read run (two reads separated by the moved row may merge), deferring to
-   * the cold fold's final grouping pass during hydration.
-   *
-   * Precondition: `from` and `to` belong to the SAME turn segment (the only
-   * current caller — `convergeStepLaneOrder` — moves a step's Thinking row
-   * onto its same-step Assistant row, so this holds by construction). A
-   * cross-turn move would duplicate a single-item turn's boundary under the
-   * turnStarts remap and needs dedicated turn-index surgery first. */
-  private moveItem(from: number, to: number): void {
-    if (from === to) return
-    const [item] = this.items.splice(from, 1)
-    const [searchEntry] = this.searchEntries.splice(from, 1)
-    this.items.splice(to, 0, item!)
-    this.searchEntries.splice(to, 0, searchEntry!)
-    // One raw-index remap for the whole shifted range: the moved item's own
-    // index becomes `to`; every other in-range index shifts by one.
-    const remap = (index: number): number => {
-      if (index === from) return to
-      if (from < to) return index > from && index <= to ? index - 1 : index
-      return index >= to && index < from ? index + 1 : index
-    }
-    for (let i = 0; i < this.turnStarts.length; i += 1) {
-      const start = this.turnStarts[i]!
-      // Turn boundaries need two special cases beyond the generic index
-      // remap: when the moved item IS the boundary and moves later, its
-      // same-turn successor takes the boundary over AT THE SAME SLOT; when
-      // the moved item lands exactly ON a boundary, it becomes that turn's
-      // first item and the boundary keeps its slot. Every other boundary in
-      // the shifted range follows its (shifted) first item.
-      this.turnStarts[i] = start === from && from < to
-        ? from
-        : start === to && from > to
-          ? to
-          : remap(start)
-    }
-    const remapValues = (map: Map<string, number>): void => {
-      for (const [mapKey, value] of map) {
-        const mapped = remap(value)
-        if (mapped !== value) map.set(mapKey, mapped)
-      }
-    }
-    remapValues(this.compacting)
-    remapValues(this.workflowIndexes)
-    remapValues(this.searchIndexByStepKey)
-    if (this.dirtySearchEntries.size > 0) {
-      const remappedDirty: number[] = []
-      for (const dirty of this.dirtySearchEntries) remappedDirty.push(remap(dirty))
-      this.dirtySearchEntries.clear()
-      for (const dirty of remappedDirty) this.dirtySearchEntries.add(dirty)
-    }
-    if (this.groupOf.size > 0) {
-      const remappedGroups: Array<[number, ReadGroupCard]> = []
-      for (const [index, group] of this.groupOf) remappedGroups.push([remap(index), group])
-      this.groupOf.clear()
-      for (const [index, group] of remappedGroups) this.groupOf.set(index, group)
-    }
-    for (const members of this.groupMembers.values()) {
-      for (let i = 0; i < members.length; i += 1) members[i] = remap(members[i]!)
-    }
-    for (const pending of this.pendingCalls.values()) {
-      pending.index = remap(pending.index)
-    }
-    this.searchRevisionCounter += 1
-    if (this.hydrating) {
-      this.groupingDirty = true
+    if ((thinkingIndex < assistantIndex) === (authority === 'thinking')) {
+      // Conformant: drop stale mappings from an earlier flipped authority.
+      this.dropLaneDisplayFor(thinkingIndex)
+      this.dropLaneDisplayFor(assistantIndex)
       return
     }
-    // The vacated slot may have brought two reads together — re-flow that
-    // run (a no-op when nothing became adjacent). The insertion side never
-    // splits a run: the row lands next to its non-groupable lane partner.
-    const neighborIndex = this.items[from] !== undefined ? from : from - 1
-    const neighbor = this.items[neighborIndex]
-    if (neighbor !== undefined && TranscriptFolder.groupable(neighbor)) {
-      this.reflowGrouping(neighborIndex)
+    // The Assistant row anchors the step; the Thinking row is displayed
+    // immediately before (thinking-first) or after (assistant-first) it.
+    this.laneDisplayByDisplaced.set(thinkingIndex, { anchor: assistantIndex, position: authority === 'thinking' ? 'before' : 'after' })
+    this.laneDisplayByAnchor.set(assistantIndex, thinkingIndex)
+  }
+
+  /** Drop any lane display mapping that references one raw item index (as
+   * displaced row or as anchor). Called when a lane row is tombstoned so a
+   * stale mapping can never strand the surviving row's display slot. */
+  private dropLaneDisplayFor(index: number): void {
+    const entry = this.laneDisplayByDisplaced.get(index)
+    if (entry !== undefined) {
+      this.laneDisplayByDisplaced.delete(index)
+      this.laneDisplayByAnchor.delete(entry.anchor)
+    }
+    const displaced = this.laneDisplayByAnchor.get(index)
+    if (displaced !== undefined) {
+      this.laneDisplayByAnchor.delete(index)
+      this.laneDisplayByDisplaced.delete(displaced)
     }
   }
+
+  /** Emit one anchor Assistant row together with its displaced Thinking row
+   * inside a raw-index walk, in the stored authority order ('before' =
+   * Thinking first). The displaced row's own physical slot is skipped by the
+   * walk; search keeps physical corpus order — match ids are untouched
+   * either way. */
+  private emitAnchorWithDisplacedLane(index: number, out: TranscriptMessage[]): void {
+    const displaced = this.laneDisplayByAnchor.get(index)
+    const anchorItem = this.items[index]
+    const anchorVisible = anchorItem !== undefined && this.isVisible(anchorItem)
+    if (displaced === undefined) {
+      if (anchorVisible) out.push(anchorItem!)
+      return
+    }
+    const entry = this.laneDisplayByDisplaced.get(displaced)
+    const laneRow = this.items[displaced]
+    const laneVisible = laneRow !== undefined && this.isVisible(laneRow)
+    if (entry?.position === 'after') {
+      if (anchorVisible) out.push(anchorItem!)
+      if (laneVisible) out.push(laneRow!)
+      return
+    }
+    if (laneVisible) out.push(laneRow!)
+    if (anchorVisible) out.push(anchorItem!)
+  }
+
 
   private restoreThinkingFromProjection(turn: number, step: number, projection: AssistantStreamProjection): void {
     const activity = this.activityByTurn.get(turn)
@@ -3392,6 +3388,9 @@ export class TranscriptFolder {
   private groupedMessages(): TranscriptMessage[] {
     const grouped: TranscriptMessage[] = []
     for (let index = 0; index < this.items.length; index += 1) {
+      // A lane row displaced by `convergeStepLaneOrder` is emitted at its
+      // anchor Assistant row below, never at its physical slot.
+      if (this.laneDisplayByDisplaced.has(index)) continue
       const group = this.groupOf.get(index)
       if (group !== undefined) {
         const members = this.groupMembers.get(group)
@@ -3400,6 +3399,13 @@ export class TranscriptFolder {
       }
       const item = this.items[index]
       if (item === undefined) continue
+      // An anchor Assistant row emits itself plus its displaced Thinking
+      // row in authority order (single emission point — the displaced
+      // row's physical slot is skipped above).
+      if (this.laneDisplayByAnchor.has(index)) {
+        this.emitAnchorWithDisplacedLane(index, grouped)
+        continue
+      }
       // Tombstoned failed-attempt text never renders.
       if (!this.isVisible(item)) continue
       grouped.push(item)
@@ -3464,6 +3470,11 @@ export class TranscriptFolder {
       return { messages: kept, tools }
     }
     for (let index = itemStart; index <= itemEnd; index += 1) {
+      // A lane row displaced by `convergeStepLaneOrder` is emitted at its
+      // anchor Assistant row below, never at its physical slot. Both lane
+      // rows share the anchor's turn, so a turn-bounded range always covers
+      // the pair together.
+      if (this.laneDisplayByDisplaced.has(index)) continue
       const group = this.groupOf.get(index)
       if (group !== undefined) {
         // A cross-turn group may begin before the selected raw range. Its
@@ -3478,6 +3489,14 @@ export class TranscriptFolder {
       }
       const message = this.items[index]
       if (message === undefined) continue
+      // An anchor Assistant row emits itself plus its displaced Thinking
+      // row in authority order (single emission point — the displaced
+      // row's physical slot is skipped above). Thinking rows are not tool
+      // cards: the range's tool count is unaffected.
+      if (this.laneDisplayByAnchor.has(index)) {
+        this.emitAnchorWithDisplacedLane(index, kept)
+        continue
+      }
       // Tombstoned failed-attempt text never renders.
       if (!this.isVisible(message)) continue
       kept.push(message)
@@ -3733,6 +3752,10 @@ export class TranscriptFolder {
     const key = stepKey(turn, step)
     const entry = this.thinkingEntries.get(key)
     if (entry === undefined) return
+    // A tombstoned lane row can no longer honor a display displacement —
+    // drop the mapping so the surviving lane falls back to its physical
+    // slot (the raw index stays the stable TranscriptItemId).
+    this.dropLaneDisplayFor(this.searchIndexByStepKey.get(`thinking:${key}`) ?? -1)
     entry.text = ''
     this.closeThinking(entry)
     this.thinkingEntries.delete(key)

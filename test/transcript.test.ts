@@ -4301,10 +4301,10 @@ test('remove and re-add reasoning keeps the lane chronology drift-free', () => {
   assert.equal(assistant.text, 'ordered answer', 'the final replacement owns the Assistant text')
 })
 
-test('lane relocation keeps search/window/group contracts intact', () => {
-  // Scenario H: a Thinking row relocated across read rows must keep every
-  // index-keyed contract — search identities, window order, read grouping,
-  // turn facts.
+test('lane displacement keeps TranscriptItemId and search/window/group contracts intact', () => {
+  // Scenario H: a display-displaced Thinking row must keep every
+  // index-keyed contract — ABOVE ALL the stable TranscriptItemId the search
+  // overlay recovers hits by (items stays append-only; nothing is spliced).
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -4319,24 +4319,67 @@ test('lane relocation keeps search/window/group contracts intact', () => {
     toolResult(7, 'r2', 'r2 ok', 'read'),
   ])
   // [Assistant, read r1, Thinking, read r2] — the two reads are separated
-  // by the Thinking row and stay individual cards.
+  // by the Thinking row's physical slot and stay individual cards.
   assert.deepEqual(kinds(folder.messages()), ['assistant', 'tool', 'thinking', 'tool'])
+  // Hold the pre-displacement search identities: the displacement must not
+  // renumber ANY raw item (the overlay recovers the open hit by id). The
+  // query matches the row both before ('late diagnostic thought') and after
+  // the replacement ('ordered thought' — the authoritative replacement
+  // replaces the row TEXT in place, same id).
+  const thinkingBefore = folder.search('thought')
+  const readBefore = folder.search('r1 ok')
+  assert.equal(thinkingBefore.length, 1)
+  assert.equal(readBefore.length, 1)
   folder.apply([messageSettlement(8, laneOrderedStep('thinking'))])
-  // The replacement relocates the Thinking row BEFORE the Assistant row;
-  // the vacated gap merges the two reads into one grouped card.
-  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant', 'tool'])
-  const merged = folder.messages()[2]
-  assert.ok(merged !== undefined && merged.kind === 'tool')
-  assert.ok(merged.result.includes('r1 ok') && merged.result.includes('r2 ok'), 'the merged read card carries both results')
-  // Search still finds both lanes and both read results (index remap).
-  assert.equal(folder.search('ordered thought').length, 1)
-  assert.equal(folder.search('ordered answer').length, 1)
-  assert.equal(folder.search('r1 ok').length, 1)
-  assert.equal(folder.search('r2 ok').length, 1)
-  // Window and grouped-turn projections stay consistent.
+  // The replacement displaces the Thinking row BEFORE the Assistant row in
+  // DISPLAY order only — physical ids are untouched, so the same id still
+  // resolves to the same logical row even though its text was replaced.
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant', 'tool', 'tool'])
+  assert.equal(folder.search('late diagnostic').length, 0, 'the authoritative replacement replaced the diagnostic text in place')
+  const thinkingAfter = folder.search('thought')
+  const readAfter = folder.search('r1 ok')
+  assert.equal(thinkingAfter.length, 1)
+  assert.equal(readAfter.length, 1)
+  assert.equal(thinkingAfter[0]?.id, thinkingBefore[0]?.id, 'the Thinking hit keeps its TranscriptItemId across the displacement')
+  assert.equal(readAfter[0]?.id, readBefore[0]?.id, 'the read hit keeps its TranscriptItemId across the displacement')
+  // Window and grouped-turn projections stay consistent; the reads stay
+  // separate cards (grouping follows PHYSICAL adjacency — conservative).
   const windowed = folder.window({ maxTurns: 1 })
-  assert.deepEqual(windowed.messages.map(message => message.kind), ['thinking', 'assistant', 'tool'])
+  assert.deepEqual(windowed.messages.map(message => message.kind), ['thinking', 'assistant', 'tool', 'tool'])
   assert.deepEqual([...folder.groupedTurns()], [0])
+})
+
+test('empty late reasoning never creates a Thinking row (visibility contract)', () => {
+  // P2-2: empty reasoning is not Thinking lane evidence — the settled late
+  // path must obey the same `thinkingVisible` contract as the live restore.
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 3, text: '' }, 4))
+  assert.deepEqual(kinds(folder.messages()), ['assistant'], 'an empty first delta creates no row')
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-end', index: 3, block: { type: 'reasoning', text: '' } } as never, 5))
+  assert.deepEqual(kinds(folder.messages()), ['assistant'], 'an empty finalized reasoning creates no row')
+})
+
+test('an empty finalized reasoning hides an existing late Thinking row', () => {
+  // P2-2 counterpart for an EXISTING row: the authoritative empty block-end
+  // replaces the row (reasoning === '' hides Thinking) instead of leaving a
+  // visible blank process row.
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    textOnlySettlement(2),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 3, text: 'diagnostic thought' }, 4))
+  assert.deepEqual(kinds(folder.messages()), ['assistant', 'thinking'])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'block-end', index: 3, block: { type: 'reasoning', text: '' } } as never, 5))
+  assert.deepEqual(kinds(folder.messages()), ['assistant'], 'the authoritative empty reasoning replaces the row')
+  const activity = folder.turnActivity(0)
+  assert.equal(activity?.think, undefined, 'the Think slot clears with the row')
 })
 
 test('late reasoning after settlement refreshes an existing Thinking row in place', () => {
