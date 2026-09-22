@@ -1100,6 +1100,30 @@ test('multiline input respects the row budget: every painted row is one physical
   panel.dispose()
 })
 
+test('caller-provided header and no-match text project to ONE physical row', () => {
+  const panel = new TaskBrowserPanel(
+    [runningJob()],
+    10,
+    { mode: 'full', header: 'Workflow · foo\nbar', enableSearch: true, noMatchText: 'nothing\nhere' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  // The header embeds caller/durable text (the Workflow scoped Task
+  // Center passes run name + phase label) — it must not carry CR/LF past
+  // the row budget.
+  const lines = panel.render(100).map(strip)
+  assertPhysicalRows(lines, 100)
+  assert.ok(lines.some(line => line.includes('Workflow · foo bar')), `the collapsed header must render:\n${lines.join('\n')}`)
+  // The no-match message is caller text on one row.
+  panel.handleInput('/')
+  for (const key of 'zz') panel.handleInput(key)
+  const noMatch = panel.render(100).map(strip)
+  assertPhysicalRows(noMatch, 100)
+  assert.ok(noMatch.some(line => line.includes('nothing here')), `the collapsed no-match text must render:\n${noMatch.join('\n')}`)
+  panel.dispose()
+})
+
 test('a multiline refresh error stays ONE physical row', () => {
   const panel = new TaskBrowserPanel(
     [multilineJob()],

@@ -850,9 +850,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     const refreshErrorLine = refreshErrorText === undefined ? undefined
       : truncateToWidth(`${refreshErrorText}${retrySuffix}`, safeWidth, '…')
     // Hoisted chrome texts: the short-grant degradation rebuilds from
-    // them without the unconditionally-kept blank spacers.
+    // them without the unconditionally-kept blank spacers. The header
+    // embeds caller/durable text (e.g. the Workflow scoped Task Center's
+    // run name and phase label), so it is projected before truncation —
+    // one returned row is one physical row.
     const headerText = this.options.header === undefined ? undefined
-      : truncateToWidth(this.headerText(), safeWidth, '…')
+      : truncateToWidth(singlePhysicalLine(this.headerText()), safeWidth, '…')
     const searchEmpty = this.getFilter() === ''
     const searchRowText = !searchOn ? '' : (() => {
       const searchLine = this.searchInput.render(Math.max(1, safeWidth - 2))[0] ?? ''
@@ -888,7 +891,7 @@ export class TaskBrowserPanel implements Component, Focusable {
 
     const rows = this.filtered
     if (rows.length === 0) {
-      push(color.textDim(this.refreshError === undefined ? (this.options.noMatchText ?? 'No matching tasks') : 'Could not load tasks'), { kind: 'inert' })
+      push(color.textDim(this.refreshError === undefined ? singlePhysicalLine(this.options.noMatchText ?? 'No matching tasks') : 'Could not load tasks'), { kind: 'inert' })
       if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
       push('', { kind: 'inert' })
       push(hintLine, { kind: 'inert' })
