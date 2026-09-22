@@ -230,3 +230,52 @@ test('the standalone Context body indent never overflows at 1-3 columns', () => 
     }
   }
 })
+
+// ── Wide-grapheme artifact suppression (body-indent supplement §9) ────────
+
+test('a content-bearing wide glyph never leaves a pure-indent ghost body row', () => {
+  // width 3 → indent 2 + content 1: the fork cannot place a wide grapheme in
+  // one cell, so it would otherwise emit `['', glyph]` → a ghost `'  '` row.
+  const one = new NoticeContextRow({ message: noticeRow('中'), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(3)
+  assert.equal(one.length, 2, `header + exactly ONE body row:\n${one.map(visible).join('|')}`)
+  assert.equal(visible(one[1]!), `${BODY}…`, 'the body row is the truncated glyph under the indent')
+  const two = new NoticeContextRow({ message: noticeRow('中中'), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji' }).render(3)
+  assert.equal(two.length, 3, `two glyphs -> two body rows, no ghosts:\n${two.map(visible).join('|')}`)
+  for (const row of one.slice(1).concat(two.slice(1))) {
+    assert.notEqual(visible(row).trim(), '', `no pure-indent ghost row:\n${JSON.stringify(visible(row))}`)
+  }
+})
+
+test('a genuine blank logical line keeps its body row (artifact cleanup is per logical line)', () => {
+  const rows = new NoticeContextRow({
+    message: noticeRow('first\n\nsecond'), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+  }).render(40)
+  const body = rows.slice(1).map(visible)
+  assert.equal(body.length, 3, `three body rows (content / blank / content):\n${body.join('|')}`)
+  assert.ok(body[0]!.includes('first'))
+  assert.equal(body[1]!.trim(), '', 'the source-authored blank line is NOT deleted')
+  assert.ok(body[2]!.includes('second'))
+})
+
+test('wide-glyph artifacts never push the relay long-message window into collapse', () => {
+  // Three CJK glyphs at content width 1 wrap to exactly THREE true physical
+  // rows. A ghost row per glyph would report six and cross a threshold of 3,
+  // wrongly collapsing the body and inflating hidden rows.
+  const rows = new RelayContextRow({
+    message: relayRow('中中中'), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+    geometry: { thresholdRows: 3, headRows: 2, tailRows: 2 },
+  }).render(3)
+  assert.equal(rows.length, 4, `header + exactly 3 body rows, no overflow marker:\n${rows.map(visible).join('|')}`)
+  assert.ok(!rows.some(row => visible(row).includes('to expand')), 'no collapse affordance at the threshold')
+  for (const row of rows) assert.ok(visibleWidth(row) <= 3, `width contract:\n${JSON.stringify(visible(row))}`)
+})
+
+test('a genuine blank relay body line survives the artifact cleanup', () => {
+  const rows = new RelayContextRow({
+    message: relayRow('alpha\n\nbeta'), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji',
+    geometry: { thresholdRows: 10, headRows: 4, tailRows: 3 },
+  }).render(20)
+  const body = rows.slice(1).map(visible)
+  assert.equal(body.length, 3, `content / blank / content:\n${body.join('|')}`)
+  assert.equal(body[1]!.trim(), '', 'the blank line is preserved')
+})

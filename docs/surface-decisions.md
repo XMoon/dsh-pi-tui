@@ -632,7 +632,12 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   hides — Focus derives it from the same transcript rows `projectFocus`
   hides under the collapsed Thought root (never a second `TurnActivity`
   chronology store), Activity derives it in `summarizeWorkSpan`'s single
-  member walk. The slot is presentation-only: Tool remains a strict
+  member walk. Post-turn replay evidence (a row that materialized after its
+  owning `turn/end`) stays transcript/search evidence but is excluded from the
+  Action aggregate/winner, Work membership and read grouping — the fence and
+  its provenance rule are owned by
+  `docs/transcript-display-disclosure.md`.
+  The slot is presentation-only: Tool remains a strict
   underlying semantic (`Command`, `Retry`, `Subagent` are never Tools). The
   shared `CompactActionStats` cardinality: a genuine tool contributes its
   `callCount`, a subagent/command/retry occurrence contributes one action of

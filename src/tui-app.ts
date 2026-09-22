@@ -3162,7 +3162,9 @@ function sameTranscriptBlockShape(left: TranscriptRenderBlock, right: Transcript
     }
     return left.message === right.message && left.truncated === right.truncated
   }
-  if (left.kind === 'activity' && right.kind === 'activity') return left.activity === right.activity
+  if (left.kind === 'activity' && right.kind === 'activity') {
+    return left.activity === right.activity && left.owner === right.owner
+  }
   if (left.kind === 'work' && right.kind === 'work') return sameWorkSpanShape(left.span, right.span)
   if (left.kind === 'context-cluster' && right.kind === 'context-cluster') {
     return left.expanded === right.expanded && sameContextClusterShape(left.cluster, right.cluster)
@@ -4135,14 +4137,17 @@ export class TuiApp {
   }>()
   /** The folder's per-turn activities (same fold state as `messages`). */
   private turnActivities: ReadonlyMap<number, TurnActivity> = new Map()
-  /** The FocusActivityComponent cache, keyed by turn: rebuilds on the
-   * activity revision, the expansion state, the theme revision, the icon
-   * style, the bounded Action signature, or the live Preparing summary
-   * (plan §39 + §34.9; addendum v2 §39 — synthetic Action changes
-   * must repaint even when `TurnActivity.tool` did not move). render()
-   * still re-reads Date.now() per frame, so the running duration refreshes
-   * on the WorkingIndicator's repaint heartbeat. */
-  private readonly focusActivityComponents = new Map<number, {
+  /** The FocusActivityComponent cache, keyed by the Thought block's run
+   * OWNER (the run's first `TranscriptMessage`) — NOT by turn: one turn can
+   * materialize several Thought runs (a turn-less window entry splits it),
+   * each with its own hidden rows/Action winner/component. Rebuilds on the
+   * activity object/revision, the expansion state, the theme revision, the
+   * icon style, the bounded Action + ActionStats signatures, or the live
+   * Preparing summary (plan §39 + §34.9; addendum v2 §39 — synthetic Action
+   * changes must repaint even when `TurnActivity.tool` did not move).
+   * render() still re-reads Date.now() per frame, so the running duration
+   * refreshes on the WorkingIndicator's repaint heartbeat. */
+  private readonly focusActivityComponents = new Map<TranscriptMessage, {
     /** The activity object the component was built from (identity key). */
     activity: TurnActivity
     component: FocusActivityComponent
@@ -8689,12 +8694,12 @@ export class TuiApp {
     // component around, and a cleared message cache must not leave one
     // either.
     if (this.focusActivityComponents.size > 0) {
-      const liveTurns = new Set<number>()
+      const liveActivityOwners = new Set<TranscriptMessage>()
       for (const block of blocks) {
-        if (block.kind === 'activity') liveTurns.add(block.activity.turn)
+        if (block.kind === 'activity') liveActivityOwners.add(block.owner)
       }
-      for (const turn of this.focusActivityComponents.keys()) {
-        if (!liveTurns.has(turn)) this.focusActivityComponents.delete(turn)
+      for (const owner of this.focusActivityComponents.keys()) {
+        if (!liveActivityOwners.has(owner)) this.focusActivityComponents.delete(owner)
       }
     }
     // The Compact Work / Context-cluster component caches follow the same
@@ -9413,6 +9418,7 @@ export class TuiApp {
    * + ActionStats signatures are mandatory cache keys). render() re-reads
    * Date.now() every frame, so the running duration is always live. */
   private focusActivityComponentFor(
+    owner: TranscriptMessage,
     activity: TurnActivity,
     expanded: boolean,
     action: CompactActionPresentation | undefined,
@@ -9421,7 +9427,7 @@ export class TuiApp {
   ): FocusActivityComponent {
     const actionSignature = compactActionSignature(action)
     const statsSignature = compactActionStatsSignature(actionStats)
-    const entry = this.focusActivityComponents.get(activity.turn)
+    const entry = this.focusActivityComponents.get(owner)
     if (entry !== undefined && entry.activity === activity
       && entry.revision === activity.revision
       && entry.expanded === expanded && entry.themeRev === this.themeRevision
@@ -9444,7 +9450,7 @@ export class TuiApp {
       preparingSummary,
       timing: this.focusTiming,
     })
-    this.focusActivityComponents.set(activity.turn, {
+    this.focusActivityComponents.set(owner, {
       activity,
       component,
       revision: activity.revision,
@@ -9576,6 +9582,7 @@ export class TuiApp {
   ): Component {
     if (block.kind === 'activity') {
       return this.focusActivityComponentFor(
+        block.owner,
         block.activity,
         projectionExpanded.has(block.activity.turn),
         this.compactActionPresentationFor(block.action),

@@ -27,7 +27,7 @@
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import { focusToolDisplay, toolTitle, type ToolPresenter } from './present.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
-import { activeSubCallsOf, THINKING_TAIL_CAP, type TranscriptMessage, type TranscriptToolMessage } from './transcript.ts'
+import { activeSubCallsOf, isPostTurnReplayEvidence, THINKING_TAIL_CAP, type TranscriptMessage, type TranscriptToolMessage } from './transcript.ts'
 import { isSurfacedInteractionToolName } from './transcript-semantics.ts'
 
 /** The fixed label column width of the collapsed body slots: the widest
@@ -239,6 +239,11 @@ export type CompactActionSource =
  *   rows return `undefined`.
  */
 export function compactActionSourceOf(message: TranscriptMessage): CompactActionSource | undefined {
+  // Post-turn replay evidence is transcript/diagnostic evidence only: it
+  // never counts as an action and never owns the collapsed Action slot
+  // (the fold's late-replay fence, shared with Work membership and read
+  // grouping).
+  if (isPostTurnReplayEvidence(message)) return undefined
   if (message.kind === 'system') {
     return message.origin === 'llm-retry' ? { kind: 'retry', message } : undefined
   }

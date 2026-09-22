@@ -81,6 +81,37 @@ projectTranscriptStructure()
   original `TranscriptMessage` objects, so presentation caches compare
   identity/order (never a synthetic hash or a content-derived owner).
 - The projector is a single forward pass plus the linear clustering pass (O(n)).
+- **Post-turn replay evidence is transcript evidence, never aggregation
+  evidence.** The fold is the ONLY authority that can know a row
+  MATERIALIZED after its owning turn's authoritative `turn/end` (the row's
+  `turn`/`kind` cannot express it), and it records that fact in a
+  presentation-only sidecar (`isPostTurnReplayEvidence`). Provenance is
+  strictly "newly created after the turn completed" — NEVER "touched by a
+  post-`turn/end` event": a `tool/result` that finds its own pending/running
+  card still settles that card normally and leaves it fully legal evidence.
+  Such a row stays in the transcript (Full, expanded Focus, search,
+  diagnostic), but it is excluded from the settled turn's Process/Action
+  aggregates at THREE shared consumers: the Action classifier, Work-span
+  membership, and consecutive-read grouping (a synthesized group card would
+  otherwise launder the provenance back into an aggregate). A replay row is a
+  grouping BOUNDARY, so a late read can never merge with a legal one; the
+  stateful folder and the exported `groupConsecutiveReads` mirror share the
+  one `isGroupableRead` predicate.
+  **Known attribution boundary:** the two producers whose events carry no turn
+  of their own (`command/done`, `subagent/descriptor`) are attributed to the
+  fold's `currentTurn` (pre-existing behavior). A fragment that arrives after
+  its turn ended while a LATER turn is already active therefore belongs to that
+  active turn and cannot be recognized as replay evidence for the finished one.
+  The synchronous slash-command and launch-time descriptor paths make this
+  unreachable; the fence deliberately does not infer an owning turn from
+  display text, so this stays a documented boundary rather than a heuristic.
+- **Focus occurrence identity ≠ Focus disclosure identity.** One turn can
+  materialize SEVERAL Thought runs (a turn-less window entry splits it), each
+  with its own hidden rows, Action winner and component. The presentation
+  occurrence identity is therefore the run's first `TranscriptMessage`
+  (`FocusProjectedBlock.owner`, the same owner pattern Work/cluster use),
+  while the SEMANTIC disclosure identity — Ctrl+O, click ownership,
+  `focusExpandedTurns`, `containerPath` — stays the turn number.
 
 Compact, Full and expanded Focus all materialize this structure:
 
@@ -182,6 +213,14 @@ Surfaced Context
   (below 3 columns it is dropped rather than overflowing). This is the card's own
   hierarchy, the same relationship the Tool card's payload inset expresses; the
   outer container flattening and `containerPath` semantics are unaffected.
+  **Wide-grapheme artifacts are suppressed per LOGICAL line:** the fork cannot
+  split a wide grapheme, so a content-bearing line at content width 1 comes
+  back as a zero-width row beside the over-wide one — that zero-width row is an
+  artifact and is dropped (otherwise it becomes a pure-indent ghost row and
+  shifts the relay's threshold / head-tail / hidden-row math). A blank or
+  whitespace-only logical line keeps its established blank-row contract; a
+  blanket `visibleWidth(row) === 0` filter is deliberately NOT used because it
+  would delete genuinely blank source lines.
 
 ### Ambient clustering
 

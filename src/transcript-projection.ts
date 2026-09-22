@@ -24,7 +24,7 @@
 
 import { clusterAdjacentAmbientContext, type ContextCluster } from './context-presentation.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool } from './transcript-semantics.ts'
-import type { TranscriptMessage } from './transcript.ts'
+import { isPostTurnReplayEvidence, type TranscriptMessage } from './transcript.ts'
 
 /**
  * One presentation-only contiguous Process run. `members` preserve raw
@@ -59,6 +59,10 @@ export function isTranscriptWorkMember(message: TranscriptMessage): message is T
   return 'turn' in message
     && classifyTranscriptMessage(message).class === 'process'
     && !isSurfacedInteractionTool(message)
+    // Post-turn replay evidence stays in the transcript but is never Process
+    // aggregation evidence for the settled turn: it must not join a Work
+    // span (and so must not feed its Action stats/preview).
+    && !isPostTurnReplayEvidence(message)
 }
 
 /**
