@@ -10,8 +10,8 @@
  * three visual rows) — plus the Error line, all muted, never competing
  * with the final assistant. The Action slot is the presentation-only
  * latest meaningful non-Thinking Process evidence hidden under the
- * collapsed root (post-F6 presentation-convergence addendum v2): genuine Tool, Preparing,
- * Subagent delegation, Command, Retry or an orphan-result diagnostic,
+ * collapsed root (post-F6 presentation-convergence addendum v2): a genuine
+ * Tool, Preparing, Retry or an orphan-result diagnostic,
  * selected by chronology from the SAME transcript rows the projection
  * hides — never a second `TurnActivity` chronology store. The expanded
  * card renders ONLY the header: the hidden process rows render below as
