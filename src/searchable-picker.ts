@@ -801,9 +801,12 @@ export class SearchablePicker implements Component, Focusable {
   }
 
   private addHintLine(lines: string[], hits: PickerMouseHit[], priorities: number[], width: number): void {
-    const hint = this.options.hint ?? (this.searchEnabled
+    // The hint is one physical row: a caller-provided hint text is
+    // projected before truncation (same single-row contract as the rest
+    // of the chrome).
+    const hint = singlePhysicalLine(this.options.hint ?? (this.searchEnabled
       ? 'type to filter · ↑↓ navigate · enter select · esc close'
-      : '↑↓ navigate · enter select · esc close')
+      : '↑↓ navigate · enter select · esc close'))
     lines.push('')
     hits.push({ kind: 'inert' })
     priorities.push(ROW_PRIORITY.spacer)

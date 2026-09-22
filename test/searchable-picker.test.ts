@@ -984,3 +984,19 @@ test('caller-provided chrome (header/noMatch/group) projects to ONE physical row
   }
   assert.ok(emptyRows.some(row => row.includes('oops nope')), `the collapsed no-match text must render:\n${emptyRows.join('\n')}`)
 })
+
+test('a custom multiline hint projects to ONE physical row', () => {
+  const picker = new SearchablePicker(
+    [{ value: 'a', label: 'alpha' }],
+    5,
+    testTheme,
+    {},
+    { showHint: true, hint: 'foo\nbar' },
+  )
+  const rows = picker.render(80)
+  for (const row of rows) {
+    assert.equal(/[\r\n]/.test(row), false, `an embedded row break leaked into the hint: ${JSON.stringify(row)}`)
+    assert.ok(visibleWidth(row) <= 80, `a hint row exceeds the grant: ${JSON.stringify(row)}`)
+  }
+  assert.ok(rows.some(row => row.includes('foo bar')), `the collapsed hint must render:\n${rows.join('\n')}`)
+})
