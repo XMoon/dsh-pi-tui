@@ -443,6 +443,23 @@ export type FocusProjectedBlock =
   }
 
 /**
+ * The Focus projection TURN of one row — the ONE authority `projectFocus` and
+ * its grouping helpers share. A COMMAND row has NO projection turn: its `turn`
+ * field is a legacy display-PLACEMENT artifact (a command is session-level
+ * standalone evidence; DSH wraps no model turn around it). Consuming that field
+ * for grouping would both hoist an idle command ahead of the turn it followed
+ * and mint an empty Thought for a turn whose only row is a command. Treating a
+ * command as a turn-less BOUNDARY makes the projection agree with the fold:
+ * `process A -> Thought A`, `command -> standalone`, `process B -> Thought B`.
+ * Both runs may still belong to one model turn (the run-owner component cache
+ * supports that), and the semantic disclosure identity stays the turn number.
+ */
+function focusProjectionTurnOf(message: TranscriptMessage): number | undefined {
+  if (isCommandTool(message)) return undefined
+  return 'turn' in message ? message.turn : undefined
+}
+
+/**
  * The Thought block for one turn: the caller-resolved TURN-LEVEL Action
  * stats (addendum v2 §18) plus — collapsed only (`hidden !== undefined`) —
  * the presentation-only Action source. `latestCompactAction` picks the
@@ -516,9 +533,11 @@ export function projectFocus(
   let index = 0
   while (index < messages.length) {
     const message = messages[index]!
-    const turn = 'turn' in message ? message.turn : undefined
+    const turn = focusProjectionTurnOf(message)
     if (turn === undefined) {
-      // Window summaries and other turn-less entries pass through.
+      // Window summaries, standalone command rows and other turn-less entries
+      // pass through as standalone blocks (a command acts as a Process-run
+      // boundary, so the surrounding Thought runs stay separate).
       out.push({ kind: 'message', message })
       index += 1
       continue
@@ -749,7 +768,9 @@ function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: num
   let index = start + 1
   while (index < messages.length) {
     const next = messages[index]!
-    if (!('turn' in next) || next.turn !== turn) break
+    // `focusProjectionTurnOf` — never the raw `turn` — so a command row's
+    // legacy placement cannot join (or split) the run it merely sits in.
+    if (focusProjectionTurnOf(next) !== turn) break
     group.push(next)
     index += 1
   }
@@ -770,11 +791,13 @@ export function isCollapsedFocusHiddenRow(messages: readonly TranscriptMessage[]
   if (!isSurfacedContext(message) || !isNoticeContext(message) || !('turn' in message)) return false
   const position = messages.indexOf(message)
   if (position < 0) return false
-  // Walk back to the start of the CONSECUTIVE run the projection would group.
+  // Walk back to the start of the CONSECUTIVE run the projection would group,
+  // with the SAME projection-turn authority (a command row is a boundary even
+  // though it carries a legacy `turn`).
   let start = position
   while (start > 0) {
     const previous = messages[start - 1]!
-    if (!('turn' in previous) || previous.turn !== message.turn) break
+    if (focusProjectionTurnOf(previous) !== focusProjectionTurnOf(message)) break
     start -= 1
   }
   const group = consecutiveTurnGroup(messages, start, message.turn)
