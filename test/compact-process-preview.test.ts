@@ -173,6 +173,17 @@ test('classifier: subagent-delegation -> none (child identity metadata)', () => 
   assert.equal(compactActionSourceOf(toolMessage({ origin: 'subagent-delegation', name: 'subagent', args: 'reviewer' })), undefined)
 })
 
+test('classifier: a genuine tool/call named subagent IS the delegation Action', () => {
+  // The parent's own delegation call is an ordinary genuine `tool/call` whose
+  // name happens to be `subagent` (upstream tool-subagent's default). Removing
+  // the DESCRIPTOR from the Action vocabulary must not remove THIS path.
+  const call = toolMessage({ name: 'subagent', args: JSON.stringify({ label: 'scout' }) })
+  assert.equal(compactActionSourceOf(call)?.kind, 'tool')
+  const stats = compactActionStatsOf([call])
+  assert.equal(stats.total, 1)
+  assert.deepEqual([...stats.types.entries()], [['subagent', 1]])
+})
+
 test('classifier: command -> none (standalone session-level lifecycle)', () => {
   // DSH appends command/run + command/done as direct log-only events with NO
   // wrapping turn, and renders the settled result outside model history: a
