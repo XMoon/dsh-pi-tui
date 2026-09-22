@@ -4172,10 +4172,10 @@ test('collapsed Focus: a command row stays standalone-visible and never becomes 
     eventAt('command/done', { commandId: 'cmd1', kind: 'success' }, 1002, 2),
   ])
   // A command's lifecycle is session-level (DSH wraps no turn around it): it is
-  // not Process evidence, so the Thought claims no Action for it…
+  // a turn-less BOUNDARY, so a turn whose only row is a command materializes no
+  // Thought at all — hence no Action, no count and no empty Thought header.
   const block = collapsedFocusActionOf(folder)
-  assert.equal(block?.action, undefined, 'a command never owns the collapsed Action')
-  assert.equal(block?.actionStats.total, 0, 'and never counts')
+  assert.equal(block, undefined, 'a command-only turn materializes no Thought block')
   const body = focusCollapsedBody(folder.turnActivity(0)!, 80, undefined)
   assert.ok(!body.some(line => line.includes('/compact')), body.join('\n'))
   assert.equal(folder.turnActivity(0)!.toolCalls, 0)
@@ -4452,10 +4452,17 @@ test('an idle human command after a completed turn stays standalone-visible and 
   assert.deepEqual(focusActionState(folder), { total: 1, types: ['read'], winner: 'read' },
     'the settled turn gains no Action from the command')
   assert.deepEqual(workSpanToolNames(folder), ['read'], 'and the command joins no Work span')
-  const visible = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
-    .filter(candidate => candidate.kind === 'message')
-    .map(candidate => candidate.kind === 'message' ? candidate.message : undefined)
-  assert.ok(visible.includes(card), 'the command card stays visible standalone (feedback is never swallowed)')
+  // EXACT ORDER, not merely "present": a command is a turn-less boundary, so
+  // it keeps its real chronology AFTER the Thought and the held-back final
+  // instead of being hoisted above the Thought it followed.
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  assert.deepEqual(blocks.map(block => block.kind === 'activity'
+    ? `Thought(turn ${block.activity.turn})`
+    : block.kind === 'message'
+      ? (block.message === card ? 'command' : block.message.kind)
+      : block.kind),
+  ['Thought(turn 0)', 'assistant', 'command'],
+  'Thought -> assistant final -> standalone command')
 })
 
 test('a command crossing a later turn never pollutes either turn', () => {
@@ -4480,7 +4487,56 @@ test('a command crossing a later turn never pollutes either turn', () => {
     assert.equal(block?.actionStats.total ?? 0, 0, `turn ${turn} stays clean`)
     assert.equal(block?.action, undefined, `turn ${turn} has no Action winner from the command`)
   }
+  // …and a turn whose ONLY row is the command must not materialize an empty
+  // Thought at all (the command is a turn-less boundary, not a pseudo turn).
+  const turnOneBlocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+    .filter(candidate => candidate.kind === 'activity' && candidate.activity.turn === 1)
+  assert.equal(turnOneBlocks.length, 0, 'no empty Thought for a command-only pseudo turn')
   assert.deepEqual(workSpanToolNames(folder), [], 'the command joins no Work span')
+})
+
+test('a standalone command splits two Process runs of the SAME model turn', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('a1'), name: 'read', arguments: '{}' }, 1001, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('ra1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('a1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('a1') },
+      },
+    }, 1002, 2),
+    eventAt('command/run', { commandId: 'mid-1', name: 'compact' }, 1003, 3),
+    eventAt('command/done', { commandId: 'mid-1', kind: 'success' }, 1004, 4),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('b1'), name: 'read', arguments: '{}' }, 1005, 5),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('rb1'), role: 'user',
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('b1'), content: [{ type: 'text', text: 'ok' }] }],
+        source: { kind: 'tool', callId: ToolCallId('b1') },
+      },
+    }, 1006, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1007, 7),
+  ])
+  const commandRow = folder.messages().find(message => message.kind === 'tool' && message.origin === 'command')
+  assert.ok(commandRow !== undefined, 'fixture: the command card exists')
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  assert.deepEqual(blocks.map(block => block.kind === 'activity'
+    ? `Thought(turn ${block.activity.turn})`
+    : block.kind === 'message'
+      ? (block.message === commandRow ? 'command' : block.message.kind)
+      : block.kind),
+  ['Thought(turn 0)', 'command', 'Thought(turn 0)'],
+  'the command splits the run: Thought / standalone command / Thought')
+  // Both runs still describe the SAME whole turn (the §18 turn-level contract).
+  for (const block of blocks) {
+    if (block.kind !== 'activity') continue
+    assert.equal(block.actionStats.total, 2, 'each run reports the whole turn: 2 read actions')
+  }
+  assert.deepEqual(workSpanToolNames(folder), ['read', 'read'], 'and the command joins NO Work span')
 })
 
 test('late-replay provenance (A): a pre-turn/end call that settles late stays legal evidence', () => {
