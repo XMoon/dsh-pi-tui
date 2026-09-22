@@ -137,6 +137,7 @@ function harness(sessionReader: SessionReader): Harness {
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},
+    outputStyleState: { style: 'checkpoint' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

@@ -140,6 +140,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
+    outputStyleState: { style: 'checkpoint' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

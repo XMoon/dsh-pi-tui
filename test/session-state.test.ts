@@ -178,6 +178,7 @@ function stubRunner(
     },
     sessionBlank: () => undefined,
     refreshStatus: () => {},
+    outputStyleState: { style: 'checkpoint' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
@@ -282,9 +283,7 @@ test('/settings working-directory row follows the live session cwd', async () =>
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
   await vt.waitForRender()
-  // The working-directory row sits at the end of the scrolling list (the
-  // icon-style and sandbox rows joined the panel, so the list is longer).
-  for (let index = 0; index < 12; index += 1) vt.sendInput('\x1b[B')
+  vt.sendInput('Working directory')
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('/ws/alpha'), `session cwd row missing:\n${view}`)
@@ -294,7 +293,7 @@ test('/settings working-directory row follows the live session cwd', async () =>
   await vt.waitForRender()
   ;(settingsDef!.handler as () => unknown)()
   await vt.waitForRender()
-  for (let index = 0; index < 12; index += 1) vt.sendInput('\x1b[B')
+  vt.sendInput('Working directory')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('/ws/beta'), `updated session cwd missing:\n${view}`)

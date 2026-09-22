@@ -35,6 +35,7 @@ import type { ComposerSubmitGesture } from './tui-app.ts'
 import { mergeDraft, sessionUnchanged } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
 import { isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyResult } from './display-preset.ts'
+import { parseOutputStyle, type OutputStyleState } from './output-style.ts'
 import { parseNotificationMethod, parseNotificationMode } from './notification/settings.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from './wheel-scroll.ts'
 import { iconStyleOf } from './icons.ts'
@@ -627,6 +628,8 @@ export interface TuiCommandRunner {
    * Optional: stubs without the coordinator fall back to a direct
    * sessionReader read. */
   forceContextMeasurement?(): number | undefined
+  /** Shared with prompt assembly; settings changes take effect on the next step. */
+  readonly outputStyleState: OutputStyleState
   /** The canonical display preset (the authoritative runtime state). */
   displayPreset?(): DisplayPreset
   /** Apply a canonical display preset through the shared setter. */
@@ -2182,6 +2185,13 @@ export function registerTuiCommands(
             values: ['full', 'compact', 'focus'],
           },
           {
+            id: 'output-style',
+            label: 'Output style',
+            description: 'Checkpoint: Brief updates at meaningful milestones; Concise: Result-first with minimal narration; Explanatory: Adds rationale and implementation insights; None: No additional output-style guidance',
+            currentValue: runner.outputStyleState.style,
+            values: ['checkpoint', 'concise', 'explanatory', 'none'],
+          },
+          {
             id: 'notification-mode',
             label: 'Notifications',
             description: 'When to notify that the main agent finished: Unfocused (default) — only while the terminal is not focused; Always — whenever the main agent settles; Off — disable completion notifications',
@@ -2561,6 +2571,16 @@ export function registerTuiCommands(
           } else if (id === 'display-preset') {
             if (value === 'full' || value === 'compact' || value === 'focus') {
               applyDisplayPreset(runner, value)
+            }
+          } else if (id === 'output-style') {
+            const style = parseOutputStyle(value)
+            runner.outputStyleState.style = style
+            const settings = tuiSettings
+            if (settings !== undefined) {
+              detach('settings output style write', () => serializeTuiSettingsMutation(
+                settings,
+                () => settings.replace(withUserFooterCustomItems({ ...settings.get(), outputStyle: style }, runner.config)),
+              ), { notify: true })
             }
           } else if (id === 'notification-mode') {
             if (value === 'unfocused' || value === 'always' || value === 'off') {

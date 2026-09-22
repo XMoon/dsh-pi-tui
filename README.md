@@ -119,6 +119,10 @@ dsh --profile pi-tui --session <session-id>
 
 需要查看过程时可以展开，关闭 Focus 后恢复普通 Transcript 展示。全屏 Focus 中可以按 Thought root 批量展开/收起,也可以单独点击卡片;切换或缩放时会保留 viewport。展示预设只影响界面投影，不修改 Session 中保存的事件。
 
+### 输出风格
+
+`/settings` → **Output style** 独立于展示预设控制模型的表达方式：`checkpoint`（默认）在重要里程碑提供简短更新，`concise` 结果优先、减少过程叙述，`explanatory` 补充相关原理与取舍，`none` 不添加输出风格指导。切换在下一次提示词组装时生效，无需重启 Agent，并保存供后续会话使用。Focus 仍隐藏中间文字并要求最终回复包含完整必要信息，选择 `none` 也不改变这一点。
+
 ### Session
 
 支持 DSH 持久化 Session，包括：

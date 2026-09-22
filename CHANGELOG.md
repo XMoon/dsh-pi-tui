@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **独立的 Output style 设置。** 在 `/settings` 选择 Checkpoint（默认）、Concise、Explanatory 或 None，下一次模型步骤即采用所选表达指导，无需重启 Agent。偏好会跨会话保存，不改变展示预设；包括 None 在内的所有风格都保留 Focus 的可见性与完成规则。
+
 ### 改进
 
 - **Compact 的过程折叠卡现在以「Activity」呈现，拥有独立身份图标与自己的耗时。** 用户可见名称从 `Work` 改为 `Activity`（内部 owner 类型保持不变），头部新增 registry 身份图标：emoji 为 `▸ 🧰 Activity`、symbols 为 `▸ ✦ Activity`、minimal 为 `▸ Activity`（仅表身份，不携带运行/完成状态）。头部遵循 Focus 的信息层级 `<identity> <duration> · <stats>`（如 `▸ 🧰 Activity 8s · 2 tools · 1 subagent`，时长紧跟身份、不在 `·` 之后），窄宽度按阶梯降级——先丢弃最后的统计、时长与身份保留到最后——且永不换行；`· thinking` 标记移除：思考不是生命周期状态，内容仍由 Think 槽承载。

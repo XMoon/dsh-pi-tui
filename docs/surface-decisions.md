@@ -424,6 +424,36 @@ read the DURABLE descendant catalog, not the live-child list:
   runner's execution path, so an idle continuable has no driver to stop
   and the UI never advertises (or fires) a dead stop.
 
+## Output style and Focus policy
+
+`OutputStyleState` is independent of `DisplayState`: `checkpoint` (default),
+`concise`, `explanatory`, and `none` control model communication, not transcript
+projection. Missing or invalid `outputStyle` settings resolve to `checkpoint`.
+The `/settings` row changes the shared runtime state synchronously, then saves
+through the existing serialized whole-document ConfigPort write, preserving raw
+extension fields. A failed save is reported without undoing the live choice.
+
+Each composed root TUI agent registers `tui:output-style` at order 80, followed
+by `tui:focus-mode` at 90 and tool guidance at 100+. The providers read live state
+on every assembly; changing either axis does not recompose the agent or change
+the other axis. Plain `composeAgent` callers that omit the style state retain
+their existing composition. `none` returns an empty style section, not a disabled
+base prompt, Focus policy, tool policy, or safety behavior.
+
+Checkpoint updates follow semantic milestones, never mandatory tool-boundary
+narration. Concise reduces narration, not correctness or requested detail.
+Explanatory adds relevant rationale, not generic verbosity. Focus owns hidden
+intermediate text, self-contained questions/approvals, independent background
+work, truthful pending-work checkpoints, and the user-needed final visible
+message. It does not duplicate those generic communication styles.
+
+Locality is split: preference state and selection are Client-local; persistence
+uses `ConfigPort.tuiSettings`, while Direct composition installs the structural
+`SystemPromptLike` section in the Host's agent scope. A future wire backend must
+round-trip the preference as settings data and install the policy Host-side;
+callbacks and the mutable state object never cross the wire. This adds no Remote
+RPC or production backend and does not change display defaults.
+
 ## Focus fullscreen disclosure
 
 The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:

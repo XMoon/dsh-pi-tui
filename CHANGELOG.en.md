@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Independent Output style setting.** Choose Checkpoint (default), Concise, Explanatory, or None in `/settings`; the next model step uses the selected communication guidance without restarting the agent. The preference is saved across sessions and does not change the display preset. Focus keeps its visibility and completion rules with every style, including None.
+
 ### Changed
 
 - **Compact's process fold card is now presented as an "Activity" with its own identity icon and duration.** The user-visible name changes from `Work` to `Activity` (the internal owner kind is unchanged), and the header gains a registry identity icon: `▸ 🧰 Activity` under emoji, `▸ ✦ Activity` under symbols, `▸ Activity` under minimal (identity only — never a running/completed state). The header follows the Focus information hierarchy `<identity> <duration> · <stats>` (e.g. `▸ 🧰 Activity 8s · 2 tools · 1 subagent`; the duration sits directly beside the identity, never behind a `·`), degrades on narrow widths by dropping the LAST stat first (duration stays with the identity to the end) and never wraps; the `· thinking` marker is removed — thinking is not a lifecycle state, and its content remains owned by the Think slot.

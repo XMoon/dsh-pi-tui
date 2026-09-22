@@ -125,6 +125,10 @@ dsh --profile pi-tui --session <session-id>
 
 The full process can still be expanded when needed. In fullscreen Focus, Thought roots can be expanded/collapsed in bulk or opened with an individual card click, and the viewport survives switches and resizes. Display presets only change presentation; they do not modify Session events.
 
+### Output style
+
+`/settings` → **Output style** controls model communication independently of the display preset: `checkpoint` (default) gives brief updates at meaningful milestones, `concise` is result-first with minimal narration, `explanatory` adds relevant rationale and tradeoffs, and `none` adds no output-style guidance. Changes apply on the next prompt assembly without restarting the agent and are saved for future sessions. Focus still hides intermediate text and requires a self-contained final response, including with `none`.
+
 ### Sessions
 
 Supports persisted DSH Sessions, including:

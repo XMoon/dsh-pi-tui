@@ -288,6 +288,7 @@ function stubRunner(options: {
       return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
     },
     refreshStatus: () => {},
+    outputStyleState: { style: 'checkpoint' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},

@@ -629,6 +629,7 @@ function setupSettings() {
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
+    outputStyleState: { style: 'checkpoint' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
