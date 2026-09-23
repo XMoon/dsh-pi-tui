@@ -1983,8 +1983,9 @@ test('a failed read breaks the group; late settlement preserves reflow counts', 
   const readResult = (seq: number, callId: string, text: string, isError = false): SessionEvent => event('tool/result', {
     turn: 0,
     step: 0,
-    // Native V4 admission requires `data.error` to accompany the durable
-    // `message.isError: true` outcome flag, which the fold reads.
+    // Native V4 admission requires `message.isError: true` whenever
+    // structured `data.error` metadata is present; the fold reads the durable
+    // outcome from `message.isError` alone.
     ...isError ? { error: { name: 'read-failed', code: 'read-failed' } } : {},
     message: {
       id: MessageId(`msg-${seq}`),
