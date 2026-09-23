@@ -9983,12 +9983,14 @@ export function apply(ctx: Context, config: Config): void {
             pendingSubagentCalls.push({ callId: event.data.callId, description })
           }
         } else if (event.type === 'tool/result') {
-          const callId = event.data.message.content[0]?.toolCallId
-          callArgs.delete(callId ?? ('' as ToolCallId))
+          // Session V4: the durable tool-role message owns the call identity
+          // directly (no user-role wrapper to unwrap).
+          const callId = event.data.message.toolCallId
+          callArgs.delete(callId)
           const callIndex = pendingSubagentCalls.findIndex(call => call.callId === callId)
           if (callIndex !== -1) pendingSubagentCalls.splice(callIndex, 1)
-          settledViewChildId = callId === undefined ? undefined : viewCallToChild.get(callId)
-          if (callId !== undefined) viewCallToChild.delete(callId)
+          settledViewChildId = viewCallToChild.get(callId)
+          viewCallToChild.delete(callId)
         }
       }
        if (mainOpening !== undefined && session.id === mainOpening.id && (viewing === undefined || viewing.id !== session.id)) {

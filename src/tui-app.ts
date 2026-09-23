@@ -14611,9 +14611,8 @@ export class TuiApp {
         container.addChild(new FileAttachmentComponent(block.attachment, { fallbackColor: color.textDim }))
       } else if (block.type === 'reasoning' || block.type === 'tool-call') {
         // These blocks belong to the existing thinking/tool surfaces, not the
-        // assistant's ordinary markdown body. A finalized tool-result has no
-        // separate assistant surface, so it falls through to the explicit
-        // bounded fallback below.
+        // assistant's ordinary markdown body. Every other finalized block
+        // falls through to the explicit bounded fallback below.
         continue
       } else {
         flushText()
@@ -16191,7 +16190,7 @@ export class TuiApp {
   private blockDisplayText(block: import('@deepseek-ai/dsh-llm').ContentBlock): string {
     if (block.type === 'image') return '[image]'
     if (block.type === 'file') return fileAttachmentSummary(block.attachment)
-    if (block.type === 'reasoning' || block.type === 'tool-call' || block.type === 'tool-result') {
+    if (block.type === 'reasoning' || block.type === 'tool-call') {
       return JSON.stringify(block, null, 2)
     }
     return finalizedBlockFallbackText(block)
