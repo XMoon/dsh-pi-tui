@@ -18,7 +18,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-preset-direct
  */
 
-import { Session, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 
@@ -44,19 +44,6 @@ export interface SessionQueryObservationLike {
     sessionId: SessionId,
     options?: { readonly signal?: AbortSignal; readonly projectionMode?: 'all' | 'none' },
   ): Promise<SessionObservationLike>
-}
-
-/** The zero-I/O projection-cache hint (structural subset of
- * `sessionProjectionCache`). A row is possibly stale but never wrong; the
- * caller's header is the identity witness, so no log read is needed. The
- * master contract completes the checkpoint identity with the EXACT
- * inherited prefix length. */
-export interface SessionProjectionCacheLike {
-  cachedSnapshot(
-    meta: SessionHeader,
-    inheritedEventCount: ReturnType<typeof SessionLogOffset>,
-    keys?: readonly AgentPresetProjectionKey[],
-  ): { readonly values?: { readonly agentPreset?: string | null } } | undefined
 }
 
 /** The minimum context surface of the runner. */
