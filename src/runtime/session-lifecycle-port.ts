@@ -5,8 +5,10 @@
  * D2.3 removed the ordinary `provider`/`model` inputs. D2.4 removes the
  * TUI-owned fork seed, child identity, lineage metadata and model/preset/cwd
  * inheritance from the cross-backend contract. `fork()` carries only the
- * source Session and an optional official event anchor; Host semantics own the
- * boundary, child identity, lineage, workspace and composition.
+ * source Session and an optional exact event cut; Host semantics own the
+ * boundary (alpha.2: an explicit `atSeq` cuts at exactly that event, an
+ * omitted one selects the latest completed prefix), child identity, lineage,
+ * workspace and composition.
  *
  * Open is the official Client semantic `select/open this Session` — not
  * `resume a Host Agent`. The Direct adapter still calls `agents.resume()`
@@ -42,12 +44,15 @@ export interface CreateSessionRequest {
 }
 
 /** Official Host-owned fork intent. The Host chooses the child identity,
- * completed-turn boundary, inherited prefix, lineage, workspace and model /
- * preset restoration. There is deliberately no signal, seed, child id or
- * caller-owned metadata. */
+ * boundary (alpha.2: an explicit `atSeq` is the exact inclusive event cut; an
+ * omitted one selects the latest completed prefix), inherited prefix, repair,
+ * lineage, workspace and model / preset restoration. There is deliberately no
+ * signal, seed, child id or caller-owned metadata. */
 export interface ForkSessionRequest {
   readonly sourceSessionId: string
-  /** Canonical non-negative safe event sequence from the TUI event model. */
+  /** Canonical non-negative safe event sequence from the TUI event model.
+   * Must name an existing canonical event; the Host rejects anything else as
+   * `session/fork-unavailable` (never floors or ceils it). */
   readonly atSeq?: number
 }
 
@@ -66,8 +71,9 @@ export type ForkOutcome =
   | { readonly kind: 'indeterminate'; readonly error: WriteError }
   /** A CLIENT-LOCAL pre-dispatch refusal: nothing reached the Host, so there is
    * no Host settlement to report. Distinct from `rejected`, which is a PROVEN
-   * Host/business refusal such as `session/fork-unavailable` (the source has no
-   * legal completed-turn boundary). Semantic `cancelled` stays removed
+   * Host/business refusal such as `session/fork-unavailable` (no legal fork
+   * boundary — no completed prefix, or an explicit `atSeq` naming no canonical
+   * event). Semantic `cancelled` stays removed
    * (v3 §7.2); this is the pre-dispatch state that removal left unnamed. */
   | { readonly kind: 'unavailable'; readonly message: string }
 

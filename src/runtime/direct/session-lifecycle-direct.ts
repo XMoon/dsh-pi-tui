@@ -4,9 +4,11 @@
  *
  * D2.3 moved ordinary create/open activation requirements INSIDE the adapter.
  * D2.4 does the same for fork: this adapter maps the official Host fork
- * algorithm (observation, completed-turn boundary, seed, lineage, preset,
- * default model and workspace attachment) without exposing those details
- * through the semantic port.
+ * algorithm (observation, the alpha.2 boundary contract — an explicit `atSeq`
+ * is an EXACT inclusive event cut, an omitted one selects the latest completed
+ * prefix —, the official `buildForkSeed` repair, lineage, preset, default model
+ * and workspace attachment) without exposing those details through the
+ * semantic port.
  *
  * The adapter is the only module in these lifecycle paths that touches `ctx`
  * and the preset composition. It keeps the real AgentHandle ownership escape
@@ -18,7 +20,8 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+import { buildForkSeed } from '@deepseek-ai/dsh-session/fork'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { recordedSessionPreset } from './session-preset-direct.ts'
@@ -276,10 +279,11 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     }
   }
 
-  /** Map the official Host fork algorithm into the Direct implementation. The
-   * only raw seed construction in the repository lives here, immediately next
-   * to `agents.create`; commands and the semantic port see only the source id
-   * and optional official anchor. */
+  /** Map the official alpha.2 Host fork algorithm into the Direct
+   * implementation. The only raw seed construction in the repository is the
+   * OFFICIAL `buildForkSeed()` called here, immediately next to
+   * `agents.create`; commands and the semantic port see only the source id and
+   * optional exact event cut. */
   async fork(request: { readonly sourceSessionId: string; readonly atSeq?: number }): Promise<ForkResult> {
     // The semantic port supplies a canonical event sequence; reject forged
     // non-canonical values consistently with the Remote adapter.
@@ -307,20 +311,22 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       )
     }
     try {
+      // The alpha.2 contract: an explicit `atSeq` is the EXACT inclusive cut
+      // (never moved to a later `turn/end`); an omitted one selects the latest
+      // completed prefix. The canonical-event proof below mirrors the official
+      // STRICT `source.events[boundary]?.seq === boundary` check — no numeric
+      // coercion, so a non-canonical observation seq (e.g. a forged string)
+      // rejects exactly like the Host.
+      const boundary = atSeq === undefined
+        ? latestCompletedPrefixBoundary(source.events)
+        : SessionSeq(atSeq)
       const lastSeq = source.events.at(-1)?.seq ?? -1
-      const anchoredBoundary = atSeq === undefined
-        ? undefined
-        : source.events.find(event => event.type === 'turn/end' && Number(event.seq) >= atSeq)
-      const boundary = anchoredBoundary
-        ?? (atSeq === undefined || atSeq > Number(lastSeq)
-          ? [...source.events].reverse().find(event => event.type === 'turn/end')
-          : undefined)
-      if (boundary === undefined) {
+      if (boundary === undefined || source.events[boundary]?.seq !== boundary) {
         return currentForkRejected(
           'session/fork-unavailable',
-          atSeq !== undefined && atSeq <= Number(lastSeq)
-            ? `session "${request.sourceSessionId}" has not completed the turn containing event ${String(atSeq)}`
-            : `session "${request.sourceSessionId}" has no completed turn to fork from`,
+          atSeq === undefined
+            ? `session "${request.sourceSessionId}" has no completed turn to fork from`
+            : `event ${String(atSeq)} does not exist in session "${request.sourceSessionId}" (last seq: ${lastSeq === -1 ? 'none' : String(lastSeq)})`,
         )
       }
 
@@ -337,10 +343,16 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       } catch (error) {
         // A composition failure is an in-process infrastructure failure, never
         // a Host fork refusal: `session/fork-unavailable` means "the source has
-        // no legal completed-turn boundary" and nothing else.
+        // no legal fork boundary" and nothing else.
         return currentForkRejected('gateway/internal', `failed to compose fork session: ${safeErrorMessage(error)}`)
       }
-      const cut = Number(boundary.seq) + 1
+      // Official `buildForkSeed` owns the seed: the inherited prefix
+      // `[0..boundary]`, the child-owned `session/end-seed { inherited: true }`
+      // marker and the synthetic fork closers for an open tail. Repair records
+      // live AFTER the inherited cut, so `inheritedEventCount` stays exactly
+      // `boundary + 1` even though `seed.length` may exceed it.
+      const seed = buildForkSeed(source.events, boundary)
+      const inheritedEventCount = SessionLogOffset(boundary + 1)
       const childMeta: Record<string, unknown> = {
         ...(source.header.cwd === undefined ? {} : { cwd: source.header.cwd }),
         parentSession: source.header.id,
@@ -351,8 +363,8 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       try {
         handle = await agents.create({
           sessionId: SessionId(`session-${randomUUID()}`),
-          seed: source.events.slice(0, cut),
-          inheritedEventCount: SessionLogOffset(cut),
+          seed,
+          inheritedEventCount,
           meta: childMeta,
           agentOptions: this.agentOptions(),
           setup: composition.setup,
@@ -405,6 +417,25 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     }
     return undefined
   }
+}
+
+/** Resolve the omitted-`atSeq` default to the latest completed-turn prefix,
+ * including standalone stable events before the next turn / queued-input
+ * admission boundary. The exact alpha.2 Host selector (`latestCompletedPrefix
+ * Boundary` in the official Session Controller) — omitted default cut
+ * selection is Host semantics, not picker semantics, so this private mapping
+ * lives immediately beside the fork adapter. */
+function latestCompletedPrefixBoundary(events: readonly SessionEvent[]): ReturnType<typeof SessionSeq> | undefined {
+  const lastTurnEnd = events.findLast(event => event.type === 'turn/end')
+  if (lastTurnEnd === undefined) return undefined
+  let boundary = Number(lastTurnEnd.seq)
+  for (const next of events.slice(boundary + 1)) {
+    if (next.type === 'turn/start'
+      || (next.type === 'user/message' && next.surfaceOp === 'append')
+      || next.type === 'agent/inbox/spliced') break
+    boundary = Number(next.seq)
+  }
+  return SessionSeq(boundary)
 }
 
 /** A Direct create rejection that still owns the local surface. */

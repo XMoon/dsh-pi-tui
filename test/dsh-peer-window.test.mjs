@@ -18,10 +18,12 @@ const dshPeerEntries = Object.entries(packageJson.peerDependencies ?? {})
 // tested with the same range semantics consumers use.
 test('all DSH runtime peers use the published npm lower bound', () => {
   assert.ok(dshPeerEntries.length > 0, 'the bundle must declare DSH runtime peers')
-  // The 0.1.7 preset packages (PR A) exist only in the 0.1.7 family; the
+  // The 0.1.7-only packages sit on the 0.1.7 family: the preset registry
+  // (PR A) and `dsh-session` whose public `/fork` subpath (imported by the
+  // Direct fork adapter since PR B3) first exists in `0.1.7-alpha.2`; the
   // legacy family keeps the published 0.1.6 floor until the compatibility
   // train's closure PR unifies the whole peer policy deliberately.
-  const newFamily = new Set(['@deepseek-ai/dsh-agent-preset-registry'])
+  const newFamily = new Set(['@deepseek-ai/dsh-agent-preset-registry', '@deepseek-ai/dsh-session'])
   for (const [name, range] of dshPeerEntries) {
     const window = newFamily.has(name) ? newFamilyWindow : expectedWindow
     const floor = newFamily.has(name) ? '0.1.7-alpha.2' : '0.1.6-alpha.2'

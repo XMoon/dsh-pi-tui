@@ -370,9 +370,10 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
   }
 
   async fork(request: ForkSessionRequest): Promise<ForkResult> {
-    // The semantic port accepts only canonical event sequence anchors; the
-    // official Client performs its own flooring for lower-level callers, but
-    // this adapter must not create a Remote-only normalization rule.
+    // The semantic port accepts only canonical event sequences; the official
+    // alpha.2 Host treats an explicit `atSeq` as the EXACT inclusive event cut
+    // and rejects a nonexistent one, so this adapter must not create a
+    // Remote-only normalization rule on top of it.
     if (request.atSeq !== undefined
       && (!Number.isSafeInteger(request.atSeq) || request.atSeq < 0)) {
       return { ownership: 'current', outcome: { kind: 'rejected', error: { code: 'gateway/bad-request', message: 'atSeq must be a non-negative safe integer' } } }
@@ -381,8 +382,8 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     if (captured === undefined) {
       // CLIENT-LOCAL pre-dispatch refusal: nothing was dispatched, so there is
       // no Host settlement. `session/fork-unavailable` is a PROVEN Host
-      // business refusal (no legal completed-turn boundary) and must never be
-      // reused for "this client is not connected".
+      // business refusal (no legal fork boundary) and must never be reused for
+      // "this client is not connected".
       return { ownership: 'current', outcome: { kind: 'unavailable', message: 'the remote connection is not connected' } }
     }
     const ownership = (): OperationOwnership =>
