@@ -265,7 +265,7 @@ test('official preset npm target uses the checkout npm dependency version', () =
   const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   const expectedNpmVersion = Object.entries(packageJson.devDependencies ?? {})
     .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
-  const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-alpha.2'
+  const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-rc.1'
   assert.equal(expectedNpmVersion, expectedNpmTarget, 'the package must keep the declared npm target')
   assert.equal(currentValidatedDshVersion(), '0.1.7-alpha.2')
   assert.equal(npmDshVersion(), expectedNpmVersion)
