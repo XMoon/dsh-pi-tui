@@ -384,7 +384,7 @@ calls, aliases and wrappers are prohibited.
   synchronous raw-log wrapper.
 - A genuine full-history read (fork, canonical export) must later use the
   official async authoritative seam — never a new TUI-private history service.
-  D2.4's fork authority is the official `session.fork` completed-turn cut (see
+  D2.4's fork authority is the official `session.fork` exact-cut contract (see
   the D2.4 note below), never the Direct raw snapshot helper.
 
 ### Subagent human prompt (alpha.4)
@@ -1087,8 +1087,9 @@ and `packages/pi-tui/**` is unchanged.
 ## D2.4 status (COMPLETE) — Host-owned fork / rewind convergence
 
 D2.4 moves `/fork` and `/rewind` to the semantic Host fork operation. The
-request carries only the source Session id and an optional canonical completed-
-turn anchor; Host owns the cut, child identity, inherited prefix, lineage,
+request carries only the source Session id and an optional exact event cut
+(`atSeq`; see the alpha.2 fork exact-cut convergence section below); Host owns
+the cut, child identity, inherited prefix, lineage,
 workspace attachment, source preset and activation default. Direct reproduces
 that algorithm inside its lifecycle adapter and retains a real unselected
 `AgentHandle` in the runner's park/claim pool. Remote calls
@@ -1099,7 +1100,7 @@ Fork publication and local navigation are separate: dispatch does not wait for
 source idle or hold the destructive transition FIFO. A current child is adopted
 through a short gated handoff; a child superseded by newer navigation remains
 published and can later be opened without a second Direct writer. Rewind rows
-use predecessor `turn/end` anchors, so the first human turn is intentionally not
+use predecessor `turn/end` cuts, so the first human turn is intentionally not
 offered. Production remains Direct; M8 still owns eventual Direct ownership
 retirement.
 
@@ -1138,9 +1139,10 @@ inside the command handler would instead detach the Session first, and a
 detached `Session.append` never reaches the persistence writer, so the durable
 log would keep `command/run` without its `command/done`.
 
-**Settlement taxonomy.** `session/fork-unavailable` means only "the source has
-no legal completed-turn boundary". A missing source is `session/not-found`, a
-malformed anchor is `gateway/bad-request`, and composition/activation/internal
+**Settlement taxonomy.** `session/fork-unavailable` means only "no legal fork
+boundary" — no completed prefix for an omitted cut, or an explicit `atSeq` that
+names no canonical event. A missing source is `session/not-found`, a
+malformed cut is `gateway/bad-request`, and composition/activation/internal
 failures are `gateway/internal` (the official taxonomy has no
 `session/fork-failed`). On the Remote side, a disconnected client is a
 client-local pre-dispatch `unavailable`, never a fabricated Host refusal, and the
@@ -1152,16 +1154,15 @@ candidate tests, runner busy-admission/supersession/park-claim tests, the
 `command/run`/`command/done` pairing regression, the source-release/reopen
 regressions (adapter `waitForRelease` contract + rewind-picker awaited
 retirement), the `smoke:remote-d2-closure` aggregate, and the
-`smoke:remote-d2-fork` same-Host Direct-vs-official-Host comparison. That smoke
-now covers, as real Direct/Host pairs on one Host and one real
-`workspaceRegistry`: latest/historical/future anchors, open-tail and not-found
-refusals, a consumed pre-cut model selection with a different post-cut selection
-excluded (both at the latest turn and at a HISTORICAL anchor between the two),
-no-explicit-selection activation through the Host default (observed on
-the child's first request header), an `aborted` `turn/end` boundary, subagent
-nearest-ancestor workspace inheritance with `origin`/`delegationDepth` not
-copied, and a cwd-absent source. The client-boundary gate stays green and
-`packages/pi-tui/**` is unchanged.
+`smoke:remote-d2-fork` same-Host Direct-vs-official-Host comparison. The smoke
+was rebuilt for DSH `0.1.7-alpha.2` as a self-contained harness (see the fork
+exact-cut convergence section below); it covers, as real Direct/Host pairs on
+one Host and one real `workspaceRegistry`: an exact mid-turn cut with official
+fork repair, an exact `turn/end` cut, nonexistent-seq refusal, omitted-cut
+standalone-tail inclusion, queued-input exclusion proven through continuation,
+subagent nearest-ancestor workspace inheritance with `origin`/`delegationDepth`
+not copied, and activation through the Host default. The client-boundary gate
+stays green and `packages/pi-tui/**` is unchanged.
 
 **DSH 0.1.6 compatibility note.** D2.4 was validated against the then-current
 DSH `0.1.6-alpha.1` family in npm mode, with Source Mode pinned to
@@ -1259,6 +1260,52 @@ Host/Client pagination smoke rather than inferred by
 `RemotePresentationReadShadow`, because the current official Session history
 contract exposes no bounded leading-turn completeness marker. The Remote reader
 therefore does not guess or prefetch full history.
+
+## DSH 0.1.7-alpha.2 fork exact-cut convergence (B3)
+
+DSH `0.1.7-alpha.2` changed the fork boundary contract; the Direct adapter
+converged to it and the semantic port stayed `{ sourceSessionId, atSeq? }`
+unchanged. The retired 0.1.6-era behavior (an explicit `atSeq` was advanced to
+the next closing `turn/end`, and an out-of-range anchor fell back to the latest
+completed turn) is gone on purpose:
+
+- **Explicit `atSeq` is an EXACT inclusive event cut.** Any existing canonical
+  event seq is legal — mid-turn, mid-step, before a tool result. Direct proves
+  the canonical event exactly like the official controller
+  (`source.events[boundary]?.seq === boundary`); it never floors, ceils, or
+  falls back. A nonexistent seq rejects as `session/fork-unavailable` ("event
+  N does not exist in session ...").
+- **Omitted `atSeq` selects the latest completed prefix** — the latest
+  `turn/end` plus standalone stable events (e.g. `session/title`) until the
+  next `turn/start`, appended `user/message`, or `agent/inbox/spliced`
+  boundary. The private Host mapping (`latestCompletedPrefixBoundary`, a
+  faithful copy of the official selector) lives beside the Direct fork
+  adapter; it is Host semantics, not picker semantics.
+- **Seed construction is the official `buildForkSeed()`** from
+  `@deepseek-ai/dsh-session/fork`: the inherited prefix `[0..boundary]`, the
+  child-owned `session/end-seed { inherited: true }` marker at
+  `seq = inheritedEventCount`, and synthetic fork closers (error tool results,
+  `step/end`, `turn/end { reason: 'forked' }`) for an open tail. The TUI
+  duplicates none of that repair vocabulary. `inheritedEventCount` stays
+  exactly `boundary + 1` even when `seed.length` exceeds it.
+- **The `@deepseek-ai/dsh-session` peer floor rose to `>=0.1.7-alpha.2`**
+  because the `/fork` public subpath first exists there; the published
+  `0.4.7-alpha.2` line remains the runtime fallback for a `0.1.6-alpha.2`
+  Host (see `docs/dsh-compatibility.md`).
+- **`/rewind` is unchanged**: it still sends predecessor `turn/end` sequences
+  as `atSeq` — a client UX policy that remains legal now that `fork()` is a
+  general exact-cut Host semantic.
+- Remote stays the reference Host path: one `ClientSessions.fork()` call,
+  `atSeq` forwarded byte-for-byte, no local seed, no normalization, no retry.
+
+Validation: `test/direct-session-fork.test.ts` (exact cuts, official repair
+shapes, omitted-boundary rules, observation disposal on every path), the Remote
+lifecycle contract tests, and the rebuilt self-contained
+`smoke:remote-d2-fork` alpha.2 harness (P1 exact mid-turn repair, P2 exact
+turn/end, P3 nonexistent-seq refusal, P4 standalone-tail inclusion, P5
+queued-input exclusion proven through child continuation, P6 lineage,
+P7 subagent ancestor workspace, P8 activation default). The old D2.3-importing
+harness was retired with the 0.1.6-era `dsh-agent-presets` package it named.
 
 ## Known blockers
 

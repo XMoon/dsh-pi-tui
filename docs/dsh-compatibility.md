@@ -101,7 +101,9 @@ Official `dsh-v0.1.2-alpha.2`/`alpha.3` use
 `@xmoon76/dsh-pi-tui@0.4.3-alpha.2`. The published 0.1.5-rc.1/rc.2 family is
 the last runtime for the `0.4.6` stable release. The current npm-mode checkout
 is separate: its legacy-family peer floor is `>=0.1.6-alpha.2` (the 0.1.7
-preset-registry peer floors at `>=0.1.7-alpha.2`), and its exact npm family is
+preset-registry and `dsh-session` peer floors sit at `>=0.1.7-alpha.2` — the
+fork adapter imports the public `@deepseek-ai/dsh-session/fork` subpath that
+first exists in `0.1.7-alpha.2`), and its exact npm family is
 verified by the lockfile.
 
 The root README intentionally uses DSH's moving `latest`/`alpha` channels for
