@@ -194,11 +194,21 @@ export class DirectTuiSettings implements TuiSettingsConfig {
       const effective = current[field]
       const owned = userSection?.[field]
       if (requested !== undefined) {
-        // Two no-op shapes never emit an op: the value is already effective,
-        // or the USER override already stores exactly it (a document rebuilt
-        // from a merged view re-states the user's own raw value — writing it
-        // back would only pin what the profile already says).
-        if (!fieldEquals(requested, effective) && !fieldEquals(requested, owned)) {
+        if (owned !== undefined) {
+          // The USER override is authoritative once it exists: writing a
+          // DIFFERENT value is always a real edit. Writing back exactly the
+          // inherited/base value (requested === effective ≠ owned) is a
+          // reset-to-inherited, expressed as an UNSET so the override stops
+          // shadowing the layers beneath instead of being pinned as data.
+          if (!fieldEquals(requested, owned)) {
+            ops.push(fieldEquals(requested, effective)
+              ? { op: 'unset', path: [field] }
+              : { op: 'set', path: [field], value: requested })
+          }
+        } else if (!fieldEquals(requested, effective)) {
+          // No USER override: only a value that actually changes the
+          // effective snapshot is written — inherited values are never
+          // promoted into the profile.
           ops.push({ op: 'set', path: [field], value: requested })
         }
       } else if (effective !== undefined && owned !== undefined) {

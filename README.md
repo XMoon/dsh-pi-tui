@@ -53,10 +53,12 @@ pnpm compat:dsh:npm
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
 | `0.4.6`（已发布 `@latest`） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 当前稳定版；最低 rc.1，兼容 rc.2 |
-| 当前 `next` npm 线（本 checkout；版本 `0.4.7-alpha.2`） | `dsh-v0.1.6-alpha.2` | 当前 next 线 |
+| `0.4.7-alpha.2`（已发布） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
+| 当前兼容列车线（本 checkout；版本 `0.4.8-alpha.1`） | `dsh-v0.1.7-alpha.2` | 当前兼容列车线；上一行 `0.4.7-alpha.2` 是 0.1.6-alpha.2 runtime 的 fallback TUI |
 
-不要把稳定线与 `next` 线混装。当前 `next` checkout 的 peer floor 是
-`>=0.1.6-alpha.2`，旧 runtime 会在正常的不兼容边界以非零状态失败。完整的
+不要把稳定线与预发布线混装。当前 checkout 的 legacy 家族 peer floor 是
+`>=0.1.6-alpha.2`（新增的 preset-registry peer 为 `>=0.1.7-alpha.2`），旧
+runtime 会在正常的不兼容边界以非零状态失败。完整的
 历史兼容矩阵和 fallback 命令见 [兼容性文档](docs/dsh-compatibility.md)；
 要查看 next 的最新集成状态，请看 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
@@ -539,8 +541,8 @@ dsh --profile pi-tui-dev
 
 ### npm 模式（当前 `next`）
 
-当前 `next` 线是 npm 模式：以本 checkout 的 `package.json` 声明、冻结
-lockfile 解析的已发布 `dsh-v0.1.6-alpha.2` family 为兼容目标。隔离的 npm
+当前兼容列车线是 npm 模式：以本 checkout 的 `package.json` 声明、
+lockfile 解析的已发布 `dsh-v0.1.7-alpha.2` family 为兼容目标。隔离的 npm
 驱动从公共 registry 安装该精确 family，并跑完整 build/test/package 路径：
 
 ```sh
