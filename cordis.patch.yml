@@ -96,7 +96,8 @@
 # its tools, its prompt sections, its delegation backends. The base keeps them
 # for single-session surfaces that compose their agent process-wide; the TUI
 # now composes one preset per session, so these rows are disabled here and the
-# `agent-presets` row above lets each session mount a preset instead.
+# official `agent-preset-registry` row above, plus the declarations it resolves,
+# lets each session mount a preset instead.
 #
 # Disabling rather than deleting is deliberate: the base is shared, and a row
 # absent from a surface overlay would silently reappear the day someone

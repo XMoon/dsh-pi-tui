@@ -3,8 +3,8 @@
  * `ConfigPort` over the dsh `settings` / `credentials` / `authorization` /
  * `permissionPresets` / `commands` / `agentPresets` services. This is the
  * ONLY module in the config path that touches `ctx` (and the Host schema
- * knowledge: the `llm-pi-ai` / `permission` / `agent-presets` settings
- * namespaces); consumers depend on the port, and a Remote adapter will
+ * knowledge: the `llm-pi-ai` / `permission` / `agent-preset-registry`
+ * settings namespaces); consumers depend on the port, and a Remote adapter will
  * implement the same interfaces in a later milestone.
  *
  * The /yolo permission switch deliberately stays on the OFFICIAL command
