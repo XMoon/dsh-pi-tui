@@ -315,12 +315,15 @@ test('open does not await the reference ready promise', async () => {
   assert.equal(result.outcome.kind, 'opened')
 })
 
-test('fork maps only source session and optional official anchor, without ordinary create', async () => {
+test('fork maps only source session and the optional exact event cut, without ordinary create', async () => {
   const h = harness()
   const result = await h.lifecycle.fork({ sourceSessionId: 'session-source', atSeq: 42 })
   assert.equal(result.ownership, 'current')
   assert.equal(result.outcome.kind, 'forked')
   assert.deepEqual(h.calls.forks, [{ sessionId: 'session-source', atSeq: 42 }])
+  // No local seed construction: the forwarded payload carries only the official
+  // fields — the Host owns the cut, seed, repair and child identity.
+  assert.deepEqual(h.calls.forks.map(payload => Object.keys(payload).sort()), [['atSeq', 'sessionId']])
   assert.deepEqual(h.calls.creates, [])
   assert.deepEqual(h.calls.remoteCreates, [])
 })
@@ -331,7 +334,7 @@ test('fork omits atSeq rather than encoding an empty prefix', async () => {
   assert.deepEqual(h.calls.forks, [{ sessionId: 'session-source' }])
 })
 
-test('non-canonical fork anchors are rejected before Client dispatch', async () => {
+test('non-canonical fork cuts are rejected before Client dispatch', async () => {
   const h = harness()
   const result = await h.lifecycle.fork({ sourceSessionId: 'session-source', atSeq: 0.5 })
   assert.equal(result.outcome.kind, 'rejected')

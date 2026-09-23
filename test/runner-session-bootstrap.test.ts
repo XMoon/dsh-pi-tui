@@ -652,7 +652,7 @@ test('/new without an explicit default intent observes the persisted default, ne
     '/new without an explicit default intent must not freeze a durable choice into the fresh Session')
 })
 
-test('/fork lets Host choose the child selection after the historical inherited prefix', async (t) => {
+test('/fork inherits the Host-chosen completed prefix including the trailing source switch', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fork-selection-')
   const previousHome = process.env.DSH_HOME
@@ -675,8 +675,9 @@ test('/fork lets Host choose the child selection after the historical inherited 
       header: { config: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' } },
     }, 1),
     ...sessionEvents('source answer'),
-    // This is the source's current switch, after the completed turn, so the
-    // Host fork seed deliberately excludes it and retains only historical A.
+    // The source's current switch stands after the completed turn with no
+    // queued-input boundary behind it, so the alpha.2 latest-completed-prefix
+    // cut INCLUDES it: the child inherits the pending switch as Host state.
     modelEvent('model/selection', currentSelection, 6),
   ])
   const source: FakeSession = fakeSession({
@@ -694,24 +695,23 @@ test('/fork lets Host choose the child selection after the historical inherited 
 
   assert.equal(harness.createdSessions.length, 1, 'fork creates one child')
   const child = harness.createdSessions[0]!
-  const inheritedPrefix = sourceEvents.slice(0, 8)
+  const inheritedPrefix = sourceEvents
   assert.deepEqual(harness.createInheritedEventCounts, [inheritedPrefix.length],
-    'inheritedEventCount ends exactly at the historical prefix')
+    'the alpha.2 latest-completed-prefix cut extends through the trailing stable selection')
   assert.deepEqual(child.snapshotEvents().slice(0, inheritedPrefix.length), inheritedPrefix,
-    'the child keeps the exact historical A prefix')
+    'the child keeps the exact inherited prefix')
   assert.deepEqual(source.snapshotEvents(), sourceEvents, 'fork does not mutate the source log')
   const childBoundary = child.snapshotEvents()[inheritedPrefix.length]
-  assert.equal((childBoundary as unknown as { type?: unknown } | undefined)?.type, undefined,
-    'the Host fork does not append the source current selection')
-  assert.deepEqual((childBoundary as unknown as { data?: unknown } | undefined)?.data, undefined,
-    'Host fork does not append the source current model selection')
+  assert.equal((childBoundary as unknown as { type?: unknown } | undefined)?.type, 'session/end-seed',
+    'the child-owned end-seed marker (not a runner write) sits at the inherited cut')
   const childSelections = child.snapshotEvents().filter(event => (event as unknown as { type?: unknown }).type === 'model/selection')
-  assert.deepEqual((childSelections.at(-1) as unknown as { data?: unknown } | undefined)?.data, {
-    provider: 'provider-a', model: 'model-a', reasoningEffort: 'high',
-  }, 'the child keeps the historical A selection rather than copying source current B/max')
+  assert.deepEqual((childSelections.at(-1) as unknown as { data?: unknown } | undefined)?.data, currentSelection,
+    'the child inherits the source current switch that stands inside the completed prefix')
   assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).lastUsed, {
     provider: 'provider-a', model: 'model-a', reasoningEffort: 'high',
-  }, 'the child effective selection is the historical A selection')
+  }, 'the child effective selection remains the consumed historical A selection')
+  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).pending, currentSelection,
+    'the inherited trailing switch stays a pending intent, Host-owned')
 })
 
 test('/fork leaves the source Session attached until the executor appends command/done', async (t) => {
@@ -1462,8 +1462,8 @@ test('/rewind forwards the Host-owned fork anchor through the real picker callba
     }, 1),
     ...firstTurn,
     ...secondTurn,
-    // The current switch is after the selected rewind cursor. It must be
-    // written after the inherited historical prefix in the child.
+    // The current switch stands after the selected rewind cursor, so the
+    // exact predecessor-turn cut must exclude it from the child.
     modelEvent('model/selection', currentSelection, firstTurn.length + secondTurn.length + 2),
   ])
   const source: FakeSession = fakeSession({
@@ -1489,8 +1489,9 @@ test('/rewind forwards the Host-owned fork anchor through the real picker callba
   assert.deepEqual(child.snapshotEvents().slice(0, inheritedPrefix.length), inheritedPrefix,
     'rewind keeps the exact historical prefix')
   assert.deepEqual(source.snapshotEvents(), sourceEvents, 'rewind does not mutate the source log')
-  assert.deepEqual((child.snapshotEvents()[inheritedPrefix.length] as unknown as { data?: unknown } | undefined)?.data, undefined,
-    'the Host fork does not append a source current-selection event after the historical prefix')
+  assert.equal((child.snapshotEvents()[inheritedPrefix.length] as unknown as { type?: unknown } | undefined)?.type,
+    'session/end-seed',
+    'the child-owned end-seed marker — never the source current-selection event — sits at the exact cut')
   const childSelections = child.snapshotEvents().filter(event => (event as unknown as { type?: unknown }).type === 'model/selection')
   assert.deepEqual((childSelections.at(-1) as unknown as { data?: unknown } | undefined)?.data, {
     provider: 'provider-a', model: 'model-a', reasoningEffort: 'high',
@@ -1550,7 +1551,7 @@ test('/rewind surfaces a current Host fork rejection', async (t) => {
     `the current rewind failure must remain visible: ${probe.notices.join(', ')}`)
 })
 
-test('/fork does not inherit a source-only reasoning-effort change', async (t) => {
+test('/fork inherits the source-only reasoning-effort change standing inside the completed prefix', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fork-selection-effort-')
   const previousHome = process.env.DSH_HOME
@@ -1589,13 +1590,15 @@ test('/fork does not inherit a source-only reasoning-effort change', async (t) =
   await settle()
 
   const child = harness.createdSessions[0]!
-  assert.deepEqual(harness.createInheritedEventCounts, [8])
-  const childBoundary = child.snapshotEvents()[8]
-  assert.deepEqual((childBoundary as unknown as { data?: unknown } | undefined)?.data, undefined,
-    'the source-only effort change is outside the inherited prefix')
+  assert.deepEqual(harness.createInheritedEventCounts, [9],
+    'the alpha.2 completed prefix extends through the trailing source-only effort change')
+  assert.equal((child.snapshotEvents()[9] as unknown as { type?: unknown } | undefined)?.type, 'session/end-seed',
+    'the child-owned end-seed marker sits at the inherited cut')
   assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).lastUsed, {
     provider: 'provider-b', model: 'model-b', reasoningEffort: 'high',
-  }, 'the child preserves the historical reasoning effort')
+  }, 'the child preserves the historical reasoning effort as the consumed selection')
+  assert.deepEqual(foldPendingModelSelection(child.snapshotEvents()).pending, currentSelection,
+    'the source-only effort change stays a pending intent inside the child prefix')
 })
 
 test('/fork avoids a duplicate selection when the inherited prefix already matches', async (t) => {
@@ -1618,11 +1621,11 @@ test('/fork avoids a duplicate selection when the inherited prefix already match
   const source: FakeSession = fakeSession({
     id: 'fork-selection-same-source',
     header: { id: 'fork-selection-same-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
-    events: [
+    events: resequence([
       modelEvent('model/selection', selection, 0),
       modelEvent('request/header', { header: { config: selection } }, 1),
       ...sessionEvents('source answer'),
-    ],
+    ]),
   })
   const harness = makeHarness(home, source, { provider: 'global', model: 'fallback', reasoningEffort: 'low' })
   context = new Context()
