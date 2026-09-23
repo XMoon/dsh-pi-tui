@@ -173,20 +173,20 @@ configurable action first (plan §3.3).
 
 ## User configuration
 
-Settings namespace `dsh-pi-tui` (the TUI's own settings section — NOT the `pi-tui` profile name), field `keybindings` (the schema deliberately
-does NOT declare the field — schemastery's `z.object` keeps unknown keys,
-and the parser owns the validation):
+The `tui-app` plugin's profile-owned Config, field `keybindings` — a
+whole-value volatile raw field since DSH 0.1.7 (the retired `dsh-pi-tui`
+settings namespace is only a legacy-migration input). The parser in
+`src/keybindings/config.ts` remains the only validation authority:
 
 ```yaml
-dsh-pi-tui:
-  keybindings:
-    app.input.steer: ctrl+s
-    app.permission.cycle: [shift+tab, ctrl+shift+p]
-    app.history.search: ctrl+r
-    app.transcript.toggleThinking: false
-    leader: ctrl+x
-    bindings:
-      app.tasks.open: <leader>t
+keybindings:
+  app.input.steer: ctrl+s
+  app.permission.cycle: [shift+tab, ctrl+shift+p]
+  app.history.search: ctrl+r
+  app.transcript.toggleThinking: false
+  leader: ctrl+x
+  bindings:
+    app.tasks.open: <leader>t
 ```
 
 Semantics: string = one key; array = several; `false` = disable the

@@ -1,19 +1,19 @@
 /**
  * User keybinding config parsing and validation (plan §12/§13/§14/§16).
  *
- * Settings shape (namespace `dsh-pi-tui` — the TUI's own settings
- * section, NOT the `pi-tui` profile name — field `keybindings`):
+ * Storage shape: the `keybindings` whole-value volatile field of the
+ * `tui-app` plugin's profile-owned Config (DSH 0.1.7; the retired
+ * `dsh-pi-tui` settings namespace is only a legacy-migration input):
  *
  * ```yaml
- * dsh-pi-tui:
- *   keybindings:
- *     app.input.steer: ctrl+s
- *     app.permission.cycle: [shift+tab, ctrl+shift+p]
- *     app.history.search: ctrl+r
- *     app.transcript.toggleThinking: false
- *     leader: ctrl+x
- *     bindings:
- *       app.tasks.open: <leader>t
+ * keybindings:
+ *   app.input.steer: ctrl+s
+ *   app.permission.cycle: [shift+tab, ctrl+shift+p]
+ *   app.history.search: ctrl+r
+ *   app.transcript.toggleThinking: false
+ *   leader: ctrl+x
+ *   bindings:
+ *     app.tasks.open: <leader>t
  * ```
  *
  * Semantics (plan §12):

@@ -454,6 +454,94 @@ test('a partial failure never rolls newer USER values back on retry (§8.9 idemp
   }
 })
 
+test('a stale descriptor snapshot cannot commit over a concurrent USER edit (§8.9 fence)', async () => {
+  // The exact race the atomic snapshot closes: the migration derives its
+  // ops from a descriptor snapshot at revision 4 with no USER overrides,
+  // but a concurrent USER edit (theme=light) lands at revision 5 before the
+  // write. The mutate must carry revision 4 — the fence of the snapshot
+  // the decision came from — so the write surfaces as SETTINGS_CONFLICT,
+  // the marker stays put, and the retry sees theme owned and skips it.
+  const home = legacyHome('dsh-pi-tui:\n  theme: dark\n')
+  const { diag } = diagHarness()
+  const world = { user: { theme: 'light' }, revision: 5 }
+  // The first served snapshot is STALE (the race window): no overrides,
+  // revision 4 — while the world has already moved to revision 5.
+  let serveStale = true
+  const calls: MutateCall[] = []
+  const forms: SettingsFormsLike = {
+    describe: () => [{
+      ns: 'tui-app',
+      ...(serveStale
+        ? { value: {}, user: {}, revision: 4 }
+        : { value: { ...world.user }, user: { ...world.user }, revision: world.revision }),
+    }],
+    mutate: async (ns, ops, expectedRevision) => {
+      if (expectedRevision !== world.revision) {
+        throw Object.assign(new Error('settings namespace "tui-app" changed since it was read'), { code: 'SETTINGS_CONFLICT' })
+      }
+      calls.push({ ns, ops, revision: expectedRevision })
+    },
+  }
+  try {
+    const probe = input(home, forms, 0, alwaysResolves, diag)
+    const first = await migrateLegacySettings(probe)
+    assert.equal(first.status, 'failed', 'the stale write surfaces as a conflict, never a silent clobber')
+    assert.equal(probe.marker.get(), 0, 'the marker does not advance on the conflicted boot')
+    // The user's newer theme=light survives untouched.
+    assert.deepEqual(world.user, { theme: 'light' })
+    // The retry reads the FRESH snapshot: theme is owned, so only the
+    // completing marker crosses, fenced by revision 5.
+    serveStale = false
+    const second = await migrateLegacySettings(probe)
+    assert.equal(second.status, 'migrated')
+    assert.deepEqual(calls.at(-1)?.ops, [
+      { op: 'set', path: ['legacySettingsMigrationVersion'], value: 1 },
+    ], 'the retry skips the owned theme and writes only the marker')
+    assert.equal(calls.at(-1)?.revision, 5)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a malformed strict-schema field is skipped while the valid fields migrate (§8.9)', async () => {
+  // footerCommand/footerLayout are strict z.object in the new Config: a
+  // malformed legacy value must not fail the whole batch (which would block
+  // theme AND the marker on every boot). It is skipped with a diagnostic.
+  const home = legacyHome(`dsh-pi-tui:
+  theme: dark
+  footerCommand:
+    schemaVersion: garbage
+  footerLayout:
+    schemaVersion: 1
+    rows:
+      - left:
+          - id: model
+            format: "{model}"
+            tone: text
+            prefix: ''
+            suffix: ''
+            importance: 5
+        right: []
+        separator: { text: ' · ', tone: text }
+`)
+  const harness = formsHarness()
+  const { diag, warnings } = diagHarness()
+  try {
+    const report = await migrateLegacySettings(input(home, harness.forms, 0, alwaysResolves, diag))
+    assert.equal(report.status, 'migrated', 'the migration completes despite the malformed field')
+    const ops = opsOf(harness.calls, 'tui-app')
+    const set = (field: string) => ops.find(op => op.op === 'set' && op.path[0] === field)
+    assert.deepEqual(set('theme'), { op: 'set', path: ['theme'], value: 'dark' }, 'the valid field migrates')
+    assert.ok(set('footerLayout') !== undefined, 'the VALID strict field migrates')
+    assert.equal(set('footerCommand'), undefined, 'the malformed strict field is dropped from the batch')
+    assert.ok(ops.some(op => op.path[0] === 'legacySettingsMigrationVersion'), 'the marker completes')
+    assert.ok(warnings.some(message => message.includes('legacy TUI field is malformed and was skipped')),
+      'the skip is visible in diagnostics')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('a broken legacy preset default is not migrated — declaration exists but activation failed', async () => {
   const home = legacyHome('agent-presets:\n  default: broken-one\n')
   const harness = formsHarness()

@@ -36,6 +36,8 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parse } from 'yaml'
 import { resolveDisplayPreset, type PersistedDisplayInput } from './display-preset.ts'
+import { parseFooterCommandConfig } from './footer/command-trust.ts'
+import { isFooterLayout, parseFooterLayout } from './footer/layout.ts'
 import type { SettingsFormsLike, TuiSettingsPathOp } from './runtime/direct/tui-settings-direct.ts'
 
 /** The migration version this build completes. */
@@ -98,6 +100,16 @@ const COPIED_RAW_FIELDS: readonly string[] = [
   'keybindings',
 ]
 
+/** Fields whose new Config schema is a STRICT z.object: a malformed legacy
+ * value would fail the whole mutate batch at SettingsForms validation, so
+ * each is validated through its existing parser BEFORE joining the batch
+ * (plan §8.9: one malformed optional field never blocks the rest). */
+function strictFieldValid(field: string, value: unknown): boolean {
+  if (field === 'footerLayout') return isFooterLayout(parseFooterLayout(value))
+  if (field === 'footerCommand') return parseFooterCommandConfig(value) !== undefined
+  return true
+}
+
 /** Read the retired legacy document: prefer the live `settings.yaml`; when
  * the upstream importer's rename wins the read race (the file can vanish
  * between the existence check and the open), fall back to opening the
@@ -148,7 +160,7 @@ function legacySection(document: unknown, section: string): Record<string, unkno
  * slots, so a retry after a partial failure can never roll a newer USER
  * value back to the stale legacy document (inherited/project effective
  * values are still legitimately overridden by legacy USER preferences). */
-function tuiAppOps(section: Record<string, unknown> | undefined, owned: ReadonlySet<string>): TuiSettingsPathOp[] {
+function tuiAppOps(section: Record<string, unknown> | undefined, owned: ReadonlySet<string>, diag: MigrationDiagLike): TuiSettingsPathOp[] {
   if (section === undefined) return []
   const ops: TuiSettingsPathOp[] = []
   for (const field of COPIED_STRING_FIELDS) {
@@ -157,7 +169,14 @@ function tuiAppOps(section: Record<string, unknown> | undefined, owned: Readonly
   }
   for (const field of COPIED_RAW_FIELDS) {
     const value = section[field]
-    if (value !== undefined && !owned.has(field)) ops.push({ op: 'set', path: [field], value })
+    if (value === undefined || owned.has(field)) continue
+    if (!strictFieldValid(field, value)) {
+      // §8.9 field-level fail-soft: drop THIS field (visible diagnostic),
+      // never the whole batch — the remaining valid fields still migrate.
+      diag.warn('legacy TUI field is malformed and was skipped', { field })
+      continue
+    }
+    ops.push({ op: 'set', path: [field], value })
   }
   // The display convergence runs only when the legacy document carried a
   // display opinion: a valid canonical value is copied verbatim, an invalid
@@ -242,10 +261,14 @@ export async function migrateLegacySettings(input: LegacySettingsMigrationInput)
   }
   // A selectedDefault the USER layer already owns is NEVER rewritten: the
   // user changed the default during the marker window and that newer value
-  // beats the stale legacy document on every retry.
-  const registryOwned = ownedFields(forms.describe()?.find(entry => entry.ns === 'agent-preset-registry')?.user)
+  // beats the stale legacy document on every retry. The ownership decision
+  // and the revision fence come from ONE descriptor snapshot — re-reading
+  // the descriptor for the revision would refresh the fence after a
+  // concurrent edit and let the stale write commit over the newer value.
+  const registryDescriptor = forms.describe()?.find(entry => entry.ns === 'agent-preset-registry')
+  const registryOwned = ownedFields(registryDescriptor?.user)
   if (presetDefault !== undefined && !registryOwned.has('selectedDefault')) {
-    const revision = forms.describe()?.find(entry => entry.ns === 'agent-preset-registry')?.revision
+    const revision = registryDescriptor?.revision
     try {
       await forms.mutate('agent-preset-registry', [
         { op: 'set', path: ['selectedDefault'], value: presetDefault },
@@ -256,12 +279,14 @@ export async function migrateLegacySettings(input: LegacySettingsMigrationInput)
       return { status: 'failed', reason: `agent-preset-registry.selectedDefault write failed: ${reason}` }
     }
   }
-  // The TUI preference batch (plus the marker) is the completing write.
-  const ops = tuiAppOps(tuiSection, ownedFields(forms.describe()?.find(entry => entry.ns === 'tui-app')?.user))
+  // The TUI preference batch (plus the marker) is the completing write. The
+  // ownership decision and the revision fence share ONE descriptor snapshot
+  // (same rule as the registry write above).
+  const tuiDescriptor = forms.describe()?.find(entry => entry.ns === 'tui-app')
+  const ops = tuiAppOps(tuiSection, ownedFields(tuiDescriptor?.user), diag)
   ops.push({ op: 'set', path: ['legacySettingsMigrationVersion'], value: LEGACY_SETTINGS_MIGRATION_VERSION })
   try {
-    const revision = forms.describe()?.find(entry => entry.ns === 'tui-app')?.revision
-    await forms.mutate('tui-app', ops, revision)
+    await forms.mutate('tui-app', ops, tuiDescriptor?.revision)
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     diag.warn('legacy TUI settings migration failed; will retry on next start', { reason })
