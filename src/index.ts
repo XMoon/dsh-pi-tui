@@ -4770,8 +4770,9 @@ export function apply(ctx: Context, config: Config): void {
       const childPreviews = new Map<string, StreamingToolPreview>()
       let childCwd = ''
       // Only the child's OWN events enter the viewer: a fork provider seeds
-      // the child with the parent's completed-turn history (session/end-seed
-      // boundary), and the parent's records — its subagent completion
+      // the child with the parent's inherited prefix (ending at the
+      // session/end-seed boundary plus child-owned repair), and the parent's
+      // records — its subagent completion
       // notices included — must never render as the child's transcript.
       const initialChild = sessions.get(childId)
       let observedEvents: readonly SessionEvent[] = initialChild?.snapshotEvents() ?? []
