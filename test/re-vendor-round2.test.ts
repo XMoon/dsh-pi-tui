@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { openerFor } from '../src/open-url.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
@@ -244,8 +245,8 @@ test('fullscreen FOCUS_OUT with an active approval still cleans the selection an
   startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
-    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
-    { type: 'assistant/message', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(0), time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'assistant/message', surfaceOp: 'append', seq: SessionSeq(1), time: 1_700_000_000_001, data: { stream: [], turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   app.setFullscreen(true)
