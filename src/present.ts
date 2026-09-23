@@ -1278,7 +1278,7 @@ export function resultTextLines(blocks: readonly ContentBlock[], error?: { name:
     // summary instead).
     else if (block.type === 'image') lines.push('[image]')
     else if (block.type === 'file') lines.push(fileAttachmentSummary(block.attachment))
-    else if (block.type === 'reasoning' || block.type === 'tool-call' || block.type === 'tool-result') {
+    else if (block.type === 'reasoning' || block.type === 'tool-call') {
       // Preserve the existing raw projection for known process blocks; their
       // dedicated transcript surfaces own ordinary rendering.
       lines.push(JSON.stringify(block, null, 2))

@@ -34,7 +34,6 @@ export type AssistantLiveContentBlock = AssistantLiveContentBlockBase & (
   | { readonly type: 'image'; readonly attachment: unknown }
   | { readonly type: 'file'; readonly attachment: unknown }
   | { readonly type: 'tool-call'; readonly id: string; readonly name: string; readonly arguments: string }
-  | { readonly type: 'tool-result'; readonly toolCallId: string; readonly content: readonly AssistantLiveContentBlock[]; readonly isError?: boolean }
   | { readonly type: string }
 )
 
