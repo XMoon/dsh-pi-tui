@@ -195,16 +195,29 @@ export class DirectTuiSettings implements TuiSettingsConfig {
       const owned = userSection?.[field]
       if (requested !== undefined) {
         if (owned !== undefined) {
-          // The USER override is authoritative once it exists: writing a
-          // DIFFERENT value is always a real edit. Writing back exactly the
-          // inherited/base value (requested === effective ≠ owned) is a
-          // reset-to-inherited, expressed as an UNSET so the override stops
-          // shadowing the layers beneath instead of being pinned as data.
-          if (!fieldEquals(requested, owned)) {
-            ops.push(fieldEquals(requested, effective)
-              ? { op: 'unset', path: [field] }
-              : { op: 'set', path: [field], value: requested })
+          if (fieldEquals(requested, owned)) {
+            // The USER override already stores exactly this value: no op
+            // (a document rebuilt from a merged view re-states the user's
+            // own raw value — writing it back would only pin it).
+          } else if (!fieldEquals(requested, effective)) {
+            ops.push({ op: 'set', path: [field], value: requested })
+          } else if (effective === null || typeof effective !== 'object') {
+            // requested === effective ≠ owned on a SCALAR: the caller wrote
+            // the inherited/base value over its own override — a
+            // reset-to-inherited, expressed as an UNSET so the override
+            // stops shadowing the layers beneath instead of being pinned.
+            ops.push({ op: 'unset', path: [field] })
           }
+          // requested === effective ≠ owned on an OBJECT is the merged-view
+          // restate: upstream mergeLayers merges nested plain objects
+          // recursively, so a project/home layer makes the EFFECTIVE value a
+          // SUPERSET of the raw USER override (keybindings/footerLayout/
+          // footerCommand). Every whole-document writer spreads get() — the
+          // merged view — so this shape must stay a NO-OP: an unset would
+          // destroy the USER's partial override (and disarm a trusted
+          // footerCommand), and a set would pin the merged superset into the
+          // USER layer. The unset-removal drop path (requested undefined)
+          // remains the explicit way to clear an owned object field.
         } else if (!fieldEquals(requested, effective)) {
           // No USER override: only a value that actually changes the
           // effective snapshot is written — inherited values are never
