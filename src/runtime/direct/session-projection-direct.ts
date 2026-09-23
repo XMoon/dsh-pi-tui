@@ -30,7 +30,6 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-projection-direct
  */
 
-import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import type { SessionProjectionSummary, SessionSummary } from '../session-reader-port.ts'
@@ -60,14 +59,13 @@ export interface SessionProjectionReaderLike {
 }
 
 /** The zero-I/O projection-cache hint (structural subset of
- * `sessionProjectionCache`). A row is possibly stale but never wrong; the
- * caller's `list()` header is the identity witness, so no log read and no
- * second corpus listing is needed. Seeded list headers without an exact cut
- * are deliberately skipped. */
+ * `sessionProjectionCache`). The SessionHeader is the listing-side lifecycle
+ * identity witness: the cache itself matches lifecycle identity (seeded and
+ * unseeded alike), a row is possibly stale but never from an unrelated
+ * lifecycle, and no log read or inherited cut is involved. */
 export interface SessionProjectionCacheLike {
   cachedSnapshot(
     meta: SessionHeader,
-    inheritedEventCount: ReturnType<typeof SessionLogOffset>,
     keys?: readonly ProjectionKey[],
   ): { readonly values?: {
     readonly title?: string | null
@@ -76,7 +74,6 @@ export interface SessionProjectionCacheLike {
   } } | undefined
   cachedPredecessorTitle?(
     meta: SessionHeader,
-    inheritedEventCount: ReturnType<typeof SessionLogOffset>,
   ): { readonly values?: { readonly title?: string | null } } | undefined
 }
 
@@ -100,28 +97,20 @@ export interface ProjectionBatchDeps {
   readonly livePresetOf: (sessionId: string) => string | undefined
 }
 
-/** The exact cache cut available from a lightweight list header. Unseeded
- * sessions always start at cut 0. A seeded list record has no exact inherited
- * cut, so it must skip the cache rather than guessing from unrelated metadata. */
-function inheritedCutOf(header: SessionHeader): ReturnType<typeof SessionLogOffset> | undefined {
-  return header.isSeeded === false ? SessionLogOffset(0) : undefined
-}
-
 /**
- * Read the projection-cache hint for one header. A seeded header without an
- * exact inherited cut skips the cache entirely — a guessed cut could seed
- * values folded from an unrelated log prefix (master contract §3.5).
+ * Read the projection-cache hint for one header - a header-only listing read.
+ * The cache owns lifecycle-identity matching, so the TUI neither computes an
+ * inherited cut nor rejects seeded headers; a current-lifecycle block wins and
+ * only its absence may consult the predecessor-title hint.
  */
 function safeCachedSnapshot(
   cache: SessionProjectionCacheLike | undefined,
   header: SessionHeader,
 ): { readonly values?: { readonly title?: string | null; readonly agentPreset?: string | null } } | undefined {
   if (cache === undefined) return undefined
-  const cut = inheritedCutOf(header)
-  if (cut === undefined) return undefined
   try {
-    return cache.cachedSnapshot(header, cut, ['title', 'agentPreset'])
-      ?? cache.cachedPredecessorTitle?.(header, cut)
+    return cache.cachedSnapshot(header, ['title', 'agentPreset'])
+      ?? cache.cachedPredecessorTitle?.(header)
   } catch {
     return undefined
   }

@@ -4,15 +4,16 @@
  * semantic boundary: the consumer depends on SessionReader and the Direct
  * adapter owns Host service access.
  *
- * Projection tests pin the master-safe ladder: live snapshots, zero-I/O cache
- * hints for eligible cold rows, and unknown fields on cold cache misses. A
- * picker must never activate a historical Session just to fill labels.
+ * Projection tests pin the master-safe ladder: live snapshots, zero-I/O
+ * header-only cache hints for cold rows, and unknown fields on cold cache
+ * misses. A picker must never activate a historical Session just to fill
+ * labels.
  * @module @xmoon76/dsh-pi-tui/session-reader-port.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { DirectSessionReader, type HostContextLike, type SessionQueryLike } from '../src/runtime/direct/session-direct.ts'
 
 function header(id: string, createdAt: number, extra: Partial<{
@@ -22,13 +23,14 @@ function header(id: string, createdAt: number, extra: Partial<{
   origin: 'subagent'
   isSeeded: boolean
 }> = {}) {
-  // `isSeeded: false` completes the cache identity: an unseeded row's exact
-  // inherited cut is zero.
+  // A current Session Format V4 header. `isSeeded` is lifecycle identity the
+  // alpha.2 projection cache matches by itself — the listing read carries no
+  // inherited cut.
   const { parentSession, ...rest } = extra
   return {
     id: SessionId(id),
     createdAt,
-    version: 3 as const,
+    version: 4 as const,
     isSeeded: false,
     cwd: '/workspace',
     ...rest,
@@ -120,19 +122,19 @@ test('list matches master visibility: cold cwd-less rows are omitted but live ro
   assert.equal(cacheReads.includes('cold-hidden'), false)
 })
 
-test('list uses sessionListMetadata activity when the optional capability exists', async () => {
+test('list uses sessionListMetadata activity through the header-only cache face', async () => {
   const old = header('session-old', 100)
   const newer = header('session-new', 300)
+  const calls: Array<{ meta: unknown; keys: unknown; arity: number }> = []
   const reader = new DirectSessionReader(host({
     sessionQuery: query([
       { header: old, live: false },
       { header: newer, live: false },
     ]),
     sessionProjectionCache: {
-      cachedSnapshot: (meta: { id: string }, cut: unknown, keys?: readonly string[]) => {
-        assert.equal(cut, SessionLogOffset(0))
-        assert.deepEqual(keys, ['sessionListMetadata'])
-        return meta.id === 'session-old'
+      cachedSnapshot: function (meta: unknown, keys?: readonly string[]) {
+        calls.push({ meta, keys, arity: arguments.length })
+        return meta === old
           ? { values: { sessionListMetadata: { blank: false, lastPromptAt: 900 } } }
           : undefined
       },
@@ -143,6 +145,9 @@ test('list uses sessionListMetadata activity when the optional capability exists
   assert.deepEqual(rows.map(r => r.id), ['session-old', 'session-new'])
   assert.deepEqual(rows.map(r => r.updatedAt), [900, 300])
   assert.deepEqual(rows.map(r => r.createdAt), [100, 300])
+  assert.deepEqual(calls.map(call => call.keys), [['sessionListMetadata'], ['sessionListMetadata']])
+  assert.ok(calls.every(call => call.arity === 2), 'the cold activity read passes no inherited-cut argument')
+  assert.ok(calls.every(call => call.meta === old || call.meta === newer), 'each read uses the exact listed header')
 })
 
 test('list falls back to createdAt when activity projection is unavailable', async () => {
@@ -157,21 +162,23 @@ test('list falls back to createdAt when activity projection is unavailable', asy
   assert.deepEqual(rows.map(r => r.id), ['session-new', 'session-old'])
 })
 
-test('list never reads a seeded cold cache without an exact inherited cut', async () => {
+test('list uses a lifecycle-matched seeded cold cache row for activity', async () => {
   const seeded = header('session-seeded', 100, { isSeeded: true })
   let cacheReads = 0
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: seeded, live: false }]),
     sessionProjectionCache: {
-      cachedSnapshot: () => {
+      cachedSnapshot: (meta: { id: string }) => {
         cacheReads += 1
+        assert.equal(meta.id, 'session-seeded')
         return { values: { sessionListMetadata: { blank: false, lastPromptAt: 900 } } }
       },
     },
   }))
   const rows = await reader.list(undefined)
   assert.deepEqual(rows?.map(r => r.id), ['session-seeded'])
-  assert.equal(cacheReads, 0)
+  assert.deepEqual(rows?.map(r => r.updatedAt), [900])
+  assert.equal(cacheReads, 1, 'a seeded cold header must reach the cache; the cache owns lifecycle matching')
 })
 
 test('list without the session-query engine is explicitly unavailable', async () => {
@@ -187,7 +194,9 @@ test('projectionBatch uses live projection and composed preset without cold read
     sessionQuery: query([{ header: liveHeader, live: true }]),
     sessionProjections: {
       cachedSnapshot: (target: unknown) => target === session
-        ? { values: { title: 'live title' } }
+        // The materialized preset cell deliberately CONFLICTS with the
+        // composition: composedPreset() must win for a live row (T9 order).
+        ? { values: { title: 'live title', agentPreset: 'cordis' } }
         : undefined,
     },
     agentPresets: {
@@ -204,11 +213,32 @@ test('projectionBatch uses live projection and composed preset without cold read
   assert.equal((await reader.projectionBatch(rows!)).get('session-live')?.preset, 'minimal')
 })
 
+test('live preset falls back to the materialized agentPreset cell only when composition is absent', async () => {
+  const liveHeader = header('session-live-fallback', 400)
+  const session = { header: liveHeader }
+  const liveAgent = { session, ctx: {} }
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([{ header: liveHeader, live: true }]),
+    sessionProjections: {
+      cachedSnapshot: (target: unknown) => target === session
+        ? { values: { title: 'live title', agentPreset: 'cordis' } }
+        : undefined,
+    },
+    agentPresets: { composedPreset: () => undefined },
+  }), {
+    sessionOf: id => String(id) === 'session-live-fallback' ? session : undefined,
+    agentOf: id => String(id) === 'session-live-fallback' ? liveAgent : undefined,
+  })
+  const rows = await reader.list(undefined)
+  assert.deepEqual((await reader.projectionBatch(rows!)).get('session-live-fallback'), { title: 'live title', preset: 'cordis' })
+})
+
 test('live projection uses cached cells and never falls back to cold metadata', async () => {
   const liveHeader = header('session-live-miss', 400)
   const session = { header: liveHeader }
   const liveAgent = { session, ctx: {} }
   let materializingSnapshots = 0
+  let materializingStateReads = 0
   let coldCacheReads = 0
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: liveHeader, live: true }]),
@@ -216,6 +246,10 @@ test('live projection uses cached cells and never falls back to cold metadata', 
       snapshot: () => {
         materializingSnapshots += 1
         throw new Error('live listing must not materialize projections')
+      },
+      stateOf: () => {
+        materializingStateReads += 1
+        throw new Error('live listing must not fold projection state')
       },
       cachedSnapshot: () => undefined,
     },
@@ -237,6 +271,7 @@ test('live projection uses cached cells and never falls back to cold metadata', 
   const rows = await reader.list(undefined)
   assert.deepEqual(await reader.projectionBatch(rows!), new Map())
   assert.equal(materializingSnapshots, 0)
+  assert.equal(materializingStateReads, 0, 'stateOf() is also a materializing read (plan §2.2)')
   assert.equal(coldCacheReads, 0)
 })
 
@@ -342,17 +377,17 @@ test('projectionBatch treats a row that became live after listing as live', asyn
   assert.equal(coldReads, 0)
 })
 
-test('projectionBatch passes exact cut zero and reads a fully cached row', async () => {
+test('projectionBatch reads a fully cached row through the header-only face', async () => {
   const persisted = header('session-cached', 100)
-  const cuts: unknown[] = []
+  const calls: Array<{ meta: unknown; keys: unknown; arity: number }> = []
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: persisted, live: false }]),
     sessionProjectionCache: {
-      cachedSnapshot: (_meta: unknown, cut: unknown, keys?: readonly string[]) => {
-        cuts.push(cut)
-        if (cuts.length === 1) assert.deepEqual(keys, ['sessionListMetadata'])
-        else assert.deepEqual(keys, ['title', 'agentPreset'])
-        return { values: { title: 'cached title', agentPreset: 'ptc' } }
+      cachedSnapshot: function (meta: unknown, keys?: readonly string[]) {
+        calls.push({ meta, keys, arity: arguments.length })
+        return keys?.includes('title')
+          ? { values: { title: 'cached title', agentPreset: 'ptc' } }
+          : undefined
       },
     },
     agentPresets: {
@@ -362,13 +397,16 @@ test('projectionBatch passes exact cut zero and reads a fully cached row', async
   }))
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
-  assert.deepEqual(cuts, [SessionLogOffset(0), SessionLogOffset(0)])
+  assert.deepEqual(calls.map(call => call.keys), [['sessionListMetadata'], ['title', 'agentPreset']])
+  assert.ok(calls.every(call => call.arity === 2), 'no listing read may carry an inherited-cut argument')
+  assert.ok(calls.every(call => call.meta === persisted), 'every cache read uses the exact listed header')
   assert.deepEqual(projections.get('session-cached'), { title: 'cached title', preset: 'ptc' })
 })
 
 test('projectionBatch uses the predecessor title hint without a cold observation', async () => {
   const persisted = header('session-predecessor', 100)
   let observed = 0
+  const hintCalls: Array<{ meta: unknown; arity: number }> = []
   const reader = new DirectSessionReader(host({
     sessionQuery: {
       ...query([{ header: persisted, live: false }]),
@@ -379,19 +417,24 @@ test('projectionBatch uses the predecessor title hint without a cold observation
     },
     sessionProjectionCache: {
       cachedSnapshot: () => undefined,
-      cachedPredecessorTitle: () => ({ values: { title: 'predecessor title' } }),
+      cachedPredecessorTitle: function (meta: unknown) {
+        hintCalls.push({ meta, arity: arguments.length })
+        return { values: { title: 'predecessor title' } }
+      },
     },
   }))
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
   assert.equal(projections.get('session-predecessor')?.title, 'predecessor title')
   assert.equal(observed, 0)
+  assert.deepEqual(hintCalls, [{ meta: persisted, arity: 1 }], 'the hint is a header-only read: the exact header, no cut')
 })
 
 test('projectionBatch keeps partial cache values and leaves misses unknown', async () => {
   const partial = header('session-partial', 200)
   const miss = header('session-miss', 100)
   let observed = 0
+  const hintReads: string[] = []
   const reader = new DirectSessionReader(host({
     sessionQuery: {
       ...query([{ header: partial, live: false }, { header: miss, live: false }]),
@@ -404,6 +447,10 @@ test('projectionBatch keeps partial cache values and leaves misses unknown', asy
       cachedSnapshot: (meta: { id: string }) => meta.id === 'session-partial'
         ? { values: { title: 'partial title', agentPreset: null } }
         : undefined,
+      cachedPredecessorTitle: (meta: { id: string }) => {
+        hintReads.push(meta.id)
+        return undefined
+      },
     },
   }))
   const rows = await reader.list(undefined)
@@ -411,9 +458,12 @@ test('projectionBatch keeps partial cache values and leaves misses unknown', asy
   assert.deepEqual(projections.get('session-partial'), { title: 'partial title' })
   assert.equal(projections.has('session-miss'), false)
   assert.equal(observed, 0)
+  // A partial current block must not consult the predecessor hint to fill
+  // missing current keys; only a total miss falls back to it.
+  assert.deepEqual(hintReads, ['session-miss'])
 })
 
-test('projectionBatch skips all cache reads for a seeded row without an exact cut', async () => {
+test('projectionBatch surfaces a lifecycle-matched seeded cache row', async () => {
   const seeded = header('session-seeded', 100, { isSeeded: true })
   let cacheReads = 0
   let observed = 0
@@ -422,27 +472,25 @@ test('projectionBatch skips all cache reads for a seeded row without an exact cu
       ...query([{ header: seeded, live: false }]),
       observeSession: async () => {
         observed += 1
-        throw new Error('seeded picker row must remain unknown')
+        throw new Error('a seeded cache hit must not activate the Session')
       },
     },
     sessionProjectionCache: {
-      cachedSnapshot: () => {
+      cachedSnapshot: (meta: { id: string }) => {
         cacheReads += 1
-        return { values: { title: 'wrong', agentPreset: 'wrong' } }
-      },
-      cachedPredecessorTitle: () => {
-        cacheReads += 1
-        return { values: { title: 'wrong' } }
+        assert.equal(meta.id, 'session-seeded')
+        return { values: { title: 'seeded title', agentPreset: 'ptc' } }
       },
     },
   }))
   const rows = await reader.list(undefined)
-  assert.deepEqual(await reader.projectionBatch(rows!), new Map())
-  assert.equal(cacheReads, 0)
+  const projections = await reader.projectionBatch(rows!)
+  assert.deepEqual(projections.get('session-seeded'), { title: 'seeded title', preset: 'ptc' })
+  assert.equal(cacheReads, 2, 'the activity pass and the batch pass both read the cache')
   assert.equal(observed, 0)
 })
 
-test('projectionBatch preserves a native V3 cached code projection', async () => {
+test('projectionBatch preserves a native cached code projection', async () => {
   const persisted = header('session-code', 100)
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: persisted, live: false }]),
@@ -458,7 +506,7 @@ test('projectionBatch preserves a native V3 cached code projection', async () =>
   assert.deepEqual((await reader.projectionBatch(rows!)).get('session-code'), { title: 'kept title', preset: 'code' })
 })
 
-test('projectionBatch keeps cached V3 preset values without a roster resolver', async () => {
+test('projectionBatch keeps cached preset values without a roster resolver', async () => {
   const healthy = header('session-healthy', 110)
   const nativeCode = header('session-native-code', 100)
   const reader = new DirectSessionReader(host({

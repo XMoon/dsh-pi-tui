@@ -14,7 +14,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-direct
  */
 
-import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { turnBoundaryBlank } from './session-preset-direct.ts'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
@@ -92,8 +92,9 @@ export interface DirectSessionLiveResolvers {
 }
 
 /** Read the optional activity projection without activating a cold Session.
- * Missing projection capability, seeded headers without an exact cut, and
- * derived-cache failures all safely fall back to header creation time. */
+ * A cold row reads the persisted cache by header alone (the cache owns
+ * lifecycle-identity matching); missing projection capability and
+ * derived-cache failures safely fall back to header creation time. */
 function activityTimestamp(
   header: SessionHeader,
   liveRow: boolean,
@@ -106,8 +107,8 @@ function activityTimestamp(
     if (liveRow && live !== undefined && projections !== undefined) {
       const metadata = projections.cachedSnapshot(live, ['sessionListMetadata'])?.values?.sessionListMetadata
       if (typeof metadata?.lastPromptAt === 'number') lastPromptAt = metadata.lastPromptAt
-    } else if (!liveRow && live === undefined && header.isSeeded === false && cache !== undefined) {
-      const metadata = cache.cachedSnapshot(header, SessionLogOffset(0), ['sessionListMetadata'])?.values?.sessionListMetadata
+    } else if (!liveRow && live === undefined && cache !== undefined) {
+      const metadata = cache.cachedSnapshot(header, ['sessionListMetadata'])?.values?.sessionListMetadata
       if (typeof metadata?.lastPromptAt === 'number') lastPromptAt = metadata.lastPromptAt
     }
   } catch {
