@@ -186,8 +186,16 @@ export async function migrateLegacySettings(input: LegacySettingsMigrationInput)
   const legacyText = await readLegacyDocument(input.home)
   if (legacyText === undefined) {
     // Nothing to import anywhere: complete the marker so the retired file
-    // a later downgrade recreates cannot override newer values.
-    await completeMarker(forms)
+    // a later downgrade recreates cannot override newer values. A refused
+    // marker write is VISIBLE and retried on the next boot (the marker is
+    // the only thing this path owns).
+    try {
+      await completeMarker(forms)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      diag.warn('legacy settings marker write failed; will retry on next start', { reason })
+      return { status: 'failed', reason: `marker write failed: ${reason}` }
+    }
     return { status: 'absent' }
   }
   let document: unknown
@@ -252,15 +260,11 @@ export async function migrateLegacySettings(input: LegacySettingsMigrationInput)
   }
 }
 
-/** Advance the marker alone (no legacy document anywhere). */
+/** Advance the marker alone (no legacy document anywhere). Throws on a
+ * refused write — the caller reports the failure so the next boot retries. */
 async function completeMarker(forms: SettingsFormsLike): Promise<void> {
-  try {
-    const revision = forms.describe()?.find(entry => entry.ns === 'tui-app')?.revision
-    await forms.mutate('tui-app', [
-      { op: 'set', path: ['legacySettingsMigrationVersion'], value: LEGACY_SETTINGS_MIGRATION_VERSION },
-    ], revision)
-  } catch {
-    // A failed marker write only costs one redundant no-op check on the
-    // next boot; nothing user-visible depends on it.
-  }
+  const revision = forms.describe()?.find(entry => entry.ns === 'tui-app')?.revision
+  await forms.mutate('tui-app', [
+    { op: 'set', path: ['legacySettingsMigrationVersion'], value: LEGACY_SETTINGS_MIGRATION_VERSION },
+  ], revision)
 }

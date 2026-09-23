@@ -497,7 +497,6 @@ test('presets roster/resolve/defaultId return detached roster DTOs', async () =>
         ],
         modeSelectionEnabled: true,
       }),
-      list: async () => [preset('standard'), preset('code', { name: 'PTC', broken: 'x' })],
       resolve: async (id?: string) => preset(id ?? 'standard'),
       get defaultId() { return 'standard' },
     },
@@ -524,7 +523,6 @@ test('presets roster carries the Host mode-selection policy', async () => {
         presets: [{ id: 'standard', isDefault: true }],
         modeSelectionEnabled: false,
       }),
-      list: async () => [preset('standard')],
       resolve: async (id?: string) => preset(id ?? 'standard'),
       get defaultId() { return 'standard' },
     },
@@ -540,7 +538,6 @@ test('presets selectSessionPreset maps the official blank-session select', async
   const calls: Array<{ agent: unknown; presetId: string }> = []
   const presets = port({
     agentPresets: {
-      list: async () => [preset('standard')],
       resolve: async (id?: string) => preset(id ?? 'standard'),
       get defaultId() { return 'standard' },
       select: async (agent: unknown, presetId: string) => { calls.push({ agent, presetId }); return presetId },
@@ -555,7 +552,6 @@ test('presets selectSessionPreset maps the official blank-session select', async
 test('presets selectSessionPreset reports the official locked refusal as rejected', async () => {
   const presets = port({
     agentPresets: {
-      list: async () => [preset('standard')],
       resolve: async (id?: string) => preset(id ?? 'standard'),
       get defaultId() { return 'standard' },
       select: async () => { throw Object.assign(new Error('session has already started'), { code: 'agent-preset/locked' }) },
@@ -569,7 +565,6 @@ test('presets selectSessionPreset reports the official locked refusal as rejecte
 test('presets selectSessionPreset refuses when the session is not live', async () => {
   const presets = port({
     agentPresets: {
-      list: async () => [preset('standard')],
       resolve: async (id?: string) => preset(id ?? 'standard'),
       get defaultId() { return 'standard' },
       select: async () => 'standard',
@@ -585,7 +580,6 @@ test('presets treats a declared code id as an ordinary preset — never rewritte
   const presets = port({
     agentPresets: {
       remoteExportList: async () => ({ presets: [{ id: 'code', isDefault: true }], modeSelectionEnabled: true }),
-      list: async () => [preset('code')],
       resolve: async (id?: string) => {
         resolved.push(id)
         if (id === 'code' || id === undefined) return preset('code')
@@ -604,7 +598,6 @@ test('presets treats a declared code id as an ordinary preset — never rewritte
 test('presets.resolve propagates an unknown-preset rejection', async () => {
   const presets = port({
     agentPresets: {
-      list: async () => [],
       resolve: async () => { throw new Error('unknown preset') },
       get defaultId() { return 'standard' },
     },
@@ -810,7 +803,6 @@ test('selectSessionModel commits the Host-NORMALIZED selection, never the raw re
 test('selectSessionPreset reports an unrecognized preset failure as indeterminate, not a blind rejection', async () => {
   const presets = port({
     agentPresets: {
-      list: async () => [preset('standard')],
       resolve: async (id?: string) => preset(id ?? 'standard'),
       get defaultId() { return 'standard' },
       select: async () => { throw new Error('durable append exploded after recompose') },
@@ -910,7 +902,6 @@ test('Direct roster aborts after the Host await (never opens on a cancelled read
   const presets = new DirectCatalogPort(host({
     agentPresets: {
       remoteExportList: async () => { started.resolve(); await gate; return { presets: [], modeSelectionEnabled: true } },
-      list: async () => [],
     },
   }), () => undefined).presets
   const controller = new AbortController()

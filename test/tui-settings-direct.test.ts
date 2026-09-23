@@ -150,6 +150,26 @@ test('§18.2 no effective→user promotion: a base-supplied theme stays out of t
   ], 'inherited footerLayout/keybindings values are not promoted')
 })
 
+test('§18.2 writing the inherited value over a USER override resets it (unset, not pin)', async () => {
+  // The USER layer owns theme: dark while the effective reference serves the
+  // inherited light: the caller writes light back — the override must be
+  // REMOVED (unset), never kept as a pinned value and never dropped silently.
+  const refs = refsOf({ theme: 'light' })
+  const forms = formsOf({ theme: 'dark' })
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  await settings.replace({ ...settings.get(), theme: 'light' } as TuiSettingsDoc)
+  assert.deepEqual(forms.calls[0]?.ops, [
+    { op: 'unset', path: ['theme'] },
+  ], 'a reset-to-inherited is an unset; the USER override stops shadowing')
+  // A different new value over the same override is an ordinary set.
+  const forms2 = formsOf({ theme: 'dark' })
+  const settings2 = new DirectTuiSettings(refsOf({ theme: 'light' }), forms2.forms)
+  await settings2.replace({ ...settings2.get(), theme: 'blue' } as TuiSettingsDoc)
+  assert.deepEqual(forms2.calls[0]?.ops, [
+    { op: 'set', path: ['theme'], value: 'blue' },
+  ])
+})
+
 test('a restated USER-owned raw value emits no op (no self-pinning)', async () => {
   const userRaw = [{ id: 'user-item', kind: 'text', text: 'keep me' }]
   const refs = refsOf({ footerCustomItems: [{ id: 'project-item' }] })
@@ -208,6 +228,20 @@ test('unknown keys in a replacement document are ignored (the schema is the auth
 test('a replace without the Settings surface fails explicitly', async () => {
   const settings = new DirectTuiSettings(refsOf(), undefined)
   await assert.rejects(settings.replace({ ...settings.get(), theme: 'dark' } as TuiSettingsDoc), /settings service unavailable/u)
+})
+
+test('the production schema defaults mount fullscreen ON (§5.5)', async () => {
+  // The test harness intentionally mounts suites with fullscreen 'off' (the
+  // historical degraded baseline); the PRODUCTION default itself is pinned
+  // here through the exported schema — the same resolution a Loader-mounted
+  // row performs.
+  const { Config } = await import('../src/index.ts')
+  const resolved = Config({} as never) as unknown as TuiConfigRefs
+  assert.equal(resolved.fullscreen.get(), 'on', 'a fresh profile mounts fullscreen on')
+  assert.equal(resolved.displayPreset.get(), 'full')
+  assert.equal(resolved.busyEnter.get(), 'queue')
+  assert.equal(resolved.notificationMode.get(), 'unfocused')
+  assert.equal(resolved.legacySettingsMigrationVersion.get(), 0)
 })
 
 test('a fresh deployment document carries the product defaults', () => {

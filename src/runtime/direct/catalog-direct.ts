@@ -101,7 +101,6 @@ export interface ModelDiagLike {
  * the official blank-Session write. Identity is id-only: `trust`/`path`/
  * `authorable` are retired upstream and deliberately absent here. */
 export interface AgentPresetsServiceLike {
-  list(): Promise<readonly AgentPreset[]>
   resolve(id?: string): Promise<AgentPreset>
   get defaultId(): string
   /** The public official roster projection: path-free rows + the

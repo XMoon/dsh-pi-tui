@@ -121,12 +121,6 @@ function presetService(
             })),
             modeSelectionEnabled: true,
           },
-      list: async () => rows.map(row => ({
-        id: row.id,
-        path: `/presets/${row.id}`,
-        ...row.name === undefined ? {} : { name: row.name },
-        ...row.description === undefined ? {} : { description: row.description },
-      })),
       resolve: async (id?: string) => {
         if (resolveOverride !== undefined) return resolveOverride(id)
         // Real-registry semantics: an omitted id resolves the deployment
