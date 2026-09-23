@@ -57,7 +57,10 @@ function detachChild(
     // The catalog's activity is Session-store presence. The current TUI row
     // contract uses the Agent registry's driver status instead.
     activity: source.agentFor(entry.id)?.status === 'running' ? 'running' : 'inactive',
-    hasChildren: entry.hasChildren,
+    // The rc.1 official direct-child face (SubagentCatalogEntry) carries no
+    // descendant fact; `false` is the conservative default, matching the
+    // Remote projection derivation (no known children).
+    hasChildren: entry.hasChildren === true,
   })
 }
 
