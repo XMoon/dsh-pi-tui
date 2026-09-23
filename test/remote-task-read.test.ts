@@ -137,8 +137,10 @@ test('Direct re-projects child activity from the live Agent registry and reads p
       },
     },
     jobs: {
-      list(owner) {
-        assert.equal(owner, parent)
+      list(caller) {
+        // DSH 0.1.7 JobRegistry ownership: the caller is the parent
+        // SessionId, never the Agent object.
+        assert.equal(caller, 'parent')
         return [job('job')]
       },
     },
@@ -174,32 +176,76 @@ test('a settled continuable child keeps its status and result fields (plan §9.3
   assert.equal(child.label, 'Child result', 'the child result metadata must survive')
 })
 
-test('Direct re-resolves the parent Agent before reading jobs after an awaited listing', async () => {
-  const oldParent: DirectTaskAgent = { status: 'running' }
-  const newParent: DirectTaskAgent = { status: 'running' }
-  let currentParent = oldParent
+test('Direct passes the parent SessionId to jobs after an awaited listing and fences a vanished parent', async () => {
+  const parent: DirectTaskAgent = { status: 'running' }
+  let parentLive = true
+  let jobsReads = 0
   let release!: () => void
-  const listing = new Promise<void>(resolve => { release = resolve })
+  let signalListingStarted!: () => void
+  const listingStarted = new Promise<void>(resolve => { signalListingStarted = resolve })
+  const listingGate = new Promise<void>(resolve => { release = resolve })
   const direct = new DirectTaskReader({
-    agentFor: id => id === 'parent' ? currentParent : undefined,
+    agentFor: id => id === 'parent' && parentLive ? parent : undefined,
     subagents: {
       async listChildren() {
-        await listing
-        currentParent = newParent
+        signalListingStarted()
+        await listingGate
         return []
       },
     },
     jobs: {
-      list(owner) {
-        assert.equal(owner, newParent)
-        return [job('new-owner-job')]
+      list(caller) {
+        jobsReads += 1
+        // DSH 0.1.7 JobRegistry ownership: the caller is the parent
+        // SessionId, never the Agent object — even after the awaited
+        // listing re-resolved the parent Agent.
+        assert.equal(caller, 'parent')
+        return [job('owner-job')]
       },
     },
   })
 
+  // While the official listing is still in flight, the SessionId-owned
+  // jobs read must not have happened: it follows the awaited catalog.
   const pending = direct.readDirectChildren('parent')
+  await listingStarted
+  assert.equal(jobsReads, 0, 'jobs.list must not run before the listing settles')
   release()
-  assert.deepEqual((await pending)?.jobs, [job('new-owner-job')])
+  assert.deepEqual((await pending)?.jobs, [job('owner-job')])
+  assert.equal(jobsReads, 1)
+
+  // The parent vanishing WHILE the listing is awaited fences the read at
+  // the post-await availability re-check: no snapshot, no jobs read. The
+  // initial check must have PASSED (the read started), so only the
+  // re-resolution after the await can produce the fence.
+  let releaseAgain!: () => void
+  let signalAgain!: () => void
+  const startedAgain = new Promise<void>(resolve => { signalAgain = resolve })
+  const gateAgain = new Promise<void>(resolve => { releaseAgain = resolve })
+  const directAgain = new DirectTaskReader({
+    agentFor: id => id === 'parent' && parentLive ? parent : undefined,
+    subagents: {
+      async listChildren() {
+        signalAgain()
+        await gateAgain
+        return []
+      },
+    },
+    jobs: {
+      list: () => {
+        jobsReads += 1
+        return [job('must-not-appear')]
+      },
+    },
+  })
+  const pendingAgain = directAgain.readDirectChildren('parent')
+  // The read STARTED with the parent live (initial availability check
+  // passed and the listing is awaited); only NOW does the parent vanish.
+  await startedAgain
+  parentLive = false
+  releaseAgain()
+  assert.equal(await pendingAgain, undefined)
+  assert.equal(jobsReads, 1, 'a parent vanishing during the awaited listing must not produce a jobs read')
 })
 
 test('returns an authoritative empty catalog but treats a catalog error as an error', async () => {
