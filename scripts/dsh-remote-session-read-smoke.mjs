@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * D1.1 integration smoke over the published 0.1.6 official Client faces.
+ * D1.1 integration smoke over the published 0.1.7-alpha.2 official Client
+ * faces.
  *
  * The browser-facing Client packages are module-loader chunks rather than
  * Node modules, so this harness installs the same tiny loader boundary that a
@@ -87,12 +88,17 @@ const SESSION_ID = 'fx-alpha'
 const SESSION_TITLE = 'Fixture 历史会话'
 const SESSION_PRESET = 'fixture-preset'
 const SESSION_CWD = '/tmp/dsh-d1-1-fixture'
-const SESSION_FORMAT_VERSION = 3
+const SESSION_FORMAT_VERSION = 4
+/** The second list row: a `sequenced` projection-hint fixture (attached-registry
+ * sequence space) that stays list-only — never retained or opened. */
+const SEQUENCED_ID = 'fx-sequenced-hint'
 
 /** One fixture turn cycle: turn/start, user/message, assistant/message, turn/end. */
 const TURN_EVENTS = 4
-/** Durable events in the fixture log (enough that a 50-message `loadOlder` page is bounded). */
-const LOG_EVENTS = 120
+/** Durable events in the fixture log. The alpha.2 Client pages history with
+ * `maxMessages: 500` (plus a turn window), so the log must stay deep enough
+ * that one `loadOlder`/jump page never exhausts it. */
+const LOG_EVENTS = 1200
 /** Records in the opening `session/follow` window (the log tail). */
 const TAIL_RECORDS = 20
 
@@ -193,8 +199,26 @@ function fixtureMock() {
       blank: false,
       cwd: SESSION_CWD,
       projections: {
+        // A cold/list-cache hint: the watermark belongs to the cache record's
+        // own sequence space, so the official Client applies it as `cached`.
+        kind: 'cached',
         asOfSeq: TAIL_CURSOR,
         values: { title: SESSION_TITLE, agentPreset: SESSION_PRESET },
+      },
+    }, {
+      sessionId: SEQUENCED_ID,
+      // Lower updatedAt keeps the primary fixture row first in the official
+      // ids order, so the history/open path below is unchanged.
+      updatedAt: 1_699_000_000_000,
+      running: false,
+      blank: false,
+      cwd: SESSION_CWD,
+      projections: {
+        // The other official union member: a live projection registry block
+        // in the attached Session's sequence space.
+        kind: 'sequenced',
+        asOfSeq: 0,
+        values: { title: 'Sequenced projection hint', agentPreset: 'sequenced-preset' },
       },
     }],
   }))
@@ -311,6 +335,11 @@ async function main() {
     const projections = await reader.projectionBatch(rows)
     assert.equal(projections.get(SESSION_ID)?.title, SESSION_TITLE)
     assert.equal(projections.get(SESSION_ID)?.preset, SESSION_PRESET)
+    // Both official list-hint union members cross the real Client boundary:
+    // the official Client merges cached and sequenced blocks itself, and the
+    // TUI Remote adapter only reads the detached projection values.
+    assert.equal(projections.get(SEQUENCED_ID)?.title, 'Sequenced projection hint')
+    assert.equal(projections.get(SEQUENCED_ID)?.preset, 'sequenced-preset')
     const search = await reader.search('fixture')
     assert.ok(search !== undefined && search.items.length > 0, 'official Session search must return fixture hits')
     const emptySearch = await reader.search('definitely-not-in-fixture')
