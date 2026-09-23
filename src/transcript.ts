@@ -5245,19 +5245,25 @@ export class TranscriptFolder {
         break
       }
       case 'tool/result': {
-        const block = event.data.message.content[0]
-        const key = block?.toolCallId
-        const pending = key !== undefined ? this.pendingCalls.get(key) : undefined
-        const name = key === undefined ? 'tool' : (this.callNames.get(key) ?? 'tool')
-        const text = textOf(block?.content ?? [])
-        const status = event.data.error !== undefined || block?.isError === true ? 'error' : 'ok'
+        // Session V4: the durable event carries a first-class tool-role
+        // message. The call identity is `message.toolCallId` (the value
+        // official admission keeps equal to `source.callId`), the content is
+        // the direct structured result, and `message.isError` is the only
+        // durable outcome authority (`event.data.error` remains optional
+        // presentation detail).
+        const message = event.data.message
+        const key = message.toolCallId
+        const pending = this.pendingCalls.get(key)
+        const name = this.callNames.get(key) ?? 'tool'
+        const text = textOf(message.content)
+        const status = message.isError === true ? 'error' : 'ok'
         // The result's OWN turn (event.data.turn) when no pending call
         // pairs it — never this.currentTurn: an orphan result of a replay
         // fragment must not land in the stale current turn (review
         // finding).
         const turn = pending?.turn ?? event.data.turn
-        this.pendingCalls.delete(key ?? '')
-        if (key !== undefined) this.callNames.delete(key)
+        this.pendingCalls.delete(key)
+        this.callNames.delete(key)
         if (pending !== undefined) {
           // The call's own running card: parallel same-name calls pair
           // correctly because the card is keyed by callId, not by name.
@@ -5270,7 +5276,7 @@ export class TranscriptFolder {
           // §12.7).
           settleToolTiming(card, event.time)
           // Raw result data for the tool-owned presentation (presentResult).
-          card.resultBlocks = block?.content
+          card.resultBlocks = message.content
           card.meta = event.data.meta
           card.error = event.data.error
           // The result text landed: mark the search entry dirty (lazy
@@ -5294,14 +5300,14 @@ export class TranscriptFolder {
               running.args = ''
               running.turn = turn
               settleToolTiming(running, event.time)
-              running.resultBlocks = block?.content
+              running.resultBlocks = message.content
               running.meta = event.data.meta
               running.error = event.data.error
               this.markSearchEntryDirty(runningIndex)
               this.scheduleGrouping(runningIndex)
             }
           } else {
-            const card: Extract<TranscriptMessage, { kind: 'tool' }> = { kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: block?.content, meta: event.data.meta, error: event.data.error }
+            const card: Extract<TranscriptMessage, { kind: 'tool' }> = { kind: 'tool', turn, name, args: '', result: text, status, resultBlocks: message.content, meta: event.data.meta, error: event.data.error }
             // An orphan settle has NO seen tool/call: explicit zero-call
             // provenance — it must neither inflate `tools` nor own the Tool
             // slot (Focus counts only genuine tool/call events, §10.2).
@@ -5709,8 +5715,8 @@ function markdownContent(blocks: readonly ContentBlock[]): string {
       parts.push(`> ${escapeMarkdownInline(fileAttachmentSummary(attachment))} · attachment \`${attachment.attachmentId}\``)
     } else if (block.type === 'reasoning' || block.type === 'tool-call') {
       // These known process blocks have their existing dedicated transcript
-      // semantics; a finalized tool-result has no separate assistant surface,
-      // so it uses the explicit bounded fallback below.
+      // semantics; every other finalized block uses the explicit bounded
+      // fallback below.
       continue
     } else {
       flush()
@@ -5810,8 +5816,7 @@ export function renderTranscriptMarkdown(session: {
         break
       }
       case 'tool/result': {
-        const block = event.data.message.content[0]
-        const text = markdownContent(block?.content ?? [])
+        const text = markdownContent(event.data.message.content)
         if (text !== '') lines.push(`<details><summary>result</summary>\n\n${text}\n\n</details>\n`)
         break
       }
