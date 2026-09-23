@@ -77,8 +77,9 @@ test('controller pages by grouped-output turns across a same-turn read group', (
           step: 0,
           message: {
             id: MessageId(`same-turn-${call}`),
-            role: 'user',
-            content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: call }] }],
+            role: 'tool',
+            toolCallId: callId,
+            content: [{ type: 'text', text: call }],
             source: { kind: 'tool', callId },
           },
         },

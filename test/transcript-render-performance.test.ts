@@ -289,8 +289,9 @@ test('read-group reflow is structural when grouped card topology changes', () =>
     step: 0,
     message: {
       id: `read-${seq}`,
-      role: 'user',
-      content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text }] }],
+      role: 'tool',
+      toolCallId: callId,
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId },
     },
   }, seq)

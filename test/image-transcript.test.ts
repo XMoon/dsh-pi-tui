@@ -7,6 +7,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { ImageLoader } from '../src/image/loader.ts'
@@ -52,8 +53,11 @@ function toolResultEvent(blocks: unknown[]): never {
     data: {
       turn: 0,
       step: 0,
-      callId: 'call-1',
-      message: { content: [{ type: 'tool-result', toolCallId: 'call-1', content: blocks }] },
+      message: createToolResultMessage({
+        callId: ToolCallId('call-1'),
+        content: blocks as readonly ContentBlock[],
+        isError: false,
+      }),
     },
   } as never
 }

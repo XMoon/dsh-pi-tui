@@ -43,8 +43,9 @@ function toolResultEvent(turn: number, callId: string, time: number, seq: number
   return eventAt('tool/result', {
     turn, step: 0,
     message: {
-      id: MessageId(`r-${callId}`), role: 'user',
-      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text: 'ok' }] }],
+      id: MessageId(`r-${callId}`), role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text: 'ok' }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, time, seq)

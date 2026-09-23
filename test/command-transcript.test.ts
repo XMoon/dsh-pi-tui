@@ -57,19 +57,15 @@ function toolCall(name: string, callId: string, seq: number, turn = 0, step = 0,
   return event('tool/call', { callId: ToolCallId(callId), name, arguments: args, turn, step }, seq)
 }
 
-function toolResult(callId: string, text: string, seq: number, isError = false): SessionEvent {
+function toolResult(callId: string, text: string, seq: number): SessionEvent {
   return event('tool/result', {
     turn: 0,
     step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-        isError,
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq)

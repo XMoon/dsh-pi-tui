@@ -494,8 +494,9 @@ function settledTurnFixture(): {
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'PROCESS_RESULT_MARKER' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'PROCESS_RESULT_MARKER' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, 1004, 4),

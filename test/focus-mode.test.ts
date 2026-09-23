@@ -112,12 +112,9 @@ function completedTurn(turn: number, baseSeq: number, startTime: number): Sessio
       step: 0,
       message: {
         id: MessageId(`msg-r-${turn}`),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId(`call-${turn}-1`),
-          content: [{ type: 'text', text: 'ok' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId(`call-${turn}-1`),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId(`call-${turn}-1`) },
       },
     }, startTime + 4, baseSeq + 4),
@@ -145,8 +142,9 @@ function intermediateTurn(turn: number, baseSeq: number, startTime: number): Ses
     eventAt('tool/result', {
       turn, step: 0,
       message: {
-        id: MessageId('r-i1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c-i1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r-i1'), role: 'tool',
+        toolCallId: ToolCallId('c-i1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c-i1') },
       },
     }, startTime + 3, baseSeq + 3),
@@ -215,8 +213,9 @@ test('tool/result never double-counts a call; same-name calls accumulate', () =>
     eventAt('tool/result', {
       turn: 3, step: 0,
       message: {
-        id: MessageId('m1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('m1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, 1002, 2),
@@ -224,8 +223,9 @@ test('tool/result never double-counts a call; same-name calls accumulate', () =>
     eventAt('tool/result', {
       turn: 3, step: 0,
       message: {
-        id: MessageId('m2'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('m2'), role: 'tool',
+        toolCallId: ToolCallId('c2'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c2') },
       },
     }, 1004, 4),
@@ -389,8 +389,9 @@ test('parallel tool results never yank the Tool slot back to an older call (plan
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('rA'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('A'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('rA'), role: 'tool',
+        toolCallId: ToolCallId('A'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('A') },
       },
     }, 1003, 3),
@@ -402,8 +403,9 @@ test('parallel tool results never yank the Tool slot back to an older call (plan
   applyMixed(folder, [eventAt('tool/result', {
     turn: 0, step: 0,
     message: {
-      id: MessageId('rB'), role: 'user',
-      content: [{ type: 'tool-result', toolCallId: ToolCallId('B'), content: [{ type: 'text', text: 'ok' }] }],
+      id: MessageId('rB'), role: 'tool',
+      toolCallId: ToolCallId('B'),
+      content: [{ type: 'text', text: 'ok' }],
       source: { kind: 'tool', callId: ToolCallId('B') },
     },
   }, 1004, 4)])
@@ -454,8 +456,9 @@ test('an orphan tool/result never settles a running card of ANOTHER turn', () =>
     eventAt('tool/result', {
       turn: 2, step: 0,
       message: {
-        id: MessageId('r'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('unknown'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r'), role: 'tool',
+        toolCallId: ToolCallId('unknown'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('unknown') },
       },
     }, 1002, 2),
@@ -476,8 +479,9 @@ test('an orphan tool/result attributes to its OWN turn, never the stale current 
     eventAt('tool/result', {
       turn: 2, step: 0,
       message: {
-        id: MessageId('r'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('unknown'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r'), role: 'tool',
+        toolCallId: ToolCallId('unknown'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('unknown') },
       },
     }, 1002, 2),
@@ -867,8 +871,9 @@ test('late reasoning and tool events after turn/end never mutate the Focus state
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('r'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, 1003, 3),
@@ -883,8 +888,9 @@ test('late reasoning and tool events after turn/end never mutate the Focus state
     eventAt('tool/result', {
       turn: 0, step: 1,
       message: {
-        id: MessageId('r2'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r2'), role: 'tool',
+        toolCallId: ToolCallId('c2'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c2') },
       },
     }, 1008, 8),
@@ -1461,7 +1467,8 @@ test('Focus collapsed Preparing temporarily overrides the formal Action slot', (
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: 'think' } }, 1001, 1),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/foo.ts' }) }, 1002, 2),
-    eventAt('tool/result', { turn: 0, step: 0, message: { id: MessageId('r1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId('c1') } } }, 1003, 3),
+    eventAt('tool/result', { turn: 0, step: 0, message: { id: MessageId('r1'), role: 'tool', toolCallId: ToolCallId('c1'),
+    content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('c1') } } }, 1003, 3),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'message' } }, 1004, 4),
   ])
   const activity = folder.turnActivity(0)!
@@ -1496,7 +1503,8 @@ test('the collapsed body renders the slots in fixed order — Think, Action, Mes
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: '这应该是 presenter fallback。' } }, 1001, 1),
     eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: '我已经找到 skill 的特殊处理。' } }, 1002, 2),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/present.ts' }) }, 1003, 3),
-    eventAt('tool/result', { turn: 0, step: 0, message: { id: MessageId('r1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId('c1') } } }, 1004, 4),
+    eventAt('tool/result', { turn: 0, step: 0, message: { id: MessageId('r1'), role: 'tool', toolCallId: ToolCallId('c1'),
+    content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('c1') } } }, 1004, 4),
   ])
   const activity = folder.turnActivity(0)!
   const action = focusActionPresentationOf(folder)
@@ -1729,8 +1737,9 @@ test('PTC child error never marks the root; the outer result decides', () => {
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('m'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('m'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 1004, 4),
@@ -1900,8 +1909,9 @@ test('the Action slot line carries the status prefix: none running, ✓ ok, ✗ 
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('r'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r'), role: 'tool',
+        toolCallId: ToolCallId('c'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c') },
       },
     }, 1002, 2),
@@ -1915,8 +1925,10 @@ test('the Action slot line carries the status prefix: none running, ✓ ok, ✗ 
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('r'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c'), content: [{ type: 'text', text: 'boom' }] }],
+        id: MessageId('r'), role: 'tool',
+        toolCallId: ToolCallId('c'),
+        content: [{ type: 'text', text: 'boom' }],
+        isError: true,
         source: { kind: 'tool', callId: ToolCallId('c') },
       },
       error: { code: 'E', message: 'boom' },
@@ -2757,8 +2769,9 @@ function steeredTurn(turn: number, baseSeq: number, startTime: number): SessionE
     eventAt('tool/result', {
       turn, step: 0,
       message: {
-        id: MessageId(`r-${turn}`), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId(`c-${turn}-1`), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId(`r-${turn}`), role: 'tool',
+        toolCallId: ToolCallId(`c-${turn}-1`),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId(`c-${turn}-1`) },
       },
     }, startTime + 4, baseSeq + 4),
@@ -2873,8 +2886,9 @@ test('Q11 a settled question after a committed pre-steer answer never crosses th
     eventAt('tool/result', {
       turn: 0, step: 2,
       message: {
-        id: MessageId('q-fence-r'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('q-fence-call'), content: [{ type: 'text', text: JSON.stringify({ answers: [{ id: 'q', selected: ['yes'] }] }) }] }],
+        id: MessageId('q-fence-r'), role: 'tool',
+        toolCallId: ToolCallId('q-fence-call'),
+        content: [{ type: 'text', text: JSON.stringify({ answers: [{ id: 'q', selected: ['yes'] }] }) }],
         source: { kind: 'tool', callId: ToolCallId('q-fence-call') },
       },
     }, 1011, 11),
@@ -3110,8 +3124,9 @@ test('an assistant with text plus tool-call stays process evidence across a stee
       step: 1,
       message: {
         id: MessageId('tool-r'),
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId, content: [{ type: 'text', text: 'ok' }] }],
+        role: 'tool',
+        toolCallId,
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: toolCallId },
       },
     }, 2005, 25),
@@ -3419,8 +3434,9 @@ test('expanded: injected/system context before the initial user stays above the 
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('r-0'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c-0-1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r-0'), role: 'tool',
+        toolCallId: ToolCallId('c-0-1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c-0-1') },
       },
     }, 1005, 5),
@@ -3775,8 +3791,9 @@ test('collapsed Focus preserves interleaved user, steer, and injected-context or
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('interleaved-r-a'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('interleaved-a'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('interleaved-r-a'), role: 'tool',
+        toolCallId: ToolCallId('interleaved-a'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('interleaved-a') },
       },
     }, 1005, 5),
@@ -3790,8 +3807,9 @@ test('collapsed Focus preserves interleaved user, steer, and injected-context or
     eventAt('tool/result', {
       turn: 0, step: 1,
       message: {
-        id: MessageId('interleaved-r-b'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('interleaved-b'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('interleaved-r-b'), role: 'tool',
+        toolCallId: ToolCallId('interleaved-b'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('interleaved-b') },
       },
     }, 1011, 11),
@@ -4359,8 +4377,9 @@ function lateReplayFolder(late: SessionEvent[]): TranscriptFolder {
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, 1003, 3),
@@ -4406,8 +4425,9 @@ test('late-replay fence: only TURN-CARRYING producers are replay evidence', () =
     ['late orphan result', id => [eventAt('tool/result', {
       turn: 0, step: 1,
       message: {
-        id: MessageId(`r-${id}`), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId(id), content: [{ type: 'text', text: 'fragment' }] }],
+        id: MessageId(`r-${id}`), role: 'tool',
+        toolCallId: ToolCallId(id),
+        content: [{ type: 'text', text: 'fragment' }],
         source: { kind: 'tool', callId: ToolCallId(id) },
       },
     }, 6002, 7)]],
@@ -4514,8 +4534,9 @@ test('a standalone command splits two Process runs of the SAME model turn', () =
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('ra1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('a1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('ra1'), role: 'tool',
+        toolCallId: ToolCallId('a1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('a1') },
       },
     }, 1002, 2),
@@ -4525,8 +4546,9 @@ test('a standalone command splits two Process runs of the SAME model turn', () =
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('rb1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('b1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('rb1'), role: 'tool',
+        toolCallId: ToolCallId('b1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('b1') },
       },
     }, 1006, 6),
@@ -4565,8 +4587,9 @@ test('late-replay provenance (A): a pre-turn/end call that settles late stays le
     eventAt('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, 6001, 5),
@@ -4586,8 +4609,9 @@ test('late-replay provenance (B): a late read never merges with the legal read',
     eventAt('tool/result', {
       turn: 0, step: 1,
       message: {
-        id: MessageId('r2'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r2'), role: 'tool',
+        toolCallId: ToolCallId('c2'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c2') },
       },
     }, 6002, 7),

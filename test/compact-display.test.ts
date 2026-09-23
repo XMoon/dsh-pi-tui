@@ -83,8 +83,9 @@ function workFixture(): SessionEvent[] {
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, 4),
@@ -1062,8 +1063,9 @@ test('a same-step timing replacement refreshes the mounted Activity duration', a
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 9_000, 2),
@@ -1097,8 +1099,9 @@ test('a Compact Activity repaints in place when its ActionStats change without a
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('rr1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('r1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('rr1'), role: 'tool',
+        toolCallId: ToolCallId('r1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('r1') },
       },
     }, T0 + 2, 2),
@@ -1116,8 +1119,9 @@ test('a Compact Activity repaints in place when its ActionStats change without a
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('rr2'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('r2'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('rr2'), role: 'tool',
+        toolCallId: ToolCallId('r2'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('r2') },
       },
     }, T0 + 4, 4),

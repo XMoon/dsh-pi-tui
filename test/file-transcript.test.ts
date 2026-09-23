@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
 import {
@@ -64,6 +64,9 @@ function typedGenericBlock(type: string, payload: string): ContentBlock {
   return { type, payload } as never
 }
 
+/** Legacy V3 vocabulary: `tool-result` is no longer a ContentBlock, so an
+ * assistant body carrying one must use the explicit bounded fallback — real
+ * tool results are first-class tool-role messages owned by the Tool Card. */
 function assistantToolResultBlock(): ContentBlock {
   return {
     type: 'tool-result',
@@ -270,14 +273,11 @@ test('result and markdown projections retain files and bound unknown blocks', ()
       data: {
         turn: 0,
         step: 0,
-        callId: 'call-c1',
-        message: {
-          content: [{
-            type: 'tool-result',
-            toolCallId: 'call-c1',
-            content: [{ type: 'text', text: 'tool before' }, fileBlock(), { type: 'text', text: 'tool after' }],
-          }],
-        },
+        message: createToolResultMessage({
+          callId: ToolCallId('call-c1'),
+          content: [{ type: 'text', text: 'tool before' }, fileBlock(), { type: 'text', text: 'tool after' }],
+          isError: false,
+        }),
       },
     } as never],
   } as never)

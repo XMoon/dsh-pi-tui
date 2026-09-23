@@ -22,7 +22,7 @@ import { DirectSessionArchive } from '../src/runtime/direct/session-archive-dire
 /** One stored logical session log served by the fake persistence backend. */
 interface StoredLog {
   readonly header: {
-    version: 3
+    version: 4
     id: ReturnType<typeof SessionId>
     createdAt: number
     isSeeded: boolean
@@ -35,7 +35,7 @@ interface StoredLog {
 
 function header(id: string, parentSession?: string): StoredLog['header'] {
   return {
-    version: 3,
+    version: 4,
     id: SessionId(id),
     createdAt: 1000,
     isSeeded: false,
@@ -279,11 +279,11 @@ test('integration: the produced ZIP contains the root log, a descendant log and 
   if (result.kind !== 'ready') return
   const entries = await archiveEntries(result.artifact.stream)
   // Root log under the canonical session filename.
-  const rootEntry = entries.get('session.v3.jsonl')
+  const rootEntry = entries.get('session.v4.jsonl')
   assert.ok(rootEntry !== undefined, 'root log entry present')
   assert.ok(new TextDecoder().decode(rootEntry).includes('session-root'), 'root log names the root session')
   // Descendant log under subagents/<id>/.
-  const childEntry = entries.get('subagents/session-child/session.v3.jsonl')
+  const childEntry = entries.get('subagents/session-child/session.v4.jsonl')
   assert.ok(childEntry !== undefined, 'descendant log entry present (descendants=true)')
   assert.ok(new TextDecoder().decode(childEntry).includes('session-child'), 'descendant log names the child')
   // Generic file under files/<prefix>/<digest>/<name>.

@@ -592,8 +592,9 @@ function actionTurnEvents(): SessionEvent[] {
       data: {
         turn: 1, step: 0,
         message: {
-          id: MessageId('r1'), role: 'user',
-          content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'message delivered to agent child-1' }] }],
+          id: MessageId('r1'), role: 'tool',
+          toolCallId: ToolCallId('c1'),
+          content: [{ type: 'text', text: 'message delivered to agent child-1' }],
           source: { kind: 'tool', callId: ToolCallId('c1') },
         },
       },
