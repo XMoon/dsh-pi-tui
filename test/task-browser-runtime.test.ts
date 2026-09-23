@@ -265,7 +265,7 @@ test('every commit re-reads the CURRENT jobs snapshot', async () => {
   await listing
   assert.deepEqual(rowValue(h.commits()[0]!), [`${AGENT_ROW_PREFIX}child-a`, 'job:bash-1'])
   // A job settles while the browser stays open: the NEXT commit re-reads
-  // the jobs registry (the runner's jobs.onJobsChanged → refreshAgents).
+  // the jobs registry (the runner's jobs.events.subscribe → refreshAgents).
   h.setJobs([])
   h.runtime.refreshRuntime()
   assert.deepEqual(rowValue(h.commits()[1]!), [`${AGENT_ROW_PREFIX}child-a`])
@@ -512,8 +512,8 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
   assert.ok(handler.includes("agents?.get(row.childId as SessionId)?.status !== 'running'"),
     'the dispatch must re-check the live registry driver at confirm time')
   // A job stop re-reads the current record through the public registry API.
-  assert.ok(handler.includes('jobs.get(row.jobId as JobId, browserSession)'),
-    'the dispatch must re-read the live job record before killing through the surface session')
+  assert.ok(handler.includes('jobs.get(row.jobId as JobId, browserSession.session.id)'),
+    'the dispatch must re-read the live job record before killing through the surface session id')
   assert.ok(handler.includes('!isActiveJobStatus(current.status)'),
     'a settled job must not be killable at confirm time')
    assert.ok(handler.includes('backend.subagent.interrupt'),
