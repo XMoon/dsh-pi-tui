@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * D1.1 same-Host parity smoke over the pinned official DSH 0.1.6-alpha.2
+ * D1.1 same-Host parity smoke over the pinned official DSH 0.1.7-alpha.2
  * Host and Client contracts.
  *
  * One Host Context owns the live Session, projections, SQLite query provider,
@@ -16,7 +16,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
-import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
+import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import commandsRemote from '@deepseek-ai/dsh-commands/remote'
@@ -24,6 +24,7 @@ import { apply as applyApiRemotes, inject as apiRemotesInject } from '@deepseek-
 import SessionController from '@deepseek-ai/dsh-api-session-controller'
 import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
@@ -119,6 +120,7 @@ async function createHost() {
   await ctx.plugin(SessionStore)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(SessionProjectionRegistry)
+  await ctx.plugin(LocalFileSystem)
   provideHostPeripheralServices(ctx)
   ctx.get('sessionProjections').register(titleProjectionDefinition)
   ctx.get('sessionProjections').register(agentPresetProjectionDefinition)
@@ -172,6 +174,9 @@ async function assertExpectedReaderState(reader, searchQuery, expectedTitle, exp
 
 function hostTransport(host) {
   const shared = host.ctx.get('connection').createSharedFetchHandler('/api')
+  /** The alpha.2 client stream carrier contract passes an optional uplink;
+   * the Host wire face always takes one, so an absent uplink is an empty one. */
+  async function* emptyUplink() {}
   return {
     ownsHost: true,
     fetch(input, init) {
@@ -180,9 +185,11 @@ function hostTransport(host) {
         : new Request(new URL(String(input), 'http://dsh-parity.local'), init)
       return shared.fetch(request)
     },
-    openStream(endpoint, payload, signal) {
+    openStream(endpoint, payload, signal, uplink) {
       return (async function* () {
-        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, signal)
+        // alpha.2 wire face: (endpoint, payload, uplink, peer, signal) — the
+        // operator's in-process carrier has no peer scope.
+        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, uplink ?? emptyUplink(), undefined, signal)
       })()
     },
   }
