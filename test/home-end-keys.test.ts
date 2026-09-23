@@ -11,6 +11,7 @@ import { afterEach, test } from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from '@xmoon76/pi-tui'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from '../src/home-end-keys.ts'
@@ -135,7 +136,7 @@ function startFullscreenApp(): { vt: VirtualTerminal; app: TuiApp } {
   const folder = new TranscriptFolder()
   const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`)
   folder.apply([
-    { type: 'assistant/message', seq: 0, time: 1_700_000_000_000, data: { turn: 0, step: 0, message: { id: MessageId('m1'), role: 'assistant', content: [{ type: 'text', text: lines.join('\n') }] } } } as SessionEvent,
+    { type: 'assistant/message', surfaceOp: 'append', seq: SessionSeq(0), time: 1_700_000_000_000, data: { stream: [], turn: 0, step: 0, message: { id: MessageId('m1'), role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: lines.join('\n') }] } } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   app.setFullscreen(true)
@@ -288,14 +289,17 @@ test('folder window summaries do not discard the older-page top anchor', async (
   for (let turn = 0; turn <= 100; turn += 1) {
     events.push({
       type: 'assistant/message',
-      seq: turn,
+      surfaceOp: 'append',
+      seq: SessionSeq(turn),
       time: 1_700_000_000_000 + turn,
       data: {
         turn,
         step: 0,
+      stream: [],
         message: {
           id: MessageId(`summary-anchor-${turn}`),
           role: 'assistant',
+        source: { kind: 'model', provider: 'p', model: 'm' },
           content: [{ type: 'text', text: [`turn-${turn}`, `detail-${turn}-one`, `detail-${turn}-two`, `detail-${turn}-three`].join('\n') }],
         },
       },
@@ -360,14 +364,17 @@ test('older boundary: a short transcript at the top never pages into a bogus his
   for (let turn = 0; turn <= 1; turn += 1) {
     events.push({
       type: 'assistant/message',
-      seq: turn,
+      surfaceOp: 'append',
+      seq: SessionSeq(turn),
       time: 1_700_000_000_000 + turn,
       data: {
         turn,
         step: 0,
+      stream: [],
         message: {
           id: MessageId(`short-${turn}`),
           role: 'assistant',
+        source: { kind: 'model', provider: 'p', model: 'm' },
           content: [{ type: 'text', text: [`turn-${turn}`, ...Array.from({ length: 30 }, (_, index) => `detail-${turn}-${index}`)].join('\n') }],
         },
       },
@@ -477,7 +484,7 @@ test('a non-scrollable transcript lets Home/End reach the editor in both modes',
     startedApps.add(app)
     const folder = new TranscriptFolder()
     folder.apply([
-      { type: 'assistant/message', seq: 0, time: 1_700_000_000_000, data: { turn: 0, step: 0, message: { id: MessageId('m1'), role: 'assistant', content: [{ type: 'text', text: 'short' }] } } } as SessionEvent,
+      { type: 'assistant/message', surfaceOp: 'append', seq: SessionSeq(0), time: 1_700_000_000_000, data: { stream: [], turn: 0, step: 0, message: { id: MessageId('m1'), role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'short' }] } } } as SessionEvent,
     ])
     app.setTranscript(folder.messages())
     app.setFullscreen(true)

@@ -321,18 +321,13 @@ test('DSH peer ranges keep the lower-bound compatibility contract', () => {
     .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
   const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-rc.1'
   assert.ok(dshPeers.length > 0, 'the bundle must declare DSH peers')
-  // The 0.1.7-only packages sit on the 0.1.7 family: the preset registry
-  // (PR A) and `dsh-session` whose public `/fork` subpath (imported by the
-  // Direct fork adapter since PR B3) first exists in `0.1.7-alpha.2`; the
-  // legacy family floors stay at the published 0.1.6 contract until the
-  // train's closure PR unifies the whole peer policy deliberately.
-  const NEW_FAMILY_FLOOR: ReadonlySet<string> = new Set([
-    '@deepseek-ai/dsh-agent-preset-registry',
-    '@deepseek-ai/dsh-session',
-  ])
+  // The compatibility train's closure unified the whole peer policy onto
+  // the rc.1 floor: the tarball's standalone install must resolve one
+  // family with the rc.1-only preset registry (whose own peer pins
+  // `dsh-agent` exactly), so a wider legacy floor can no longer satisfy a
+  // fresh `npm install --omit=dev`.
   for (const [name, range] of dshPeers) {
-    const expectedFloor = NEW_FAMILY_FLOOR.has(name) ? '>=0.1.7-alpha.2' : '>=0.1.6-alpha.2'
-    assert.equal(range, expectedFloor, `${name} must use the published-npm DSH compatibility contract`)
+    assert.equal(range, '>=0.1.7-rc.1', `${name} must use the published-npm DSH compatibility contract`)
     assert.ok(!range.includes('0.1.1'), `${name} must not claim DSH 0.1.1`)
   }
   assert.equal(expectedDevVersion, expectedNpmTarget, 'the package must keep the declared npm target')

@@ -898,10 +898,14 @@ correct presentation.
   real, no fake rollback, and the authoritative snapshot reconciles the
   remaining rows. The Remote adapter plugs into that same orchestration.
 
-Validation for this stage: per-adapter unit contract tests, the
-submission-presentation and pending-input mapping tests, and the same-Host
-`smoke:remote-d2-write` integration smoke. D1 closure and the boundary gate stay
-green. `packages/pi-tui/**` and the DSH source pin are unchanged.
+Validation for this stage: per-adapter unit contract tests (the Remote
+writer, host-command, subagent-port, and pending-input reader suites) and
+the submission-presentation and pending-input mapping tests. The 0.1.6-era
+same-Host `smoke:remote-d2-write` integration smoke was retired with that
+replacement coverage; the D2 closure smoke keeps proving lifecycle and
+fork/rewind parity through the current d2.4 child, and D1 closure and the
+boundary gate stay green. `packages/pi-tui/**` and the DSH source pin are
+unchanged.
 
 > Frozen-plan note: the maintainer froze `temp/m2/` plan documents. The D2.2
 > plan's §29 ("serialize all prerequisites that may fail before admission ->

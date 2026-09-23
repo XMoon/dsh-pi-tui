@@ -1344,13 +1344,16 @@ test('command/done success text and error text settle the same command row', () 
   assert.equal(bad.outcome?.text, 'boom')
 })
 
-test('plugin-sourced user messages fold as system entries', () => {
+test('skill-invocation user messages fold as system entries', () => {
+  // The retired catch-all `plugin` source kind became per-producer kinds;
+  // a producer-named injected instruction context is carried by the
+  // official `skill-invocation` source (name + form 'instructions').
   const messages = foldTranscript([
     event('user/message', {
       id: MessageId('msg-4'),
       role: 'user',
       content: [{ type: 'text', text: '<system-reminder>\nworkspace instructions…' }],
-      source: { kind: 'plugin', plugin: 'agent-instructions' },
+      source: { kind: 'skill-invocation', name: 'workspace-instructions', form: 'instructions' },
     }, 0),
     event('user/message', {
       id: MessageId('msg-5'),
@@ -1363,7 +1366,7 @@ test('plugin-sourced user messages fold as system entries', () => {
   const system = messages[0]
   assert.ok(system !== undefined && system.kind === 'system')
   assert.ok(system.text.includes('<system-reminder>'))
-  assert.equal(system.label, 'agent-instructions', 'the producer label must be projected')
+  assert.equal(system.label, 'workspace-instructions', 'the producer label must be projected')
 })
 
 test('aborted turn/end folds into an interrupted card', () => {
@@ -2647,12 +2650,14 @@ test('a notice-form injection records its one-line summary', () => {
       id: MessageId('msg-notice'),
       role: 'user',
       content: [{ type: 'text', text: '3 files written' }],
-      source: { kind: 'plugin', plugin: 'todo', form: 'notice', summary: 'saved the todo list' },
+      // The official notice carrier is any ContextFormed producer kind;
+      // `plan-mode` declares form 'notice' with its one-line summary.
+      source: { kind: 'plan-mode', form: 'notice', summary: 'saved the todo list' },
     }, 0),
   ])
   const system = messages[0]
   assert.ok(system !== undefined && system.kind === 'system')
-  assert.equal(system.label, 'todo')
+  assert.equal(system.label, 'plan-mode')
   assert.equal(system.summary, 'saved the todo list')
 })
 

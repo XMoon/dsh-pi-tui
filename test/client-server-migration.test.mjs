@@ -57,7 +57,6 @@ test('D1-D2 task, presentation, and closure smokes are Source Mode gates', () =>
     ['Remote task read parity smoke', 'smoke:remote-task-read-parity'],
     ['Remote presentation/history parity smoke', 'smoke:remote-presentation-parity'],
     ['D1 closure gate', 'smoke:remote-d1-closure'],
-    ['Remote D2.2 ordinary-write same-Host smoke', 'smoke:remote-d2-write'],
     ['D2 closure smoke', 'smoke:remote-d2-closure'],
   ]) {
     assert.match(
@@ -65,6 +64,14 @@ test('D1-D2 task, presentation, and closure smokes are Source Mode gates', () =>
       new RegExp(`- name: ${name}\\n\\s+if: env\\.DSH_MODE == 'source'\\n\\s+run: pnpm ${command}`),
     )
   }
+  // The 0.1.6-era D2.2 ordinary-write harness was retired with replacement
+  // coverage: its scenarios (queue/steer/edit/remove/cancel/rename through
+  // the official SessionFace) are covered by the remote writer,
+  // host-command, subagent-port, and pending-input reader unit suites, and
+  // the D2 closure keeps proving fork/rewind parity through the current
+  // d2.4 smoke.
+  assert.doesNotMatch(workflow, /smoke:remote-d2-write/,
+    'the retired D2.2 write harness must not remain a gate')
 })
 
 // ── deprecated synchronous Session history reader freeze (WP2) ─────────────

@@ -961,9 +961,14 @@ test('a second artifact save while one prompt is active is refused with a notice
     await settle()
   }
   await settle()
-  await new Promise<void>(resolve => setTimeout(resolve, 50))
-  await settle()
-  const view = vt.getViewport().join('\n')
+  // Bounded poll for the refused-save notice: a fixed sleep raced the
+  // prompt/notice rendering under load (the flake this replaces).
+  let view = ''
+  for (let round = 0; round < 50 && !view.includes('already active'); round += 1) {
+    await new Promise<void>(resolve => setTimeout(resolve, 10))
+    await settle()
+    view = vt.getViewport().join('\n')
+  }
   assert.ok(view.includes('already active'),
     `the refused second save must notify, never silently drop:\n${view}`)
   // Cancel the first prompt (Esc) to clean up.

@@ -3953,8 +3953,8 @@ test('fullscreen drag selection copies through the host copySelection policy (is
   startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
-    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
-    { type: 'assistant/message', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(0), time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'assistant/message', surfaceOp: 'append', seq: SessionSeq(1), time: 1_700_000_000_001, data: { stream: [], turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   app.setFullscreen(true)
@@ -4006,8 +4006,8 @@ test('fullscreen drag selection reaches the shared clipboard policy (Remote ORCA
   startedApps.add(app)
   const folder = new TranscriptFolder()
   folder.apply([
-    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('s1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
-    { type: 'assistant/message', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0, message: { id: MessageId('s2'), role: 'assistant', content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(0), time: 1_700_000_000_000, data: { id: MessageId('s1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'assistant/message', surfaceOp: 'append', seq: SessionSeq(1), time: 1_700_000_000_001, data: { stream: [], turn: 0, step: 0, message: { id: MessageId('s2'), role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'alpha\nbeta' }] } } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   app.setFullscreen(true)
@@ -4030,11 +4030,13 @@ test('an interrupted assistant message keeps its body and renders a separate mar
   folder.apply([
     {
       type: 'assistant/message',
-      seq: 0,
+      surfaceOp: 'append',
+      seq: SessionSeq(0),
       time: 1_700_000_000_000,
       data: {
         turn: 0,
         step: 0,
+      stream: [],
         message: {
           id: MessageId('interrupted-message'),
           role: 'assistant',
@@ -4064,16 +4066,16 @@ test('a reasoning-only assistant message (no text) adds no blank row between car
   startedApps.add(app)
   const folder = new TranscriptFolder()
   applyMixed(folder, [
-    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(0), time: 1_700_000_000_000, data: { id: MessageId('m1'), role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } } } as SessionEvent,
     // Thinking streams (Session v2: THROUGH THE LIVE SEAM), then the step
     // settles with a reasoning-only message (NO text block): the image
     // pipeline's non-text-block retention keeps the empty assistant entry —
     // it must not occupy a spacer row, or the thinking card and the next
     // card read two blank rows apart.
     { type: 'assistant/chunk', seq: SessionSeq(1), time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think one\nthink two\n' } } },
-    { type: 'assistant/message', seq: 2, time: 1_700_000_000_002, data: { turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', content: [{ type: 'reasoning', text: 'think one\nthink two' }] } } } as SessionEvent,
+    { type: 'assistant/message', surfaceOp: 'append', seq: SessionSeq(2), time: 1_700_000_000_002, data: { stream: [], turn: 0, step: 0, message: { id: MessageId('m2'), role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'reasoning', text: 'think one\nthink two' }] } } } as SessionEvent,
     { type: 'tool/call', seq: 3, time: 1_700_000_000_003, data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } } as SessionEvent,
-    { type: 'tool/result', seq: 4, time: 1_700_000_000_004, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: ToolCallId('c1'), content: [{ type: 'text', text: 'file.txt' }], isError: false }) } } as SessionEvent,
+    { type: 'tool/result', surfaceOp: 'append', seq: 4, time: 1_700_000_000_004, data: { turn: 0, step: 0, message: createToolResultMessage({ callId: ToolCallId('c1'), content: [{ type: 'text', text: 'file.txt' }], isError: false }) } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   await vt.waitForRender()
@@ -4100,7 +4102,7 @@ test('a running compact Thinking row follows its reasoning tail (Focus off)', as
   const folder = new TranscriptFolder()
   const reasoning = `HEAD-TOKEN ${'x'.repeat(80)} TAIL-TOKEN`
   applyMixed(folder, [
-    { type: 'user/message', seq: 0, time: 1_700_000_000_000, data: { id: MessageId('t1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(0), time: 1_700_000_000_000, data: { id: MessageId('t1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
     { type: 'assistant/chunk', seq: SessionSeq(1), time: 1_700_000_000_001, data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: reasoning } } },
   ])
   app.setTranscript(folder.messages())
@@ -4141,7 +4143,7 @@ test('opening an approval freezes the live Focus timer through the app projectio
   const startedAt = Date.now() - 5_000
   applyMixed(folder, [
     { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
-    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('f1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('f1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
   ])
   app.setFocusMode(true)
   app.setWorking(true)
@@ -4178,7 +4180,7 @@ test('an approval that opens before the delayed transcript repaint keeps the pre
   const startedAt = Date.now() - 5_000
   applyMixed(folder, [
     { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
-    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('race1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('race1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
   ])
   app.setFocusMode(true)
   app.setWorking(true)
@@ -4209,7 +4211,7 @@ test('an approval that opens AND resolves before the delayed transcript repaint 
   const startedAt = Date.now() - 3_000
   applyMixed(folder, [
     { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
-    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('race2'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('race2'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
   ])
   app.setFocusMode(true)
   app.setWorking(true)
@@ -4274,7 +4276,7 @@ test('an approval resolved before turn/end and before the delayed publish still 
   const startedAt = Date.now() - 1_000
   applyMixed(folder, [
     { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
-    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('race3'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('race3'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
   ])
   app.setFocusMode(true)
   app.setWorking(true)
@@ -4317,7 +4319,7 @@ test('a session switch resets the Focus timer phase and pause windows', async ()
   const startedAt = Date.now() - 1_000
   applyMixed(folder, [
     { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
-    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('sess2'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('sess2'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
   ])
   app.setTranscript(folder.messages(), folder.turnActivities())
   await vt.waitForRender()
@@ -4340,7 +4342,7 @@ test('the timer publication pass observes only windowed turns, never the full ac
   const startedAt = Date.now() - 5_000
   applyMixed(folder, [
     { type: 'turn/start', seq: 0, time: startedAt, data: { turn: 0 } } as SessionEvent,
-    { type: 'user/message', seq: 1, time: startedAt + 1, data: { id: MessageId('win1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt + 1, data: { id: MessageId('win1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
   ])
   const activities = new Map<number, TurnActivity>()
   for (let turn = 0; turn < 2_000; turn += 1) {
@@ -4374,10 +4376,10 @@ test('the live timer keeps freezing while the transcript window shows history', 
   const startedAt = Date.now() - 1_000
   applyMixed(folder, [
     { type: 'turn/start', seq: 0, time: startedAt - 5_000, data: { turn: 0 } } as SessionEvent,
-    { type: 'user/message', seq: 1, time: startedAt - 4_999, data: { id: MessageId('h0'), role: 'user', content: [{ type: 'text', text: 'old' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(1), time: startedAt - 4_999, data: { id: MessageId('h0'), role: 'user', content: [{ type: 'text', text: 'old' }], source: { kind: 'user' } } } as SessionEvent,
     { type: 'turn/end', seq: 2, time: startedAt - 4_000, data: { turn: 0, reason: { kind: 'completed' } } } as SessionEvent,
     { type: 'turn/start', seq: 3, time: startedAt, data: { turn: 1 } } as SessionEvent,
-    { type: 'user/message', seq: 4, time: startedAt + 1, data: { id: MessageId('live1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
+    { type: 'user/message', surfaceOp: 'append', seq: SessionSeq(4), time: startedAt + 1, data: { id: MessageId('live1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } } as SessionEvent,
   ])
   app.setFocusMode(true)
   app.setWorking(true)
