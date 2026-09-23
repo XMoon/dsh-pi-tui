@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { Config as TuiConfigSchema } from '../src/index.ts'
 import { DirectTuiSettings, type SettingsFormsLike, type TuiConfigRefs, type TuiSettingsDescriptorLike, type TuiSettingsPathOp } from '../src/runtime/direct/tui-settings-direct.ts'
 import type { TuiSettingsDoc } from '../src/runtime/config-port.ts'
 
@@ -150,6 +151,35 @@ test('§18.2 no effective→user promotion: a base-supplied theme stays out of t
   ], 'inherited footerLayout/keybindings values are not promoted')
 })
 
+test('§18.2 an unrelated write never drops a USER-owned object field whose effective value is a merged superset', async () => {
+  // Upstream mergeLayers merges nested plain objects recursively: with a
+  // project/home layer contributing extra keys, the EFFECTIVE value is a
+  // SUPERSET of the raw USER override. Production writers spread get() (the
+  // merged view), so the restated object must be a NO-OP — an unset would
+  // destroy the USER's partial override (and disarm a trusted footerCommand);
+  // a set would pin the merged superset into the USER layer.
+  const userKeybindings = { 'app.input.steer': 'ctrl+x' }
+  const effectiveKeybindings = { 'app.input.steer': 'ctrl+x', 'app.display.focus': 'ctrl+g' }
+  const userCommand = { schemaVersion: 1, command: 'status.sh', timeoutMs: 3000, refreshIntervalMs: 10000, maxRows: 2 }
+  const effectiveCommand = { ...userCommand, env: { PROJECT: '1' } }
+  const refs = refsOf({ keybindings: effectiveKeybindings, footerCommand: effectiveCommand })
+  const forms = formsOf({ keybindings: userKeybindings, footerCommand: userCommand })
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  await settings.replace({ ...settings.get(), theme: 'dark' } as TuiSettingsDoc)
+  assert.deepEqual(forms.calls[0]?.ops, [
+    { op: 'set', path: ['theme'], value: 'dark' },
+  ], 'the merged-superset keybindings/footerCommand restates emit NO ops — only the changed scalar crosses')
+
+  // The same protection holds when the whole-value object is genuinely
+  // CHANGED (requested differs from both owned and effective): a set.
+  const forms2 = formsOf({ keybindings: userKeybindings })
+  const settings2 = new DirectTuiSettings(refsOf({ keybindings: effectiveKeybindings }), forms2.forms)
+  await settings2.replace({ ...settings2.get(), keybindings: { 'app.input.steer': 'alt+s' } } as TuiSettingsDoc)
+  assert.deepEqual(forms2.calls[0]?.ops, [
+    { op: 'set', path: ['keybindings'], value: { 'app.input.steer': 'alt+s' } },
+  ])
+})
+
 test('§18.2 writing the inherited value over a USER override resets it (unset, not pin)', async () => {
   // The USER layer owns theme: dark while the effective reference serves the
   // inherited light: the caller writes light back — the override must be
@@ -230,13 +260,12 @@ test('a replace without the Settings surface fails explicitly', async () => {
   await assert.rejects(settings.replace({ ...settings.get(), theme: 'dark' } as TuiSettingsDoc), /settings service unavailable/u)
 })
 
-test('the production schema defaults mount fullscreen ON (§5.5)', async () => {
+test('the production schema defaults mount fullscreen ON (§5.5)', () => {
   // The test harness intentionally mounts suites with fullscreen 'off' (the
   // historical degraded baseline); the PRODUCTION default itself is pinned
   // here through the exported schema — the same resolution a Loader-mounted
   // row performs.
-  const { Config } = await import('../src/index.ts')
-  const resolved = Config({} as never) as unknown as TuiConfigRefs
+  const resolved = TuiConfigSchema({} as never) as unknown as TuiConfigRefs
   assert.equal(resolved.fullscreen.get(), 'on', 'a fresh profile mounts fullscreen on')
   assert.equal(resolved.displayPreset.get(), 'full')
   assert.equal(resolved.busyEnter.get(), 'queue')

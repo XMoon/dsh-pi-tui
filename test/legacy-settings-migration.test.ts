@@ -396,6 +396,28 @@ test('a refused profile write fails visibly and does not advance the marker', as
   }
 })
 
+test('a refused marker write on the absent-document path fails visibly and retries', async () => {
+  const home = legacyHome()
+  const harness = formsHarness()
+  harness.failMutates = true
+  const { diag, warnings } = diagHarness()
+  try {
+    const probe = input(home, harness.forms, 0, alwaysResolves, diag)
+    const report = await migrateLegacySettings(probe)
+    assert.equal(report.status, 'failed')
+    assert.match(report.reason, /marker write failed/u)
+    assert.equal(probe.marker.get(), 0, 'the marker does not advance on a refused write')
+    assert.ok(warnings.some(message => message.includes('marker write failed; will retry on next start')),
+      'the refused marker write is visible in diagnostics')
+    // The next boot (write healthy again) completes the marker.
+    harness.failMutates = false
+    const second = await migrateLegacySettings(probe)
+    assert.equal(second.status, 'absent')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('without the Settings surface nothing migrates and the marker stays put', async () => {
   const home = legacyHome('dsh-pi-tui:\n  theme: dark\n')
   const { diag, warnings } = diagHarness()
