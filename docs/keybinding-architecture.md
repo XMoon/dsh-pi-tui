@@ -318,7 +318,8 @@ The branch went through an extended external review chain
 (openai-codex / gpt-5.6-luna) on the PR #34 diff: review rounds fixed
 per-key rule ids, printable/space leader rejection, the monotonic keymap
 revision, leader fall-through, search-toggle effective keys, the
-`dsh-pi-tui` settings namespace, `app.input.submit` real remapping
+then-`dsh-pi-tui` settings namespace (now the `tui-app` profile Config
+`keybindings` field), `app.input.submit` real remapping
 (editor sync + cross-instance isolation + safe mode + leader-only/
 conflict fail-soft), action-driven host reservation, leader-prefix
 collision, host/plugin rule layering, the fixed viewer Esc close, the

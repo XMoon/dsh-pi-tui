@@ -38,6 +38,19 @@ import { parse } from 'yaml'
 import { resolveDisplayPreset, type PersistedDisplayInput } from './display-preset.ts'
 import { parseFooterCommandConfig } from './footer/command-trust.ts'
 import { isFooterLayout, parseFooterLayout } from './footer/layout.ts'
+
+/** The normalized, schema-clean footerCommand value for a legacy raw field:
+ * the runtime parser's CANONICAL output (fail-soft repairs applied) wrapped
+ * in the versioned shape the strict Config schema requires. undefined means
+ * the legacy value is unusable (skip with a diagnostic). Writing the raw
+ * legacy object instead would let a repaired-at-runtime field (e.g. a
+ * string timeoutMs) reach the strict z.number() schema and fail the WHOLE
+ * migration batch at ConfigEditor validation. */
+function normalizedFooterCommand(value: unknown): { schemaVersion: number; command: string; timeoutMs: number; refreshIntervalMs: number; maxRows: number } | undefined {
+  const parsed = parseFooterCommandConfig(value)
+  if (parsed === undefined) return undefined
+  return { schemaVersion: 1, ...parsed }
+}
 import type { SettingsFormsLike, TuiSettingsPathOp } from './runtime/direct/tui-settings-direct.ts'
 
 /** The migration version this build completes. */
@@ -106,7 +119,6 @@ const COPIED_RAW_FIELDS: readonly string[] = [
  * (plan §8.9: one malformed optional field never blocks the rest). */
 function strictFieldValid(field: string, value: unknown): boolean {
   if (field === 'footerLayout') return isFooterLayout(parseFooterLayout(value))
-  if (field === 'footerCommand') return parseFooterCommandConfig(value) !== undefined
   return true
 }
 
@@ -170,6 +182,19 @@ function tuiAppOps(section: Record<string, unknown> | undefined, owned: Readonly
   for (const field of COPIED_RAW_FIELDS) {
     const value = section[field]
     if (value === undefined || owned.has(field)) continue
+    if (field === 'footerCommand') {
+      // Migrate the parser's CANONICAL output, never the raw legacy object:
+      // the runtime parser repairs bad numeric types in place, but the raw
+      // strings would still fail the strict z.number() Config schema and
+      // reject the whole batch (§8.9 field-level fail-soft).
+      const normalized = normalizedFooterCommand(value)
+      if (normalized === undefined) {
+        diag.warn('legacy TUI field is malformed and was skipped', { field })
+        continue
+      }
+      ops.push({ op: 'set', path: [field], value: normalized })
+      continue
+    }
     if (!strictFieldValid(field, value)) {
       // §8.9 field-level fail-soft: drop THIS field (visible diagnostic),
       // never the whole batch — the remaining valid fields still migrate.

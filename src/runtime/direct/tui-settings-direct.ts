@@ -189,7 +189,15 @@ export class DirectTuiSettings implements TuiSettingsConfig {
     // projection is only the write-reconciliation snapshot.
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) throw new Error('settings entry "tui-app" is not configurable in this deployment')
-    const current = (descriptor.value ?? {}) as Record<string, unknown>
+    if (descriptor.value === undefined) {
+      // Upstream projectForm always returns a populated object for an entry
+      // with volatile fields (the TUI declares 19), so an absent projection
+      // is unrepresentable — fail loud rather than diffing every defaulted
+      // field against undefined, which would pin the whole document into
+      // the USER layer.
+      throw new Error('settings entry "tui-app" exposes no form projection')
+    }
+    const current = descriptor.value as Record<string, unknown>
     const next = doc as unknown as Record<string, unknown>
     // The USER override decides whether a dropped field is an UNSET (the
     // user layer owns a value to remove) or a no-op (the effective value is
