@@ -220,14 +220,17 @@ test('the legacy footerCommand and keybindings ride verbatim; absent fields emit
     assert.deepEqual(ops.find(op => op.path[0] === 'footerCommand'), {
       op: 'set',
       path: ['footerCommand'],
+      // The parser's canonical output: the legacy 3000ms timeout clamps to
+      // the MAX_COMMAND_TIMEOUT_MS bound (1000) — the migrated value equals
+      // what the OLD runtime actually ran with, not the raw legacy number.
       value: {
         schemaVersion: 1,
         command: 'status.sh',
-        timeoutMs: 3000,
+        timeoutMs: 1000,
         refreshIntervalMs: 10000,
         maxRows: 2,
       },
-    }, 'the legacy USER command migrates as a whole-value set (USER provenance preserved)')
+    }, 'the legacy USER command migrates as the parser-canonical whole-value set (USER provenance preserved)')
     assert.deepEqual(ops.find(op => op.path[0] === 'keybindings'), {
       op: 'set',
       path: ['keybindings'],
@@ -537,6 +540,37 @@ test('a malformed strict-schema field is skipped while the valid fields migrate 
     assert.ok(ops.some(op => op.path[0] === 'legacySettingsMigrationVersion'), 'the marker completes')
     assert.ok(warnings.some(message => message.includes('legacy TUI field is malformed and was skipped')),
       'the skip is visible in diagnostics')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a runtime-repairable legacy footerCommand migrates normalized, never raw', async () => {
+  // parseFooterCommandConfig REPAIRS a non-number timeoutMs to the default
+  // at runtime, but the raw string would fail the strict z.number() Config
+  // schema and reject the whole batch. The migration must carry the
+  // parser's CANONICAL output so the persisted value both satisfies the
+  // schema and matches the old runtime's effective semantics.
+  const home = legacyHome(`dsh-pi-tui:
+  theme: dark
+  footerCommand:
+    schemaVersion: 1
+    command: status.sh
+    timeoutMs: garbage
+`)
+  const harness = formsHarness()
+  const { diag } = diagHarness()
+  try {
+    const report = await migrateLegacySettings(input(home, harness.forms, 0, alwaysResolves, diag))
+    assert.equal(report.status, 'migrated')
+    const ops = opsOf(harness.calls, 'tui-app')
+    const set = (field: string) => ops.find(op => op.op === 'set' && op.path[0] === field)
+    assert.deepEqual(set('theme'), { op: 'set', path: ['theme'], value: 'dark' }, 'theme migrates alongside')
+    const footerCommand = set('footerCommand')
+    assert.ok(footerCommand !== undefined, 'the repairable footerCommand still migrates (normalized)')
+    assert.equal((footerCommand as { value: { timeoutMs?: unknown } }).value.timeoutMs, 300,
+      'the garbage timeoutMs migrates as the parser default, never the raw string')
+    assert.ok(ops.some(op => op.path[0] === 'legacySettingsMigrationVersion'), 'the batch (and marker) settle')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

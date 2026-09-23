@@ -71,7 +71,7 @@ export function parseFooterCommandConfig(input: unknown): FooterCommandConfig | 
  * merged/project-supplied value is refused (undefined = command mode
  * disabled, native fallback, diagnostic warning).
  * @param descriptors - the settings provider's describe() output.
- * @param namespace - the dsh-pi-tui settings namespace value.
+ * @param namespace - the tui-app settings/profile Config namespace value.
  * @returns the validated config, or undefined when untrusted/invalid.
  */
 export function resolveTrustedFooterCommand(
