@@ -4867,7 +4867,7 @@ export function registerTuiCommands(
 
   commands.register({
     name: 'fork',
-    description: 'Fork this session at the Host-selected completed-turn boundary',
+    description: 'Fork this session at the Host-selected latest completed prefix',
     handler: async () => {
       const source = runner.liveAgent
       if (source === undefined) return { kind: 'error', text: 'no conversation to fork from' }
