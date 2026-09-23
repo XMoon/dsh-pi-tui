@@ -9,7 +9,7 @@ const expectedWindow = '>=0.1.6-alpha.2'
 const newFamilyWindow = '>=0.1.7-alpha.2'
 const expectedDevVersion = Object.entries(packageJson.devDependencies ?? {})
   .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
-const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-alpha.2'
+const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-rc.1'
 const dshPeerEntries = Object.entries(packageJson.peerDependencies ?? {})
   .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
 

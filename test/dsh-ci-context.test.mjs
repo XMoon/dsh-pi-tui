@@ -12,7 +12,7 @@ import {
 const nextSha = '00102833dfaee1da9f48a3a8eae9d34005a75218'
 const expectedNpmDshVersion = Object.entries(JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).devDependencies ?? {})
   .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
-const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-alpha.2'
+const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-rc.1'
 
 /** A temp mode-config file with the given mode (the tracked policy is
  * injectable so the source branch of the resolver is testable without

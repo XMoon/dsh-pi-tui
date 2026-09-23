@@ -319,7 +319,7 @@ test('DSH peer ranges keep the lower-bound compatibility contract', () => {
     .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
   const expectedDevVersion = Object.entries(packageJson.devDependencies ?? {})
     .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
-  const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-alpha.2'
+  const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-rc.1'
   assert.ok(dshPeers.length > 0, 'the bundle must declare DSH peers')
   // The 0.1.7-only packages sit on the 0.1.7 family: the preset registry
   // (PR A) and `dsh-session` whose public `/fork` subpath (imported by the
