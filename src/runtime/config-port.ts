@@ -10,7 +10,7 @@
  * settings/credentials/authorization service objects (no
  * `settings.get(namespace)` / `settings.mutate(namespace, arbitraryPatch)`
  * god API — the Direct adapter owns the Host schema knowledge, e.g. the
- * `llm-pi-ai` / `permission` / `agent-presets` namespaces). Host schema
+ * `llm-pi-ai` / `permission` / `agent-preset-registry` namespaces). Host schema
  * knowledge is NOT the consumer's business: a command handler never names
  * a settings namespace or path — and the DTOs that cross the port carry
  * SEMANTIC facts only (`CredentialProviderOption.canProvisionProfile`),
@@ -392,8 +392,8 @@ export interface SubagentModelSelectionConfig {
 }
 
 /** The saved agent-preset default sub-domain (`/preset default`): the
- * persisted default (settings `agent-presets.default`), falling back to
- * the roster's own default. */
+ * persisted default (settings `agent-preset-registry.selectedDefault`),
+ * falling back to the roster's own default. */
 export interface PresetDefaultConfig {
   /** Whether the settings service (the persistence surface) is present. */
   available(): boolean
