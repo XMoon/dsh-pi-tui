@@ -4118,26 +4118,57 @@ function makeJobsFake(
   let entries: Entry[] = initial.map(entry => ({ ...entry }))
   let listFailure: Error | undefined
   const listeners: Array<() => void> = []
-  return {
-    list: (): Entry[] => {
+  const subscribeFilters: unknown[] = []
+  let subscribeDisposals = 0
+  const registry = {
+    list: (caller?: unknown): Entry[] => {
+      // DSH 0.1.7 JobRegistry ownership: the caller, when present, is the
+      // owning SessionId — never an Agent object.
+      if (caller !== undefined && typeof caller !== 'string') {
+        throw new Error(`jobs.list must receive a SessionId, got ${String(caller)}`)
+      }
       if (listFailure !== undefined) throw listFailure
       return entries.map(entry => ({ ...entry }))
     },
-    get: (id: string): Entry => {
+    get: (id: string, caller?: unknown): Entry => {
+      if (caller !== undefined && typeof caller !== 'string') {
+        throw new Error(`jobs.get must receive a SessionId, got ${String(caller)}`)
+      }
       const entry = entries.find(candidate => candidate.id === id)
       // A vanished job is the registry's own "not found" contract.
       if (entry === undefined) throw new Error(`unknown job ${id}`)
       return { ...entry }
     },
-    kill: (): string => 'accepted',
-    onJobsChanged: (listener: () => void): (() => void) => {
-      listeners.push(listener)
-      return () => {}
+    kill: (id: string, caller?: unknown): string => {
+      if (caller !== undefined && typeof caller !== 'string') {
+        throw new Error(`jobs.kill must receive a SessionId, got ${String(caller)}`)
+      }
+      return 'accepted'
+    },
+    // DSH 0.1.7 JobRegistry unified event seam: the runner subscribes
+    // through `events.subscribe(filter, listener)`; the disposer removes
+    // the listener so disposal semantics are observable.
+    events: {
+      subscribe: (filter: unknown, listener: () => void): (() => void) => {
+        subscribeFilters.push(filter)
+        listeners.push(listener)
+        return () => {
+          subscribeDisposals += 1
+          const index = listeners.indexOf(listener)
+          if (index !== -1) listeners.splice(index, 1)
+        }
+      },
     },
     setEntries: (next: readonly Entry[]): void => { entries = next.map(entry => ({ ...entry })) },
     setListFailure: (error: Error | undefined): void => { listFailure = error },
     emit: (): void => { for (const listener of [...listeners]) listener() },
+    /** C1 contract probes: exactly-once subscribe/dispose observability. */
+    subscribeCount: (): number => subscribeFilters.length,
+    disposalCount: (): number => subscribeDisposals,
+    activeListenerCount: (): number => listeners.length,
+    filterAt: (index: number): unknown => subscribeFilters[index],
   }
+  return registry
 }
 
 test('a Job detail opened from /tasks keeps its parent mounted and live-refreshes it (jobs-only)', async (t) => {
@@ -4191,7 +4222,7 @@ test('a Job detail opened from /tasks keeps its parent mounted and live-refreshe
   assert.equal(app.overlayGraphState().handles, 2, 'the Job detail must keep the parent browser mounted')
 
   // The job settles WHILE the parent is hidden. In a jobs-only session the
-  // only channel is jobs.onJobsChanged → refreshTasks, which must repaint the
+  // only channel is jobs.events.subscribe → refreshTasks, which must repaint the
   // open (hidden) browser, not just the dock badge.
   jobs.setEntries([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'completed', startedAt: 1 }])
   jobs.emit()
@@ -4213,6 +4244,65 @@ test('a Job detail opened from /tasks keeps its parent mounted and live-refreshe
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 1,
     'a vanished job must not dismiss the parent browser')
+})
+
+test('the runner-level Job event subscription is exactly-once and disposed with the surface (C1)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-jobs-events-lifecycle-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'jobs-events-lifecycle-parent',
+    header: { id: 'jobs-events-lifecycle-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const jobs = makeJobsFake([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'running', startedAt: 1 }])
+  const harness = makeHarness(home, [parent], { provider: 'p', model: 'm' })
+  harness.jobs = jobs
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, {})
+  assert.ok(probe.apps.at(-1), 'the production runner must create a TuiApp')
+  await settle()
+
+  // The runner subscribes exactly once through the unified event seam, with
+  // the composition scope filter — never process-global observation.
+  assert.equal(jobs.subscribeCount(), 1,
+    'the runner must subscribe exactly once through jobs.events')
+  assert.deepEqual(jobs.filterAt(0), { owners: 'scope' },
+    'the runner-level filter must be the composition scope, not { owners: \'all\' }')
+
+  // A live emission still reaches the refresh channel.
+  jobs.setEntries([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'completed', startedAt: 1 }])
+  jobs.emit()
+  await settle()
+
+  // Surface teardown releases the subscription exactly once, and a later
+  // emission has no listener left to fire a post-disposal refresh.
+  const mountedFiber = fiber
+  assert.ok(mountedFiber)
+  await mountedFiber.dispose()
+  fiber = undefined
+  await settle()
+  assert.equal(jobs.disposalCount(), 1, 'the subscription must be disposed exactly once')
+  assert.equal(jobs.activeListenerCount(), 0, 'no listener may survive the surface teardown')
+  jobs.emit()
+  await settle()
+  assert.equal(jobs.disposalCount(), 1, 'a post-disposal emission must not re-subscribe')
+  assert.equal(jobs.subscribeCount(), 1, 'a post-disposal emission must not create a new subscription')
 })
 
 test('a failed jobs read never blanks the retained Task Browser parent', async (t) => {

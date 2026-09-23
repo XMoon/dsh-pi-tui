@@ -3607,6 +3607,11 @@ export function apply(ctx: Context, config: Config): void {
     // stack down (closing the hidden parent alone would leave the child
     // alive).
     let activeJobViewerClose: (() => void) | undefined
+    // C1: the runner-level Job event subscription's disposer. Hoisted so
+    // disposeSurface can release it before the app dies — no Job listener
+    // may fire a refresh into a disposed surface (the refreshes also fence
+    // on cleanedUp; this makes the release explicit and idempotent).
+    let jobsEventsDispose: (() => void) | undefined
     // M5: the footer command lifecycle slots. Hoisted here for TWO TDZ
     // guards: cleanup releases them, and — unlike the two slots above —
     // `onTerminalResize` (captured by startProcessTui below) READS
@@ -3689,6 +3694,8 @@ export function apply(ctx: Context, config: Config): void {
       // callbacks. Invalidate the browser handle and token first so an action
       // already waiting on Direct/Host work cannot notify or repaint the dead
       // surface after this teardown.
+      jobsEventsDispose?.()
+      jobsEventsDispose = undefined
       activeJobViewerClose = undefined
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
@@ -8209,7 +8216,9 @@ export function apply(ctx: Context, config: Config): void {
       let jobSnapshots: ReturnType<NonNullable<typeof jobs>['list']> = []
       if (jobs !== undefined) {
         try {
-          jobSnapshots = jobs.list(liveAgent)
+          // Job ownership is the Session id (DSH 0.1.7 JobRegistry): the
+          // liveAgent object is only the id source here.
+          jobSnapshots = jobs.list(liveAgent.session.id)
         } catch {
           // The registry read is best-effort; the jobs half stays empty.
         }
@@ -8335,13 +8344,13 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         // Job stop is capability-gated to an actually active current record.
-        // Pass the live caller to the public registry API; no output/read
-        // cursor is touched by the UI.
+        // The registry authorizes by the owning Session id (DSH 0.1.7
+        // JobRegistry); no output/read cursor is touched by the UI.
         if (jobs === undefined || !isActiveJobStatus(row.status)) return
         try {
-          const current = jobs.get(row.jobId as JobId, browserSession)
+          const current = jobs.get(row.jobId as JobId, browserSession.session.id)
           if (current === undefined || !isActiveJobStatus(current.status)) return
-          const result = jobs.kill(row.jobId as JobId, browserSession, 'stopped from Task Center')
+          const result = jobs.kill(row.jobId as JobId, browserSession.session.id, 'stopped from Task Center')
           app.notify(result === 'already-finished' ? `${row.label} already finished` : `stopping ${row.label}`, 'info')
         } catch (error) {
           app.notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
@@ -8976,8 +8985,10 @@ export function apply(ctx: Context, config: Config): void {
         try {
           // Keep terminal records in the catalog. Active/total separation is
           // a presentation fact; dropping completed/failed jobs here made
-          // Full Task Center history and failure attention impossible.
-          snapshots = jobs.list(liveAgent)
+          // Full Task Center history and failure attention impossible. Job
+          // ownership is the Session id; without a live agent the registry
+          // read is the unowned-only view (caller omitted).
+          snapshots = jobs.list(liveAgent?.session.id)
         } catch {
           // Best-effort: a failed registry read is NOT an authoritative empty
           // catalog. Keeping the previous snapshot matters most for a Job
@@ -9004,8 +9015,14 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       // A jobs change usually means a delegation settled; the subagent half
-      // of the dock may have changed with it.
-      jobs.onJobsChanged(() => { refreshTasks(); refreshAgents() })
+      // of the dock may have changed with it. `{ owners: 'scope' }` names
+      // every owner composed under this runner's composition — the TUI's own
+      // agents — rather than process-global observation; the refreshes
+      // themselves re-fence on the live session. The disposer is released by
+      // disposeSurface so no listener survives the runner (the effect scope
+      // would also reclaim it at plugin unload — this makes the surface
+      // teardown order explicit).
+      jobsEventsDispose = jobs.events.subscribe({ owners: 'scope' }, () => { refreshTasks(); refreshAgents() })
       refreshTasks()
     }
     // Continuable children and foreground one-shot children never register
@@ -9049,7 +9066,7 @@ export function apply(ctx: Context, config: Config): void {
           if (jobs === undefined || liveAgent === undefined) return []
           const key = `${sessionGeneration}:${liveAgent.session.id}`
           try {
-            const rows = jobs.list(liveAgent)
+            const rows = jobs.list(liveAgent.session.id)
             jobSnapshot = { key, rows }
             return rows
           } catch {
@@ -9137,7 +9154,7 @@ export function apply(ctx: Context, config: Config): void {
       const owner = liveAgent
       let snapshot: ReturnType<NonNullable<typeof jobs>['get']>
       try {
-        snapshot = jobs.get(jobId as JobId, owner)
+        snapshot = jobs.get(jobId as JobId, owner.session.id)
       } catch {
         return 'keep-open'
       }
@@ -9190,12 +9207,13 @@ export function apply(ctx: Context, config: Config): void {
     ): void => {
       // One viewer at a time, and a fresh selection replaces the previous.
       activeJobViewerClose?.()
+      if (liveAgent === undefined) return
       // The viewer belongs to the session it was OPENED for: capture that
-      // owner so a leaked viewer can never refresh/stop a same-id job in a
-      // different session (defense in depth on top of the close-on-transition
+      // owning Session id so a leaked viewer can never refresh/stop a
+      // same-id job in a different session (the registry fences every read
+      // and kill against the owner, on top of the close-on-transition
       // below).
-      const owner = liveAgent
-      if (owner === undefined) return
+      const ownerSessionId = liveAgent.session.id
       activeJobViewerClose = app.openOutputViewer({
         title,
         initial: snapshot.kind === 'subagent'
@@ -9204,7 +9222,7 @@ export function apply(ctx: Context, config: Config): void {
         refresh: () => {
           if (jobs === undefined) return ''
           try {
-            const current = jobs.get(jobId as JobId, owner)
+            const current = jobs.get(jobId as JobId, ownerSessionId)
             return current.kind === 'subagent'
               ? subagentJobViewHint(current.status, current.detail)
               : jobStatusHint(current.status, current.detail)
@@ -9216,7 +9234,7 @@ export function apply(ctx: Context, config: Config): void {
         onStop: () => {
           if (jobs === undefined) return
           try {
-            jobs.kill(jobId as JobId, owner, 'stopped from the task browser')
+            jobs.kill(jobId as JobId, ownerSessionId, 'stopped from the task browser')
           } catch {
             // Already finished: nothing to stop.
           }
@@ -9228,7 +9246,7 @@ export function apply(ctx: Context, config: Config): void {
         canStop: () => {
           if (jobs === undefined) return false
           try {
-            return isActiveJobStatus(jobs.get(jobId as JobId, owner).status)
+            return isActiveJobStatus(jobs.get(jobId as JobId, ownerSessionId).status)
           } catch {
             // The job left the registry: nothing can be stopped.
             return false

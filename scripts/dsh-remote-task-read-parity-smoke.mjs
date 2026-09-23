@@ -242,7 +242,8 @@ async function main() {
         listChildren: (id, signal) => host.ctx.get('subagents').listChildren(SessionId(id), signal),
       },
       jobs: {
-        list: agent => host.ctx.get('jobs').list(agent),
+        // DSH 0.1.7 JobRegistry ownership: the caller is the parent SessionId.
+        list: caller => host.ctx.get('jobs').list(SessionId(caller)),
       },
     })
     const remote = new RemoteTaskReader(sessions, connection.generation)

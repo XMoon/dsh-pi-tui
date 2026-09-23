@@ -2,9 +2,9 @@
  * Direct reference reader for the M2 Task Center read shadow.
  *
  * This adapter only composes existing Host read services: the official direct
- * child listing, the Agent registry's live driver status, and `jobs.list`.
- * It never creates or activates an Agent and never exposes a Host object in the
- * detached result.
+ * child listing, the Agent registry's live driver status, and the
+ * SessionId-owned `jobs.list`. It never creates or activates an Agent and
+ * never exposes a Host object in the detached result.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/task-read-direct
  */
 
@@ -31,9 +31,10 @@ export interface DirectTaskReadSource {
       signal?: AbortSignal,
     ): Promise<readonly TaskSubagentEntry[]>
   }
-  /** Status-only job snapshots owned by the parent Agent. */
+  /** Status-only job snapshots owned by the parent session (DSH 0.1.7
+   * JobRegistry SessionId ownership). */
   readonly jobs: {
-    list(owner: DirectTaskAgent): readonly TaskJobEntry[]
+    list(caller: string): readonly TaskJobEntry[]
   }
 }
 
@@ -93,7 +94,9 @@ export class DirectTaskReader implements TaskReader {
     const currentParent = this.source.agentFor(parentSessionId)
     if (currentParent === undefined) return undefined
     const children = Object.freeze(entries.map(entry => detachChild(entry, this.source)))
-    const jobs = Object.freeze(this.source.jobs.list(currentParent).map(detachJob))
+    // Job ownership is the parent Session id (DSH 0.1.7 JobRegistry), not
+    // the Agent object; `currentParent` above only fences availability.
+    const jobs = Object.freeze(this.source.jobs.list(parentSessionId).map(detachJob))
     return Object.freeze({
       parentSessionId,
       parentAvailable: true,
