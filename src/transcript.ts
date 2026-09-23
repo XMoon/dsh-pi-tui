@@ -5651,11 +5651,12 @@ export function foldTranscript(events: readonly SessionEvent[], options?: FoldOp
 /**
  * A child session's OWN events: everything after the LAST tagged inherited
  * `session/end-seed` marker. The fork provider seeds a child with the
- * PARENT's completed-turn prefix (upstream: "a fork seed replays the
- * parent's log"), so the child log's pre-marker events are the parent's
- * history — parent completion notices included. The subagent viewer must
- * never render them as the child's transcript. Ordinary untagged markers
- * delimit restore/replay lifecycles and do not change child ownership.
+ * PARENT's inherited prefix — the exact cut may land mid-turn, and the
+ * child-owned synthetic repair always follows the marker (upstream: "a fork
+ * seed replays the parent's log"), so the child log's pre-marker events are
+ * the parent's history — parent completion notices included. The subagent
+ * viewer must never render them as the child's transcript. Ordinary untagged
+ * markers delimit restore/replay lifecycles and do not change child ownership.
  * Supported seeded logs always carry the tagged marker; an unseeded child has
  * no ownership marker, so all of its events remain visible.
  */
