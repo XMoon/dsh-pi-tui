@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -249,10 +250,14 @@ test('a tool-card image row still toggles the CARD — never swallowed by an att
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'screenshot_tool', arguments: [] } } as never,
-    { type: 'tool/result', seq: 2, time: 2, data: { turn: 0, step: 0, callId: 'call-1', message: { content: [{ type: 'tool-result', toolCallId: 'call-1', content: [
-      { type: 'text', text: 'caption' },
-      { type: 'image', attachment: IMAGE_REF },
-    ] }] } } } as never,
+    { type: 'tool/result', seq: 2, time: 2, data: { turn: 0, step: 0, message: createToolResultMessage({
+      callId: ToolCallId('call-1'),
+      content: [
+        { type: 'text', text: 'caption' },
+        { type: 'image', attachment: IMAGE_REF },
+      ] as unknown as ContentBlock[],
+      isError: false,
+    }) } } as never,
   ])
   app.setTranscript(folder.messages())
   // Folded: only the header. Click it to expand the card (per-message

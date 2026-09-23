@@ -94,8 +94,9 @@ function longThoughtTurn(seqBase: number): SessionEvent[] {
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: lines }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: lines }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, seqBase + 4),
@@ -453,8 +454,9 @@ test('clicking the USER message or the FINAL assistant inside an expanded Though
     eventAt('tool/result', {
       turn: 3, step: 0,
       message: {
-        id: MessageId('r3'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c3'), content: [{ type: 'text', text: '1\n2\n3' }] }],
+        id: MessageId('r3'), role: 'tool',
+        toolCallId: ToolCallId('c3'),
+        content: [{ type: 'text', text: '1\n2\n3' }],
         source: { kind: 'tool', callId: ToolCallId('c3') },
       },
     }, T0 + 3, 203),

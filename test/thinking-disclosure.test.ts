@@ -142,8 +142,9 @@ function noReasoningTurn(seqBase: number): SessionEvent[] {
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 3, seqBase + 3),

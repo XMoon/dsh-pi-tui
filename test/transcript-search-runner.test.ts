@@ -295,8 +295,9 @@ test('runner search: a Compact dismiss promotes the revealed Work span and keeps
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('r-0'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'zzq-needle-body' }] }],
+        id: MessageId('r-0'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'zzq-needle-body' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, 3),

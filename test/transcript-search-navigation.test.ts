@@ -289,8 +289,9 @@ test('dismiss promotion: Focus root and fullscreen secondary card keep a searche
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('focus-result'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('focus-tool'), content: [{ type: 'text', text: 'needle output' }] }],
+        id: MessageId('focus-result'), role: 'tool',
+        toolCallId: ToolCallId('focus-tool'),
+        content: [{ type: 'text', text: 'needle output' }],
         source: { kind: 'tool', callId: ToolCallId('focus-tool') },
       },
     }, 3),
@@ -468,8 +469,9 @@ test('navigation: a live group reflow keeps the current highlight via stable-mat
     event('tool/result', {
       turn, step: 0,
       message: {
-        id: MessageId(`m-${seq}`), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text }] }],
+        id: MessageId(`m-${seq}`), role: 'tool',
+        toolCallId: ToolCallId(callId),
+        content: [{ type: 'text', text }],
         source: { kind: 'tool', callId: ToolCallId(callId) },
       },
     }, seq)
@@ -529,8 +531,9 @@ test('navigation: tool args and result hits are anchor-only (no guessed strong)'
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'needle output' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'needle output' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, 2),
@@ -777,8 +780,9 @@ test('navigation: tool args and result anchor rows are visually distinct without
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'needle output' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'needle output' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, 2),

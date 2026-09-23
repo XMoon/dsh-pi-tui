@@ -49,8 +49,9 @@ function durableToolTurn(turn: number, callId: string, name = 'bash'): Transcrip
   folder.apply([eventAt('tool/result', {
     turn, step: 0,
     message: {
-      id: MessageId(`r-${callId}`), role: 'user',
-      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text: 'ok' }] }],
+      id: MessageId(`r-${callId}`), role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text: 'ok' }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, 1003, 3)])
@@ -267,9 +268,11 @@ function interactionTurn(name: 'ask_user_question' | 'exit_plan_mode'): {
     eventAt('turn/start', { turn: 1 }, 1000, 0),
     eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }, 1001, 1),
     eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1002, 2),
-    eventAt('tool/result', { turn: 1, step: 0, message: { id: MessageId('r1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId('c1') } } }, 1003, 3),
+    eventAt('tool/result', { turn: 1, step: 0, message: { id: MessageId('r1'), role: 'tool', toolCallId: ToolCallId('c1'),
+    content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('c1') } } }, 1003, 3),
     eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('q1'), name, arguments: args }, 1004, 4),
-    eventAt('tool/result', { turn: 1, step: 1, message: { id: MessageId('qr1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('q1'), content: [{ type: 'text', text: result }] }], source: { kind: 'tool', callId: ToolCallId('q1') } } }, 1005, 5),
+    eventAt('tool/result', { turn: 1, step: 1, message: { id: MessageId('qr1'), role: 'tool', toolCallId: ToolCallId('q1'),
+    content: [{ type: 'text', text: result }], source: { kind: 'tool', callId: ToolCallId('q1') } } }, 1005, 5),
   ] as SessionEvent[])
   return { folder, interactionMarker: name === 'ask_user_question' ? '1/1 answered' : 'PLAN_APPROVED_MARKER' }
 }
@@ -338,7 +341,8 @@ test('a trailing ambient cluster is a durable fence: the live call follows it in
     eventAt('turn/start', { turn: 1 }, 1000, 0),
     eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }, 1001, 1),
     eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1002, 2),
-    eventAt('tool/result', { turn: 1, step: 0, message: { id: MessageId('r1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId('c1') } } }, 1003, 3),
+    eventAt('tool/result', { turn: 1, step: 0, message: { id: MessageId('r1'), role: 'tool', toolCallId: ToolCallId('c1'),
+    content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('c1') } } }, 1003, 3),
     eventAt('user/message', { id: MessageId('ctx-a'), role: 'user', content: [{ type: 'text', text: 'ambient A body' }], source: { kind: 'plugin', form: 'instructions', plugin: 'agent-instructions' } }, 1004, 4),
     eventAt('user/message', { id: MessageId('ctx-b'), role: 'user', content: [{ type: 'text', text: 'ambient B body' }], source: { kind: 'plugin', form: 'catalog', plugin: 'skill-catalog' } }, 1005, 5),
   ] as SessionEvent[])

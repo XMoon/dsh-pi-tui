@@ -294,8 +294,9 @@ test('renderTranscriptMarkdown never replays surface replacements', () => {
           step: 0,
           message: {
             id: 'msg-1' as never,
-            role: 'user',
-            content: [{ type: 'tool-result', toolCallId: 'call-1' as never, content: [{ type: 'text', text: 'ORIGINAL RESULT' }] }],
+            role: 'tool',
+            toolCallId: 'call-1' as never,
+            content: [{ type: 'text', text: 'ORIGINAL RESULT' }],
             source: { kind: 'tool', callId: 'call-1' as never },
           },
         },
@@ -310,8 +311,9 @@ test('renderTranscriptMarkdown never replays surface replacements', () => {
           step: 0,
           message: {
             id: 'msg-2' as never,
-            role: 'user',
-            content: [{ type: 'tool-result', toolCallId: 'call-1' as never, content: [{ type: 'text', text: 'PRUNED RESULT' }] }],
+            role: 'tool',
+            toolCallId: 'call-1' as never,
+            content: [{ type: 'text', text: 'PRUNED RESULT' }],
             source: { kind: 'tool', callId: 'call-1' as never },
           },
         },

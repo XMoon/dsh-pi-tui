@@ -131,8 +131,9 @@ function settledTurn(turn: number, seqBase: number): SessionEvent[] {
     eventAt('tool/result', {
       turn, step: 0,
       message: {
-        id: MessageId(`r${turn}`), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId(`c${turn}`), content: [{ type: 'text', text: lines }] }],
+        id: MessageId(`r${turn}`), role: 'tool',
+        toolCallId: ToolCallId(`c${turn}`),
+        content: [{ type: 'text', text: lines }],
         source: { kind: 'tool', callId: ToolCallId(`c${turn}`) },
       },
     }, T0 + 4, seqBase + 4),
@@ -285,8 +286,9 @@ test('running Thought + user following the end keeps following (plan §21.3)', a
       eventAt('tool/result', {
         turn: 4, step: 0,
         message: {
-          id: MessageId('r4'), role: 'user',
-          content: [{ type: 'tool-result', toolCallId: ToolCallId('c4'), content: [{ type: 'text', text: 'fresh output line' }] }],
+          id: MessageId('r4'), role: 'tool',
+          toolCallId: ToolCallId('c4'),
+          content: [{ type: 'text', text: 'fresh output line' }],
           source: { kind: 'tool', callId: ToolCallId('c4') },
         },
       }, T0 + 44000, 900),

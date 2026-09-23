@@ -107,12 +107,9 @@ function toolResult(seq: number, callId: string, text: string, name = 'bash', tu
     turn, step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, 'append')
@@ -430,8 +427,10 @@ test('G5: error results and synthetic error cards keep legacy semantics', () => 
     surfaceEvent('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-e1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('e1'), isError: true, content: [{ type: 'text', text: 'ENOENT: no such file' }] }],
+        id: MessageId('msg-e1'), role: 'tool',
+        toolCallId: ToolCallId('e1'),
+        content: [{ type: 'text', text: 'ENOENT: no such file' }],
+        isError: true,
         source: { kind: 'tool', callId: ToolCallId('e1') },
       },
     }, 2, 'append'),
@@ -657,8 +656,10 @@ test('failed-read singleton never merges; its search text keeps the path', () =>
     surfaceEvent('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('bad'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('bad1'), isError: true, content: [{ type: 'text', text: 'read failed' }] }],
+        id: MessageId('bad'), role: 'tool',
+        toolCallId: ToolCallId('bad1'),
+        content: [{ type: 'text', text: 'read failed' }],
+        isError: true,
         source: { kind: 'tool', callId: ToolCallId('bad1') },
       },
     }, 4, 'append'),

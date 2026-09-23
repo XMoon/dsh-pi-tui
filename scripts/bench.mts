@@ -135,8 +135,9 @@ function buildEvents(turns: number): SessionEvent[] {
     events.push({
       type: 'tool/result', seq: seq++, time: turn * 1000 + 13, data: {
         turn, step: 0, message: {
-          id: `m-${turn}`, role: 'user',
-          content: [{ type: 'tool-result', toolCallId: `r${turn}`, content: [{ type: 'text', text: DIFF_BODY }] }],
+          id: `m-${turn}`, role: 'tool',
+          toolCallId: `r${turn}`,
+          content: [{ type: 'text', text: DIFF_BODY }],
           source: { kind: 'tool', callId: `r${turn}` },
         },
       },
@@ -149,8 +150,9 @@ function buildEvents(turns: number): SessionEvent[] {
     events.push({
       type: 'tool/result', seq: seq++, time: turn * 1000 + 15, data: {
         turn, step: 0, message: {
-          id: `bm-${turn}`, role: 'user',
-          content: [{ type: 'tool-result', toolCallId: `b${turn}`, content: [{ type: 'text', text: 'total 8\ndrwxr-xr-x 2 user user 4096 Aug 15 00:00 .\n-rw-r--r-- 1 user user 123 src/a.ts' }] }],
+          id: `bm-${turn}`, role: 'tool',
+          toolCallId: `b${turn}`,
+          content: [{ type: 'text', text: 'total 8\ndrwxr-xr-x 2 user user 4096 Aug 15 00:00 .\n-rw-r--r-- 1 user user 123 src/a.ts' }],
           source: { kind: 'tool', callId: `b${turn}` },
         },
       },
@@ -216,8 +218,9 @@ function buildReadHeavyEvents(turns: number, readsPerTurn: number): SessionEvent
         step: 0,
         message: {
           id: `read-message-${callId}`,
-          role: 'user',
-          content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: `file ${callId}` }] }],
+          role: 'tool',
+          toolCallId: callId,
+          content: [{ type: 'text', text: `file ${callId}` }],
           source: { kind: 'tool', callId },
         },
       })
@@ -298,8 +301,9 @@ function buildTextHeavyEvents(turns: number, assistantChars: number, resultChars
       step: 0,
       message: {
         id: `text-heavy-result-${turn}`,
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: repeatedText(resultChars) }] }],
+        role: 'tool',
+        toolCallId: callId,
+        content: [{ type: 'text', text: repeatedText(resultChars) }],
         source: { kind: 'tool', callId },
       },
     })
@@ -343,8 +347,9 @@ function buildSearchEvents(turns: number): SessionEvent[] {
       step: 0,
       message: {
         id: `search-result-${turn}`,
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: `read output for turn ${turn} with needle payload` }] }],
+        role: 'tool',
+        toolCallId: callId,
+        content: [{ type: 'text', text: `read output for turn ${turn} with needle payload` }],
         source: { kind: 'tool', callId },
       },
     })
