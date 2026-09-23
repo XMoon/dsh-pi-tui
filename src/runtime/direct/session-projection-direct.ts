@@ -32,7 +32,7 @@
 
 import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
-import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
+import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import type { SessionProjectionSummary, SessionSummary } from '../session-reader-port.ts'
 
 /** The projection keys this batch reads (the official registered units). */

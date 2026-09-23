@@ -68,10 +68,17 @@ export interface HostContextLike {
   on?(event: string, listener: unknown): unknown
 }
 
-/** The structural settings service surface. */
+/** The structural 0.1.7 SettingsForms surface (descriptor projection +
+ * path-scoped mutation). The old `get(namespace)` business-store read is
+ * gone upstream: effective values arrive form-projected on the descriptor,
+ * and every write carries the read revision. */
 export interface SettingsServiceLike {
-  get(ns: string): unknown
-  mutate(ns: string, ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[]): Promise<unknown>
+  describe(options?: { readonly redactSecrets?: boolean }): readonly SettingsDescriptorLike[] | undefined
+  mutate(
+    ns: string,
+    ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[],
+    expectedRevision?: number,
+  ): Promise<unknown>
 }
 
 /** The structural credentials service surface. */
@@ -86,6 +93,10 @@ export interface CredentialsServiceLike {
 /** The structural permission-presets service surface. */
 export interface PermissionPresetsServiceLike {
   get names(): readonly string[]
+  /** The 0.1.7 effective-default read (deployment `default` merged with the
+   * volatile `defaultPreset` user preference) — the owner already exposes
+   * the value, so the TUI must not read it back through Settings forms. */
+  readonly defaultPreset?: string
 }
 
 /** The structural approval service surface (the session override read). */
@@ -98,7 +109,7 @@ export interface CommandsServiceLike {
   execute(agent: unknown, line: string, args: readonly unknown[], signal?: AbortSignal): Promise<unknown>
 }
 
-/** The structural agent-presets service surface (the roster default). */
+/** The structural agent-presets service surface (the registry default). */
 export interface AgentPresetsServiceLike {
   get defaultId(): string
 }
@@ -133,17 +144,34 @@ export class DirectConfigPort implements ConfigPort {
   }
 }
 
-/** The settings descriptor's shape the trust read needs (structural). */
+/** The settings descriptor's shape the form reads need (structural). */
 interface SettingsDescriptorLike {
   readonly ns: string
+  /** Form-projected effective value (volatile fields only). */
+  readonly value?: unknown
   readonly user?: unknown
+  readonly revision?: number
 }
 
-/** The Direct M5 footer-command trust read: the USER layer of the
- * dsh-pi-tui settings descriptor decides BOTH the command mode and the
- * command (plan §17.4 — a project layer can never silently trigger the
- * user's command). The adapter owns the descriptor access; a Remote
- * adapter replays the same facts from the wire. */
+/** Read ONE form descriptor by entry id (the narrow 0.1.7 replacement for
+ * the removed `settings.get(ns)` business read). Callers must treat the
+ * result as a Settings/UI form projection, never a second business store. */
+function readSettingsDescriptor(settings: SettingsServiceLike | undefined, ns: string): SettingsDescriptorLike | undefined {
+  if (settings === undefined || typeof settings.describe !== 'function') return undefined
+  try {
+    return (settings.describe() ?? []).find(entry => entry.ns === ns)
+  } catch {
+    // A throwing projection read degrades to "no descriptor" — the caller's
+    // own fail-soft rules decide what that means.
+    return undefined
+  }
+}
+
+/** The Direct M5 footer-command trust read: the USER layer of the `tui-app`
+ * settings descriptor decides BOTH the command mode and the command (plan
+ * §17.4 — a project layer can never silently trigger the user's command).
+ * The adapter owns the descriptor access; a Remote adapter replays the same
+ * facts from the wire. */
 class DirectFooterCommandTrust implements FooterCommandTrust {
   private readonly ctx: HostContextLike
   /** The descriptor snapshot for the CURRENT read pair (both getters
@@ -157,13 +185,13 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   get userFooterMode(): string | undefined {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
-    return resolveUserLayerFooterMode([descriptor], 'dsh-pi-tui')
+    return resolveUserLayerFooterMode([descriptor], 'tui-app')
   }
 
   get command() {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
-    return resolveTrustedFooterCommand([descriptor], 'dsh-pi-tui')
+    return resolveTrustedFooterCommand([descriptor], 'tui-app')
   }
 
   /** The ids the USER layer authorizes for custom command item execution
@@ -175,7 +203,7 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   get userCommandItemActivationIds() {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return new Set<string>()
-    return resolveUserCommandItemActivationIds([descriptor], 'dsh-pi-tui')
+    return resolveUserCommandItemActivationIds([descriptor], 'tui-app')
   }
 
   /** The ids authorized for the native FALLBACK surface (the USER's own
@@ -183,7 +211,7 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   get userCommandItemFallbackActivationIds() {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return new Set<string>()
-    return resolveUserCommandItemFallbackActivationIds([descriptor], 'dsh-pi-tui')
+    return resolveUserCommandItemFallbackActivationIds([descriptor], 'tui-app')
   }
 
   /** One describe() read per synchronous evaluation: the two getters are
@@ -191,10 +219,9 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
    * the current tick halves the settings-service read. */
   private readDescriptor(): SettingsDescriptorLike | undefined {
     if (this.descriptorCache !== null) return this.descriptorCache
-    const settings = this.ctx.get('settings') as { describe?(): readonly SettingsDescriptorLike[] | undefined } | undefined
-    const descriptors = settings?.describe?.()
-    const found = descriptors?.find(entry => entry.ns === 'dsh-pi-tui')
-    this.descriptorCache = found ?? undefined
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    const found = readSettingsDescriptor(settings, 'tui-app')
+    this.descriptorCache = found
     // The cache is per-synchronous-evaluation only: reset on the next
     // macrotask so a settings change is picked up.
     queueMicrotask(() => { this.descriptorCache = null })
@@ -234,11 +261,8 @@ class DirectFooterCustomItems implements FooterCustomItemsConfig {
 
   private readConfigRaw(): { value: unknown; failed: boolean } {
     try {
-      const settings = this.ctx.get('settings') as { describe?(): readonly SettingsDescriptorLike[] | undefined } | undefined
-      if (settings === undefined || typeof settings.describe !== 'function') return { value: undefined, failed: true }
-      const descriptors = settings.describe()
-      if (descriptors === undefined) return { value: undefined, failed: true }
-      const descriptor = descriptors.find(entry => entry.ns === 'dsh-pi-tui')
+      const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+      const descriptor = readSettingsDescriptor(settings, 'tui-app')
       if (descriptor === undefined) return { value: undefined, failed: true }
       const user = descriptor.user
       if (user === undefined) return { value: undefined, failed: false }
@@ -309,16 +333,18 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     return this.ctx.get('llm') as { listConfigurableProviders(): readonly ProviderCatalogEntry[] } | undefined
   }
 
-  /** Read ONE provider-config settings section DETACHED (the section URI
-   * comes from the directory entries — internal to the adapter, a
-   * consumer never names a namespace). */
+  /** Read ONE provider-config form descriptor's EFFECTIVE value DETACHED
+   * (the entry id comes from the directory entries — internal to the
+   * adapter, a consumer never names a namespace). The 0.1.7 projection
+   * carries the entry's volatile fields; the llm-pi-ai `providers` dict is
+   * volatile, so the section data the merge needs survives the projection.) */
   private readSectionInternal(ns: string): unknown {
     const settings = this.settings()
     if (settings === undefined) return undefined
     try {
-      return detachedSection(settings.get(ns))
+      return detachedSection(readSettingsDescriptor(settings, ns)?.value)
     } catch {
-      // An unregistered namespace degrades to undefined (the old read-side
+      // An unreadable projection degrades to undefined (the old read-side
       // degradation — /login never escapes its command handler).
       return undefined
     }
@@ -383,7 +409,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
     if (!PROVIDER_ROUTE_PATTERN.test(route)) throw new Error('invalid provider route')
-    await settings.mutate('llm-pi-ai', [
+    await mutateSettings(settings, 'llm-pi-ai', [
       { op: 'set', path: ['providers', route], value: profile },
     ])
   }
@@ -418,7 +444,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     // conventional llm-pi-ai slot apply.
     const llm = this.llm()
     if (llm === undefined) {
-      await settings.mutate('llm-pi-ai', [
+      await mutateSettings(settings, 'llm-pi-ai', [
         { op: 'set', path: ['providers', route], value: {} },
       ])
       return { kind: 'written' }
@@ -439,11 +465,23 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     if (!validLayout) {
       return { kind: 'skipped', reason: `hostile or malformed directory entry for ${route}` }
     }
-    await settings.mutate(directoryEntry.settingsNs, [
+    await mutateSettings(settings, directoryEntry.settingsNs, [
       { op: 'set', path, value: {} },
     ])
     return { kind: 'written' }
   }
+}
+
+/** Carry the CURRENT descriptor revision on every form write (the 0.1.7
+ * conflict contract): a concurrent external edit surfaces as the official
+ * SettingsConflictError instead of a silent last-write-wins. */
+async function mutateSettings(
+  settings: SettingsServiceLike,
+  ns: string,
+  ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[],
+): Promise<unknown> {
+  const revision = readSettingsDescriptor(settings, ns)?.revision
+  return settings.mutate(ns, ops, revision)
 }
 
 /** A JSON-safe DETACHED copy of one settings section (settings documents
@@ -818,13 +856,13 @@ export class DirectPermissionConfig implements PermissionConfig {
   }
 
   defaultPreset(): string | undefined {
-    const settings = this.settings()
-    if (settings === undefined) return undefined
+    // Read authority is the owning service's effective value (0.1.7); the
+    // Settings form remains the WRITE surface only.
+    const permission = this.ctx.get('permissionPresets') as PermissionPresetsServiceLike | undefined
     try {
-      const doc = settings.get('permission') as { defaultPreset?: string } | undefined
-      return doc?.defaultPreset
+      return permission?.defaultPreset
     } catch {
-      // The namespace is absent until the presets service registers it.
+      // A throwing service read degrades to "no persisted default".
       return undefined
     }
   }
@@ -832,7 +870,7 @@ export class DirectPermissionConfig implements PermissionConfig {
   async setDefaultPreset(name: string): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) return
-    await settings.mutate('permission', [
+    await mutateSettings(settings, 'permission', [
       { op: 'set', path: ['defaultPreset'], value: name },
     ])
   }
@@ -870,8 +908,11 @@ export class DirectPermissionConfig implements PermissionConfig {
   }
 }
 
-/** The Direct preset-default config (`ctx.settings` `agent-presets`
- * namespace + the roster's own default). */
+/** The Direct preset-default config: the 0.1.7 registry's own
+ * `defaultId` (deployment `default` merged with the volatile
+ * `selectedDefault` user preference and the chooser policy) is the read
+ * authority; the `agent-preset-registry` Settings form is the WRITE
+ * surface for "future sessions" defaults. */
 export class DirectPresetDefaultConfig implements PresetDefaultConfig {
   private readonly ctx: HostContextLike
 
@@ -888,35 +929,30 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
   }
 
   get(): string | undefined {
-    const settings = this.settings()
-    if (settings === undefined) return undefined
-    try {
-      const doc = settings.get('agent-presets') as { default?: string } | undefined
-      // `??` semantics: an empty saved value is displayed as-is, only an
-      // ABSENT value falls back to the roster default (old behavior).
-      if (doc?.default !== undefined) return doc.default
-    } catch {
-      // An unreadable namespace falls back to the roster default.
-    }
     const presets = this.ctx.get('agentPresets') as AgentPresetsServiceLike | undefined
-    return presets?.defaultId
+    try {
+      return presets?.defaultId
+    } catch {
+      // A throwing registry read degrades to "no default known".
+      return undefined
+    }
   }
 
   async set(id: string): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
-    await settings.mutate('agent-presets', [
-      { op: 'set', path: ['default'], value: id },
+    await mutateSettings(settings, 'agent-preset-registry', [
+      { op: 'set', path: ['selectedDefault'], value: id },
     ])
   }
 }
 
 /** The Direct subagent model-selection config: the OFFICIAL
- * `subagent-model-selection` settings section (registered Host-side by the
- * subagent-model-selection-settings service — mounting the service alone
- * does NOT enable anything; the section defaults to disabled with an
- * empty allowlist, and each NEW session samples the preference at
- * composition time). */
+ * `subagentModelSelection` service (`subagent-model-selection-settings`
+ * entry) owns the live preference read; the entry's Settings form is the
+ * WRITE surface — mounting the service alone does NOT enable anything;
+ * the section defaults to disabled with an empty allowlist, and each NEW
+ * session samples the preference at composition time. */
 export class DirectSubagentModelSelectionConfig implements SubagentModelSelectionConfig {
   private readonly ctx: HostContextLike
 
@@ -928,25 +964,25 @@ export class DirectSubagentModelSelectionConfig implements SubagentModelSelectio
     return this.ctx.get('settings') as SettingsServiceLike | undefined
   }
 
+  private selection(): { current(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } } | undefined {
+    return this.ctx.get('subagentModelSelection') as { current(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } } | undefined
+  }
+
   available(): boolean {
-    // The OFFICIAL capability is the subagent-model-selection-settings
-    // service (it registers the section into the settings service when it
-    // mounts). A generic settings service alone does NOT make the section
-    // writable — without the official service the /settings rows must not
-    // appear at all.
-    return this.ctx.get('subagentModelSelection') !== undefined && this.settings() !== undefined
+    // The OFFICIAL capability is the subagentModelSelection service (its
+    // settings entry exists only while the service mounts). Without the
+    // official service the /settings rows must not appear at all.
+    return this.selection() !== undefined && this.settings() !== undefined
   }
 
   get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } {
-    const settings = this.settings()
-    if (settings === undefined) return { enabled: false, allowedModels: [] }
+    const selection = this.selection()
+    if (selection === undefined) return { enabled: false, allowedModels: [] }
     try {
-      const doc = settings.get('subagent-model-selection') as
-        | { enabled?: unknown; allowedModels?: readonly unknown[] }
-        | undefined
+      const current = selection.current()
       return {
-        enabled: doc?.enabled === true,
-        allowedModels: (doc?.allowedModels ?? []).flatMap(route => {
+        enabled: current.enabled === true,
+        allowedModels: (current.allowedModels ?? []).flatMap(route => {
           const candidate = route as { provider?: unknown; model?: unknown }
           return typeof candidate?.provider === 'string' && typeof candidate?.model === 'string'
             ? [{ provider: candidate.provider, model: candidate.model }]
@@ -954,8 +990,7 @@ export class DirectSubagentModelSelectionConfig implements SubagentModelSelectio
         }),
       }
     } catch {
-      // The section registers only when the settings service knows it; an
-      // unknown namespace reads as the shipped default (off, empty).
+      // A failing official read reports the shipped default (off, empty).
       return { enabled: false, allowedModels: [] }
     }
   }
@@ -970,7 +1005,7 @@ export class DirectSubagentModelSelectionConfig implements SubagentModelSelectio
     }
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
-    await settings.mutate('subagent-model-selection', [
+    await mutateSettings(settings, 'subagent-model-selection-settings', [
       { op: 'set', path: ['enabled'], value: value.enabled },
       { op: 'set', path: ['allowedModels'], value: value.allowedModels.map(route => ({ ...route })) },
     ])

@@ -61,14 +61,14 @@
     - id: authorization
       name: '@deepseek-ai/dsh-authorization'
 
-    # Official shipped presets are the composition authority. The upstream
-    # service defaults includeShippedRoot/includeUserRoot to true, so this
-    # bundle deliberately owns no duplicate standard/ptc/minimal/cordis root.
-    # DSH's V2→V3 format migration owns historical session preset conversion;
-    # the settings/default compatibility shim is kept separately at the TUI
-    # request boundary and does not add another preset row.
-    - id: agent-presets
-      name: '@deepseek-ai/dsh-agent-presets'
+    # The 0.1.7 declarative preset registry: preset identity, revisions and
+    # default/selection policy are registry-owned (deployment `default` here;
+    # the user's `selectedDefault` rides the profile form). The four shipped
+    # preset declarations follow as separate patch files under
+    # config/dsh-presets/, listed after this file in package.json
+    # `dsh.bundle.patch` — the same composition the upstream web bundle uses.
+    - id: agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
       config:
         default: standard
 

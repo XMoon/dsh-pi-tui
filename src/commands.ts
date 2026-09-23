@@ -278,11 +278,12 @@ export function sessionSearchCategory(options: {
 
 /**
  * Display copy for the four shipped agent presets, fixed in English — the
- * web surface's `BUILT_IN_PRESET_KEYS` mapping (`dsh-client-ui-agent-preset`),
- * TUI-side. The effective roster root is the DSH agent-presets package's
- * official shipped root; its preset metadata language is not ours to control. Mapping the known ids keeps the picker English regardless of
- * what the files say; everything else renders file metadata. Names follow
- * the upstream English locale (`presetCodeName` is 'PTC mode').
+ * web surface's `BUILT_IN_PRESET_KEYS` mapping (`dsh-agent-preset-registry`
+ * display helpers), TUI-side. The shipped declarations publish no `name`
+ * (the official built-in classification), and their metadata language is
+ * not ours to control: mapping the known ids keeps the picker English
+ * regardless of what the declarations say; everything else renders the
+ * declaration's own metadata. Names follow the upstream English locale.
  */
 const BUILT_IN_PRESET_COPY: Readonly<Record<string, { name: string; description: string }>> = {
   standard: {
@@ -303,15 +304,28 @@ const BUILT_IN_PRESET_COPY: Readonly<Record<string, { name: string; description:
   },
 }
 
-/** Resolve one roster row's display copy: fixed English for a shipped
- * (system-trust) preset id, otherwise the preset's file metadata. */
+/** Whether one roster row is a SHIPPED preset under the official 0.1.7
+ * classification: a known shipped id that publishes no `name` of its own.
+ * A declaration that names itself — even with a shipped id — owns its
+ * copy (the same rule as `isBuiltInPreset` upstream; kept local so the
+ * display layer carries no runtime import). */
+export function isBuiltInPresetRow(preset: {
+  id: string
+  name?: string
+  description?: string
+}): boolean {
+  return preset.name === undefined && BUILT_IN_PRESET_COPY[preset.id] !== undefined
+}
+
+/** Resolve one roster row's display copy: the TUI's fixed English copy for
+ * a shipped preset (official classification above), otherwise the preset's
+ * own published metadata — a user-authored copy is never translated. */
 export function presetDisplayText(preset: {
   id: string
-  trust: string
   name?: string
   description?: string
 }): { name: string; description?: string } {
-  const builtIn = preset.trust === 'system' ? BUILT_IN_PRESET_COPY[preset.id] : undefined
+  const builtIn = isBuiltInPresetRow(preset) ? BUILT_IN_PRESET_COPY[preset.id] : undefined
   if (builtIn !== undefined) return { name: builtIn.name, description: builtIn.description }
   return {
     name: preset.name ?? preset.id,
@@ -4249,23 +4263,9 @@ export function registerTuiCommands(
       // the roster catalog the command surface needs is the port's. Every
       // session-dependent decision RE-READS `runner.liveAgent` at its own
       // operation boundary so an await cannot apply a stale Session.
-      const displayedDefault = async (): Promise<string | undefined> => {
-        const configured = runner.config.presetDefault.get()
-        if (configured !== 'code') return configured ?? presets.defaultId()
-        // The omitted settings default is resolved through the roster. This
-        // keeps status/default display consistent with composition: a real
-        // custom code remains code, while old settings without code display ptc.
-        try {
-          return (await presets.resolve(undefined, runner.signal)).id ?? configured
-        } catch {
-          return configured
-        }
-      }
-      const presetErrorText = (error: unknown, id: string): string => {
-        const message = safeErrorMessage(error)
-        if (id !== 'code' || !/\b(?:not found|unknown|unavailable)\b/iu.test(message)) return message
-        return `${message}; if you meant the legacy PTC session identity, use preset "ptc"`
-      }
+      const displayedDefault = async (): Promise<string | undefined> =>
+        runner.config.presetDefault.get() ?? presets.defaultId()
+      const presetErrorText = (error: unknown): string => safeErrorMessage(error)
       const matched = invocation.rawInput.trim().match(/^(\S+)(?:\s+(.*))?$/)
       const verb = matched?.[1] ?? ''
       const rest = matched?.[2]?.trim() ?? ''
@@ -4317,7 +4317,7 @@ export function registerTuiCommands(
           await presets.resolve(rest, runner.signal)
           await runner.config.presetDefault.set(rest)
         } catch (error) {
-          return { kind: 'error', text: presetErrorText(error, rest) }
+          return { kind: 'error', text: presetErrorText(error) }
         }
         if (runner.effectivePresetId === undefined) {
           const outcome = await runner.refreshCatalog({
@@ -4470,7 +4470,7 @@ export function registerTuiCommands(
         try {
           outcome = await applyPresetSelection(id, owner)
         } catch (error) {
-          app.notify(presetErrorText(error, id), 'error')
+          app.notify(presetErrorText(error), 'error')
           return
         }
         if (outcome.kind === 'pending') {
@@ -4515,7 +4515,7 @@ export function registerTuiCommands(
           app.notify(outcome.message, 'error')
           return { kind: 'error', text: outcome.message }
         } catch (error) {
-          return { kind: 'error', text: presetErrorText(error, verb) }
+          return { kind: 'error', text: presetErrorText(error) }
         }
       }
       // The picker belongs to the EXACT Session that opened it (generation +
@@ -4574,7 +4574,7 @@ export function registerTuiCommands(
             label: `${display.name} (${preset.id})`,
             description: [
               display.description,
-              preset.trust === 'system' ? 'system' : 'user',
+              isBuiltInPresetRow(preset) ? 'system' : 'user',
               preset.id === defaultId ? 'default' : undefined,
               preset.id === current ? '← current' : undefined,
               preset.broken,

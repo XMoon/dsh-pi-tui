@@ -31,19 +31,20 @@ import type { FooterCustomItemsParseResult } from '../footer/custom-items.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
  * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/
- * displayPreset/focusMode/wheelScrollLines). `displayPreset` is the canonical
- * display authority; `focusMode` remains a legacy migration input. The old
- * `history` field moved to $DSH_HOME/user-history/*.jsonl and is
+ * displayPreset/wheelScrollLines). `displayPreset` is the canonical display
+ * authority (the DSH 0.1.7 profile-owned `tui-app` Config references are the
+ * runtime backend; `focusMode` retired to a legacy-migration input only).
+ * The old `history` field moved to $DSH_HOME/user-history/*.jsonl and is
  * deliberately NOT part of the document anymore. `footerLayout` is the
  * M2 versioned custom layout (nested settings object), absent when not
- * configured. The user keybinding overrides (`keybindings`) ride along
- * as an unknown-key pass-through of the schemastery-registered document
- * — the field is RAW EXTENSION DATA, deliberately not a semantic DTO:
- * the keybinding shape is owned by src/keybindings/config.ts (the only
- * validator), and the settings document is the storage the Direct
- * adapter passes through verbatim. A future Remote adapter MUST preserve
- * this raw field verbatim too (get/replace round-trip), never reinterpret
- * it — add a Remote-shaped contract test when the wire backend lands. */
+ * configured. The user keybinding overrides (`keybindings`) ride as a
+ * whole-value RAW field of the profile-owned plugin Config — the field is
+ * deliberately not a semantic DTO: the keybinding shape is owned by
+ * src/keybindings/config.ts (the only validator), and the settings
+ * document is the storage the Direct adapter passes through verbatim.
+ * A future Remote adapter MUST preserve this raw field verbatim too
+ * (get/replace round-trip), never reinterpret it — add a Remote-shaped
+ * contract test when the wire backend lands. */
 export interface TuiSettingsDoc {
   theme: string
   iconStyle: string
@@ -75,8 +76,6 @@ export interface TuiSettingsDoc {
    * 'explanatory'); absent/invalid values resolve to default. */
   responseStyle?: string
   displayPreset?: string
-  /** @deprecated Legacy migration input; runtime writes use displayPreset. */
-  focusMode: string
   /** Completion-notification mode: 'unfocused' (default) | 'always' |
    * 'off' — when the main agent's settlement notifies the terminal. */
   notificationMode: string

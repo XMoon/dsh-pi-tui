@@ -301,28 +301,28 @@ test('production startup resolves both settings before compose and settings swit
       return options.setup?.(ctx, agent)
     },
   }))
-  // Both new keys persisted; loaded before the first compose.
+  // Both new keys persisted on the plugin's profile-owned Config
+  // references; loaded before the first compose. The Settings surface
+  // records the path-scoped writes.
   const doc: Record<string, unknown> = {
-    theme: 'dark', iconStyle: 'emoji', footer: 'full', fullscreen: 'off',
-    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
-    displayPreset: 'full', focusMode: 'off', wheelScrollLines: '1',
     progressUpdates: 'off', responseStyle: 'explanatory', customExtension: { keep: true },
   }
   const ctx = new Context()
   life.defer(() => disposeContext(ctx))
   ctx.provide('settings', {
-    register: () => ({
-      get: () => ({ ...doc }),
-      // Wholesale replace (production semantics — the retired `history` key
-      // dropped the same way): keys absent from the written doc are gone.
-      replace: (next: Record<string, unknown>) => {
-        for (const key of Object.keys(doc)) if (!(key in next)) delete doc[key]
-        Object.assign(doc, next)
-      },
-    }),
-    describe: () => [{ ns: 'dsh-pi-tui', user: {} }],
+    describe: () => [{ ns: 'tui-app', value: { ...doc }, user: { ...doc }, revision: 1 }],
+    mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
+      for (const op of ops) {
+        if (op.op === 'set') doc[op.path[0]!] = op.value
+        else delete doc[op.path[0]!]
+      }
+    },
   } as never)
-  const fiber = await mountRunner(ctx, home, harness, { sessionId: session.id }, { sessionId: session.id })
+  const fiber = await mountRunner(ctx, home, harness, { sessionId: session.id }, {
+    sessionId: session.id,
+    progressUpdates: 'off',
+    responseStyle: 'explanatory',
+  })
   life.defer(() => fiber.dispose())
   assert.match(registry.text('tui:progress-updates'), /# Progress updates: Off/)
   assert.match(registry.text('tui:response-style'), /# Response style: Explanatory/)
@@ -336,7 +336,7 @@ test('production startup resolves both settings before compose and settings swit
   assert.match(registry.text('tui:progress-updates'), /# Progress updates: Off/)
   assert.equal(doc.responseStyle, 'default')
   assert.equal(doc.progressUpdates, 'off')
-  assert.equal(doc.displayPreset, 'full')
+  assert.equal(doc.displayPreset, undefined, 'displayPreset is never pinned by an unrelated write')
   assert.deepEqual(doc.customExtension, { keep: true })
   vt.sendInput('\x1b')
   // Plan §12 behavior: switch to Focus without recompose, then back.

@@ -24,7 +24,6 @@ import type { RemoteResultLike } from './session-writer-remote.ts'
 /** One path-free row of the official `agentPresets.list` roster. */
 export interface RemotePresetRosterRow {
   readonly id: string
-  readonly trust: string
   readonly isDefault?: boolean
   readonly name?: string
   readonly description?: string
@@ -50,7 +49,6 @@ function generationChanged(generation: RemoteConnectionGenerationSource, capture
 function copyRosterEntry(row: RemotePresetRosterRow): PresetRosterEntry {
   return {
     id: row.id,
-    trust: row.trust,
     ...row.name === undefined ? {} : { name: row.name },
     ...row.description === undefined ? {} : { description: row.description },
     ...row.broken === undefined ? {} : { broken: row.broken },

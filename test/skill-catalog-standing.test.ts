@@ -1,14 +1,16 @@
 /**
  * M0 contract gate for the standing-scope skill catalog: the cold skill
  * read through a preset's STANDING SCOPE works against the real
- * dsh-agent-presets + dsh-skill services without creating an Agent, a
- * session, or a turn — the mechanism that avoids the catalog-probe dead
- * end (host `session/created` observers like dsh-permission-presets write
- * durable knob events into every fresh session).
+ * declarative preset registry + dsh-skill services without creating an
+ * Agent, a session, or a turn — the mechanism that avoids the
+ * catalog-probe dead end (host `session/created` observers like
+ * dsh-permission-presets write durable knob events into every fresh
+ * session).
  *
  * Assertions:
- * - `standingKeyFor()` returns the preset's standing `ScopeKey`; the mount
- *   creates NO session and emits NO session event;
+ * - `acquireScope()` leases the preset's standing `ScopeKey` (released
+ *   after the read); the mount creates NO session and emits NO session
+ *   event;
  * - `skills.snapshot({ cwd, scope: standingKey })` returns the injected
  *   provider's summaries (invocation metadata intact);
  * - the standing mount is REUSED: a second `standingKeyFor()` returns the
@@ -32,7 +34,7 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentRegistry, { installModelSelection } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import AgentPresets from '@deepseek-ai/dsh-agent-presets'
+import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -40,9 +42,6 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SkillRegistry, { type SkillProvider } from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-
-/** The fixture preset root (bundled with the tests, not shipped). */
-const FIXTURE_ROOT = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'presets')
 
 /** One provider feeding the REAL registry (global layer — visible to any
  * scope along the chain, exactly like a host-layered skill row). */
@@ -82,12 +81,11 @@ async function mountRuntime(): Promise<Context> {
   // alpha.2 agent-presets registers its projection unit at construction and
   // requires the shared projection registry to be composed first.
   await ctx.plugin(SessionProjectionRegistry)
-  await ctx.plugin(AgentPresets, {
-    default: 'fixture',
-    roots: [{ path: FIXTURE_ROOT, trust: 'system' }],
-    includeShippedRoot: false,
-    includeUserRoot: false,
-  })
+  await ctx.plugin(AgentPresetRegistry, { default: 'fixture' })
+  // One EMPTY declarative preset (rows would require services outside the
+  // bundle dependency tree; shipped-preset row mounts are verified in the
+  // real-profile smoke).
+  await ctx.get('agentPresets')!.register({ id: 'fixture', plugins: [] })
   return ctx
 }
 
@@ -105,14 +103,15 @@ test('a standing-scope skill read creates no session, emits no event, and serves
   try {
     const presets = ctx.get('agentPresets')
     const skills = ctx.get('skills')
-    assert.ok(presets !== undefined && typeof presets.standingKeyFor === 'function',
-      'the installed agent-presets must expose standingKeyFor (M0 gate)')
+    assert.ok(presets !== undefined && typeof presets.acquireScope === 'function',
+      'the installed preset registry must expose acquireScope (M0 gate)')
     assert.ok(skills !== undefined && typeof skills.snapshot === 'function',
       'the installed dsh-skill must expose snapshot (M0 gate)')
     skills.registerProvider(fixtureProvider)
 
-    const key = await presets.standingKeyFor('fixture')
-    assert.deepEqual(key, { agentPreset: 'fixture' }, 'the standing key identifies the preset')
+    const lease = await presets.acquireScope('fixture')
+    const key = lease.key
+    assert.ok(typeof key === 'object' && key !== null, 'the standing lease carries a scope key')
 
     // No session, no agent, no session event — the mechanism that avoids
     // the probe dead end (permission-presets writes on session/created).
@@ -126,6 +125,7 @@ test('a standing-scope skill read creates no session, emits no event, and serves
     assert.equal(snapshot.complete, true)
     const userSkill = snapshot.skills.find(skill => skill.name === 'user-skill')
     assert.equal(userSkill?.invocation.userInvocable, true, 'invocation metadata survives the snapshot')
+    await lease[Symbol.asyncDispose]()
   } finally {
     await disposeRuntime(ctx)
   }
@@ -139,9 +139,10 @@ test('the standing mount is reused: the same key object on re-resolution and aft
     assert.ok(presets !== undefined && skills !== undefined)
     skills.registerProvider(fixtureProvider)
 
-    const key1 = await presets.standingKeyFor('fixture')
-    const key2 = await presets.standingKeyFor('fixture')
-    assert.equal(key2, key1, 'a second standing resolution must reuse the same mount (same key object)')
+    const lease1 = await presets.acquireScope('fixture')
+    const lease2 = await presets.acquireScope('fixture')
+    assert.equal(lease2.key, lease1.key, 'a second standing resolution must reuse the same mount (same key object)')
+    await lease2[Symbol.asyncDispose]()
 
     // A real Agent on the same preset joins the standing generation.
     const selected = { current: undefined, assembled: undefined }
@@ -160,8 +161,10 @@ test('the standing mount is reused: the same key object on re-resolution and aft
     })
     try {
       await handle.agent.whenIdle()
-      const key3 = await presets.standingKeyFor('fixture')
-      assert.equal(key3, key1, 'the real Agent must join the existing standing generation, not mount a second one')
+      const lease3 = await presets.acquireScope('fixture')
+      assert.equal(lease3.key, lease1.key, 'the real Agent must join the existing standing generation, not mount a second one')
+      await lease3[Symbol.asyncDispose]()
+      await lease1[Symbol.asyncDispose]()
       assert.equal(Number(handle.agent.session.seq), 0, 'the fixture composition stays zero-event')
     } finally {
       await handle.dispose()
@@ -179,8 +182,9 @@ test('the real Agent view matches the standing view for the same composition', a
     assert.ok(presets !== undefined && skills !== undefined)
     skills.registerProvider(fixtureProvider)
 
-    const key = await presets.standingKeyFor('fixture')
-    const standing = await skills.snapshot({ cwd: '/ws', scope: key })
+    const lease = await presets.acquireScope('fixture')
+    const standing = await skills.snapshot({ cwd: '/ws', scope: lease.key })
+    await lease[Symbol.asyncDispose]()
 
     const selected = { current: undefined, assembled: undefined }
     const resolvedId = (await presets.resolve('fixture')).id

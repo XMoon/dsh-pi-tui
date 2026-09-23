@@ -7,7 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { apply as applyRunner } from '../src/index.ts'
+import { apply as applyRunner, Config as TuiConfigSchema } from '../src/index.ts'
 import { foldPendingModelSelection } from '../src/model-selection.ts'
 import { StatsFolder } from '../src/stats.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
@@ -884,7 +884,6 @@ test('a rewind-picker fork awaits source retirement before its handoff completes
   await settle()
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must mount a TUI for the rewind picker')
-
   ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
   const reachedDrain = await Promise.race([
     drainReached.then(() => true),
@@ -1920,21 +1919,15 @@ test('startup applies the persisted wheel step BEFORE the first fullscreen mount
   })
   const harness = makeHarness(home, resumed)
   context = new Context()
-  // A settings service carrying the persisted wheel step AND fullscreen
-  // 'on': the runner must hand the step to the app BEFORE the first
-  // alt-screen mount (the fork reads it at construction).
-  const doc: Record<string, unknown> = {
-    theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'on',
-    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
-    focusMode: 'off', wheelScrollLines: '8',
-  }
-  context.provide('settings', {
-    register: () => ({
-      get: () => ({ ...doc }),
-      replace: async (next: Record<string, unknown>) => { Object.assign(doc, next) },
-    }),
-  } as never)
-  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  // The persisted wheel step AND fullscreen 'on' ride the plugin's
+  // profile-owned Config references: the runner must hand the step to the
+  // app BEFORE the first alt-screen mount (the fork reads it at
+  // construction). No settings service is needed for reads.
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, {
+    sessionId: resumed.id,
+    fullscreen: 'on',
+    wheelScrollLines: '8',
+  })
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
   await vt.waitForRender()
@@ -1968,37 +1961,35 @@ test('startup restores a persisted Compact preset unchanged and /display compact
     events: sessionEvents('display compact'),
   })
   const userFooterItems = [{ id: 'user-item', kind: 'text', text: 'keep me' }]
-  const doc: Record<string, unknown> = {
-    theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'off',
-    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
-    displayPreset: 'compact', focusMode: 'on', wheelScrollLines: '1',
-    notificationMode: 'unfocused', notificationMethod: 'auto',
-    footerCustomItems: [{ id: 'project-item' }], keybindings: { tab: 'custom' },
-  }
-  const replacements: Record<string, unknown>[] = []
+  // The persisted document rides the plugin's profile-owned Config
+  // references; the Settings surface records path-scoped writes.
+  const mutations: Array<{ ns: string; ops: readonly { op: string; path: readonly string[]; value?: unknown }[] }> = []
   const settings = {
-    register: () => ({
-      get: () => ({ ...doc }),
-      replace: async (next: Record<string, unknown>) => {
-        replacements.push({ ...next })
-        Object.assign(doc, next)
-      },
-    }),
-    describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: userFooterItems } }],
+    describe: () => [{ ns: 'tui-app', value: {}, user: { footerCustomItems: userFooterItems }, revision: 1 }],
+    mutate: async (ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
+      mutations.push({ ns, ops })
+    },
   }
   const context = new Context()
   const harness = makeHarness(home, resumed)
   context.provide('settings', settings as never)
-  const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, {
+    sessionId: resumed.id,
+    fullscreen: 'off',
+    displayPreset: 'compact',
+    footerCustomItems: [{ id: 'project-item' }],
+    keybindings: { tab: 'custom' },
+  })
   await settle()
   const app = probe.apps.at(-1)
   assert.ok(app !== undefined, 'the production runner must create a TuiApp')
   assert.equal(app.displayPreset(), 'compact', 'a persisted Compact must restore as Compact, never fall back to Full')
-  assert.equal(replacements.length, 0, 'a canonical preset must not trigger a migration write')
-  assert.equal(doc.displayPreset, 'compact', 'the canonical field is left untouched')
-  assert.equal(doc.focusMode, 'on', 'legacy focusMode remains migration-only and preserved')
-  assert.deepEqual(doc.footerCustomItems, [{ id: 'project-item' }], 'a canonical boot must not rewrite the settings document')
-  assert.deepEqual(doc.keybindings, { tab: 'custom' }, 'unknown settings pass-through survives an untouched document')
+  // The boot completes exactly the one-shot legacy-migration marker (no
+  // legacy document exists anywhere): NO preference field is pinned and the
+  // USER footer definitions are not copied over the project-layer value.
+  assert.deepEqual(mutations, [
+    { ns: 'tui-app', ops: [{ op: 'set', path: ['legacySettingsMigrationVersion'], value: 1 }] },
+  ], 'a canonical preset must not trigger a preference write')
 
   const displayHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
   assert.ok(displayHandler !== undefined, 'the production runner must register /display')
@@ -2006,13 +1997,19 @@ test('startup restores a persisted Compact preset unchanged and /display compact
   assert.deepEqual(compactResult, { kind: 'success', text: 'Display: compact.' })
   await settle()
   assert.equal(app.displayPreset(), 'compact', 'Compact stays the live preset')
-  assert.equal(replacements.length, 1, 'the explicit /display write persists the canonical field even when unchanged')
-  assert.equal(replacements[0]?.displayPreset, 'compact')
+  assert.equal(mutations.length, 1, 'an unchanged value emits no write (no pinning; only the boot marker)')
+  const focusResult = await (displayHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'focus' })
+  assert.deepEqual(focusResult, { kind: 'success', text: 'Display: focus.' })
+  await settle()
+  assert.equal(mutations.length, 2, 'a changed value persists through one more path-scoped mutation')
+  assert.deepEqual(mutations[1]!.ops, [
+    { op: 'set', path: ['displayPreset'], value: 'focus' },
+  ], 'only the changed field is written; the user footer items are not re-pinned')
   await fiber.dispose()
   await disposeContext(context)
 })
 
-test('startup canonicalizes an invalid display preset, preserves legacy/raw settings, and retries after a failed write', async (t) => {
+test('startup canonicalizes an invalid display preset, preserves raw fields, and retries after a failed write', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-display-migration-')
   const previousHome = process.env.DSH_HOME
@@ -2032,34 +2029,32 @@ test('startup canonicalizes an invalid display preset, preserves legacy/raw sett
     events: sessionEvents('display migration'),
   })
   const userFooterItems = [{ id: 'user-item', kind: 'text', text: 'keep me' }]
-  const doc: Record<string, unknown> = {
-    theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'off',
-    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
-    displayPreset: 'garbage', focusMode: 'on', wheelScrollLines: '1',
-    notificationMode: 'unfocused', notificationMethod: 'auto',
-    footerCustomItems: [{ id: 'project-item' }], keybindings: { tab: 'custom' },
-  }
-  const replacements: Record<string, unknown>[] = []
+  // The invalid canonical value rides the plugin Config references on every
+  // boot; the Settings surface records (and can refuse) the canonicalizing
+  // path-scoped writes.
+  const written: Array<{ op: string; path: readonly string[]; value?: unknown }> = []
   let failFirstWrite = true
   const settings = {
-    register: () => ({
-      get: () => ({ ...doc }),
-      replace: async (next: Record<string, unknown>) => {
-        replacements.push({ ...next })
-        if (failFirstWrite) {
-          failFirstWrite = false
-          throw new Error('display migration write failed')
-        }
-        Object.assign(doc, next)
-      },
-    }),
-    describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: userFooterItems } }],
+    describe: () => [{ ns: 'tui-app', value: {}, user: { footerCustomItems: userFooterItems }, revision: 1 }],
+    mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
+      for (const op of ops) written.push({ ...op })
+      if (failFirstWrite) {
+        failFirstWrite = false
+        throw new Error('display migration write failed')
+      }
+    },
   }
   const mount = async (): Promise<{ context: Context; fiber: { dispose: () => Promise<unknown> }; app: TuiApp; harness: RunnerHarness }> => {
     const context = new Context()
     const harness = makeHarness(home, resumed)
     context.provide('settings', settings as never)
-    const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+    const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, {
+      sessionId: resumed.id,
+      fullscreen: 'off',
+      displayPreset: 'garbage',
+      footerCustomItems: [{ id: 'project-item' }],
+      keybindings: { tab: 'custom' },
+    })
     await settle()
     const app = probe.apps.at(-1)
     assert.ok(app !== undefined, 'the production runner must create a TuiApp')
@@ -2068,105 +2063,23 @@ test('startup canonicalizes an invalid display preset, preserves legacy/raw sett
 
   const first = await mount()
   assert.equal(first.app.displayPreset(), 'full', 'an invalid canonical value resolves to Full before the first frame')
-  assert.equal(replacements.length, 1, 'boot must attempt one canonical migration write')
-  assert.equal(doc.displayPreset, 'garbage', 'a failed migration must not change the live settings document')
+  // The boot writes: the one-shot marker completion, then the canonicalizing
+  // displayPreset set — raw fields are never re-pinned.
+  assert.deepEqual(written, [
+    { op: 'set', path: ['legacySettingsMigrationVersion'], value: 1 },
+    { op: 'set', path: ['displayPreset'], value: 'full' },
+  ])
   await first.fiber.dispose()
   await disposeContext(first.context)
 
   const second = await mount()
   assert.equal(second.app.displayPreset(), 'full')
-  assert.equal(replacements.length, 2, 'a later boot must retry the failed canonicalization')
-  assert.equal(doc.displayPreset, 'full')
-  assert.equal(doc.focusMode, 'on', 'legacy focusMode remains migration-only and preserved')
-  assert.deepEqual(doc.footerCustomItems, userFooterItems, 'whole-document migration preserves the USER footer definitions')
-  assert.deepEqual(doc.keybindings, { tab: 'custom' }, 'unknown settings pass-through survives migration')
-  assert.equal(replacements[1]?.displayPreset, 'full')
+  // The retry boot: the marker batch is now a no-op (the fake never commits
+  // the reference), so the canonicalizing write retries alone.
+  assert.deepEqual(written.at(-1), { op: 'set', path: ['displayPreset'], value: 'full' },
+    'a later boot must retry the failed canonicalization')
   await second.fiber.dispose()
   await disposeContext(second.context)
-
-  // Remove the canonical field to exercise the real legacy Focus fallback
-  // through apply/compose, not only the pure resolver.
-  delete doc.displayPreset
-  const third = await mount()
-  assert.equal(third.app.displayPreset(), 'focus', 'legacy focusMode must apply before the first production frame')
-  assert.equal(replacements.length, 3)
-  assert.equal(replacements[2]?.displayPreset, 'focus', 'legacy boot must canonicalize to Focus')
-  assert.equal(doc.focusMode, 'on', 'legacy focusMode remains preserved after canonicalization')
-
-  const displayHandler = (third.harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
-  assert.ok(displayHandler !== undefined, 'the production runner must register /display')
-  const displayResult = await (displayHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'full' })
-  assert.deepEqual(displayResult, { kind: 'success', text: 'Display: full.' })
-  await settle()
-  assert.equal(doc.displayPreset, 'full', 'the production canonical setter must persist displayPreset')
-  assert.equal(doc.focusMode, 'on', 'the production display write must not mutate legacy focusMode')
-  assert.equal(replacements.at(-1)?.displayPreset, 'full')
-  await third.fiber.dispose()
-  await disposeContext(third.context)
-})
-
-test('display full retries canonical persistence after a failed migration write', async (t) => {
-  const life = testLifecycle(t)
-  const home = life.tempDir('dsh-pi-tui-display-unchanged-retry-')
-  const previousHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  life.defer(() => {
-    if (previousHome === undefined) delete process.env.DSH_HOME
-    else process.env.DSH_HOME = previousHome
-  })
-  const vt = new VirtualTerminal(100, 30)
-  const restoreTerminal = installVirtualProcessTerminal(vt)
-  life.defer(restoreTerminal)
-  const probe = installProbe()
-  life.defer(probe.restore)
-  const resumed: FakeSession = fakeSession({
-    id: 'display-unchanged-retry-session',
-    header: { id: 'display-unchanged-retry-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
-    events: sessionEvents('display unchanged retry'),
-  })
-  const doc: Record<string, unknown> = {
-    theme: 'auto', iconStyle: 'emoji', footer: 'full', fullscreen: 'off',
-    busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input',
-    focusMode: 'on', wheelScrollLines: '1',
-    notificationMode: 'unfocused', notificationMethod: 'auto',
-  }
-  const replacements: Record<string, unknown>[] = []
-  let failFirstWrite = true
-  const settings = {
-    register: () => ({
-      get: () => ({ ...doc }),
-      replace: async (next: Record<string, unknown>) => {
-        replacements.push({ ...next })
-        if (failFirstWrite) {
-          failFirstWrite = false
-          throw new Error('display migration write failed')
-        }
-        Object.assign(doc, next)
-      },
-    }),
-    describe: () => [{ ns: 'dsh-pi-tui', user: {} }],
-  }
-  const context = new Context()
-  const harness = makeHarness(home, resumed)
-  context.provide('settings', settings as never)
-  const fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
-  await settle()
-  const app = probe.apps.at(-1)
-  assert.ok(app !== undefined, 'the production runner must create a TuiApp')
-  assert.equal(app.displayPreset(), 'focus', 'legacy focusMode migrates to Focus at runtime')
-  assert.equal(replacements.length, 1, 'boot must attempt the migration write')
-  assert.equal(doc.displayPreset, undefined, 'the failed migration leaves settings unchanged')
-
-  const displayHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
-  assert.ok(displayHandler !== undefined, 'the production runner must register /display')
-  const result = await (displayHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'full' })
-  assert.deepEqual(result, { kind: 'success', text: 'Display: full.' })
-  await settle()
-  assert.equal(replacements.length, 2, 'an unchanged runtime preset must still retry persistence')
-  assert.equal(doc.displayPreset, 'full', 'the explicit /display full retry must repair the canonical setting')
-  assert.equal(replacements[1]?.displayPreset, 'full')
-  await fiber.dispose()
-  await disposeContext(context)
 })
 
 test('live repaint preserves manual scrolling in the latest window', async (t) => {
@@ -3810,7 +3723,7 @@ test('a pre-mount unload while the resume whenIdle is pending cancels the agent 
   context.provide('commands', harness.commands as never)
   context.provide('subagents', harness.subagents as never)
   context.provide('loader', { await: async () => {} } as never)
-  const fiber = context.plugin((pluginCtx) => applyRunner(pluginCtx, { sessionId: resumed.id }))
+  const fiber = context.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: resumed.id } as never)))
   await fiber
   await whenIdleStartedPromise
   await disposeContext(context)

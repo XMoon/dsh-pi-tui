@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectCatalogPort, type HostContextLike } from '../src/runtime/direct/catalog-direct.ts'
-import type { AgentPreset } from '@deepseek-ai/dsh-agent-presets'
+import type { AgentPreset } from '@deepseek-ai/dsh-agent-preset-registry'
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -28,7 +28,7 @@ function host(services: Record<string, unknown>): HostContextLike {
 }
 
 function preset(id: string, extra: Partial<AgentPreset> = {}): AgentPreset {
-  return { id, trust: 'system', ...extra } as AgentPreset
+  return { id, ...extra }
 }
 
 const liveAgent = {
@@ -483,7 +483,7 @@ test('presets degrade to unavailable without a roster service', async () => {
   assert.equal(presets.available(), false)
   assert.deepEqual(await presets.roster(), { presets: [], modeSelectionEnabled: false })
   assert.deepEqual(await presets.resolve('standard'), {}, 'rosterless resolve yields no preset identity')
-  await assert.rejects(presets.resolve('code'), /preset "code" is unavailable/)
+  assert.deepEqual(await presets.resolve('code'), {}, 'an ordinary id is never special in a rosterless deployment')
   assert.equal(presets.defaultId(), undefined)
 })
 
@@ -492,12 +492,12 @@ test('presets roster/resolve/defaultId return detached roster DTOs', async () =>
     agentPresets: {
       remoteExportList: async () => ({
         presets: [
-          { id: 'standard', trust: 'system', isDefault: true },
-          { id: 'code', trust: 'user', name: 'PTC', broken: 'x' },
+          { id: 'standard', isDefault: true },
+          { id: 'code', name: 'PTC', broken: 'x' },
         ],
         modeSelectionEnabled: true,
       }),
-      list: async () => [preset('standard'), preset('code', { trust: 'user', name: 'PTC', broken: 'x' })],
+      list: async () => [preset('standard'), preset('code', { name: 'PTC', broken: 'x' })],
       resolve: async (id?: string) => preset(id ?? 'standard'),
       get defaultId() { return 'standard' },
     },
@@ -506,8 +506,8 @@ test('presets roster/resolve/defaultId return detached roster DTOs', async () =>
   const roster = await presets.roster()
   assert.deepEqual(roster, {
     presets: [
-      { id: 'standard', trust: 'system' },
-      { id: 'code', trust: 'user', name: 'PTC', broken: 'x' },
+      { id: 'standard' },
+      { id: 'code', name: 'PTC', broken: 'x' },
     ],
     defaultId: 'standard',
     modeSelectionEnabled: true,
@@ -521,7 +521,7 @@ test('presets roster carries the Host mode-selection policy', async () => {
   const presets = port({
     agentPresets: {
       remoteExportList: async () => ({
-        presets: [{ id: 'standard', trust: 'system', isDefault: true }],
+        presets: [{ id: 'standard', isDefault: true }],
         modeSelectionEnabled: false,
       }),
       list: async () => [preset('standard')],
@@ -530,24 +530,10 @@ test('presets roster carries the Host mode-selection policy', async () => {
     },
   }).presets
   assert.deepEqual(await presets.roster(), {
-    presets: [{ id: 'standard', trust: 'system' }],
+    presets: [{ id: 'standard' }],
     defaultId: 'standard',
     modeSelectionEnabled: false,
   })
-})
-
-test('presets roster FAILS CLOSED without the public policy read', async () => {
-  const presets = port({
-    agentPresets: {
-      list: async () => [preset('standard')],
-      resolve: async (id?: string) => preset(id ?? 'standard'),
-      get defaultId() { return 'standard' },
-    },
-  }).presets
-  assert.deepEqual(await presets.roster(), {
-    presets: [{ id: 'standard', trust: 'system' }],
-    modeSelectionEnabled: false,
-  }, 'a roster surface without the public policy read must not expose the picker')
 })
 
 test('presets selectSessionPreset maps the official blank-session select', async () => {
@@ -594,23 +580,25 @@ test('presets selectSessionPreset refuses when the session is not live', async (
   if (outcome.kind === 'rejected') assert.equal(outcome.error.code, 'session/not-found')
 })
 
-test('presets resolves an absent legacy code default as ptc but preserves explicit code semantics', async () => {
+test('presets treats a declared code id as an ordinary preset — never rewritten, no legacy fallback', async () => {
   const resolved: Array<string | undefined> = []
   const presets = port({
     agentPresets: {
-      list: async () => [preset('ptc')],
+      remoteExportList: async () => ({ presets: [{ id: 'code', isDefault: true }], modeSelectionEnabled: true }),
+      list: async () => [preset('code')],
       resolve: async (id?: string) => {
         resolved.push(id)
-        if (id === 'code') throw Object.assign(new Error('unknown preset'), { presetId: 'code' })
-        return preset(id ?? 'ptc')
+        if (id === 'code' || id === undefined) return preset('code')
+        throw Object.assign(new Error('unknown preset'), { presetId: id })
       },
       get defaultId() { return 'code' },
     },
   }).presets
-  assert.deepEqual(await presets.resolve(undefined), { id: 'ptc' })
-  await assert.rejects(() => presets.resolve('code'), /unknown preset/u)
-  assert.deepEqual(resolved, ['code', 'ptc', 'code'], 'only omitted default resolution gets the legacy fallback')
-  assert.equal(presets.defaultId(), 'code', 'the synchronous default read preserves roster ambiguity')
+  // An explicit code resolves AS code — the registry owns identity and the
+  // TUI adds no alias, no probe and no ptc fallback.
+  assert.deepEqual(await presets.resolve('code'), { id: 'code' })
+  assert.deepEqual(await presets.resolve(undefined), { id: 'code' }, 'the default resolves through the registry alone')
+  assert.deepEqual(resolved, ['code', undefined])
 })
 
 test('presets.resolve propagates an unknown-preset rejection', async () => {
@@ -694,7 +682,7 @@ test('skills standing reads the cold catalog through the standing scope', async 
   const skills = port({
     skills: skillRegistry({ cold: 'Cold skill' }),
     agentPresets: {
-      standingKeyFor: async (id?: string) => { standingKey = id; return { scope: 'standing' } },
+      acquireScope: async (id?: string) => { standingKey = id; return { key: { scope: 'standing' }, [Symbol.asyncDispose]: async () => {} } },
     },
   }).skills
   const read = await skills.standing('standard', '/ws')
@@ -707,7 +695,7 @@ test('skills standing degrades to the global layer with a one-shot notice', asyn
   const skills = port({
     skills: skillRegistry({ cold: 'Cold skill' }),
     agentPresets: {
-      standingKeyFor: async () => { throw new Error('mount broken') },
+      acquireScope: async () => { throw new Error('mount broken') },
     },
   }).skills
   const read = await skills.standing(undefined, '/ws')
@@ -933,7 +921,7 @@ test('Direct roster aborts after the Host await (never opens on a cancelled read
   await assert.rejects(pending, /abort/i)
 })
 
-test('Direct preset resolve aborts between the code probe and the ptc fallback', async () => {
+test('Direct preset resolve surfaces an abort raised during the Host read', async () => {
   const started = deferred<void>()
   let release!: () => void
   const gate = new Promise<void>((resolve) => { release = resolve })
@@ -943,12 +931,9 @@ test('Direct preset resolve aborts between the code probe and the ptc fallback',
       defaultId: 'code',
       resolve: async (id?: string) => {
         calls.push(id)
-        if (id === 'code') {
-          started.resolve()
-          await gate
-          throw Object.assign(new Error('agent-presets: preset "code" not found (available: standard)'), { code: 'agent-preset/not-found' })
-        }
-        return { id: 'ptc', trust: 'system' }
+        started.resolve()
+        await gate
+        return { id: 'code' }
       },
     },
   }), () => undefined).presets
@@ -958,7 +943,7 @@ test('Direct preset resolve aborts between the code probe and the ptc fallback',
   controller.abort()
   release()
   await assert.rejects(pending, /abort/i)
-  assert.deepEqual(calls, ['code'], 'the fallback Host read must not run after an abort')
+  assert.deepEqual(calls, [undefined], 'exactly one Host read — no fallback read after an abort')
 })
 
 test('Direct selectSessionModel reports cancelled (not rejected) when aborted while normalization rejects', async () => {

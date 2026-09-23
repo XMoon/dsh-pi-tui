@@ -78,11 +78,14 @@ function fakeAgent(sessionId: string, events: readonly { type: string }[] = []):
 
 /** The four shipped rows WITH Chinese metadata, exactly as the dsh install's
  * agent-presets package ships them in its official shipped root. */
+/** The 0.1.7 shipped declarations publish no name/description of their
+ * own (the official built-in classification); the TUI's fixed English copy
+ * supplies the picker text. */
 const SHIPPED_ROWS = [
-  { id: 'standard', name: '标准模式', description: '功能完整的编码 Agent。', trust: 'system' },
-  { id: 'ptc', name: 'PTC 模式', description: 'Code Mode SDK。', trust: 'system' },
-  { id: 'minimal', name: '极简模式', description: '双工具编码 Agent。', trust: 'system' },
-  { id: 'cordis', name: '创造模式', description: '自定义 Agent preset。', trust: 'system' },
+  { id: 'standard' },
+  { id: 'ptc' },
+  { id: 'minimal' },
+  { id: 'cordis' },
 ]
 
 function presetService(
@@ -112,7 +115,6 @@ function presetService(
         : {
             presets: rows.map(row => ({
               id: row.id,
-              trust: row.trust ?? 'system',
               isDefault: row.id === defaultPresetId,
               ...row.name === undefined ? {} : { name: row.name },
               ...row.description === undefined ? {} : { description: row.description },
@@ -121,16 +123,18 @@ function presetService(
           },
       list: async () => rows.map(row => ({
         id: row.id,
-        trust: row.trust ?? 'system',
         path: `/presets/${row.id}`,
         ...row.name === undefined ? {} : { name: row.name },
         ...row.description === undefined ? {} : { description: row.description },
       })),
       resolve: async (id?: string) => {
         if (resolveOverride !== undefined) return resolveOverride(id)
-        const row = rows.find(candidate => candidate.id === id)
-        if (row === undefined) throw new Error(`agent-presets: preset "${id}" not found (available: standard)`)
-        resolved.push(id!)
+        // Real-registry semantics: an omitted id resolves the deployment
+        // default; an unknown id (explicit OR default) is refused.
+        const wanted = id ?? defaultPresetId
+        resolved.push(wanted)
+        const row = rows.find(candidate => candidate.id === wanted)
+        if (row === undefined) throw new Error(`agent-presets: preset "${wanted}" not found (available: standard)`)
         return { id: row.id, trust: row.trust ?? 'system', path: `/presets/${row.id}` }
       },
       // The official blank-session select: re-checks the session's turn
@@ -377,7 +381,7 @@ function setup(options: {
   startedApps.add(app)
   const commands = fakeCommands(options.commandsListRegistered === true, options.commandsPresetOverride)
   ctx.provide('commands', commands.service as never)
-  if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
+  if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
   const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked, options.roster, options.resolve, options.selectHook)
   if (options.noPresets !== true) ctx.provide('agentPresets', presets.service as never)
   if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
@@ -445,7 +449,6 @@ test('/keybindings opens sessionless without creating a session', async () => {
       busyEnter: 'queue',
       localShellSandbox: 'bypass',
       homeEndKeys: 'viewport',
-      focusMode: 'off',
     wheelScrollLines: '1',
       iconStyle: 'emoji',
       notificationMode: 'unfocused',
@@ -505,12 +508,12 @@ test('/preset <id> with no session rejects an unknown id', async () => {
   t.app.stop()
 })
 
-test('/preset code remains unknown when the roster has no code entry', async () => {
+test('/preset reports an unknown id verbatim — no legacy alias hint', async () => {
   const t = setup({})
   const result = await t.run('code') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
   assert.match(result.text, /preset "code" not found/)
-  assert.match(result.text, /use preset "ptc"/)
+  assert.doesNotMatch(result.text, /use preset "ptc"/, 'the retired code→ptc alias must not surface as a hint')
   assert.equal(t.pending.value, undefined)
   t.app.stop()
 })
@@ -523,7 +526,7 @@ test('/preset code selects a legal custom code roster entry', async () => {
   t.app.stop()
 })
 
-test('/new resolves an absent legacy code default as canonical ptc', async () => {
+test('/new refuses a registry default no declaration supplies — no guessed replacement', async () => {
   const created: { agentPreset?: string }[] = []
   const t = setup({
     defaultPresetId: 'code',
@@ -536,9 +539,10 @@ test('/new resolves an absent legacy code default as canonical ptc', async () =>
     },
   })
   const result = await t.runCommand('new') as { kind: string; text?: string }
-  assert.deepEqual(result, { kind: 'success', text: 'started a fresh session' })
-  assert.deepEqual(t.presets.resolved, ['ptc'], 'the legacy default falls back to the canonical ptc roster entry')
-  assert.deepEqual(created, [{ agentPreset: 'ptc' }], 'new session metadata must stay canonical')
+  assert.equal(result.kind, 'error', 'an invalid deployment default must surface, never silently become ptc')
+  assert.match(result.text ?? '', /preset "code" not found/u)
+  assert.deepEqual(t.presets.resolved, ['code'], 'exactly one registry resolution — no fallback probe')
+  assert.deepEqual(created, [], 'no session is created on a refused default')
   t.app.stop()
 })
 
@@ -711,7 +715,7 @@ test('/preset default <id> with no override requests a standing refresh of the n
   t.app.stop()
 })
 
-test('/preset default code remains unknown when the roster has no code entry', async () => {
+test('/preset default reports an unknown id verbatim — no legacy alias hint', async () => {
   const writes: unknown[] = []
   const t = setup({
     refreshCatalog: async () => standingOutcome(['glab']),
@@ -723,7 +727,7 @@ test('/preset default code remains unknown when the roster has no code entry', a
   const result = await t.run('default code') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
   assert.match(result.text, /preset "code" not found/u)
-  assert.match(result.text, /use preset "ptc"/u)
+  assert.doesNotMatch(result.text, /use preset "ptc"/u, 'the retired code→ptc alias must not surface as a hint')
   assert.deepEqual(writes, [], 'an unknown code id must never be persisted')
   assert.deepEqual(t.refreshes, [])
   t.app.stop()
@@ -741,7 +745,7 @@ test('/preset default code writes a legal custom roster entry', async () => {
   })
   const result = await t.run('default code') as { kind: string; text: string }
   assert.deepEqual(result, { kind: 'success', text: 'default preset set: code' })
-  assert.deepEqual(writes, [[{ op: 'set', path: ['default'], value: 'code' }]])
+  assert.deepEqual(writes, [[{ op: 'set', path: ['selectedDefault'], value: 'code' }]])
   assert.deepEqual(t.refreshes[0]?.target, { kind: 'preset', presetId: 'code' })
   t.app.stop()
 })
@@ -804,7 +808,7 @@ function reloadSettings(theme: string, onGet?: (count: number) => void): TuiSett
     get: () => {
       reads += 1
       onGet?.(reads)
-      return { theme: currentTheme, iconStyle: 'emoji', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }
+      return { theme: currentTheme, iconStyle: 'emoji', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }
     },
     replace: doc => { currentTheme = doc.theme as string },
   }
@@ -961,7 +965,7 @@ test('/keybindings reload re-reads the settings document LAZILY (the explicit re
   // reload time (a stale cached parse would miss a later settings edit).
   let settingsDoc = {
     theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue',
-    localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1',
+    localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1',
     iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto',
     keybindings: { 'app.input.steer': 'ctrl+x' },
   }
@@ -1000,7 +1004,6 @@ test('/keybindings reload queues behind an editor write and applies the latest d
     busyEnter: 'queue',
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
-    focusMode: 'off',
     wheelScrollLines: '1',
     iconStyle: 'emoji',
     notificationMode: 'unfocused',
@@ -1066,7 +1069,6 @@ test('/keybindings reset queues behind an editor write and keeps the final reset
     busyEnter: 'queue',
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
-    focusMode: 'off',
     wheelScrollLines: '1',
     iconStyle: 'emoji',
     notificationMode: 'unfocused',
@@ -1124,7 +1126,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
   // now-keybindings-less document.
   let replaced = 0
   const failing: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }),
+    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }),
     replace: async () => { replaced += 1; throw new Error('write refused') },
   }
   let t = setup({ tuiSettings: failing })
@@ -1151,7 +1153,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
     get: () => {
       okReads += 1
       if (okReads > 1) throw new Error('no second read allowed')
-      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
     },
     replace: async () => { okReplaced += 1 },
   }
@@ -1212,7 +1214,7 @@ test('/keybindings reload is fail-soft: a throwing settings read keeps the last-
   const tuiSettings: TuiSettingsLike = {
     get: () => {
       if (failing) throw new Error('settings read exploded')
-      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', focusMode: 'off', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
     },
     replace: async () => {},
   }
@@ -1354,9 +1356,7 @@ test('an older /preset superseded during the roster read is silent even when the
       return {
         presets: SHIPPED_ROWS.map(row => ({
           id: row.id,
-          trust: row.trust ?? 'system',
           isDefault: row.id === 'standard',
-          ...row.name === undefined ? {} : { name: row.name },
         })),
         modeSelectionEnabled: false,
       }
@@ -1401,9 +1401,7 @@ test('an older /preset whose Session generation moved during the roster read is 
       return {
         presets: SHIPPED_ROWS.map(row => ({
           id: row.id,
-          trust: row.trust ?? 'system',
           isDefault: row.id === 'standard',
-          ...row.name === undefined ? {} : { name: row.name },
         })),
         modeSelectionEnabled: false,
       }
@@ -1459,7 +1457,7 @@ test('typed /preset whose subject drifts to a same-generation live Session is su
       // WITHOUT a generation bump.
       state.agent = fakeAgent('s2', [])
       return {
-        presets: SHIPPED_ROWS.map(row => ({ id: row.id, trust: row.trust ?? 'system', isDefault: row.id === 'standard' })),
+        presets: SHIPPED_ROWS.map(row => ({ id: row.id, isDefault: row.id === 'standard' })),
         modeSelectionEnabled: true,
       }
     },
@@ -1518,7 +1516,7 @@ test('a /preset picker whose Session identity drifts during the roster read neve
       // roster read is in flight.
       state.agent = fakeAgent('s2', [])
       return {
-        presets: SHIPPED_ROWS.map(row => ({ id: row.id, trust: row.trust ?? 'system', isDefault: row.id === 'standard' })),
+        presets: SHIPPED_ROWS.map(row => ({ id: row.id, isDefault: row.id === 'standard' })),
         modeSelectionEnabled: true,
       }
     },
@@ -1543,9 +1541,7 @@ function policyRoster(enabled: boolean) {
   return async () => ({
     presets: SHIPPED_ROWS.map(row => ({
       id: row.id,
-      trust: row.trust ?? 'system',
       isDefault: row.id === 'standard',
-      ...row.name === undefined ? {} : { name: row.name },
     })),
     modeSelectionEnabled: enabled,
   })
@@ -1618,7 +1614,6 @@ test('a stale roster result cannot rewrite the new Session preset visibility', a
       return {
         presets: SHIPPED_ROWS.map(row => ({
           id: row.id,
-          trust: row.trust ?? 'system',
           isDefault: row.id === 'standard',
         })),
         // The generation-1 read says ENABLED and settles late; the
@@ -1651,7 +1646,7 @@ test('a disabled preset policy does not leak across owners; an unavailable roste
       calls += 1
       if (calls === 1) {
         return {
-          presets: SHIPPED_ROWS.map(row => ({ id: row.id, trust: row.trust ?? 'system', isDefault: row.id === 'standard' })),
+          presets: SHIPPED_ROWS.map(row => ({ id: row.id, isDefault: row.id === 'standard' })),
           modeSelectionEnabled: false,
         }
       }
@@ -1684,7 +1679,7 @@ test('a same-owner late roster read cannot overwrite a newer preset-visibility r
       calls += 1
       if (calls === 1) await gate
       return {
-        presets: SHIPPED_ROWS.map(row => ({ id: row.id, trust: row.trust ?? 'system', isDefault: row.id === 'standard' })),
+        presets: SHIPPED_ROWS.map(row => ({ id: row.id, isDefault: row.id === 'standard' })),
         // The LATE first read says ENABLED; the newer read says DISABLED.
         modeSelectionEnabled: calls === 1,
       }
@@ -1718,7 +1713,6 @@ function gatedStaleEnabledRoster() {
     return {
       presets: SHIPPED_ROWS.map(row => ({
         id: row.id,
-        trust: row.trust ?? 'system',
         isDefault: row.id === 'standard',
       })),
       modeSelectionEnabled: enabled,
@@ -1790,7 +1784,7 @@ test('a stale /preset default read cannot overwrite newer visibility, but still 
   await new Promise(resolve => setTimeout(resolve, 25))
   assert.ok(!t.app.commandCompletionsForTest().some(command => command.name === 'preset'),
     'the stale default read must not overwrite the newer visibility state')
-  assert.deepEqual(writes, [[{ op: 'set', path: ['default'], value: 'ptc' }]],
+  assert.deepEqual(writes, [[{ op: 'set', path: ['selectedDefault'], value: 'ptc' }]],
     'a still-current /preset default mutation must still write, decided by ITS OWN roster')
   t.app.stop()
 })

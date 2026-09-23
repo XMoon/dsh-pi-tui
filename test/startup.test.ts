@@ -1,9 +1,9 @@
 /**
  * Headless tests for the startup compatibility notice: on a DeepSeek Harness
- * older than the published npm floor (dsh-v0.1.6-alpha.2) the TUI prints
+ * older than the published npm floor (dsh-v0.1.7-alpha.2) the TUI prints
  * npm-aware upgrade guidance when it can prove the version, but does not make
  * concurrent Loader ordering a hard startup contract. The recommended published
- * 0.1.6-alpha.2 target is suggested with its native install scripts enabled. Future runtime lines are not
+ * 0.1.7-alpha.2 target is suggested with its native install scripts enabled. Future runtime lines are not
  * rejected without evidence of a break. `--help` stays available on any
  * harness (the action never runs).
  * @module @xmoon76/dsh-pi-tui/startup.test
@@ -86,8 +86,8 @@ test('an older harness gets actionable npm upgrade guidance without a hard Loade
     assert.equal((ctx.get(TUI_STARTUP_SERVICE) as { sessionId: string }).sessionId, 's1')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes(`running dsh 0.1.0-rc.8`), `stderr must name the installed version:\n${joined}`)
-    assert.ok(joined.includes('DeepSeek Harness 0.1.6-alpha.2 or later'), `stderr must name the npm floor:\n${joined}`)
-    assert.ok(joined.includes('npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2'), `stderr must give the exact npm upgrade:\n${joined}`)
+    assert.ok(joined.includes('DeepSeek Harness 0.1.7-alpha.2 or later'), `stderr must name the npm floor:\n${joined}`)
+    assert.ok(joined.includes('npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-alpha.2'), `stderr must give the exact npm upgrade:\n${joined}`)
     assert.doesNotMatch(joined, /pinned master source|pinned DSH master source distribution/u, `stderr must not keep Source Mode wording:\n${joined}`)
   } finally {
     stderr.restore()
@@ -95,9 +95,9 @@ test('an older harness gets actionable npm upgrade guidance without a hard Loade
   }
 })
 
-test('the published 0.1.6-alpha.2 harness version starts normally and provides the service', (t) => {
+test('the published 0.1.7-alpha.2 harness version starts normally and provides the service', (t) => {
   const life = testLifecycle(t)
-  const launcher = fakeLauncher(life, '0.1.6-alpha.2')
+  const launcher = fakeLauncher(life, '0.1.7-alpha.2')
   const stderr = captureStderr()
   try {
     const ctx = mountStartup(['--session', 's1'])
@@ -110,9 +110,9 @@ test('the published 0.1.6-alpha.2 harness version starts normally and provides t
   }
 })
 
-test('an older alpha.1 line is rejected by the 0.1.6-alpha.2 npm gate', (t) => {
+test('an older alpha.1 line is rejected by the 0.1.7-alpha.2 npm gate', (t) => {
   const life = testLifecycle(t)
-  // The npm minimum is >=0.1.6-alpha.2; this older alpha line is below the
+  // The npm minimum is >=0.1.7-alpha.2; this older alpha line is below the
   // floor and must be refused with the exact npm upgrade.
   const launcher = fakeLauncher(life, '0.1.3-alpha.1')
   const stderr = captureStderr()
@@ -121,8 +121,8 @@ test('an older alpha.1 line is rejected by the 0.1.6-alpha.2 npm gate', (t) => {
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block concurrent profile mounting')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes('running dsh 0.1.3-alpha.1'), `stderr must name the installed version:\n${joined}`)
-    assert.ok(joined.includes('DeepSeek Harness 0.1.6-alpha.2 or later'), `stderr must name the requirement:\n${joined}`)
-    assert.ok(joined.includes('npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2'), `stderr must give the exact npm upgrade:\n${joined}`)
+    assert.ok(joined.includes('DeepSeek Harness 0.1.7-alpha.2 or later'), `stderr must name the requirement:\n${joined}`)
+    assert.ok(joined.includes('npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-alpha.2'), `stderr must give the exact npm upgrade:\n${joined}`)
     assert.doesNotMatch(joined, /pinned master source|pinned DSH master source distribution/u, `stderr must not keep Source Mode wording:\n${joined}`)
   } finally {
     stderr.restore()
@@ -130,9 +130,9 @@ test('an older alpha.1 line is rejected by the 0.1.6-alpha.2 npm gate', (t) => {
   }
 })
 
-test('the previous alpha.3 line is rejected by the 0.1.6-alpha.2 npm gate', (t) => {
+test('the previous alpha.3 line is rejected by the 0.1.7-alpha.2 npm gate', (t) => {
   const life = testLifecycle(t)
-  // The npm minimum is >=0.1.6-alpha.2; the previous alpha line is below
+  // The npm minimum is >=0.1.7-alpha.2; the previous alpha line is below
   // the floor and must be refused with the exact npm upgrade.
   const launcher = fakeLauncher(life, '0.1.2-alpha.3')
   const stderr = captureStderr()
@@ -141,8 +141,8 @@ test('the previous alpha.3 line is rejected by the 0.1.6-alpha.2 npm gate', (t) 
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block concurrent profile mounting')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes('running dsh 0.1.2-alpha.3'), `stderr must name the installed version:\n${joined}`)
-    assert.ok(joined.includes('DeepSeek Harness 0.1.6-alpha.2 or later'), `stderr must name the requirement:\n${joined}`)
-    assert.ok(joined.includes('npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2'), `stderr must give the exact npm upgrade:\n${joined}`)
+    assert.ok(joined.includes('DeepSeek Harness 0.1.7-alpha.2 or later'), `stderr must name the requirement:\n${joined}`)
+    assert.ok(joined.includes('npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-alpha.2'), `stderr must give the exact npm upgrade:\n${joined}`)
     assert.doesNotMatch(joined, /pinned master source|pinned DSH master source distribution/u, `stderr must not keep Source Mode wording:\n${joined}`)
   } finally {
     stderr.restore()
@@ -150,9 +150,9 @@ test('the previous alpha.3 line is rejected by the 0.1.6-alpha.2 npm gate', (t) 
   }
 })
 
-test('the previous alpha.4/alpha.5 line is rejected by the 0.1.6-alpha.2 npm gate', (t) => {
+test('the previous alpha.4/alpha.5 line is rejected by the 0.1.7-alpha.2 npm gate', (t) => {
   const life = testLifecycle(t)
-  // The npm minimum is >=0.1.6-alpha.2: the previous alpha line is below
+  // The npm minimum is >=0.1.7-alpha.2: the previous alpha line is below
   // the floor and must be refused with the exact npm upgrade.
   const launcher = fakeLauncher(life, '0.1.2-alpha.5')
   const stderr = captureStderr()
@@ -161,8 +161,8 @@ test('the previous alpha.4/alpha.5 line is rejected by the 0.1.6-alpha.2 npm gat
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block concurrent profile mounting')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes('running dsh 0.1.2-alpha.5'), `stderr must name the installed version:\n${joined}`)
-    assert.ok(joined.includes('DeepSeek Harness 0.1.6-alpha.2 or later'), `stderr must name the requirement:\n${joined}`)
-    assert.ok(joined.includes('npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2'), `stderr must give the exact npm upgrade:\n${joined}`)
+    assert.ok(joined.includes('DeepSeek Harness 0.1.7-alpha.2 or later'), `stderr must name the requirement:\n${joined}`)
+    assert.ok(joined.includes('npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-alpha.2'), `stderr must give the exact npm upgrade:\n${joined}`)
     assert.doesNotMatch(joined, /pinned master source|pinned DSH master source distribution/u, `stderr must not keep Source Mode wording:\n${joined}`)
   } finally {
     stderr.restore()
@@ -171,7 +171,7 @@ test('the previous alpha.4/alpha.5 line is rejected by the 0.1.6-alpha.2 npm gat
 })
 
 test('the published floor and future stable lines start normally', (t) => {
-  for (const version of ['0.1.6-alpha.2', '0.1.6', '0.2.0']) {
+  for (const version of ['0.1.7-alpha.2', '0.1.7', '0.2.0']) {
     const life = testLifecycle(t)
     const launcher = fakeLauncher(life, version)
     try {
@@ -186,8 +186,9 @@ test('the published floor and future stable lines start normally', (t) => {
 test('the published 0.1.6-alpha.1 harness is refused by the alpha.2 contract gate', (t) => {
   const life = testLifecycle(t)
   // dsh-v0.1.6-alpha.1 is published and works with the older 0.4.7-alpha.1
-  // bundle, but the current line depends on the alpha.2 Client Session
-  // contract: the user must be told to upgrade (or fall back).
+  // bundle, but the current line depends on the 0.1.7 profile-config and
+  // declarative-preset contracts: the user must be told to upgrade (or fall
+  // back).
   const launcher = fakeLauncher(life, '0.1.6-alpha.1')
   const stderr = captureStderr()
   try {
@@ -195,7 +196,7 @@ test('the published 0.1.6-alpha.1 harness is refused by the alpha.2 contract gat
     assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block concurrent profile mounting')
     const joined = stderr.lines.join('')
     assert.ok(joined.includes('running dsh 0.1.6-alpha.1'), `stderr must name the installed version:\n${joined}`)
-    assert.ok(joined.includes('DeepSeek Harness 0.1.6-alpha.2 or later'), `stderr must name the requirement:\n${joined}`)
+    assert.ok(joined.includes('DeepSeek Harness 0.1.7-alpha.2 or later'), `stderr must name the requirement:\n${joined}`)
     assert.ok(joined.includes('@xmoon76/dsh-pi-tui@0.4.7-alpha.1'), `stderr must offer the compatible alpha.1 fallback:\n${joined}`)
   } finally {
     stderr.restore()
@@ -298,9 +299,9 @@ test('incompatibleHarnessMessage is actionable and names both versions', () => {
   // hardcoded), so the assertion reads it the same way.
   const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
   assert.ok(message.includes(`dsh-pi-tui v${pkg.version}`), `must name the bundle version: ${message}`)
-  assert.ok(message.includes('DeepSeek Harness 0.1.6-alpha.2 or later'), 'must name the requirement')
+  assert.ok(message.includes('DeepSeek Harness 0.1.7-alpha.2 or later'), 'must name the requirement')
   assert.ok(message.includes('0.1.0-rc.8'), 'must name the installed version')
-  assert.ok(message.includes('npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2'), 'must give the exact npm upgrade')
+  assert.ok(message.includes('npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-alpha.2'), 'must give the exact npm upgrade')
   assert.ok(message.includes('dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.2'), 'must offer the compatible 0.2 fallback for the official rc.8 runtime')
   assert.doesNotMatch(message, /pinned master source|pinned DSH master source distribution/u, 'must not keep Source Mode wording')
 })
@@ -318,10 +319,17 @@ test('DSH peer ranges keep the lower-bound compatibility contract', () => {
     .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
   const expectedDevVersion = Object.entries(packageJson.devDependencies ?? {})
     .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
-  const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.6-alpha.2'
+  const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? '0.1.7-alpha.2'
   assert.ok(dshPeers.length > 0, 'the bundle must declare DSH peers')
+  // The 0.1.7 preset packages (PR A) exist only in the 0.1.7 family; the
+  // legacy family floors stay at the published 0.1.6 contract until the
+  // train's closure PR unifies the whole peer policy deliberately.
+  const NEW_FAMILY_FLOOR: ReadonlySet<string> = new Set([
+    '@deepseek-ai/dsh-agent-preset-registry',
+  ])
   for (const [name, range] of dshPeers) {
-    assert.equal(range, '>=0.1.6-alpha.2', `${name} must use the published-npm DSH compatibility contract`)
+    const expectedFloor = NEW_FAMILY_FLOOR.has(name) ? '>=0.1.7-alpha.2' : '>=0.1.6-alpha.2'
+    assert.equal(range, expectedFloor, `${name} must use the published-npm DSH compatibility contract`)
     assert.ok(!range.includes('0.1.1'), `${name} must not claim DSH 0.1.1`)
   }
   assert.equal(expectedDevVersion, expectedNpmTarget, 'the package must keep the declared npm target')
@@ -333,7 +341,7 @@ test('DSH peer ranges keep the lower-bound compatibility contract', () => {
   }
 })
 
-test('harnessCompatEntryFor follows the official DSH tag matrix below the published 0.1.6-alpha.2 floor', () => {
+test('harnessCompatEntryFor follows the official DSH tag matrix below the published 0.1.7-alpha.2 floor', () => {
   // These entries correspond to the published dsh-v* tags, not invented versions.
   const matrix: readonly [string, string | undefined][] = [
     ['0.1.0-rc.7', undefined],
@@ -354,11 +362,14 @@ test('harnessCompatEntryFor follows the official DSH tag matrix below the publis
     ['0.1.5-rc.2', '0.4.6'],
     // Published, but below the current line's alpha.2 Client-contract floor.
     ['0.1.6-alpha.1', '0.4.7-alpha.1'],
+    // Published and below the 0.1.7 profile-config/preset floor (PR A):
+    // the released 0.4.7-alpha.2 line remains the compatible fallback.
+    ['0.1.6-alpha.2', '0.4.7-alpha.2'],
   ]
   for (const [version, fallback] of matrix) {
     const entry = harnessCompatEntryFor(version)
     assert.ok(entry !== undefined, `${version} must match an incompatible entry`)
-    assert.equal(entry.upgradeDsh, '0.1.6-alpha.2')
+    assert.equal(entry.upgradeDsh, '0.1.7-alpha.2')
     assert.equal(entry.fallbackTui, fallback, `${version} must use its historically compatible TUI line`)
     const message = incompatibleHarnessMessage(version, entry)
     if (fallback === undefined) {
@@ -367,8 +378,9 @@ test('harnessCompatEntryFor follows the official DSH tag matrix below the publis
       assert.ok(message.includes(`@xmoon76/dsh-pi-tui@${fallback}`), `${version} must advertise ${fallback}`)
     }
   }
-  assert.equal(harnessCompatEntryFor('0.1.6-alpha.1')?.upgradeDsh, '0.1.6-alpha.2', 'the previous alpha.1 is below the floor')
-  assert.equal(harnessCompatEntryFor('0.1.6-alpha.2'), undefined, 'the published npm floor is supported')
+  assert.equal(harnessCompatEntryFor('0.1.6-alpha.1')?.upgradeDsh, '0.1.7-alpha.2', 'the previous alpha.1 is below the floor')
+  assert.equal(harnessCompatEntryFor('0.1.6-alpha.2')?.fallbackTui, '0.4.7-alpha.2', 'the released 0.1.6-alpha.2 line falls back to its released TUI')
+  assert.equal(harnessCompatEntryFor('0.1.7-alpha.2'), undefined, 'the published npm floor is supported')
   assert.equal(harnessCompatEntryFor('0.2.0'), undefined, 'future stable runtimes are not rejected without evidence')
   assert.equal(harnessCompatEntryFor('1.0.0'), undefined)
 })

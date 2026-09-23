@@ -95,13 +95,14 @@ function fakeCredentials(records: { key: string; kind?: string }[] = [{ key: 'll
   }
 }
 
-/** A fake settings service serving the llm-pi-ai section, recording writes. */
+/** A fake SettingsForms surface serving the llm-pi-ai form descriptor,
+ * recording writes. */
 function fakeSettings() {
   const mutations: { ns: string; ops: unknown[] }[] = []
   return {
     mutations,
     service: {
-      get: (ns: string): unknown => (ns === 'llm-pi-ai' ? LLM_PI_AI_SECTION : undefined),
+      describe: () => [{ ns: 'llm-pi-ai', value: LLM_PI_AI_SECTION, user: LLM_PI_AI_SECTION, revision: 2 }],
       mutate: async (ns: string, ops: unknown[]): Promise<void> => { mutations.push({ ns, ops }) },
     },
   }
