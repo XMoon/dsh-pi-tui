@@ -155,6 +155,8 @@
     "@deepseek-ai/dsh-sandbox-policy": "0.1.7-alpha.2",
     "@deepseek-ai/dsh-scope": "0.1.7-alpha.2",
     "@deepseek-ai/dsh-session": "0.1.7-alpha.2",
+    "@deepseek-ai/dsh-session-format": "0.1.7-alpha.2",
+    "@deepseek-ai/dsh-session-format-v3-to-v4": "0.1.7-alpha.2",
     "@deepseek-ai/dsh-session-log-export": "0.1.7-alpha.2",
     "@deepseek-ai/dsh-session-persistence": "0.1.7-alpha.2",
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.1.7-alpha.2",
