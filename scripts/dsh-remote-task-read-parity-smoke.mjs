@@ -23,6 +23,9 @@ import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import SubagentRuntime, { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import JobController from '@deepseek-ai/dsh-api-job-controller'
+import jobRemote from '@deepseek-ai/dsh-api-job-controller/remote'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { DirectTaskReader } from '../src/runtime/direct/task-read-direct.ts'
 import { RemoteTaskReader } from '../src/runtime/remote/task-read-remote.ts'
@@ -32,6 +35,7 @@ const PACKAGE_IDS = {
   connection: '@deepseek-ai/dsh-client-connection',
   gateway: '@deepseek-ai/dsh-api-gateway',
   session: '@deepseek-ai/dsh-api-session-controller',
+  jobs: '@deepseek-ai/dsh-api-job-controller',
 }
 
 function installModuleLoader() {
@@ -107,11 +111,19 @@ async function createHost() {
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SubagentRuntime)
   provideHostPeripheralServices(ctx)
+  // The fs service the Session Controller injects: without it the official
+  // controller (and its Remote stream exports) never constructs.
+  await ctx.plugin(LocalFileSystem)
   await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
     new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
   })
   await ctx.inject(SessionController.inject, controllerCtx => {
     new SessionController(controllerCtx, { nativeOpen: false })
+  })
+  // rc.1 ClientJobs authority: the Host must serve the `job.list` roster
+  // stream the official client watch consumes.
+  await ctx.inject(JobController.inject, controllerCtx => {
+    new JobController(controllerCtx, {})
   })
   await ctx.plugin(hostCtx => { new HostConnectionService(hostCtx, [], {}) })
   await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
@@ -149,6 +161,23 @@ async function createHost() {
     provider: 'fixture',
     label: 'task one-shot child',
   }))
+  // The parent-owned discovery facts (the runtime appends these through its
+  // own establishCatalogChild on a real spawn; the fixture writes the same
+  // v0 catalog events directly so both read authorities see the children).
+  parent.append('subagent/catalog', {
+    version: 0,
+    childId: childContinuable.id,
+    childCreatedAt: 3_001,
+    mode: 'continuable',
+    label: 'task continuable child',
+  })
+  parent.append('subagent/catalog', {
+    version: 0,
+    childId: childOneShot.id,
+    childCreatedAt: 3_002,
+    mode: 'one-shot',
+    label: 'task one-shot child',
+  })
 
   const parentFiber = ctx.plugin(() => {})
   const emptyInbox = { nextTurn: [], nextStep: [] }
@@ -168,7 +197,9 @@ async function createHost() {
       jobCtx.jobs.start({
         kind: 'bash',
         label: 'task parity job',
-        owner: parentAgent,
+        // rc.1 JobSpec ownership: the owner is the parent SessionId (the
+        // registry resolves the live Agent under it), never the Agent object.
+        owner: parent.id,
         run: () => ({ done, cancel: () => {} }),
       })
     },
@@ -179,6 +210,9 @@ async function createHost() {
 
 function hostTransport(host) {
   const shared = host.ctx.get('connection').createSharedFetchHandler('/api')
+  /** The client stream carrier contract passes an optional uplink; the Host
+   * wire face always takes one, so an absent uplink is an empty one. */
+  async function* emptyUplink() {}
   return {
     ownsHost: true,
     fetch(input, init) {
@@ -187,9 +221,11 @@ function hostTransport(host) {
         : new Request(new URL(String(input), 'http://dsh-task-parity.local'), init)
       return shared.fetch(request)
     },
-    openStream(endpoint, payload, signal) {
+    openStream(endpoint, payload, signal, uplink) {
       return (async function* () {
-        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, signal)
+        // Wire face: (endpoint, payload, uplink, peer, signal) — the
+        // operator's in-process carrier has no peer scope.
+        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, uplink ?? emptyUplink(), undefined, signal)
       })()
     },
   }
@@ -208,16 +244,20 @@ async function main() {
   let client
   let host
   let shadow
+  let remoteRef
   try {
     await import('@deepseek-ai/dsh-client-connection/client')
     await import('@deepseek-ai/dsh-api-gateway/client')
     await import('@deepseek-ai/dsh-api-session-controller/client')
+    await import('@deepseek-ai/dsh-api-job-controller/client')
     const connectionClient = loader.modules.get(PACKAGE_IDS.connection)
     const gatewayClient = loader.modules.get(PACKAGE_IDS.gateway)
     const sessionClient = loader.modules.get(PACKAGE_IDS.session)
+    const jobClient = loader.modules.get(PACKAGE_IDS.jobs)
     assert.ok(connectionClient !== undefined, 'official Connection Client did not load')
     assert.ok(gatewayClient !== undefined, 'official API Gateway Client did not load')
     assert.ok(sessionClient !== undefined, 'official Session Controller Client did not load')
+    assert.ok(jobClient !== undefined, 'official Job Controller Client did not load')
 
     host = await createHost()
     globalThis.__DSH_TRANSPORT__ = hostTransport(host)
@@ -226,15 +266,18 @@ async function main() {
     await client.plugin(TypertRegistry)
     await client.plugin(connectionClient)
     await client.plugin(gatewayClient)
-    for (const contribution of [commandsRemote, subagentsRemote, sessionRemote]) {
+    for (const contribution of [commandsRemote, subagentsRemote, sessionRemote, jobRemote]) {
       await client.remote.$mount(contribution)
     }
     client.provide('fileUpload', { available: false })
     await client.plugin(sessionClient)
+    await client.plugin(jobClient)
 
     const connection = client.get('connection')
     const sessions = client.get('sessions')
     await waitFor('official Client readiness', () => connection.generation.getSnapshot() !== undefined && sessions.list.getSnapshot().phase === 'ready')
+    const clientJobs = client.get('jobs')
+    assert.ok(clientJobs !== undefined, 'official ClientJobs service did not load')
 
     const direct = new DirectTaskReader({
       agentFor: id => host.ctx.get('agents').get(SessionId(id)),
@@ -246,8 +289,15 @@ async function main() {
         list: caller => host.ctx.get('jobs').list(SessionId(caller)),
       },
     })
-    const remote = new RemoteTaskReader(sessions, connection.generation)
+    const remote = new RemoteTaskReader(sessions, clientJobs, connection.generation)
+    remoteRef = remote
     shadow = new RemoteTaskReadShadow(direct, remote, connection.generation)
+    // The ClientJobs roster's first frame is async: the reader's retained
+    // watch must be open and the official stream settled BEFORE the first
+    // parity compare (a first-frame-empty roster is not an authoritative
+    // empty set).
+    await remote.readDirectChildren('task-parent')
+    await waitFor('the official roster frame', () => (clientJobs.state.getSnapshot().rows['task-parent'] ?? []).length === 1)
     const outcome = await shadow.compare({ parentSessionId: 'task-parent' })
     assert.equal(outcome.status, 'compared')
     assert.equal(outcome.report.comparable, true)
@@ -271,7 +321,12 @@ async function main() {
 
     host.childOneShotAgent.status = 'idle'
     host.settleJob({ status: 'completed', detail: 'fixture complete' })
-    await waitFor('remote job settlement', () => sessions.list.getSnapshot().jobsBySession['task-parent']?.[0]?.status === 'completed')
+    await waitFor('remote job settlement', () => clientJobs.state.getSnapshot().rows['task-parent']?.[0]?.status === 'completed')
+    // The fixture mutates the fake Agent registry in place (no status
+    // events), so the Client's Session baseline is re-pulled through its
+    // official refresh face before the parity compare.
+    await sessions.refresh()
+    await waitFor('remote child inactivity', () => sessions.list.getSnapshot().byId['task-child-one-shot']?.running === false)
     const updated = await shadow.compare({ parentSessionId: 'task-parent' })
     assert.equal(updated.status, 'compared')
     assert.equal(updated.report.comparable, true)
@@ -291,6 +346,10 @@ async function main() {
     }))
   } finally {
     shadow?.dispose()
+    // Release the reader's retained ClientJobs roster watch explicitly
+    // (the client fiber disposal would also reclaim it; this keeps the
+    // reader's own ownership contract observable).
+    remoteRef?.dispose()
     if (client !== undefined) await client.fiber.dispose()
     if (host !== undefined) {
       host.settleJob?.({ status: 'completed' })
