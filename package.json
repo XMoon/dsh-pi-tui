@@ -54,7 +54,7 @@
   "files": [
     "dist",
     "cordis.patch.yml",
-    "config",
+    "generated",
     "README.md",
     "README.en.md",
     "LICENSE"
@@ -66,10 +66,10 @@
     "bundle": {
       "patch": [
         "./cordis.patch.yml",
-        "./config/dsh-presets/standard.patch.yml",
-        "./config/dsh-presets/ptc.patch.yml",
-        "./config/dsh-presets/minimal.patch.yml",
-        "./config/dsh-presets/cordis.patch.yml"
+        "./generated/dsh-presets/standard.patch.yml",
+        "./generated/dsh-presets/ptc.patch.yml",
+        "./generated/dsh-presets/minimal.patch.yml",
+        "./generated/dsh-presets/cordis.patch.yml"
       ]
     }
   },
@@ -116,6 +116,7 @@
     "@deepseek-ai/schemastery": "~3.18.4"
   },
   "devDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
     "@deepseek-ai/cordis-plugin-loader": "~1.0.5",
     "@deepseek-ai/dsh-agent": "0.1.7-alpha.2",
     "@deepseek-ai/dsh-agent-default-model": "0.1.7-alpha.2",
@@ -193,6 +194,7 @@
     "@deepseek-ai/dsh-typert-registry": "0.1.7-alpha.2",
     "@deepseek-ai/dsh-user-approval": "0.1.7-alpha.2",
     "@deepseek-ai/dsh-user-questions": "0.1.7-alpha.2",
+    "@deepseek-ai/dsh-web-app": "0.1.7-alpha.2",
     "@deepseek-ai/dsh-workspace": "0.1.7-alpha.2",
     "@deepseek-ai/schemastery": "~3.18.4",
     "@types/node": "^22.0.0",
@@ -204,8 +206,7 @@
     "tsdown": "0.22.0",
     "tsx": "^4.23.12",
     "typescript": "^5.9.0",
-    "zustand": "~4.4.7",
-    "@deepseek-ai/cordis": "~4.0.4"
+    "zustand": "~4.4.7"
   },
   "engines": {
     "node": "^22.19.0 || >=24"
@@ -215,7 +216,7 @@
     "clean": "rm -rf dist",
     "clean:fork": "pnpm --dir packages/pi-tui clean",
     "build:fork": "pnpm --dir packages/pi-tui build",
-    "build:bundle": "tsdown",
+    "build:bundle": "pnpm gen:dsh-presets && tsdown",
     "build": "pnpm build:fork && pnpm build:bundle",
     "typecheck:fork": "pnpm --dir packages/pi-tui typecheck",
     "typecheck:bundle": "tsc -p tsconfig.json --noEmit",
@@ -276,7 +277,9 @@
     "prepare": "husky",
     "gate:boundary": "node scripts/client-boundary-gate.mjs",
     "gate:keybindings": "node --import tsx/esm scripts/check-host-keybindings.mts",
-    "test:tooling": "node scripts/run-with-temp-root.mjs node --test test/bench-smoke.test.mjs test/dev-environment.test.mjs test/dev-bootstrap-ephemeral.test.mjs test/client-server-migration.test.mjs test/pre-push-hook.test.mjs test/pre-push-stages.test.mjs test/dsh-ci-context.test.mjs test/dsh-distribution.test.mjs test/dsh-npm-verify.test.mjs test/dsh-peer-window.test.mjs test/dsh-process.test.mjs test/dsh-runtime-boundary.test.mjs test/dsh-source-identity.test.mjs test/dsh-source-leak.test.mjs test/release-context.test.mjs test/release-notes.test.mjs test/source-mode-rules.test.mjs test/client-boundary-gate.test.mjs test/tarball-source-install.test.mjs test/pi2dsh-compat-smoke.test.mjs test/temp-hygiene-gate.test.mjs test/pi-vendor-diff-gate.test.mjs test/pi-divergence-ledger-gate.test.mjs test/run-with-temp-root.test.mjs test/raw-persistence-coupling-gate.test.mjs",
-    "test:product": "node scripts/run-with-temp-root.mjs node --test test/*.test.ts test/tarball-smoke.test.mjs"
+    "test:tooling": "node scripts/run-with-temp-root.mjs node --test test/bench-smoke.test.mjs test/dev-environment.test.mjs test/dev-bootstrap-ephemeral.test.mjs test/client-server-migration.test.mjs test/pre-push-hook.test.mjs test/pre-push-stages.test.mjs test/dsh-ci-context.test.mjs test/dsh-distribution.test.mjs test/dsh-npm-verify.test.mjs test/dsh-peer-window.test.mjs test/dsh-process.test.mjs test/dsh-runtime-boundary.test.mjs test/dsh-source-identity.test.mjs test/dsh-source-leak.test.mjs test/release-context.test.mjs test/release-notes.test.mjs test/source-mode-rules.test.mjs test/client-boundary-gate.test.mjs test/tarball-source-install.test.mjs test/pi2dsh-compat-smoke.test.mjs test/temp-hygiene-gate.test.mjs test/pi-vendor-diff-gate.test.mjs test/pi-divergence-ledger-gate.test.mjs test/run-with-temp-root.test.mjs test/raw-persistence-coupling-gate.test.mjs test/dsh-preset-parity.test.mjs",
+    "test:product": "node scripts/run-with-temp-root.mjs node --test test/*.test.ts test/tarball-smoke.test.mjs",
+    "gen:dsh-presets": "node scripts/generate-dsh-presets.mjs",
+    "gate:dsh-preset-parity": "node scripts/generate-dsh-presets.mjs --check"
   }
 }

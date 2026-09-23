@@ -70,9 +70,9 @@ integration status.
 New agent sessions use the official roster's selected preset id. A custom DSH
 preset literally named `code` is valid and remains `code` when it exists in the
 current roster. DSH V3 migration owns historical session `code -> ptc`
-conversion, while the current projection preserves a legal custom `code`. Only
-an omitted legacy settings default `code` falls back to `ptc` after the roster
-proves that no custom `code` preset exists.
+conversion, while the current projection preserves a legal custom `code`. An
+omitted legacy settings default is never aliased: with no matching declaration
+in the current roster it is simply an invalid preference.
 
 ### Profile management
 

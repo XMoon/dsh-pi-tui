@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateLegacySettings, type LegacySettingsMigrationInput, type MigrationDiagLike } from '../src/legacy-settings-migration.ts'
@@ -42,11 +42,20 @@ function formsHarness(sections: Record<string, unknown> = {}) {
     mutate: async (ns, ops, expectedRevision) => {
       if (failMutates) throw new Error('profile write rejected')
       calls.push({ ns, ops, revision: expectedRevision })
+      // The profile write commits the USER override for every set op —
+      // later describe() reads (and retry decisions) observe it, exactly
+      // like the Loader committing volatile refs after mutate settles.
+      const section = (sections[ns] ?? (sections[ns] = {})) as Record<string, unknown>
+      for (const op of ops) {
+        if (op.op === 'set') section[op.path[0]!] = op.value
+        else delete section[op.path[0]!]
+      }
       revisionOf(ns)
     },
   }
   return {
     forms,
+    sections,
     calls,
     get failMutates() { return failMutates },
     set failMutates(value: boolean) { failMutates = value },
@@ -231,36 +240,6 @@ test('the legacy footerCommand and keybindings ride verbatim; absent fields emit
   }
 })
 
-test('the legacy per-cwd history moves to user-history JSONL files, never into Config', async () => {
-  const home = legacyHome(`dsh-pi-tui:
-  theme: dark
-  history:
-    /ws/one:
-      - second
-      - first
-    /ws/empty: []
-`)
-  const harness = formsHarness()
-  const { diag } = diagHarness()
-  try {
-    await migrateLegacySettings(input(home, harness.forms, 0, alwaysResolves, diag))
-    // The file name is derived from the cwd hash; locate it by content.
-    const dir = join(home, 'user-history')
-    assert.ok(existsSync(dir), 'the user-history directory exists')
-    const { readdirSync } = await import('node:fs')
-    const files = readdirSync(dir)
-    const lines = files.flatMap(name => readFileSync(join(dir, name), 'utf8').split('\n').filter(Boolean))
-    assert.deepEqual(lines, ['{"content":"first"}', '{"content":"second"}'],
-      'the legacy entries land in a JSONL file (file order is oldest-first)')
-    assert.equal((opsOf(harness.calls, 'tui-app')).some(op => op.path[0] === 'history'), false,
-      'history never becomes a Config field')
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
-// ── §19.8 legacy preset identity ──────────────────────────────────────────
-
 test('a legacy default the current registry does not declare is invalid — no alias, no write, official default stays', async () => {
   const home = legacyHome('agent-presets:\n  default: code\n')
   const harness = formsHarness()
@@ -427,6 +406,87 @@ test('without the Settings surface nothing migrates and the marker stays put', a
     assert.equal(report.status, 'failed')
     assert.equal(probe.marker.get(), 0)
     assert.ok(warnings.some(message => message.includes('settings service missing')))
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a partial failure never rolls newer USER values back on retry (§8.9 idempotence)', async () => {
+  // The exact P1-2 scenario: the preset write commits, the tui-app batch
+  // fails, the user changes the default to standard, and the retry must NOT
+  // rewrite the stale legacy minimal.
+  const home = legacyHome('dsh-pi-tui:\n  theme: dark\nagent-presets:\n  default: minimal\n')
+  const harness = formsHarness()
+  const { diag, warnings } = diagHarness()
+  try {
+    // First boot: the registry write succeeds, the tui-app write fails.
+    let tuiWrites = 0
+    const originalMutate = harness.forms.mutate.bind(harness.forms)
+    harness.forms.mutate = async (ns, ops, revision) => {
+      if (ns === 'tui-app') {
+        tuiWrites += 1
+        if (tuiWrites === 1) throw new Error('tui-app write rejected')
+      }
+      return originalMutate(ns, ops, revision)
+    }
+    const probe = input(home, harness.forms, 0, alwaysResolves, diag)
+    const first = await migrateLegacySettings(probe)
+    assert.equal(first.status, 'failed', 'the refused tui-app write fails the boot visibly')
+    assert.deepEqual(opsOf(harness.calls, 'agent-preset-registry'), [
+      { op: 'set', path: ['selectedDefault'], value: 'minimal' },
+    ], 'the preset default committed before the failure')
+    // The user now picks a DIFFERENT default during the marker window.
+    harness.sections['agent-preset-registry'] = { selectedDefault: 'standard' } as Record<string, unknown>
+    harness.sections['tui-app'] = { theme: 'light' } as Record<string, unknown>
+    // Retry boot: neither owned field may be rolled back to legacy values.
+    const second = await migrateLegacySettings(probe)
+    assert.equal(second.status, 'migrated')
+    assert.equal(opsOf(harness.calls, 'agent-preset-registry').length, 1,
+      'NO second selectedDefault write — the user-owned default wins over the stale legacy minimal')
+    assert.deepEqual(opsOf(harness.calls, 'tui-app').map(op => op.path[0]),
+      ['legacySettingsMigrationVersion'],
+      'the user-owned theme stays light; only the completing marker crosses')
+    assert.equal((harness.sections['agent-preset-registry'] as Record<string, unknown> | undefined)?.selectedDefault, 'standard')
+    assert.equal((harness.sections['tui-app'] as Record<string, unknown> | undefined)?.theme, 'light')
+    void warnings
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a broken legacy preset default is not migrated — declaration exists but activation failed', async () => {
+  const home = legacyHome('agent-presets:\n  default: broken-one\n')
+  const harness = formsHarness()
+  const { diag, warnings } = diagHarness()
+  const brokenResolve: (id: string) => Promise<void> = async (id) => {
+    throw Object.assign(new Error(`preset ${id} failed to mount: missing plugin`), { code: 'agent-preset/invalid' })
+  }
+  try {
+    const report = await migrateLegacySettings(input(home, harness.forms, 0, brokenResolve, diag))
+    assert.equal(report.status, 'migrated', 'the TUI side still completes with the marker')
+    assert.equal(opsOf(harness.calls, 'agent-preset-registry').length, 0,
+      'a declared-but-broken preset is NOT a valid legacy default')
+    assert.ok(warnings.some(message => message.includes('legacy agent preset default is invalid or unavailable')))
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a non-ENOENT legacy read error fails visibly and keeps the marker', async () => {
+  // A directory where settings.yaml should be: readFile fails with EISDIR —
+  // the migration must surface it instead of crashing startup silently.
+  const home = legacyHome()
+  const harness = formsHarness()
+  const { diag, warnings } = diagHarness()
+  try {
+    const fs = await import('node:fs')
+    fs.mkdirSync(join(home, 'settings.yaml'), { recursive: true })
+    const probe = input(home, harness.forms, 0, alwaysResolves, diag)
+    const report = await migrateLegacySettings(probe)
+    assert.equal(report.status, 'failed', 'an unreadable legacy document is a visible failure')
+    assert.equal(probe.marker.get(), 0)
+    assert.ok(warnings.some(message => message.includes('legacy settings document read failed')),
+      `the read error is diagnosed: ${warnings.join(' | ')}`)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

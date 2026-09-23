@@ -140,7 +140,7 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean } =
   ctx.provide('settings', settings.service as never)
   // The 0.1.7 read authority is the official service's current() snapshot;
   // the fake serves the same document the settings write commits.
-  ctx.provide('subagentModelSelection', { current: () => ({ enabled: settings.doc.enabled, allowedModels: settings.doc.allowedModels.map(route => ({ ...route })) }) } as never)
+  ctx.provide('subagentModelSelection', { current: () => ({ enabled: settings.doc.enabled, allowedModels: (settings.doc.allowedModels ?? []).map(route => ({ ...route })) }) } as never)
   ctx.provide('llm', {
     listProviders: () => [{ id: 'p', name: 'Provider P' }],
     listModels: async () => [{ id: 'm1' }, { id: 'm2' }],

@@ -65,8 +65,8 @@ runtime 会在正常的不兼容边界以非零状态失败。完整的
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
 DSH V3 migration 负责历史 session header/selection 的 `code -> ptc` 转换；
-当前 projection 会原样保留合法的自定义 `code`。只有省略请求的 legacy
-settings default `code` 才会在确认 roster 不含 `code` 后回退到 `ptc`。
+当前 projection 会原样保留合法的自定义 `code`。省略请求的 legacy settings
+default 不再做任何别名映射：当前 roster 没有声明就是无效偏好。
 
 ### Profile management
 

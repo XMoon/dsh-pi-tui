@@ -397,10 +397,13 @@ test('legacy history moves to JSONL files and never re-enters Config', () => {
   assert.doesNotMatch(source, /settings history cleanup/u,
     'the retired whole-document history cleanup write must stay deleted')
   const migration = readFileSync(join(srcDir, 'legacy-settings-migration.ts'), 'utf8')
-  // The field lists that DO cross into Config never mention history.
+  // The field lists that DO cross into Config never mention history, and no
+  // history migration exists at all in PR A (plan §8.5: the legacy data
+  // stays in the read-only file; a durable history move is not this PR's
+  // scope).
   const lists = migration.slice(migration.indexOf('COPIED_STRING_FIELDS'), migration.indexOf('function tuiAppOps'))
   assert.doesNotMatch(lists, /'history'/u, 'history is never a copied Config field')
-  assert.match(migration, /function migrateLegacyHistory/u, 'the history move is file-only (JSONL)')
+  assert.doesNotMatch(migration, /migrateLegacyHistory|user-history/u, 'PR A ships no history migration')
 })
 
 test('startup-eager callbacks of startProcessTui never reference a later-declared binding (TDZ guard)', () => {

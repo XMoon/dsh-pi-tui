@@ -595,6 +595,26 @@ test('presets treats a declared code id as an ordinary preset — never rewritte
   assert.deepEqual(resolved, ['code', undefined])
 })
 
+test('presets resolve refuses a declared-but-broken preset with the official invalid code', async () => {
+  const presets = port({
+    agentPresets: {
+      remoteExportList: async () => ({ presets: [{ id: 'broken-one', isDefault: false, broken: 'missing plugin' }], modeSelectionEnabled: true }),
+      // Official semantics: resolve RETURNS a broken row (only mount/retain
+      // throws); the TUI selectability seam must still refuse it.
+      resolve: async (id?: string) => ({ id: id ?? 'broken-one', broken: 'preset failed to mount: missing plugin' }),
+      get defaultId() { return 'standard' },
+    },
+  }).presets
+  await assert.rejects(
+    presets.resolve('broken-one'),
+    (error: unknown) => (error as { code?: unknown }).code === 'agent-preset/invalid' && /missing plugin/u.test((error as Error).message),
+    'the broken diagnostic surfaces with the official refusal code',
+  )
+  // The roster still SHOWS the broken row (visible but not selectable).
+  const roster = await presets.roster()
+  assert.deepEqual(roster.presets, [{ id: 'broken-one', broken: 'missing plugin' }])
+})
+
 test('presets.resolve propagates an unknown-preset rejection', async () => {
   const presets = port({
     agentPresets: {
