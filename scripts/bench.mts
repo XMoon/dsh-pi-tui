@@ -30,7 +30,8 @@ import { StatsFolder } from '../src/stats.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
 import { ContextMeasurementCoordinator } from '../src/status/context-measurement.ts'
 import { usageFromStats } from '../src/status/derive-usage.ts'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Terminal } from '@xmoon76/pi-tui'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import type { SessionStats } from '../src/stats.ts'
@@ -108,7 +109,9 @@ function buildEvents(turns: number): SessionEvent[] {
   for (let turn = 0; turn < turns; turn += 1) {
     events.push({ type: 'turn/start', seq: seq++, time: turn * 1000, data: { turn } } as SessionEvent)
     events.push({
-      type: 'user/message', seq: seq++, time: turn * 1000 + 1, data: {
+      type: 'user/message', surfaceOp: 'append', seq: SessionSeq(seq++), time: turn * 1000 + 1, data: {
+        id: MessageId(`bench-user-${turn}`),
+        role: 'user',
         content: [{ type: 'text', text: `user prompt ${turn} with CJK 你好 and emoji 🐋` }],
         source: { kind: 'user' },
       },
@@ -133,12 +136,12 @@ function buildEvents(turns: number): SessionEvent[] {
       },
     } as SessionEvent)
     events.push({
-      type: 'tool/result', seq: seq++, time: turn * 1000 + 13, data: {
+      type: 'tool/result', surfaceOp: 'append', seq: SessionSeq(seq++), time: turn * 1000 + 13, data: {
         turn, step: 0, message: {
-          id: `m-${turn}`, role: 'tool',
-          toolCallId: `r${turn}`,
+          id: MessageId(`m-${turn}`), role: 'tool',
+          toolCallId: ToolCallId(`r${turn}`),
           content: [{ type: 'text', text: DIFF_BODY }],
-          source: { kind: 'tool', callId: `r${turn}` },
+          source: { kind: 'tool', callId: ToolCallId(`r${turn}`) },
         },
       },
     } as SessionEvent)
@@ -148,12 +151,12 @@ function buildEvents(turns: number): SessionEvent[] {
       },
     } as SessionEvent)
     events.push({
-      type: 'tool/result', seq: seq++, time: turn * 1000 + 15, data: {
+      type: 'tool/result', surfaceOp: 'append', seq: SessionSeq(seq++), time: turn * 1000 + 15, data: {
         turn, step: 0, message: {
-          id: `bm-${turn}`, role: 'tool',
-          toolCallId: `b${turn}`,
+          id: MessageId(`bm-${turn}`), role: 'tool',
+          toolCallId: ToolCallId(`b${turn}`),
           content: [{ type: 'text', text: 'total 8\ndrwxr-xr-x 2 user user 4096 Aug 15 00:00 .\n-rw-r--r-- 1 user user 123 src/a.ts' }],
-          source: { kind: 'tool', callId: `b${turn}` },
+          source: { kind: 'tool', callId: ToolCallId(`b${turn}`) },
         },
       },
     } as SessionEvent)
@@ -551,8 +554,8 @@ function appendDurableTurn(fixture: RenderFixture, turn: number): void {
   fixture.folder.apply([
     { type: 'turn/start', seq, time: seq, data: { turn } } as SessionEvent,
     {
-      type: 'user/message', seq: seq + 1, time: seq + 1, data: {
-        id: `append-user-${turn}`,
+      type: 'user/message', surfaceOp: 'append', seq: SessionSeq(seq + 1), time: seq + 1, data: {
+        id: MessageId(`append-user-${turn}`),
         role: 'user',
         content: [{ type: 'text', text: `appended prompt ${turn}` }],
         source: { kind: 'user' },

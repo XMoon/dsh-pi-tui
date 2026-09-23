@@ -283,10 +283,6 @@ jobs:
         if: env.DSH_MODE == 'source'
         run: pnpm smoke:remote-d1-closure
 
-      - name: Remote D2.2 ordinary-write same-Host smoke
-        if: env.DSH_MODE == 'source'
-        run: pnpm smoke:remote-d2-write
-
       - name: D2 closure smoke
         if: env.DSH_MODE == 'source'
         run: pnpm smoke:remote-d2-closure

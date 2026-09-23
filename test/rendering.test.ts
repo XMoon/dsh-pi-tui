@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
@@ -1866,11 +1867,13 @@ test('fullscreen Ctrl+F and Ctrl+Shift+F search the full folder and re-window to
   const folder = new TranscriptFolder()
   folder.apply(Array.from({ length: 100 }, (_, turn) => ({
     type: 'assistant/message',
-    seq: turn,
+    surfaceOp: 'append',
+    seq: SessionSeq(turn),
     time: 1_700_000_000_000 + turn,
     data: {
       turn,
       step: 0,
+    stream: [],
       message: {
         id: MessageId(`history-${turn}`),
         role: 'assistant',

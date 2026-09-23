@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
@@ -11,11 +12,12 @@ function longSession(turnCount: number): SessionEvent[] {
   const events: SessionEvent[] = []
   let seq = 0
   for (let turn = 1; turn <= turnCount; turn += 1) {
-    events.push({ type: 'turn/start', seq, time: 1_700_000_000_000 + seq, data: { turn } } as SessionEvent)
+    events.push({ type: 'turn/start', seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data: { turn } } as SessionEvent)
     seq += 1
     events.push({
       type: 'user/message',
-      seq,
+      surfaceOp: 'append',
+      seq: SessionSeq(seq),
       time: 1_700_000_000_000 + seq,
       data: {
         id: MessageId(`message-${turn}`),
@@ -64,13 +66,14 @@ test('controller pages by grouped-output turns across a same-turn read group', (
     return [
       {
         type: 'tool/call',
-        seq,
+        seq: SessionSeq(seq),
         time: 1_700_000_000_000 + seq,
         data: { turn, step: 0, callId, name: 'read', arguments: '{}' },
       } as SessionEvent,
       {
         type: 'tool/result',
-        seq: seq + 1,
+        surfaceOp: 'append',
+        seq: SessionSeq(seq + 1),
         time: 1_700_000_000_000 + seq + 1,
         data: {
           turn,
@@ -92,11 +95,13 @@ test('controller pages by grouped-output turns across a same-turn read group', (
     ...pair(1, 'r1', 4),
     {
       type: 'assistant/message',
-      seq: 6,
+      surfaceOp: 'append',
+      seq: SessionSeq(6),
       time: 1_700_000_000_006,
       data: {
         turn: 2,
         step: 0,
+      stream: [],
         message: {
           id: MessageId('same-turn-tail'),
           role: 'assistant',
