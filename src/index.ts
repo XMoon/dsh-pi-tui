@@ -3972,10 +3972,19 @@ export function apply(ctx: Context, config: Config): void {
         // logic stays in onResult and the cancellation/failure semantics
         // stay per-task (runOwned — AGENTS.md); the classification
         // diagnostics (cancellation → debug, failure → error) are recorded
-        // by runOwned itself. The dsh shell may reject an abort with a
-        // plain Error, so the task-local classifier routes it to onCancel
-        // instead of a false ERROR line. Never a bare void.
-        runOwned('local shell', () => shell.run(spec), {
+        // by runOwned itself. DSH 0.1.7 execute/result contract: execute()
+        // publishes the handle after preparation (throwing on preparation
+        // failure or caller cancellation before the process exists) and
+        // result() is the foreground projection — nonzero exits, timeout
+        // kills, and abort kills RESOLVE with a descriptive result, and
+        // only infrastructure failures reject. The dsh shell may still
+        // reject an abort with a plain Error, so the task-local classifier
+        // routes it to onCancel instead of a false ERROR line. Never a
+        // bare void.
+        runOwned('local shell', async () => {
+          const execution = await shell.execute(spec)
+          return execution.result()
+        }, {
           diag,
           sessionId: () => liveAgent?.session.id,
           isCancellation: () => localSignal.aborted,
