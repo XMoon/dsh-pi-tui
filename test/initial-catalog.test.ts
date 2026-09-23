@@ -29,7 +29,7 @@ function fakeAgent(sessionId = 'session-live'): Agent {
 function fakeCtx(services: {
   commands?: { list: (agent: Agent | undefined) => unknown[] }
   skills?: { snapshot?: (options: { cwd?: string; scope?: object; signal?: AbortSignal }) => Promise<{ skills: unknown[]; complete: boolean }> }
-  presets?: { standingKeyFor?: (id?: string) => Promise<object> }
+  presets?: { acquireScope?: (id?: string) => Promise<{ key: object } & AsyncDisposable> }
 } = {}): SurfaceCatalogContext {
   const commands = services.commands ?? {
     list: (agent) => agent === undefined
@@ -120,9 +120,9 @@ test('a deferred start reads the cold human skill catalog through the preset sta
         },
       },
       presets: {
-        standingKeyFor: async (id) => {
+        acquireScope: async (id) => {
           assert.equal(id, 'standard')
-          return key
+          return { key, [Symbol.asyncDispose]: async () => {} }
         },
       },
     }),
@@ -149,7 +149,7 @@ test('a broken standing mount degrades the cold read to the global view with a o
         snapshot: async () => ({ complete: true, skills: [{ name: 'global-skill', description: 'g', invocation: { modelInvocable: true, userInvocable: true } }] }),
       },
       presets: {
-        standingKeyFor: async () => { throw new Error('preset exploded') },
+        acquireScope: async () => { throw new Error('preset exploded') },
       },
     }),
     diag,
@@ -170,7 +170,7 @@ test('a failed cold read degrades to a notice — the TUI still starts with buil
         snapshot: async () => { throw new Error('registry down') },
       },
       presets: {
-        standingKeyFor: async () => ({ agentPreset: 'standard' }),
+        acquireScope: async () => ({ key: { agentPreset: 'standard' }, [Symbol.asyncDispose]: async () => {} }),
       },
     }),
     diag,
@@ -186,7 +186,7 @@ test('a deferred start with no skill registry resolves nothing', async () => {
     liveAgent: undefined,
     presetId: 'standard',
     signal: new AbortController().signal,
-    ctx: fakeCtx({ presets: { standingKeyFor: async () => ({ agentPreset: 'standard' }) } }),
+    ctx: fakeCtx({ presets: { acquireScope: async () => ({ key: { agentPreset: 'standard' }, [Symbol.asyncDispose]: async () => {} }) } }),
     diag,
   })
   assert.equal(resolution.skills, undefined)

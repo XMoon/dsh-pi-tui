@@ -83,11 +83,12 @@ export interface SkillRegistryLike {
   get?(name: string, options: SkillCatalogReadOptions): Promise<SkillSummaryLike | undefined>
 }
 
-/** The agent-presets service as the adapter sees it. `standingKeyFor` is
- * OPTIONAL: its absence (or failure) degrades the cold target to the
- * global layer. */
+/** The agent-preset registry as the adapter sees it. `acquireScope` (the
+ * 0.1.7 revision-lease seam) is OPTIONAL: its absence (or failure) degrades
+ * the cold target to the global layer. The lease must be released after the
+ * scoped read completes — the caller owns that lifetime. */
 export interface AgentPresetsLike {
-  standingKeyFor?(id?: string): Promise<object>
+  acquireScope?(id?: string): Promise<{ key: object } & AsyncDisposable>
   serviceFor?(agent: { ctx: unknown }, name: 'skills'): SkillRegistryLike | undefined
 }
 
@@ -147,6 +148,10 @@ export interface ColdSkillTargetResolution {
   /** One-shot user notice when the standing path degraded to the global
    * layer (absent when nothing degraded). */
   readonly degraded?: string
+  /** Release the standing-scope revision lease once the scoped read has
+   * completed; absent when no lease was acquired (the global layer owns
+   * nothing to release). */
+  readonly release?: () => Promise<void>
 }
 
 /** Copy one summary, keeping ONLY the supported display fields. An entry
@@ -224,13 +229,19 @@ export async function resolveColdSkillTarget(
   const registry = ctx.get('skills')
   if (registry === undefined) return {}
   const presets = ctx.get('agentPresets')
-  if (presets === undefined || typeof presets.standingKeyFor !== 'function') {
+  if (presets === undefined || typeof presets.acquireScope !== 'function') {
     // Rosterless deployment: the global layer is the correct cold view.
     return { target: { kind: 'cold-global', registry, cwd, scope: undefined } }
   }
   try {
-    const scope = await presets.standingKeyFor(presetId)
-    return { target: { kind: 'cold-standing', registry, cwd, scope } }
+    // The official revision lease: the scope stays retained (the running
+    // composition cannot drift under the read) until the caller releases
+    // it AFTER the scoped read completes.
+    const lease = await presets.acquireScope(presetId)
+    return {
+      target: { kind: 'cold-standing', registry, cwd, scope: lease.key },
+      release: async () => { await lease[Symbol.asyncDispose]() },
+    }
   } catch (error) {
     // Cancellation belongs to the current coordinator epoch and must not be
     // converted into a stale global catalog. Ordinary preset/mount failures

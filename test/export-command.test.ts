@@ -19,7 +19,7 @@ import { ProcessTerminal } from '@xmoon76/pi-tui'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
-import { apply as applyRunner, type Config } from '../src/index.ts'
+import { apply as applyRunner, Config as TuiConfigSchema } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
 import { sessionArtifactFilename, safeSessionIdSegment } from '../src/session-artifact-filename.ts'
 import { resolveClientDirectory, streamToFile, writeTextAtomically } from '../src/client-artifact-save.ts'
@@ -809,7 +809,7 @@ async function mountRunner(
   home: string,
   harness: ReturnType<typeof makeHarness>,
   startup: { sessionId?: string; presetId?: string },
-  config: Config,
+  config: Record<string, unknown> = {},
 ) {
   ctx.provide('appExit', () => {})
   ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
@@ -821,7 +821,7 @@ async function mountRunner(
   ctx.provide('llm', harness.llm as never)
   ctx.provide('commands', harness.commands as never)
   ctx.provide('loader', { await: async () => {} } as never)
-  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, config))
+  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema(config as never)))
   await fiber
   await settle()
   return fiber

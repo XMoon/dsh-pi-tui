@@ -21,7 +21,7 @@ import { CommandId } from '@deepseek-ai/dsh-commands'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { apply as applyRunner, type Config } from '../src/index.ts'
+import { apply as applyRunner, Config as TuiConfigSchema } from '../src/index.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
@@ -517,7 +517,7 @@ async function mountRunner(
   home: string,
   harness: ReturnType<typeof makeHarness>,
   startup: { sessionId?: string },
-  config: Config = {},
+  config: Record<string, unknown> = {},
 ): Promise<{ dispose: () => Promise<void>; app: TuiApp }> {
   ctx.provide('appExit', () => {})
   // The startup service is normally provided here; an extension-hosting
@@ -539,7 +539,7 @@ async function mountRunner(
     return originalStart.call(this)
   }
   try {
-    const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, { sessionId: startup.sessionId, ...config }))
+    const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: startup.sessionId, ...config } as never)))
     await fiber
     for (let index = 0; index < 60; index += 1) await Promise.resolve()
   } finally {
@@ -1339,10 +1339,13 @@ async function bootCommandHarness(
   }
   const doc: Record<string, unknown> = { busyEnter: options.busyEnter }
   context.provide('settings', {
-    register: () => ({
-      get: () => ({ ...doc }),
-      replace: async (next: Record<string, unknown>) => { Object.assign(doc, next) },
-    }),
+    describe: () => [{ ns: 'tui-app', value: { ...doc }, user: { ...doc }, revision: 1 }],
+    mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
+      for (const op of ops) {
+        if (op.op === 'set') doc[op.path[0]!] = op.value
+        else delete doc[op.path[0]!]
+      }
+    },
   } as never)
   let extensionService: unknown
   const registerContribution = async (contribution: {
@@ -1409,7 +1412,8 @@ async function bootCommandHarness(
     }
   }
   const mounted = await mountRunner(context, home, harness,
-    options.deferredStart === true ? {} : { sessionId: 'command-session' })
+    options.deferredStart === true ? {} : { sessionId: 'command-session' },
+    { busyEnter: options.busyEnter })
   harness.host.status = options.status
   return {
     harness,

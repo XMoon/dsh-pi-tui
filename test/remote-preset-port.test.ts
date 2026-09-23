@@ -36,9 +36,9 @@ function generationHarness(): GenerationHarness {
 
 const ROSTER: RemotePresetRoster = {
   presets: [
-    { id: 'standard', trust: 'system', isDefault: true, name: 'Standard' },
-    { id: 'minimal', trust: 'system' },
-    { id: 'local', trust: 'user', name: 'Local', broken: 'bad yaml' },
+    { id: 'standard', isDefault: true, name: 'Standard' },
+    { id: 'minimal' },
+    { id: 'local', name: 'Local', broken: 'bad yaml' },
   ],
   modeSelectionEnabled: true,
 }
@@ -101,9 +101,9 @@ test('roster maps the official agentPresets.list value and marks the Host defaul
   const harness = presetHarness()
   assert.deepEqual(await harness.catalog.roster(), {
     presets: [
-      { id: 'standard', trust: 'system', name: 'Standard' },
-      { id: 'minimal', trust: 'system' },
-      { id: 'local', trust: 'user', name: 'Local', broken: 'bad yaml' },
+      { id: 'standard', name: 'Standard' },
+      { id: 'minimal' },
+      { id: 'local', name: 'Local', broken: 'bad yaml' },
     ],
     defaultId: 'standard',
     modeSelectionEnabled: true,
@@ -193,8 +193,8 @@ test('a roster FAILURE after a reconnect reports the stale-generation fence, not
 
 test('an out-of-order older roster read is refused to its caller and kept out of cache', async () => {
   const harness = presetHarness()
-  const older: RemotePresetRoster = { presets: [{ id: 'standard', trust: 'system', isDefault: true }], modeSelectionEnabled: true }
-  const newer: RemotePresetRoster = { presets: [{ id: 'minimal', trust: 'system', isDefault: true }], modeSelectionEnabled: true }
+  const older: RemotePresetRoster = { presets: [{ id: 'standard', isDefault: true }], modeSelectionEnabled: true }
+  const newer: RemotePresetRoster = { presets: [{ id: 'minimal', isDefault: true }], modeSelectionEnabled: true }
   const gates: Array<() => void> = []
   let call = 0
   harness.setListHook(() => new Promise<void>((resolve) => { gates[call++] = resolve }))

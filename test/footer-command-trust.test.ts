@@ -97,7 +97,7 @@ test('the Direct config-port trust read resolves the same USER-layer facts', asy
   const ctx = {
     get: () => ({
       describe: () => [{
-        ns: 'dsh-pi-tui',
+        ns: 'tui-app',
         user: { footer: 'command', footerCommand: { schemaVersion: 1, command: '~/.config/dsh/statusline.sh' } },
       }],
     }),
@@ -106,7 +106,7 @@ test('the Direct config-port trust read resolves the same USER-layer facts', asy
   assert.equal(port.footerCommandTrust.userFooterMode, 'command')
   assert.equal(port.footerCommandTrust.command?.command, '~/.config/dsh/statusline.sh')
   // No user layer: refused.
-  const empty = new DirectConfigPort({ get: () => ({ describe: () => [{ ns: 'dsh-pi-tui' }] }) } as never, undefined, () => undefined)
+  const empty = new DirectConfigPort({ get: () => ({ describe: () => [{ ns: 'tui-app' }] }) } as never, undefined, () => undefined)
   assert.equal(empty.footerCommandTrust.userFooterMode, undefined)
   assert.equal(empty.footerCommandTrust.command, undefined)
 })
@@ -118,7 +118,7 @@ test('the Direct custom-item read separates USER raw storage from the safe runti
   ]
   const projectRaw: unknown[] = [{ schemaVersion: 1, id: 'user:project-owned', kind: 'text', text: 'PROJECT' }]
   const port = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
-    get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', value: { footerCustomItems: projectRaw }, user: { footerCustomItems: userRaw } }] }),
+    get: () => ({ describe: () => [{ ns: 'tui-app', value: { footerCustomItems: projectRaw }, user: { footerCustomItems: userRaw } }] }),
   } as never, {
     get: () => ({ footerCustomItems: projectRaw }),
     replace: () => {},
@@ -140,12 +140,12 @@ test('the Direct custom-item read separates USER raw storage from the safe runti
   const revoked = Proxy.revocable([], {})
   revoked.revoke()
   const unsafe = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
-    get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: revoked.proxy } }] }),
+    get: () => ({ describe: () => [{ ns: 'tui-app', user: { footerCustomItems: revoked.proxy } }] }),
   } as never, undefined, () => undefined)
   assert.deepEqual(unsafe.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
 
   const noUser = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
-    get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', value: { footerCustomItems: projectRaw } }] }),
+    get: () => ({ describe: () => [{ ns: 'tui-app', value: { footerCustomItems: projectRaw } }] }),
   } as never, {
     get: () => ({ footerCustomItems: projectRaw }),
     replace: () => {},
@@ -212,7 +212,7 @@ test('TuiSettingsDoc round-trip: a whole-document replace never wipes the truste
     wheelScrollLines: '1',
     keybindings: { version: 1, bindings: {} },
   }
-  const port = new DirectConfigPort({ get: () => ({ describe: () => [{ ns: 'dsh-pi-tui', user: { footerCommand } }] }) } as never, {
+  const port = new DirectConfigPort({ get: () => ({ describe: () => [{ ns: 'tui-app', user: { footerCommand } }] }) } as never, {
     get: () => backing as never,
     replace: (next: unknown) => { backing = { ...(next as Record<string, unknown>) } },
   }, () => undefined)
@@ -236,7 +236,7 @@ test('the USER-layer activation ids are mode-gated (PR D activation trust)', asy
   // no layout → the authorization is EMPTY.
   const port = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'dsh-pi-tui',
+      ns: 'tui-app',
       value: { footer: 'custom', footerLayout: userLayout },
       user: { footer: 'default' },
     }] }),
@@ -249,7 +249,7 @@ test('the USER-layer activation ids are mode-gated (PR D activation trust)', asy
   // keeps the old layout).
   const stalePort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'dsh-pi-tui',
+      ns: 'tui-app',
       value: { footer: 'custom', footerLayout: userLayout },
       user: { footer: 'default', footerLayout: userLayout },
     }] }),
@@ -260,7 +260,7 @@ test('the USER-layer activation ids are mode-gated (PR D activation trust)', asy
   // The USER layer declaring custom + a valid layout IS the authorization.
   const userPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'dsh-pi-tui',
+      ns: 'tui-app',
       value: { footer: 'custom', footerLayout: userLayout },
       user: { footer: 'custom', footerLayout: userLayout },
     }] }),
@@ -270,7 +270,7 @@ test('the USER-layer activation ids are mode-gated (PR D activation trust)', asy
   // An INVALID user layout authorizes nothing (fail-safe).
   const invalidPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'dsh-pi-tui',
+      ns: 'tui-app',
       user: { footer: 'custom', footerLayout: { schemaVersion: 1, rows: 'junk' } },
     }] }),
   } as never, undefined, () => undefined)
@@ -280,7 +280,7 @@ test('the USER-layer activation ids are mode-gated (PR D activation trust)', asy
   // custom + a valid layout → its refs; default → empty.
   const fallbackPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'dsh-pi-tui',
+      ns: 'tui-app',
       value: { footer: 'command', footerFallbackMode: 'custom', footerLayout: userLayout },
       user: { footer: 'command', footerFallbackMode: 'custom', footerLayout: userLayout },
     }] }),
@@ -288,7 +288,7 @@ test('the USER-layer activation ids are mode-gated (PR D activation trust)', asy
   assert.deepEqual([...fallbackPort.footerCommandTrust.userCommandItemFallbackActivationIds], ['user:clock'])
   const defaultFallbackPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'dsh-pi-tui',
+      ns: 'tui-app',
       user: { footer: 'command', footerFallbackMode: 'default', footerLayout: userLayout },
     }] }),
   } as never, undefined, () => undefined)
@@ -300,7 +300,7 @@ test('the USER-layer activation ids are mode-gated (PR D activation trust)', asy
   // caller can forget the outer mode gate.
   const staleFallbackPort = new (await import('../src/runtime/direct/config-direct.ts')).DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'dsh-pi-tui',
+      ns: 'tui-app',
       value: { footer: 'command', footerFallbackMode: 'custom', footerLayout: userLayout },
       user: { footer: 'default', footerFallbackMode: 'custom', footerLayout: userLayout },
     }] }),

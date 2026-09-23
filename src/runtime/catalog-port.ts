@@ -158,8 +158,6 @@ export interface ProviderDirectoryEntry {
 /** One roster row of the `/preset` picker (detached display metadata). */
 export interface PresetRosterEntry {
   readonly id: string
-  /** `system` for shipped presets, `user` for locally authored ones. */
-  readonly trust: string
   readonly name?: string
   readonly description?: string
   /** Why the preset cannot compose a session (absent when it can). */

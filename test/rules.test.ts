@@ -387,33 +387,20 @@ test('the restored fullscreen startup path initializes custom-item persistence b
     'fullscreen startup can synchronously invoke its persistence callback; the custom-item save projection must be initialized first')
 })
 
-test('legacy history cleanup preserves the raw USER custom-item field', () => {
-  // The migration cleanup is another whole-document replace. Keep this
-  // source-level guard beside the startup-order guard: omitting the raw USER
-  // projection here would promote a merged/project footerCustomItems value or
-  // erase unknown/future definitions while deleting legacy history.
+test('legacy history moves to JSONL files and never re-enters Config', () => {
+  // PR A: the retired per-cwd history never lived in the profile-owned
+  // plugin Config, and the legacy settings.yaml migration must keep it that
+  // way — history only ever lands in $DSH_HOME/user-history/*.jsonl files.
+  // The old whole-document cleanup write (whose footerCustomItems
+  // projection this guard used to pin) is gone with the old Settings store.
   const source = readFileSync(join(srcDir, 'index.ts'), 'utf8')
-  const start = source.indexOf("runDetached('settings history cleanup'")
-  const end = source.indexOf("          }, {", start)
-  assert.ok(start >= 0, 'the legacy history cleanup write must exist')
-  assert.ok(end > start, 'the legacy history cleanup write must have options')
-  const cleanup = source.slice(start, end)
-  assert.match(cleanup, /doc\.footerCustomItems\s*=\s*userFooterCustomItemsForSave\(\)/,
-    'history cleanup must project the exact raw USER custom definitions before replace')
-  assert.match(cleanup, /delete doc\.history/, 'history cleanup must still remove the legacy field')
-
-  // Pin the ownership outcome represented by the production projection above:
-  // a merged project value is replaced by the raw USER value, including an
-  // entry this version intentionally cannot parse.
-  const userRaw = [
-    { schemaVersion: 1, id: 'user:known', kind: 'text', text: 'USER' },
-    { schemaVersion: 1, id: 'user:future', kind: 'future-kind', command: 'date' },
-  ]
-  const merged = { footerCustomItems: [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }], history: { '/ws': ['old'] } }
-  const projected: { footerCustomItems: unknown; history?: unknown } = { ...merged, footerCustomItems: userRaw }
-  delete projected.history
-  assert.deepEqual(projected.footerCustomItems, userRaw,
-    'the cleanup projection must retain raw USER data rather than merged project data')
+  assert.doesNotMatch(source, /settings history cleanup/u,
+    'the retired whole-document history cleanup write must stay deleted')
+  const migration = readFileSync(join(srcDir, 'legacy-settings-migration.ts'), 'utf8')
+  // The field lists that DO cross into Config never mention history.
+  const lists = migration.slice(migration.indexOf('COPIED_STRING_FIELDS'), migration.indexOf('function tuiAppOps'))
+  assert.doesNotMatch(lists, /'history'/u, 'history is never a copied Config field')
+  assert.match(migration, /function migrateLegacyHistory/u, 'the history move is file-only (JSONL)')
 })
 
 test('startup-eager callbacks of startProcessTui never reference a later-declared binding (TDZ guard)', () => {

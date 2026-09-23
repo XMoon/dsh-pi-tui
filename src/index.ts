@@ -24,7 +24,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -35,12 +35,12 @@ import type { ToolCallId, ContentBlock } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-// P6: the agent-preset roster — ctx.agentPresets and the
+// P6: the agent-preset registry — ctx.agentPresets and the
 // `agent-preset/selected` session projection owned by DSH.
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-tool-todo'
-import { resolvePresetRequest } from './runtime/session-preset.ts'
 import { recordedSessionPreset, selectBlankSessionPreset, sessionPresetOf } from './runtime/direct/session-preset-direct.ts'
+import { DirectTuiSettings, type SettingsFormsLike, type TuiConfigRefs } from './runtime/direct/tui-settings-direct.ts'
 import { DirectModelSelectionOwner, type DefaultModelServiceLike } from './runtime/direct/model-selection-direct.ts'
 import { rawSelectionFromRequestHeader, sameModelSelection } from './model-selection.ts'
 // Empty type imports carry the loader Context merge for the settlement await
@@ -56,8 +56,8 @@ import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands
 import type {} from '@deepseek-ai/dsh-commands'
 // The skill registry merge for the /skill command.
 import type {} from '@deepseek-ai/dsh-skill'
-// The settings service merge for persisting TUI preferences.
-import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
+// The settings service merge: the 0.1.7 SettingsForms surface (profile
+// form projection + path-scoped writes for TUI preferences).
 import type {} from '@deepseek-ai/dsh-settings'
 // The user-questions service merge: ctx.userQuestions for ask_user_question.
 import type {} from '@deepseek-ai/dsh-user-questions'
@@ -125,7 +125,7 @@ import { resolveDisplaySubject } from './status/resolve-subject.ts'
 import { ContextMeasurementCoordinator, deferInitialContextMeasure, type ContextMeasureReason } from './status/context-measurement.ts'
 import { refreshedSearchState, steppedSearchOverlayState, type SearchOverlayState } from './search-overlay.ts'
 import type { CompositionStatus, HostStatus, WorkspaceStatus } from './status/types.ts'
-import { DEFAULT_FOOTER_LAYOUT } from './footer/presets.ts'
+import { migrateLegacySettings } from './legacy-settings-migration.ts'
 import { parseFooterLayout, isFooterLayout, resolveCommandFooterFallback } from './footer/layout.ts'
 import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from './footer/custom-items.ts'
 import { FooterCommandRunner } from './footer/command-runner.ts'
@@ -265,7 +265,12 @@ export const name = 'tui-runner'
 /** Core services required before the TUI can mount. */
 export const inject = ['agentDefaultModel', 'agents', 'sessions', TUI_STARTUP_SERVICE]
 
-/** Plugin config: the session to resume, resolved from the startup service. */
+/** Plugin config: the session to resume, resolved from the startup service,
+ * plus the DSH 0.1.7 profile-owned live TUI preferences. Every preference
+ * field is a schemastery `.volatile()` reference (PR A): the `tui-app`
+ * plugin's Config is the ONE runtime authority, Loader commits live updates
+ * into the references without remounting, and the Settings service projects
+ * these fields into editable forms keyed by the `tui-app` profile entry. */
 export interface Config {
   /** Resumed session id; a fresh session is created when absent. */
   sessionId?: string
@@ -279,11 +284,115 @@ export interface Config {
     readonly isTTY?: boolean
     write(text: string): unknown
   }
+  /** Theme values: auto | dark | light | custom:<name>. */
+  readonly theme: Volatile<string>
+  readonly iconStyle: Volatile<string>
+  readonly footer: Volatile<string>
+  /** The user's LAST NATIVE footer mode ('default' | 'compact' | 'custom'):
+   * persisted separately because `footer` itself is overwritten by
+   * 'command' when the command surface arms — the command surface's failure
+   * fallback resolves from THIS, so a compact user's fallback survives a
+   * restart. */
+  readonly footerFallbackMode: Volatile<string>
+  /** The M2 versioned custom footer layout (a nested object, never a JSON
+   * string). No schema default: parseFooterLayout is the authority on the
+   * persisted value and resolves absence to the builtin default layout. */
+  readonly footerLayout: Volatile<unknown>
+  /** PR C: the Custom Text/Command definition collection, retained as raw
+   * data — the fail-soft parser (footer/custom-items.ts) owns validation. */
+  readonly footerCustomItems: Volatile<unknown>
+  /** M5: the trusted command status-line config (armed ONLY while the USER
+   * profile layer owns it — see resolveTrustedFooterCommand). */
+  readonly footerCommand: Volatile<unknown>
+  readonly fullscreen: Volatile<string>
+  /** Busy-Enter delivery for plain Enter while the agent runs: 'queue'
+   * (default) or 'steer'. */
+  readonly busyEnter: Volatile<string>
+  /** Local-shell sandbox for user-typed `!`/`!!` commands: 'bypass'
+   * (default) runs them outside the dsh sandbox, 'sandbox' routes them
+   * through the dsh shell capability's policy. */
+  readonly localShellSandbox: Volatile<string>
+  /** Home/End navigation behavior (issue #9): 'input' (default) moves
+   * within the input, 'viewport' keeps Home/End scrolling. */
+  readonly homeEndKeys: Volatile<string>
+  /** Canonical transcript display preset (focus | compact | full). */
+  readonly displayPreset: Volatile<string>
+  /** Mid-turn progress-update cadence (off | milestones | frequent). */
+  readonly progressUpdates: Volatile<string>
+  /** Visible-answer density guidance (default | concise | explanatory). */
+  readonly responseStyle: Volatile<string>
+  /** Completion-notification mode ('unfocused' | 'always' | 'off'). */
+  readonly notificationMode: Volatile<string>
+  /** Completion-notification method ('auto' | 'osc9' | 'osc777' | 'bell'). */
+  readonly notificationMethod: Volatile<string>
+  /** Fullscreen mouse-wheel step ('1' | '2' | '3' | '5' | '8'). */
+  readonly wheelScrollLines: Volatile<string>
+  /** The user keybinding overrides as a whole-value RAW field. The
+   * keybindings parser (src/keybindings/config.ts) is the only
+   * validation/parsing authority — the keybinding business schema
+   * deliberately stays out of the plugin Config. */
+  readonly keybindings: Volatile<unknown>
+  /** Internal one-shot legacy-migration marker (PR A §8.3): never a
+   * product row, never a behavior switch — it only keeps the retired
+   * settings.yaml(.imported) from re-overwriting newer user values. */
+  readonly legacySettingsMigrationVersion: Volatile<number>
 }
 
+// The cast bridges schemastery's structural volatile inference to the
+// declared Config interface (the declared type is what the public .d.mts
+// carries; the runtime object is the schema itself).
 export const Config: z<Config> = z.object({
   sessionId: z.string(),
-})
+  theme: z.string().default('auto').volatile(),
+  iconStyle: z.string().default('emoji').volatile(),
+  footer: z.string().default('full').volatile(),
+  footerFallbackMode: z.string().default('default').volatile(),
+  footerLayout: z.object({
+    schemaVersion: z.const(1),
+    rows: z.array(z.object({
+      left: z.array(z.object({
+        id: z.string(),
+        format: z.string(),
+        tone: z.string(),
+        prefix: z.string(),
+        suffix: z.string(),
+        importance: z.number(),
+      })),
+      right: z.array(z.object({
+        id: z.string(),
+        format: z.string(),
+        tone: z.string(),
+        prefix: z.string(),
+        suffix: z.string(),
+        importance: z.number(),
+      })),
+      separator: z.object({
+        text: z.string(),
+        tone: z.string(),
+      }),
+    })),
+  }).volatile(),
+  footerCustomItems: z.any().volatile(),
+  footerCommand: z.object({
+    schemaVersion: z.const(1),
+    command: z.string(),
+    timeoutMs: z.number(),
+    refreshIntervalMs: z.number(),
+    maxRows: z.number(),
+  }).volatile(),
+  fullscreen: z.string().default('on').volatile(),
+  busyEnter: z.string().default('queue').volatile(),
+  localShellSandbox: z.string().default('bypass').volatile(),
+  homeEndKeys: z.string().default('input').volatile(),
+  displayPreset: z.string().default('full').volatile(),
+  progressUpdates: z.string().default('milestones').volatile(),
+  responseStyle: z.string().default('default').volatile(),
+  notificationMode: z.string().default('unfocused').volatile(),
+  notificationMethod: z.string().default('auto').volatile(),
+  wheelScrollLines: z.string().default('1').volatile(),
+  keybindings: z.any().volatile(),
+  legacySettingsMigrationVersion: z.number().default(0).volatile(),
+}) as unknown as z<Config>
 
 /** The launcher's bounded exit request; the TUI invokes it after keyboard
  * confirmation. */
@@ -820,7 +929,9 @@ export async function resolveInitialCatalog(options: ResolveInitialCatalogOption
     }
   }
   // Deferred start: the cold standing-scope skill read. No Agent, no
-  // session, no turn — and no probe fallback on any failure.
+  // session, no turn — and no probe fallback on any failure. The standing
+  // scope rides the official revision lease; it is released once the read
+  // settles on ANY path (the lease must never outlive its read).
   const target = await resolveColdSkillTarget(ctx as unknown as SkillCatalogContext, presetId, process.cwd())
   if (target.target === undefined) return {}
   try {
@@ -841,6 +952,8 @@ export async function resolveInitialCatalog(options: ResolveInitialCatalogOption
     onLog?.()
     diag.warn('skill catalog unavailable', { phase: 'cold', error: message })
     return { notice: `skill catalog unavailable: ${message}` }
+  } finally {
+    await target.release?.()
   }
 }
 
@@ -964,7 +1077,7 @@ function packageVersion(): string {
 /**
  * The welcome card's version line: the installed dsh version plus the
  * bundle's own version (header-badge parity — `dsh-0.1.6-alpha.2 ·
- * tui-v0.4.7-alpha.2`). Without a resolvable dsh launcher it degrades to
+ * tui-v0.4.8-alpha.1`). Without a resolvable dsh launcher it degrades to
  * the bundle version alone.
  * @returns the combined version string.
  */
@@ -1502,9 +1615,6 @@ export async function composeAgent(
   }
   const presets = ctx.get('agentPresets')
   if (presets === undefined) {
-    if (presetId === 'code') {
-      throw new Error('preset "code" is unavailable in this deployment; use a configured preset')
-    }
     if (typeof installSelection === 'function') {
       return {
         setup: (agentCtx: Context, agent: Agent): void => {
@@ -1520,13 +1630,11 @@ export async function composeAgent(
       },
     }
   }
-  // DSH allows a user preset literally named `code`. Resolve the real roster
-  // entry first; DSH's V2→V3 migration owns historical session conversion, and
-  // only an omitted legacy settings default may use the `ptc` fallback.
-  const resolved = await resolvePresetRequest(presets, presetId)
-  // The resolver returns the concrete roster identity, including a legitimate
-  // custom `code` entry. The only compatibility rewrite is inside the shared
-  // omitted-default resolver above.
+  // The official registry owns identity resolution (unknown/broken ids are
+  // refused by `resolve`); the TUI only maps the concrete id onto the new
+  // Agent's composition. There is deliberately NO legacy alias here: a
+  // requested id — `code` included — is an ordinary preset id.
+  const resolved = await presets.resolve(presetId)
   const finishSetup = async (agentCtx: Context): Promise<void> => {
     await presets.mount(agentCtx, resolved.id)
     // Install after the preset mounts its services. Preset-only recomposition
@@ -2016,122 +2124,44 @@ export function apply(ctx: Context, config: Config): void {
       return aborted
     }
 
-    // Persisted TUI preferences: register the namespace FIRST — before any
-    // agent compose/resume — so the Focus runtime state is restored before
-    // the first model step could assemble (plan §6.1: a resumed agent may
-    // step during startup, and its first prompt assembly must already see
-    // the persisted Focus state). The App-dependent VISUAL applications
-    // (theme/footer/fullscreen/…) still run after the app exists.
-    // Theme values: auto | dark | light | custom:<name>.
-    const tuiSettings = ctx.get('settings')?.register(
-      'dsh-pi-tui' as SettingsNamespace,
-      z.object({
-        theme: z.string(),
-        footer: z.string(),
-        // M5: the user's LAST NATIVE footer mode, persisted separately
-        // because `footer` itself is overwritten by 'command' when the
-        // command surface arms. The command surface's failure fallback
-        // resolves from THIS (default | compact | custom) — a compact
-        // user's fallback survives a restart. Absent on documents written
-        // before the field existed → 'default'.
-        footerFallbackMode: z.string(),
-        // M2: the versioned custom footer layout (nested object — never a
-        // JSON string). The base is the builtin default layout, so an
-        // absent key always resolves to a valid layout. Schemastery object
-        // fields are optional by default; parseFooterLayout is the
-        // authority on the persisted value.
-        footerLayout: z.object({
-          schemaVersion: z.const(1),
-          rows: z.array(z.object({
-            left: z.array(z.object({
-              id: z.string(),
-              format: z.string(),
-              tone: z.string(),
-              prefix: z.string(),
-              suffix: z.string(),
-              importance: z.number(),
-            })),
-            right: z.array(z.object({
-              id: z.string(),
-              format: z.string(),
-              tone: z.string(),
-              prefix: z.string(),
-              suffix: z.string(),
-              importance: z.number(),
-            })),
-            separator: z.object({
-              text: z.string(),
-              tone: z.string(),
-            }),
-          })),
-        }),
-        // PR C: retain the definition collection as raw data. The custom-item
-        // parser is the fail-soft authority, so malformed entries (or even a
-        // malformed collection) are skipped instead of making the whole TUI
-        // unavailable.
-        footerCustomItems: z.any(),
-        // M5: the trusted command status-line config (the command is
-        // executed ONLY when it lives in the USER layer — see
-        // resolveTrustedFooterCommand).
-        footerCommand: z.object({
-          schemaVersion: z.const(1),
-          command: z.string(),
-          timeoutMs: z.number(),
-          refreshIntervalMs: z.number(),
-          maxRows: z.number(),
-        }),
-        fullscreen: z.string(),
-        // Busy-Enter delivery mode for plain Enter while the agent is
-        // running (web busyEnter parity): 'queue' (default) or 'steer'.
-        busyEnter: z.string(),
-        // Local-shell sandbox for user-typed `!`/`!!` commands: 'bypass'
-        // (default) runs them outside the dsh sandbox (pi/kimi parity —
-        // the sandbox guards the model's autonomous commands, not the
-        // user's own), 'sandbox' routes them through the dsh shell
-        // capability's policy for deployments that want it applied.
-        localShellSandbox: z.string(),
-        // Home/End navigation behavior (issue #9): 'input' (default)
-        // makes Home/End move within the input (Ctrl+Home/End scroll);
-        // 'viewport' keeps Home/End scrolling the fullscreen conversation.
-        homeEndKeys: z.string(),
-        // Legacy Focus preference retained as a migration input only. Runtime
-        // writes use displayPreset and never mutate this field.
-        focusMode: z.string(),
-        // Completion notifications: mode = when the main agent's
-        // settlement notifies ('unfocused' default | 'always' | 'off'),
-        // method = how ('auto' default | 'osc9' | 'osc777' | 'bell').
-        notificationMode: z.string(),
-        notificationMethod: z.string(),
-        // Fullscreen mouse-wheel step: '1' (default) | '2' | '3' | '5' |
-        // '8' — the transcript lines moved per wheel event. A Client
-        // preference; wheelScrollLinesOf is the single parsing authority.
-        wheelScrollLines: z.string(),
-        // Icon style: 'emoji' (default) or 'symbols' — the first-party
-        // structural icon palette (see src/icons.ts). A persisted invalid
-        // value fails safe to emoji at consumption.
-        iconStyle: z.string(),
-        // NOTE: the user keybinding overrides (`keybindings`) are NOT in
-        // the schema — schemastery's z.object keeps unknown keys in the
-        // resolved doc (see the `history` migration note below), and the
-        // keybindings parser (src/keybindings/config.ts) owns the
-        // validation fail-soft. Adding a schema field here would break
-        // the z<T> inference of the whole register call (probed).
-      }).set('displayPreset', z.string()).set('progressUpdates', z.string()).set('responseStyle', z.string()),
-      // `history` used to live here (a per-cwd map in the settings
-      // document). It moved to $DSH_HOME/user-history/*.jsonl (see
-      // history.ts); the schema deliberately no longer carries it, so the
-      // stored section drops the key on the next settings write.
-      // The base layout is the builtin default; the schemastery output
-      // type is fully-populated, so the cast bridges the sparse literal
-      // (the runtime validation accepts missing optional fields).
-      { base: { theme: 'auto', iconStyle: 'emoji', footer: 'full', footerFallbackMode: 'default', footerLayout: DEFAULT_FOOTER_LAYOUT as never, footerCustomItems: undefined as never, footerCommand: undefined as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' } },
-    )
+    // Persisted TUI preferences: the `tui-app` plugin's profile-owned
+    // volatile Config references are the ONE runtime authority (DSH 0.1.7
+    // PR A) — the Direct facade unwraps them into the settings document the
+    // runner surface already consumes, and converts whole-document
+    // get→modify→replace cycles into path-scoped SettingsForms mutations.
+    // The legacy settings.yaml(.imported) migration runs FIRST — before any
+    // display/progress/response/notification startup state resolution and
+    // before any agent compose/resume — so the first model prompt assembly
+    // already sees the migrated Focus/display state (plan §8.4: this
+    // barrier is P0). Reads always work off the plugin references; without
+    // the Settings service there is no persistence surface, and a write
+    // attempt fails explicitly instead of silently skipping.
+    const settingsForms = ctx.get('settings') as SettingsFormsLike | undefined
+    const tuiSettings = new DirectTuiSettings(config, settingsForms)
+    // The TUI ships its own /settings surface: keep the Settings service's
+    // auto-generated page off this entry (it would also expose the internal
+    // legacy-migration marker). The optional-inject child names the tui-app
+    // fiber the presentation policy belongs to; the TUI runs without the
+    // Settings service mounted.
+    ctx.inject(['settings'], (child) => {
+      child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+    })
+    await migrateLegacySettings({
+      home: (ctx.get('profileContext') as { readonly home: string } | undefined)?.home ?? dshHome(process.env),
+      forms: settingsForms,
+      resolvePreset: async (id) => {
+        const presets = ctx.get('agentPresets') as { resolve(id?: string): Promise<unknown> } | undefined
+        if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
+        await presets.resolve(id)
+      },
+      migrationMarker: config.legacySettingsMigrationVersion,
+      diag,
+    })
     // Resolve the canonical display state before the first compose/resume so
     // the first model prompt and the first transcript frame agree.
     const persistedTuiSettings = tuiSettings?.get() as unknown as TuiSettingsDoc | undefined
     const displayResolution = resolveDisplayPreset({
       displayPreset: persistedTuiSettings?.displayPreset,
-      focusMode: persistedTuiSettings?.focusMode,
     })
     const displayState: DisplayState = { preset: displayResolution.preset }
     // Two independent live authorities, resolved before the first compose.
@@ -2268,7 +2298,7 @@ export function apply(ctx: Context, config: Config): void {
         modelSelections,
         diag,
       ),
-      new DirectConfigPort(ctx, tuiSettings as unknown as import('./runtime/config-port.ts').TuiSettingsConfig | undefined, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
+      new DirectConfigPort(ctx, tuiSettings, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
       new DirectHostFilePort((sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
       new DirectSessionArchive(ctx),
       new DirectHostCommandPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
@@ -2289,7 +2319,7 @@ export function apply(ctx: Context, config: Config): void {
     // Migrate legacy/invalid display settings without delaying composition or
     // changing the initial frame. The canonical field always wins at boot;
     // this best-effort write only makes the chosen runtime value durable.
-    if (displayResolution.canonicalize && tuiSettings !== undefined) {
+    if (displayResolution.canonicalize && settingsForms !== undefined) {
       runDetached('display preset migration', () => serializeTuiSettingsMutation(
         tuiSettings,
         () => tuiSettings.replace({
@@ -2301,8 +2331,8 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     // Launch-time preset entry: `--preset` wins over $DSH_PI_TUI_PRESET, and
-    // both fall back to the saved default (settings `agent-presets.default`,
-    // then the roster config) when absent. A fresh session starts on it; a
+    // both fall back to the saved default (the registry's merged policy)
+    // when absent. A fresh session starts on it; a
     // resumed BLANK session may still be re-composed onto it; a resumed
     // started session keeps its recorded preset (warned, never overridden).
     const launchPreset = startup.presetId ?? (process.env.DSH_PI_TUI_PRESET?.trim() || undefined)
@@ -7332,7 +7362,7 @@ export function apply(ctx: Context, config: Config): void {
       },
       onFullscreenChange: (fullscreen) => {
         const settings = tuiSettings
-        if (settings !== undefined) {
+        if (settingsForms !== undefined) {
           runDetached('settings fullscreen write', () => serializeTuiSettingsMutation(
              settings,
              () => settings.replace({ ...settings.get(), footerCustomItems: userFooterCustomItemsForSave(), fullscreen: fullscreen ? 'on' : 'off' }),
@@ -8879,70 +8909,11 @@ export function apply(ctx: Context, config: Config): void {
     }
     const storedFooter = tuiSettings?.get().footer
     applyFooterSettings(tuiSettings?.get())
-    // One-time migration: per-cwd input history used to live inside this
-    // settings namespace. Move it to the JSONL history files (oldest-first
-    // file order; the stored arrays are newest-first) and drop the stale
-    // key from the stored section (the cleanup below deletes it explicitly —
-    // schemastery's z.object does NOT strip unknown keys, so a spread of the
-    // resolved doc would otherwise write the key right back).
-    let legacyHistory: Record<string, readonly string[]> | undefined
-    try {
-      const descriptor = ctx.get('settings')?.describe()
-        .find(d => d.ns === 'dsh-pi-tui')
-      const user = descriptor?.user as Record<string, unknown> | undefined
-      const value = user?.history
-      if (typeof value === 'object' && value !== null) {
-        legacyHistory = value as Record<string, readonly string[]>
-      }
-    } catch {
-      // Best-effort; an unreadable settings document skips migration.
-    }
-    if (legacyHistory !== undefined) {
-      const home = dshHome(process.env)
-      for (const [cwd, entries] of Object.entries(legacyHistory)) {
-        if (!Array.isArray(entries) || entries.length === 0) continue
-        const file = historyFilePath(home, cwd)
-        // Idempotency: an existing file means this cwd was already migrated
-        // (a crash mid-migration leaves the file in place and the settings
-        // key intact, so the next boot resumes from the unwritten cwds and
-        // only deletes the key once every file exists).
-        if (existsSync(file)) continue
-        for (const entry of entries.slice().reverse()) {
-          try { appendHistoryLine(file, entry, undefined) } catch { /* best effort */ }
-        }
-      }
-      if (tuiSettings !== undefined) {
-        // Only drop the stale key once every legacy cwd has a file: a crash
-        // between the file writes and this cleanup would otherwise lose the
-        // unwritten entries on the next boot (the key would be gone).
-        const allMigrated = Object.entries(legacyHistory).every(([cwd, entries]) => {
-          if (!Array.isArray(entries) || entries.length === 0) return true
-          return existsSync(historyFilePath(home, cwd))
-        })
-        if (allMigrated) {
-          // The schema does NOT strip unknown keys (schemastery z.object keeps
-          // them), so the resolved doc still carries `history`: delete it
-          // explicitly, or the replace would write it right back.
-          runDetached('settings history cleanup', () => {
-            return serializeTuiSettingsMutation(tuiSettings, () => {
-              const doc = { ...tuiSettings.get() } as Record<string, unknown>
-              // This is a whole-document write from the merged settings view;
-              // keep the raw USER custom definitions out of the project layer.
-              doc.footerCustomItems = userFooterCustomItemsForSave()
-              delete doc.history
-              return tuiSettings.replace(doc)
-            })
-          }, {
-            diag,
-            notify: (message) => {
-              if (cleanedUp) return
-              app.notify(message, 'error')
-            },
-            recoverable: () => true,
-          })
-        }
-      }
-    }
+    // One-time legacy input-history migration (per-cwd arrays that used to
+    // live inside the retired settings namespace) runs inside the PR A
+    // legacy-settings barrier: the retired settings.yaml(.imported) is the
+    // only remaining carrier of that data, and it moves straight into the
+    // $DSH_HOME/user-history/*.jsonl files — never back into Config.
     // Input history is loaded PER SESSION by initLiveSession (keyed on the
     // live session's cwd), never once at boot: a session switch to another
     // workspace must replace the recall history, not keep the old one. With
@@ -9617,7 +9588,7 @@ export function apply(ctx: Context, config: Config): void {
       // retried while the runtime is already on that preset.
       if (result.kind === 'applied') refreshStatusCheap()
       const settings = tuiSettings
-      if (settings !== undefined) {
+      if (settingsForms !== undefined) {
         runDetached('settings display preset write', () => serializeTuiSettingsMutation(
            settings,
            () => settings.replace({ ...settings.get(), footerCustomItems: userFooterCustomItemsForSave(), displayPreset: preset }),

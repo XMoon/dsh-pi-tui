@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { ProcessTerminal } from '@xmoon76/pi-tui'
-import { apply as applyRunner, type Config } from '../../src/index.ts'
+import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import type { VirtualTerminal } from '../virtual-terminal.ts'
 
@@ -425,7 +425,13 @@ export async function mountRunner(
   home: string,
   harness: RunnerHarness,
   startup: { sessionId?: string; presetId?: string },
-  config: Config,
+  /** Plain plugin-config input; resolved through the exported schema so the
+   * live preference fields arrive as volatile references, exactly like a
+   * Loader-mounted row. `fullscreen` defaults to OFF to preserve the
+   * historical degraded-mount baseline these suites were written against
+   * (a settings-less mount used to resolve no document at all); tests that
+   * exercise the fullscreen surface pass it explicitly. */
+  config: Record<string, unknown> = {},
   appExit: () => void = () => {},
 ) {
   ctx.provide('appExit', appExit)
@@ -440,7 +446,7 @@ export async function mountRunner(
   if (harness.subagents !== undefined) ctx.provide('subagents', harness.subagents as never)
   if (harness.jobs !== undefined) ctx.provide('jobs', harness.jobs as never)
   ctx.provide('loader', { await: async () => {} } as never)
-  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, config))
+  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ fullscreen: 'off', ...config } as never)))
   await fiber
   await settle()
   return fiber

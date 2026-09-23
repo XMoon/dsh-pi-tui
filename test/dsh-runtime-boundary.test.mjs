@@ -20,12 +20,12 @@ test('runtime boundary rejects explicit and discovered symlinked candidates', (t
   assert.throws(() => resolveTarball(undefined, directory), /no candidate tarball/u)
 })
 
-test('runtime boundary accepts the recommended npm 0.1.6-alpha.2 advisory notice', () => {
+test('runtime boundary accepts the recommended npm 0.1.7-alpha.2 advisory notice', () => {
   const output = [
-    `dsh-pi-tui v${bundleVersion} requires DeepSeek Harness 0.1.6-alpha.2 or later,`,
+    `dsh-pi-tui v${bundleVersion} requires DeepSeek Harness 0.1.7-alpha.2 or later,`,
     'but this installation is running dsh 0.1.1-rc.2.',
     'Upgrade DeepSeek Harness:',
-    '  npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2',
+    '  npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-alpha.2',
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
   assert.doesNotThrow(() => assertBoundary(output, 1, '0.1.1-rc.2', bundleVersion))
@@ -36,10 +36,10 @@ test('runtime boundary rejects a stale candidate bundle-version label', () => {
   // The real smoke passes the candidate tarball's version: a packed bundle
   // built before a version bump must fail instead of passing silently.
   const output = [
-    'dsh-pi-tui v0.0.1 requires DeepSeek Harness 0.1.6-alpha.2 or later,',
+    'dsh-pi-tui v0.0.1 requires DeepSeek Harness 0.1.7-alpha.2 or later,',
     'but this installation is running dsh 0.1.1-rc.2.',
     'Upgrade DeepSeek Harness:',
-    '  npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2',
+    '  npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-alpha.2',
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
   assert.throws(() => assertBoundary(output, 1, '0.1.1-rc.2', bundleVersion), /boundary output is missing/u)
@@ -47,10 +47,10 @@ test('runtime boundary rejects a stale candidate bundle-version label', () => {
 
 test('runtime boundary applies the same npm floor to an earlier runtime', () => {
   const output = [
-    `dsh-pi-tui v${bundleVersion} requires DeepSeek Harness 0.1.6-alpha.2 or later,`,
+    `dsh-pi-tui v${bundleVersion} requires DeepSeek Harness 0.1.7-alpha.2 or later,`,
     'but this installation is running dsh 0.1.3-alpha.0.',
     'Upgrade DeepSeek Harness:',
-    '  npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.6-alpha.2',
+    '  npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-alpha.2',
     'Then re-run: dsh --profile pi-tui',
   ].join('\n')
   assert.doesNotThrow(() => assertBoundary(output, 1, '0.1.3-alpha.0', bundleVersion))

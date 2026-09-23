@@ -57,7 +57,7 @@ interface SettingsDoc {
 /** A settings service whose writes can be DELAYED (the serialization
  * repro: the first write must not land after the second). */
 function settingsService(initial: SettingsDoc): {
-  service: { get(ns: string): unknown; mutate(ns: string, ops: unknown): Promise<unknown> }
+  service: { describe(): Array<{ ns: string; value: unknown; user: unknown; revision: number }>; mutate(ns: string, ops: unknown): Promise<unknown> }
   doc: SettingsDoc
   writes: Array<{ enabled: boolean; allowedModels: unknown }>
   setPromises: Promise<void>[]
@@ -71,7 +71,7 @@ function settingsService(initial: SettingsDoc): {
   let fail = false
   return {
     service: {
-      get: (ns: string) => (ns === 'subagent-model-selection' ? doc : undefined),
+      describe: () => [{ ns: 'subagent-model-selection-settings', value: doc, user: doc, revision: 2 }],
       mutate: async (_ns: string, ops: unknown) => {
         const attempt = (async () => {
           if (fail) {
@@ -138,7 +138,9 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean } =
   ctx.provide('commands', commandsService as never)
   const settings = settingsService(initial)
   ctx.provide('settings', settings.service as never)
-  ctx.provide('subagentModelSelection', {} as never)
+  // The 0.1.7 read authority is the official service's current() snapshot;
+  // the fake serves the same document the settings write commits.
+  ctx.provide('subagentModelSelection', { current: () => ({ enabled: settings.doc.enabled, allowedModels: settings.doc.allowedModels.map(route => ({ ...route })) }) } as never)
   ctx.provide('llm', {
     listProviders: () => [{ id: 'p', name: 'Provider P' }],
     listModels: async () => [{ id: 'm1' }, { id: 'm2' }],

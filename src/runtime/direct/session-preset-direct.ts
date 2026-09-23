@@ -1,6 +1,6 @@
 /**
- * Direct session-preset adapter for the DSH 0.1.6 session-projection API
- * (introduced in `0.1.6-alpha.1`).
+ * Direct session-preset adapter for the DSH session-projection API
+ * (`agentPreset`, owned by the 0.1.7 preset registry).
  *
  * The Harness owns the `agentPreset` projection. TUI callers must not fold the
  * session log themselves: the projection initializes from the creation header
@@ -20,7 +20,7 @@
 
 import { Session, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
-import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
+import type { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 
 type AgentPresetProjectionKey = typeof agentPresetProjectionDefinition.key
 

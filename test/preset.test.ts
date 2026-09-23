@@ -13,7 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { composeAgent, recordedPreset } from '../src/index.ts'
 import { presetDisplayText } from '../src/commands.ts'
 import { recordedSessionPreset, selectBlankSessionPreset, sessionPresetOf, turnBoundaryBlank, type SessionObservationLike } from '../src/runtime/direct/session-preset-direct.ts'
-import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
+import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
@@ -148,12 +148,10 @@ test('composeAgent passes the composed Agent to the explicit installer', async (
   assert.equal(received, unpublishedAgent)
 })
 
-test('composeAgent rejects code when no preset roster exists', async () => {
+test('composeAgent without a roster composes preset-free — no id is special', async () => {
   const ctx = ctxWith(() => undefined)
-  await assert.rejects(
-    composeAgent(ctx, installSelection, 'code'),
-    /preset "code" is unavailable/,
-  )
+  const composition = await composeAgent(ctx, installSelection, 'code')
+  assert.equal('agentPreset' in composition, false, 'a rosterless deployment carries no preset identity, even for code')
 })
 
 test('composeAgent with a roster resolves the default and mounts it in setup', async () => {
@@ -183,32 +181,38 @@ test('composeAgent accepts a legal custom code preset', async () => {
   assert.deepEqual(fake.mounted, ['code'])
 })
 
-test('composeAgent keeps a real custom code default instead of applying the legacy fallback', async () => {
+test('composeAgent composes a declared code default as itself — never rewritten', async () => {
   const fake = roster()
-  const service = { ...fake.service, defaultId: 'code' }
+  const service = {
+    ...fake.service,
+    defaultId: 'code',
+    // Real-registry semantics: an omitted id resolves the declared default.
+    resolve: async (id?: string) => ({ id: id ?? 'code' }),
+  }
   const ctx = ctxWith(name => name === 'agentPresets' ? service : undefined)
   const composition = await composeAgent(ctx, installSelection)
   assert.equal(composition.agentPreset, 'code')
+  await composition.setup(agentCtx(), unpublishedAgent)
+  assert.deepEqual(fake.mounted, ['code'])
 })
 
-test('composeAgent resolves an absent legacy code default as ptc', async () => {
+test('composeAgent refuses an undeclared default — no ptc fallback, one resolution', async () => {
   const fake = roster()
   const resolvedIds: Array<string | undefined> = []
   const service = {
     ...fake.service,
     defaultId: 'code',
     resolve: async (id?: string) => {
-      resolvedIds.push(id)
-      if (id === 'code') throw Object.assign(new Error('unknown preset'), { presetId: 'code' })
-      return { id: id ?? 'standard' }
+      const wanted = id ?? 'code'
+      resolvedIds.push(wanted)
+      if (wanted === 'code') throw Object.assign(new Error('unknown preset'), { presetId: 'code' })
+      return { id: wanted }
     },
   }
   const ctx = ctxWith(name => name === 'agentPresets' ? service : undefined)
-  const composition = await composeAgent(ctx, installSelection)
-  assert.deepEqual(resolvedIds, ['code', 'ptc'])
-  assert.equal(composition.agentPreset, 'ptc')
-  await composition.setup(agentCtx(), unpublishedAgent)
-  assert.deepEqual(fake.mounted, ['ptc'])
+  await assert.rejects(composeAgent(ctx, installSelection), /unknown preset/u)
+  assert.deepEqual(resolvedIds, ['code'], 'exactly one registry resolution — no fallback probe')
+  assert.deepEqual(fake.mounted, [])
 })
 
 test('composeAgent propagates an unknown-preset rejection', async () => {
@@ -298,25 +302,28 @@ test('selectBlankSessionPreset propagates the official refusal (e.g. agent-prese
 })
 
 test('presetDisplayText maps the four shipped presets to fixed English copy', () => {
-  // The official shipped root may provide localized metadata; the canonical
-  // id mapping keeps the TUI's built-in picker copy stable.
-  assert.deepEqual(presetDisplayText({ id: 'standard', trust: 'system', name: '标准模式', description: '中文描述' }), {
+  // A shipped declaration publishes no name (the official built-in
+  // classification); the canonical id mapping keeps the TUI's built-in
+  // picker copy stable regardless of the declaration's description.
+  assert.deepEqual(presetDisplayText({ id: 'standard', description: '中文描述' }), {
     name: 'Standard mode',
     description: 'Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.',
   })
-  assert.equal(presetDisplayText({ id: 'ptc', trust: 'system' }).name, 'PTC mode')
-  assert.equal(presetDisplayText({ id: 'minimal', trust: 'system' }).name, 'Minimal mode')
-  assert.equal(presetDisplayText({ id: 'cordis', trust: 'system' }).name, 'Creator mode')
+  assert.equal(presetDisplayText({ id: 'ptc' }).name, 'PTC mode')
+  assert.equal(presetDisplayText({ id: 'minimal' }).name, 'Minimal mode')
+  assert.equal(presetDisplayText({ id: 'cordis' }).name, 'Creator mode')
 })
 
-test('presetDisplayText renders file metadata for everything else', () => {
+test('presetDisplayText renders declaration metadata for everything else', () => {
   assert.deepEqual(
-    presetDisplayText({ id: 'custom', trust: 'user', name: 'My Preset', description: 'mine' }),
+    presetDisplayText({ id: 'custom', name: 'My Preset', description: 'mine' }),
     { name: 'My Preset', description: 'mine' },
   )
-  // A user-authored preset may shadow a shipped id: trust decides.
-  assert.deepEqual(presetDisplayText({ id: 'standard', trust: 'user', name: 'User Standard' }), { name: 'User Standard' })
-  assert.deepEqual(presetDisplayText({ id: 'custom', trust: 'system' }), { name: 'custom' })
+  // A declaration that names itself owns its copy, even on a shipped id
+  // (official rule: named metadata is never translated).
+  assert.deepEqual(presetDisplayText({ id: 'standard', name: 'User Standard' }), { name: 'User Standard' })
+  // An unknown id without a name falls back to the id itself.
+  assert.deepEqual(presetDisplayText({ id: 'custom' }), { name: 'custom' })
 })
 
 // ── D2.3 Host turn-boundary blank authority ───────────────────────────────

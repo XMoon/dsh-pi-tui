@@ -15,7 +15,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/catalog-direct
  */
 
-import type { AgentPreset } from '@deepseek-ai/dsh-agent-presets'
+import type { AgentPreset } from '@deepseek-ai/dsh-agent-preset-registry'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import {
   copyModelSelection,
@@ -51,7 +51,6 @@ import type {
 } from '../catalog-port.ts'
 import type { StandingSkillRead } from '../../skill-catalog-refresh.ts'
 import type { ProviderCatalogEntry } from '../../provider-catalog.ts'
-import { resolvePresetRequest } from '../session-preset.ts'
 import { selectBlankSessionPreset } from './session-preset-direct.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
@@ -95,10 +94,12 @@ export interface ModelDiagLike {
   warn(message: string, fields?: Record<string, unknown>): void
 }
 
-/** The structural `agentPresets` service surface. `remoteExportList` is the
- *  PUBLIC official roster projection (the `@Remote('list')` method); `select`
- *  is the official blank-Session write. Both are optional so a
- *  structurally-narrower test double still type-checks. */
+/** The structural `agentPresets` service surface (the 0.1.7 declarative
+ * registry). `remoteExportList` is the PUBLIC official roster projection
+ * (the `@Remote('list')` method — path-free rows, the Host-effective
+ * default and the mode-selection policy from one snapshot); `select` is
+ * the official blank-Session write. Identity is id-only: `trust`/`path`/
+ * `authorable` are retired upstream and deliberately absent here. */
 export interface AgentPresetsServiceLike {
   list(): Promise<readonly AgentPreset[]>
   resolve(id?: string): Promise<AgentPreset>
@@ -106,11 +107,10 @@ export interface AgentPresetsServiceLike {
   /** The public official roster projection: path-free rows + the
    *  Host-effective default + the deployment's mode-selection policy, read
    *  from ONE settings snapshot. */
-  remoteExportList?(): Promise<{
+  remoteExportList(): Promise<{
     readonly presets: readonly {
       readonly id: string
-      readonly trust: string
-      readonly isDefault?: boolean
+      readonly isDefault: boolean
       readonly name?: string
       readonly description?: string
       readonly broken?: string
@@ -502,39 +502,21 @@ export class DirectPresetCatalog implements PresetCatalog {
     signal?.throwIfAborted()
     const presets = this.presets()
     if (presets === undefined) return { presets: [], modeSelectionEnabled: false }
-    if (typeof presets.remoteExportList === 'function') {
-      // The PUBLIC official roster projection (the `@Remote('list')` method):
-      // path-free rows, the Host-effective default and the mode-selection
-      // policy from ONE settings snapshot.
-      const roster = await presets.remoteExportList()
-      signal?.throwIfAborted()
-      const defaultId = roster.presets.find(preset => preset.isDefault === true)?.id
-      return {
-        presets: roster.presets.map(preset => ({
-          id: preset.id,
-          trust: preset.trust,
-          ...preset.name === undefined ? {} : { name: preset.name },
-          ...preset.description === undefined ? {} : { description: preset.description },
-          ...preset.broken === undefined ? {} : { broken: preset.broken },
-        })),
-        ...defaultId === undefined ? {} : { defaultId },
-        modeSelectionEnabled: roster.modeSelectionEnabled,
-      }
-    }
-    // A roster surface without the public policy read cannot express the
-    // deployment's mode-selection policy: FAIL CLOSED rather than expose
-    // presets a disabled deployment may have intended to hide.
-    const roster = await presets.list()
+    // The PUBLIC official roster projection (the `@Remote('list')` method):
+    // path-free rows, the Host-effective default and the mode-selection
+    // policy from ONE settings snapshot.
+    const roster = await presets.remoteExportList()
     signal?.throwIfAborted()
+    const defaultId = roster.presets.find(preset => preset.isDefault === true)?.id
     return {
-      presets: roster.map(preset => ({
+      presets: roster.presets.map(preset => ({
         id: preset.id,
-        trust: preset.trust,
         ...preset.name === undefined ? {} : { name: preset.name },
         ...preset.description === undefined ? {} : { description: preset.description },
         ...preset.broken === undefined ? {} : { broken: preset.broken },
       })),
-      modeSelectionEnabled: false,
+      ...defaultId === undefined ? {} : { defaultId },
+      modeSelectionEnabled: roster.modeSelectionEnabled,
     }
   }
 
@@ -543,22 +525,18 @@ export class DirectPresetCatalog implements PresetCatalog {
     const presets = this.presets()
     // Rosterless deployment: no preset identity to record (the old compose
     // path returned `agentPreset: undefined`).
-    if (presets === undefined) {
-      if (id === 'code') throw new Error('preset "code" is unavailable in this deployment; use a configured preset')
-      return {}
-    }
-    // An omitted id means "use the persisted deployment default". DSH allows
-    // a user preset literally named `code`, so probe that real roster entry
-    // before applying the old pi-tui default-data compatibility mapping.
-    const preset = await resolvePresetRequest(presets, id, signal)
+    if (presets === undefined) return {}
+    // The official registry owns identity resolution: an unknown or broken
+    // id is refused by `resolve` itself. A requested id — `code` included —
+    // is an ordinary preset id; there is deliberately NO legacy alias.
+    const preset = await presets.resolve(id)
     signal?.throwIfAborted()
     return { id: preset.id }
   }
 
   defaultId(): string | undefined {
-    // This synchronous projection cannot inspect the async roster. Preserve a
-    // literal `code`; callers resolving a persisted default use resolve(),
-    // which disambiguates a real custom entry from old TUI data.
+    // The registry's own merged policy (deployment default +
+    // selectedDefault + mode selection) — never recomputed TUI-side.
     return this.presets()?.defaultId
   }
 
@@ -649,8 +627,14 @@ export class DirectSkillCatalog implements SkillCatalogCapability {
     const resolution = await resolveColdSkillTarget(this.ctx as unknown as SkillCatalogContext, presetId, cwd)
     const target = resolution.target
     if (target === undefined) throw new Error('skill service unavailable')
-    const catalog = await readHumanSkillCatalog(target.registry, { cwd: target.cwd, scope: target.scope, signal })
-    return { catalog, ...resolution.degraded === undefined ? {} : { notice: resolution.degraded } }
+    try {
+      const catalog = await readHumanSkillCatalog(target.registry, { cwd: target.cwd, scope: target.scope, signal })
+      return { catalog, ...resolution.degraded === undefined ? {} : { notice: resolution.degraded } }
+    } finally {
+      // The standing scope rides the official revision lease: release it
+      // once the read settles, on every path.
+      await resolution.release?.()
+    }
   }
 
   async listHumanSkills(sessionId: string, signal?: AbortSignal): Promise<import('../../skill-catalog.ts').HumanSkillCatalog | undefined> {

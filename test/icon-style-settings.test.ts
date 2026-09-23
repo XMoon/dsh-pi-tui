@@ -69,7 +69,7 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     find: () => undefined,
     execute: async () => undefined,
   } as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'dsh-pi-tui', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
   // The fake document starts from the FULL default shape. When no
   // iconStyle is passed, the field is OMITTED entirely — the exact shape
   // of an old settings file written before the preference existed.

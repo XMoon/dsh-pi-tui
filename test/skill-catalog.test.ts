@@ -176,17 +176,21 @@ function abortError(): Error {
 test('the cold target resolves the standing scope of the effective preset', async () => {
   const key = { agentPreset: 'fixture' }
   const registry = fakeRegistry({})
+  let released = false
   const presets: AgentPresetsLike = {
-    standingKeyFor: async (id) => {
+    acquireScope: async (id) => {
       assert.equal(id, 'fixture')
-      return key
+      return { key, [Symbol.asyncDispose]: async () => { released = true } }
     },
   }
   const resolution = await resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'fixture', '/ws')
   assert.equal(resolution.target?.kind, 'cold-standing')
-  assert.equal(resolution.target?.scope, key, 'the standing key is the view scope')
+  assert.equal(resolution.target?.scope, key, 'the standing lease key is the view scope')
   assert.equal(resolution.target?.registry, registry)
   assert.equal(resolution.degraded, undefined)
+  assert.equal(released, false, 'the lease stays retained until the caller releases it')
+  await resolution.release?.()
+  assert.equal(released, true, 'the caller-owned release disposes the lease')
 })
 
 test('a rosterless deployment resolves the global cold view with no scope', async () => {
@@ -197,7 +201,7 @@ test('a rosterless deployment resolves the global cold view with no scope', asyn
   assert.equal(resolution.degraded, undefined)
 })
 
-test('a missing standingKeyFor capability degrades to the global view (upstream API drift)', async () => {
+test('a missing acquireScope capability degrades to the global view (upstream API drift)', async () => {
   const registry = fakeRegistry({})
   const resolution = await resolveColdSkillTarget(
     fakeCtx({ skills: registry, presets: { serviceFor: () => undefined } }),
@@ -208,10 +212,10 @@ test('a missing standingKeyFor capability degrades to the global view (upstream 
   assert.equal(resolution.degraded, undefined, 'a missing capability is a quiet degradation, not a failure notice')
 })
 
-test('an AbortError from standingKeyFor propagates instead of degrading to global', async () => {
+test('an AbortError from acquireScope propagates instead of degrading to global', async () => {
   const registry = fakeRegistry({})
   const presets: AgentPresetsLike = {
-    standingKeyFor: async () => { throw abortError() },
+    acquireScope: async () => { throw abortError() },
   }
   await assert.rejects(
     resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'cancelled', '/ws'),
@@ -219,10 +223,10 @@ test('an AbortError from standingKeyFor propagates instead of degrading to globa
   )
 })
 
-test('a cross-realm-shaped AbortError from standingKeyFor propagates', async () => {
+test('a cross-realm-shaped AbortError from acquireScope propagates', async () => {
   const registry = fakeRegistry({})
   const presets: AgentPresetsLike = {
-    standingKeyFor: async () => { throw { name: 'AbortError', code: 'ABORT_ERR' } },
+    acquireScope: async () => { throw { name: 'AbortError', code: 'ABORT_ERR' } },
   }
   await assert.rejects(
     resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'cross-realm', '/ws'),
@@ -230,10 +234,10 @@ test('a cross-realm-shaped AbortError from standingKeyFor propagates', async () 
   )
 })
 
-test('a hostile standingKeyFor abort probe degrades safely', async () => {
+test('a hostile acquireScope abort probe degrades safely', async () => {
   const registry = fakeRegistry({})
   const presets: AgentPresetsLike = {
-    standingKeyFor: async () => {
+    acquireScope: async () => {
       throw new Proxy({}, { get: () => { throw new Error('hostile getter') } })
     },
   }
@@ -242,21 +246,21 @@ test('a hostile standingKeyFor abort probe degrades safely', async () => {
   assert.match(resolution.degraded ?? '', /<unprintable error>/)
 })
 
-test('a standingKeyFor failure degrades to the global view with a one-shot notice', async () => {
+test('an acquireScope failure degrades to the global view with a one-shot notice', async () => {
   const registry = fakeRegistry({})
   const presets: AgentPresetsLike = {
-    standingKeyFor: async () => { throw new Error('preset broken') },
+    acquireScope: async () => { throw new Error('preset broken') },
   }
   const resolution = await resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'broken', '/ws')
   assert.equal(resolution.target?.kind, 'cold-global', 'a broken preset still serves the global view')
   assert.match(resolution.degraded ?? '', /skill catalog unavailable for preset "broken": preset broken/)
 })
 
-test('a hostile standingKeyFor rejection degrades through safeErrorMessage, never escapes', async () => {
+test('a hostile acquireScope rejection degrades through safeErrorMessage, never escapes', async () => {
   const hostile = { toString: () => { throw new Error('hostile') } } as never
   const registry = fakeRegistry({})
   const presets: AgentPresetsLike = {
-    standingKeyFor: async () => { throw hostile },
+    acquireScope: async () => { throw hostile },
   }
   const resolution = await resolveColdSkillTarget(fakeCtx({ skills: registry, presets }), 'x', '/ws')
   assert.equal(resolution.target?.kind, 'cold-global')

@@ -1146,7 +1146,7 @@ test('/settings theme pick persists the BUILTIN choice too (review P1: the trans
   const projectFooterCustomItems: unknown[] = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
   ctx.provide('settings', {
     describe: () => [{
-      ns: 'dsh-pi-tui',
+      ns: 'tui-app',
       value: { footerCustomItems: projectFooterCustomItems },
       user: { footerCustomItems: userFooterCustomItems },
     }],
@@ -1220,7 +1220,7 @@ test('/settings nested Theme submenu responds to fullscreen mouse clicks (mouse 
   const projectFooterCustomItems: unknown[] = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
   ctx.provide('settings', {
     describe: () => [{
-      ns: 'dsh-pi-tui',
+      ns: 'tui-app',
       value: { footerCustomItems: projectFooterCustomItems },
       user: { footerCustomItems: userFooterCustomItems },
     }],

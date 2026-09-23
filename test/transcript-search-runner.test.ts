@@ -123,7 +123,7 @@ async function mountSearchRunner(
     events: events === undefined ? searchSession(turns, matchTurns, term) : [...events],
   })
   const harness = makeHarness(home, session, { provider: 'p', model: 'm' })
-  const fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id })
+  const fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id, fullscreen: 'on' })
   life.defer(() => fiber.dispose())
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
@@ -414,7 +414,7 @@ test('runner search: a late session event never strands the current target', asy
     focusMode: 'off', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto',
   }
   context.provide('settings', {
-    describe: () => [{ ns: 'dsh-pi-tui', user: { footerCustomItems: [] } }],
+    describe: () => [{ ns: 'tui-app', user: { footerCustomItems: [] } }],
     register: () => ({
       get: () => ({ ...settingsDoc }),
       replace: async (next: Record<string, unknown>) => { Object.assign(settingsDoc, next) },
@@ -426,7 +426,7 @@ test('runner search: a late session event never strands the current target', asy
     events: searchSession(3, [0, 2]),
   })
   const harness = makeHarness(home, session, { provider: 'p', model: 'm' })
-  const fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id })
+  const fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id, fullscreen: 'on' })
   life.defer(() => fiber.dispose())
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')

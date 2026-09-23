@@ -557,7 +557,7 @@ test('npm distribution forwards the caller package manifest (path or object) to 
 
 test('npm distribution defaults to the declared package target, never a stale literal', () => {
   const declared = npmDshVersion()
-  assert.equal(declared, '0.1.6-alpha.2')
+  assert.equal(declared, '0.1.7-alpha.2')
   const distribution = loadDshDistribution({ mode: 'npm' })
   assert.equal(distribution.version, declared, 'an omitted npm version must resolve the declared target')
   // An explicit caller target still wins so historical lanes keep working.
