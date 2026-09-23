@@ -334,20 +334,22 @@ Use `/help` inside the TUI for the current command and keybinding list. The tabl
 Host shortcuts are semantic actions (`app.*`) resolved through a
 context-aware keymap — the UI (footer hints, `/help`, `/keybindings`)
 always shows the EFFECTIVE keys, so a remap updates every hint. Configure
-them in the `dsh-pi-tui` settings namespace; apply with `/keybindings
-reload` (explicit — a settings edit takes effect after the reload, no
-restart):
+them through the in-TUI `/keybindings` panel (it writes the `keybindings`
+field of the `tui-app` plugin's profile-owned configuration — since DSH
+0.1.7 TUI preferences live on the profile Config, not the retired
+`dsh-pi-tui` settings namespace); apply with `/keybindings reload`
+(explicit — a configuration edit takes effect after the reload, no
+restart). Field shape:
 
 ```yaml
-dsh-pi-tui:
-  keybindings:
-    app.input.steer: ctrl+s          # one key
-    app.permission.cycle: [shift+tab, ctrl+shift+p]   # several keys
-    app.history.search: ctrl+r
-    app.transcript.toggleThinking: false   # disable the action's keys
-    leader: ctrl+x                    # M6: leader sequences
-    bindings:
-      app.tasks.open: <leader>t
+keybindings:
+  app.input.steer: ctrl+s          # one key
+  app.permission.cycle: [shift+tab, ctrl+shift+p]   # several keys
+  app.history.search: ctrl+r
+  app.transcript.toggleThinking: false   # disable the action's keys
+  leader: ctrl+x                    # M6: leader sequences
+  bindings:
+    app.tasks.open: <leader>t
 ```
 
 - A plain printable key can never be bound to a Host action (it would

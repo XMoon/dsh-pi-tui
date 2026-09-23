@@ -8,6 +8,19 @@ import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-a
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../src/index.ts'
+
+/** The effective merged view a real SettingsForms describe() would project
+ * for the tui-app entry mounted with the given plain config input (schema
+ * defaults + the passed overrides). */
+function effectiveConfigView(input: Record<string, unknown>): Record<string, unknown> {
+  const resolved = TuiConfigSchema(input as never) as unknown as Record<string, { get(): unknown }>
+  return Object.fromEntries(
+    Object.entries(resolved)
+      .filter(([field]) => field !== 'sessionId' && field !== 'startupStatusOutput')
+      .map(([field, ref]) => [field, ref.get()])
+      .filter(([, value]) => value !== undefined),
+  )
+}
 import { foldPendingModelSelection } from '../src/model-selection.ts'
 import { StatsFolder } from '../src/stats.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
@@ -1965,7 +1978,17 @@ test('startup restores a persisted Compact preset unchanged and /display compact
   // references; the Settings surface records path-scoped writes.
   const mutations: Array<{ ns: string; ops: readonly { op: string; path: readonly string[]; value?: unknown }[] }> = []
   const settings = {
-    describe: () => [{ ns: 'tui-app', value: {}, user: { footerCustomItems: userFooterItems }, revision: 1 }],
+    describe: () => [{
+      ns: 'tui-app',
+      value: effectiveConfigView({
+        fullscreen: 'off',
+        displayPreset: 'compact',
+        footerCustomItems: [{ id: 'project-item' }],
+        keybindings: { tab: 'custom' },
+      }),
+      user: { footerCustomItems: userFooterItems },
+      revision: 1,
+    }],
     mutate: async (ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
       mutations.push({ ns, ops })
     },
@@ -2035,7 +2058,17 @@ test('startup canonicalizes an invalid display preset, preserves raw fields, and
   const written: Array<{ op: string; path: readonly string[]; value?: unknown }> = []
   let failFirstWrite = true
   const settings = {
-    describe: () => [{ ns: 'tui-app', value: {}, user: { footerCustomItems: userFooterItems }, revision: 1 }],
+    describe: () => [{
+      ns: 'tui-app',
+      value: effectiveConfigView({
+        fullscreen: 'off',
+        displayPreset: 'garbage',
+        footerCustomItems: [{ id: 'project-item' }],
+        keybindings: { tab: 'custom' },
+      }),
+      user: { footerCustomItems: userFooterItems },
+      revision: 1,
+    }],
     mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
       for (const op of ops) written.push({ ...op })
       if (failFirstWrite) {

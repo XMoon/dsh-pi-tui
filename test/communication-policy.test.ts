@@ -309,8 +309,14 @@ test('production startup resolves both settings before compose and settings swit
   }
   const ctx = new Context()
   life.defer(() => disposeContext(ctx))
+  const { Config: TuiConfigSchema } = await import('../src/index.ts')
+  const resolved = TuiConfigSchema({ progressUpdates: 'off', responseStyle: 'explanatory' } as never) as unknown as Record<string, { get(): unknown }>
+  const effective = Object.fromEntries(
+    Object.entries(resolved).filter(([field]) => field !== 'sessionId' && field !== 'startupStatusOutput')
+      .map(([field, ref]) => [field, ref.get()]).filter(([, value]) => value !== undefined),
+  )
   ctx.provide('settings', {
-    describe: () => [{ ns: 'tui-app', value: { ...doc }, user: { ...doc }, revision: 1 }],
+    describe: () => [{ ns: 'tui-app', value: effective, user: { ...doc }, revision: 1 }],
     mutate: async (_ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[]) => {
       for (const op of ops) {
         if (op.op === 'set') doc[op.path[0]!] = op.value

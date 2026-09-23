@@ -316,20 +316,21 @@ TUI 使用 DSH 提供的模型和设置服务。
 
 Host 快捷键是语义 action(`app.*`),通过 context-aware keymap 解析——
 UI(页脚提示、`/help`、`/keybindings`)始终显示**生效**的按键,因此
-改键后所有提示自动更新。在 `dsh-pi-tui` settings 命名空间中配置,
-然后用 `/keybindings reload` 应用(显式 reload——改设置后执行 reload
-即生效,无需重启):
+改键后所有提示自动更新。配置入口是 TUI 里的 `/keybindings` 面板
+(写入 `tui-app` 插件的 profile 配置的 `keybindings` 字段——DSH 0.1.7
+起 TUI 偏好保存在 profile-owned Config,不再使用旧 `dsh-pi-tui`
+settings 命名空间);保存后用 `/keybindings reload` 应用(显式
+reload——配置变更后执行 reload 即生效,无需重启)。字段形状:
 
 ```yaml
-dsh-pi-tui:
-  keybindings:
-    app.input.steer: ctrl+s          # 单个按键
-    app.permission.cycle: [shift+tab, ctrl+shift+p]   # 多个按键
-    app.history.search: ctrl+r
-    app.transcript.toggleThinking: false   # 禁用该 action 的按键
-    leader: ctrl+x                    # M6:leader 序列
-    bindings:
-      app.tasks.open: <leader>t
+keybindings:
+  app.input.steer: ctrl+s          # 单个按键
+  app.permission.cycle: [shift+tab, ctrl+shift+p]   # 多个按键
+  app.history.search: ctrl+r
+  app.transcript.toggleThinking: false   # 禁用该 action 的按键
+  leader: ctrl+x                    # M6:leader 序列
+  bindings:
+    app.tasks.open: <leader>t
 ```
 
 - 普通可打印键永远不能绑定到 Host action(会吞掉输入);坏配置只是

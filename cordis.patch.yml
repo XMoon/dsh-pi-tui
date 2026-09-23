@@ -65,8 +65,10 @@
     # default/selection policy are registry-owned (deployment `default` here;
     # the user's `selectedDefault` rides the profile form). The four shipped
     # preset declarations follow as separate patch files under
-    # config/dsh-presets/, listed after this file in package.json
-    # `dsh.bundle.patch` — the same composition the upstream web bundle uses.
+    # generated/dsh-presets/, listed after this file in package.json
+    # `dsh.bundle.patch` — a generated, parity-gated byte-exact mirror of
+    # @deepseek-ai/dsh-web-app's exported preset assets (0.1.7
+    # dsh.bundle.patch cannot reference another package's files).
     - id: agent-preset-registry
       name: '@deepseek-ai/dsh-agent-preset-registry'
       config:

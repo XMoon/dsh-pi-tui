@@ -179,12 +179,22 @@ export class DirectTuiSettings implements TuiSettingsConfig {
   async replace(doc: TuiSettingsDoc): Promise<void> {
     const forms = this.forms
     if (forms === undefined) throw new Error('settings service unavailable')
-    const current = this.get() as unknown as Record<string, unknown>
+    // ONE descriptor snapshot is the indivisible decision unit for a write:
+    // its value (effective), user (override ownership) and revision (the
+    // conflict fence) are read together, the ops are derived from exactly
+    // that snapshot, and the SAME revision guards the mutate. Re-reading
+    // the descriptor for the revision would refresh the fence after a
+    // concurrent edit and let stale ops commit over a newer USER value.
+    // Runtime READS stay on the Config references (get()); the descriptor
+    // projection is only the write-reconciliation snapshot.
+    const descriptor = this.readDescriptor()
+    if (descriptor === undefined) throw new Error('settings entry "tui-app" is not configurable in this deployment')
+    const current = (descriptor.value ?? {}) as Record<string, unknown>
     const next = doc as unknown as Record<string, unknown>
     // The USER override decides whether a dropped field is an UNSET (the
     // user layer owns a value to remove) or a no-op (the effective value is
     // inherited and stays inherited — never pinned into the profile).
-    const user = this.readDescriptor()?.user
+    const user = descriptor.user
     const userSection = user !== null && typeof user === 'object' && !Array.isArray(user)
       ? user as Record<string, unknown>
       : undefined
@@ -229,7 +239,6 @@ export class DirectTuiSettings implements TuiSettingsConfig {
       }
     }
     if (ops.length === 0) return
-    const revision = this.readDescriptor()?.revision
-    await forms.mutate(this.ns, ops, revision)
+    await forms.mutate(this.ns, ops, descriptor.revision)
   }
 }
