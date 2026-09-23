@@ -85,12 +85,9 @@ function toolResult(seq: number, callId: string, text: string, name = 'bash'): S
     step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, 'append')
@@ -103,12 +100,9 @@ function pruneReplacement(seq: number, callId: string, text: string, originalSeq
     step: 0,
     message: {
       id: MessageId(`msg-prune-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, { op: 'replace', start: originalSeq, end: originalSeq })
@@ -411,12 +405,9 @@ test('pairs tool calls with their results and caps long summaries', () => {
       step: 0,
       message: {
         id: MessageId('msg-3'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('call-1'),
-          content: [{ type: 'text', text: long }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('call-1'),
+        content: [{ type: 'text', text: long }],
         source: { kind: 'tool', callId: ToolCallId('call-1') },
       },
     }, 1),
@@ -450,12 +441,9 @@ test('run_code root call folds into a stable Code card', () => {
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 1),
@@ -492,12 +480,9 @@ test('nested PTC bash dispatch attaches to the run_code card subCalls tree', () 
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: '(run_code completed with no output)' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: '(run_code completed with no output)' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -563,8 +548,9 @@ test('nested PTC dispatch supports recursive grandchild topology', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-1'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 5),
@@ -642,8 +628,9 @@ test('nested PTC siblings keep their durable dispatch order', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-1'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 7),
@@ -680,12 +667,9 @@ test('nested PTC dispatch with an error outcome keeps the durable error status',
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -723,8 +707,9 @@ test('a spilled result with an exit marker still parses the terminal failure', (
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-1'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -765,12 +750,9 @@ test('nested spilled/generic dispatch content stays readable without a fabricate
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -811,12 +793,9 @@ test('nested dispatch with an explicit exit marker keeps the marker in the body'
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -854,12 +833,9 @@ test('nested dispatch with a signal marker is marked failed', () => {
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -897,12 +873,9 @@ test('nested dispatch with an exit code 0 marker stays ok', () => {
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -942,8 +915,9 @@ test('a nested PTC read child never joins the top-level read grouping', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-4'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-4'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 4),
@@ -951,8 +925,9 @@ test('a nested PTC read child never joins the top-level read grouping', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-6'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('r1'), content: [{ type: 'text', text: 'aaa' }] }],
+        id: MessageId('msg-6'), role: 'tool',
+        toolCallId: ToolCallId('r1'),
+        content: [{ type: 'text', text: 'aaa' }],
         source: { kind: 'tool', callId: ToolCallId('r1') },
       },
     }, 6),
@@ -960,8 +935,9 @@ test('a nested PTC read child never joins the top-level read grouping', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-8'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('r2'), content: [{ type: 'text', text: 'bbb' }] }],
+        id: MessageId('msg-8'), role: 'tool',
+        toolCallId: ToolCallId('r2'),
+        content: [{ type: 'text', text: 'bbb' }],
         source: { kind: 'tool', callId: ToolCallId('r2') },
       },
     }, 8),
@@ -1023,8 +999,9 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-2'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-2'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 2),
@@ -1060,8 +1037,9 @@ test('an orphan nested dispatch creates no surface node and connects when the pa
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-3'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-3'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -1099,8 +1077,9 @@ test('a settle parked before its start applies when the parent is already mounte
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('code-1'), content: [{ type: 'text', text: 'program output' }] }],
+        id: MessageId('msg-1'), role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -1121,13 +1100,10 @@ test('an outer run_code error result keeps the error status', () => {
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          isError: true,
-          content: [{ type: 'text', text: 'CODE_RUN_FAILED: boom' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'CODE_RUN_FAILED: boom' }],
+        isError: true,
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 1),
@@ -1163,12 +1139,9 @@ test('PTC event replay folds to the same topology and presentation', () => {
       step: 0,
       message: {
         id: MessageId('msg-1'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('code-1'),
-          content: [{ type: 'text', text: 'program output' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('code-1'),
+        content: [{ type: 'text', text: 'program output' }],
         source: { kind: 'tool', callId: ToolCallId('code-1') },
       },
     }, 3),
@@ -1431,12 +1404,9 @@ test('parallel same-name tool calls pair results by callId', () => {
       step: 0,
       message: {
         id: MessageId('msg-a'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('call-1'),
-          content: [{ type: 'text', text: 'out-one' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('call-1'),
+        content: [{ type: 'text', text: 'out-one' }],
         source: { kind: 'tool', callId: ToolCallId('call-1') },
       },
     }, 3),
@@ -1445,12 +1415,9 @@ test('parallel same-name tool calls pair results by callId', () => {
       step: 0,
       message: {
         id: MessageId('msg-b'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('call-2'),
-          content: [{ type: 'text', text: 'out-two' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('call-2'),
+        content: [{ type: 'text', text: 'out-two' }],
         source: { kind: 'tool', callId: ToolCallId('call-2') },
       },
     }, 4),
@@ -1578,8 +1545,9 @@ test('windows older turns into one summary entry', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('call-0'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('msg-1'), role: 'tool',
+        toolCallId: ToolCallId('call-0'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('call-0') },
       },
     }, 3),
@@ -1666,12 +1634,14 @@ test('a same-turn read group keeps the fast window consistent with the full scan
     event('tool/call', { turn: 1, step: 0, callId: ToolCallId('call-1'), name: 'read', arguments: '{}' }, 1),
     event('tool/result', {
       turn: 1, step: 0,
-      message: { id: MessageId('msg-1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('call-1'), content: [{ type: 'text', text: 'a' }] }], source: { kind: 'tool', callId: ToolCallId('call-1') } },
+      message: { id: MessageId('msg-1'), role: 'tool', toolCallId: ToolCallId('call-1'),
+      content: [{ type: 'text', text: 'a' }], source: { kind: 'tool', callId: ToolCallId('call-1') } },
     }, 2),
     event('tool/call', { turn: 1, step: 0, callId: ToolCallId('call-2'), name: 'read', arguments: '{}' }, 3),
     event('tool/result', {
       turn: 1, step: 0,
-      message: { id: MessageId('msg-2'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('call-2'), content: [{ type: 'text', text: 'b' }] }], source: { kind: 'tool', callId: ToolCallId('call-2') } },
+      message: { id: MessageId('msg-2'), role: 'tool', toolCallId: ToolCallId('call-2'),
+      content: [{ type: 'text', text: 'b' }], source: { kind: 'tool', callId: ToolCallId('call-2') } },
     }, 4),
     event('turn/start', { turn: 2 }, 5),
     event('user/message', {
@@ -1802,14 +1772,16 @@ test('the fast window matches the full scan across mixed grouping shapes', () =>
     events.push(event('tool/call', { turn, step: 0, callId: ToolCallId(`call-${seq}`), name: 'read', arguments: '{}' }, seq++))
     events.push(event('tool/result', {
       turn, step: 0,
-      message: { id: MessageId(`msg-${seq}`), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId(`call-${seq}`), content: [{ type: 'text', text: 'file' }] }], source: { kind: 'tool', callId: ToolCallId(`call-${seq}`) } },
+      message: { id: MessageId(`msg-${seq}`), role: 'tool', toolCallId: ToolCallId(`call-${seq}`),
+      content: [{ type: 'text', text: 'file' }], source: { kind: 'tool', callId: ToolCallId(`call-${seq}`) } },
     }, seq++))
   }
   const tool = (turn: number): void => {
     events.push(event('tool/call', { turn, step: 0, callId: ToolCallId(`call-${seq}`), name: 'bash', arguments: '{}' }, seq++))
     events.push(event('tool/result', {
       turn, step: 0,
-      message: { id: MessageId(`msg-${seq}`), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId(`call-${seq}`), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId(`call-${seq}`) } },
+      message: { id: MessageId(`msg-${seq}`), role: 'tool', toolCallId: ToolCallId(`call-${seq}`),
+      content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId(`call-${seq}`) } },
     }, seq++))
   }
   // turn 0: user + read; turn 1: read (cross-turn merge with turn 0)
@@ -1858,8 +1830,9 @@ test('the window summary counts grouped read cards from the incremental projecti
     events.push(event('tool/result', {
       turn, step: 0,
       message: {
-        id: MessageId(`msg-${turn}`), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId(`call-${turn}`), content: [{ type: 'text', text: 'file' }] }],
+        id: MessageId(`msg-${turn}`), role: 'tool',
+        toolCallId: ToolCallId(`call-${turn}`),
+        content: [{ type: 'text', text: 'file' }],
         source: { kind: 'tool', callId: ToolCallId(`call-${turn}`) },
       },
     }, seq++))
@@ -1920,12 +1893,9 @@ test('consecutive read results group into one card', () => {
     step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq)
@@ -1940,8 +1910,9 @@ test('consecutive read results group into one card', () => {
     event('tool/result', {
       turn: 0, step: 0,
       message: {
-        id: MessageId('msg-6'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('b1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('msg-6'), role: 'tool',
+        toolCallId: ToolCallId('b1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('b1') },
       },
     }, 6),
@@ -1968,8 +1939,9 @@ test('consecutive read grouping never spans turn boundaries (incremental project
     step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text }] }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq)
@@ -2011,11 +1983,15 @@ test('a failed read breaks the group; late settlement preserves reflow counts', 
   const readResult = (seq: number, callId: string, text: string, isError = false): SessionEvent => event('tool/result', {
     turn: 0,
     step: 0,
+    // Native V4 admission requires `data.error` to accompany the durable
+    // `message.isError: true` outcome flag, which the fold reads.
     ...isError ? { error: { name: 'read-failed', code: 'read-failed' } } : {},
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text }] }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
+      ...isError ? { isError: true } : {},
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq)
@@ -2098,8 +2074,9 @@ test('cold hydrate defers adjacent-read reflow and preserves apply semantics', (
       step: 0,
       message: {
         id: MessageId(`hydrate-read-message-${index}`),
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: `result-${index}` }] }],
+        role: 'tool',
+        toolCallId: callId,
+        content: [{ type: 'text', text: `result-${index}` }],
         source: { kind: 'tool', callId },
       },
     }, events.length))
@@ -2156,8 +2133,9 @@ test('cold hydrate defers adjacent-read reflow and preserves apply semantics', (
       step: 0,
       message: {
         id: MessageId('hydrate-read-live-message'),
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId: nextCall, content: [{ type: 'text', text: 'live-result' }] }],
+        role: 'tool',
+        toolCallId: nextCall,
+        content: [{ type: 'text', text: 'live-result' }],
         source: { kind: 'tool', callId: nextCall },
       },
     }, events.length + 1),
@@ -2597,12 +2575,9 @@ test('tool results keep their content blocks and meta for presentation', () => {
       step: 0,
       message: {
         id: MessageId('msg-3'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('call-1'),
-          content: [{ type: 'text', text: 'hi' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('call-1'),
+        content: [{ type: 'text', text: 'hi' }],
         source: { kind: 'tool', callId: ToolCallId('call-1') },
       },
       meta: { path: '/ws/src/foo.ts', totalLines: 1 },
@@ -2910,12 +2885,9 @@ test('Test F: legacy unmarked sessions keep their current behavior', () => {
       step: 0,
       message: {
         id: MessageId('msg-legacy'),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: ToolCallId('legacy-1'),
-          content: [{ type: 'text', text: 'legacy result' }],
-        }],
+        role: 'tool',
+        toolCallId: ToolCallId('legacy-1'),
+        content: [{ type: 'text', text: 'legacy result' }],
         source: { kind: 'tool', callId: ToolCallId('legacy-1') },
       },
     }, 2),
@@ -2961,12 +2933,9 @@ test('a replacement does not disturb consecutive-read grouping or the window sum
     step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, 'append')
@@ -3000,12 +2969,9 @@ test('window summaries stay identical across a prune replacement', () => {
     step: 0,
     message: {
       id: MessageId(`msg-${seq}`),
-      role: 'user',
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId(callId),
-        content: [{ type: 'text', text }],
-      }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   }, seq, 'append')

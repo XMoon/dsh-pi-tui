@@ -150,14 +150,16 @@ function interactionTurn(options: {
     { type: 'turn/start', seq: 0, time: 1000, data: { turn: TURN } },
     { type: 'user/message', seq: 1, time: 1001, data: { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } },
     { type: 'tool/call', seq: 2, time: 1002, data: { turn: TURN, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' } },
-    { type: 'tool/result', seq: 3, time: 1003, data: { turn: TURN, step: 0, message: { id: MessageId('r1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId('c1') } } } },
+    { type: 'tool/result', seq: 3, time: 1003, data: { turn: TURN, step: 0, message: { id: MessageId('r1'), role: 'tool', toolCallId: ToolCallId('c1'),
+    content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('c1') } } } },
     { type: 'tool/call', seq: 4, time: 1004, data: { turn: TURN, step: 0, callId: ToolCallId('q1'), name: options.toolName, arguments: options.toolArgs } },
     {
       type: 'tool/result', seq: 5, time: 1005,
       data: {
         turn: TURN, step: 0,
         ...(options.errored ? { error: { name: 'UserQuestionError', code: 'ASK_CANCELLED' } } : {}),
-        message: { id: MessageId('qr1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('q1'), content: resultContent }], source: { kind: 'tool', callId: ToolCallId('q1') } },
+        message: { id: MessageId('qr1'), role: 'tool', toolCallId: ToolCallId('q1'),
+        content: resultContent, ...(options.errored ? { isError: true } : {}), source: { kind: 'tool', callId: ToolCallId('q1') } },
       },
     },
     { type: 'tool/call', seq: 6, time: 1006, data: { turn: TURN, step: 1, callId: ToolCallId('c2'), name: 'bash', arguments: '{}' } },
@@ -404,7 +406,8 @@ test('a RUNNING interaction tool is a Work member but never counts or previews i
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1000, data: { turn: TURN } },
     { type: 'tool/call', seq: 1, time: 1001, data: { turn: TURN, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' } },
-    { type: 'tool/result', seq: 2, time: 1002, data: { turn: TURN, step: 0, message: { id: MessageId('r1'), role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: ToolCallId('c1') } } } },
+    { type: 'tool/result', seq: 2, time: 1002, data: { turn: TURN, step: 0, message: { id: MessageId('r1'), role: 'tool', toolCallId: ToolCallId('c1'),
+    content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('c1') } } } },
     { type: 'tool/call', seq: 3, time: 1003, data: { turn: TURN, step: 0, callId: ToolCallId('q1'), name: 'ask_user_question', arguments: '{}' } },
   ] as SessionEvent[])
   const activity = folder.turnActivity(TURN)

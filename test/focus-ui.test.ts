@@ -105,8 +105,9 @@ function settleEvents(seqBase: number): SessionEvent[] {
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 5000, seqBase + 4),
@@ -1352,8 +1353,9 @@ function settleMultilineBashTurn(seqBase: number): SessionEvent[] {
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 5000, seqBase + 3),
@@ -1500,8 +1502,9 @@ function settledThoughtTurn(turn: number, baseSeq: number): SessionEvent[] {
     eventAt('tool/result', {
       turn, step: 0,
       message: {
-        id: MessageId(`r${turn}`), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId(`c${turn}`), content: [{ type: 'text', text: lines }] }],
+        id: MessageId(`r${turn}`), role: 'tool',
+        toolCallId: ToolCallId(`c${turn}`),
+        content: [{ type: 'text', text: lines }],
         source: { kind: 'tool', callId: ToolCallId(`c${turn}`) },
       },
     }, T0 + baseSeq + 4, baseSeq + 4),
@@ -1539,8 +1542,9 @@ function offscreenThoughtTurn(seqBase: number): SessionEvent[] {
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: lines }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: lines }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, seqBase + 4),
@@ -2942,8 +2946,9 @@ function reasoningTailTurn(seqBase: number): SessionEvent[] {
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, seqBase + 4),
@@ -3178,8 +3183,9 @@ test('gutter blocker: the fullscreen Focus hit-map stays aligned across the disc
     eventAt('tool/result', {
       turn: 1, step: 0,
       message: {
-        id: MessageId('r1'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c1') },
       },
     }, T0 + 4, 4),
@@ -3289,8 +3295,9 @@ test('the truncated marker stays ONE row inside the gutter: a click below it sti
     eventAt('tool/result', {
       turn: 2, step: 0,
       message: {
-        id: MessageId('r2'), role: 'user',
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('c2'), content: [{ type: 'text', text: 'ok' }] }],
+        id: MessageId('r2'), role: 'tool',
+        toolCallId: ToolCallId('c2'),
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: ToolCallId('c2') },
       },
     }, T0 + 7, 7),

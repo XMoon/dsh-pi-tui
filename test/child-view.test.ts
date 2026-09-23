@@ -122,8 +122,9 @@ test('the child viewer keeps the child full assistant surface (never text-only)'
       step: 1,
       message: {
         id: 'msg-4',
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'text', text: 'TOOL OUTPUT' }] }],
+        role: 'tool',
+        toolCallId: 'call-1',
+        content: [{ type: 'text', text: 'TOOL OUTPUT' }],
         source: { kind: 'tool', callId: 'call-1' },
       },
     }),
@@ -154,8 +155,9 @@ test('a parent settlement notice never alters the child viewer surface', () => {
       step: 1,
       message: {
         id: 'msg-12',
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'text', text: 'TOOL OUTPUT' }] }],
+        role: 'tool',
+        toolCallId: 'call-1',
+        content: [{ type: 'text', text: 'TOOL OUTPUT' }],
         source: { kind: 'tool', callId: 'call-1' },
       },
     }),

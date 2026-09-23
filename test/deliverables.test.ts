@@ -62,12 +62,9 @@ function successfulPresentToolEvents(turn = 1): SessionEvent[] {
       step: 0,
       message: {
         id: MessageId(`present-result-${turn}`),
-        role: 'user',
-        content: [{
-          type: 'tool-result',
-          toolCallId: callId,
-          content: [{ type: 'text', text: 'Presented out/report.md' }],
-        }],
+        role: 'tool',
+        toolCallId: callId,
+        content: [{ type: 'text', text: 'Presented out/report.md' }],
         source: { kind: 'tool', callId },
       },
     }, 2),
