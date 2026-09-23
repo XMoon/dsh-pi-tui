@@ -133,6 +133,9 @@ export interface RunnerHarness {
   readonly subagents?: unknown
   /** An optional jobs registry service (the Task Center's jobs half). */
   jobs?: unknown
+  /** An optional shell executor service (the sandbox-opt-in local-shell
+   * path; absent models "sandbox unavailable in this composition"). */
+  shell?: unknown
   /** Retirement-phase records (`cancel:<id>` / `idle:<id>` / `drain:<id>` /
    * `flush:<id>` / `dispose:<id>`) in call order — the Direct
    * owned-session retirement assertions. */
@@ -445,6 +448,7 @@ export async function mountRunner(
   ctx.provide('commands', harness.commands as never)
   if (harness.subagents !== undefined) ctx.provide('subagents', harness.subagents as never)
   if (harness.jobs !== undefined) ctx.provide('jobs', harness.jobs as never)
+  if (harness.shell !== undefined) ctx.provide('shell', harness.shell as never)
   ctx.provide('loader', { await: async () => {} } as never)
   const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ fullscreen: 'off', ...config } as never)))
   await fiber
