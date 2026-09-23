@@ -98,7 +98,7 @@ function presetService(
   /** Per-call official roster projection override (gating/disabled tests). */
   rosterOverride?: () => Promise<unknown>,
   /** Explicit resolve override (subject-drift windows). */
-  resolveOverride?: (id?: string) => Promise<{ readonly id: string; readonly trust: string; readonly path: string }>,
+  resolveOverride?: (id?: string) => Promise<{ readonly id: string; broken?: string }>,
   /** Runs inside the official Host select BEFORE it settles (transition drift). */
   selectHook?: () => void,
 ) {
@@ -342,7 +342,7 @@ function setup(options: {
   /** Per-call official roster override (see presetService). */
   roster?: () => Promise<unknown>
   /** Explicit resolve override (see presetService). */
-  resolve?: (id?: string) => Promise<{ readonly id: string; readonly trust: string; readonly path: string }>
+  resolve?: (id?: string) => Promise<{ readonly id: string; broken?: string }>
   /** Runs inside the official Host select before it settles (see presetService). */
   selectHook?: () => void
   refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
@@ -499,6 +499,45 @@ test('/preset <id> with no session rejects an unknown id', async () => {
   assert.match(result.text, /not found/)
   assert.equal(t.pending.value, undefined)
   assert.deepEqual(t.ensureCalls, [])
+  t.app.stop()
+})
+
+test('/preset default refuses a declared-but-broken preset without writing', async () => {
+  const writes: unknown[] = []
+  const t = setup({
+    rows: [{ id: 'broken-one', description: 'visible but unusable' }],
+    roster: async () => ({
+      presets: [{ id: 'broken-one', broken: 'preset failed to mount: missing plugin', isDefault: false }],
+      modeSelectionEnabled: true,
+    }),
+    resolve: async () => ({ id: 'broken-one', broken: 'preset failed to mount: missing plugin' }),
+    refreshCatalog: async () => standingOutcome(['glab']),
+    settings: {
+      get: () => undefined,
+      mutate: async (_ns, patch) => { writes.push(patch); return undefined },
+    },
+  })
+  const result = await t.run('default broken-one') as { kind: string; text: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /preset failed to mount/u, 'the broken diagnostic surfaces')
+  assert.deepEqual(writes, [], 'a broken preset is never persisted as the default')
+  assert.deepEqual(t.refreshes, [])
+  t.app.stop()
+})
+
+test('/preset <broken> sessionless never stages the broken preset', async () => {
+  const t = setup({
+    rows: [{ id: 'broken-one' }],
+    roster: async () => ({
+      presets: [{ id: 'broken-one', broken: 'preset failed to mount: missing plugin', isDefault: false }],
+      modeSelectionEnabled: true,
+    }),
+    resolve: async () => ({ id: 'broken-one', broken: 'preset failed to mount: missing plugin' }),
+  })
+  const result = await t.run('broken-one') as { kind: string; text: string }
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /preset failed to mount/u)
+  assert.equal(t.pending.value, undefined, 'a broken preset is never staged as the pending preset')
   t.app.stop()
 })
 

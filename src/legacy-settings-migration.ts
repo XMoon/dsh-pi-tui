@@ -36,7 +36,6 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parse } from 'yaml'
 import { resolveDisplayPreset, type PersistedDisplayInput } from './display-preset.ts'
-import { appendHistoryLine, historyFilePath } from './history.ts'
 import type { SettingsFormsLike, TuiSettingsPathOp } from './runtime/direct/tui-settings-direct.ts'
 
 /** The migration version this build completes. */
@@ -100,34 +99,36 @@ const COPIED_RAW_FIELDS: readonly string[] = [
 ]
 
 /** Read the retired legacy document: prefer the live `settings.yaml`; when
- * the upstream importer's rename wins the race, retry the `.imported`
- * backup. Returns undefined when neither file exists. */
+ * the upstream importer's rename wins the read race (the file can vanish
+ * between the existence check and the open), fall back to opening the
+ * `.imported` backup. A missing file on either path means "no legacy
+ * document" (the sync checks keep the common no-legacy boot free of
+ * asynchronous I/O before the TUI mounts); any OTHER read error propagates
+ * so the caller reports a visible migration failure. */
 async function readLegacyDocument(home: string): Promise<string | undefined> {
   const live = join(home, 'settings.yaml')
-  if (existsSync(live)) return readFile(live, 'utf8')
+  if (existsSync(live)) {
+    try {
+      return await readFile(live, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
   const imported = `${live}.imported`
-  if (existsSync(imported)) return readFile(imported, 'utf8')
+  if (existsSync(imported)) {
+    try {
+      return await readFile(imported, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
   return undefined
 }
 
-/** Carry the legacy per-cwd input history (which used to live inside the
- * retired settings section) into the $DSH_HOME/user-history/*.jsonl files
- * — never back into Config. Idempotent per cwd: an existing file means
- * that cwd already migrated (a crash mid-write leaves the file in place,
- * so the next boot resumes from the unwritten cwds). */
-function migrateLegacyHistory(home: string, section: Record<string, unknown> | undefined): void {
-  const history = section?.history
-  if (history === null || typeof history !== 'object' || Array.isArray(history)) return
-  for (const [cwd, entries] of Object.entries(history as Record<string, unknown>)) {
-    if (!Array.isArray(entries) || entries.length === 0) continue
-    const file = historyFilePath(home, cwd)
-    if (existsSync(file)) continue
-    // File order is oldest-first; the stored arrays are newest-first.
-    for (const entry of entries.slice().reverse()) {
-      if (typeof entry !== 'string') continue
-      try { appendHistoryLine(file, entry, undefined) } catch { /* best effort */ }
-    }
-  }
+/** The fields a Settings form's USER override currently owns. */
+function ownedFields(user: unknown): ReadonlySet<string> {
+  if (user === null || typeof user !== 'object' || Array.isArray(user)) return new Set()
+  return new Set(Object.keys(user as Record<string, unknown>))
 }
 
 /** One plain-object section of the legacy document, or undefined. */
@@ -142,23 +143,27 @@ function legacySection(document: unknown, section: string): Record<string, unkno
  * Field-level fail-soft: a malformed optional field never blocks the rest
  * (the runtime parsers own validation). An absent section produces no ops —
  * the schema defaults already express the same effective values, and the
- * profile override must not pin them. */
-function tuiAppOps(section: Record<string, unknown> | undefined): TuiSettingsPathOp[] {
+ * profile override must not pin them. Fields the CURRENT `tui-app` USER
+ * override already owns are skipped: the migration only fills unowned
+ * slots, so a retry after a partial failure can never roll a newer USER
+ * value back to the stale legacy document (inherited/project effective
+ * values are still legitimately overridden by legacy USER preferences). */
+function tuiAppOps(section: Record<string, unknown> | undefined, owned: ReadonlySet<string>): TuiSettingsPathOp[] {
   if (section === undefined) return []
   const ops: TuiSettingsPathOp[] = []
   for (const field of COPIED_STRING_FIELDS) {
     const value = section[field]
-    if (typeof value === 'string') ops.push({ op: 'set', path: [field], value })
+    if (typeof value === 'string' && !owned.has(field)) ops.push({ op: 'set', path: [field], value })
   }
   for (const field of COPIED_RAW_FIELDS) {
     const value = section[field]
-    if (value !== undefined) ops.push({ op: 'set', path: [field], value })
+    if (value !== undefined && !owned.has(field)) ops.push({ op: 'set', path: [field], value })
   }
   // The display convergence runs only when the legacy document carried a
   // display opinion: a valid canonical value is copied verbatim, an invalid
   // one converges through the legacy focusMode rule, and a section with
   // neither field leaves the schema default ('full') unpinned.
-  if (section.displayPreset !== undefined || section.focusMode !== undefined) {
+  if ((section.displayPreset !== undefined || section.focusMode !== undefined) && !owned.has('displayPreset')) {
     const display = resolveDisplayPreset({
       displayPreset: typeof section.displayPreset === 'string' ? section.displayPreset : undefined,
       focusMode: typeof section.focusMode === 'string' ? section.focusMode : undefined,
@@ -183,7 +188,16 @@ export async function migrateLegacySettings(input: LegacySettingsMigrationInput)
     diag.warn('legacy settings migration unavailable: settings service missing', {})
     return { status: 'failed', reason: 'settings service unavailable' }
   }
-  const legacyText = await readLegacyDocument(input.home)
+  let legacyText: string | undefined
+  try {
+    legacyText = await readLegacyDocument(input.home)
+  } catch (error) {
+    // A non-ENOENT read failure (permissions, I/O) is a visible migration
+    // failure — the marker stays put and the next boot retries.
+    const reason = error instanceof Error ? error.message : String(error)
+    diag.warn('legacy settings document read failed; will retry on next start', { reason })
+    return { status: 'failed', reason: `legacy settings document read failed: ${reason}` }
+  }
   if (legacyText === undefined) {
     // Nothing to import anywhere: complete the marker so the retired file
     // a later downgrade recreates cannot override newer values. A refused
@@ -207,8 +221,6 @@ export async function migrateLegacySettings(input: LegacySettingsMigrationInput)
     return { status: 'failed', reason: `malformed legacy settings document: ${reason}` }
   }
   const tuiSection = legacySection(document, 'dsh-pi-tui')
-  // The per-cwd input history rides along (JSONL files only — never Config).
-  migrateLegacyHistory(input.home, tuiSection)
   // The legacy preset default migrates FIRST (its own namespace): a failure
   // here aborts before the marker advances, and both writes are idempotent,
   // so a retry re-applies the same values.
@@ -228,7 +240,11 @@ export async function migrateLegacySettings(input: LegacySettingsMigrationInput)
       })
     }
   }
-  if (presetDefault !== undefined) {
+  // A selectedDefault the USER layer already owns is NEVER rewritten: the
+  // user changed the default during the marker window and that newer value
+  // beats the stale legacy document on every retry.
+  const registryOwned = ownedFields(forms.describe()?.find(entry => entry.ns === 'agent-preset-registry')?.user)
+  if (presetDefault !== undefined && !registryOwned.has('selectedDefault')) {
     const revision = forms.describe()?.find(entry => entry.ns === 'agent-preset-registry')?.revision
     try {
       await forms.mutate('agent-preset-registry', [
@@ -241,7 +257,7 @@ export async function migrateLegacySettings(input: LegacySettingsMigrationInput)
     }
   }
   // The TUI preference batch (plus the marker) is the completing write.
-  const ops = tuiAppOps(tuiSection)
+  const ops = tuiAppOps(tuiSection, ownedFields(forms.describe()?.find(entry => entry.ns === 'tui-app')?.user))
   ops.push({ op: 'set', path: ['legacySettingsMigrationVersion'], value: LEGACY_SETTINGS_MIGRATION_VERSION })
   try {
     const revision = forms.describe()?.find(entry => entry.ns === 'tui-app')?.revision

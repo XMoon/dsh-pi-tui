@@ -9,7 +9,7 @@
 
 ### 新增
 
-- **兼容 DeepSeek Harness `0.1.7-alpha.2`：设置迁入 profile 持有的插件配置，Agent preset 切换到官方声明式 registry。** TUI 偏好（主题、页脚、显示预设、通知、按键绑定等）现在保存在 `tui-app` 插件的 profile 配置中，`/settings` 修改即时生效且按字段持久化；旧版 `settings.yaml` 中的既有偏好会在首次启动时自动迁移（含 Focus 偏好到显示预设的收敛与输入历史迁出），迁移只读旧文件、可重试且不会覆盖迁移后修改过的新值。Agent preset 列表改为官方 `standard` / `ptc` / `minimal` / `cordis` 声明（默认选择与「设为默认」由 Host 统一裁决），已移除对旧 `code` 默认值的猜测式别名映射。运行最低要求提升到 `dsh 0.1.7-alpha.2`。
+- **兼容 DeepSeek Harness `0.1.7-alpha.2`：设置迁入 profile 持有的插件配置，Agent preset 切换到官方声明式 registry。** TUI 偏好（主题、页脚、显示预设、通知、按键绑定等）现在保存在 `tui-app` 插件的 profile 配置中，`/settings` 修改即时生效且按字段持久化；旧版 `settings.yaml` 中的既有偏好会在首次启动时自动迁移（含 Focus 偏好到显示预设的收敛），迁移只读旧文件、可重试且不会覆盖迁移后修改过的新值。Agent preset 列表改为官方 `standard` / `ptc` / `minimal` / `cordis` 声明（默认选择与「设为默认」由 Host 统一裁决），已移除对旧 `code` 默认值的猜测式别名映射。运行最低要求提升到 `dsh 0.1.7-alpha.2`。
 
 - **两个独立的沟通设置：Progress updates 与 Response style。** 在 `/settings` 分别控制工作时的中途更新节奏（Milestones 默认 / Frequent / Off）与可见回复的密度（Default 默认 / Concise / Explanatory）；下一次模型步骤即生效，无需重启 Agent。偏好跨会话保存、互不影响，也不改变展示预设；Focus 只暂时抑制进度更新节（保存的节奏不变），Response style 在 Focus 下仍生效。
 

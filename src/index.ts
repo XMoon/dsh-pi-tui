@@ -2150,9 +2150,15 @@ export function apply(ctx: Context, config: Config): void {
       home: (ctx.get('profileContext') as { readonly home: string } | undefined)?.home ?? dshHome(process.env),
       forms: settingsForms,
       resolvePreset: async (id) => {
-        const presets = ctx.get('agentPresets') as { resolve(id?: string): Promise<unknown> } | undefined
+        const presets = ctx.get('agentPresets') as { resolve(id?: string): Promise<{ broken?: string }> } | undefined
         if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
-        await presets.resolve(id)
+        // §8.8: the current registry validates BOTH existence and
+        // usability — a declared-but-broken preset is not a valid legacy
+        // default (the official resolve returns it carrying `broken`).
+        const resolved = await presets.resolve(id)
+        if (resolved.broken !== undefined) {
+          throw Object.assign(new Error(resolved.broken), { code: 'agent-preset/invalid' })
+        }
       },
       migrationMarker: config.legacySettingsMigrationVersion,
       diag,
@@ -8909,11 +8915,10 @@ export function apply(ctx: Context, config: Config): void {
     }
     const storedFooter = tuiSettings?.get().footer
     applyFooterSettings(tuiSettings?.get())
-    // One-time legacy input-history migration (per-cwd arrays that used to
-    // live inside the retired settings namespace) runs inside the PR A
-    // legacy-settings barrier: the retired settings.yaml(.imported) is the
-    // only remaining carrier of that data, and it moves straight into the
-    // $DSH_HOME/user-history/*.jsonl files — never back into Config.
+    // The retired per-cwd input history (which used to live inside the old
+    // settings namespace) is deliberately NOT migrated in PR A (plan §8.5):
+    // it stays in the read-only legacy settings.yaml(.imported); the JSONL
+    // history store remains the sole live history authority.
     // Input history is loaded PER SESSION by initLiveSession (keyed on the
     // live session's cwd), never once at boot: a session switch to another
     // workspace must replace the recall history, not keep the old one. With

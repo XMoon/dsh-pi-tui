@@ -525,11 +525,19 @@ export class DirectPresetCatalog implements PresetCatalog {
     // Rosterless deployment: no preset identity to record (the old compose
     // path returned `agentPreset: undefined`).
     if (presets === undefined) return {}
-    // The official registry owns identity resolution: an unknown or broken
-    // id is refused by `resolve` itself. A requested id — `code` included —
-    // is an ordinary preset id; there is deliberately NO legacy alias.
+    // The official registry owns identity resolution: an unknown id is
+    // refused by `resolve` itself, but a DECLARED preset whose activation
+    // failed resolves successfully carrying `broken` — the official
+    // `agent-preset/invalid` refusal only happens at mount/retain time.
+    // This seam is the TUI's selectability gate (default saves, sessionless
+    // staging, migration validation), so a broken row is refused HERE with
+    // the official invalid semantics. A requested id — `code` included — is
+    // an ordinary preset id; there is deliberately NO legacy alias.
     const preset = await presets.resolve(id)
     signal?.throwIfAborted()
+    if (preset.broken !== undefined) {
+      throw Object.assign(new Error(preset.broken), { code: 'agent-preset/invalid' })
+    }
     return { id: preset.id }
   }
 
