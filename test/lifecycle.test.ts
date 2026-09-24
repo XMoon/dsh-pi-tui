@@ -766,46 +766,65 @@ test('isCancellation recognizes AbortError name and ABORT_ERR code', () => {
 
 // --- createExitController: the ONE exit orchestration (Ctrl+C/D, /exit, /quit) ---
 
-/** A controller harness recording every side effect; `exit` resolves the
- * returned promise so tests await the orchestration's completion. */
+/** A controller harness recording every side effect IN ORDER; `exit`
+ * resolves the returned promise so tests await the orchestration's completion.
+ * `prepareRetirement` is optional so the "no hook registered" contract stays
+ * covered too. */
 function exitHarness(options: {
   resumeHint?: () => string | undefined
+  prepareRetirement?: () => void
 } = {}) {
   const { diag, lines } = captureDiag()
   const calls = {
     cleanup: 0,
+    prepare: 0,
     hints: [] as string[],
     exits: [] as number[],
+    order: [] as string[],
   }
   let resolveExit!: (code: number) => void
   const exitDone = new Promise<number>(resolve => { resolveExit = resolve })
   const { requestExit } = createExitController({
     diag,
-    cleanup: () => { calls.cleanup += 1 },
-    hint: (message) => { calls.hints.push(message) },
+    cleanup: () => { calls.cleanup += 1; calls.order.push('cleanup') },
+    ...options.prepareRetirement === undefined ? {} : {
+      prepareRetirement: () => { calls.prepare += 1; calls.order.push('prepare'); options.prepareRetirement?.() },
+    },
+    hint: (message) => { calls.hints.push(message); calls.order.push('hint') },
     resumeHint: options.resumeHint ?? (() => 'dsh --profile pi-tui --session session-exit'),
-    exit: (code) => { calls.exits.push(code); resolveExit(code) },
+    exit: (code) => { calls.exits.push(code); calls.order.push('exit'); resolveExit(code) },
   })
   return { requestExit, calls, exitDone, lines }
 }
 
-test('exit cleans up, hints, and exits once', async () => {
-  const { requestExit, calls, exitDone, lines } = exitHarness()
+test('exit cleans up, prepares retirement, hints, and exits once — in that order', async () => {
+  const { requestExit, calls, exitDone, lines } = exitHarness({ prepareRetirement: () => {} })
   requestExit()
   assert.equal(await exitDone, 0)
   assert.equal(calls.cleanup, 1)
+  assert.equal(calls.prepare, 1)
   assert.deepEqual(calls.exits, [0])
   assert.deepEqual(calls.hints, ['dsh --profile pi-tui --session session-exit'])
+  assert.deepEqual(calls.order, ['cleanup', 'prepare', 'hint', 'exit'],
+    'the synchronous retirement preparation must sit between the surface cleanup and the resume hint')
   assert.match(lines.join('\n'), /exit/)
 })
 
-test('exit is idempotent: later requests while in flight or after are no-ops', async () => {
+test('exit without a preparation hook still cleans up, hints, and exits', async () => {
   const { requestExit, calls, exitDone } = exitHarness()
+  requestExit()
+  assert.equal(await exitDone, 0)
+  assert.deepEqual(calls.order, ['cleanup', 'hint', 'exit'])
+})
+
+test('exit is idempotent: later requests while in flight or after are no-ops', async () => {
+  const { requestExit, calls, exitDone } = exitHarness({ prepareRetirement: () => {} })
   requestExit()
   requestExit() // in-flight: must be a no-op
   assert.equal(await exitDone, 0)
   requestExit() // after completion: must be a no-op
   assert.equal(calls.cleanup, 1, 'a second request must not clean up again')
+  assert.equal(calls.prepare, 1, 'a second request must not prepare retirement again')
   assert.deepEqual(calls.exits, [0], 'a second request must not exit again')
 })
 
@@ -824,19 +843,77 @@ test('exit: throwing cleanup/hint cannot skip the exit, zero unhandled', async (
   process.on('unhandledRejection', listener)
   try {
     const { diag } = captureDiag()
-    const calls = { cleanup: 0, exits: [] as number[] }
+    const calls = { cleanup: 0, prepare: 0, exits: [] as number[] }
     let resolveExit!: (code: number) => void
     const exitDone = new Promise<number>(resolve => { resolveExit = resolve })
     createExitController({
       diag,
       cleanup: () => { calls.cleanup += 1; throw new Error('cleanup exploded') },
+      prepareRetirement: () => { calls.prepare += 1 },
       hint: () => { throw new Error('hint exploded') },
       resumeHint: () => 'resume',
       exit: (code) => { calls.exits.push(code); resolveExit(code) },
     }).requestExit()
     assert.equal(await exitDone, 0, 'a throwing cleanup is not an orchestration failure: exit 0')
     assert.equal(calls.cleanup, 1, 'cleanup still runs (and its throw is consumed)')
+    assert.equal(calls.prepare, 1, 'a throwing cleanup must not skip the retirement preparation')
     assert.deepEqual(calls.exits, [0], 'a throwing hint/cleanup must never skip the exit')
+    assert.deepEqual(unhandled, [], 'no step may leak a rejection')
+  } finally {
+    process.off('unhandledRejection', listener)
+  }
+})
+
+test('exit: a throwing retirement preparation is recorded and never blocks appExit', async () => {
+  const unhandled: unknown[] = []
+  const listener = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', listener)
+  try {
+    const { diag, lines } = captureDiag()
+    const calls = { prepare: 0, hints: [] as string[], exits: [] as number[] }
+    let resolveExit!: (code: number) => void
+    const exitDone = new Promise<number>(resolve => { resolveExit = resolve })
+    createExitController({
+      diag,
+      cleanup: () => {},
+      prepareRetirement: () => { calls.prepare += 1; throw new Error('cancel exploded') },
+      hint: (message) => { calls.hints.push(message) },
+      resumeHint: () => 'resume',
+      exit: (code) => { calls.exits.push(code); resolveExit(code) },
+    }).requestExit()
+    assert.equal(await exitDone, 0, 'a failed preparation still exits 0')
+    assert.equal(calls.prepare, 1)
+    assert.deepEqual(calls.hints, ['resume'], 'the hint must still run')
+    assert.deepEqual(calls.exits, [0], 'exit must run exactly once')
+    assert.match(lines.join('\n'), /retirement preparation failed/,
+      'the failed preparation must be recorded for diagnostics')
+    assert.deepEqual(unhandled, [], 'no step may leak a rejection')
+  } finally {
+    process.off('unhandledRejection', listener)
+  }
+})
+
+test('exit: cleanup AND preparation throwing still exits exactly once', async () => {
+  const unhandled: unknown[] = []
+  const listener = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', listener)
+  try {
+    const { diag, lines } = captureDiag()
+    const exits: number[] = []
+    let resolveExit!: (code: number) => void
+    const exitDone = new Promise<number>(resolve => { resolveExit = resolve })
+    createExitController({
+      diag,
+      cleanup: () => { throw new Error('cleanup exploded') },
+      prepareRetirement: () => { throw new Error('prepare exploded') },
+      hint: () => {},
+      resumeHint: () => undefined,
+      exit: (code) => { exits.push(code); resolveExit(code) },
+    }).requestExit()
+    assert.equal(await exitDone, 0)
+    assert.deepEqual(exits, [0], 'exit runs exactly once')
+    assert.match(lines.join('\n'), /cleanup failed/)
+    assert.match(lines.join('\n'), /retirement preparation failed/)
     assert.deepEqual(unhandled, [], 'no step may leak a rejection')
   } finally {
     process.off('unhandledRejection', listener)

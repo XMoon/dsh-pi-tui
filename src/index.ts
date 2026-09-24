@@ -1987,26 +1987,65 @@ export function apply(ctx: Context, config: Config): void {
     // diag stays open until the retirement diagnostics are recorded. The
     // fatal catch reaches this coordinator through retireOwnedSessionRef.
     let retirementPromise: Promise<RetirementReport> | undefined
+    // The exact Agent whose SHUTDOWN cancel already landed. Keyed by Agent
+    // OBJECT identity, never by session id or a boolean: a committed session
+    // transition replaces the current owner, and the new owner must still be
+    // cancelled. A failed cancel is deliberately NOT recorded, so a later
+    // attempt can retry it.
+    let shutdownCancelledAgent: Agent | undefined
+    // ONE exactly-once shutdown cancel. BOTH shutdown cancel sources funnel
+    // here:
+    //   - `whenIdleOrAbort`'s lifecycle-abort listener, which fires while
+    //     `disposeSurface()` aborts the controller and unblocks a transition
+    //     parked in its pre/post-commit quiesce;
+    //   - the synchronous exit preparation and the memoized retirement entry.
+    // Without a shared marker those two cancel the SAME Agent twice.
+    // `agent.cancel` is idempotent, but the second call must not land after
+    // the root teardown unregistered the inbox projection — that ordering is
+    // the exact failure this hardening fixes.
+    const cancelShutdownAgent = (agent: Agent): void => {
+      if (shutdownCancelledAgent === agent) return
+      agent.cancel({ kind: 'user' })
+      shutdownCancelledAgent = agent
+    }
+    // Synchronous shutdown preparation: cancel the CURRENT Direct owner's work
+    // BEFORE the Host tree is torn down. The surface teardown above already
+    // aborted the runner lifecycle, but a plain interactive exit reaches the
+    // appExit disposal through `transitionGate.run(...)`, which schedules its
+    // task on a promise continuation — so the root teardown could unregister
+    // the inbox projection before the retirement's async cancel phase ran
+    // (`phase=cancel ... projection registration is not active`). This is ONLY
+    // the first cancel: it never awaits idle, drains descendants, flushes, or
+    // disposes a handle, and the full retirement stays inside the
+    // appExit-bounded disposal. `cancelShutdownAgent` makes it exactly-once
+    // with the lifecycle-abort cancel, so the later cancel phase is a no-op
+    // for the same Agent.
+    const preCancelOwnedSession = (): void => {
+      const agent = liveAgent
+      if (agent === undefined) return
+      if (shutdownCancelledAgent === agent) return
+      diag.info('retire cancel', { session: agent.session.id })
+      try {
+        cancelShutdownAgent(agent)
+      } catch (error) {
+        // Do NOT mark success: the appExit-disposal cancel phase must retry.
+        // A failure here must never throw into the exit controller — appExit
+        // has to follow regardless.
+        diag.error('retire pre-cancel failed', {
+          session: agent.session.id,
+          error: safeErrorMessage(error),
+        })
+      }
+    }
     const retireOwnedSession = (): Promise<RetirementReport> => {
       if (retirementPromise !== undefined) return retirementPromise
+      // Every entry (interactive exit, HMR unload, fatal teardown) shares the
+      // ONE synchronous pre-cancel before the memoized retirement is created:
+      // the interactive exit controller has no hook for HMR/fatal, and
+      // duplicating the cancel there is exactly the twin-track divergence that
+      // makes exactly-once hard to prove.
+      preCancelOwnedSession()
       retirementPromise = (async (): Promise<RetirementReport> => {
-        // If a session transition is queued or in flight, its pre-commit
-        // `whenIdle()` does not observe the lifecycle signal: cancel the
-        // CURRENT owner's work so the transition settles instead of waiting
-        // for the LLM (the appExit watchdog would otherwise force-exit
-        // without an ordered retirement). Keyed on `pending` (queued OR
-        // running), not `busy`: a queued-but-not-started transition is about
-        // to quiesce the old agent, and the pre-cancel must fire before the
-        // task starts. This pre-cancel is a DELIBERATE extra cancel on the
-        // transition path only: `agent.cancel` is idempotent (re-cancelling
-        // an already cancelled agent is a no-op), so the retirement's own
-        // cancel phase — the single cancel on the ordinary (no-transition)
-        // path — may run again on the same owner without changing the
-        // outcome. The tests assert the ordinary path cancels exactly once
-        // and the transition path cancels at least once.
-        if (transitionGate?.pending === true) {
-          liveAgent?.cancel({ kind: 'user' })
-        }
         // The CURRENT Direct owner is read INSIDE the gate task, not at
         // call time: an exit that lands while a session transition is
         // committing must retire the NEW current owner (the old owner's
@@ -2034,8 +2073,18 @@ export function apply(ctx: Context, config: Config): void {
           diag.info('retire start', { session: agent.session.id })
           const report = await retireDirectOwnedSession({
             cancel: () => {
+              // The exactly-once shutdown cancel already covered THIS exact
+              // Agent (the ordinary interactive path, or the lifecycle-abort
+              // listener that unblocked a parked quiesce). Re-cancelling is
+              // idempotent, but skipping it keeps every shutdown path at
+              // exactly one cancel and — more importantly — keeps the second
+              // cancel from landing after the root teardown unregistered the
+              // inbox projection. A DIFFERENT Agent here means a committed
+              // transition replaced the owner, and that one must be cancelled
+              // now.
+              if (shutdownCancelledAgent === agent) return
               diag.info('retire cancel', { session: agent.session.id })
-              agent.cancel({ kind: 'user' })
+              cancelShutdownAgent(agent)
             },
             whenIdle: async () => {
               diag.info('retire idle', { session: agent.session.id })
@@ -2134,7 +2183,7 @@ export function apply(ctx: Context, config: Config): void {
     // ordered retirement would never run.
     const whenIdleOrAbort = async (agent: Agent, signal: AbortSignal): Promise<boolean> => {
       if (signal.aborted) {
-        agent.cancel({ kind: 'user' })
+        cancelShutdownAgent(agent)
         await agent.whenIdle()
         return true
       }
@@ -2142,7 +2191,11 @@ export function apply(ctx: Context, config: Config): void {
       await new Promise<void>((resolve, reject) => {
         const onAbort = (): void => {
           aborted = true
-          agent.cancel({ kind: 'user' })
+          // The lifecycle abort IS a shutdown cancel, so it shares the ONE
+          // exactly-once path with the exit preparation / retirement entry:
+          // otherwise this cancel and the later cancel phase hit the same
+          // Agent twice.
+          cancelShutdownAgent(agent)
         }
         signal.addEventListener('abort', onAbort, { once: true })
         agent.whenIdle().then(
@@ -3758,15 +3811,17 @@ export function apply(ctx: Context, config: Config): void {
     }
     // The ONE exit orchestration, shared by every exit entry (the exit keys,
     // /exit, /quit): latch once → dispose/restore the Client surface →
-    // resume-hint policy → request appExit. A later request while one is
-    // in flight is a no-op (createExitController latches), so a command
-    // plus a key can never double-cleanup or double-exit. The Direct
-    // owned-session retirement is NOT awaited here: it runs inside the
-    // application-tree disposal that appExit starts, under the DSH
-    // process-shutdown watchdog (see docs/concurrency.md).
+    // synchronously pre-cancel the exact current Direct owner → resume-hint
+    // policy → request appExit. A later request while one is in flight is a
+    // no-op (createExitController latches), so a command plus a key can never
+    // double-cleanup or double-exit. Only the FIRST cancel is brought forward;
+    // the full retirement (idle → descendants → flush → dispose) is still NOT
+    // awaited here — it runs inside the application-tree disposal that appExit
+    // starts, under the DSH process-shutdown watchdog (see docs/concurrency.md).
     const { requestExit } = createExitController({
       diag,
       cleanup: disposeSurface,
+      prepareRetirement: preCancelOwnedSession,
       hint: (message) => process.stdout.write(`\n${message}\n`),
       resumeHint: () => {
         const resume = resumeCommand(runningProfile(), liveAgent?.session.id ?? '')
