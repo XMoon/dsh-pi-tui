@@ -3,7 +3,7 @@
  * adapter consumes ONLY the official non-consuming follow stream, so observing
  * a job never advances the model's `job_output` cursor.
  *
- * Upstream proof relied on here (`dsh-v0.1.7-rc.1`,
+ * Upstream proof relied on here (`dsh-v0.1.7-rc.2`,
  * `packages/api/job-controller/src/observe.ts`): `follow()` reads ONLY
  * `JobRegistry.readAt()` and never `JobRegistry.read()`; it neither advances
  * the model cursor nor acknowledges a completion notice.
