@@ -52,15 +52,16 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.4.6`（已发布 `@latest`） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 当前稳定版；最低 rc.1，兼容 rc.2 |
-| `0.4.7-alpha.2`（已发布） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
-| 当前兼容列车线（本 checkout；版本 `0.4.8-alpha.1`） | `dsh-v0.1.7-rc.1` | 当前兼容列车线；上一行 `0.4.7-alpha.2` 是 0.1.6-alpha.2 runtime 的 fallback TUI |
+| `0.4.8`（stable / `@latest`） | `dsh-v0.1.7-rc.1` | 当前稳定版；最低 0.1.7-rc.1 |
+| `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
+| `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与预发布线混装。当前 checkout 的整个 DSH peer floor 统一为
+不要把稳定线与 `@next` 预发布线混装。`0.4.8` 的整个 DSH peer floor 统一为
 `>=0.1.7-rc.1`（rc.1 的 preset registry 精确 peer `dsh-agent`，更宽的旧
-floor 已无法满足独立 tarball 安装），旧 runtime 会在正常的不兼容边界以非零状态失败。完整的
-历史兼容矩阵和 fallback 命令见 [兼容性文档](docs/dsh-compatibility.md)；
-要查看 next 的最新集成状态，请看 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
+floor 已无法满足独立 tarball 安装）；旧 runtime 会在正常的不兼容边界以非零状态失败，
+请按上表安装配对的 TUI 线。完整的历史兼容矩阵和 fallback 命令见
+[兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成状态，请看
+[next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。

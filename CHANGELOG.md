@@ -7,11 +7,55 @@
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-09-24
+
+### 安装与版本对应
+
+本稳定版把 DSH 兼容目标推进到已发布的 `0.1.7-rc.1`（peer floor
+`>=0.1.7-rc.1`）：TUI 偏好迁入 profile 持有的插件配置，Agent preset 改用官方
+声明式 registry，后台任务、沙箱 shell、任务中心与远程读取采用 rc.1 官方运行时
+契约。安装 DSH 时需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.4.8
+dsh --profile pi-tui
+```
+
+仍需保留旧版 DSH 的用户，请安装与该 runtime 配对的 TUI 线：
+`@deepseek-ai/dsh@0.1.6-alpha.2` 使用 `@xmoon76/dsh-pi-tui@0.4.7-alpha.2`，
+`@deepseek-ai/dsh@0.1.5-rc.2` 使用 `@xmoon76/dsh-pi-tui@0.4.6`，更旧的
+DSH `0.1.1-rc.1`/`rc.2` 使用 `@xmoon76/dsh-pi-tui@0.3`。
+
 ### 新增
 
 - **兼容 DeepSeek Harness `0.1.7-rc.1`：设置迁入 profile 持有的插件配置，Agent preset 切换到官方声明式 registry。** TUI 偏好（主题、页脚、显示预设、通知、按键绑定等）现在保存在 `tui-app` 插件的 profile 配置中，`/settings` 修改即时生效且按字段持久化；旧版 `settings.yaml` 中的既有偏好会在首次启动时自动迁移（含 Focus 偏好到显示预设的收敛），迁移只读旧文件、可重试且不会覆盖迁移后修改过的新值。Agent preset 列表改为官方 `standard` / `ptc` / `minimal` / `cordis` 声明（默认选择与「设为默认」由 Host 统一裁决），已移除对旧 `code` 默认值的猜测式别名映射。运行最低要求提升到 `dsh 0.1.7-rc.1`：后台任务、沙箱 shell、任务中心与远程读取全面采用 rc.1 官方运行时契约（任务按会话所有权、shell 的 execute/result 生命周期、任务中心的官方投影与任务名册），现有交互行为保持不变。
 
 - **两个独立的沟通设置：Progress updates 与 Response style。** 在 `/settings` 分别控制工作时的中途更新节奏（Milestones 默认 / Frequent / Off）与可见回复的密度（Default 默认 / Concise / Explanatory）；下一次模型步骤即生效，无需重启 Agent。偏好跨会话保存、互不影响，也不改变展示预设；Focus 只暂时抑制进度更新节（保存的节奏不变），Response style 在 Focus 下仍生效。
+
+- **超长用户消息可以收起。** 纯文本 Prompt 超过 10 个终端视觉行时默认只显示开头 4 行、
+  一条 `── N rows compacted · … to expand ──` 提示和结尾 3 行；`Ctrl+O` 展开并收回最近
+  3 个用户回合内的超长 Prompt，全屏下也可点击提示行或搜索命中展开单条。全屏下展开后的
+  消息尾部新增 `▴ Collapse · …` 控件可直接收回，`steering…` 阶段的长输入按同一套视觉行
+  规则折叠且状态行始终可见。折叠按当前宽度换行后的视觉行判断（CJK / emoji 按真实占位），
+  resize 后重新计算；折叠/展开保持视口（跟随最新时继续跟随，历史浏览时停留在同一条
+  语义行），该尾部控件只出现在全屏且不会被复制进剪贴板。已知限制：搜索跳转只展开命中
+  所在的整条消息，不会把视口定位到命中那一行。
+- **全屏 `↓ Latest` 提示。** 全屏 Transcript 一旦离开实时尾部（手动上滚或浏览
+  history 窗口），底部出现可点击的 `↓ Latest · <快捷键>`；点击与 `Ctrl+End` 语义
+  相同，直接回到全局 latest，回到尾部后提示自动消失。
+- **`/model` 改为即时打开的可搜索模型面板。** 输入 `/model` 后立即显示
+  `Loading models…`，目录加载完成后原地填充；provider 仅作分组，一次搜索覆盖
+  provider/model 的名称与 id；reasoning 模型按 `Enter` 进入同一行的行内 effort 编辑
+  （`←→` 调整、`Enter` 提交、`Esc` 返回）。DSH 的 session / 全局默认模型语义不变。
+- **`/settings` 的 “Subagent allowed models” 改为可搜索分组列表。** `Enter` 直接
+  增删允许路由；官方整段写入、last-route 保护、写入串行与失败回滚语义不变。
+- **Job 详情浮层有独立的底部操作提示。** 运行中的 Job 显示 `S stop · Esc back`；
+  任务结束后 Stop 提示消失且该键失效；`Esc back` 在长内容、短终端或窄屏下始终可见。
+- **已接受但未落地的输入保持可见，并读取官方持久 inbox projection。** 提交的
+  steering / 排队输入在 queue pane 或会话尾部显示本地回显，直到权威 transcript 落地
+  才退场；回显与权威消息按请求 id 关联，不依赖文本匹配，重连或重启后仍可恢复。被其他
+  DSH 实例或上下文占用 writer 时会给出可执行的退出指引，而不是内部诊断信息。
 
 ### 改进
 
@@ -51,6 +95,42 @@
   输入焦点（`Home`/`End`、`Ctrl+U`/`Ctrl+D` 等编辑按键仍归搜索框）；编辑器、
   提交和其它弹窗仍被搜索框阻断。
 
+- **Quick Tasks 收敛为纯导航。** Footer `↓` 打开的 Quick Tasks 只响应方向键、`Tab`、
+  `Enter` 和 `Esc`，其余按键一律 no-op（`S` / `/` / `T` 不再触发停止确认、搜索或
+  视图切换）；`N` / `Shift+N` 与 Quick 的 `T` 进入完整视图已改为底部 “Open Task
+  Center” 行 + `Enter`，完整 Task Center 新增 `Shift+Tab` 反向遍历类型过滤。
+- **被中断的 parked steering 准确呈现并给出恢复路径。** turn 被 Interrupted 后，仍在
+  inbox 的 steering 行显示 `waiting for next turn…`，并在下一次普通消息唤醒时按官方
+  语义消费；此时空的 Ctrl+S 会给出提示而不是静默无操作。
+- **Focus 头部显示真实执行状态。** 未完成 turn 显示 `Working`、
+  `Waiting for approval · 12s` 或 `Waiting for input · 12s`，完成后显示 `Turn complete`；
+  等待用户的时间不计入运行时长。
+- **Focus compact 工具行改为工具身份 + 官方描述。** 前台 Bash 显示
+  `Bash · <description>`，后台卡片显示 `<工具名> · <content 描述>`；未知的自定义工具
+  保留原始名字，完整命令仍保留在展开后的 tool card 中。
+- **短屏全屏下 Todo 首次展开 3 项。** 终端行数 ≤16 时 compact Todo 面板显示 3 项
+  （普通终端仍为 5 项），缩放时按当前高度重新推导。
+- **全屏拖选与 `/copy` 统一 clipboard policy。** 二者同时尝试 terminal OSC 52 与本机
+  helper 两条通道，helper 成功不再阻断 OSC 52；修复远端（如 ORCA/xterm.js）下选择被
+  复制到远端主机剪贴板、本地粘贴不到的问题。
+- **文件 edit/write diff 卡片对齐 DSH 的边界化上下文 diff。** 共享上下文行不再
+  被误报为增删，大文件中的稀疏改动保持精确；只有超出官方边界化 edit search（每个
+  fragment 256 次 edit）才退化为粗粒度替换，折叠处的 `+N/-M` 与展开内容同源。
+- **Task Center 的 Job 详情按层级返回，捕获型浮层的焦点恢复统一。** 从 Quick Tasks 或
+  完整 Task Center 打开 Job **状态详情**后，`Esc` 返回同一个 Task Center 实例（保留
+  选中行、滚动、过滤、搜索与展开状态），再按一次才回到编辑器；能定位子会话的 subagent
+  作业仍直接打开子会话 transcript。浮层关闭后被恢复的下层捕获型浮层重新取得键盘焦点
+  与焦点席位，`nonCapturing` 提示浮层不自动夺焦也不压住同级浮层；Question / Save
+  Location 结束与 fullscreen 切换只做内部恢复，保留当前逻辑层级、可见性与焦点意图
+  以及前置顺序。
+- **`/fork` 与 `/rewind` 采用 DSH 官方 Host 分支语义。** Host 负责完成回合截断、子会话
+  身份、谱系、工作区和模型/预设组合；Direct 与 Remote 路径保持同一语义。运行中的
+  `/fork` 在派生请求提交时确定截断点，不再等待旧回合结束；导航被后续操作取代时，已发布
+  的子会话仍可在会话列表中打开。官方 Host fork 无法表达空前缀子会话，因此首个用户回合
+  不再提供 rewind。
+- **工作区归属现在与 Web 端共享。** TUI 配置挂载官方 workspace 服务；对已归属某个
+  工作区的会话执行 `/fork` 时，子会话加入同一工作区，Web 端会把它显示在该工作区下。
+
 ### 修复
 
 - **折叠 Think 预览不再冻结在第一行。** 无论流式还是结算，Think 槽都读取有界推理尾部的最新逻辑行：流式时窗口贴右缘跟随最新 token，结算后显示最新逻辑行的开头截断（此前多行推理永远显示第一行，流式时 UI 看起来像卡住）。Focus 与 Compact 共用同一预览实现（新增共享的 compact-process-preview 权威模块）。
@@ -65,6 +145,25 @@
   无 durable owner 的展示以及搜索期间明确折叠的内容仍会清除；`Ctrl+End` 仍明确返回最新位置。
 - **切换会话时不再残留上一次搜索的当前命中。** 新会话不会继承旧会话的搜索高亮或
   临时展开。
+
+- **TUI 启动失败不再被静默当作可选插件失败。** 启动提交就绪但 `tui-app` 从未挂载时，
+  打印明确错误并**以非零状态退出**，不再出现「告警 + 成功 + 进程仍驻留」的假成功。
+- **preset 选择可见性跟随部署策略。** 部署把 `modeSelectionEnabled` 设为 `false` 时，
+  `/preset` 不再出现在斜杠候选与 `/help` 中，直接输入仍按官方策略拒绝；roster 不可用
+  时保持原展示。
+- **全屏历史滚动位置不再被拉回尾部。** 队列面板增删、其他 chrome 变化或终端 resize
+  改变 viewport 高度时，已经滚离实时尾部的视图保持原位置；只有显式回到底部才恢复
+  跟随。
+
+### 兼容性
+
+- **PTC / workflow runtime 对齐官方组合。** `ptc` preset 通过官方 `ptc-runtime`
+  行获得 PTC 运行时，TUI 不再插入已退休的 `code-runtime-worker-thread` 行，host 平面
+  的 workflow 行也对齐到官方 `workflow-ptc`。本版本的 DSH peer floor 为
+  `>=0.1.7-rc.1`，低于该 floor 的 runtime 会在启动时收到配对 TUI 线与精确 npm
+  升级目标的提示。
+
+> **已知限制：** 当前生产默认后端仍为 Direct；remote attach 暂不支持。
 
 ## [0.4.7-alpha.2] - 2026-09-18
 
@@ -1065,7 +1164,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.2...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...HEAD
+[0.4.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...v0.4.8
 [0.4.7-alpha.2]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.7-alpha.1...next-v0.4.7-alpha.2
 [0.4.7-alpha.1]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.4.3-alpha.2...next-v0.4.7-alpha.1
 [0.4.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.5...v0.4.6

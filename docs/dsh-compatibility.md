@@ -17,10 +17,10 @@ fallback was checked against the peer manifest at its corresponding TUI tag.
 | `0.4.0-alpha.2` | `dsh-v0.1.2-alpha.4`, `dsh-v0.1.2-alpha.5` | Previous 0.4 prerelease |
 | `0.4.1` (published) | `dsh-v0.1.2-rc.1` | Historical stable |
 | `0.4.3-alpha.2` (historical next npm line) | `dsh-v0.1.3-alpha.2` | Last official runtime tag for this TUI line |
-| `0.4.6` (published stable) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Current stable; validated against the published npm rc.1 family |
+| `0.4.6` (published stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; validated against the published npm rc.1 family |
 | `0.4.7-alpha.1` (published) | `dsh-v0.1.6-alpha.1` | Published forward-integration target; keeps its own alpha.1 contract and is the fallback TUI for an alpha.1 runtime |
 | `0.4.7-alpha.2` (published) | `dsh-v0.1.6-alpha.2` | Released forward-integration line; first line on the alpha.2 Client Session contract and the fallback TUI for a 0.1.6-alpha.2 runtime |
-| `0.4.8-alpha.1` (current compat train, unreleased) | `dsh-v0.1.7-rc.1` | Compatibility train to the 0.1.7 profile-owned Config, declarative preset registry, SessionId-owned jobs, execute/result shell, and official Client projections/ClientJobs |
+| `0.4.8` (published stable) | `dsh-v0.1.7-rc.1` | Current stable line: the 0.1.7 profile-owned Config, declarative preset registry, SessionId-owned jobs, execute/result shell, and official Client projections/ClientJobs |
 | No historical fallback | `dsh-v0.1.0-rc.7`, `dsh-v0.1.2-alpha.1`, `dsh-v0.1.3-alpha.1`, `dsh-v0.1.5-alpha.1`, `dsh-v0.1.5-alpha.2` | Upgrade DSH to a supported release |
 
 The table is keyed to the official release tags above. Do not widen a pairing
@@ -31,8 +31,8 @@ For example, `>=0.1.2-rc.1` does not include `0.1.3-alpha.1`, and
 floor to the published npm `0.1.5-rc.1` release, and 0.4.6 kept that same
 floor; their open peer range also accepted the compatible `0.1.5-rc.2` family.
 The `0.4.7-alpha.2` line raised the floor to the published npm `0.1.6-alpha.2`
-release. The current compat-train line (`0.4.8-alpha.1`) raises the floor to
-the published npm `0.1.7-rc.1` release: TUI preferences now live on the
+release. The `0.4.8` stable release raises the floor to the published npm
+`0.1.7-rc.1` release: TUI preferences now live on the
 `tui-app` plugin's profile-owned volatile Config (the retired
 `settings.register`/`settings.get` business store is gone upstream), and preset
 identity comes from the official `@deepseek-ai/dsh-agent-preset-registry` with
@@ -46,17 +46,17 @@ reference contract; its last compatible TUI stays the published
 mount concurrently; the floor is a registry release, so the notice suggests the
 exact npm upgrade target.
 
-For the current stable 0.4 line, install the recommended DSH family and the
-stable TUI. DSH `0.1.5-rc.1` is the minimum; `0.1.5-rc.2` is also compatible.
-The recommended install command explicitly allows the DSH native install
-scripts:
+For the current stable `0.4.8` line, install the recommended DSH family and the
+stable TUI. DSH `0.1.7-rc.1` is the minimum and the validated target; older
+runtimes must use their paired TUI line from the table above. The recommended
+install command explicitly allows the DSH native install scripts:
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.5-rc.2
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs,fs-ext @deepseek-ai/dsh@0.1.7-rc.1
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 ```
 
-The current compat-train checkout is npm Mode and targets the published
+The `0.4.8` checkout is npm Mode and targets the published
 `0.1.7-rc.1` family through its lockfile. Use the local development
 flow to materialize it:
 
@@ -99,8 +99,8 @@ Official `dsh-v0.1.2-alpha.2`/`alpha.3` use
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.1`, `alpha.4`/`alpha.5` use
 `@xmoon76/dsh-pi-tui@0.4.0-alpha.2`, and `dsh-v0.1.3-alpha.2` uses
 `@xmoon76/dsh-pi-tui@0.4.3-alpha.2`. The published 0.1.5-rc.1/rc.2 family is
-the last runtime for the `0.4.6` stable release. The current npm-mode checkout
-is separate: its whole DSH peer floor is unified at `>=0.1.7-rc.1` (the
+the last runtime for the `0.4.6` stable release. The `0.4.8` npm-mode line is
+separate: its whole DSH peer floor is unified at `>=0.1.7-rc.1` (the
 rc.1 preset registry peers `dsh-agent` exactly, so a wider legacy floor can
 no longer satisfy a fresh standalone tarball install), and its exact npm
 family is verified by the lockfile.
