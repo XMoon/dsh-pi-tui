@@ -271,15 +271,14 @@ export function buildPluginManagerModel(
     }
   }
 
-  // PROTECTION-ONLY set (never used for visibility or role): a standalone
-  // live entry that imports a module the running TUI bundle owns must not be
-  // toggled from this surface, even when the self-bundle row's Loader id is
-  // unproven. Visibility stays entry-id proof based, so an independent row
-  // that merely shares a module is still shown (a protection false positive
-  // only NARROWS actions, which is safe).
-  const selfBundle = snapshot.bundles.find(bundle => bundle.name === SELF_BUNDLE)
-  const selfModuleNames = new Set<string>([SELF_BUNDLE])
-  for (const row of selfBundle?.rows ?? []) selfModuleNames.add(row.moduleName)
+  // PROTECTION-ONLY (never visibility/role): a standalone live entry that IS a
+  // module of the TUI package must not be toggled from this surface, even when
+  // its self-bundle row's Loader id is unproven. The set is the self package
+  // specifier ONLY — shared Host packages the TUI patch also mounts
+  // (`@deepseek-ai/dsh-workspace`, …) are ordinary manageable rows, outside the
+  // plan's "current TUI and its rows" scope.
+  const isSelfModule = (moduleName: string): boolean =>
+    moduleName === SELF_BUNDLE || moduleName.startsWith(`${SELF_BUNDLE}/`)
 
   const cards: PluginCardView[] = []
   for (const bundle of snapshot.bundles) {
@@ -327,7 +326,7 @@ export function buildPluginManagerModel(
     const role: PluginPresentationRole = claim?.role ?? 'dsh-plugin'
     // Protection-only: never changes visibility or role, only the effective
     // toggle capability (and the self-protection notice).
-    const selfProtected = selfModuleNames.has(entry.moduleName)
+    const selfProtected = isSelfModule(entry.moduleName)
     const row = entryRowView(entry, selfProtected)
     cards.push(Object.freeze({
       value,
@@ -434,6 +433,8 @@ export function cardDetailRows(
   }
   if (card.role === 'current-tui') {
     rows.push(info('This bundle provides the current TUI and is managed outside this screen.'))
+  } else if (card.isSelf) {
+    rows.push(info('This entry is a module of the current TUI package; it is not changed from this screen.'))
   }
   if (card.extension !== undefined) {
     const extension = card.extension

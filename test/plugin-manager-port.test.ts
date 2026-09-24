@@ -490,3 +490,32 @@ test('an operation outcome message survives an explicit refresh', async () => {
   await tick()
   assert.equal(controller.notice(), 'enable applied', 'refresh must not wipe an operation outcome')
 })
+
+test('a protected TUI-module entry is refused with the module wording and never mutated', async () => {
+  const { port, state } = fakePort({
+    snapshotImpl: async () => ({
+      bundles: [{
+        name: SELF_BUNDLE,
+        enabled: true,
+        installed: true,
+        optional: false,
+        removable: true,
+        // No entryId: the row cannot exclude the live entry by id.
+        rows: [{ rowId: 'builtins', moduleName: `${SELF_BUNDLE}/builtins` }],
+        overrides: [],
+      }],
+      plugins: [{ entryId: 'include:builtins', moduleName: `${SELF_BUNDLE}/builtins`, enabled: true, fiberPhase: 'active', patchId: 'builtins' }],
+      registries: { registry: null, fallbackRegistries: [], resolved: null },
+      exemptions: [],
+      exemptionWarnings: [],
+    }),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  select(controller, entryValue('include:builtins'))
+  await controller.toggleSelectedCard()
+  await tick()
+  assert.equal(state.setPlugin.length, 0)
+  assert.match(controller.notice() ?? '', /module of the current TUI package/)
+})
