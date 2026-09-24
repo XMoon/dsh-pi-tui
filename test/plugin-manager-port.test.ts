@@ -402,8 +402,8 @@ test('a late old mutation cannot overwrite a newer refresh', async () => {
 
 test('row-level self protection never offers a toggle row action', async () => {
   const { port, state } = fakePort({
-    snapshotImpl: async () => snapshot([
-      {
+    snapshotImpl: async () => ({
+      bundles: [{
         name: SELF_BUNDLE,
         enabled: true,
         installed: true,
@@ -411,8 +411,14 @@ test('row-level self protection never offers a toggle row action', async () => {
         removable: true,
         rows: [{ rowId: 'app', moduleName: SELF_BUNDLE, entryId: 'e-app' }],
         overrides: [],
-      },
-    ]),
+      }],
+      // The self row is LIVE and addressable: absent the self policy its
+      // effective toggle would be true.
+      plugins: [{ entryId: 'e-app', moduleName: SELF_BUNDLE, enabled: true, fiberPhase: 'active', patchId: 'app' }],
+      registries: { registry: null, fallbackRegistries: [], resolved: null },
+      exemptions: [],
+      exemptionWarnings: [],
+    }),
   })
   const { controller } = controllerOf(port)
   controller.open('direct-command')
@@ -423,4 +429,48 @@ test('row-level self protection never offers a toggle row action', async () => {
   assert.ok(rows.some(row => row.label === 'Plugin rows'))
   assert.ok(!rows.some(row => row.value.startsWith('action:toggle-row:')), 'no self row toggle action')
   assert.equal(state.setPlugin.length, 0)
+})
+
+test('a settlement-side hook throw never misclassifies a successful install', async () => {
+  let settleThrow = false
+  const { port } = fakePort({
+    installImpl: async () => {
+      // Arm the throw so it fires from SETTLEMENT, after startInstall resolved.
+      settleThrow = true
+      return change({ stage: 'install' })
+    },
+  })
+  const controller = new PluginManagerController(port, {
+    requestRender: () => { if (settleThrow) throw new Error('render boom') },
+    requestClose: () => {},
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  }, { observations: () => [] })
+  controller.openInstall()
+  controller.inspect('pkg', null)
+  await tick()
+  controller.confirmInstall()
+  await tick(8)
+  assert.equal(controller.installView()?.phase, 'done', 'the successful outcome must not be overwritten by a settlement throw')
+})
+
+test('the Refresh action row clears a stale read-failure notice', async () => {
+  let fail = true
+  const { port } = fakePort({
+    snapshotImpl: async () => {
+      if (fail) throw new Error('boom')
+      return snapshot([{ name: 'ordinary', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }])
+    },
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  assert.match(controller.notice() ?? '', /refresh failed/)
+  fail = false
+  select(controller, PLUGIN_ACTION.refresh)
+  controller.activate()
+  await tick()
+  assert.equal(controller.status().state, 'ready')
+  assert.equal(controller.notice(), undefined, 'a successful action-row refresh clears the stale notice')
 })

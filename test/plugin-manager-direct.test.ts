@@ -153,7 +153,7 @@ test('subscribeInstall delivers detached phase/log events and unsubscribes', () 
   })
   assert.deepEqual(received[1], {
     kind: 'log',
-    log: { requestId: 'req-1', jobId: 'job-1', stream: 'stderr', text: 'boom', exitCode: 1 },
+    log: { requestId: 'req-1', jobId: 'job-1', stream: 'stderr', text: 'boom' },
   })
   off()
   assert.equal([...listeners.get('plugin-manager/install-state')!].length, 0)
