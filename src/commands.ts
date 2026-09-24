@@ -30,7 +30,7 @@ import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefini
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './session-operation-barrier.ts'
 import type { DefaultIntentRecord } from './default-intent.ts'
-import { SettingsList, type SettingItem } from '@xmoon76/pi-tui'
+import { SettingsList, type Component, type SettingItem } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture } from './tui-app.ts'
 import { mergeDraft, sessionUnchanged } from './steer.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './home-end-keys.ts'
@@ -677,6 +677,18 @@ export interface TuiCommandRunner {
    * the compact Quick Tasks view.
    */
   openTasksBrowser(): void
+  /**
+   * Open the shared Plugin Manager surface directly (`/plugins`, P1-A). It is
+   * profile-wide and sessionless: it never creates or switches a Session.
+   */
+  openPluginManager(): void
+  /**
+   * Build the SAME Plugin Manager panel as a lazy `/settings` submenu
+   * component (`/settings → Plugins  Manage…`). The single runner-owned
+   * controller owns operation state; `done` returns to the Settings list.
+   * Opening `/settings` alone never calls this (no eager inventory read).
+   */
+  createPluginManagerSubmenu(done: (selected?: string) => void): Component
   /**
    * Open the conversation rewind picker (plan: the ONE entry shared by the
    * idle empty-editor double-Esc and `/rewind`). The runner decides what
@@ -2285,6 +2297,19 @@ export function registerTuiCommands(
             currentValue: row.currentValue,
             ...(row.values.length > 0 ? { values: [...row.values] } : {}),
           })),
+          // P1: lazy discovery entry into the SAME Plugin Manager surface.
+          // Opening /settings never reads plugin inventory/registries — the
+          // submenu factory runs only when the row is activated, and the
+          // outer value is static (no eager counts in P1). Placed LAST so the
+          // existing settings row order/index contract is unchanged.
+          {
+            id: 'plugins',
+            label: 'Plugins',
+            description: 'Manage DSH plugins and TUI extensions',
+            currentValue: 'Manage…',
+            submenu: (_currentValue: string, done: (selected?: string) => void) =>
+              runner.createPluginManagerSubmenu(done),
+          },
         ],
         (id, value, revert, navigate) => {
           if (id === 'approval') {
@@ -4204,6 +4229,18 @@ export function registerTuiCommands(
       // one-shot children are reachable exactly through this path.
       await requireAgent()
       runner.openTasksBrowser()
+      return { kind: 'success' }
+    },
+  })
+
+  // `/plugins` (P1-A): the canonical sessionless entry into the shared
+  // profile-wide Plugin Manager surface. It never creates or switches a
+  // Session; the runner facade owns the controller/panel.
+  registerTuiCommand({
+    name: 'plugins',
+    description: 'Inspect and manage DSH plugins and TUI extensions for this profile',
+    handler: () => {
+      runner.openPluginManager()
       return { kind: 'success' }
     },
   })

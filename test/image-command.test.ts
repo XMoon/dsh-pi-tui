@@ -147,7 +147,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {},
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
     openRewindPicker: () => {},
     sessionTransitionPending: options.transitionPending ?? (() => false),
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

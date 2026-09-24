@@ -143,6 +143,7 @@ import { parseUserKeybindings } from './keybindings/config.ts'
 
 import { normalizedKeyToKeyId } from './keybindings/manager.ts'
 import { Text } from '@xmoon76/pi-tui'
+import type { Component } from '@xmoon76/pi-tui'
 import { SurfaceHost } from './extension/internal/surface-host.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import {
@@ -214,6 +215,10 @@ import { DirectCatalogPort } from './runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from './runtime/direct/config-direct.ts'
 import { DirectSessionArchive } from './runtime/direct/session-archive-direct.ts'
 import { DirectHostCommandPort } from './runtime/direct/host-command-direct.ts'
+import { DirectPluginManagerPort } from './runtime/direct/plugin-manager-direct.ts'
+import { PluginManagerController } from './plugin-manager/controller.ts'
+import { PluginManagerPanel } from './plugin-manager/panel.ts'
+import { observeTuiExtensions } from './plugin-manager/extension-inventory.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from './runtime/config-port.ts'
 import { DirectHostFilePort } from './runtime/direct/host-file-direct.ts'
 import { installAssistantStreamDirect } from './runtime/direct/assistant-stream-direct.ts'
@@ -423,7 +428,7 @@ const LOCAL_SHELL_TAIL_FLUSH_MS = 200
  */
 export const SESSIONLESS_COMMANDS = new Set([
   'display', 'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
-  'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings',
+  'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings', 'plugins',
   // `/statusline` is the approved alias of `/footer` (same configurator,
   // other-agent muscle memory) — it rides the same ownership sets, so it
   // executes locally, never steers, and works before any session exists.
@@ -444,7 +449,7 @@ export const SESSIONLESS_COMMANDS = new Set([
  */
 export const LOCAL_COMMANDS = new Set([
   'copy', 'display', 'exit', 'export', 'focus', 'footer', 'fork', 'help', 'attach', 'image', 'keybindings', 'kill', 'login', 'logout',
-  'model', 'new', 'preset', 'quit', 'reload', 'rename', 'resume', 'rewind',
+  'model', 'new', 'preset', 'plugins', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'transcript', 'yolo',
   // `/statusline` — the approved alias of `/footer` (see its registration
@@ -2308,7 +2313,14 @@ export function apply(ctx: Context, config: Config): void {
       new DirectHostFilePort((sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
       new DirectSessionArchive(ctx),
       new DirectHostCommandPort(ctx, (sessionId) => liveAgent?.session.id === sessionId ? liveAgent : undefined),
+      new DirectPluginManagerPort(ctx),
     )
+
+    // The Plugin Manager operation owner OUTLIVES the panel (plan §17): a
+    // closed `/plugins` never cancels an active install. It is wired once the
+    // extension read seam exists (below); teardown disposes its install-event
+    // subscription through this holder.
+    let disposePluginManagerController: (() => void) | undefined
 
     // Whole-document settings writes must not copy a project-layer
     // footerCustomItems value into the USER section. The config port is the
@@ -3202,6 +3214,8 @@ export function apply(ctx: Context, config: Config): void {
       readonly renderers: import('./renderer-registry.ts').RendererRegistry
       readonly editors: import('./editor-registry.ts').EditorRegistry
       _ledger(): import('./extension/internal/ledger.ts').ExtensionLedger
+      /** INTERNAL owner → owning Loader entry id projection (P1-A1.4). */
+      _ownerEntryIds(): ReadonlyMap<string, string>
       // The REF protocol: capture the identity at INVOCATION START and
       // report settlements against the captured ref — never the live
       // registry (an HMR reload may replace the id with a new owner by
@@ -3663,6 +3677,9 @@ export function apply(ctx: Context, config: Config): void {
       // Abort any in-flight catalog refresh: its late result must never
       // register commands or repaint after the app is gone.
       catalogCoordinator?.dispose()
+      // Release the Plugin Manager install-event subscription. This never
+      // cancels a Host install: only the official cancel action does that.
+      disposePluginManagerController?.()
       // PR D2: cancel the deferred initial context measure — a stale
       // callback must never measure/repaint into the disposed surface.
       cancelDeferredContextMeasure?.()
@@ -7054,6 +7071,47 @@ export function apply(ctx: Context, config: Config): void {
     // before the first frame (no stale scrollback line after mount).
     if (lifecycleController.signal.aborted) return
     startupStatus.clear()
+    // ── Plugin Manager (P1-A) ──────────────────────────────────────────────
+    // ONE controller/panel for both entries (`/plugins` and
+    // `/settings → Plugins`). The port is the narrow Direct adapter; the
+    // presentation classification reads only the shared extension runtime's
+    // own health records — never a second inventory or a second manager.
+    let activePluginManagerHost: { readonly close: () => void } | undefined
+    const pluginManagerController = new PluginManagerController(backend.pluginManager, {
+      requestRender: () => { if (activePluginManagerHost !== undefined) app.requestRender() },
+      requestClose: () => activePluginManagerHost?.close(),
+      notify: (message, kind) => app.notify(message, kind),
+      isOpen: () => activePluginManagerHost !== undefined,
+      diag,
+    }, {
+      observations: () => extensionService === undefined ? [] : observeTuiExtensions({
+        healthSnapshot: () => extensionService!._ledger().healthSnapshot(),
+        ownerEntryIds: () => extensionService!._ownerEntryIds(),
+      }),
+    })
+    disposePluginManagerController = () => pluginManagerController.dispose()
+    const openPluginManager = (): void => {
+      // A second open is a no-op: the panel is already the active surface.
+      if (activePluginManagerHost !== undefined) return
+      const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender())
+      const close = app.openPluginManagerPanel(panel, () => { activePluginManagerHost = undefined })
+      activePluginManagerHost = { close }
+      pluginManagerController.open('direct-command')
+    }
+    /** The `/settings → Plugins` entry: the SAME panel/controller hosted as a
+     * lazy SettingsList submenu; `done` returns to the Settings list. */
+    const createPluginManagerSubmenu = (done: (selected?: string) => void): Component => {
+      const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender())
+      const previous = activePluginManagerHost
+      activePluginManagerHost = {
+        close: () => {
+          activePluginManagerHost = previous
+          done()
+        },
+      }
+      pluginManagerController.open('settings-submenu')
+      return panel
+    }
     app = startProcessTui({
       // ONE submission entry: the request (the Enter gesture, the
       // accelerated chord, or the explicit queue action) rides along — the
@@ -9886,6 +9944,10 @@ export function apply(ctx: Context, config: Config): void {
       // it opens the FULL browser explicitly.
       openTasksBrowser: () => openTasksBrowser('full'),
       openRewindPicker,
+      // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
+      // NOT session-owned: it never creates or switches a Session.
+      openPluginManager,
+      createPluginManagerSubmenu,
       // The transition write fence: agent-write entry points (plain
       // submits, steers, skill invocations, shell submits) refuse while a
       // transition is in flight (quiesce → commit) — the old agent may be

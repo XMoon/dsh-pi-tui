@@ -18708,6 +18708,32 @@ export class TuiApp {
     return () => handle?.hide()
   }
 
+  /**
+   * Host the shared Plugin Manager panel (P1-A) as a standalone overlay. The
+   * panel/controller are runner-owned and outlive this overlay: hiding the
+   * panel never cancels an active install (plan §10.5/§17). `onClosed` fires
+   * on every hide path so the runner can drop its active-host reference.
+   * Returns the closer.
+   */
+  openPluginManagerPanel(panel: Component, onClosed?: () => void): () => void {
+    // A finally-disposed surface must not mount a live panel whose controller
+    // hook could repaint into a dead app.
+    if (this.disposed) return () => {}
+    const configuredWidth = 76
+    const configuredMaxHeight = 28
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
+    }
+    const budgetAware = panel as Component & { setMaxRows?: (rows: number) => void }
+    const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
+      budgetAware.setMaxRows?.(Math.max(1, geometry.maxHeight - 2))
+    }, onClosed)
+    const handle = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
+    return () => handle.hide()
+  }
+
   /** Track an action-first editor even when it is nested inside the
    * SettingsList submenu rather than mounted as a standalone overlay. The
    * returned unregister callback is idempotent. */
