@@ -20,7 +20,7 @@ fields.
 |---|---|---|
 | Layout, rendering, input routing, overlays | `src/tui-app.ts` (`TuiApp`) | messages, messageComponents render cache, themeRevision, expandedOverride, search overlay, status/todo/dock/queue state, working indicator |
 | Transcript folding / projection | `src/transcript.ts` | incremental read grouping, assistant/thinking entries, pending calls |
-| Exit contract | `src/exit.ts` | latch → surface cleanup → hint → appExit (pure, tested); Direct owned-session retirement in `src/runtime/direct/owned-session-retirement.ts` |
+| Exit contract | `src/exit.ts` | latch → surface cleanup → synchronous Direct retirement preparation → hint → appExit (pure, tested); the remaining idle → descendants → flush → dispose retirement in `src/runtime/direct/owned-session-retirement.ts` |
 | Detached tasks | `src/detached.ts` | runDetached rejection classification (pure, tested) |
 | Diagnostics | `src/diag.ts` | file/stderr sinks |
 | Model picker | `src/model-picker.ts` | Models/Efforts view state (query, selection, effort cursor), disposed latch |
@@ -30,9 +30,11 @@ fields.
 ## Target controllers (extraction order, one responsibility per commit)
 
 1. **RunnerLifecycle** — start, surface cleanup (idempotent), lifecycle
-   abort, exit order (latch → surface cleanup → resume hint → appExit; the
-   Direct owned-session retirement runs inside the appExit disposal under
-   the DSH process-shutdown watchdog), detached-task accounting. Already
+   abort, exit order (latch → surface cleanup → synchronous Direct
+   retirement preparation → resume hint → appExit; the remaining
+   idle → descendants → flush → dispose retirement runs inside the appExit
+   disposal under the DSH process-shutdown watchdog), detached-task
+   accounting. Already
    has its primitives (`exit.ts`, `detached.ts`, the runner's
    `disposeSurface()` / `retireOwnedSession()`); extraction = moving the
    runner closure's lifecycle block into a class with an explicit

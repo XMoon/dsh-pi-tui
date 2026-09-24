@@ -363,14 +363,41 @@ skipped dispose would pin the old session lease).
 Where it runs:
 
 - **Interactive exit** (`/exit`, Ctrl+C/D, plain `exit`): the exit
-  controller only latches, disposes the Client surface, prints the resume
-  hint and requests `appExit`. The retirement runs inside the
-  application-tree disposal that `appExit` starts, under the DSH
-  process-shutdown watchdog — the TUI never awaits a potentially long Host
-  teardown in front of `appExit`.
+  controller latches, disposes the Client surface, then runs ONE synchronous
+  Direct-retirement preparation hook, then prints the resume hint and
+  requests `appExit`:
+
+  ```text
+  latch
+  → dispose/restore the Client surface
+  → synchronously cancel the exact CURRENT Direct owner
+  → resume hint
+  → appExit
+  → application-tree disposer joins the SAME memoized retirement:
+       idle → descendants → flush → dispose
+  ```
+
+  Only the FIRST cancel comes forward. It is needed because the ordinary
+  exit reaches the appExit disposal through `transitionGate.run(...)`, whose
+  task is scheduled on a promise continuation: the root teardown could
+  unregister the inbox projection before the retirement's async `cancel`
+  phase ran (`phase=cancel ... its projection registration is not active`).
+  The TUI still never awaits `whenIdle` / drain / flush / dispose in front of
+  `appExit` — that full retirement stays inside the application-tree disposal
+  under the DSH process-shutdown watchdog.
+
+  The pre-cancel is deduplicated by **exact Agent object identity**, not by a
+  boolean or a session id: a session transition that commits during the exit
+  replaces the current owner, and the NEW owner must still be cancelled by the
+  retirement's cancel phase. A pre-cancel that THROWS is not recorded as done,
+  so the retirement retries it. This is Direct-only shutdown preparation; it
+  is not the Remote `session.close`, and parked owners are retired by the
+  disposal's own loop rather than by the interactive call stack.
 - **HMR / runner fiber unload**: the fiber disposer is async (Cordis
   unloads await it) and runs the SAME memoized retirement — one teardown
-  promise shared by every teardown path, never four copies.
+  promise shared by every teardown path, never four copies. That entry has no
+  exit-controller hook, so `retireOwnedSession` performs the same synchronous
+  pre-cancel itself before creating the memoized promise.
 - **Successful ordinary session transition** (`/new`, `/sessions` switch,
   or open): the pre-commit quiesce (whenIdle + flush) is preserved; AFTER the
   commit the old owner is retired with the same fixed order, so the old

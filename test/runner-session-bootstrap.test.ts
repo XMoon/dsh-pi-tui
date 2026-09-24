@@ -3203,7 +3203,7 @@ test('a fresh start with a FAILING preset resolution shows only the Loader barri
   assert.ok(orderedLog.some(write => write === 'stdout:\r\x1b[2KStarting DSH…'),
     `the Loader barrier status is shown once on this path too: ${JSON.stringify(orderedLog)}`)
   assert.ok(!orderedLog.some(write => write.includes('Resuming session') || write.includes('Preparing conversation')),
-    `a fresh start with a failing preset must not show any startup status: ${JSON.stringify(orderedLog)}`)
+    `a fresh start with a failing preset must not show the resume/preparing stages: ${JSON.stringify(orderedLog)}`)
   // The TUI still mounts (degraded — the failure is a one-shot warn).
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must still create a TuiApp')
@@ -3732,6 +3732,9 @@ test('an interactive exit retires the owned session through the appExit disposal
   context = new Context()
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
     exitCalls += 1
+    // Recorded in the SAME event log as the retirement phases so the test can
+    // assert that the first cancel lands BEFORE the root teardown starts.
+    harness.retirementEvents.push('appExit')
     // The launcher's appExit disposes the application tree: the runner
     // fiber disposer runs the Direct owned-session retirement.
     void fiber?.dispose()
@@ -3745,13 +3748,79 @@ test('an interactive exit retires the owned session through the appExit disposal
   assert.equal(exitCalls, 1, 'the interactive exit must request appExit exactly once')
   const events = harness.retirementEvents
   assert.equal(events.filter(event => event === 'cancel:retire-interactive-session').length, 1,
-    'the interactive exit must cancel the owned agent')
+    'the interactive exit must cancel the owned agent exactly once (pre-cancel and the retirement cancel phase are the same Agent)')
   assert.equal(events.filter(event => event === 'drain:retire-interactive-session').length, 1,
     'the interactive exit must drain the continuable descendants')
   assert.equal(events.filter(event => event === 'dispose:retire-interactive-session').length, 1,
     'the interactive exit must dispose the owned handle')
-  assert.ok(events.indexOf('drain:retire-interactive-session') < events.indexOf('dispose:retire-interactive-session'),
+  // The hardening contract: the FIRST cancel is synchronous shutdown
+  // preparation and must precede appExit, because the root teardown
+  // unregisters the inbox projection the later cancel depends on. Only the
+  // cancel comes forward — idle/drain/flush/dispose stay inside the
+  // appExit-bounded disposal.
+  const cancelIndex = events.indexOf('cancel:retire-interactive-session')
+  const appExitIndex = events.indexOf('appExit')
+  assert.ok(cancelIndex >= 0 && appExitIndex >= 0 && cancelIndex < appExitIndex,
+    `the pre-cancel must land before appExit (cancel at ${cancelIndex}, appExit at ${appExitIndex}): ${JSON.stringify(events)}`)
+  assert.ok(events.indexOf('drain:retire-interactive-session') > appExitIndex,
+    'the descendant drain must stay inside the appExit disposal')
+  assert.ok(events.indexOf('dispose:retire-interactive-session') > events.indexOf('drain:retire-interactive-session'),
     'the descendant drain must precede the parent handle dispose on the interactive path too')
+})
+
+test('a FAILING pre-cancel is not recorded as done: appExit still runs and the retirement retries the cancel', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-precancel-failure-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-precancel-failure-session',
+    header: { id: 'retire-precancel-failure-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  let exitCalls = 0
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
+    exitCalls += 1
+    harness.retirementEvents.push('appExit')
+    void fiber?.dispose()
+  })
+  // The FIRST cancel throws (exactly the projection-already-unregistered
+  // failure this hardening exists for); the retirement's own cancel phase
+  // must retry it rather than treating the failed preparation as done.
+  const liveAgent = (harness.agents as { get(id: string): { cancel(): void } | undefined }).get(resumed.id)
+  assert.ok(liveAgent, 'the resumed session must have a live Agent')
+  const originalCancel = liveAgent.cancel.bind(liveAgent)
+  let cancelAttempts = 0
+  liveAgent.cancel = () => {
+    cancelAttempts += 1
+    if (cancelAttempts === 1) throw new Error('cancel exploded before the projection was torn down')
+    originalCancel()
+  }
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settle()
+  assert.equal(exitCalls, 1, 'a failing preparation must never block appExit')
+  assert.equal(cancelAttempts, 2, 'the failed pre-cancel must be retried by the retirement cancel phase')
+  const events = harness.retirementEvents
+  assert.equal(events.filter(event => event === 'cancel:retire-precancel-failure-session').length, 1,
+    'only the successful retry cancels the fake agent')
+  assert.equal(events.filter(event => event === 'dispose:retire-precancel-failure-session').length, 1,
+    'the retirement must still dispose the owner exactly once')
+  assert.ok(events.indexOf('appExit') >= 0, 'appExit must have been requested')
 })
 
 test('exit after a transition COMMITTED retires the NEW current owner, never the old twice', async (t) => {
@@ -3862,8 +3931,8 @@ test('exit during a transition stuck in pre-commit whenIdle: the pre-cancel unbl
   const events = harness.retirementEvents
   assert.equal(events.filter(event => event === 'dispose:retire-whenidle-stuck-old').length, 1,
     'the still-current old owner must be retired exactly once')
-  assert.ok(events.filter(event => event === 'cancel:retire-whenidle-stuck-old').length >= 1,
-    'the old owner must be cancelled (pre-cancel and/or the retirement cancel phase)')
+  assert.equal(events.filter(event => event === 'cancel:retire-whenidle-stuck-old').length, 1,
+    'the old owner must be cancelled EXACTLY once: the lifecycle-abort cancel and the shutdown pre-cancel are the same cancel')
   assert.equal(harness.createdSessions.length, 0, 'the aborted create must not publish a child')
 })
 
@@ -4001,8 +4070,8 @@ test('exit with TWO queued transitions: the second quiesce is abort-aware and th
     'the original owner must be retired exactly once (first transition post-commit)')
   assert.equal(events.filter(event => event === `dispose:${created.id}`).length, 1,
     'the still-current first child must be retired exactly once (teardown)')
-  assert.ok(events.filter(event => event === `cancel:${created.id}`).length >= 1,
-    'the first child must be cancelled (pre-cancel and/or the abort-aware quiesce)')
+  assert.equal(events.filter(event => event === `cancel:${created.id}`).length, 1,
+    'the first child must be cancelled EXACTLY once (abort-aware quiesce and retirement share one cancel)')
 })
 
 test('exit during the post-commit child quiesce skips surface init and retires the committed child', async (t) => {
@@ -4054,8 +4123,8 @@ test('exit during the post-commit child quiesce skips surface init and retires t
     'the old owner must be retired exactly once (post-commit)')
   assert.equal(events.filter(event => event === `dispose:${created.id}`).length, 1,
     'the committed child must be retired exactly once (teardown)')
-  assert.ok(events.filter(event => event === `cancel:${created.id}`).length >= 1,
-    'the committed child must be cancelled by the abort-aware quiesce')
+  assert.equal(events.filter(event => event === `cancel:${created.id}`).length, 1,
+    'the committed child must be cancelled EXACTLY once by the abort-aware quiesce, not again by retirement')
 })
 
 test('a retirement flush failure warns the user on stderr (durability is not silently lost)', async (t) => {
