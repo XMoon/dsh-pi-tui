@@ -324,6 +324,57 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
   client-local UI over Host-owned settings** (the dsh-pi-tui settings
   document via the settings service).
 
+## P1 capability ledger (v0.4.9)
+
+P1 (`v0.4.9`) is the DSH `0.1.7-rc.1` **core user-facing capability
+checkpoint**. The scope below is frozen with the first P1 PR: after it lands,
+a scope change needs an explicit P1.x follow-up rather than quietly expanding
+an in-flight PR. Locality classes:
+
+| Class | Meaning |
+|---|---|
+| P1 required | stable official Host capability with a real TUI user story |
+| already present | inherited behavior the TUI must preserve, not reimplement |
+| experimental | upstream experimental surface; never a `0.4.9` blocker |
+| P2 backlog | useful, deliberately post-`0.4.9` |
+| M3-owned | only correct behind the official Host/Client transport |
+| N/A | Web-only surface with no TUI user story |
+
+| Capability | Class | Official DSH authority | P1 action |
+|---|---|---|---|
+| Official Plugin Manager | P1 required | `@deepseek-ai/dsh-plugin-manager` — the `pluginManager` Host service mounted by the dsh-base layer | TUI-native `/plugins` surface through a narrow semantic port + Direct adapter + controller/panel |
+| Installed bundle/plugin inspection | P1 required | same (`listBundles` / `listPlugins` / `registries` / `inspect`) | render Host facts exactly; never infer manageability |
+| Bundle/plugin enable/disable | P1 required | same (`setBundleEnabled` / `setPluginEnabled`) | official mutation, then refresh the official inventory |
+| Bundle remove | P1 required | same (`removeBundle`) | confirmed, exact-identity mutation, then refresh |
+| Bundle install | P1 required | same (`installBundle`) | pre-inspect, confirm, official install |
+| Registry selection/fallback visibility | P1 required | same (`registries()`) | show offered/fallback/resolved registries; never retry for the Host |
+| Install progress/log/cancel | P1 required | same (`plugin-manager/install-state` / `install-log` events, `cancelInstall`) | request-correlated, bounded presentation log tail |
+| Install request recovery | P1 required | same (`waitForInstall(requestId)`) | reconcile an indeterminate result; never auto-retry `installBundle()` |
+| Compatibility refusal diagnostics | P1 required | same (inspect/change compatibility result) | show package/version/required range/current runtime/exemption state; no TUI semver guessing |
+| Exact-version exemption mutation | advanced / non-blocking | same (`listVersionExemptions` / `setVersionExemption`) | diagnostics required; grant/revoke only if it stays a small official action |
+| Job live observation | P1 required **if B0 proof is green** | `@deepseek-ai/dsh-api-job-controller` (`JobController.follow()`) over `@deepseek-ai/dsh-jobs` (`JobRegistry.readAt()`) | official non-consuming Host observer only; a TUI events+`readAt` loop is forbidden |
+| Job gap/loss presentation | P1 required if live view ships | same official follow frames | represent loss honestly; never a full-transcript claim |
+| Job human Stop | already present / preserve | existing Direct job stop path | do not redesign |
+| Task Center roster/search/type/scope/tree | already present / preserve | `TaskReadPort` (status-only) + official subagent catalog | regression baseline |
+| Workflow presentation | already present / converge only | existing Workflow projection | reuse; no new workflow reducer |
+| Tool Preparing | already implemented | official assistant transient events | no P1 work |
+| `AgentPresetRegistry.readDocument()` viewer | P2 backlog | `AgentPresetRegistry.readDocument()` | record only |
+| Agent Team | experimental | `packages/experimental/*` `agentTeam` Session projection | no Team code in P1 |
+| Web work-detail vocabulary | P2 backlog (UX reference) | dsh-web presentation | no Focus/Compact renaming |
+| Remote ClientJobs transport/reconnect | M3-owned | `@deepseek-ai/dsh-api-job-controller/client` `ClientJobs.observe()` over the DSH Connection | do not implement — P1 has no Client Context/Connection/transport |
+| Complete Web Plugin Manager UI parity | N/A | dsh-web React UI | TUI-native UX only |
+| Creator-mode marketplace/discovery | N/A | — | do not implement |
+
+Already-covered behavior this ledger must not reimplement: Task Center confirmed
+Stop, Quick Tasks, the merged Agent/Job roster, Tool Preparing, the Workflow
+transcript model, and the Direct production backend (unchanged).
+
+M3 owns every transport-shaped piece: `ClientJobs` reference-counted observation
+over the DSH Connection, Remote reconnect recovery, and a Remote production
+backend. P1 must not build a temporary TUI RPC or a TUI-owned follow protocol to
+unlock one UI; if a P1 capability cannot be correct on the Direct path it is
+reclassified, not smuggled in.
+
 ## Official seam mapping (DSH 0.1.2-alpha.4) — history, skills, errors, diagnostics
 
 The M2/M3 Remote backend maps to the official seams below (first shipped in
