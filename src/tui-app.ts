@@ -2377,7 +2377,7 @@ export interface TuiAppEventsBase {
   onCyclePermission?: () => void
   /**
    * The empty-editor ↓ affordance (the app.tasks.open action) with active
-   * background tasks: open the task browser (running jobs/subagents). The
+   * jobs/subagents: open the task browser. The
    * host lists the tasks and mounts the picker/viewer. Optional.
    */
   onOpenTasks?: () => void
@@ -3638,7 +3638,7 @@ export class TuiApp {
   /** Activity of the same pending-input subject shown in queueItems. */
   private queueRunning = true
 
-  /** Whether any background task is running/stopping. */
+  /** Whether any job/subagent is running/stopping. */
   private tasksActive = false
   /** Independent Task Center counts; footer consumes this through status. */
   private taskSummary: TaskBrowserSummary = {
@@ -13841,7 +13841,7 @@ export class TuiApp {
   /**
    * The task-browser trigger semantic — ONE definition shared by the ↓
    * routing gate, the viewer's parent-lock, and the footer's `↓ view`
-   * hint: active background tasks or failure attention, no overlay entries, an EMPTY VISIBLE
+   * hint: active jobs/subagents or failure attention, no overlay entries, an EMPTY VISIBLE
    * seat editor in PROMPT mode. The visible seat decides (a shell-mode
    * empty body is composing a command; a plugin replacement editor
    * contributes its own text/mode) — the hidden host editor's draft is
@@ -16977,15 +16977,16 @@ export class TuiApp {
   }
 
   /**
-   * Replace the background-job snapshot used by the footer badge. The
+   * Replace the JobRegistry snapshot used by the footer badge. The
    * runtime-backed caller supplies terminal records too; the rich summary
-   * separates active and total counts. Non-empty active/attention sets arm
-   * the footer ↓ Task Center trigger.
+   * separates active and tracked counts (the tracked denominator is the
+   * registry's CURRENT roster, never a session lifetime total).
+   * Non-empty active/attention sets arm the footer ↓ Task Center trigger.
    * @param tasks - job records (id + label + lifecycle status), empty to hide.
    */
   setTasks(tasks: readonly { id: string; label: string; status: string; kind?: string }[]): void {
     this.dockTasks = tasks
-    // In RICH mode the running/total counts come ONLY from the runtime's
+    // In RICH mode the active/tracked counts come ONLY from the runtime's
     // commitSummary (setTaskSummary) — never derived from whatever list a
     // caller happens to pass here: the badge callback may legitimately
     // receive a subset (e.g. running-only) and length-based derivation
@@ -17024,7 +17025,7 @@ export class TuiApp {
     this.syncExtensionState()
   }
 
-  /** Whether background tasks or unacknowledged failures are available. */
+  /** Whether active jobs/subagents or unacknowledged failures are available. */
   isTasksActive(): boolean {
     return this.tasksActive
   }

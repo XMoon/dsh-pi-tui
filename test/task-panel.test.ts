@@ -153,6 +153,50 @@ test('the header carries live running/done/failed counts', () => {
   assert.ok(joined.includes('1 failed'), `failed count missing:\n${joined}`)
 })
 
+test('the full default scope chip reads TRACKED, never ALL (presentation vocabulary)', () => {
+  const { rendered } = makePanel([runningJob(), doneJob()])
+  const joined = rendered().map(strip).join('\n')
+  assert.ok(joined.includes('[TRACKED]'), `the full default scope chip must read TRACKED:\n${joined}`)
+  assert.ok(!joined.includes('[ALL]'), `the legacy ALL vocabulary must be gone:\n${joined}`)
+})
+
+test('A toggles the scope chip while getViewState().scope stays the internal active/all contract', () => {
+  const { panel, rendered } = makePanel([runningJob(), doneJob()])
+  assert.ok(rendered().map(strip).join('\n').includes('[TRACKED]'), 'full starts on the tracked scope')
+  assert.equal(panel.getViewState().scope, 'all')
+  panel.handleInput('a')
+  assert.ok(rendered().map(strip).join('\n').includes('[ACTIVE]'), 'a flips the chip to ACTIVE')
+  assert.equal(panel.getViewState().scope, 'active', 'the vocabulary change is presentation-only')
+  panel.handleInput('a')
+  const joined = rendered().map(strip).join('\n')
+  assert.ok(joined.includes('[TRACKED]'), 'a flips the chip back to TRACKED')
+  assert.ok(!joined.includes('[ACTIVE]'), `only one scope chip may render:\n${joined}`)
+  assert.equal(panel.getViewState().scope, 'all')
+})
+
+test('Quick keeps the ACTIVE chip and consumes A as a no-op', () => {
+  const panel = new TaskBrowserPanel(
+    [runningJob()],
+    8,
+    { mode: 'quick', header: 'Quick Tasks', noMatchText: 'no active tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const rendered = (): string[] => panel.render(100).map(strip)
+  const first = rendered().join('\n')
+  assert.ok(first.includes('[ACTIVE]'), `Quick shows the active scope chip:\n${first}`)
+  assert.ok(!first.includes('[TRACKED]'), `Quick never claims the tracked scope:\n${first}`)
+  assert.equal(panel.getViewState().scope, 'active')
+  // Quick is navigation-only: A is consumed as a no-op and cannot flip
+  // the scope (the Quick/Full input-ownership whitelist).
+  panel.handleInput('a')
+  const after = rendered().join('\n')
+  assert.ok(after.includes('[ACTIVE]'), `a must stay a no-op in Quick:\n${after}`)
+  assert.equal(panel.getViewState().scope, 'active')
+  panel.dispose()
+})
+
 test('selected row shows the pointer and bold label', () => {
   const { panel, rendered } = makePanel([runningJob(), doneJob()])
   const first = rendered().map(strip).join('\n')

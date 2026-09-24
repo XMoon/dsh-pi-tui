@@ -205,7 +205,7 @@ export interface KeybindingContext {
   readonly editorPromptMode: boolean
   /** The editor's autocomplete dropdown is open. */
   readonly autocompleteActive: boolean
-  /** Background tasks/subagents are active (the ↓ browser affordance). */
+  /** Jobs/subagents are active (the ↓ browser affordance). */
   readonly tasksActive: boolean
 }
 

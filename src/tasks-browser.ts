@@ -1,23 +1,33 @@
 /**
- * Task-browser row model — the merged view over the two background surfaces.
+ * Task-browser row model — the merged view over:
+ *  A. the DSH JobRegistry projection (`ctx.jobs`), and
+ *  B. the DSH subagent descendant catalog
+ *     (`ctx.subagents.listDescendants`).
  *
- * Source A — the jobs registry (`ctx.jobs`): bash jobs and one-shot
- * subagent jobs. A job row is STATUS-ONLY:
- *  - a bash job's output has a single read cursor owned by the model's
+ * Since DSH 0.1.7 the JobRegistry is NOT a background-only roster: the
+ * foreground `bash`/`pwsh` wait path temporarily registers the work while
+ * it is observable/stoppable, a foreground completion may `remove()` the
+ * record (the model never saw the id), and an explicit
+ * `run_in_background` / promoted job is handed out and its terminal
+ * record stays listed until an owner removes/disposes it. The TUI only
+ * consumes `JobView` — it has no handed-out/provisional bit and NEVER
+ * guesses provenance (kind/tool args/transcript/timing); row membership
+ * simply follows the registry on every commit. A job row is STATUS-ONLY:
+ *  - a shell job's output has a single read cursor owned by the model's
  *    `job_output`; consuming it from the UI would swallow the main
  *    session's result;
- *  - a one-shot subagent job record carries no child session id, so it can
- *    never be matched to its child transcript — label/order/time are never
- *    identity (see subagentJobTranscriptId).
+ *  - a `subagent`-kind job record is the registry's reliable contract for
+ *    a background ONE-SHOT subagent job, but it carries no child session
+ *    id, so it can never be matched to its child transcript — label/
+ *    order/time are never identity (see subagentJobTranscriptId).
  *
- * Source B — the subagent registry (`ctx.subagents.listDescendants`):
- * the durable child tree. Every row — continuable AND one-shot, running
- * AND inactive — is a viewable row: the catalog `activity` is live-store
- * PRESENCE, never an outcome, and a finished one-shot child stays
- * reachable through its persisted transcript (plan §6.4). Rows keep the
- * DSH stable pre-order VERBATIM (plan §6.5): the tree structure comes
- * from `parentId` + `depth`, so no running-first re-sort may ever break
- * the lineage.
+ * Source B — the subagent registry: the durable child tree. Every row —
+ * continuable AND one-shot, running AND inactive — is a viewable row: the
+ * catalog `activity` is live-store PRESENCE, never an outcome, and a
+ * finished one-shot child stays reachable through its persisted
+ * transcript (plan §6.4). Rows keep the DSH stable pre-order VERBATIM
+ * (plan §6.5): the tree structure comes from `parentId` + `depth`, so no
+ * running-first re-sort may ever break the lineage.
  *
  * Runtime activity is NOT a catalog fact: the UI projects each child's
  * `running` / `inactive` word from the Agent registry at COMMIT time

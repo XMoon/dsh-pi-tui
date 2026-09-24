@@ -257,18 +257,49 @@ test('no live session: neither refresh lists nor commits', async () => {
   assert.equal(h.commits().length, 0, 'no commit without a live root')
 })
 
-test('every commit re-reads the CURRENT jobs snapshot', async () => {
+test('every commit re-reads the CURRENT jobs snapshot: a RETAINED terminal record stays', async () => {
   const h = makeHarness()
   h.setStatus('child-a', 'running')
   const listing = h.runtime.refreshCatalog()
   h.settleListing(0, [child({ activity: 'running' })])
   await listing
   assert.deepEqual(rowValue(h.commits()[0]!), [`${AGENT_ROW_PREFIX}child-a`, 'job:bash-1'])
-  // A job settles while the browser stays open: the NEXT commit re-reads
-  // the jobs registry (the runner's jobs.events.subscribe → refreshAgents).
+  // The job SETTLES while the browser stays open and the registry RETAINS
+  // the terminal record (a handed-out background job): the NEXT commit
+  // re-reads the jobs snapshot (the runner's jobs.events.subscribe →
+  // refreshAgents) and keeps the row. Settlement is NOT removal (DSH
+  // 0.1.7 JobRegistry keeps settled records listed until an owner
+  // removes/disposes them).
+  h.setJobs([job({ status: 'completed', finishedAt: 2_000 })])
+  h.runtime.refreshRuntime()
+  const rows = h.commits()[1]!
+  assert.deepEqual(rowValue(rows), [`${AGENT_ROW_PREFIX}child-a`, 'job:bash-1'],
+    'a retained terminal record must stay in the tracked rows')
+  const settledRow = rows.find(row => row.kind === 'job') as Extract<TaskBrowserRow, { kind: 'job' }>
+  assert.equal(settledRow.status, 'completed')
+  const summary = h.summaries()[1]!
+  assert.equal(summary.runningJobs, 0, 'a terminal record is not running')
+  assert.equal(summary.totalJobs, 1, 'the tracked roster still counts it')
+})
+
+test('registry removal removes the Job row on the next runtime commit', async () => {
+  const h = makeHarness()
+  h.setStatus('child-a', 'running')
+  const listing = h.runtime.refreshCatalog()
+  h.settleListing(0, [child({ activity: 'running' })])
+  await listing
+  assert.deepEqual(rowValue(h.commits()[0]!), [`${AGENT_ROW_PREFIX}child-a`, 'job:bash-1'])
+  // This is the shape DSH uses for a provisional foreground shell record
+  // after its direct result is collected, but the runtime itself only
+  // knows that the authoritative registry removed the row — membership
+  // follows the registry; the TUI never guesses provenance and never
+  // keeps a tombstone.
   h.setJobs([])
   h.runtime.refreshRuntime()
-  assert.deepEqual(rowValue(h.commits()[1]!), [`${AGENT_ROW_PREFIX}child-a`])
+  assert.deepEqual(rowValue(h.commits()[1]!), [`${AGENT_ROW_PREFIX}child-a`],
+    'an authoritative registry removal must remove the row')
+  assert.equal(h.summaries()[1]!.totalJobs, 0,
+    'the tracked roster follows the registry, never a lifetime total')
 })
 
 test('the preferred cursor is the first running subagent, else the first active job', async () => {
