@@ -1292,10 +1292,12 @@ export function dangerCommand(command: string): boolean {
 }
 
 /**
- * The dsh profile this process was launched with (the `--profile` flag),
- * so the exit-time resume hint names the profile the TUI actually runs
- * under. Falls back to `pi-tui` when the flag is absent (the TUI bundle
- * cannot load without a profile, so this is defensive only).
+ * The dsh profile named by the `--profile` flag in `argv`, in both spellings.
+ * This is the ARGV-ONLY fallback: it cannot see the positional `dsh <name>`
+ * launch form, because the launcher consumes that bare name by synthesizing
+ * `['--profile', ...argv]` for its OWN commander parse and leaves
+ * `process.argv` untouched. Prefer {@link hostRunningProfile}, which reads the
+ * Host's profile identity instead of scraping the command line.
  * @param argv - the process argument vector.
  * @param fallback - the default profile.
  */
@@ -1311,12 +1313,42 @@ export function runningProfile(argv: readonly string[] = process.argv, fallback 
   return fallback
 }
 
+/** The one context read {@link hostRunningProfile} needs (a cordis Context satisfies it). */
+export interface ProfileContextReadLike {
+  get(name: string): unknown
+}
+
+/**
+ * The profile this process actually runs — the official Host
+ * `profileContext.name` when it is composed, else {@link runningProfile}'s
+ * argv scrape.
+ *
+ * `profileContext.name` is the launcher's own profile identity, so it is
+ * correct for EVERY launch form: `--profile <name>`, `--profile=<name>`, the
+ * positional `dsh <name>`, and `--from-default-profile <name>`. The argv
+ * scrape only knows the flag form, which is why it is the fallback for a
+ * profile-less mount (tests, an embedded surface) rather than the primary
+ * source.
+ * @param ctx - the plugin context (or any structural `get`-only stand-in).
+ * @param argv - the process argument vector for the fallback path.
+ * @param fallback - the default profile for the fallback path.
+ * @returns the running profile name.
+ */
+export function hostRunningProfile(
+  ctx: ProfileContextReadLike,
+  argv: readonly string[] = process.argv,
+  fallback = 'pi-tui',
+): string {
+  const name = (ctx.get('profileContext') as { readonly name?: string } | undefined)?.name
+  return name ?? runningProfile(argv, fallback)
+}
+
 /**
  * The interactive-quit resume hint (pi parity): `dsh --profile <p>
  * --session <id>`, printed after the terminal restores so the user can
  * re-enter the session later. Returns undefined when there is no session
  * to resume (deferred start never created one).
- * @param profile - the running profile ({@link runningProfile}).
+ * @param profile - the running profile ({@link hostRunningProfile}).
  * @param sessionId - the live session id.
  * @returns the resume command line, or undefined without a session.
  */
@@ -3824,7 +3856,11 @@ export function apply(ctx: Context, config: Config): void {
       prepareRetirement: preCancelOwnedSession,
       hint: (message) => process.stdout.write(`\n${message}\n`),
       resumeHint: () => {
-        const resume = resumeCommand(runningProfile(), liveAgent?.session.id ?? '')
+        // The Host's profileContext names the profile for EVERY launch form,
+        // including the positional `dsh <name>` (see hostRunningProfile): the
+        // argv scrape alone would answer the pi-tui fallback there and hand the
+        // user a resume command for the wrong profile.
+        const resume = resumeCommand(hostRunningProfile(ctx), liveAgent?.session.id ?? '')
         return resume === undefined ? undefined : `${color.textDim('To resume this session:')} ${resume}`
       },
       exit,

@@ -3339,6 +3339,57 @@ test('an abort while the Host Loader is still pending clears the barrier status 
   assert.equal(harness.createdSessions.length, 0, 'an aborted startup must not create an Agent')
 })
 
+test('the exit resume hint names the Host profileContext profile, not the argv fallback', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-resume-profile-hint-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'resume-profile-hint-session',
+    header: { id: 'resume-profile-hint-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  context = new Context()
+  // The Host profile service a profile boot always publishes. Its name is the
+  // ONLY source that is correct under every launch form: the positional
+  // `dsh <name>` never appears as `--profile` in process.argv, so the argv
+  // scrape answers the pi-tui fallback and would name the wrong profile.
+  context.provide('profileContext', { name: 'tui-custom', home })
+  // The hint has no injected output seam (unlike the startup status), so it is
+  // captured through a pass-through stdout wrapper: every write still reaches
+  // the test reporter, and only the resume-command line is recorded.
+  const hintWrites: string[] = []
+  const originalWrite = process.stdout.write
+  process.stdout.write = function (this: unknown, chunk: unknown, ...rest: unknown[]): boolean {
+    const text = String(chunk)
+    if (text.includes('dsh --profile')) hintWrites.push(text)
+    return (originalWrite as unknown as (chunk: unknown, ...rest: unknown[]) => boolean).call(process.stdout, chunk, ...rest)
+  } as typeof process.stdout.write
+  life.defer(() => { process.stdout.write = originalWrite })
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settle()
+  const hint = hintWrites.join('')
+  assert.ok(hint.includes('dsh --profile tui-custom --session resume-profile-hint-session'),
+    `the hint must name the Host profile: ${JSON.stringify(hintWrites)}`)
+  assert.ok(!hint.includes('--profile pi-tui '),
+    `the hint must not fall back to the argv default: ${JSON.stringify(hintWrites)}`)
+})
+
 test('an invalid --preset on a healthy resumed session never degrades the resume', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-resume-invalid-preset-')
