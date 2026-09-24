@@ -230,10 +230,11 @@ test('Current TUI is the self BUNDLE card only; a same-module standalone entry s
   // The row owned by the self bundle is inside that card…
   assert.ok(model.currentTui[0]!.rows.some(entry => entry.entryId === 'include:tui-app'))
   // …while the independent same-module entry remains its own DSH Plugin card.
-  // It stays VISIBLE (ownership is entry-id proof), but it is PROTECTED
-  // because it imports the TUI package itself.
+  // It stays VISIBLE and MANAGEABLE: same module name is not proof of self
+  // ownership (its patch row `other` is not one the self bundle declares).
   assert.deepEqual(model.dshPlugins.map(card => card.value), [entryValue('include:other')])
-  assert.equal(model.dshPlugins[0]!.canToggle, false)
+  assert.equal(model.dshPlugins[0]!.canToggle, true)
+  assert.equal(model.dshPlugins[0]!.isSelf, false)
 })
 
 test('a bundle row module shared with an unrelated standalone entry never swallows it', () => {
@@ -260,24 +261,60 @@ test('a bundle row module shared with an unrelated standalone entry never swallo
   assert.equal(model.dshPlugins[0]!.isSelf, false)
 })
 
-test('an unproven self-bundle row still self-protects its live module entry (without hiding it)', () => {
+test('an unproven self-bundle row protects its live entry by patchId proof, not module name', () => {
   // The self-bundle row exposes NO entryId (abnormal composition), so the live
-  // entry cannot be excluded by id. It must stay VISIBLE but never toggleable.
+  // entry cannot be excluded by id. `patchId === rowId` is the official proof
+  // that this is the row the bundle declares. It stays VISIBLE but protected.
   const snap = snapshot(
-    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
-    [row({ entryId: 'include:builtins', moduleName: `${SELF_BUNDLE}/builtins`, patchId: 'builtins' })],
+    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'pi-tui-builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
+    [row({ entryId: 'include:pi-tui-builtins', moduleName: `${SELF_BUNDLE}/builtins`, patchId: 'pi-tui-builtins' })],
   )
   const claims = classifyPluginPackages(
     inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
-    [observation({ owner: '1:builtins', entryId: 'include:builtins' })],
+    [observation({ owner: '1:builtins', entryId: 'include:pi-tui-builtins' })],
   )
   const model = buildPluginManagerModel(snap, claims)
   const card = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins]
-    .find(candidate => candidate.value === entryValue('include:builtins'))
+    .find(candidate => candidate.value === entryValue('include:pi-tui-builtins'))
   assert.ok(card !== undefined, 'the entry must stay visible')
-  assert.equal(card.canToggle, false, 'a self-module entry must never be toggleable')
+  assert.equal(card.canToggle, false, 'a proven self row must never be toggleable')
   assert.equal(card.isSelf, true)
   assert.equal(card.rows[0]!.canToggle, false)
+})
+
+test('the same TUI module with an unrelated patch row stays manageable (no package-name protection)', () => {
+  const snap = snapshot(
+    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'pi-tui-builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
+    [row({ entryId: 'include:my-own', moduleName: `${SELF_BUNDLE}/builtins`, patchId: 'unrelated-row' })],
+  )
+  const claims = classifyPluginPackages(
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
+    [],
+  )
+  const model = buildPluginManagerModel(snap, claims)
+  const card = model.dshPlugins.find(candidate => candidate.value === entryValue('include:my-own'))
+  assert.ok(card !== undefined)
+  assert.equal(card.canToggle, true, 'a different patch row must not inherit self protection')
+  assert.equal(card.isSelf, false)
+})
+
+test('a shared Host package row declared by the self bundle is protected by patchId proof', () => {
+  const snap = snapshot(
+    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'workspace', moduleName: '@deepseek-ai/dsh-workspace' }] })],
+    [row({ entryId: 'include:workspace', moduleName: '@deepseek-ai/dsh-workspace', patchId: 'workspace' })],
+  )
+  const claims = classifyPluginPackages(
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
+    [],
+  )
+  const model = buildPluginManagerModel(snap, claims)
+  const card = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins]
+    .find(candidate => candidate.value === entryValue('include:workspace'))
+  assert.ok(card !== undefined)
+  // A package name outside the TUI package is protected ONLY because the self
+  // bundle provably declares this row.
+  assert.equal(card.canToggle, false)
+  assert.equal(card.isSelf, true)
 })
 
 test('a standalone entry unrelated to the self modules keeps its toggle', () => {

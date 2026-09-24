@@ -67,7 +67,8 @@ export interface PluginCardView {
   /** Effective bundle capability = Host capability ∩ Current-TUI safety. */
   readonly canToggle: boolean
   readonly canRemove: boolean
-  /** True only for the bundle that provides the running TUI surface. */
+  /** True when the Current-TUI safety policy narrows this card's actions: the
+   * self bundle itself, or a self-bundle row it provably owns. */
   readonly isSelf: boolean
 }
 
@@ -271,14 +272,14 @@ export function buildPluginManagerModel(
     }
   }
 
-  // PROTECTION-ONLY (never visibility/role): a standalone live entry that IS a
-  // module of the TUI package must not be toggled from this surface, even when
-  // its self-bundle row's Loader id is unproven. The set is the self package
-  // specifier ONLY — shared Host packages the TUI patch also mounts
-  // (`@deepseek-ai/dsh-workspace`, …) are ordinary manageable rows, outside the
-  // plan's "current TUI and its rows" scope.
-  const isSelfModule = (moduleName: string): boolean =>
-    moduleName === SELF_BUNDLE || moduleName.startsWith(`${SELF_BUNDLE}/`)
+  // PROTECTION-ONLY (never visibility/role): the official identity proof for a
+  // self-owned row whose Loader entryId could not be matched in this snapshot
+  // (the bundle/plugin reads are not one atomic Host snapshot). `PluginInfo.
+  // patchId` is the persistent patch row id and `BundleRowInfo.rowId` is the
+  // row the bundle declares — their equality proves the SAME logical row,
+  // WITHOUT any module/package-name guessing.
+  const selfBundle = snapshot.bundles.find(bundle => bundle.name === SELF_BUNDLE)
+  const selfRowIds = new Set<string>((selfBundle?.rows ?? []).map(row => row.rowId))
 
   const cards: PluginCardView[] = []
   for (const bundle of snapshot.bundles) {
@@ -324,9 +325,9 @@ export function buildPluginManagerModel(
     // self BUNDLE card alone. A standalone entry is a TUI extension only when
     // its proven entryId was associated, otherwise an ordinary DSH plugin.
     const role: PluginPresentationRole = claim?.role ?? 'dsh-plugin'
-    // Protection-only: never changes visibility or role, only the effective
-    // toggle capability (and the self-protection notice).
-    const selfProtected = isSelfModule(entry.moduleName)
+    // Protection-only: proven by the official patch row id, never by a module
+    // name. It never changes visibility or role, only the effective toggle.
+    const selfProtected = entry.patchId !== undefined && selfRowIds.has(entry.patchId)
     const row = entryRowView(entry, selfProtected)
     cards.push(Object.freeze({
       value,
