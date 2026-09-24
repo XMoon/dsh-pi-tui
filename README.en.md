@@ -54,12 +54,13 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.4.8` (stable / `@latest`) | `dsh-v0.1.7-rc.1` | Current stable line; 0.1.7-rc.1 minimum |
+| `0.4.9` (stable / `@latest`) | `dsh-v0.1.7-rc.2` | Current stable line; 0.1.7-rc.2 minimum |
+| `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. The `0.4.8` line unifies its
-whole DSH peer floor at `>=0.1.7-rc.1` (the rc.1 preset registry peers
+Do not mix the stable and `@next` prerelease lines. The `0.4.9` line unifies its
+whole DSH peer floor at `>=0.1.7-rc.2` (the rc.2 preset registry peers
 `dsh-agent` exactly, so a wider legacy floor no longer satisfies a standalone
 tarball install); older runtimes fail at the normal incompatible-runtime
 boundary, so install the paired TUI line from the table above. The startup notice
@@ -594,7 +595,7 @@ This section contains DSH compatibility and CI validation details only; ordinary
 ### npm mode (current `next`)
 
 The current compatibility-train line is npm mode: it targets the published
-`dsh-v0.1.7-rc.1` family declared by this checkout's `package.json` and
+`dsh-v0.1.7-rc.2` family declared by this checkout's `package.json` and
 resolved by its lockfile. The isolated npm driver installs that exact
 family from the public registry and exercises the TUI build/test/package path:
 
