@@ -1,0 +1,163 @@
+/**
+ * Direct Job observation adapter tests (P1-B0). The decisive regression: the
+ * adapter consumes ONLY the official non-consuming follow stream, so observing
+ * a job never advances the model's `job_output` cursor.
+ *
+ * Upstream proof relied on here (`dsh-v0.1.7-rc.1`,
+ * `packages/api/job-controller/src/observe.ts`): `follow()` reads ONLY
+ * `JobRegistry.readAt()` and never `JobRegistry.read()`; it neither advances
+ * the model cursor nor acknowledges a completion notice.
+ * @module @xmoon76/dsh-pi-tui/job-observation-direct.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { DirectJobObservationPort } from '../src/runtime/direct/job-observation-direct.ts'
+import type { JobObservedSnapshot } from '../src/runtime/job-observation-port.ts'
+import { createDiag } from '../src/diag.ts'
+
+const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
+
+type Frame =
+  | { readonly type: 'opened'; readonly job: { id: string; kind: string; label: string; status: string; progress?: string; detail?: string }; readonly from: number }
+  | { readonly type: 'output'; readonly chunks: readonly { text: string; gapBefore?: true }[]; readonly next: number; readonly lossy?: true }
+  | { readonly type: 'status'; readonly job: { id: string; kind: string; label: string; status: string; progress?: string; detail?: string } }
+
+function service(frames: readonly Frame[], behavior: { reject?: Error } = {}): {
+  get: (name: string) => unknown
+  aborted: () => boolean
+} {
+  let aborted = false
+  const controller = {
+    follow: (_request: unknown, signal: AbortSignal) => (async function* () {
+      for (const frame of frames) {
+        if (signal.aborted) { aborted = true; return }
+        yield frame
+        await Promise.resolve()
+      }
+      if (behavior.reject !== undefined) throw behavior.reject
+    })(),
+  }
+  return { get: (name: string) => name === 'jobController' ? controller : undefined, aborted: () => aborted }
+}
+
+async function flush(times = 6): Promise<void> {
+  for (let i = 0; i < times; i += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
+}
+
+test('maps opened/output/status frames into a detached snapshot', async () => {
+  const host = service([
+    { type: 'opened', job: { id: 'job-1', kind: 'bash', label: 'build', status: 'running' }, from: 0 },
+    { type: 'output', chunks: [{ text: 'line one\n' }], next: 9 },
+    { type: 'output', chunks: [{ text: 'line two\n', gapBefore: true }], next: 18, lossy: true },
+    { type: 'status', job: { id: 'job-1', kind: 'bash', label: 'build', status: 'completed', detail: 'exit 0' } },
+  ])
+  const port = new DirectJobObservationPort(host, diag)
+  const seen: JobObservedSnapshot[] = []
+  port.open('session-1', 'job-1', snapshot => seen.push(snapshot))
+  await flush()
+
+  const final = seen[seen.length - 1]!
+  assert.equal(final.jobId, 'job-1')
+  assert.equal(final.label, 'build')
+  assert.equal(final.status, 'completed')
+  assert.equal(final.detail, 'exit 0')
+  assert.equal(final.text, 'line one\nline two\n')
+  assert.equal(final.gapBefore, true)
+  assert.equal(final.settled, true)
+  assert.ok(Object.isFrozen(final))
+})
+
+test('a follow failure is surfaced while the last good snapshot is retained', async () => {
+  const host = service([
+    { type: 'opened', job: { id: 'job-2', kind: 'bash', label: 'run', status: 'running' }, from: 0 },
+    { type: 'output', chunks: [{ text: 'partial' }], next: 7 },
+  ], { reject: new Error('stream broke') })
+  const port = new DirectJobObservationPort(host, diag)
+  const seen: JobObservedSnapshot[] = []
+  port.open(undefined, 'job-2', snapshot => seen.push(snapshot))
+  await flush(10)
+  const final = seen[seen.length - 1]!
+  assert.equal(final.error, 'stream broke')
+  assert.equal(final.text, 'partial')
+  assert.equal(final.status, 'running')
+})
+
+test('closing the observer aborts the official stream and ignores late frames', async () => {
+  let release: (() => void) | undefined
+  const controller = {
+    follow: (_request: unknown, signal: AbortSignal) => (async function* () {
+      yield { type: 'opened', job: { id: 'job-3', kind: 'bash', label: 'x', status: 'running' }, from: 0 }
+      await new Promise<void>(resolve => { release = resolve })
+      if (signal.aborted) return
+      yield { type: 'output', chunks: [{ text: 'late' }], next: 4 }
+    })(),
+  }
+  const port = new DirectJobObservationPort({ get: () => controller }, diag)
+  const seen: JobObservedSnapshot[] = []
+  const close = port.open('s', 'job-3', snapshot => seen.push(snapshot))
+  await flush()
+  const countAfterOpen = seen.length
+  close()
+  close() // idempotent
+  release?.()
+  await flush(10)
+  assert.equal(seen.length, countAfterOpen, 'no frame may arrive after the closer ran')
+})
+
+test('a missing jobController service fails loud', () => {
+  const port = new DirectJobObservationPort({ get: () => undefined }, diag)
+  assert.throws(() => port.open('s', 'j', () => {}), /jobController service unavailable/)
+})
+
+/**
+ * The model-cursor regression: the adapter's follow reads retained output
+ * WITHOUT consuming it, so a later model-side `read()` still receives the
+ * same unread output. This mirrors the upstream readAt/read split.
+ */
+test('observing never advances the model job_output cursor', async () => {
+  const chunks = ['alpha', 'beta', 'gamma']
+  let modelCursor = 0
+  const total = chunks.join('').length
+  const readAt = (from: number): { chunks: { text: string; at: number }[]; next: number } => {
+    const joined = chunks.join('')
+    const text = joined.slice(from)
+    return { chunks: text === '' ? [] : [{ text, at: from }], next: total }
+  }
+  const modelRead = (): string => {
+    const remaining = chunks.join('').slice(modelCursor)
+    modelCursor = total
+    return remaining
+  }
+  const controller = {
+    follow: (request: { jobId: unknown }, signal: AbortSignal) => (async function* () {
+      let cursor = 0
+      yield { type: 'opened', job: { id: String(request.jobId), kind: 'bash', label: 'j', status: 'running' }, from: cursor }
+      while (!signal.aborted) {
+        const read = readAt(cursor)
+        if (read.chunks.length > 0) {
+          yield { type: 'output', chunks: read.chunks.map(chunk => ({ text: chunk.text })), next: read.next }
+          cursor = read.next
+        }
+        yield { type: 'status', job: { id: String(request.jobId), kind: 'bash', label: 'j', status: 'completed' } }
+        return
+      }
+    })(),
+  }
+  const port = new DirectJobObservationPort({ get: () => controller }, diag)
+
+  const a: JobObservedSnapshot[] = []
+  const b: JobObservedSnapshot[] = []
+  const closeA = port.open('s', 'job-4', snapshot => a.push(snapshot))
+  await flush()
+  // Two independent observers both see the retained output.
+  const closeB = port.open('s', 'job-4', snapshot => b.push(snapshot))
+  await flush()
+  closeA()
+  closeB()
+
+  assert.equal(a[a.length - 1]!.text, chunks.join(''))
+  assert.equal(b[b.length - 1]!.text, chunks.join(''))
+  // The model's own consuming read still receives every unread byte.
+  assert.equal(modelRead(), chunks.join(''))
+})
