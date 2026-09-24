@@ -13,12 +13,14 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+// `presentation.leadingTurnCompleteness` closed with the rc.1 turn-aligned
+// opening windows: the presentation smoke now asserts the COMPLETE leading
+// turn instead of skipping its completeness.
 const KNOWN_SKIPS = Object.freeze([
   'session.createdAt',
   'session.live',
   'session.measureContext',
   'subagent.descendantTree',
-  'presentation.leadingTurnCompleteness',
 ])
 
 function runProof(name, script, parse) {

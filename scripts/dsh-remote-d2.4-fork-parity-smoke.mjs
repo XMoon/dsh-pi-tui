@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
- * B3 same-Host fork parity smoke over the pinned official DSH 0.1.7-alpha.2
+ * B3 same-Host fork parity smoke over the pinned official DSH 0.1.7-rc.1
  * Host and Client contracts.
  *
- * This is a SELF-CONTAINED alpha.2 harness (it deliberately does not import
- * the retired D2.3 parity smoke, whose harness still encodes 0.1.6-era
- * packages and the old completed-turn flooring semantics). One real Host
+ * This is a SELF-CONTAINED harness (it deliberately does not import the
+ * retired D2.3 parity smoke, whose 0.1.6-era harness still encodes the
+ * retired packages and the old completed-turn flooring semantics; the alpha.2
+ * line is only the historical contract provenance of this fork parity
+ * scenario). One real Host
  * Context owns the Session store, the production AgentLoop with an in-process
  * stub LLM route, the declarative agent preset registry, projections, the
  * SQLite session query engine, the local fs service, the real workspace stack,

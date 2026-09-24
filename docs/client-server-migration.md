@@ -586,10 +586,13 @@ lifecycle, child-control, custom-serve, or production-backend switch.
 - `DirectTaskReader` reads the live Direct child catalog and jobs registry. It
   re-projects child activity from the live Agent registry at read time and maps
   only status/detail/timestamp job facts into detached Task snapshots.
-- `RemoteTaskReader` consumes only the official `ClientSessions` list snapshot and
-  `refreshSubagents(parentSessionId)`. Catalog errors are errors rather than an
-  authoritative empty result; generation, operation, caller-cancellation, and
-  disposal fences discard stale work.
+- `RemoteTaskReader` consumes only the official Client Session projections
+  (`projectionsBySession[parent].values.subagentCatalog` through
+  `refreshProjections`) for child membership, the Session list facts for
+  parent availability, and the official ClientJobs retained `watchRows`
+  roster for status-only jobs. Projection loading/error states are never an
+  authoritative empty membership (a ready empty catalog is); generation,
+  operation, caller-cancellation, and disposal fences discard stale work.
 - `RemoteTaskReadShadow` compares direct-child membership/order, kind, label, mode,
   activity, diagnostics, parent availability, jobs, and the existing
   `buildTaskRows` projection. It records the complete descendant tree as an
@@ -601,12 +604,13 @@ lifecycle, child-control, custom-serve, or production-backend switch.
   start marker per live tuple. It never fabricates an assistant end marker.
   `deliverables/presented` remains a generic durable Session event; no
   deliverables-specific Remote contract is added.
-- The official bounded Session history window is message-aligned, not
-  turn-aligned. It can expose a closing assistant while an earlier turn-local
-  durable fact is in the next older page. The Remote reader does not guess at
-  completeness or prefetch unbounded history; this known capability gap is
-  recorded as `presentation.leadingTurnCompleteness` until the official Session
-  history contract exposes a bounded completeness target.
+- The official bounded Session history opening window is TURN-ALIGNED under
+  the rc.1 Client: including a turn's closing assistant necessarily includes
+  that turn's own leading durable facts (the 0.1.6-era message-aligned
+  mid-turn cut is gone upstream). The Remote reader therefore starts from a
+  complete leading turn and the former `presentation.leadingTurnCompleteness`
+  capability gap is CLOSED; `loadOlder()` still extends the window without
+  prefetching unbounded history.
 - `DirectPresentationReader` uses the existing Direct Session event snapshot and
   assistant stream baseline; it does not introduce a second stream tracker or
   history reducer. `RemotePresentationReadShadow` compares the matching durable
@@ -616,9 +620,10 @@ lifecycle, child-control, custom-serve, or production-backend switch.
 - `scripts/dsh-remote-task-read-parity-smoke.mjs` proves same-Host continuable
   and one-shot child catalog parity, job parity, and a child/job status mutation.
   `scripts/dsh-remote-presentation-parity-smoke.mjs` proves a real bounded
-  Client event window, records the leading-turn capability gap, verifies
-  `loadOlder()` paging with retained overlap, and proves eventual semantic
-  transcript/window/Focus parity without an external provider.
+  Client event window (turn-aligned opening page with a complete leading
+  turn), verifies `loadOlder()` paging with retained overlap, and proves
+  eventual semantic transcript/window/Focus parity without an external
+  provider.
 - `scripts/dsh-remote-d1-closure-smoke.mjs` aggregates the existing Session and
   authority proof surfaces with the D1.3 Task and presentation proofs into one
   bounded read-capability result.
@@ -973,7 +978,9 @@ port is never invoked and the draft is preserved
 D2.3 converges Session-local model selection, blank-Session preset selection,
 ordinary fresh create and ordinary open onto the official DSH Host/Client
 contracts. Production remains Direct; the Remote adapters are consumed by
-tests and the same-Host `smoke:remote-d2-lifecycle` only. There is still no
+tests only (the 0.1.6-era same-Host `smoke:remote-d2-lifecycle` smoke was
+retired with the unit and presentation suites carrying the coverage). There
+is still no
 `BackendKind='remote'`, no CLI/environment switch, and no production Remote
 Session mount.
 
@@ -1083,10 +1090,11 @@ Session mount.
   surface until the create commits.
 
 Validation for this stage: per-adapter contract tests for the Remote model,
-preset and lifecycle adapters; the D2.3 Direct contract/outcome tests; headless
-model/preset/create/open presentation tests; and the same-Host
-`smoke:remote-d2-lifecycle` integration smoke. The boundary gate stays green
-and `packages/pi-tui/**` is unchanged.
+preset and lifecycle adapters; the D2.3 Direct contract/outcome tests; and
+headless model/preset/create/open presentation tests. The 0.1.6-era
+same-Host `smoke:remote-d2-lifecycle` integration smoke was retired with
+that replacement coverage; the boundary gate stays green and
+`packages/pi-tui/**` is unchanged.
 
 ## D2.4 status (COMPLETE) — Host-owned fork / rewind convergence
 
@@ -1246,10 +1254,10 @@ The D1 closure ledger is:
 | search | sessionQuery | `ClientSessions.search` | parity | — |
 | commands | `ctx.commands` | commands Remote | parity | — |
 | skills | scoped skill registry | skills Remote | parity | — |
-| direct-child subagents | Host subagent runtime | `ClientSessions.refreshSubagents` / `subagentsByParent` | parity | — |
-| jobs | `ctx.jobs` | `ClientSessions.jobsBySession` | parity | — |
+| direct-child subagents | Host subagent runtime | Client Session projections (`projectionsBySession` / `subagentCatalog` via `refreshProjections`; the 0.1.6-era `refreshSubagents` / `subagentsByParent` mirror is retired) | parity | — |
+| jobs | `ctx.jobs` (SessionId ownership) | official ClientJobs retained `watchRows` roster (the 0.1.6-era `jobsBySession` mirror is retired) | parity | — |
 | history window | Direct Session events | `SessionBinding.eventSource` | parity | — |
-| history paging | Direct full history | `SessionFace.loadOlder()` + eventSource | eventual parity; bounded leading-turn completeness skipped | DSH Session history contract |
+| history paging | Direct full history | `SessionFace.loadOlder()` + eventSource | eventual parity; leading-turn completeness CLOSED by the rc.1 turn-aligned opening windows | — |
 | live Assistant presentation | Direct stream | transient event-source entries | parity | — |
 | full descendant tree | `listDescendants` | no exact official equivalent | skipped | D5/upstream |
 | `createdAt` | Direct query | no Client list field | skipped | later only if required |
@@ -1257,13 +1265,11 @@ The D1 closure ledger is:
 | context pressure | token meter | no Client equivalent | skipped | later Host seam if retained |
 
 The D1 skips are `session.createdAt`, `session.live`,
-`session.measureContext`, `subagent.descendantTree`, and
-`presentation.leadingTurnCompleteness`; each is explicit in the D1 closure
-ledger and smoke. `presentation.leadingTurnCompleteness` is proven by the real
-Host/Client pagination smoke rather than inferred by
-`RemotePresentationReadShadow`, because the current official Session history
-contract exposes no bounded leading-turn completeness marker. The Remote reader
-therefore does not guess or prefetch full history.
+`session.measureContext`, and `subagent.descendantTree`; each is explicit in
+the D1 closure ledger and smoke. `presentation.leadingTurnCompleteness` CLOSED
+with the rc.1 turn-aligned opening windows: the pagination smoke now asserts
+a complete leading turn directly, so the skip is no longer carried. The
+Remote reader still does not guess or prefetch full history.
 
 ## DSH 0.1.7-alpha.2 fork exact-cut convergence (B3)
 
@@ -1323,7 +1329,7 @@ harness was retired with the 0.1.6-era `dsh-agent-presets` package it named.
 | `@file` resolving on the Client filesystem | High | M1.10 sealed the locality boundary: all `@` discovery/canonicalization goes through `HostFilePort`; the M2 Remote adapter maps it to Host fileReferences |
 | Credentials exposure beyond loopback | Critical | Attach limited to localhost/SSH until real auth |
 | Dual-stack semantic drift | Medium | Shared backend contract test matrix |
-| Bounded Session history pages do not expose leading-turn completeness | Medium | Track `presentation.leadingTurnCompleteness` upstream; do not guess or prefetch full history in the Remote reader |
+| Session history opening pages without a complete leading turn | Medium | Closed for the rc.1 turn-aligned opening windows; if a future contract re-introduces partial turns, track a `presentation.leadingTurnCompleteness` skip again instead of guessing or prefetching full history |
 | Upstream DSH contract changes | Medium | Public export audit + per-release compatibility matrix; no old/new runtime fallback |
 
 ## Startup constraint
