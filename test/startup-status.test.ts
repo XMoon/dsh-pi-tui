@@ -87,3 +87,22 @@ test('isTTY defaults to true when the output does not declare it', () => {
   status.show('Resuming session…')
   assert.deepEqual(writes, ['\r\x1b[2KResuming session…'])
 })
+
+test('a throwing output seam is contained: the status never fails a boot', () => {
+  // The seam has no never-throws contract, and the helper is called from an
+  // AbortSignal listener and the terminal startup-failure root, where a throw
+  // would become an uncaughtException or block teardown/exit.
+  const writes: string[] = []
+  const status = createStartupStatus({
+    isTTY: true,
+    write: (text) => {
+      writes.push(text)
+      throw new Error('stream exploded')
+    },
+  })
+  assert.doesNotThrow(() => status.show('Starting DSH…'), 'show must contain a throwing write')
+  assert.doesNotThrow(() => status.clear(), 'clear must contain a throwing write')
+  // State semantics are unchanged: a show owns the line, so a later clear still
+  // ATTEMPTS the erase (both writes were attempted above).
+  assert.deepEqual(writes, ['\r\x1b[2KStarting DSH…', '\r\x1b[2K'])
+})

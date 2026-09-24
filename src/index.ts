@@ -10713,7 +10713,16 @@ export function apply(ctx: Context, config: Config): void {
     // the same "clear the status, then write the log" rule the resume-failure
     // path already follows; here it also covers a body failure that threw
     // before its own stage cleanup ran.
-    startupStatus.clear()
+    // Contained like every other step of this terminal root: the status writer
+    // is an injected output seam with NO never-throws contract (and the Loader
+    // barrier's own `finally` clear can land here too), so a throwing clear must
+    // not reject this discarded `.catch` chain — that would skip the logs, the
+    // abort, the owner retirement and `exit(1)`.
+    try {
+      startupStatus.clear()
+    } catch {
+      // A broken status stream must not block the teardown.
+    }
     try {
       ctx.logger.error(`tui-runner: ${message}`)
     } catch {
