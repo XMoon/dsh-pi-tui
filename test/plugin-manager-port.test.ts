@@ -60,6 +60,7 @@ interface FakeState {
   installImpl: (request: unknown) => Promise<PluginChangeFact>
   waitImpl: (requestId: string) => Promise<PluginChangeFact | null>
   cancelImpl: (requestId: string) => Promise<{ status: 'cancelled' | 'too-late' | 'not-running' }>
+  setBundleImpl?: (name: string, enabled: boolean) => Promise<PluginChangeFact>
 }
 
 function fakePort(state: Partial<FakeState> = {}): { port: PluginManagerPort; state: FakeState; emit: (event: PluginInstallEvent) => void } {
@@ -86,7 +87,10 @@ function fakePort(state: Partial<FakeState> = {}): { port: PluginManagerPort; st
   const port: PluginManagerPort = {
     snapshot: async () => { full.snapshotCalls += 1; return full.snapshotImpl() },
     inspect: async (spec, registry) => { full.inspectCalls.push({ spec, registry }); return full.inspectImpl(spec, registry ?? null) },
-    setBundleEnabled: async (name, enabled) => { full.setBundle.push({ name, enabled }); return change() },
+    setBundleEnabled: async (name, enabled) => {
+      full.setBundle.push({ name, enabled })
+      return full.setBundleImpl === undefined ? change() : full.setBundleImpl(name, enabled)
+    },
     setPluginEnabled: async (id, enabled) => { full.setPlugin.push({ id, enabled }); return change() },
     removeBundle: async (name) => { full.removeBundle.push({ name }); return change({ stage: 'remove' }) },
     startInstall: async (request) => { full.installCalls.push(request); return full.installImpl(request) },
@@ -327,4 +331,96 @@ test('standalone entry toggle uses the official plugin-entry mutation', async ()
   controller.activate()
   await tick()
   assert.deepEqual(state.setPlugin, [{ id: 'e-free', enabled: false }])
+})
+
+test('remove success goes through the official service and refreshes', async () => {
+  const { port, state } = fakePort()
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  select(controller, bundleValue('ordinary'))
+  controller.activate()
+  select(controller, PLUGIN_ACTION.remove)
+  controller.activate()
+  select(controller, PLUGIN_ACTION.confirmRemove)
+  controller.activate()
+  await tick()
+  assert.deepEqual(state.removeBundle, [{ name: 'ordinary' }])
+  assert.equal(state.snapshotCalls, 2)
+})
+
+test('an ordinary read-only bundle exposes no mutation affordance and rejects a direct dispatch', async () => {
+  const { port, state } = fakePort({
+    snapshotImpl: async () => snapshot([
+      { name: 'managed', enabled: true, installed: true, optional: false, removable: false, readOnlyReason: 'management-required', rows: [], overrides: [] },
+    ]),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  select(controller, bundleValue('managed'))
+  controller.activate()
+  assert.ok(!controller.rows().some(row => row.value === PLUGIN_ACTION.toggle))
+  assert.ok(!controller.rows().some(row => row.value === PLUGIN_ACTION.remove))
+  controller.back()
+  select(controller, bundleValue('managed'))
+  await controller.toggleSelectedCard()
+  await tick()
+  assert.equal(state.setBundle.length, 0)
+  assert.match(controller.notice() ?? '', /management-required/)
+  controller.requestRemoveSelected()
+  assert.ok(!controller.rows().some(row => row.value === PLUGIN_ACTION.confirmRemove))
+})
+
+test('a late old mutation cannot overwrite a newer refresh', async () => {
+  const gate = deferred<PluginChangeFact>()
+  let drop = false
+  const { port } = fakePort({
+    setBundleImpl: () => gate.promise,
+    snapshotImpl: async () => snapshot(drop
+      ? []
+      : [{ name: 'ordinary', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }]),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  select(controller, bundleValue('ordinary'))
+  controller.activate()
+  select(controller, PLUGIN_ACTION.toggle)
+  controller.activate() // dispatch the slow mutation
+  await tick()
+  // A newer refresh commits a snapshot without the bundle…
+  drop = true
+  controller.refresh()
+  await tick()
+  assert.ok(!controller.rows().some(row => row.value === bundleValue('ordinary')))
+  // …then the old mutation settles and re-reads; the newest truth still wins.
+  gate.resolve(change())
+  await tick()
+  assert.ok(!controller.rows().some(row => row.value === bundleValue('ordinary')))
+})
+
+test('row-level self protection never offers a toggle row action', async () => {
+  const { port, state } = fakePort({
+    snapshotImpl: async () => snapshot([
+      {
+        name: SELF_BUNDLE,
+        enabled: true,
+        installed: true,
+        optional: false,
+        removable: true,
+        rows: [{ rowId: 'app', moduleName: SELF_BUNDLE, entryId: 'e-app' }],
+        overrides: [],
+      },
+    ]),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  select(controller, bundleValue(SELF_BUNDLE))
+  controller.activate()
+  const rows = controller.rows()
+  assert.ok(rows.some(row => row.label === 'Plugin rows'))
+  assert.ok(!rows.some(row => row.value.startsWith('action:toggle-row:')), 'no self row toggle action')
+  assert.equal(state.setPlugin.length, 0)
 })

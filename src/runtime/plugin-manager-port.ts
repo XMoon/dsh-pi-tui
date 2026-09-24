@@ -124,35 +124,18 @@ export type PluginSpecInspectionFact =
     readonly registries?: readonly (string | null)[]
   }
 
-/** The last pnpm run's completion facts (official `PackageResult`). */
-export interface PluginPackageResultFact {
-  readonly exitCode: number
-  readonly kind?: string
-  readonly timedOut?: boolean
-  readonly truncated: boolean
-  readonly logPath: string
-  /** Bounded captured output (the Host's `outputBytes` budget). */
-  readonly output: string
-  readonly incompatible?: readonly PluginIncompatibleFact[]
-}
-
-/** One persisted change and its independently observed application outcome. */
+/** One persisted change and its independently observed application outcome.
+ * Only the facts the TUI renders: the port never mirrors the whole upstream
+ * `ChangeResult` (no package output, no Host log path, no profile facts). */
 export interface PluginChangeFact {
   readonly changed: boolean
   readonly application: 'applied' | 'restart-required' | 'overridden' | 'failed' | 'cancelled'
   readonly stage: 'install' | 'enable' | 'remove'
   readonly target: string
-  readonly enabled?: boolean
   readonly error?: PluginErrorFact
   readonly warnings?: readonly string[]
   /** The bundle an installation added, once pnpm and the bundle check accepted it. */
   readonly bundle?: string
-  /** Packages awaiting explicit script approval in the profile's pnpm settings. */
-  readonly pendingBuilds?: readonly string[]
-  /** The registries the installation asked, in order. */
-  readonly registries?: readonly (string | null)[]
-  readonly failedAt?: 'registry' | 'spec-host'
-  readonly packageResult?: PluginPackageResultFact
 }
 
 /** One user install attempt: exactly one request id owns it. */
@@ -163,7 +146,6 @@ export interface PluginInstallRequest {
   /** The registry asked first; null = the one pnpm's own configuration names. */
   readonly registry: string | null
   readonly enabled?: boolean
-  readonly approvedBuilds?: readonly string[]
 }
 
 /** One official install-phase announcement, correlated by request id. */

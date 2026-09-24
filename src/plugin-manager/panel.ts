@@ -190,6 +190,10 @@ export class PluginManagerPanel implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
+    // Keep the text-input focus in step with the controller's install phase
+    // (e.g. after `openInstall()`/`editInstall()` the spec Input must own the
+    // hardware cursor without a keyboard event first).
+    this.syncInputFocus()
     const install = this.controller.installView()
     const lines = install === undefined
       ? this.renderList(safeWidth)

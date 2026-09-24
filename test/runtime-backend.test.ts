@@ -183,6 +183,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   assert.equal(backend.hostFile, hostFile)
   assert.equal(backend.sessionArchive, sessionArchive)
   assert.equal(backend.hostCommand, hostCommand)
+  assert.equal(backend.pluginManager, pluginManager)
   // Truthful advertisement: the backend serves EXACTLY the implemented
   // ports — nothing is advertised without a port.
   for (const capability of DIRECT_IMPLEMENTED_CAPABILITIES) {

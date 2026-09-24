@@ -101,7 +101,6 @@ export const PLUGIN_ACTION = {
   back: 'action:back',
   confirmRemove: 'action:confirm-remove',
   cancelRemove: 'action:cancel-remove',
-  cancelInstall: 'action:cancel-install',
 } as const
 
 /** The row-level toggle value for one addressable plugin entry id. */
@@ -269,10 +268,6 @@ export function buildPluginManagerModel(
   }
 
   const selfBundle = snapshot.bundles.find(bundle => bundle.name === SELF_BUNDLE)
-  const selfEntryIds = new Set<string>()
-  for (const row of selfBundle?.rows ?? []) {
-    if (row.entryId !== undefined) selfEntryIds.add(String(row.entryId))
-  }
   const selfModuleNames = new Set<string>([SELF_BUNDLE])
   for (const row of selfBundle?.rows ?? []) selfModuleNames.add(row.moduleName)
 
@@ -284,7 +279,7 @@ export function buildPluginManagerModel(
     const isSelf = role === 'current-tui'
     const rows = bundle.rows.map(row => {
       const liveId = row.entryId === undefined ? undefined : liveByEntry.get(String(row.entryId))
-      const selfOwned = isSelf || (row.entryId !== undefined && selfEntryIds.has(String(row.entryId)))
+      const selfOwned = isSelf
       return rowView(row, liveId, selfOwned)
     })
     const hostToggle = bundle.readOnlyReason === undefined
@@ -314,15 +309,19 @@ export function buildPluginManagerModel(
 
   for (const entry of snapshot.plugins) {
     if (bundledEntryIds.has(entry.entryId)) continue
+    // A standalone entry that imports the current TUI package is part of the
+    // same surface, not a second manageable card: it must never create a
+    // duplicate Current TUI section (the self bundle card above already owns
+    // the section).
+    if (selfModuleNames.has(entry.moduleName)) continue
     const value = entryValue(entry.entryId)
     const claim = claims.get(value)
     const role: PluginPresentationRole = claim?.role ?? 'dsh-plugin'
-    const isSelf = role === 'current-tui' || selfEntryIds.has(entry.entryId) || selfModuleNames.has(entry.moduleName)
-    const row = entryRowView(entry, isSelf)
+    const row = entryRowView(entry, false)
     cards.push(Object.freeze({
       value,
       source: 'entry' as const,
-      role: isSelf ? 'current-tui' : role,
+      role,
       name: entry.moduleName,
       ...(entry.title === undefined ? {} : { title: entry.title }),
       ...(entry.description === undefined ? {} : { description: entry.description }),
@@ -336,7 +335,7 @@ export function buildPluginManagerModel(
       ...(claim?.observation === undefined ? {} : { observation: claim.observation }),
       canToggle: row.canToggle,
       canRemove: false,
-      isSelf,
+      isSelf: false,
     }))
   }
 
@@ -398,8 +397,13 @@ export function pluginManagerListRows(
   return rows
 }
 
-/** Package detail: metadata, declared rows, diagnostics and item actions. */
-export function cardDetailRows(card: PluginCardView): PluginManagerRow[] {
+/** Package detail: metadata, declared rows, diagnostics and item actions.
+ * `exemptions` cross-references the profile's exact-version exemptions so a
+ * compatibility error says whether one already applies (plan §11). */
+export function cardDetailRows(
+  card: PluginCardView,
+  exemptions: readonly PluginExemptionFact[] = [],
+): PluginManagerRow[] {
   const rows: PluginManagerRow[] = []
   const status = [card.enabled ? 'enabled' : 'disabled', roleLabel(card.role)]
   if (!card.installed) status.push('provided by the installation')
@@ -407,7 +411,16 @@ export function cardDetailRows(card: PluginCardView): PluginManagerRow[] {
   status.push(card.removable ? 'removable' : 'not removable')
   rows.push(info('Status', status.join(' · ')))
   if (card.readOnlyReason !== undefined) rows.push(info('Read-only', card.readOnlyReason))
-  if (card.error !== undefined) rows.push({ ...info('Error', errorText(card.error)), tone: 'error' })
+  if (card.error !== undefined) {
+    rows.push({ ...info('Error', errorText(card.error)), tone: 'error' })
+    for (const entry of card.error.incompatible ?? []) {
+      const key = `${entry.name}@${entry.version}`
+      const exemption = exemptions.find(candidate => candidate.packageVersion === key)
+      rows.push(info('  exemption', exemption === undefined
+        ? `${key}: no exact-version exemption applies`
+        : `${key}: exempted for DSH ${exemption.runtimeVersions.join(', ')}`))
+    }
+  }
   if (card.role === 'current-tui') {
     rows.push(info('This bundle provides the current TUI and is managed outside this screen.'))
   }

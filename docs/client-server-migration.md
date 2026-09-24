@@ -395,7 +395,14 @@ owner→Loader-entry-id projection over the shared `piTuiExtensions` runtime; no
 name heuristics, no duplicate card), and DSH Plugins (everything else). All
 mutations (enable/disable/remove/install) go through the official service; the
 TUI never spawns pnpm, edits `package.json`/patch YAML, or invents final state —
-every operation is followed by a fresh official inventory read.
+every operation is followed by a fresh official inventory read. The Direct
+adapter imports the official rc.1 types for precision (a devDependency pin);
+because the repo's naming gate requires every `@deepseek-ai/*` import in `src/`
+to be a declared peer, `@deepseek-ai/dsh-plugin-manager` also joins the peer list
+at the unchanged `>=0.1.7-rc.1` floor (the DSH base already ships the package —
+the same pattern as `dsh-jobs`). The extension observation reports only facts the
+shared runtime actually tracks (advanced/unstable capability use is observed
+from the tracked capability slots, so it under-reports rather than infers).
 
 ### P1-B status — selected Job live output
 
