@@ -275,11 +275,17 @@ export function buildPluginManagerModel(
   // PROTECTION-ONLY (never visibility/role): the official identity proof for a
   // self-owned row whose Loader entryId could not be matched in this snapshot
   // (the bundle/plugin reads are not one atomic Host snapshot). `PluginInfo.
-  // patchId` is the persistent patch row id and `BundleRowInfo.rowId` is the
-  // row the bundle declares — their equality proves the SAME logical row,
-  // WITHOUT any module/package-name guessing.
+  // patchId` is the persistent patch row id; `BundleRowInfo.rowId` is a row the
+  // bundle declares and `BundleInfo.overrides` are the ids its patch CHANGES
+  // (e.g. the base rows `cordis.patch.yml` disables). Equality proves the SAME
+  // logical row, WITHOUT any module/package-name guessing. The TUI bundle's own
+  // patch layer is immutable from its own screen: re-enabling a base row the
+  // bundle disabled would undo its intended composition.
   const selfBundle = snapshot.bundles.find(bundle => bundle.name === SELF_BUNDLE)
-  const selfRowIds = new Set<string>((selfBundle?.rows ?? []).map(row => row.rowId))
+  const selfRowIds = new Set<string>([
+    ...(selfBundle?.rows ?? []).map(row => row.rowId),
+    ...(selfBundle?.overrides ?? []),
+  ])
 
   const cards: PluginCardView[] = []
   for (const bundle of snapshot.bundles) {

@@ -392,7 +392,13 @@ state, and a rendering-only panel. The inventory is classified into Current TUI
 never by forging `readOnlyReason`/`removable`), TUI Extensions (only after an
 exact + unique live-owner association, proven through a package-private
 owner→Loader-entry-id projection over the shared `piTuiExtensions` runtime; no
-name heuristics, no duplicate card), and DSH Plugins (everything else). All
+name heuristics, no duplicate card), and DSH Plugins (everything else). Both
+ownership decisions use official identity, never a package/module name: a
+bundle row's `entryId` decides visibility, and a `PluginInfo.patchId` equal to a
+`rowId` the self bundle declares (or an id in its `overrides` — e.g. the base
+rows `cordis.patch.yml` disables) decides the protection-only narrowing, so the
+TUI bundle's own patch layer cannot be undone from its own screen while an
+independent row that merely shares a module specifier stays manageable. All
 mutations (enable/disable/remove/install) go through the official service; the
 TUI never spawns pnpm, edits `package.json`/patch YAML, or invents final state —
 every operation is followed by a fresh official inventory read. The Direct

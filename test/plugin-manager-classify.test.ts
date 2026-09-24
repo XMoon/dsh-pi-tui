@@ -317,6 +317,24 @@ test('a shared Host package row declared by the self bundle is protected by patc
   assert.equal(card.isSelf, true)
 })
 
+test('a base row the self bundle overrides is protected by patchId proof', () => {
+  // `cordis.patch.yml` disables base rows such as `tool-bash`; those ids land
+  // in BundleInfo.overrides. The TUI bundle's own patch layer must not be
+  // undone from its own screen.
+  const snap = snapshot(
+    [bundle({ name: SELF_BUNDLE, rows: [], overrides: ['tool-bash', 'tool-web'] })],
+    [row({ entryId: 'include:tool-bash', moduleName: '@deepseek-ai/dsh-tool-bash', enabled: false, patchId: 'tool-bash' })],
+  )
+  const model = buildPluginManagerModel(snap, classifyPluginPackages(
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
+    [],
+  ))
+  const card = model.dshPlugins.find(candidate => candidate.value === entryValue('include:tool-bash'))
+  assert.ok(card !== undefined, 'the overridden base row stays visible')
+  assert.equal(card.canToggle, false)
+  assert.equal(card.isSelf, true)
+})
+
 test('a standalone entry unrelated to the self modules keeps its toggle', () => {
   const snap = snapshot(
     [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
