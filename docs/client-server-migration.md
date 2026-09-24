@@ -326,7 +326,7 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
 
 ## P1 capability ledger (v0.4.9)
 
-P1 (`v0.4.9`) is the DSH `0.1.7-rc.1` **core user-facing capability
+P1 (`v0.4.9`) is the DSH `0.1.7-rc.2` **core user-facing capability
 checkpoint**. The scope below is frozen with the first P1 PR: after it lands,
 a scope change needs an explicit P1.x follow-up rather than quietly expanding
 an in-flight PR. Locality classes:
@@ -402,10 +402,10 @@ independent row that merely shares a module specifier stays manageable. All
 mutations (enable/disable/remove/install) go through the official service; the
 TUI never spawns pnpm, edits `package.json`/patch YAML, or invents final state —
 every operation is followed by a fresh official inventory read. The Direct
-adapter imports the official rc.1 types for precision (a devDependency pin);
+adapter imports the official rc.2 types for precision (a devDependency pin);
 because the repo's naming gate requires every `@deepseek-ai/*` import in `src/`
 to be a declared peer, `@deepseek-ai/dsh-plugin-manager` also joins the peer list
-at the unchanged `>=0.1.7-rc.1` floor (the DSH base already ships the package —
+at the unchanged `>=0.1.7-rc.2` floor (the DSH base already ships the package —
 the same pattern as `dsh-jobs`). The extension observation reports only facts the
 shared runtime actually tracks (advanced/unstable capability use is observed
 from the tracked capability slots, so it under-reports rather than infers).
@@ -427,6 +427,41 @@ time) and is aborted on close, session transition, and surface teardown;
 `TaskReadPort` stays status-only. If the `jobController` service is absent, the
 detail degrades to the previous status-only view with an explicit note instead
 of failing.
+
+## rc.2 release-capability dispositions (v0.4.9)
+
+The `0.4.9` line adapts the already-completed P1 product to published DSH
+`0.1.7-rc.2`. Every meaningful rc.2 release item has exactly one disposition:
+
+| rc.2 item | Disposition | Action in this release |
+|---|---|---|
+| Preset chooser-policy removal (`modeSelectionEnabled`) | ADAPTED | the DTO/Direct/Remote/command policy layer is deleted; `/preset` is a normal command over the official registry |
+| Model exact-availability admission + background default save | ADAPTED | the Direct Session write admits the current provider/model, commits, then returns while the official default save runs detached |
+| Dynamic tool enablement in an already-live Session | ADAPTED | official `developer/message` tool updates are tolerated by the fold/projections; live Plugin Manager enablement is proven end to end |
+| Interrupted Plugin Manager operation recovery | INHERITED + integration proof | the TUI still owns request-id start/wait/cancel only; rc.2 owns run/process recovery |
+| Registry/mirror install improvements | INHERITED | existing install-source/registry presentation regressions |
+| Long tool-output fix | INHERITED | long multibyte tool-result regression over the real fold/search/export path |
+| Long-conversation send fix | INHERITED | long-session fold + next-prompt regression |
+| Schedule | **DEFERRED** (post-0.4.9) | stable rc.2 Host capability, but its optional composition is not a TUI plugin-install target and the TUI must not insert optional Schedule rows into its own protected bundle |
+| Time Context | **DEFERRED** (post-0.4.9) | official Time Context uses browser request-zone facts; the TUI has no equivalent user-timezone authority and must not promote the Host process timezone into one |
+| Approval `displayReason` | INHERITED / additive | no rc.2 blocker; the current generic reason presentation stays |
+| Auto Review | DEFERRED / experimental | upstream experimental surface, never a release blocker |
+| Web/Desktop shortcuts manager | WEB-ONLY / N/A | the TUI keeps its own keybinding owner |
+| Desktop onboarding / window+background lifecycle / updater | WEB-ONLY / N/A | none |
+| Web archive filter chrome | WEB-ONLY presentation; Workspace archive/pin remains a separate TUI follow-up | not mixed into rc.2 |
+| Standard prompt token reduction | INHERITED | preset/runtime parity only |
+
+Schedule and Time Context are the two upstream capabilities that exist in rc.2
+but are deliberately **not** activated here. Their future owner is a
+post-`0.4.9` product/composition slice (possibly around M3, depending on the
+locality design) that must decide optional-composition ownership, enable/disable
+UX, the timezone source, task catalog/history UX, and Remote locality. The
+historical capability-debt items (Session/conversation references in `@`
+completion, continuable Subagent follow-up images and queue editing, Session
+archive/unarchive/pin, subagent delegation settings UI, turn-level Changed
+Files/Review, preset read-document viewer, compatibility-exemption mutation UI,
+Agent Team, and the M3-owned Remote items) remain tracked, unchanged, and
+visible — none is silently dropped or implemented by this release.
 
 ## Official seam mapping (DSH 0.1.2-alpha.4) — history, skills, errors, diagnostics
 
@@ -1134,8 +1169,8 @@ harness.
   is invalidated by a reconnect, and its refusal table is an EXACT allowlist —
   an unknown `session/model-*` code stays `indeterminate`, never a blind
   rejection.
-- `PresetCatalog` gained `roster()` (path-free rows + Host-effective default +
-  `modeSelectionEnabled`, matching `agentPresets.list`) and
+- `PresetCatalog` gained `roster()` (path-free rows + Host-effective default,
+  matching the rc.2 `agentPresets.list`) and
   `selectSessionPreset(sessionId, presetId)` (`OperationResult<{preset}>`). Both
   adapters map the blank-Session WRITE to the official blank check + recompose
   transaction + durable `agent-preset/selected` commit; the TUI owns neither
@@ -1201,7 +1236,7 @@ harness.
   authoritative Host read reconciles it (the persisted default either carries
   the choice — committed — or proves it did not land), and a failed intent is
   never seeded into a create. `/preset`
-  respects the Host `modeSelectionEnabled` policy, reads blankness from the
+  reads blankness from the
   official turn-boundary projection (never the TUI transcript), revalidates the
   Session identity/generation inside the transition gate, and maps
   `agent-preset/locked` to the started-session wording. `/new` keeps the old
@@ -1467,8 +1502,9 @@ merge blockers; each records what is absent and the follow-up shape.
 Harness versions below the current floor. Experimental Remote dependencies must
 never enter its static import graph — load the selected backend via dynamic
 import in a `runtime/backend-loader` module. The current line requires DSH
-`>=0.1.7-rc.1`; `HARNESS_COMPAT` maps every older official tag to its
-historically compatible TUI line (the `0.1.6-alpha.2` runtime falls back to the
+`>=0.1.7-rc.2`; `HARNESS_COMPAT` maps every older official tag to its
+historically compatible TUI line (the `0.1.7-rc.1` runtime falls back to the
+published `0.4.8` bundle, the `0.1.6-alpha.2` runtime falls back to the
 published `0.4.7-alpha.2` bundle, `0.1.6-alpha.1` to `0.4.7-alpha.1`, and the
 `0.1.5-rc.1`/`rc.2` family to `0.4.6`) and supplies the exact npm upgrade
 command. There is no old/new runtime

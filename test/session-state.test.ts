@@ -583,8 +583,8 @@ test('a FAILED global-default save still commits the live Session choice (no ses
     await vt.waitForRender()
     const saveStartedM1 = deferred<void>()
     saveStarted.set('m1', saveStartedM1.resolve)
-    // Select m1: the picker enters the selecting state and the default save
-    // hangs on the gate.
+    // Select m1: rc.2 returns the Session success immediately while the
+    // best-effort default save hangs on the gate.
     vt.sendInput('\r')
     await vt.waitForRender()
     await Promise.resolve()
@@ -593,12 +593,13 @@ test('a FAILED global-default save still commits the live Session choice (no ses
     await vt.waitForRender()
     const saveM1 = gates.get('m1')
     assert.ok(saveM1 !== undefined, 'save(m1) must have started')
-    assert.ok(vt.getViewport().join('\n').includes('Selecting'),
-      'the picker must show a selecting state while the write settles')
-    // The durable Session append already committed (the save is best-effort).
+    // The durable Session append already committed and the picker never waits
+    // for the background default save to settle.
     const catalog = proxy.catalog as DirectCatalogPort
     assert.deepEqual(catalog.models.sessionSelection('session-a'), { provider: 'p', model: 'm1' },
       'the durable append must commit the Session choice before the save settles')
+    assert.ok(!vt.getViewport().join('\n').includes('Selecting'),
+      'the picker must not stay in a selecting state waiting for the background save')
     saveM1.reject(new Error('quota exceeded'))
     await vt.waitForRender()
     await Promise.resolve()

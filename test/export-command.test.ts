@@ -97,7 +97,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
       presets: {
         available: () => false,
-        roster: async () => ({ presets: [], modeSelectionEnabled: false }),
+        roster: async () => ({ presets: [] }),
         resolve: async () => ({}),
         defaultId: () => undefined,
         selectSessionPreset: async () => ({ ownership: 'current' as const, outcome: { kind: 'committed' as const, value: { preset: '' } } }),
