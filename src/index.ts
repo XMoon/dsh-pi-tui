@@ -1894,8 +1894,16 @@ export function apply(ctx: Context, config: Config): void {
     // skipping a pending row, no half-composed Agent): the only thing this
     // layer owes the user is that the wait is VISIBLE.
     startupStatus.show('Starting DSH…')
-    await ctx.get('loader')?.await()
-    startupStatus.clear()
+    try {
+      await ctx.get('loader')?.await()
+    } finally {
+      // The barrier owns the terminal row only while it is waiting: release it
+      // on EVERY exit, including a rejected Loader. Leaving it up would let the
+      // fatal log land on the same row (`Starting DSH…[tui] … ERROR fatal …`)
+      // and the later clear would then erase part of that error line — a TTY
+      // shares one cursor between stdout and stderr.
+      startupStatus.clear()
+    }
     if (lifecycleController.signal.aborted) {
       // Pre-mount unload before any Agent existed: nothing to retire; close
       // the diagnostics handle (the early cancellation disposer no longer
@@ -10697,6 +10705,15 @@ export function apply(ctx: Context, config: Config): void {
     // protected, so a hostile rejection or a throwing dependency can never
     // skip the teardown or leak a rejection from this discarded chain.
     const message = safeErrorMessage(error)
+    // Release the shared terminal row BEFORE the first log line. The pre-mount
+    // status owns the current row, and a TTY shares one cursor between stdout
+    // and stderr: logging first would append the failure to `Starting DSH…`
+    // (or `Resuming session…`/`Preparing conversation…`), and the abort
+    // listener's later clear would then erase part of that error line. This is
+    // the same "clear the status, then write the log" rule the resume-failure
+    // path already follows; here it also covers a body failure that threw
+    // before its own stage cleanup ran.
+    startupStatus.clear()
     try {
       ctx.logger.error(`tui-runner: ${message}`)
     } catch {
@@ -10709,8 +10726,8 @@ export function apply(ctx: Context, config: Config): void {
     }
     // Startup failure: cancel every in-flight lifecycle load, then tear
     // down. (The runner-internal cleanup() never ran — the body threw.)
-    // The pre-mount status line is cleared by the lifecycle abort
-    // listener registered at startup (idempotent).
+    // The pre-mount status line has already been cleared above; the lifecycle
+    // abort listener's clear is idempotent.
     // Terminal focus reporting (CSI ? 1004) may already be enabled when
     // the body threw AFTER the TUI mount — disable it here so the mode
     // never leaks into the shell on the startup-failure path either
