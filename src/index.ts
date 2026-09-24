@@ -219,6 +219,7 @@ import { DirectPluginManagerPort } from './runtime/direct/plugin-manager-direct.
 import { DirectJobObservationPort } from './runtime/direct/job-observation-direct.ts'
 import type { JobObservedSnapshot } from './runtime/job-observation-port.ts'
 import { PluginManagerController } from './plugin-manager/controller.ts'
+import { PluginManagerHostRegistry, type PluginManagerHostClaim } from './plugin-manager/host-registry.ts'
 import { PluginManagerPanel } from './plugin-manager/panel.ts'
 import { observeTuiExtensions } from './plugin-manager/extension-inventory.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from './runtime/config-port.ts'
@@ -7082,16 +7083,14 @@ export function apply(ctx: Context, config: Config): void {
     // `/settings → Plugins`). The port is the narrow Direct adapter; the
     // presentation classification reads only the shared extension runtime's
     // own health records — never a second inventory or a second manager.
-    // The active host carries an opaque token so an EXTERNAL teardown (the
-    // Settings parent overlay being hidden/disposed, which never calls the
-    // submenu's `done()`) can release the owner WITHOUT pretending the user
-    // closed it.
-    let activePluginManagerHost: { readonly token: object; readonly close: () => void } | undefined
+    // The token-owned registry distinguishes a normal close from an external
+    // Settings teardown (see its module header).
+    const pluginManagerHosts = new PluginManagerHostRegistry()
     const pluginManagerController = new PluginManagerController(backend.pluginManager, {
-      requestRender: () => { if (activePluginManagerHost !== undefined) app.requestRender() },
-      requestClose: () => activePluginManagerHost?.close(),
+      requestRender: () => { if (pluginManagerHosts.isOpen()) app.requestRender() },
+      requestClose: () => pluginManagerHosts.closeActive(),
       notify: (message, kind) => app.notify(message, kind),
-      isOpen: () => activePluginManagerHost !== undefined,
+      isOpen: () => pluginManagerHosts.isOpen(),
       diag,
     }, {
       observations: () => extensionService === undefined ? [] : observeTuiExtensions({
@@ -7106,38 +7105,28 @@ export function apply(ctx: Context, config: Config): void {
     const jobObservation = new DirectJobObservationPort(ctx, diag)
     const openPluginManager = (): void => {
       // A second open is a no-op: the panel is already the active surface.
-      if (activePluginManagerHost !== undefined) return
-      const token = {}
+      if (pluginManagerHosts.isOpen()) return
+      let close: () => void = () => {}
+      const claim = pluginManagerHosts.claim(() => close())
       const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender(), {
-        // Any hide path that disposes the panel (Esc, the returned closer, or
-        // a surface-level teardown) releases this owner exactly once.
-        onDispose: () => { if (activePluginManagerHost?.token === token) activePluginManagerHost = undefined },
+        // Any hide path that disposes the panel releases this owner exactly
+        // once (a normal close and an external teardown are the same here).
+        onDispose: () => claim.releaseExternally(),
       })
-      const close = app.openPluginManagerPanel(panel, () => {
-        if (activePluginManagerHost?.token === token) activePluginManagerHost = undefined
-      })
-      activePluginManagerHost = { token, close }
+      close = app.openPluginManagerPanel(panel, () => claim.releaseExternally())
       pluginManagerController.open('direct-command')
     }
     /** The `/settings → Plugins` entry: the SAME panel/controller hosted as a
      * lazy SettingsList submenu; `done` returns to the Settings list. */
     const createPluginManagerSubmenu = (done: (selected?: string) => void): Component => {
-      const token = {}
-      const previous = activePluginManagerHost
+      let claim: PluginManagerHostClaim | undefined
       const panel = new PluginManagerPanel(pluginManagerController, () => app.requestRender(), {
         // The Settings parent may dispose this submenu WITHOUT calling `done`
-        // (the fork's lifecycle contract). Release only the OWNER — never
-        // restore navigation or call `done()` while the parent is tearing down.
-        onDispose: () => { if (activePluginManagerHost?.token === token) activePluginManagerHost = previous },
+        // (the fork's lifecycle contract): release only the OWNER.
+        onDispose: () => claim?.releaseExternally(),
       })
-      activePluginManagerHost = {
-        token,
-        close: () => {
-          if (activePluginManagerHost?.token !== token) return
-          activePluginManagerHost = previous
-          done()
-        },
-      }
+      // The user close path returns to Settings; an external teardown must not.
+      claim = pluginManagerHosts.claim(() => claim?.closeNormally(), done)
       pluginManagerController.open('settings-submenu')
       return panel
     }

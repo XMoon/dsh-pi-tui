@@ -211,23 +211,58 @@ test('a bundle row is never emitted as a second standalone card', () => {
   assert.ok(!values.includes(entryValue('e-r')))
 })
 
-test('a self-owned standalone entry never creates a second Current TUI card', () => {
+test('Current TUI is the self BUNDLE card only; a same-module standalone entry stays visible', () => {
   const snap = snapshot(
-    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'r', moduleName: 'helper', entryId: 'e-helper' }] })],
+    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'include:tui-app' }] })],
     [
-      row({ entryId: 'e-helper', moduleName: 'helper', patchId: 'r' }),
-      // A standalone entry that imports the self package itself is part of the
-      // same surface, not a second manageable card.
-      row({ entryId: 'e-self', moduleName: SELF_BUNDLE, patchId: 'self' }),
+      row({ entryId: 'include:tui-app', moduleName: SELF_BUNDLE, patchId: 'tui-app' }),
+      // A DIFFERENT Loader row that merely imports the same module: it is not
+      // owned by the self bundle and must not be swallowed by a name match.
+      row({ entryId: 'include:other', moduleName: SELF_BUNDLE, patchId: 'other' }),
     ],
   )
   const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['e-helper'] }]),
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['include:tui-app'] }]),
     [],
   )
   const model = buildPluginManagerModel(snap, claims)
-  assert.equal(model.currentTui.length, 1, 'Current TUI appears exactly once')
-  assert.equal(model.currentTui[0]!.rows[0]!.canToggle, false)
+  assert.deepEqual(model.currentTui.map(card => card.value), [bundleValue(SELF_BUNDLE)])
+  // The row owned by the self bundle is inside that card…
+  assert.ok(model.currentTui[0]!.rows.some(entry => entry.entryId === 'include:tui-app'))
+  // …while the independent same-module entry remains its own DSH Plugin card.
+  assert.deepEqual(model.dshPlugins.map(card => card.value), [entryValue('include:other')])
+  assert.equal(model.dshPlugins[0]!.canToggle, true)
+})
+
+test('a bundle row module shared with an unrelated standalone entry never swallows it', () => {
+  const snap = snapshot(
+    [bundle({ name: SELF_BUNDLE, rows: [
+      { rowId: 'workspace', moduleName: '@deepseek-ai/dsh-workspace', entryId: 'include:workspace' },
+    ] })],
+    [
+      row({ entryId: 'include:workspace', moduleName: '@deepseek-ai/dsh-workspace', patchId: 'workspace' }),
+      // An unrelated user row importing the SAME module.
+      row({ entryId: 'include:user-workspace', moduleName: '@deepseek-ai/dsh-workspace', patchId: 'user-workspace' }),
+    ],
+  )
+  const claims = classifyPluginPackages(
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['include:workspace'] }]),
+    [],
+  )
+  const model = buildPluginManagerModel(snap, claims)
   const values = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins].map(card => card.value)
-  assert.ok(!values.includes(entryValue('e-self')), 'the self-module standalone entry is not a separate card')
+  assert.ok(values.includes(entryValue('include:user-workspace')), 'the unrelated workspace entry must stay visible')
+  assert.deepEqual(model.dshPlugins.map(card => card.value), [entryValue('include:user-workspace')])
+})
+
+test('without the self bundle there is no Current TUI card and no guessed fallback', () => {
+  const snap = snapshot(
+    [],
+    [row({ entryId: 'include:tui-app', moduleName: SELF_BUNDLE, patchId: 'tui-app' })],
+  )
+  const model = buildPluginManagerModel(snap, new Map())
+  assert.deepEqual(model.currentTui, [])
+  // The self-module entry is shown as an ordinary DSH plugin, never guessed
+  // into the Current TUI section.
+  assert.deepEqual(model.dshPlugins.map(card => card.value), [entryValue('include:tui-app')])
 })

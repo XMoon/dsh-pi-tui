@@ -152,10 +152,18 @@ test('a long list keeps the selected row visible (selection-aware viewport)', as
   assert.match(clipped, /↓ more/)
 
   // A very short grant must never overflow: the frame is clamped (indicators
-  // suppressed) even at maxRows 1..6.
-  for (let rows = 1; rows <= 6; rows += 1) {
+  // suppressed) even at maxRows 1..5 and 10.
+  for (const rows of [1, 2, 3, 4, 5, 10]) {
     panel.setMaxRows(rows)
-    assert.ok(panel.render(80).length <= rows, `maxRows ${rows} must not overflow`)
+    const rendered = panel.render(80)
+    assert.ok(rendered.length <= rows, `maxRows ${rows} must not overflow (got ${rendered.length})`)
+    // The selection is still present whenever a body row fits.
+    const value = controller.selectedValue()
+    const row = controller.rows().find(candidate => candidate.value === value)
+    if (rows >= 2 && row !== undefined) {
+      const label = strip(row.label).replace(/…$/, '').trim().slice(0, 12)
+      assert.ok(strip(rendered.join('\n')).includes(label), `maxRows ${rows} must keep the selection visible`)
+    }
   }
 })
 
