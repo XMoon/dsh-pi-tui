@@ -3758,6 +3758,158 @@ test('a late non-cooperative child create skips disposed-surface commit work and
     'the late committed child owner must be retired exactly once')
 })
 
+test('an interactive exit during a non-cooperative transition create cancels each owner exactly once', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-late-commit-exit-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-late-commit-exit-old',
+    header: { id: 'retire-late-commit-exit-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // The fake Direct create deliberately ignores lifecycle cancellation: it
+  // resolves only when the test releases it, AFTER the interactive exit has
+  // already started the appExit root teardown.
+  let releaseCreate!: () => void
+  const createRelease = new Promise<void>(resolve => { releaseCreate = resolve })
+  let createStarted!: () => void
+  const createStartedPromise = new Promise<void>(resolve => { createStarted = resolve })
+  const harness = makeHarness(
+    home,
+    resumed,
+    { provider: 'p', model: 'm' },
+    undefined,
+    async () => {
+      createStarted()
+      await createRelease
+    },
+    retirementSubagents,
+  )
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
+    harness.retirementEvents.push('appExit')
+    // The launcher's appExit disposes the application tree: the runner fiber
+    // disposer joins the memoized retirement.
+    void fiber?.dispose()
+  })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await createStartedPromise
+
+  // Interactive exit while the create is pending: the exit preparation cancels
+  // the CURRENT owner synchronously, before appExit starts the root teardown.
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settle()
+  const beforeRelease = harness.retirementEvents
+  assert.equal(beforeRelease.filter(event => event === 'cancel:retire-late-commit-exit-old').length, 1,
+    `the interactive exit must pre-cancel the current owner exactly once: ${JSON.stringify(beforeRelease)}`)
+  assert.ok(beforeRelease.indexOf('cancel:retire-late-commit-exit-old') < beforeRelease.indexOf('appExit'),
+    `the pre-cancel must land before appExit: ${JSON.stringify(beforeRelease)}`)
+
+  // The non-cooperative create now commits its child after appExit began: the
+  // transition's own post-commit retirement must NOT cancel the old owner a
+  // second time (that second cancel is the one that can land after the inbox
+  // projection was unregistered).
+  releaseCreate()
+  await settle()
+  await transition
+  const events = harness.retirementEvents
+  const child = harness.createdSessions.at(-1)
+  assert.ok(child, 'the non-cooperative create still produces a child owner')
+  assert.equal(events.filter(event => event === 'cancel:retire-late-commit-exit-old').length, 1,
+    `the replaced owner must not be cancelled again after the root teardown began: ${JSON.stringify(events)}`)
+  assert.equal(events.filter(event => event === `cancel:${child.id}`).length, 1,
+    `the committed NEW owner must be cancelled exactly once by the retirement: ${JSON.stringify(events)}`)
+  assert.equal(events.filter(event => event === 'dispose:retire-late-commit-exit-old').length, 1,
+    'the replaced owner must be retired exactly once')
+  assert.equal(events.filter(event => event === `dispose:${child.id}`).length, 1,
+    'the late committed child owner must be retired exactly once')
+})
+
+test('a throwing shutdown cancel inside the abort listener is contained and retried, never an uncaught exception', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-abort-throw-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-abort-throw-old',
+    header: { id: 'retire-abort-throw-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // The FIRST whenIdle (startup resume) settles; the SECOND (the /new
+  // pre-commit quiesce) hangs, so the transition parks in `whenIdleOrAbort`
+  // with its lifecycle-abort listener armed.
+  let idleCalls = 0
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents, async () => {
+    idleCalls += 1
+    if (idleCalls > 1) await new Promise<void>(() => {})
+  })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await settle()
+  assert.equal(idleCalls, 2, 'the /new pre-commit quiesce must be awaiting the stuck whenIdle')
+
+  // The FIRST shutdown cancel throws — exactly the
+  // `cannot read inbox state: its projection registration is not active`
+  // failure the hardening exists for. An AbortSignal listener is a Node
+  // EventTarget: an escaping throw would become an uncaughtException that no
+  // `try { disposeSurface() } catch` can see.
+  const liveAgent = (harness.agents as { get(id: string): { cancel(): void } | undefined }).get(resumed.id)
+  assert.ok(liveAgent, 'the resumed session must have a live Agent')
+  const originalCancel = liveAgent.cancel.bind(liveAgent)
+  let cancelAttempts = 0
+  liveAgent.cancel = () => {
+    cancelAttempts += 1
+    if (cancelAttempts === 1) throw new Error('cancel exploded before the projection was torn down')
+    originalCancel()
+  }
+  const uncaught: unknown[] = []
+  const onUncaught = (error: unknown): void => { uncaught.push(error) }
+  process.on('uncaughtException', onUncaught)
+  life.defer(() => { process.off('uncaughtException', onUncaught) })
+
+  await fiber.dispose()
+  fiber = undefined
+  await transition
+  await settle()
+  const events = harness.retirementEvents
+  assert.deepEqual(uncaught.map(error => String(error)), [],
+    'a throwing shutdown cancel must never escape the abort listener')
+  assert.equal(cancelAttempts, 2, 'the failed cancel must be retried by the retirement cancel phase')
+  assert.equal(events.filter(event => event === 'cancel:retire-abort-throw-old').length, 1,
+    'only the successful retry cancels the fake agent')
+  assert.equal(events.filter(event => event === 'dispose:retire-abort-throw-old').length, 1,
+    'the owner must still be disposed exactly once')
+})
+
 test('an interactive exit retires the owned session through the appExit disposal', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-retire-interactive-')

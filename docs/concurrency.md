@@ -393,6 +393,19 @@ Where it runs:
   so the retirement retries it. This is Direct-only shutdown preparation; it
   is not the Remote `session.close`, and parked owners are retired by the
   disposal's own loop rather than by the interactive call stack.
+
+  Every shutdown-aware cancel shares that one identity set, because more than
+  one owner can be cancelled in a single exit: the current owner is
+  pre-cancelled before `appExit`, and a session transition or fork that commits
+  AFTERWARDS still retires the owner it replaced. Those transition/fork cancel
+  phases join the same set while the lifecycle signal is aborted (outside
+  shutdown they keep the ordinary cancel semantics), which is what keeps a late
+  non-cooperative child create from producing a second cancel after the root
+  teardown unregistered the inbox projection. The `whenIdleOrAbort`
+  lifecycle-abort listener contains a throwing cancel and rejects its quiesce
+  instead: an `AbortSignal` is a Node EventTarget, so a listener exception
+  would otherwise become an `uncaughtException` that the caller's `try`/`catch`
+  cannot observe, and the memoized retirement would never get to retry.
 - **HMR / runner fiber unload**: the fiber disposer is async (Cordis
   unloads await it) and runs the SAME memoized retirement — one teardown
   promise shared by every teardown path, never four copies. That entry has no
