@@ -76,11 +76,9 @@ export function classifyPluginPackages(
     out.set(input.key, { role: 'tui-extension', observation })
   }
   // Drop every ambiguous claim: one live owner may decorate at most one card.
-  for (const [owner, keys] of claimed) {
+  for (const keys of claimed.values()) {
     if (keys.length < 2) continue
-    const observation = observations.find(candidate => candidate.owner === owner)!
     for (const key of keys) out.set(key, { role: 'dsh-plugin' })
-    void observation
   }
   return out
 }

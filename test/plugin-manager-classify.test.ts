@@ -176,12 +176,13 @@ test('a bundle row is never emitted as a second standalone card', () => {
   assert.ok(!values.includes(entryValue('e-r')))
 })
 
-test('a self-owned standalone entry cannot be toggled', () => {
+test('a self-owned standalone entry never creates a second Current TUI card', () => {
   const snap = snapshot(
     [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'r', moduleName: 'helper', entryId: 'e-helper' }] })],
     [
       row({ entryId: 'e-helper', moduleName: 'helper', patchId: 'r' }),
-      // A standalone entry that imports the self package itself is self-owned.
+      // A standalone entry that imports the self package itself is part of the
+      // same surface, not a second manageable card.
       row({ entryId: 'e-self', moduleName: SELF_BUNDLE, patchId: 'self' }),
     ],
   )
@@ -190,9 +191,8 @@ test('a self-owned standalone entry cannot be toggled', () => {
     [],
   )
   const model = buildPluginManagerModel(snap, claims)
+  assert.equal(model.currentTui.length, 1, 'Current TUI appears exactly once')
   assert.equal(model.currentTui[0]!.rows[0]!.canToggle, false)
-  const selfEntry = model.currentTui.find(card => card.value === entryValue('e-self'))
-  assert.ok(selfEntry !== undefined)
-  assert.equal(selfEntry.canToggle, false)
-  assert.equal(selfEntry.rows[0]!.canToggle, false)
+  const values = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins].map(card => card.value)
+  assert.ok(!values.includes(entryValue('e-self')), 'the self-module standalone entry is not a separate card')
 })

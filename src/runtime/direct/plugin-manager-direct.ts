@@ -17,7 +17,6 @@ import type {
   IncompatiblePlugin,
   InstallBundleOptions,
   ManagementError,
-  PackageResult,
   PluginEntryId,
   PluginInfo,
   PluginInstallCancellation,
@@ -41,7 +40,6 @@ import type {
   PluginInstallRequest,
   PluginManagerPort,
   PluginManagerSnapshot,
-  PluginPackageResultFact,
   PluginRegistriesFact,
   PluginRowFact,
   PluginSpecInspectionFact,
@@ -155,35 +153,15 @@ function detachRegistries(registries: PluginRegistries): PluginRegistriesFact {
   })
 }
 
-function detachPackageResult(result: PackageResult | undefined): PluginPackageResultFact | undefined {
-  if (result === undefined) return undefined
-  return Object.freeze({
-    exitCode: result.exitCode,
-    ...(result.kind === undefined ? {} : { kind: result.kind }),
-    ...(result.timedOut === undefined ? {} : { timedOut: result.timedOut }),
-    truncated: result.truncated,
-    logPath: result.logPath,
-    output: result.output,
-    ...(result.incompatible === undefined
-      ? {}
-      : { incompatible: Object.freeze(result.incompatible.map(detachIncompatible)) }),
-  })
-}
-
 function detachChange(result: ChangeResult): PluginChangeFact {
   return Object.freeze({
     changed: result.changed,
     application: result.application,
     stage: result.stage,
     target: result.target,
-    ...(result.enabled === undefined ? {} : { enabled: result.enabled }),
     ...(result.error === undefined ? {} : { error: detachError(result.error) }),
     ...(result.warnings === undefined ? {} : { warnings: Object.freeze([...result.warnings]) }),
     ...(result.bundle === undefined ? {} : { bundle: result.bundle }),
-    ...(result.pendingBuilds === undefined ? {} : { pendingBuilds: Object.freeze([...result.pendingBuilds]) }),
-    ...(result.registries === undefined ? {} : { registries: Object.freeze([...result.registries]) }),
-    ...(result.failedAt === undefined ? {} : { failedAt: result.failedAt }),
-    ...(result.packageResult === undefined ? {} : { packageResult: detachPackageResult(result.packageResult)! }),
   })
 }
 
@@ -307,7 +285,6 @@ export class DirectPluginManagerPort implements PluginManagerPort {
       requestId: pluginInstallRequestId(request.requestId),
       registry: request.registry,
       ...(request.enabled === undefined ? {} : { enabled: request.enabled }),
-      ...(request.approvedBuilds === undefined ? {} : { approvedBuilds: [...request.approvedBuilds] }),
     }
     return detachChange(await this.service().installBundle(request.spec, options))
   }

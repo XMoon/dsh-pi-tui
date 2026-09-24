@@ -9238,11 +9238,12 @@ export function apply(ctx: Context, config: Config): void {
       refreshAgents()
     }
     /**
-     * Open one job from the task browser: a bash job shows a STATUS viewer
-     * (never the output — the job's single read cursor belongs to the agent's
-     * job_output; consuming it from the UI would leave the model an
-     * incomplete result and could swallow the completion notice); a subagent
-     * job shows the status viewer with a /tasks hint. The job record
+     * Open one job from the task browser: an ordinary Job opens the detail
+     * viewer, which shows a NON-CONSUMING live output preview through the
+     * official JobController.follow() stream (never `jobs.read()`), so it can
+     * never leave the model an incomplete `job_output` result or swallow the
+     * completion notice; a subagent job whose stable child session id is
+     * unknown shows the same Job detail with a /tasks hint. The job record
      * carries no child session id, so label/order/time heuristics cannot
      * distinguish a background child from a same-label foreground one-shot;
      * the task browser therefore never opens a transcript by guess.
@@ -9294,9 +9295,12 @@ export function apply(ctx: Context, config: Config): void {
       return 'keep-open'
     }
     /**
-     * Status-only viewer for one job (never touches the read cursor). The
-     * subagent variant appends the /tasks hint because a transcript
-     * cannot always be matched; the bash variant is pure status.
+     * Selected-Job detail viewer. It opens one official non-consuming
+     * observation stream for exactly this Job and repaints the latest local
+     * snapshot on the viewer's timer (the tick never reads Host output). The
+     * subagent variant appends the /tasks hint because a transcript cannot
+     * always be matched. If the jobController service is absent the detail
+     * degrades to the status-only view with an explicit note.
      */
     const openJobStatusViewer = (
       jobId: string,

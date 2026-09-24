@@ -119,7 +119,6 @@ interface ActiveInstall {
   inspection?: PluginSpecInspectionFact
   outcome?: PluginChangeFact
   inspectAbort?: AbortController
-  dispatch?: Promise<void>
 }
 
 const EMPTY_MODEL: PluginManagerModel = Object.freeze({
@@ -171,12 +170,12 @@ export class PluginManagerController {
   open(host: PluginManagerEntryHost): void {
     if (this.disposed) return
     this.entryHost = host
-    // An active install reopens as the same operation (plan §10.5); otherwise
-    // the surface always starts at the classified list.
-    const active = this.install
-    const activeOperation = active !== undefined
-      && active.phase !== 'done' && active.phase !== 'failed' && active.phase !== 'unknown'
-    this.mode = activeOperation ? 'install' : 'list'
+    // Only a DISPATCHED install reopens as the same operation (plan §10.5).
+    // An un-dispatched dialog (editing/inspecting/confirm) is not an active
+    // Host operation, so reopening the surface starts at the list.
+    const phase = this.install?.phase
+    const dispatched = phase === 'starting' || phase === 'installing' || phase === 'applying' || phase === 'cancelling'
+    this.mode = dispatched ? 'install' : 'list'
     this.selected = 0
     this.detailValue = undefined
     this.confirming = undefined
@@ -184,15 +183,12 @@ export class PluginManagerController {
     this.run('plugin manager read', () => this.read())
   }
 
-  /** Read the official inventory once. */
-  start(): void {
-    if (this.disposed) return
-    this.run('plugin manager read', () => this.read())
-  }
-
   /** Explicit Refresh: read the official inventory again. */
   refresh(): void {
     if (this.disposed) return
+    // A user-initiated refresh clears a previous read-failure notice; the
+    // next failure re-establishes it.
+    this.message = undefined
     this.run('plugin manager read', () => this.read())
   }
 
@@ -203,16 +199,11 @@ export class PluginManagerController {
     this.unsubscribe()
   }
 
-  /** The current entry host (diagnostics/tests). */
-  host(): PluginManagerEntryHost {
-    return this.entryHost
-  }
-
   /** Current rendered rows for the panel. */
   rows(): readonly PluginManagerRow[] {
     if (this.mode === 'detail') {
       const card = this.selectedCard()
-      if (card !== undefined) return cardDetailRows(card)
+      if (card !== undefined) return cardDetailRows(card, this.model.exemptions)
       return pluginManagerListRows(this.model, this.busy)
     }
     if (this.mode === 'confirm-remove') {
@@ -371,9 +362,6 @@ export class PluginManagerController {
         this.selected = 0
         this.hooks.requestRender()
         return
-      case PLUGIN_ACTION.cancelInstall:
-        this.cancelInstall()
-        return
       default:
         return
     }
@@ -506,40 +494,46 @@ export class PluginManagerController {
     active.message = undefined
     this.hooks.requestRender()
     const requestId = active.requestId
-    active.dispatch = this.port.startInstall({
-      requestId,
-      spec: active.spec,
-      registry: active.registry,
-      enabled: true,
-    }).then(
-      (outcome) => {
-        if (this.disposed) return
-        this.settleInstall(requestId, outcome, epoch)
-      },
-      async (error: unknown) => {
-        if (this.disposed) return
-        // The Host may already have accepted the request: recover through the
-        // official waitForInstall before deciding, and NEVER retry installBundle.
-        let recovered: PluginChangeFact | null = null
-        try {
-          recovered = await this.port.waitForInstall(requestId)
-        } catch {
-          recovered = null
-        }
-        if (this.disposed) return
-        const current = this.install
-        if (current === undefined || current.requestId !== requestId) return
-        if (recovered !== null) {
-          this.settleInstall(requestId, recovered, epoch)
-          return
-        }
-        current.phase = 'unknown'
-        current.message = `install outcome unknown: ${errorMessage(error)} — check the inventory below; not retried automatically`
-        this.run('plugin manager read', () => this.read())
-        this.hooks.requestRender()
-        if (!this.hooks.isOpen()) this.hooks.notify('plugin install outcome unknown; inventory refreshed', 'error')
-      },
-    )
+    this.run('plugin manager install', () => this.performInstall(requestId, epoch))
+  }
+
+  /** Dispatch installBundle and settle it; an indeterminate failure recovers
+   * through the official waitForInstall and NEVER retries the install. */
+  private async performInstall(requestId: string, epoch: number): Promise<void> {
+    const active = this.install
+    if (active === undefined || active.requestId !== requestId) return
+    try {
+      const outcome = await this.port.startInstall({
+        requestId,
+        spec: active.spec,
+        registry: active.registry,
+        enabled: true,
+      })
+      if (this.disposed) return
+      this.settleInstall(requestId, outcome)
+    } catch (error) {
+      if (this.disposed) return
+      // The Host may already have accepted the request: recover through the
+      // official waitForInstall before deciding, and NEVER retry installBundle.
+      let recovered: PluginChangeFact | null = null
+      try {
+        recovered = await this.port.waitForInstall(requestId)
+      } catch {
+        recovered = null
+      }
+      if (this.disposed) return
+      const current = this.install
+      if (current === undefined || current.requestId !== requestId) return
+      if (recovered !== null) {
+        this.settleInstall(requestId, recovered)
+        return
+      }
+      current.phase = 'unknown'
+      current.message = `install outcome unknown: ${errorMessage(error)} — check the inventory below; not retried automatically`
+      this.run('plugin manager read', () => this.read())
+      this.hooks.requestRender()
+      if (!this.hooks.isOpen()) this.hooks.notify('plugin install outcome unknown; inventory refreshed', 'error')
+    }
   }
 
   /** Stop an active installation; only valid before the Host starts applying. */
@@ -559,14 +553,20 @@ export class PluginManagerController {
       if (this.disposed) return
       const current = this.install
       if (current === undefined || current.requestId !== requestId) return
-      if (cancellation.status === 'cancelled') current.message = 'cancelled — profile files restored'
-      else if (cancellation.status === 'too-late') {
+      if (cancellation.status === 'cancelled') {
+        // Host cleanup has completed: the operation is terminal.
+        current.phase = 'done'
+        current.message = 'cancelled — profile files restored'
+      } else if (cancellation.status === 'too-late') {
         // The Host already started applying: the operation is still running.
         current.phase = 'applying'
         current.message = 'too late to cancel: the bundle is being applied'
       } else {
-        current.phase = 'installing'
-        current.message = 'the installation already settled'
+        // No active request with this id: the dispatch already settled (or is
+        // about to). Never claim success; reconcile with an explicit check.
+        current.phase = 'unknown'
+        current.message = 'the installation already settled; the outcome will reconcile'
+        this.run('plugin manager read', () => this.read())
       }
       this.hooks.requestRender()
     } catch (error) {
@@ -810,7 +810,7 @@ export class PluginManagerController {
     this.selected = count === 0 ? 0 : Math.min(this.selected, count - 1)
   }
 
-  private settleInstall(requestId: string, outcome: PluginChangeFact, epoch: number): void {
+  private settleInstall(requestId: string, outcome: PluginChangeFact): void {
     const current = this.install
     if (current === undefined || current.requestId !== requestId) return
     current.outcome = outcome
@@ -824,7 +824,6 @@ export class PluginManagerController {
       current.phase = 'done'
       current.message = changeSummary(outcome)
     }
-    if (this.installEpoch < epoch) return
     this.hooks.requestRender()
     this.run('plugin manager read', () => this.read())
     if (!this.hooks.isOpen()) {
