@@ -9031,7 +9031,19 @@ export function apply(ctx: Context, config: Config): void {
       // disposeSurface so no listener survives the runner (the effect scope
       // would also reclaim it at plugin unload — this makes the surface
       // teardown order explicit).
-      jobsEventsDispose = jobs.events.subscribe({ owners: 'scope' }, () => { refreshTasks(); refreshAgents() })
+      //
+      // `output` events are ring APPENDS — one per chunk of a streaming
+      // job — and never change the roster or any status fact the Task
+      // surfaces read (the upstream Job Controller likewise keeps output
+      // streams off the roster refresh path). Reacting to them would turn
+      // refreshAgents' catalog work into a per-chunk storm, so only the
+      // lifecycle vocabulary (registered/progress/stopping/settled/removed)
+      // reaches the refreshes.
+      jobsEventsDispose = jobs.events.subscribe({ owners: 'scope' }, (event: { type: string }) => {
+        if (event.type === 'output') return
+        refreshTasks()
+        refreshAgents()
+      })
       refreshTasks()
     }
     // Continuable children and foreground one-shot children never register

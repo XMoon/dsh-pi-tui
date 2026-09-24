@@ -111,7 +111,14 @@ function appendTurn(session, turn, text, context = false) {
   if (context) {
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: `fixture context ${turn}` }],
-      source: { kind: 'plugin', plugin: 'fixture', form: 'notice', summary: 'fixture context' },
+      // Native V4 source admission rejects the retired catch-all `plugin`
+      // kind, so the rc.1 parity fixture must not manufacture it. A pure
+      // fixture should not impersonate a real producer either: an unknown
+      // non-empty producer kind is the documented default for opaque
+      // content and keeps the ContextFormed notice semantics intact.
+      // Pagination counting only looks at the event type + surface op, so
+      // this preserves the window tuning.
+      source: { kind: 'presentation-fixture', form: 'notice', summary: 'fixture context' },
     }), { surfaceOp: 'append' })
   }
   session.append('user/message', createUserMessage({
