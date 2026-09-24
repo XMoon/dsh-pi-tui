@@ -13,6 +13,16 @@
 
 - **`/tasks`：选中后台 Job 可查看非消耗式的实时输出。** Job 详情现在通过官方 Job Controller 的 `follow()` 流展示状态、进度与保留的输出尾部，并在输出被截断时明确提示；该查看是只读预览，不消耗模型的 `job_output` 游标、不影响完成通知、也不写入会话历史。Esc 返回原来的 Task Center，Stop 行为保持不变。
 
+- **启动等待不再像死机：Host Loader 未就绪时显示 `Starting DSH…`。** 当某个可选插件让 Host Loader 迟迟不结束（例如初始连接或 `tools/list` 一直没有响应的远程 MCP），TUI 会在开始等待前就在终端写出单行 `Starting DSH…`，Loader 就绪后立即清除；非 TTY 保持静默。没有引入超时、跳过 pending 插件或半装配 Agent —— 只是让全局就绪等待可见。
+
+### 修复
+
+- **`/quit`、`exit`、Ctrl+C 退出时不再出现 `retire phase failed ... phase=cancel`（`cannot read inbox state: its projection registration is not active`）。** 交互退出现在会在请求 `appExit` 之前先同步取消当前 Direct Agent 的首次工作，避免 Host root teardown 先把 inbox 投影注销、导致稍后的 cancel 失败；`idle → 后代 drain → flush → dispose` 仍留在 `appExit` 的关闭看门狗边界内完成，退出前不会等待完整 Host teardown。取消按 Agent 对象身份去重，因此会话切换提交后的新 Agent 仍会被取消；首次取消若失败不会被记为已完成，正式 retire 会重试。
+
+- **仍在运行的 Agent 丢失 standing preset 组合时会立刻报错，而不是静默地把残缺请求发给模型。** profile 现在挂载官方 `@deepseek-ai/dsh-invariants`（只启用 `@deepseek-ai/dsh-agent-preset-registry` 一项检查）和官方 `agent-preset-registry/invariant`：一旦某个 live Agent 不再 joined 任何 preset，下一次 prompt 组装就会 fail loud，而不是像此前那样把只剩 `subagent` 的工具列表当成正常请求发出去。TUI 不自行 remount / reparent / 重建 Agent，preset 生命周期仍由 DSH 负责。
+
+- **用 `dsh <profile>` 位置参数形式启动时，退出提示不再给错 profile。** 退出时的 resume 提示此前只从 `process.argv` 里找 `--profile`；而 `dsh <name>` 形式下 launcher 只是为自己的参数解析临时合成 `--profile`、并不改动 `process.argv`，于是提示会回退成硬编码的 `pi-tui`（对 `dsh tui`、`dsh rescue` 等任何非 `pi-tui` 的 profile 都是错的）。现在改为读取 Host 官方的 `profileContext.name`：它对 `--profile <name>`、`--profile=<name>`、`dsh <name>` 和 `--from-default-profile <name>` 一律正确；只有拿不到该服务的无 profile 场景（测试、嵌入式挂载）才继续用 argv 兜底。
+
 ## [0.4.8] - 2026-09-24
 
 ### 安装与版本对应
