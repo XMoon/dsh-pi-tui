@@ -405,7 +405,11 @@ Where it runs:
   lifecycle-abort listener contains a throwing cancel and rejects its quiesce
   instead: an `AbortSignal` is a Node EventTarget, so a listener exception
   would otherwise become an `uncaughtException` that the caller's `try`/`catch`
-  cannot observe, and the memoized retirement would never get to retry.
+  cannot observe, and the memoized retirement would never get to retry. The
+  listener rejects the RAW thrown value — any formatting step (`String(value)`,
+  an unprotected `instanceof`, a `.message` read) can itself throw for a
+  hostile value, which would escape the listener the same way; observation
+  downstream goes through the repo's total error formatters.
 - **HMR / runner fiber unload**: the fiber disposer is async (Cordis
   unloads await it) and runs the SAME memoized retirement — one teardown
   promise shared by every teardown path, never four copies. That entry has no
