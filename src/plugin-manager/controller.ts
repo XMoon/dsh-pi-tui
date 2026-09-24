@@ -186,12 +186,11 @@ export class PluginManagerController {
     this.run('plugin manager read', () => this.read())
   }
 
-  /** Explicit Refresh: read the official inventory again. */
+  /** Explicit Refresh: read the official inventory again. `read()` owns the
+   * notice clearing (it removes only a previous read-failure notice, so a
+   * just-shown operation outcome survives a refresh). */
   refresh(): void {
     if (this.disposed) return
-    // A user-initiated refresh clears a previous read-failure notice; the
-    // next failure re-establishes it.
-    this.message = undefined
     this.run('plugin manager read', () => this.read())
   }
 

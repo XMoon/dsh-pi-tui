@@ -130,6 +130,13 @@ test('observing never advances the model job_output cursor', async () => {
     modelCursor = total
     return remaining
   }
+  let jobsReadCalls = 0
+  const jobsRegistry = {
+    read: (): string => {
+      jobsReadCalls += 1
+      return modelRead()
+    },
+  }
   const controller = {
     follow: (request: { jobId: unknown }, signal: AbortSignal) => (async function* () {
       let cursor = 0
@@ -145,7 +152,12 @@ test('observing never advances the model job_output cursor', async () => {
       }
     })(),
   }
-  const port = new DirectJobObservationPort({ get: () => controller }, diag)
+  const port = new DirectJobObservationPort({
+    // The adapter may only reach the job-controller observer; a `jobs` registry
+    // (whose `read()` consumes the model cursor) is available but must never be
+    // touched.
+    get: (name: string) => name === 'jobController' ? controller : name === 'jobs' ? jobsRegistry : undefined,
+  }, diag)
 
   const a: JobObservedSnapshot[] = []
   const b: JobObservedSnapshot[] = []
@@ -159,11 +171,13 @@ test('observing never advances the model job_output cursor', async () => {
 
   assert.equal(a[a.length - 1]!.text, chunks.join(''))
   assert.equal(b[b.length - 1]!.text, chunks.join(''))
-  // Observing used the non-consuming readAt path only: the model's consuming
-  // read was never invoked, so its cursor is still at the start.
+  // Observing used the non-consuming observer only: the model's consuming
+  // read was never invoked (a spy would have fired) and its cursor is intact.
+  assert.equal(jobsReadCalls, 0, 'the adapter must never call the consuming jobs.read()')
   assert.equal(modelCursor, 0)
   // The model's own consuming read still receives every unread byte.
-  assert.equal(modelRead(), chunks.join(''))
+  assert.equal(jobsRegistry.read(), chunks.join(''))
+  assert.equal(jobsReadCalls, 1)
   assert.equal(modelCursor, total)
 })
 
